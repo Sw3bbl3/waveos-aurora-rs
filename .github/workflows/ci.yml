@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install QEMU and OVMF
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Build bootloader and kernel
+        run: cargo xtask build
+
+      - name: Kernel self-tests
+        run: cargo xtask test
+
+      - name: Boot to desktop (headless smoke test)
+        run: |
+          timeout 180 cargo xtask run --no-build --headless > serial.log 2>&1 || true
+          sed 's/\x1b\[[0-9;]*[A-Za-z]//g' serial.log | grep -v '^\s*$' | tail -40
+          grep -q "Aurora desktop ready" serial.log
+
+      - name: Build USB disk image
+        run: cargo xtask image
+
+      - name: Upload disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveos-aurora-img
+          path: target/waveos-aurora.img
+          compression-level: 9
