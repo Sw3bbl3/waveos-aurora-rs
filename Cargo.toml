@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["xtask", "bootloader", "kernel", "libs/bootinfo"]
+default-members = ["xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+debug = 1
+codegen-units = 1
