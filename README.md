@@ -61,8 +61,8 @@ You need an x86_64 or Apple Silicon Mac, or a Linux machine, with:
   - Debian/Ubuntu: `sudo apt install qemu-system-x86 ovmf`
 
 ```sh
-git clone https://github.com/<you>/waveos-aurora.git
-cd waveos-aurora
+git clone https://github.com/Sw3bbl3/waveos-aurora-rs.git
+cd waveos-aurora-rs
 cargo xtask run          # build everything and boot it in QEMU
 ```
 
