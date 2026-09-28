@@ -1,0 +1,10 @@
+[package]
+name = "aurora-boot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bootinfo = { path = "../libs/bootinfo" }
+uefi = { version = "0.36", features = ["alloc", "panic_handler", "logger", "global_allocator"] }
+log = "0.4"
