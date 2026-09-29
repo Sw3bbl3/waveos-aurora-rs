@@ -20,6 +20,7 @@ pub mod dnd;
 pub mod fs;
 pub mod heap;
 pub mod io;
+pub mod net;
 pub mod notify;
 pub mod power;
 pub mod prefs;

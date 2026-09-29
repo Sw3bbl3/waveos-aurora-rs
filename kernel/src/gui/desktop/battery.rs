@@ -70,6 +70,7 @@ impl Desktop {
         }
         if on_item && self.menu.is_none() && self.launcher.is_none() {
             self.close_volume_popover();
+            self.close_network_popover();
             if self.center_open() {
                 self.toggle_center();
             }

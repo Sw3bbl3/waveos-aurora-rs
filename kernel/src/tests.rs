@@ -34,6 +34,7 @@ const TESTS: &[Test] = &[
     ("sound: HDA playback", sound),
     ("ACPI: AML, sleep states, battery", acpi_runtime),
     ("USB: hub, keyboard, tablet, storage", usb),
+    ("network: DHCP, ICMP, UDP, TCP", network),
     ("sleep (S3) and wake", sleep_and_wake),
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
@@ -50,13 +51,20 @@ pub fn run() {
     // Devices present at boot finish setting up first (the frame counts
     // some tests compare would otherwise move underneath them).
     crate::drivers::usb::settle(10_000);
-    crate::kprintln!("\nrunning {} kernel tests", TESTS.len());
-    for (name, test) in TESTS {
+    // `cargo xtask test --filter NAME` runs only matching tests (and the
+    // persistence check the harness relies on).
+    let filter = crate::gui::prefs::boot_option("test_filter");
+    let chosen: Vec<&Test> = TESTS
+        .iter()
+        .filter(|(name, _)| filter.as_deref().is_none_or(|f| name.contains(f) || name.starts_with("persistence")))
+        .collect();
+    crate::kprintln!("\nrunning {} kernel tests", chosen.len());
+    for (name, test) in &chosen {
         crate::kprint!("test {name} ... ");
         test();
         crate::kprintln!("ok");
     }
-    crate::kprintln!("\ntest result: ok. {} passed", TESTS.len());
+    crate::kprintln!("\ntest result: ok. {} passed", chosen.len());
     power::qemu_exit(0x10);
 }
 
@@ -729,5 +737,148 @@ fn sleep_and_wake() {
     sched::sleep_ms(200);
     // And the restarted CPUs really run work again.
     smp_work();
+    // The network card was reset too: talk to the host again.
+    if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
+        use crate::net::socket::{Kind, Socket};
+        assert!(wait_for(crate::net::online, 10_000), "no network address after sleep");
+        let c = Socket::new(Kind::Tcp);
+        c.option(aurora_abi::net::OPT_TIMEOUT, 10_000).unwrap();
+        c.connect(&aurora_abi::SockAddr::new([10, 0, 2, 2], port)).expect("no network after sleep");
+        c.write(b"GET /none HTTP/1.1\r\nHost: h\r\n\r\n").unwrap();
+        let mut buf = [0u8; 64];
+        let n = c.read(&mut buf).expect("no reply after sleep");
+        assert!(buf[..n].starts_with(b"HTTP/1.1 404"), "unexpected reply after sleep");
+    }
     crate::kprint!("[{} CPUs back] ", crate::arch::percpu::count());
+}
+
+fn network() {
+    use crate::net::socket::{Kind, Socket};
+    use aurora_abi::SockAddr;
+    // DHCP (QEMU's user networking hands out 10.0.2.15).
+    assert!(
+        wait_for(
+            || crate::net::interfaces().iter().any(|i| i.ip != [0; 4] && i.flags & aurora_abi::net::IF_LOOPBACK == 0),
+            10_000
+        ),
+        "no address from DHCP"
+    );
+    let me = crate::net::interfaces().into_iter().find(|i| i.flags & aurora_abi::net::IF_LOOPBACK == 0).unwrap().ip;
+
+    // ICMP echo, to ourselves over loopback and on our own address.
+    for dst in [[127, 0, 0, 1], me] {
+        let ping = Socket::new(Kind::Icmp);
+        ping.option(aurora_abi::net::OPT_TIMEOUT, 2000).unwrap();
+        let msg = [8u8, 0, 0, 0, 0, 0, 0, 7, b'h', b'i'];
+        ping.send_to(&msg, &SockAddr::new(dst, 0)).unwrap();
+        let mut buf = [0u8; 64];
+        let (n, from) = ping.recv_from(&mut buf).expect("no echo reply");
+        assert_eq!((n, from.ip, buf[0], buf[7], &buf[8..10]), (10, dst, 0, 7, &b"hi"[..]));
+    }
+
+    // UDP over loopback.
+    let a = Socket::new(Kind::Udp);
+    a.bind(&SockAddr::new([0; 4], 5353)).unwrap();
+    a.option(aurora_abi::net::OPT_TIMEOUT, 2000).unwrap();
+    let b = Socket::new(Kind::Udp);
+    b.send_to(b"datagram", &SockAddr::new([127, 0, 0, 1], 5353)).unwrap();
+    let mut buf = [0u8; 64];
+    let (n, from) = a.recv_from(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"datagram");
+    assert_eq!(from.ip, [127, 0, 0, 1]);
+
+    // TCP over loopback: 1 MiB up, a summary and 1 MiB back.
+    let pattern = |i: usize| (i.wrapping_mul(131) % 253) as u8;
+    const SIZE: usize = 1 << 20;
+    crate::sched::spawn("t-tcp-server", || {
+        let l = Socket::new(Kind::Tcp);
+        l.bind(&SockAddr::new([0; 4], 7070)).unwrap();
+        l.listen(4).unwrap();
+        let (c, _) = l.accept().unwrap();
+        let mut got = 0usize;
+        let mut sum = 0u64;
+        let mut buf = alloc::vec![0u8; 16384];
+        loop {
+            let n = c.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            for (k, &b) in buf[..n].iter().enumerate() {
+                sum = sum.wrapping_add(b as u64 * ((got + k) as u64 % 7 + 1));
+            }
+            got += n;
+        }
+        let reply: Vec<u8> = alloc::format!("{got} {sum}\n")
+            .into_bytes()
+            .into_iter()
+            .chain((0..SIZE).map(|i| (i.wrapping_mul(131) % 253) as u8))
+            .collect();
+        c.write(&reply).unwrap();
+    });
+    crate::sched::sleep_ms(50);
+    let c = Socket::new(Kind::Tcp);
+    c.connect(&SockAddr::new([127, 0, 0, 1], 7070)).expect("connect over loopback");
+    let data: Vec<u8> = (0..SIZE).map(pattern).collect();
+    let want_sum = data.iter().enumerate().fold(0u64, |s, (k, &b)| s.wrapping_add(b as u64 * (k as u64 % 7 + 1)));
+    assert_eq!(c.write(&data).unwrap(), SIZE);
+    c.shutdown().unwrap();
+    let mut back = Vec::new();
+    let mut buf = alloc::vec![0u8; 16384];
+    loop {
+        let n = c.read(&mut buf).unwrap_or_else(|e| {
+            panic!("loopback read failed after {} bytes: {}", back.len(), aurora_abi::err::name(e))
+        });
+        if n == 0 {
+            break;
+        }
+        back.extend_from_slice(&buf[..n]);
+    }
+    let line_end = back.iter().position(|&b| b == b'\n').unwrap();
+    assert_eq!(core::str::from_utf8(&back[..line_end]).unwrap(), alloc::format!("{SIZE} {want_sum}"));
+    assert!(
+        back[line_end + 1..].iter().enumerate().all(|(i, &b)| b == pattern(i)) && back.len() - line_end - 1 == SIZE
+    );
+    drop(c);
+
+    // To the host (10.0.2.2) through QEMU's NAT: 1 MiB over HTTP.
+    if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
+        let c = Socket::new(Kind::Tcp);
+        c.connect(&SockAddr::new([10, 0, 2, 2], port)).expect("connect to the host");
+        c.write(b"GET /big HTTP/1.1\r\nHost: host\r\n\r\n").unwrap();
+        c.option(aurora_abi::net::OPT_TIMEOUT, 20_000).unwrap();
+        let mut resp = Vec::new();
+        loop {
+            let n = c.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            resp.extend_from_slice(&buf[..n]);
+        }
+        let head = resp.windows(4).position(|w| w == b"\r\n\r\n").expect("HTTP header") + 4;
+        let body = &resp[head..];
+        assert_eq!(body.len(), 1 << 20, "short body from the host");
+        assert!(body.iter().enumerate().all(|(i, &b)| b as u32 == (i as u32).wrapping_mul(31).wrapping_add(7) % 251));
+        crate::kprint!("[1 MiB from the host] ");
+
+        // From the host: QEMU forwards a host port to our 8080.
+        let l = Socket::new(Kind::Tcp);
+        l.bind(&SockAddr::new([0; 4], 8080)).unwrap();
+        l.listen(1).unwrap();
+        l.option(aurora_abi::net::OPT_TIMEOUT, 15_000).unwrap();
+        log!("net-test", "listening on 8080");
+        let (conn, peer) = l.accept().expect("no connection from the host");
+        conn.option(aurora_abi::net::OPT_TIMEOUT, 5000).unwrap();
+        let mut got = Vec::new();
+        while !got.ends_with(b"\n") {
+            let n = conn.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, b"ping\n");
+        conn.write(b"pong\n").unwrap();
+        crate::kprint!("[inbound from {}] ", crate::net::wire::ip_str(peer.ip));
+        crate::sched::sleep_ms(100);
+    }
 }

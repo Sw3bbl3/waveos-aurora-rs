@@ -248,6 +248,82 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             out.commit(n)?;
             Ok(text.len() as u64)
         }
+        nr::SOCKET => {
+            use crate::net::socket::{Kind, Socket};
+            let kind = match a[0] {
+                aurora_abi::net::TCP => Kind::Tcp,
+                aurora_abi::net::UDP => Kind::Udp,
+                aurora_abi::net::ICMP => Kind::Icmp,
+                _ => return Err(EINVAL),
+            };
+            let p = proc::current().ok_or(EPERM)?;
+            p.install_fd(Arc::new(Handle::Socket(Socket::new(kind)))).map(|fd| fd as u64)
+        }
+        nr::CONNECT => {
+            let addr: aurora_abi::SockAddr = user::get(a[1])?;
+            socket(a[0])?.connect(&addr).map(|_| 0)
+        }
+        nr::BIND => {
+            let addr: aurora_abi::SockAddr = user::get(a[1])?;
+            socket(a[0])?.bind(&addr).map(|_| 0)
+        }
+        nr::LISTEN => socket(a[0])?.listen(a[1] as usize).map(|_| 0),
+        nr::ACCEPT => {
+            let listener = proc::current().ok_or(EPERM)?.fd(a[0] as usize)?;
+            let Handle::Socket(s) = &*listener else { return Err(EINVAL) };
+            let (conn, peer) = s.accept()?;
+            if a[1] != 0 {
+                user::put(a[1], &peer)?;
+            }
+            let p = proc::current().ok_or(EPERM)?;
+            p.install_fd(Arc::new(Handle::Socket(conn))).map(|fd| fd as u64)
+        }
+        nr::SENDTO => {
+            let data = user::slice(a[1], a[2].min(65536))?;
+            let addr: aurora_abi::SockAddr = user::get(a[3])?;
+            socket(a[0])?.send_to(&data, &addr).map(|n| n as u64)
+        }
+        nr::RECVFROM => {
+            let mut out = user::slice_mut(a[1], a[2].min(65536))?;
+            let (n, from) = socket(a[0])?.recv_from(&mut out)?;
+            out.commit(n)?;
+            if a[3] != 0 {
+                user::put(a[3], &from)?;
+            }
+            Ok(n as u64)
+        }
+        nr::SHUTDOWN => socket(a[0])?.shutdown().map(|_| 0),
+        nr::SOCKOPT => socket(a[0])?.option(a[1], a[2]),
+        nr::SOCK_INFO => {
+            let (local, remote, state) = socket(a[0])?.info();
+            if a[1] != 0 {
+                user::put(a[1], &local)?;
+            }
+            if a[2] != 0 {
+                user::put(a[2], &remote)?;
+            }
+            Ok(state)
+        }
+        nr::NET_INFO => {
+            let list = crate::net::interfaces();
+            let max = (a[1] as usize).min(16);
+            let size = core::mem::size_of::<aurora_abi::NetInterface>();
+            let mut out = user::slice_mut(a[0], (max * size) as u64)?;
+            let n = list.len().min(max);
+            for (i, f) in list.iter().take(n).enumerate() {
+                let bytes = unsafe { core::slice::from_raw_parts(f as *const _ as *const u8, size) };
+                out[i * size..(i + 1) * size].copy_from_slice(bytes);
+            }
+            out.commit(n * size)?;
+            Ok(list.len() as u64)
+        }
+        nr::GETRANDOM => {
+            let mut out = user::slice_mut(a[0], a[1].min(4096))?;
+            crate::random::fill(&mut out);
+            let n = out.len();
+            out.commit(n)?;
+            Ok(n as u64)
+        }
         nr::STATFS => {
             let path = user::path(a[0], a[1])?;
             let (total, free) = fs::space_of(&path).ok_or(ENOSYS)?;
@@ -274,6 +350,28 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         | nr::WIN_RESIZE
         | nr::NEXT_EVENT => crate::gui::server::syscall(nr, a),
         _ => Err(ENOSYS),
+    }
+}
+
+/// The socket behind file descriptor `fd`.
+fn socket(fd: u64) -> Result<SocketRef, isize> {
+    let h = proc::current().ok_or(EPERM)?.fd(fd as usize)?;
+    match &*h {
+        Handle::Socket(_) => Ok(SocketRef(h)),
+        _ => Err(EINVAL),
+    }
+}
+
+/// Keeps the handle alive while its socket is used.
+struct SocketRef(Arc<Handle>);
+
+impl core::ops::Deref for SocketRef {
+    type Target = crate::net::socket::Socket;
+    fn deref(&self) -> &Self::Target {
+        match &*self.0 {
+            Handle::Socket(s) => s,
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -312,6 +410,7 @@ fn read(fd: usize, ptr: u64, len: u64) -> SysResult {
     let n = match &*h {
         Handle::File(f) => f.lock().read(&mut buf)?,
         Handle::PipeRead { pipe, nonblocking } => pipe.read(&mut buf, *nonblocking)?,
+        Handle::Socket(s) => s.read(&mut buf)?,
         Handle::PipeWrite(_) | Handle::Log | Handle::Audio(_) => return Err(EBADF),
     };
     buf.commit(n)?;
@@ -329,6 +428,7 @@ fn write(fd: usize, ptr: u64, len: u64) -> SysResult {
             buf.len()
         }
         Handle::Audio(stream) => stream.write(&buf)?,
+        Handle::Socket(s) => s.write(&buf)?,
         Handle::PipeRead { .. } => return Err(EBADF),
     };
     Ok(n as u64)

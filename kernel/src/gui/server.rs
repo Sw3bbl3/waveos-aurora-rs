@@ -69,6 +69,8 @@ pub enum Command {
     PowerChanged,
     /// Back from sleep.
     Resumed,
+    /// A network interface got (or lost) an address.
+    NetworkChanged,
 }
 
 /// Queues a command for the compositor.

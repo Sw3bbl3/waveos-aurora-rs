@@ -119,7 +119,104 @@ pub mod nr {
     /// `statfs(path, len, *mut [u64; 2])` — total and free bytes of the volume holding `path`
     /// (`-ENOSYS` if it doesn't say, e.g. the read-only system image)
     pub const STATFS: usize = 56;
-    pub const COUNT: usize = 57;
+    /// `socket(kind) -> fd` — [`super::net::TCP`], [`super::net::UDP`] or [`super::net::ICMP`]
+    pub const SOCKET: usize = 57;
+    /// `connect(fd, *const SockAddr)` — TCP: blocks until connected (or the receive
+    /// timeout); UDP: sets the default destination
+    pub const CONNECT: usize = 58;
+    /// `bind(fd, *const SockAddr)` — port 0 picks a free one
+    pub const BIND: usize = 59;
+    /// `listen(fd, backlog)`
+    pub const LISTEN: usize = 60;
+    /// `accept(fd, *mut SockAddr) -> fd` — blocks for the next connection
+    pub const ACCEPT: usize = 61;
+    /// `sendto(fd, buf, len, *const SockAddr) -> sent` — UDP and ICMP (TCP uses `write`)
+    pub const SENDTO: usize = 62;
+    /// `recvfrom(fd, buf, len, *mut SockAddr) -> received` — UDP and ICMP (TCP uses `read`)
+    pub const RECVFROM: usize = 63;
+    /// `shutdown(fd)` — TCP: no more sending (the peer sees end of file)
+    pub const SHUTDOWN: usize = 64;
+    /// `sockopt(fd, option, value) -> previous` — see [`super::net`]
+    pub const SOCKOPT: usize = 65;
+    /// `net_info(*mut NetInterface, max) -> count`
+    pub const NET_INFO: usize = 66;
+    /// `getrandom(buf, len)` — cryptographically strong random bytes
+    pub const GETRANDOM: usize = 67;
+    /// `sock_info(fd, *mut SockAddr local, *mut SockAddr remote) -> state`
+    pub const SOCK_INFO: usize = 68;
+    pub const COUNT: usize = 69;
+}
+
+/// Networking (IPv4).
+pub mod net {
+    /// Socket kinds.
+    pub const TCP: u64 = 1;
+    pub const UDP: u64 = 2;
+    /// ICMP echo ("ping"): send an echo request (type 8) with any identifier;
+    /// the kernel sets the identifier and checksum and delivers the replies.
+    pub const ICMP: u64 = 3;
+
+    /// `sockopt` options.
+    /// Receive/accept/connect timeout in ms (0 = wait forever).
+    pub const OPT_TIMEOUT: u64 = 1;
+    /// 1 = operations that would wait return `EAGAIN` instead.
+    pub const OPT_NONBLOCK: u64 = 2;
+    /// (read-only) bytes waiting to be read.
+    pub const OPT_READABLE: u64 = 3;
+
+    /// [`NetInterface::flags`].
+    pub const IF_UP: u32 = 1 << 0;
+    /// A cable / link is present.
+    pub const IF_LINK: u32 = 1 << 1;
+    /// The address came from DHCP.
+    pub const IF_DHCP: u32 = 1 << 2;
+    pub const IF_LOOPBACK: u32 = 1 << 3;
+
+    /// `sock_info` TCP states.
+    pub const STATE_CLOSED: u64 = 0;
+    pub const STATE_LISTEN: u64 = 1;
+    pub const STATE_CONNECTING: u64 = 2;
+    pub const STATE_ESTABLISHED: u64 = 3;
+    pub const STATE_CLOSING: u64 = 4;
+}
+
+/// An IPv4 address and port.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SockAddr {
+    pub ip: [u8; 4],
+    pub port: u16,
+    pub _pad: u16,
+}
+
+impl SockAddr {
+    pub const fn new(ip: [u8; 4], port: u16) -> SockAddr {
+        SockAddr { ip, port, _pad: 0 }
+    }
+}
+
+/// A network interface as `net_info` reports it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NetInterface {
+    pub name: [u8; 16],
+    pub name_len: u32,
+    pub flags: u32,
+    pub mac: [u8; 6],
+    pub _pad: [u8; 2],
+    pub ip: [u8; 4],
+    pub netmask: [u8; 4],
+    pub gateway: [u8; 4],
+    pub dns: [[u8; 4]; 2],
+    /// Seconds left on the DHCP lease (0 if static or none).
+    pub lease_secs: u32,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub driver: [u8; 32],
+    pub driver_len: u32,
+    pub _pad2: u32,
 }
 
 /// `sys_report` kinds.
@@ -228,7 +325,15 @@ pub mod err {
     pub const ENAMETOOLONG: isize = 36;
     pub const ENOSYS: isize = 38;
     pub const ENOTEMPTY: isize = 39;
+    pub const EMSGSIZE: isize = 90;
+    pub const EADDRINUSE: isize = 98;
+    pub const ENETUNREACH: isize = 101;
+    pub const ECONNRESET: isize = 104;
+    pub const EISCONN: isize = 106;
+    pub const ENOTCONN: isize = 107;
     pub const ETIMEDOUT: isize = 110;
+    pub const ECONNREFUSED: isize = 111;
+    pub const EHOSTUNREACH: isize = 113;
 
     pub fn name(e: isize) -> &'static str {
         match e.abs() {
@@ -256,6 +361,14 @@ pub mod err {
             ENOSYS => "not implemented",
             ENOTEMPTY => "directory not empty",
             ETIMEDOUT => "timed out",
+            EMSGSIZE => "message too long",
+            EADDRINUSE => "address already in use",
+            ENETUNREACH => "network unreachable",
+            ECONNRESET => "connection reset",
+            EISCONN => "already connected",
+            ENOTCONN => "not connected",
+            ECONNREFUSED => "connection refused",
+            EHOSTUNREACH => "host unreachable",
             _ => "unknown error",
         }
     }

@@ -111,6 +111,8 @@ pub fn cpu() -> String {
     let hpet = if crate::drivers::hpet::present() { " (HPET present)" } else { "" };
     let _ = writeln!(s, "Clock:      {clock}{hpet}");
     let _ = writeln!(s, "Features:   {}", flags.join(" "));
+    let rng = if crate::random::hardware() { "RDRAND/RDSEED + timer jitter" } else { "timer jitter only" };
+    let _ = writeln!(s, "Randomness: {rng}");
     let times = crate::sched::cpu_times();
     for (i, (busy, idle)) in times.iter().enumerate() {
         let total = (busy + idle).max(1);

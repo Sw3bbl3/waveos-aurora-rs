@@ -59,6 +59,11 @@ pub fn start() {
     sched::spawn("crest", run);
 }
 
+/// A network interface got (or lost) its address.
+pub fn network_changed() {
+    server::command(server::Command::NetworkChanged);
+}
+
 /// The ACPI power button was pressed: ask what to do, like the menu's Shut Down….
 pub fn power_button() {
     server::command(server::Command::PowerButton);

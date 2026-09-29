@@ -38,6 +38,12 @@ fn main() {
         eprintln!("--disk must be ahci, virtio or nvme");
         exit(2);
     }
+    let net =
+        args.iter().position(|a| a == "--net").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("virtio");
+    if !["virtio", "e1000", "e1000e", "none"].contains(&net) {
+        eprintln!("--net must be virtio, e1000, e1000e or none");
+        exit(2);
+    }
 
     match args.first().map(String::as_str) {
         Some("build") => {
@@ -58,6 +64,8 @@ fn main() {
                 smp,
                 audio: if flag("--no-sound") || flag("--headless") { String::from("none") } else { host_audio() },
                 battery: flag("--battery"),
+                net,
+                netdev_extra: String::new(),
                 usb_stick: flag("--usb-stick").then(|| {
                     let stick = root().join("target/usb-stick.img");
                     image::create_usb_stick(&stick).expect("USB stick image");
@@ -87,7 +95,7 @@ fn main() {
             println!("wrote {}", out.display());
             println!("flash to a USB stick with: sudo dd if={} of=/dev/rdiskN bs=4m", out.display());
         }
-        Some("test") => test(profile, disk, smp),
+        Some("test") => test(profile, disk, smp, net),
         _ => {
             eprintln!("usage: cargo xtask <build|run|image|test> [--debug] [--headless] [--no-build] [--gdb] [--int]");
             exit(2);
@@ -315,6 +323,10 @@ struct RunOpts<'a> {
     battery: bool,
     /// A raw disk image to attach as a USB stick.
     usb_stick: Option<PathBuf>,
+    /// Network card: virtio, e1000, e1000e or none (QEMU user networking).
+    net: &'a str,
+    /// Extra user-networking options, e.g. host port forwards.
+    netdev_extra: String,
 }
 
 /// The host's own sound output, for interactive runs.
@@ -363,6 +375,15 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         fs::write(&ssdt, aml::battery_ssdt()).expect("write battery SSDT");
         cmd.arg("-acpitable").arg(format!("file={}", ssdt.display()));
     }
+    // A network card on QEMU's user networking (NAT; the host is 10.0.2.2).
+    if opts.net != "none" {
+        cmd.arg("-netdev").arg(format!("user,id=net0{}", opts.netdev_extra));
+        cmd.arg("-device").arg(match opts.net {
+            "e1000" => "e1000,netdev=net0",
+            "e1000e" => "e1000e,netdev=net0",
+            _ => "virtio-net-pci,netdev=net0,disable-legacy=on",
+        });
+    }
     // Allow S3 (suspend to RAM); wake with QMP `system_wakeup` or a key press.
     cmd.args(["-global", "ICH9-LPC.disable_s3=0"]);
     cmd.args(["-rtc", "base=localtime"]);
@@ -390,21 +411,96 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
 /// Boots the kernel with the `ktest` feature. The kernel runs its self-tests
 /// and reports through `isa-debug-exit`: exit code 0x10 means success, which
 /// QEMU turns into process status (0x10 << 1) | 1 = 33.
-fn test(profile: Profile, disk: &str, smp: u32) {
+/// The body the test HTTP server sends for `/big`: 1 MiB of a known pattern.
+fn test_body() -> Vec<u8> {
+    (0..1u32 << 20).map(|i| (i.wrapping_mul(31).wrapping_add(7) % 251) as u8).collect()
+}
+
+/// A tiny HTTP server on the host for the network tests (the guest reaches
+/// the host as 10.0.2.2). Returns its port.
+fn start_test_http_server() -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("test HTTP server");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let body = test_body();
+        for conn in listener.incoming().map_while(Result::ok) {
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let mut conn = conn;
+                let mut req = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match conn.read(&mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => req.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let resp = if req.starts_with(b"GET /big ") {
+                    let mut r =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+                            .into_bytes();
+                    r.extend_from_slice(&body);
+                    r
+                } else {
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+                };
+                let _ = conn.write_all(&resp);
+            });
+        }
+    });
+    port
+}
+
+/// A free port on the host (for forwarding into the guest).
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or(18080)
+}
+
+/// The inbound test: connect to the guest's listener through the forward.
+fn inbound_check(port: u16) {
+    use std::io::{Read, Write};
+    std::thread::spawn(move || {
+        let ok = (|| -> std::io::Result<bool> {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port))?;
+            s.set_read_timeout(Some(Duration::from_secs(10)))?;
+            s.write_all(b"ping\n")?;
+            let mut got = Vec::new();
+            let mut buf = [0u8; 64];
+            while !got.ends_with(b"\n") {
+                let n = s.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+            }
+            Ok(got == b"pong\n")
+        })();
+        println!("harness: inbound connection {}", if matches!(ok, Ok(true)) { "ok" } else { "FAILED" });
+    });
+}
+
+fn test(profile: Profile, disk: &str, smp: u32, net: &str) {
     let esp = build(profile, true);
     let img = root().join("target/test-disk.img");
-    println!("running kernel tests with the disk on {disk}");
+    println!("running kernel tests with the disk on {disk}, network {net}");
+    let http_port = start_test_http_server();
+    let fwd_port = free_port();
     // AURORA_TEST_SLEEP=off skips the sleep test (firmware that can't resume).
     let mut sleep = env::var("AURORA_TEST_SLEEP").as_deref() != Ok("off");
     'attempt: loop {
         image::create(&esp, &root().join("assets/home"), &img, 128 * 1024 * 1024).expect("test disk creation failed");
+        image::set_boot_option(&img, "test_http_port", &http_port.to_string()).expect("write boot.conf");
+        if let Ok(filter) = env::var("AURORA_TEST_FILTER") {
+            image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
+        }
         if !sleep {
             image::set_boot_option(&img, "sleep", "off").expect("write boot.conf");
         }
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let output = match run_tests_once(&img, disk, smp) {
+            let output = match run_tests_once(&img, disk, smp, net, fwd_port) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
                     // The firmware never handed back control: some OVMF builds
@@ -419,7 +515,7 @@ fn test(profile: Profile, disk: &str, smp: u32) {
                 eprintln!("\npersistence check FAILED: the second boot did not find the first boot's file");
                 exit(1);
             }
-            if output.contains("audio: output:") {
+            if output.contains("test sound: HDA playback") {
                 // The guest played a test tone; QEMU recorded everything it output.
                 let peak = recorded_peak(&root().join("target/test-audio.wav"));
                 if peak < 1000 {
@@ -464,7 +560,7 @@ fn recorded_peak(path: &Path) -> i32 {
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
 /// as an error if the tests failed or timed out.
-fn run_tests_once(img: &Path, disk: &str, smp: u32) -> Result<String, String> {
+fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, fwd_port: u16) -> Result<String, String> {
     use std::io::{BufRead, BufReader};
     let audio = root().join("target/test-audio.wav");
     let _ = fs::remove_file(&audio);
@@ -477,6 +573,8 @@ fn run_tests_once(img: &Path, disk: &str, smp: u32) -> Result<String, String> {
         telemetry: None,
         smp,
         audio: format!("wav:{}", audio.display()),
+        net,
+        netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
         battery: true,
         usb_stick: Some({
             let stick = root().join("target/test-usb-stick.img");
@@ -496,6 +594,9 @@ fn run_tests_once(img: &Path, disk: &str, smp: u32) -> Result<String, String> {
         let mut all = String::new();
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             println!("{line}");
+            if line.contains("net-test: listening on 8080") {
+                inbound_check(fwd_port);
+            }
             if line.contains("awake after S3") {
                 woke_w.store(true, std::sync::atomic::Ordering::Relaxed);
             }

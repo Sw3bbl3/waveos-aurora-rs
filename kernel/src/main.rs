@@ -15,8 +15,10 @@ mod arch;
 mod fs;
 mod gui;
 mod mm;
+mod net;
 mod power;
 mod proc;
+mod random;
 mod report;
 mod sched;
 mod sync;
@@ -90,6 +92,9 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::display::init(boot_info);
     drivers::block::init();
     fs::mount_disks();
+    telemetry::stage("network", "Network cards and the TCP/IP stack");
+    net::init();
+    drivers::net::init();
     telemetry::stage("usb", "USB controllers and devices");
     drivers::usb::init();
     if !fs::root_persistent() {

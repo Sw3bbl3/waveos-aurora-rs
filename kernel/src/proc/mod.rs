@@ -45,6 +45,8 @@ pub enum Handle {
     Log,
     /// A sound playback stream.
     Audio(Arc<crate::drivers::audio::Stream>),
+    /// A network socket.
+    Socket(crate::net::socket::Socket),
 }
 
 impl Drop for Handle {

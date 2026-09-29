@@ -7,10 +7,12 @@ pub mod hpet;
 pub mod input;
 pub mod keyboard;
 pub mod keymap;
+pub mod net;
 pub mod pci;
 pub mod ps2;
 pub mod rtc;
 pub mod usb;
+pub mod virtio;
 pub mod vmmouse;
 
 /// After sleep every controller was reset: bring each driver's hardware back.
@@ -22,5 +24,6 @@ pub fn resume() {
     display::resume(w as u32, h as u32);
     ps2::init();
     audio::resume();
+    net::resume();
     usb::resume();
 }

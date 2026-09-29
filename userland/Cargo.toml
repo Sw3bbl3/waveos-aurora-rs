@@ -16,6 +16,7 @@ aurora-abi = { path = "../libs/abi" }
 aurora-gfx = { path = "../libs/gfx" }
 aurora-image = { path = "../libs/image" }
 aurora-wav = { path = "../libs/wav" }
+aurora-web = { path = "../libs/web" }
 
 [profile.dev]
 panic = "abort"
