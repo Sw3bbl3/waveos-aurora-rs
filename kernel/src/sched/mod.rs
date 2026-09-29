@@ -347,7 +347,9 @@ fn schedule() {
         pc.pid.store(next.pid, Ordering::Relaxed);
         pc.cr3.store(next.cr3, Ordering::Relaxed);
         pc.idle.store(next.idle, Ordering::Relaxed);
-        let load = next.rsp;
+        // Its saved stack pointer is read only after the hand-off below: if
+        // the task is still leaving another CPU, that CPU has yet to store it.
+        let load = &next.rsp as *const u64;
         let flag = &next.on_cpu as *const AtomicBool;
         s.cpus[cpu].current = next_id;
         s.cpus[cpu].prev = Some(cur_id);
@@ -360,6 +362,7 @@ fn schedule() {
     while flag.swap(true, Ordering::Acquire) {
         core::hint::spin_loop();
     }
+    let load = unsafe { load.read_volatile() };
     unsafe { switch::switch(save, load) };
     finish_switch();
 }
