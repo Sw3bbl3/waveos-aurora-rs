@@ -20,18 +20,25 @@ pub struct Packet {
 }
 
 /// Issues a backdoor call; returns (eax, ebx, ecx, edx).
+///
+/// The hypervisor writes guest registers back on this `in` (eax..edx, and
+/// esi/edi for some commands). `rbx` is reserved by LLVM, so it is saved in
+/// `r8` — a register the backdoor never touches — and everything the backdoor
+/// may modify is declared clobbered.
 fn call(cmd: u32, arg: u32) -> (u32, u32, u32, u32) {
     let (a, c, d): (u32, u32, u32);
     let mut b: u64 = arg as u64;
     unsafe {
         asm!(
-            "xchg rbx, {b}",
+            "xchg rbx, r8",
             "in eax, dx",
-            "xchg rbx, {b}",
-            b = inout(reg) b,
+            "xchg rbx, r8",
+            inout("r8") b,
             inout("eax") MAGIC => a,
             inout("ecx") cmd => c,
             inout("edx") PORT as u32 => d,
+            lateout("rsi") _,
+            lateout("rdi") _,
             options(nostack)
         );
     }
