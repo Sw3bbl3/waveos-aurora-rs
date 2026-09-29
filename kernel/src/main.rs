@@ -45,6 +45,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     arch::gdt::init();
     arch::idt::init();
     arch::syscall::init();
+    arch::fpu::init();
     log!("boot", "GDT, TSS and IDT loaded");
 
     telemetry::stage("memory", "Memory: frames, heap, page tables");

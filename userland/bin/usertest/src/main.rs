@@ -10,8 +10,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use aurora::abi::{err::*, nr};
 use aurora::process::Stdio;
+use aurora::sync::{futex_wait, Mutex};
 use aurora::sys::call;
-use aurora::{fs, println, process, time};
+use aurora::{fs, println, process, thread, time};
+use core::hint::black_box;
+use core::sync::atomic::AtomicU32;
 
 aurora::entry!(main);
 
@@ -38,6 +41,14 @@ fn main(args: aurora::Args) -> i32 {
         // Child mode: echo arguments to stdout and exit with a known code.
         println!("child says {}", args[2..].join(" "));
         return 7;
+    }
+    if args.get(1).map(String::as_str) == Some("spinner") {
+        // Exit while another thread is busy: the whole process must go away.
+        let _ = thread::spawn(|| loop {
+            core::hint::spin_loop();
+        });
+        time::sleep_ms(20);
+        return 5;
     }
     println!("usertest: pid {}", process::pid());
 
@@ -111,7 +122,66 @@ fn main(args: aurora::Args) -> i32 {
         Err(_) => check("spawn crashtest", false),
     }
 
+    threads_and_simd();
+
     let failed = unsafe { FAILED };
     println!("usertest: {}", if failed == 0 { String::from("all passed") } else { alloc::format!("{failed} FAILED") });
     failed
+}
+
+/// Long enough to be preempted many times (10 ms quantum).
+fn float_work(seed: f64) -> f64 {
+    let mut acc = 0.0f64;
+    for i in 1..3_000_000u32 {
+        acc += black_box(seed) / (i as f64) * 1.000_001;
+    }
+    acc
+}
+
+fn threads_and_simd() {
+    // SIMD state survives preemption: threads and the main thread compute
+    // interleaved and must match the results computed alone.
+    let expect_a = float_work(1.5);
+    let expect_b = float_work(-2.25);
+    let a = thread::spawn(|| float_work(1.5));
+    let b = thread::spawn(|| float_work(-2.25));
+    let mine = float_work(3.0);
+    check("thread spawn", a.is_ok() && b.is_ok());
+    if let (Ok(a), Ok(b)) = (a, b) {
+        let (ra, rb) = (a.join(), b.join());
+        check("SSE state preserved across switches", ra == expect_a && rb == expect_b && mine == float_work(3.0));
+    }
+
+    // A futex-based mutex under contention.
+    static COUNTER: Mutex<u64> = Mutex::new(0);
+    let workers: Vec<_> = (0..4)
+        .filter_map(|_| {
+            thread::spawn(|| {
+                for i in 0..5_000 {
+                    *COUNTER.lock() += 1;
+                    if i % 1000 == 0 {
+                        process::yield_now();
+                    }
+                }
+            })
+            .ok()
+        })
+        .collect();
+    let n = workers.len();
+    for w in workers {
+        w.join();
+    }
+    check("mutex counter (4 threads)", n == 4 && *COUNTER.lock() == 20_000);
+
+    let word = AtomicU32::new(0);
+    let t0 = time::uptime_ms();
+    let woke = futex_wait(&word, 0, Some(30));
+    check("futex timeout", !woke && time::uptime_ms() - t0 >= 25);
+    check("futex value mismatch → EAGAIN", errno(call(nr::FUTEX_WAIT, &[word.as_ptr() as u64, 1, 1000])) == EAGAIN);
+    check("futex bad address → EFAULT", errno(call(nr::FUTEX_WAIT, &[0x1000, 0, 10])) == EFAULT);
+
+    match process::spawn("/System/Bin/usertest", &["spinner"], Stdio::default()) {
+        Ok(pid) => check("exit tears down other threads", process::wait(pid, Some(5000)).ok() == Some(5)),
+        Err(_) => check("spawn spinner", false),
+    }
 }

@@ -144,6 +144,15 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             out[..n].copy_from_slice(&cwd.as_bytes()[..n]);
             Ok(cwd.len() as u64)
         }
+        nr::THREAD_SPAWN => proc::spawn_thread(a[0], a[1], a[2]),
+        nr::THREAD_EXIT => {
+            if a[0] != 0 {
+                proc::futex::notify_exit(a[0]);
+            }
+            proc::exit_thread()
+        }
+        nr::FUTEX_WAIT => proc::futex::wait(a[0], a[1] as u32, a[2]),
+        nr::FUTEX_WAKE => proc::futex::wake(a[0], a[1]),
         nr::DESKTOP => crate::gui::server::desktop_request(a[0] as usize, a[1], a[2]),
         nr::WIN_CREATE
         | nr::WIN_SURFACE

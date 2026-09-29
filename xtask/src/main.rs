@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 const UEFI_TARGET: &str = "x86_64-unknown-uefi";
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
+const USER_TARGET: &str = "x86_64-aurora-user";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -165,19 +166,23 @@ fn build_userland(profile: Profile) -> Vec<Program> {
     }
     let user_ld = root().join("userland/libaurora/user.ld");
     let target_dir = root().join("target/user");
+    let spec = root().join("userland").join(format!("{USER_TARGET}.json"));
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    // User programs are built for our own target (ring 3 with SSE2; the kernel
+    // is soft-float), so core and alloc are rebuilt for it.
     cmd.current_dir(root().join("userland"))
-        .args(["build", "--workspace", "--target", KERNEL_TARGET])
+        .args([
+            "build",
+            "--workspace",
+            "-Zjson-target-spec",
+            "-Zbuild-std=core,alloc",
+            "-Zbuild-std-features=compiler-builtins-mem",
+        ])
+        .arg("--target")
+        .arg(&spec)
         .arg("--target-dir")
         .arg(&target_dir)
-        // Overrides the kernel's `code-model=kernel` flags from .cargo/config.toml.
-        .env(
-            "CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS",
-            format!(
-                "-C relocation-model=static -C link-arg=--script={} -C force-frame-pointers=yes",
-                user_ld.display()
-            ),
-        );
+        .env("RUSTFLAGS", format!("-C link-arg=--script={} -C force-frame-pointers=yes", user_ld.display()));
     if profile == Profile::Release {
         cmd.arg("--release");
     }
@@ -186,7 +191,7 @@ fn build_userland(profile: Profile) -> Vec<Program> {
         exit(status.code().unwrap_or(1));
     }
 
-    let out_dir = target_dir.join(KERNEL_TARGET).join(profile.dir());
+    let out_dir = target_dir.join(USER_TARGET).join(profile.dir());
     let mut programs = Vec::new();
     for entry in fs::read_dir(&out_dir).unwrap() {
         let path = entry.unwrap().path();

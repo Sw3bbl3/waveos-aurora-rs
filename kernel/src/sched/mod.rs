@@ -6,6 +6,7 @@
 //! context, which becomes the idle task. Timer ticks drive preemption every
 //! `QUANTUM_MS`; tasks can also sleep, yield, or block until woken.
 
+use crate::arch::fpu::FpuState;
 use crate::arch::{switch, syscall};
 use crate::mm::vmm;
 use crate::sync::IrqMutex;
@@ -43,6 +44,8 @@ struct Task {
     cr3: u64,
     /// Top of this task's kernel stack (for syscalls and ring-3 interrupts).
     kstack_top: u64,
+    /// SIMD registers of user tasks (kernel threads never use them).
+    fpu: Option<Box<FpuState>>,
 }
 
 struct Scheduler {
@@ -66,6 +69,7 @@ pub fn init() {
         pid: 0,
         cr3: vmm::kernel_pml4(),
         kstack_top: 0,
+        fpu: None,
     });
     *SCHED.lock() = Some(Scheduler { tasks: alloc::vec![boot], current: 0, slice_start: 0 });
     STARTED.store(true, Ordering::Release);
@@ -98,6 +102,7 @@ pub fn spawn_task(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64) -> TaskI
         pid,
         cr3,
         kstack_top: top,
+        fpu: (pid != 0).then(|| Box::new(FpuState::new())),
     });
     SCHED.lock().as_mut().unwrap().tasks.push(task);
     id
@@ -129,13 +134,12 @@ pub fn current_pid() -> u32 {
     SCHED.lock().as_ref().map(|s| s.tasks[s.current].pid).unwrap_or(0)
 }
 
-/// Marks every task of `pid` except the caller as dead (they never run again).
-pub fn kill_process_tasks(pid: u32) {
+/// Wakes every sleeping task of `pid` (e.g. so they notice a kill request).
+pub fn wake_process(pid: u32) {
     if let Some(s) = SCHED.lock().as_mut() {
-        let cur = s.current;
-        for (i, t) in s.tasks.iter_mut().enumerate() {
-            if t.pid == pid && i != cur {
-                t.state = State::Dead;
+        for t in s.tasks.iter_mut().filter(|t| t.pid == pid) {
+            if matches!(t.state, State::Sleeping(_)) {
+                t.state = State::Ready;
             }
         }
     }
@@ -192,6 +196,12 @@ fn schedule() {
         if kstack != 0 {
             syscall::set_kernel_stack(kstack);
         }
+        if let Some(f) = s.tasks[cur].fpu.as_mut() {
+            f.save();
+        }
+        if let Some(f) = s.tasks[next].fpu.as_ref() {
+            f.restore();
+        }
         (save, load)
         // The lock guard drops here; interrupts stay off because the caller disabled them.
     };
@@ -220,7 +230,14 @@ fn reap() {
         s.current = s.tasks.iter().position(|t| t.id == current_id).unwrap();
         dead
     };
-    drop(dead);
+    // A user thread is gone only once no CPU runs on its stack or page tables.
+    for t in dead {
+        let pid = t.pid;
+        drop(t);
+        if pid != 0 {
+            crate::proc::thread_gone(pid);
+        }
+    }
 }
 
 /// Called from the timer interrupt (interrupts already disabled).

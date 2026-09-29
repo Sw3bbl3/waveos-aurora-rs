@@ -1,10 +1,16 @@
 //! User processes: address space, open handles, lifecycle.
 //!
 //! A process owns an [`AddressSpace`], a table of [`Handle`]s (files, pipe
-//! ends, the log console) and one thread (its main task). Processes are
-//! created with [`spawn`] (no fork). Exits and crashes are queued to the
-//! `reaper` kernel task, which frees resources outside of interrupt context.
+//! ends, the log console) and one or more threads (scheduler tasks sharing
+//! the address space). Processes are created with [`spawn`] (no fork).
+//!
+//! Termination is cooperative: exiting, crashing or being killed records the
+//! exit code and flags the process; every thread then leaves at its next safe
+//! point (syscall return, a timer tick in ring 3, or a blocking wait), so no
+//! thread ever dies holding a kernel lock. When the scheduler has reaped the
+//! last thread, the `reaper` kernel task frees the process's resources.
 
+pub mod futex;
 pub mod pipe;
 
 use crate::fs::{self, OpenFile};
@@ -67,7 +73,11 @@ pub struct Process {
     pub cwd: Mutex<String>,
     exit: AtomicI64,
     pub killed: AtomicBool,
+    /// Set once a parent has collected the exit code with `wait`.
+    waited: AtomicBool,
     pub main_task: AtomicU64,
+    /// Threads that have not been reaped yet.
+    threads: AtomicU32,
     pub resident_kib: AtomicU64,
     entry: u64,
     user_sp: u64,
@@ -213,7 +223,9 @@ pub fn spawn(path: &str, argv: &[&str], stdio: [Option<Arc<Handle>>; 3], parent:
         cwd: Mutex::new(cwd.unwrap_or_else(|| String::from("/"))),
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
+        waited: AtomicBool::new(false),
         main_task: AtomicU64::new(0),
+        threads: AtomicU32::new(1),
         entry: image.entry,
         user_sp,
         arg: block_va,
@@ -234,25 +246,69 @@ fn user_main(pid: u64) {
     crate::arch::syscall::enter_user(entry, sp, arg);
 }
 
-fn finish(pid: Pid, code: i64) {
-    if let Some(p) = get(pid) {
-        let _ = p.exit.compare_exchange(RUNNING, code, Ordering::AcqRel, Ordering::Acquire);
-        p.killed.store(true, Ordering::Release);
-        // Wake a parent blocked in `wait`.
-        if let Some(parent) = get(p.parent) {
-            sched::wake(parent.main_task.load(Ordering::Relaxed));
-        }
+struct ThreadStart {
+    entry: u64,
+    stack: u64,
+    arg: u64,
+}
+
+/// Starts another thread in the calling process at `entry(arg)` on `stack`.
+pub fn spawn_thread(entry: u64, stack: u64, arg: u64) -> Result<u64, isize> {
+    let p = current().ok_or(EPERM)?;
+    if entry >= layout::USER_END || stack >= layout::USER_END || stack < 4096 {
+        return Err(EINVAL);
     }
-    sched::kill_process_tasks(pid);
+    if p.threads.load(Ordering::Acquire) >= 64 {
+        return Err(EAGAIN);
+    }
+    p.threads.fetch_add(1, Ordering::AcqRel);
+    let start = alloc::boxed::Box::new(ThreadStart { entry, stack: stack & !0xF, arg });
+    let raw = alloc::boxed::Box::into_raw(start) as u64;
+    Ok(sched::spawn_task(&p.name, user_thread, raw, p.pid, p.cr3))
+}
+
+fn user_thread(raw: u64) {
+    let start = unsafe { alloc::boxed::Box::from_raw(raw as *mut ThreadStart) };
+    // Entered like a function call: rsp ≡ 8 (mod 16).
+    let (entry, sp, arg) = (start.entry, start.stack - 8, start.arg);
+    drop(start);
+    if interrupted() {
+        return; // the process is already going away
+    }
+    crate::arch::syscall::enter_user(entry, sp, arg);
+}
+
+/// Called by the scheduler once a thread of `pid` has been switched away from
+/// for the last time. The last thread hands the process to the reaper.
+pub fn thread_gone(pid: Pid) {
+    let Some(p) = get(pid) else { return };
+    if p.threads.fetch_sub(1, Ordering::AcqRel) != 1 {
+        return;
+    }
+    // A process whose threads all returned without calling exit.
+    let _ = p.exit.compare_exchange(RUNNING, 0, Ordering::AcqRel, Ordering::Acquire);
+    sched::wake_process(p.parent);
     REAP_QUEUE.lock().push_back(pid);
     sched::wake(REAPER.load(Ordering::Relaxed));
 }
 
+/// Records the exit code (the first one wins) and asks every thread to leave.
+fn terminate(p: &Process, code: i64) {
+    let _ = p.exit.compare_exchange(RUNNING, code, Ordering::AcqRel, Ordering::Acquire);
+    p.killed.store(true, Ordering::Release);
+    sched::wake_process(p.pid);
+}
+
 /// Terminates the calling process. Never returns.
 pub fn exit_current(code: i64) -> ! {
-    let pid = sched::current_pid();
-    x86_64::instructions::interrupts::disable();
-    finish(pid, code);
+    if let Some(p) = current() {
+        terminate(&p, code);
+    }
+    sched::exit();
+}
+
+/// Ends only the calling thread (the process lives on while others remain).
+pub fn exit_thread() -> ! {
     sched::exit();
 }
 
@@ -264,30 +320,30 @@ pub fn crash_current(reason: core::fmt::Arguments) -> ! {
     let _ = core::fmt::Write::write_fmt(&mut text, reason);
     if let Some(p) = get(pid) {
         log!("proc", "pid {} '{}' crashed: {}", pid, p.name, text.as_str());
-        CRASHES.lock().push_back(Crash {
-            parent: p.parent,
-            name: p.name.clone(),
-            path: p.path.clone(),
-            reason: String::from(text.as_str()),
-        });
+        if p.exit_code().is_none() {
+            CRASHES.lock().push_back(Crash {
+                parent: p.parent,
+                name: p.name.clone(),
+                path: p.path.clone(),
+                reason: String::from(text.as_str()),
+            });
+        }
+        terminate(&p, CRASH_CODE);
     }
-    finish(pid, CRASH_CODE);
     sched::exit();
 }
 
-/// Requests termination of `pid`. The target exits itself at the next safe
-/// point (syscall return, a timer tick in ring 3, or a blocking wait), so it
-/// never dies while holding a kernel lock.
+/// Requests termination of `pid`. Its threads exit themselves at their next
+/// safe point, so none dies while holding a kernel lock.
 pub fn kill(pid: Pid) -> Result<(), isize> {
     let p = get(pid).ok_or(ESRCH)?;
     if p.exit_code().is_some() {
         return Ok(());
     }
+    terminate(&p, KILLED_CODE);
     if pid == sched::current_pid() {
-        exit_current(KILLED_CODE);
+        sched::exit();
     }
-    p.killed.store(true, Ordering::Release);
-    sched::wake(p.main_task.load(Ordering::Relaxed));
     Ok(())
 }
 
@@ -297,10 +353,10 @@ pub fn interrupted() -> bool {
     pid != 0 && get(pid).is_some_and(|p| p.killed.load(Ordering::Acquire))
 }
 
-/// Exits the current process if it was killed. Call only at safe points.
+/// Ends the current thread if its process is terminating. Call only at safe points.
 pub fn check_killed() {
     if interrupted() {
-        exit_current(KILLED_CODE);
+        sched::exit();
     }
 }
 
@@ -311,16 +367,21 @@ pub fn wait(pid: Pid, timeout_ms: u64) -> Result<i64, isize> {
     if p.parent != me {
         return Err(ECHILD);
     }
-    sched::wait_until(timeout_ms, || p.exit_code().is_some());
-    match p.exit_code() {
-        Some(code) => {
-            // Reaped zombie: drop it from the table once its resources are gone.
+    let deadline = crate::time::uptime_ms().saturating_add(timeout_ms);
+    loop {
+        if let Some(code) = p.exit_code() {
+            p.waited.store(true, Ordering::Release);
+            // Already reaped: drop the zombie now (otherwise the reaper will).
             if p.aspace.lock().is_none() {
                 TABLE.lock().remove(&pid);
             }
-            Ok(code)
+            return Ok(code);
         }
-        None => Err(EAGAIN),
+        let now = crate::time::uptime_ms();
+        if now >= deadline || interrupted() {
+            return Err(EAGAIN);
+        }
+        sched::wait_until(deadline - now, || p.exit_code().is_some() || interrupted());
     }
 }
 
@@ -341,7 +402,7 @@ fn reaper() {
             crate::telemetry::process(if code == CRASH_CODE { "crash" } else { "exit" }, pid, &p.name, &detail);
             // Nobody will wait for children of the kernel or of dead parents.
             let orphan = p.parent == 0 || get(p.parent).is_none_or(|pp| pp.exit_code().is_some());
-            if orphan {
+            if orphan || p.waited.load(Ordering::Acquire) {
                 TABLE.lock().remove(&pid);
             }
             // Children of this process become orphans; reap any that already exited.

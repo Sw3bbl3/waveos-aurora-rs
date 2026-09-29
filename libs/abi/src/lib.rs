@@ -73,7 +73,16 @@ pub mod nr {
     pub const CHDIR: usize = 35;
     /// `getcwd(buf, len) -> length`
     pub const GETCWD: usize = 36;
-    pub const COUNT: usize = 37;
+    /// `thread_spawn(entry, stack_top, arg) -> thread id` — `entry(arg)` runs in this process
+    pub const THREAD_SPAWN: usize = 37;
+    /// `thread_exit(notify)` — if `notify` is non-zero, writes 1 to that `u32` and wakes its futex waiters
+    pub const THREAD_EXIT: usize = 38;
+    /// `futex_wait(addr, expected, timeout_ms)` — sleeps while `*addr == expected` (`-EAGAIN` if it
+    /// already differs, `-ETIMEDOUT` on timeout; `u64::MAX` blocks)
+    pub const FUTEX_WAIT: usize = 39;
+    /// `futex_wake(addr, count) -> woken`
+    pub const FUTEX_WAKE: usize = 40;
+    pub const COUNT: usize = 41;
 }
 
 /// Error numbers (returned negated).
@@ -99,6 +108,7 @@ pub mod err {
     pub const ENAMETOOLONG: isize = 36;
     pub const ENOSYS: isize = 38;
     pub const ENOTEMPTY: isize = 39;
+    pub const ETIMEDOUT: isize = 110;
 
     pub fn name(e: isize) -> &'static str {
         match e.abs() {
@@ -123,6 +133,7 @@ pub mod err {
             ENAMETOOLONG => "name too long",
             ENOSYS => "not implemented",
             ENOTEMPTY => "directory not empty",
+            ETIMEDOUT => "timed out",
             _ => "unknown error",
         }
     }

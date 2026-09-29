@@ -1,10 +1,10 @@
 //! The process heap: a chain of arenas obtained from `mmap` on demand.
 
 use crate::abi::nr;
+use crate::sync::Mutex;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
 use linked_list_allocator::Heap;
-use spin::Mutex;
 
 const MAX_ARENAS: usize = 48;
 const MIN_ARENA: usize = 1 << 20;

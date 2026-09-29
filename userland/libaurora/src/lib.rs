@@ -19,7 +19,9 @@ pub mod heap;
 pub mod io;
 pub mod process;
 pub mod rt;
+pub mod sync;
 pub mod sys;
+pub mod thread;
 pub mod time;
 
 pub use aurora_abi as abi;
