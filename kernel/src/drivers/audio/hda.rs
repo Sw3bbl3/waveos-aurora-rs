@@ -503,8 +503,8 @@ fn set_up_codec(hda: &mut Hda) -> bool {
         return false;
     }
     let nodes = hda.param(0, P_NODES);
-    let Some(afg) = ((nodes >> 16) & 0xFF..((nodes >> 16) & 0xFF) + (nodes & 0xFF))
-        .find(|&n| hda.param(n, P_FG_TYPE) & 0xFF == 1)
+    let Some(afg) =
+        ((nodes >> 16) & 0xFF..((nodes >> 16) & 0xFF) + (nodes & 0xFF)).find(|&n| hda.param(n, P_FG_TYPE) & 0xFF == 1)
     else {
         return false;
     };

@@ -265,7 +265,13 @@ fn block_round_trip() {
     let pattern: Vec<u8> = (0..len).map(|i| (i as u32).wrapping_mul(2654435761).to_le_bytes()[1]).collect();
     // Every controller QEMU emulates here supports MSI or MSI-X.
     let name = disk.name();
-    let owner = if name.starts_with("sata") { "ahci" } else if name.starts_with("nvme") { "nvme" } else { "virtio-blk" };
+    let owner = if name.starts_with("sata") {
+        "ahci"
+    } else if name.starts_with("nvme") {
+        "nvme"
+    } else {
+        "virtio-blk"
+    };
     let interrupts = || -> u64 { crate::arch::irq::list().iter().filter(|v| v.1 == owner).map(|v| v.2).sum() };
     let before = interrupts();
     disk.write(scratch, &pattern).unwrap();

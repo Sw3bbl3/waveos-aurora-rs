@@ -9,7 +9,7 @@ env:
 
 jobs:
   host:
-    name: Format and host tests (WaveFS, FAT32)
+    name: Format and host tests (WaveFS, FAT32, gfx, image, WAV)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -21,16 +21,21 @@ jobs:
           cargo fmt --all -- --check
           (cd userland && cargo fmt --all -- --check)
       - name: Filesystem library tests
-        run: cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image
+        run: cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav
 
   kernel:
-    name: Kernel tests (${{ matrix.disk }})
+    name: Kernel tests (${{ matrix.disk }}, ${{ matrix.smp }} CPU)
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         disk: [ahci, virtio, nvme]
+        smp: [4]
+        include:
+          # The single-CPU path (no APs, no IPIs) stays covered too.
+          - disk: ahci
+            smp: 1
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU and OVMF
@@ -39,7 +44,7 @@ jobs:
         run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: Kernel self-tests, two boots on the same disk
-        run: cargo xtask test --disk ${{ matrix.disk }}
+        run: cargo xtask test --disk ${{ matrix.disk }} --smp ${{ matrix.smp }}
 
   boot:
     name: Boot to desktop and build the USB image

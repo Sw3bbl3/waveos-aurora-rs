@@ -84,7 +84,15 @@ static SCHED: IrqMutex<Option<Scheduler>> = IrqMutex::new(None);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static STARTED: AtomicBool = AtomicBool::new(false);
 
-fn new_task(name: &str, rsp: u64, stack: Option<Box<[u8]>>, pid: u32, cr3: u64, kstack_top: u64, cpu: usize) -> Box<Task> {
+fn new_task(
+    name: &str,
+    rsp: u64,
+    stack: Option<Box<[u8]>>,
+    pid: u32,
+    cr3: u64,
+    kstack_top: u64,
+    cpu: usize,
+) -> Box<Task> {
     Box::new(Task {
         name: String::from(name),
         rsp,
@@ -175,7 +183,9 @@ fn enqueue(s: &mut Scheduler, id: TaskId, mut cpu: usize) -> Option<usize> {
     }
     // Prefer an idle CPU over waiting behind a busy one.
     if s.cpus[cpu].current != s.cpus[cpu].idle || !s.cpus[cpu].queue.is_empty() {
-        if let Some(idle) = percpu::online().find(|&c| c < s.cpus.len() && s.cpus[c].current == s.cpus[c].idle && s.cpus[c].queue.is_empty()) {
+        if let Some(idle) = percpu::online()
+            .find(|&c| c < s.cpus.len() && s.cpus[c].current == s.cpus[c].idle && s.cpus[c].queue.is_empty())
+        {
             cpu = idle;
         }
     }
@@ -185,7 +195,10 @@ fn enqueue(s: &mut Scheduler, id: TaskId, mut cpu: usize) -> Option<usize> {
 
 fn kick(cpu: Option<usize>) {
     if let Some(c) = cpu {
-        crate::arch::apic::send_ipi(percpu::CPUS[c].lapic_id.load(Ordering::Relaxed), crate::arch::idt::RESCHEDULE_VECTOR);
+        crate::arch::apic::send_ipi(
+            percpu::CPUS[c].lapic_id.load(Ordering::Relaxed),
+            crate::arch::idt::RESCHEDULE_VECTOR,
+        );
     }
 }
 
@@ -257,7 +270,8 @@ fn pick_next(s: &mut Scheduler, cpu: usize) -> Option<TaskId> {
     }
     let victim = (0..s.cpus.len()).filter(|&c| c != cpu).max_by_key(|&c| s.cpus[c].queue.len())?;
     let q = &mut s.cpus[victim].queue;
-    let pos = q.iter().position(|id| s.tasks.get(id).is_some_and(|t| t.state == State::Ready && t.running_on.is_none()))?;
+    let pos =
+        q.iter().position(|id| s.tasks.get(id).is_some_and(|t| t.state == State::Ready && t.running_on.is_none()))?;
     q.remove(pos)
 }
 
@@ -411,7 +425,12 @@ pub fn on_reschedule_ipi() {
 fn wake_sleepers() {
     let now = time::ticks();
     let due: Vec<TaskId> = match SCHED.lock().as_ref() {
-        Some(s) => s.tasks.iter().filter(|(_, t)| matches!(t.state, State::Sleeping(u) if now >= u)).map(|(&id, _)| id).collect(),
+        Some(s) => s
+            .tasks
+            .iter()
+            .filter(|(_, t)| matches!(t.state, State::Sleeping(u) if now >= u))
+            .map(|(&id, _)| id)
+            .collect(),
         None => return,
     };
     for id in due {
@@ -538,7 +557,8 @@ pub fn cpu_times() -> Vec<(u64, u64)> {
                 .iter()
                 .map(|c| {
                     let run = now.saturating_sub(c.slice_start);
-                    let (b, i) = if c.current == c.idle { (c.busy_ns, c.idle_ns + run) } else { (c.busy_ns + run, c.idle_ns) };
+                    let (b, i) =
+                        if c.current == c.idle { (c.busy_ns, c.idle_ns + run) } else { (c.busy_ns + run, c.idle_ns) };
                     (b / 1_000_000, i / 1_000_000)
                 })
                 .collect()
