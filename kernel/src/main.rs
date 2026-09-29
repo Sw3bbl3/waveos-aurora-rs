@@ -42,7 +42,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     assert_eq!(boot_info.version, bootinfo::BOOTINFO_VERSION, "bootloader/kernel version mismatch");
 
     telemetry::stage("cpu", "CPU tables: GDT, TSS, IDT, syscall");
-    arch::gdt::init();
+    arch::gdt::init(0);
     arch::idt::init();
     arch::syscall::init();
     arch::fpu::init();
@@ -51,9 +51,13 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     telemetry::stage("memory", "Memory: frames, heap, page tables");
     mm::init(boot_info);
 
-    telemetry::stage("interrupts", "ACPI, APIC timer and interrupt routing");
+    telemetry::stage("interrupts", "ACPI, clocks, APIC timer and interrupt routing");
     let acpi = acpi::parse(boot_info.rsdp_phys);
+    drivers::hpet::init(acpi.hpet);
+    time::init_clock();
     arch::apic::init(&acpi);
+    arch::percpu::init(0);
+    let cpu_ids = acpi.cpu_apic_ids.clone();
 
     let fb = boot_info.framebuffer;
     input::set_screen_size(fb.width as i32, fb.height as i32);
@@ -75,6 +79,9 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     proc::init();
     x86_64::instructions::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
+
+    telemetry::stage("smp", "Starting the other CPUs");
+    arch::smp::start_aps(&cpu_ids, boot_info.trampoline_phys);
 
     // Storage needs a running clock (timeouts) and scheduler (drivers yield while polling).
     telemetry::stage("storage", "PCI, disk drivers and filesystems");
@@ -104,6 +111,7 @@ fn initrd(boot_info: &BootInfo) -> &'static [u8] {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     x86_64::instructions::interrupts::disable();
+    arch::smp::halt_others();
     unsafe { drivers::serial::force_unlock() };
     kprintln!("\n*** KERNEL PANIC: {}", info);
     if cfg!(feature = "ktest") {

@@ -48,7 +48,7 @@ pub fn wait(addr: u64, expected: u32, timeout_ms: u64) -> Result<u64, isize> {
         // The value is read under the lock that `wake` takes, so a wakeup
         // between the check and the sleep cannot be lost.
         let mut w = WAITERS.lock();
-        let value = unsafe { (addr as *const u32).read_volatile() };
+        let value = crate::syscall::user::read_u32(addr)?;
         if value != expected {
             return Err(EAGAIN);
         }
@@ -98,7 +98,7 @@ fn wake_key(k: Key, count: u64) -> u64 {
 /// `thread_exit(notify)`: stores 1 into `notify` and wakes everyone joining on it.
 pub fn notify_exit(addr: u64) {
     if let Ok(k) = key(addr) {
-        unsafe { (addr as *mut u32).write_volatile(1) };
+        let _ = crate::syscall::user::write_u32(addr, 1);
         wake_key(k, u64::MAX);
     }
 }

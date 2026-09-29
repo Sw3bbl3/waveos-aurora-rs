@@ -29,6 +29,17 @@ pub struct AcpiInfo {
     pub reset_port: Option<(u16, u8)>,
     /// PCIe enhanced configuration space: (base, first bus, last bus) for segment 0.
     pub ecam: Option<(u64, u8, u8)>,
+    /// HPET registers (physical address).
+    pub hpet: Option<u64>,
+    /// FADT fields for the ACPI subsystem: SCI interrupt, PM1 event blocks,
+    /// the FACS, IAPC_BOOT_ARCH flags.
+    pub sci_irq: u16,
+    pub pm1a_evt: u16,
+    pub pm1b_evt: u16,
+    pub pm1_evt_len: u8,
+    pub facs: u64,
+    pub boot_arch: u16,
+    pub fadt_flags: u32,
 }
 
 impl AcpiInfo {
@@ -74,6 +85,7 @@ pub fn parse(rsdp_phys: u64) -> AcpiInfo {
                 b"APIC" => parse_madt(table, &mut info),
                 b"FACP" => parse_fadt(table, &mut info),
                 b"MCFG" => parse_mcfg(table, &mut info),
+                b"HPET" => info.hpet = Some(read::<u64>(table + 44)),
                 _ => {}
             }
         }
@@ -141,6 +153,18 @@ unsafe fn parse_mcfg(table: u64, info: &mut AcpiInfo) {
 
 unsafe fn parse_fadt(table: u64, info: &mut AcpiInfo) {
     let len = table_len(table);
+    info.facs = read::<u32>(table + 36) as u64;
+    if len >= 140 && read::<u64>(table + 132) != 0 {
+        info.facs = read::<u64>(table + 132);
+    }
+    info.sci_irq = read::<u16>(table + 46);
+    info.pm1a_evt = read::<u32>(table + 56) as u16;
+    info.pm1b_evt = read::<u32>(table + 60) as u16;
+    info.pm1_evt_len = read::<u8>(table + 88);
+    if len >= 111 {
+        info.boot_arch = read::<u16>(table + 109);
+    }
+    info.fadt_flags = read::<u32>(table + 112);
     info.smi_cmd = read::<u32>(table + 48) as u16;
     info.acpi_enable = read::<u8>(table + 52);
     info.pm1a_cnt = read::<u32>(table + 64) as u16;

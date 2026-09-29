@@ -1,6 +1,6 @@
 //! System call dispatch. See `aurora_abi` for numbers and calling convention.
 
-mod user;
+pub(crate) mod user;
 
 use crate::arch::syscall::SyscallFrame;
 use crate::fs;
@@ -51,7 +51,7 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::MUNMAP => munmap(a[0], a[1]),
         nr::LOG => {
             let text = user::slice(a[0], a[1].min(4096))?;
-            log_line(text);
+            log_line(&text);
             Ok(0)
         }
         nr::OPEN => {
@@ -99,7 +99,7 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::RENAME => fs::rename(&user::path(a[0], a[1])?, &user::path(a[2], a[3])?).map(|_| 0),
         nr::PIPE => {
             let p = proc::current().ok_or(EPERM)?;
-            user::slice_mut(a[0], 8)?; // validate before creating anything
+            user::writable(a[0], 8)?; // validate before creating anything
             let (r, w) = proc::new_pipe(a[1] & 1 != 0);
             let rfd = p.install_fd(r)?;
             let wfd = match p.install_fd(w) {
@@ -139,9 +139,10 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         }
         nr::GETCWD => {
             let cwd = proc::current().ok_or(EPERM)?.cwd.lock().clone();
-            let out = user::slice_mut(a[0], a[1])?;
+            let mut out = user::slice_mut(a[0], a[1])?;
             let n = cwd.len().min(out.len());
             out[..n].copy_from_slice(&cwd.as_bytes()[..n]);
+            out.commit(n)?;
             Ok(cwd.len() as u64)
         }
         nr::THREAD_SPAWN => proc::spawn_thread(a[0], a[1], a[2]),
@@ -155,36 +156,39 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::FUTEX_WAKE => proc::futex::wake(a[0], a[1]),
         nr::CLIPBOARD_SET => {
             let data = user::slice(a[1], a[2].min(aurora_abi::clip::MAX_LEN as u64 + 1))?;
-            crate::gui::clipboard::set(a[0] as usize, data).map(|_| 0)
+            crate::gui::clipboard::set(a[0] as usize, &data).map(|_| 0)
         }
         nr::CLIPBOARD_GET => {
-            let out = user::slice_mut(a[1], a[2].min(aurora_abi::clip::MAX_LEN as u64))?;
-            crate::gui::clipboard::get(a[0] as usize, out).map(|n| n as u64)
+            let mut out = user::slice_mut(a[1], a[2].min(aurora_abi::clip::MAX_LEN as u64))?;
+            let n = crate::gui::clipboard::get(a[0] as usize, &mut out)?;
+            out.commit(n)?;
+            Ok(n as u64)
         }
         nr::DRAG_START => {
             let data = user::slice(a[1], a[2].min(aurora_abi::clip::MAX_LEN as u64 + 1))?;
-            crate::gui::server::drag_start(sched::current_pid(), a[0] as usize, data, a[3] as u32, a[4] as usize)
+            crate::gui::server::drag_start(sched::current_pid(), a[0] as usize, &data, a[3] as u32, a[4] as usize)
                 .map(|_| 0)
         }
         nr::NOTIFY => {
             let title = user::str(a[0], a[1].min(512))?;
             let body = user::str(a[2], a[3].min(2048))?;
             let p = proc::current().ok_or(EPERM)?;
-            crate::gui::notify::post(p.pid, &p.path, title, body);
+            crate::gui::notify::post(p.pid, &p.path, &title, &body);
             Ok(0)
         }
         nr::PREF_GET => {
             let key = user::str(a[0], a[1].min(64))?;
-            let v = crate::gui::prefs::get(key).ok_or(ENOENT)?;
-            let out = user::slice_mut(a[2], a[3].min(4096))?;
+            let v = crate::gui::prefs::get(&key).ok_or(ENOENT)?;
+            let mut out = user::slice_mut(a[2], a[3].min(4096))?;
             let n = v.len().min(out.len());
             out[..n].copy_from_slice(&v.as_bytes()[..n]);
+            out.commit(n)?;
             Ok(v.len() as u64)
         }
         nr::PREF_SET => {
             let key = user::str(a[0], a[1].min(64))?;
             let value = user::str(a[2], a[3].min(1024))?;
-            crate::gui::prefs::set(key, value).map(|_| 0)
+            crate::gui::prefs::set(&key, &value).map(|_| 0)
         }
         nr::SET_DATETIME => {
             let d: DateTime = user::get(a[0])?;
@@ -213,18 +217,22 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             let modes = crate::drivers::display::modes((w as u32, h as u32), crate::gui::prefs::boot_resolution());
             let max = (a[1] as usize).min(64);
             let size = core::mem::size_of::<aurora_abi::DisplayMode>();
-            let out = user::slice_mut(a[0], (max * size) as u64)?;
-            for (i, m) in modes.iter().take(max).enumerate() {
+            let mut out = user::slice_mut(a[0], (max * size) as u64)?;
+            let n = modes.len().min(max);
+            for (i, m) in modes.iter().take(n).enumerate() {
                 let bytes = unsafe { core::slice::from_raw_parts(m as *const _ as *const u8, size) };
                 out[i * size..(i + 1) * size].copy_from_slice(bytes);
             }
+            out.commit(n * size)?;
             Ok(modes.len() as u64)
         }
         nr::SET_DISPLAY => crate::gui::prefs::set_display(a[0] as u32, a[1] as u32),
         nr::SYS_STATS => user::put(a[0], &sys_stats()).map(|_| 0),
         nr::DRAG_DATA => {
-            let out = user::slice_mut(a[0], a[1].min(aurora_abi::clip::MAX_LEN as u64))?;
-            crate::gui::dnd::data(sched::current_pid(), out).map(|n| n as u64)
+            let mut out = user::slice_mut(a[0], a[1].min(aurora_abi::clip::MAX_LEN as u64))?;
+            let n = crate::gui::dnd::data(sched::current_pid(), &mut out)?;
+            out.commit(n)?;
+            Ok(n as u64)
         }
         nr::DESKTOP => crate::gui::server::desktop_request(a[0] as usize, a[1], a[2]),
         nr::WIN_CREATE
@@ -269,12 +277,13 @@ fn spawn(a: [u64; 6]) -> SysResult {
 
 fn read(fd: usize, ptr: u64, len: u64) -> SysResult {
     let h = proc::current().ok_or(EPERM)?.fd(fd)?;
-    let buf = user::slice_mut(ptr, len)?;
+    let mut buf = user::slice_mut(ptr, len)?;
     let n = match &*h {
-        Handle::File(f) => f.lock().read(buf)?,
-        Handle::PipeRead { pipe, nonblocking } => pipe.read(buf, *nonblocking)?,
+        Handle::File(f) => f.lock().read(&mut buf)?,
+        Handle::PipeRead { pipe, nonblocking } => pipe.read(&mut buf, *nonblocking)?,
         Handle::PipeWrite(_) | Handle::Log => return Err(EBADF),
     };
+    buf.commit(n)?;
     Ok(n as u64)
 }
 
@@ -282,10 +291,10 @@ fn write(fd: usize, ptr: u64, len: u64) -> SysResult {
     let h = proc::current().ok_or(EPERM)?.fd(fd)?;
     let buf = user::slice(ptr, len)?;
     let n = match &*h {
-        Handle::File(f) => f.lock().write(buf)?,
-        Handle::PipeWrite(pipe) => pipe.write(buf)?,
+        Handle::File(f) => f.lock().write(&buf)?,
+        Handle::PipeWrite(pipe) => pipe.write(&buf)?,
         Handle::Log => {
-            log_line(buf);
+            log_line(&buf);
             buf.len()
         }
         Handle::PipeRead { .. } => return Err(EBADF),
@@ -327,7 +336,9 @@ fn readdir(a: [u64; 6]) -> SysResult {
     let path = user::path(a[0], a[1])?;
     let entries = fs::readdir(&path)?;
     let max = (a[3] as usize).min(4096);
-    let out = user::slice_mut(a[2], (max * core::mem::size_of::<DirEntry>()) as u64)?;
+    let mut out = user::slice_mut(a[2], (max * core::mem::size_of::<DirEntry>()) as u64)?;
+    let size = core::mem::size_of::<DirEntry>();
+    let count = entries.len().min(max);
     for (i, e) in entries.iter().take(max).enumerate() {
         let mut d = DirEntry::zeroed();
         d.kind = if e.kind == fs::Kind::Dir { aurora_abi::KIND_DIR } else { aurora_abi::KIND_FILE };
@@ -336,10 +347,10 @@ fn readdir(a: [u64; 6]) -> SysResult {
         d.name_len = n as u32;
         d.size = e.size;
         d.mtime = e.mtime;
-        let size = core::mem::size_of::<DirEntry>();
         let bytes = unsafe { core::slice::from_raw_parts(&d as *const DirEntry as *const u8, size) };
         out[i * size..(i + 1) * size].copy_from_slice(bytes);
     }
+    out.commit(count * size)?;
     Ok(entries.len() as u64)
 }
 
@@ -352,10 +363,11 @@ fn fixed<const N: usize>(s: &str) -> ([u8; N], u32) {
 
 fn proc_list(ptr: u64, max: u64) -> SysResult {
     let max = max.min(512) as usize;
-    let out = user::slice_mut(ptr, (max * core::mem::size_of::<ProcInfo>()) as u64)?;
+    let mut out = user::slice_mut(ptr, (max * core::mem::size_of::<ProcInfo>()) as u64)?;
     let tasks = sched::list();
     let mut rows: Vec<ProcInfo> = Vec::new();
-    for t in tasks.iter().filter(|t| t.pid == 0) {
+    // Idle tasks are left out: their time is the "idle" share in SYS_STATS.
+    for t in tasks.iter().filter(|t| t.pid == 0 && !t.idle) {
         let (name, name_len) = fixed::<32>(&t.name);
         rows.push(ProcInfo {
             pid: t.id as u32,
@@ -393,6 +405,7 @@ fn proc_list(ptr: u64, max: u64) -> SysResult {
         let bytes = unsafe { core::slice::from_raw_parts(r as *const ProcInfo as *const u8, size) };
         out[i * size..(i + 1) * size].copy_from_slice(bytes);
     }
+    out.commit(rows.len().min(max) * size)?;
     Ok(rows.len() as u64)
 }
 
@@ -406,13 +419,14 @@ fn state_of(s: sched::State) -> u32 {
 }
 
 fn sys_stats() -> aurora_abi::SysStats {
-    let mut s = aurora_abi::SysStats { uptime_ms: time::uptime_ms(), cpus: 1, ..Default::default() };
+    let mut s = aurora_abi::SysStats { uptime_ms: time::uptime_ms(), ..Default::default() };
     let tasks = sched::list();
-    s.tasks = tasks.len() as u32;
-    // Tick counts are milliseconds (1 kHz timer); the idle task's time is idle time.
-    let idle: u64 = tasks.iter().filter(|t| t.id == 0).map(|t| t.cpu_ticks).sum();
-    let busy: u64 = tasks.iter().filter(|t| t.id != 0).map(|t| t.cpu_ticks).sum();
-    s.cpu[0] = aurora_abi::CpuTime { busy_ms: busy, idle_ms: idle };
+    s.tasks = tasks.iter().filter(|t| !t.idle).count() as u32;
+    let cpus = sched::cpu_times();
+    s.cpus = cpus.len().min(aurora_abi::MAX_CPUS) as u32;
+    for (i, (busy, idle)) in cpus.iter().take(aurora_abi::MAX_CPUS).enumerate() {
+        s.cpu[i] = aurora_abi::CpuTime { busy_ms: *busy, idle_ms: *idle };
+    }
     let m = mm::stats();
     (s.mem_total, s.mem_used, s.heap_size, s.heap_used) = (m.total_bytes, m.used_bytes, m.heap_size, m.heap_used);
     (s.interrupts, s.syscalls, s.context_switches) = crate::telemetry::totals();

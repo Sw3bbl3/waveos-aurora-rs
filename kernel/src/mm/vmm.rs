@@ -118,6 +118,8 @@ pub fn kmap(frames: &[u64]) -> Option<u64> {
     Some(base)
 }
 
+/// Unmaps a `kmap` range on every CPU. Must not be called while holding an
+/// `IrqMutex` (other CPUs have to take the shootdown IPI).
 pub fn kunmap(base: u64, pages: u64) {
     let pml4 = kernel_pml4();
     for i in 0..pages {
@@ -127,7 +129,70 @@ pub fn kunmap(base: u64, pages: u64) {
             x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
         }
     }
+    shootdown(base, pages, None);
     KVA.lock().free.push((base, pages));
+}
+
+// ----------------------------------------------------------- TLB shootdown
+
+/// One shootdown at a time; `PENDING` counts CPUs yet to flush.
+static SHOOTDOWN: spin::Mutex<()> = spin::Mutex::new(());
+static REQ_START: AtomicU64 = AtomicU64::new(0);
+static REQ_PAGES: AtomicU64 = AtomicU64::new(0);
+static PENDING: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Makes other CPUs drop stale translations of `[start, start + pages)`: all
+/// of them for kernel addresses, or those running address space `cr3`.
+/// While waiting it also serves requests aimed at this CPU, so two CPUs
+/// shooting at each other can't deadlock even with interrupts off.
+pub fn shootdown(start: u64, pages: u64, cr3: Option<u64>) {
+    use crate::arch::percpu;
+    if percpu::count() <= 1 {
+        return;
+    }
+    let me = percpu::cpu_id();
+    let targets: Vec<usize> = percpu::online()
+        .filter(|&c| c != me && cr3.is_none_or(|r| percpu::CPUS[c].cr3.load(Ordering::Relaxed) == r))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let guard = loop {
+        if let Some(g) = SHOOTDOWN.try_lock() {
+            break g;
+        }
+        service_shootdown();
+        core::hint::spin_loop();
+    };
+    REQ_START.store(start, Ordering::Relaxed);
+    REQ_PAGES.store(pages, Ordering::Relaxed);
+    PENDING.store(targets.len() as u32, Ordering::Release);
+    for &c in &targets {
+        percpu::CPUS[c].tlb_pending.store(true, Ordering::Release);
+        crate::arch::apic::send_ipi(percpu::CPUS[c].lapic_id.load(Ordering::Relaxed), crate::arch::idt::TLB_VECTOR);
+    }
+    while PENDING.load(Ordering::Acquire) != 0 {
+        service_shootdown();
+        core::hint::spin_loop();
+    }
+    drop(guard);
+}
+
+/// Flushes what a shootdown asked of this CPU (from the IPI, or while waiting).
+pub fn service_shootdown() {
+    let me = &crate::arch::percpu::this().tlb_pending;
+    if !me.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let (start, pages) = (REQ_START.load(Ordering::Relaxed), REQ_PAGES.load(Ordering::Relaxed));
+    if pages > 64 {
+        x86_64::instructions::tlb::flush_all();
+    } else {
+        for i in 0..pages {
+            x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(start + i * PAGE_SIZE));
+        }
+    }
+    PENDING.fetch_sub(1, Ordering::AcqRel);
 }
 
 // ---------------------------------------------------------- address spaces
@@ -215,18 +280,25 @@ impl AddressSpace {
 
     /// Unmaps pages, freeing private frames.
     pub fn unmap(&mut self, va: u64, pages: u64) {
+        let mut freed = Vec::new();
         for i in 0..pages {
             let page = va + i * PAGE_SIZE;
             if let Some(e) = walk(self.pml4, page, false, true) {
                 if *e & PRESENT != 0 {
                     if *e & SHARED == 0 {
-                        frame::free(*e & ADDR);
+                        freed.push(*e & ADDR);
                         self.resident = self.resident.saturating_sub(PAGE_SIZE);
                     }
                     *e = 0;
                     self.invalidate(page);
                 }
             }
+        }
+        // Other threads of this process may run on other CPUs: they must
+        // forget the pages before the frames can be reused.
+        shootdown(va, pages, Some(self.pml4));
+        for f in freed {
+            frame::free(f);
         }
     }
 

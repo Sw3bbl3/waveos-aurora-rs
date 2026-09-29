@@ -2,6 +2,7 @@
 pub mod serial;
 pub mod block;
 pub mod display;
+pub mod hpet;
 pub mod input;
 pub mod keyboard;
 pub mod keymap;

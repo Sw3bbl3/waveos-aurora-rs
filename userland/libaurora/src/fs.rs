@@ -37,14 +37,18 @@ impl File {
     }
 
     pub fn read_to_end(&mut self) -> Result<Vec<u8>> {
+        // Read straight into the vector in large chunks (the kernel copies
+        // each read through a buffer, so fewer, bigger reads are cheaper).
+        const CHUNK: usize = 64 * 1024;
         let mut out = Vec::new();
-        let mut buf = [0u8; 4096];
         loop {
-            let n = self.read(&mut buf)?;
+            let len = out.len();
+            out.resize(len + CHUNK, 0);
+            let n = self.read(&mut out[len..])?;
+            out.truncate(len + n);
             if n == 0 {
                 return Ok(out);
             }
-            out.extend_from_slice(&buf[..n]);
         }
     }
 }

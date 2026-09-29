@@ -8,9 +8,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::instructions::port::Port;
 
 static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
+/// LAPIC timer count for one tick (divide-by-16), measured once on the BSP.
+static TIMER_COUNT: AtomicU64 = AtomicU64::new(0);
 static IOAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 
 const LAPIC_ID: u32 = 0x20;
+const LAPIC_ICR_LOW: u32 = 0x300;
+const LAPIC_ICR_HIGH: u32 = 0x310;
 const LAPIC_TPR: u32 = 0x80;
 const LAPIC_EOI: u32 = 0xB0;
 const LAPIC_SVR: u32 = 0xF0;
@@ -59,8 +63,21 @@ fn disable_legacy_pic() {
     }
 }
 
-/// Measures LAPIC timer ticks (divide-by-16) per millisecond against PIT channel 2.
+/// Measures LAPIC timer ticks (divide-by-16) per millisecond: against the
+/// HPET when there is one, else against PIT channel 2.
 fn calibrate_timer() -> u32 {
+    if crate::drivers::hpet::present() {
+        lapic_write(LAPIC_TIMER_DIVIDE, 0x3);
+        lapic_write(LAPIC_TIMER_INIT, u32::MAX);
+        crate::drivers::hpet::spin_us(10_000);
+        let elapsed = u32::MAX - lapic_read(LAPIC_TIMER_CURRENT);
+        lapic_write(LAPIC_TIMER_INIT, 0);
+        return (elapsed / 10).max(1);
+    }
+    calibrate_timer_pit()
+}
+
+fn calibrate_timer_pit() -> u32 {
     const PIT_HZ: u32 = 1_193_182;
     const MS: u32 = 10;
     unsafe {
@@ -84,21 +101,38 @@ fn calibrate_timer() -> u32 {
     }
 }
 
-pub fn init(acpi: &AcpiInfo) {
-    disable_legacy_pic();
-
-    LAPIC_BASE.store(phys_to_virt(acpi.lapic_phys), Ordering::Relaxed);
+/// Enables this CPU's local APIC (task priority, masked LINTs, spurious vector).
+fn enable_local() {
     lapic_write(LAPIC_TPR, 0);
     lapic_write(LAPIC_LVT_LINT0, LVT_MASKED);
     lapic_write(LAPIC_LVT_LINT1, LVT_MASKED);
     lapic_write(LAPIC_LVT_ERROR, LVT_MASKED);
     lapic_write(LAPIC_SVR, 0x100 | SPURIOUS_VECTOR as u32); // software enable
+}
 
-    let per_ms = calibrate_timer();
-    log!("apic", "LAPIC id {} at {:#x}, timer {} ticks/ms", lapic_id(), acpi.lapic_phys, per_ms);
+/// Starts this CPU's periodic scheduler tick.
+fn start_timer() {
     lapic_write(LAPIC_TIMER_DIVIDE, 0x3);
     lapic_write(LAPIC_LVT_TIMER, TIMER_VECTOR as u32 | TIMER_PERIODIC);
-    lapic_write(LAPIC_TIMER_INIT, per_ms * 1000 / crate::time::HZ as u32);
+    lapic_write(LAPIC_TIMER_INIT, TIMER_COUNT.load(Ordering::Relaxed) as u32);
+}
+
+/// Local APIC setup for an application processor (the BSP measured the timer).
+pub fn init_ap() {
+    enable_local();
+    start_timer();
+}
+
+pub fn init(acpi: &AcpiInfo) {
+    disable_legacy_pic();
+
+    LAPIC_BASE.store(phys_to_virt(acpi.lapic_phys), Ordering::Relaxed);
+    enable_local();
+    let per_ms = calibrate_timer();
+    let source = if crate::drivers::hpet::present() { "HPET" } else { "PIT" };
+    log!("apic", "LAPIC id {} at {:#x}, timer {} ticks/ms ({})", lapic_id(), acpi.lapic_phys, per_ms, source);
+    TIMER_COUNT.store((per_ms as u64 * 1000 / crate::time::HZ).max(1), Ordering::Relaxed);
+    start_timer();
 
     IOAPIC_BASE.store(phys_to_virt(acpi.ioapic_phys), Ordering::Relaxed);
     let max_entry = (ioapic_read(1) >> 16) & 0xFF;
@@ -137,4 +171,51 @@ pub fn route_isa_irq(acpi: &AcpiInfo, irq: u8, vector: u8) {
     let pin = gsi - acpi.ioapic_gsi_base;
     ioapic_write(0x10 + 2 * pin + 1, lapic_id() << 24);
     ioapic_write(0x10 + 2 * pin, low);
+}
+
+// -------------------------------------------------------------------- IPIs
+
+fn wait_icr() {
+    for _ in 0..1_000_000 {
+        if lapic_read(LAPIC_ICR_LOW) & (1 << 12) == 0 {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Sends a fixed interrupt `vector` to the CPU with local APIC id `apic`.
+pub fn send_ipi(apic: u32, vector: u8) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        wait_icr();
+        lapic_write(LAPIC_ICR_HIGH, apic << 24);
+        lapic_write(LAPIC_ICR_LOW, vector as u32);
+        wait_icr();
+    });
+}
+
+/// Sends `vector` to every other CPU.
+pub fn broadcast_ipi(vector: u8) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        wait_icr();
+        lapic_write(LAPIC_ICR_HIGH, 0);
+        // Destination shorthand 0b11: all excluding self.
+        lapic_write(LAPIC_ICR_LOW, vector as u32 | 0b11 << 18);
+        wait_icr();
+    });
+}
+
+/// INIT, then two STARTUP IPIs pointing at `page` (a 4 KiB page below 1 MiB).
+pub fn start_ap(apic: u32, page: u64, delay_us: impl Fn(u64)) {
+    wait_icr();
+    lapic_write(LAPIC_ICR_HIGH, apic << 24);
+    lapic_write(LAPIC_ICR_LOW, 0x0000_4500); // INIT, level assert
+    wait_icr();
+    delay_us(10_000);
+    for _ in 0..2 {
+        lapic_write(LAPIC_ICR_HIGH, apic << 24);
+        lapic_write(LAPIC_ICR_LOW, 0x0000_4600 | (page >> 12) as u32); // STARTUP
+        wait_icr();
+        delay_us(200);
+    }
 }

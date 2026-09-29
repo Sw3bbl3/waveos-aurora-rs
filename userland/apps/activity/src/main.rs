@@ -56,6 +56,8 @@ pub struct Activity {
     prev: Option<SysStats>,
     stats: SysStats,
     cpu_hist: VecDeque<u32>,
+    /// Load history of each core (tenths of a percent).
+    core_hist: Vec<VecDeque<u32>>,
     mem_hist: VecDeque<u32>,
     read_hist: VecDeque<u64>,
     write_hist: VecDeque<u64>,
@@ -115,6 +117,7 @@ impl Activity {
             prev: None,
             stats: SysStats::default(),
             cpu_hist: VecDeque::new(),
+            core_hist: Vec::new(),
             mem_hist: VecDeque::new(),
             read_hist: VecDeque::new(),
             write_hist: VecDeque::new(),
@@ -137,10 +140,17 @@ impl Activity {
         let s = process::sys_stats();
         let dt = now.saturating_sub(self.last_sample).max(1);
         if let Some(p) = &self.prev {
-            let busy = s.cpu[0].busy_ms.saturating_sub(p.cpu[0].busy_ms);
-            let idle = s.cpu[0].idle_ms.saturating_sub(p.cpu[0].idle_ms);
-            let pct = (busy * 1000 / (busy + idle).max(1)) as u32;
-            push(&mut self.cpu_hist, pct);
+            let n = (s.cpus as usize).clamp(1, s.cpu.len());
+            self.core_hist.resize_with(n, VecDeque::new);
+            let (mut all_busy, mut all_idle) = (0, 0);
+            for (i, hist) in self.core_hist.iter_mut().enumerate() {
+                let busy = s.cpu[i].busy_ms.saturating_sub(p.cpu[i].busy_ms);
+                let idle = s.cpu[i].idle_ms.saturating_sub(p.cpu[i].idle_ms);
+                push(hist, (busy * 1000 / (busy + idle).max(1)) as u32);
+                all_busy += busy;
+                all_idle += idle;
+            }
+            push(&mut self.cpu_hist, (all_busy * 1000 / (all_busy + all_idle).max(1)) as u32);
             let rate = |a: u64, b: u64| a.saturating_sub(b) * 1000 / dt;
             push(&mut self.read_hist, rate(s.disk_read_bytes, p.disk_read_bytes));
             push(&mut self.write_hist, rate(s.disk_write_bytes, p.disk_write_bytes));
@@ -331,7 +341,6 @@ impl Activity {
                 };
                 cv.fill_circle(r.x + 12, y + ROW_H / 2, 3, dot);
                 let name = match (info.user, info.name()) {
-                    (0, "idle") => String::from("System idle time"),
                     (0, n) => format!("{n} (kernel)"),
                     (_, "Activity") => String::from("Activity Monitor"),
                     (_, n) => String::from(n),
@@ -349,7 +358,8 @@ impl Activity {
                     human_time(info.cpu_ms),
                     format!("{}", info.threads),
                     if info.user == 0 { String::from("—") } else { human_bytes(info.mem_kib * 1024) },
-                    format!("{}", info.pid),
+                    // Kernel tasks have task ids, not process ids.
+                    if info.user == 0 { String::from("—") } else { format!("{}", info.pid) },
                 ];
                 let f = theme::ui(13);
                 for (k, v) in values.iter().enumerate() {
@@ -369,9 +379,22 @@ impl Activity {
         let orange = 0xFFFF_9F0A;
         match self.tab {
             Tab::Cpu => {
-                let hist: VecDeque<u64> = self.cpu_hist.iter().map(|&v| v as u64).collect();
                 let gr = Rect::new(g.x, g.y, g.w - 200, g.h);
-                Self::graph(cv, gr, &[&hist], 1000, &[theme::accent()]);
+                if self.core_hist.len() > 1 {
+                    // One small history graph per core, side by side.
+                    let n = self.core_hist.len() as i32;
+                    let gap = 8;
+                    let w = (gr.w - gap * (n - 1)) / n;
+                    for (i, core) in self.core_hist.iter().enumerate() {
+                        let hist: VecDeque<u64> = core.iter().map(|&v| v as u64).collect();
+                        let cr = Rect::new(gr.x + i as i32 * (w + gap), gr.y, w, gr.h);
+                        Self::graph(cv, cr, &[&hist], 1000, &[theme::accent()]);
+                        cv.text(cr.x + 10, cr.y + 18, &format!("CPU {i}"), theme::ui(11), t.text_secondary);
+                    }
+                } else {
+                    let hist: VecDeque<u64> = self.cpu_hist.iter().map(|&v| v as u64).collect();
+                    Self::graph(cv, gr, &[&hist], 1000, &[theme::accent()]);
+                }
                 let now = self.cpu_hist.back().copied().unwrap_or(0);
                 let x = gr.right() + 24;
                 Self::stat(cv, x, g.y + 22, "CPU load", &format!("{}.{}%", now / 10, now % 10), Some(theme::accent()));

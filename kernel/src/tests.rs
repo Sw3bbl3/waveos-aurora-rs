@@ -27,6 +27,10 @@ const TESTS: &[Test] = &[
     ("TrueType text", truetype),
     ("Spotlight: calculator and file index", spotlight),
     ("clipboard and Trash", clipboard_and_trash),
+    ("SMP: work on every CPU, lock stress", smp_work),
+    ("SMP: TLB shootdown", smp_shootdown),
+    ("clock: TSC/HPET monotonic", clock),
+    ("user copies recover from faults", user_copy_fault),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
     ("storage: disk + GPT", storage_devices),
@@ -447,4 +451,131 @@ fn clipboard_and_trash() {
     assert!(trash::move_to_trash("/System/version.txt").is_err(), "the system image can't be trashed");
     trash::empty().unwrap();
     assert_eq!(trash::count(), 0);
+}
+
+fn wait_for(cond: impl Fn() -> bool, ms: u64) -> bool {
+    let end = time::ticks() + ms;
+    while !cond() && time::ticks() < end {
+        crate::sched::yield_now();
+    }
+    cond()
+}
+
+fn smp_work() {
+    use crate::arch::percpu;
+    use core::sync::atomic::{AtomicU32, AtomicU64};
+    static SEEN: AtomicU32 = AtomicU32::new(0);
+    static DONE: AtomicU32 = AtomicU32::new(0);
+    static COUNT: crate::sync::IrqMutex<u64> = crate::sync::IrqMutex::new(0);
+    static SLOW: crate::sync::Mutex<u64> = crate::sync::Mutex::new(0);
+    static ATOMIC: AtomicU64 = AtomicU64::new(0);
+    fn worker() {
+        for i in 0..20_000 {
+            SEEN.fetch_or(1 << percpu::cpu_id(), Ordering::SeqCst);
+            *COUNT.lock() += 1;
+            ATOMIC.fetch_add(1, Ordering::Relaxed);
+            if i % 100 == 0 {
+                *SLOW.lock() += 1;
+            }
+        }
+        DONE.fetch_add(1, Ordering::SeqCst);
+    }
+    let n = 8;
+    for _ in 0..n {
+        crate::sched::spawn("t-smp", worker);
+    }
+    assert!(wait_for(|| DONE.load(Ordering::SeqCst) == n, 30_000), "workers finished");
+    assert_eq!(*COUNT.lock(), n as u64 * 20_000, "spinlock-protected counter");
+    assert_eq!(ATOMIC.load(Ordering::SeqCst), n as u64 * 20_000);
+    assert_eq!(*SLOW.lock(), n as u64 * 200, "sleeping mutex counter");
+    let online = percpu::count() as u32;
+    let seen = SEEN.load(Ordering::SeqCst).count_ones();
+    crate::kprint!("[{} CPUs, work ran on {}] ", online, seen);
+    assert_eq!(seen, online, "every CPU ran some of the work");
+}
+
+fn smp_shootdown() {
+    use crate::mm::{frame, phys_to_virt, vmm};
+    use core::sync::atomic::{AtomicU32, AtomicU64};
+    // Phases: 0 = readers warm their TLB with page A, 2 = paused while the
+    // page is swapped, 1 = read again: without a shootdown they'd still see A.
+    static VA: AtomicU64 = AtomicU64::new(0);
+    static PHASE: AtomicU32 = AtomicU32::new(0);
+    static PAUSED: AtomicU32 = AtomicU32::new(0);
+    static SAW_NEW: AtomicU32 = AtomicU32::new(0);
+    fn reader() {
+        let va = VA.load(Ordering::Acquire);
+        let mut paused = false;
+        loop {
+            match PHASE.load(Ordering::Acquire) {
+                0 => {
+                    let _ = unsafe { (va as *const u64).read_volatile() };
+                }
+                2 if !paused => {
+                    paused = true;
+                    PAUSED.fetch_add(1, Ordering::SeqCst);
+                }
+                1 => {
+                    if unsafe { (va as *const u64).read_volatile() } == 0xBBBB {
+                        SAW_NEW.fetch_add(1, Ordering::SeqCst);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            core::hint::spin_loop();
+        }
+    }
+    let (a, b) = (frame::alloc().unwrap(), frame::alloc().unwrap());
+    unsafe {
+        (phys_to_virt(a) as *mut u64).write(0xAAAA);
+        (phys_to_virt(b) as *mut u64).write(0xBBBB);
+    }
+    let va = vmm::kmap(&[a]).unwrap();
+    VA.store(va, Ordering::Release);
+    let readers = 3;
+    for _ in 0..readers {
+        crate::sched::spawn("t-tlb", reader);
+    }
+    crate::sched::sleep_ms(50); // let them cache the old translation
+    PHASE.store(2, Ordering::SeqCst);
+    assert!(wait_for(|| PAUSED.load(Ordering::SeqCst) == readers, 5000), "readers paused");
+    vmm::kunmap(va, 1);
+    let va2 = vmm::kmap(&[b]).unwrap();
+    assert_eq!(va2, va, "the freed range is reused");
+    PHASE.store(1, Ordering::SeqCst);
+    let ok = wait_for(|| SAW_NEW.load(Ordering::SeqCst) == readers, 5000);
+    vmm::kunmap(va2, 1);
+    frame::free(a);
+    frame::free(b);
+    assert!(ok, "every CPU sees the new mapping after the shootdown");
+}
+
+fn clock() {
+    use crate::drivers::hpet;
+    let mut last = time::now_ns();
+    for _ in 0..10_000 {
+        let t = time::now_ns();
+        assert!(t >= last, "time went backwards");
+        last = t;
+    }
+    if hpet::present() {
+        let (t0, h0) = (time::now_ns(), hpet::nanos());
+        crate::sched::sleep_ms(50);
+        let (dt, dh) = (time::now_ns() - t0, hpet::nanos() - h0);
+        let drift = (dt as i64 - dh as i64).unsigned_abs();
+        assert!(drift < 2_000_000, "clock drifts {} ns from the HPET over {} ms", drift, dh / 1_000_000);
+    }
+}
+
+fn user_copy_fault() {
+    use crate::syscall::user;
+    // Kernel tests run on the kernel page table: the user half is unmapped,
+    // so these copies fault and must come back as EFAULT, not a panic.
+    for addr in [0x40_0000u64, 0x7fff_f000, 0x1000_0000_0000] {
+        assert_eq!(user::read_u32(addr), Err(aurora_abi::err::EFAULT));
+        assert_eq!(user::write_u32(addr, 7), Err(aurora_abi::err::EFAULT));
+    }
+    // Addresses outside the user half are refused before copying.
+    assert_eq!(user::read_u32(0xffff_8000_0000_0000), Err(aurora_abi::err::EFAULT));
 }

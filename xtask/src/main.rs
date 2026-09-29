@@ -5,6 +5,7 @@
 //!       --disk ahci|virtio|nvme           storage controller for the disk (default: ahci)
 //!       --fresh-disk                      recreate the disk (erases files saved inside WaveOS)
 //!       --monitor                         open the live System Explorer (http://127.0.0.1:7777)
+//!       --smp N                           number of CPUs (default 4)
 //!       --headless --no-build --debug --gdb --int
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
@@ -29,6 +30,8 @@ fn main() {
     let profile = if flag("--debug") { Profile::Debug } else { Profile::Release };
     let disk =
         args.iter().position(|a| a == "--disk").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("ahci");
+    let smp: u32 =
+        args.iter().position(|a| a == "--smp").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(4);
     if !["ahci", "virtio", "nvme"].contains(&disk) {
         eprintln!("--disk must be ahci, virtio or nvme");
         exit(2);
@@ -50,6 +53,7 @@ fn main() {
                 disk,
                 allow_reboot: true,
                 telemetry: mon.as_ref().map(|m| m.socket.clone()),
+                smp,
             };
             let mut cmd = qemu(&img, &opts);
             let Some(mon) = mon else {
@@ -74,7 +78,7 @@ fn main() {
             println!("wrote {}", out.display());
             println!("flash to a USB stick with: sudo dd if={} of=/dev/rdiskN bs=4m", out.display());
         }
-        Some("test") => test(profile, disk),
+        Some("test") => test(profile, disk, smp),
         _ => {
             eprintln!("usage: cargo xtask <build|run|image|test> [--debug] [--headless] [--no-build] [--gdb] [--int]");
             exit(2);
@@ -290,6 +294,7 @@ struct RunOpts<'a> {
     allow_reboot: bool,
     /// Unix socket for the kernel's COM2 telemetry stream (System Explorer).
     telemetry: Option<PathBuf>,
+    smp: u32,
 }
 
 fn qemu(img: &Path, opts: &RunOpts) -> Command {
@@ -301,7 +306,8 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let _ = fs::remove_file(&qmp);
 
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-m", "512M", "-smp", "1", "-vga", "std"]);
+    cmd.args(["-machine", "q35", "-m", "512M", "-cpu", "max", "-vga", "std"]);
+    cmd.arg("-smp").arg(opts.smp.to_string());
     if !opts.allow_reboot {
         cmd.arg("-no-reboot");
     }
@@ -338,7 +344,7 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
 /// Boots the kernel with the `ktest` feature. The kernel runs its self-tests
 /// and reports through `isa-debug-exit`: exit code 0x10 means success, which
 /// QEMU turns into process status (0x10 << 1) | 1 = 33.
-fn test(profile: Profile, disk: &str) {
+fn test(profile: Profile, disk: &str, smp: u32) {
     let esp = build(profile, true);
     let img = root().join("target/test-disk.img");
     image::create(&esp, &root().join("assets/home"), &img, 128 * 1024 * 1024).expect("test disk creation failed");
@@ -346,7 +352,7 @@ fn test(profile: Profile, disk: &str) {
     // Boot twice on the same disk: the second boot checks what the first one saved.
     for boot in 1..=2 {
         println!("\n=== boot {boot} of 2 ===");
-        let output = run_tests_once(&img, disk);
+        let output = run_tests_once(&img, disk, smp);
         if boot == 2 && !output.contains("verified from previous boot") {
             eprintln!("\npersistence check FAILED: the second boot did not find the first boot's file");
             exit(1);
@@ -356,9 +362,10 @@ fn test(profile: Profile, disk: &str) {
 }
 
 /// Boots the test kernel once, echoing its serial output; exits on failure.
-fn run_tests_once(img: &Path, disk: &str) -> String {
+fn run_tests_once(img: &Path, disk: &str, smp: u32) -> String {
     use std::io::{BufRead, BufReader};
-    let opts = RunOpts { headless: true, gdb: false, log_int: false, disk, allow_reboot: false, telemetry: None };
+    let opts =
+        RunOpts { headless: true, gdb: false, log_int: false, disk, allow_reboot: false, telemetry: None, smp };
     let mut cmd = qemu(img, &opts);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped());
     let mut child = cmd.spawn().expect("failed to launch qemu");

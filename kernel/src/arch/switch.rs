@@ -28,7 +28,7 @@ global_asm!(
     "",
     ".global aurora_task_trampoline",
     "aurora_task_trampoline:",
-    "sti",
+    // Interrupts stay off: task_entry first completes the switch, then enables them.
     "mov rdi, r12",
     "mov rsi, r13",
     "call {entry}",
@@ -51,7 +51,7 @@ pub unsafe fn switch(save_rsp: *mut u64, load_rsp: u64) {
 }
 
 /// Prepares a fresh stack so the first switch into it "returns" into the
-/// trampoline, which enables interrupts and calls `task_entry(f, arg)`.
+/// trampoline, which calls `task_entry(f, arg)`.
 pub fn init_stack(stack_top: u64, f: u64, arg: u64) -> u64 {
     let top = stack_top & !0xF;
     let frame: [u64; 7] = [

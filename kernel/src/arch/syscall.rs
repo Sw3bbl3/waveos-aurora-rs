@@ -3,9 +3,10 @@
 //! On `syscall` the CPU loads RIP from LSTAR, saves the user RIP in RCX and
 //! RFLAGS in R11, and masks RFLAGS with FMASK (we clear IF, so no interrupt can
 //! arrive before we are on the kernel stack). It does *not* switch stacks: the
-//! entry stub swaps to the current task's kernel stack via `KERNEL_RSP`, which
-//! the scheduler updates on every switch (single CPU; SMP will move this to a
-//! GS-based per-CPU block).
+//! entry stub `swapgs`es to reach this CPU's `percpu::SyscallArea`, stashes
+//! the user RSP there, loads the task's kernel stack (which the scheduler
+//! keeps current), and swaps GS straight back — so kernel code never depends
+//! on GS.
 
 use super::gdt::{KERNEL_CS, KERNEL_SS};
 use core::arch::global_asm;
@@ -13,13 +14,6 @@ use x86_64::registers::model_specific::{Efer, EferFlags, LStar, SFMask, Star};
 use x86_64::registers::rflags::RFlags;
 use x86_64::structures::gdt::SegmentSelector;
 use x86_64::{PrivilegeLevel, VirtAddr};
-
-/// Top of the current task's kernel stack (set by the scheduler).
-#[no_mangle]
-static mut AURORA_KERNEL_RSP: u64 = 0;
-/// Scratch slot for the user RSP during entry.
-#[no_mangle]
-static mut AURORA_USER_RSP: u64 = 0;
 
 /// Register state saved on entry; the dispatcher writes the result into `rax`.
 #[repr(C)]
@@ -39,9 +33,11 @@ pub struct SyscallFrame {
 global_asm!(
     ".global aurora_syscall_entry",
     "aurora_syscall_entry:",
-    "mov [rip + AURORA_USER_RSP], rsp",
-    "mov rsp, [rip + AURORA_KERNEL_RSP]",
-    "push qword ptr [rip + AURORA_USER_RSP]",
+    "swapgs",
+    "mov gs:[8], rsp",
+    "mov rsp, gs:[0]",
+    "push qword ptr gs:[8]",
+    "swapgs",
     "push r11",
     "push rcx",
     "push r9",
@@ -102,6 +98,7 @@ extern "sysv64" {
     fn aurora_enter_user(entry: u64, stack: u64, arg: u64) -> !;
 }
 
+/// Enables `syscall` on the calling CPU (every CPU runs this).
 pub fn init() {
     unsafe {
         Efer::update(|f| f.insert(EferFlags::SYSTEM_CALL_EXTENSIONS));
@@ -116,12 +113,11 @@ pub fn init() {
         )
         .expect("GDT layout incompatible with sysret");
     }
-    log!("syscall", "syscall/sysret enabled");
 }
 
-/// Records the kernel stack for the task about to run (syscalls and ring-3 interrupts).
+/// Records the kernel stack for the task about to run on this CPU (syscalls and ring-3 interrupts).
 pub fn set_kernel_stack(top: u64) {
-    unsafe { AURORA_KERNEL_RSP = top };
+    super::percpu::this().syscall.kernel_rsp.store(top, core::sync::atomic::Ordering::Relaxed);
     super::gdt::set_kernel_stack(top);
 }
 

@@ -29,15 +29,15 @@ pub static FRAMES: AtomicU64 = AtomicU64::new(0);
 pub static PIXELS: AtomicU64 = AtomicU64::new(0);
 static STAGE: IrqMutex<&'static str> = IrqMutex::new("firmware");
 
-/// Recent scheduling decisions: (uptime ms, task id), drained by each snapshot.
-const SWITCH_LOG: usize = 512;
+/// Recent scheduling decisions: (uptime ms, task id, cpu), drained by each snapshot.
+const SWITCH_LOG: usize = 1024;
 struct SwitchLog {
-    entries: [(u32, u32); SWITCH_LOG],
+    entries: [(u32, u32, u8); SWITCH_LOG],
     len: usize,
     dropped: u64,
 }
 static SWITCH_RING: IrqMutex<SwitchLog> =
-    IrqMutex::new(SwitchLog { entries: [(0, 0); SWITCH_LOG], len: 0, dropped: 0 });
+    IrqMutex::new(SwitchLog { entries: [(0, 0, 0); SWITCH_LOG], len: 0, dropped: 0 });
 
 /// Totals for Activity Monitor: (interrupts, system calls, context switches).
 pub fn totals() -> (u64, u64, u64) {
@@ -77,7 +77,7 @@ pub fn irq(kind: Irq) {
 
 /// Called by the scheduler on every context switch (interrupts are off).
 #[inline]
-pub fn switched(to_task: u64) {
+pub fn switched(to_task: u64, cpu: usize) {
     SWITCHES.fetch_add(1, Ordering::Relaxed);
     if !enabled() {
         return;
@@ -85,7 +85,7 @@ pub fn switched(to_task: u64) {
     let mut ring = SWITCH_RING.lock();
     if ring.len < SWITCH_LOG {
         let i = ring.len;
-        ring.entries[i] = (crate::time::uptime_ms() as u32, to_task as u32);
+        ring.entries[i] = (crate::time::uptime_ms() as u32, to_task as u32, cpu as u8);
         ring.len += 1;
     } else {
         ring.dropped += 1;
@@ -226,27 +226,32 @@ fn snapshot() -> String {
         };
         let _ = write!(
             o,
-            "{}{{\"id\":{},\"n\":{},\"pid\":{},\"st\":\"{}\",\"cpu\":{}}}",
+            "{}{{\"id\":{},\"n\":{},\"pid\":{},\"st\":\"{}\",\"cpu\":{},\"on\":{}}}",
             if i > 0 { "," } else { "" },
             t.id,
             json_str(&t.name),
             t.pid,
             st,
-            t.cpu_ticks
+            t.cpu_ticks,
+            t.cpu.map(|c| c as i64).unwrap_or(-1)
         );
     }
     // Scheduling decisions since the last snapshot.
-    let (log, dropped): (Vec<(u32, u32)>, u64) = {
+    let (log, dropped): (Vec<(u32, u32, u8)>, u64) = {
         let mut ring = SWITCH_RING.lock();
         let v = ring.entries[..ring.len].to_vec();
         ring.len = 0;
         (v, core::mem::take(&mut ring.dropped))
     };
     let _ = write!(o, "],\"sched\":[");
-    for (i, (t, id)) in log.iter().enumerate() {
-        let _ = write!(o, "{}[{},{}]", if i > 0 { "," } else { "" }, t, id);
+    for (i, (t, id, cpu)) in log.iter().enumerate() {
+        let _ = write!(o, "{}[{},{},{}]", if i > 0 { "," } else { "" }, t, id, cpu);
     }
-    let _ = write!(o, "],\"schedDropped\":{}", dropped);
+    let _ = write!(o, "],\"schedDropped\":{},\"cpus\":[", dropped);
+    for (i, (busy, idle)) in crate::sched::cpu_times().iter().enumerate() {
+        let _ = write!(o, "{}[{},{}]", if i > 0 { "," } else { "" }, busy, idle);
+    }
+    let _ = write!(o, "]");
 
     // Processes.
     let _ = write!(o, ",\"procs\":[");

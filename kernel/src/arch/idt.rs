@@ -8,6 +8,10 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, Pag
 pub const TIMER_VECTOR: u8 = 32;
 pub const KEYBOARD_VECTOR: u8 = 33;
 pub const MOUSE_VECTOR: u8 = 44;
+/// Inter-processor interrupts.
+pub const RESCHEDULE_VECTOR: u8 = 0xF0;
+pub const TLB_VECTOR: u8 = 0xF1;
+pub const HALT_VECTOR: u8 = 0xF2;
 /// The legacy 8259 PICs are remapped here and masked; stray IRQs land harmlessly.
 pub const PIC_BASE_VECTOR: u8 = 0xE0;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
@@ -16,7 +20,9 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     let mut idt = InterruptDescriptorTable::new();
     idt.divide_error.set_handler_fn(divide_error);
     idt.debug.set_handler_fn(debug);
-    idt.non_maskable_interrupt.set_handler_fn(nmi);
+    unsafe {
+        idt.non_maskable_interrupt.set_handler_fn(nmi).set_stack_index(gdt::NMI_IST);
+    }
     idt.breakpoint.set_handler_fn(breakpoint);
     idt.overflow.set_handler_fn(overflow);
     idt.bound_range_exceeded.set_handler_fn(bound_range);
@@ -42,9 +48,13 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
         idt[v].set_handler_fn(ignored_irq);
     }
     idt[SPURIOUS_VECTOR].set_handler_fn(ignored_irq);
+    idt[RESCHEDULE_VECTOR].set_handler_fn(reschedule_ipi);
+    idt[TLB_VECTOR].set_handler_fn(tlb_ipi);
+    idt[HALT_VECTOR].set_handler_fn(halt_ipi);
     idt
 });
 
+/// Loads the IDT on the calling CPU (every CPU shares it).
 pub fn init() {
     IDT.load();
 }
@@ -114,13 +124,20 @@ extern "x86-interrupt" fn machine_check(frame: InterruptStackFrame) -> ! {
     fatal("Machine Check (#MC)", &frame, format_args!(""));
 }
 
-extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, code: PageFaultErrorCode) {
+extern "x86-interrupt" fn page_fault(mut frame: InterruptStackFrame, code: PageFaultErrorCode) {
     let addr = Cr2::read_raw();
+    if !from_user(&frame) {
+        // A user copy hitting memory another thread just unmapped: resume
+        // at the copy routine's fault exit, which reports EFAULT.
+        if let Some(resume) = crate::syscall::user::fixup(frame.instruction_pointer.as_u64(), addr) {
+            unsafe { frame.as_mut().update(|f| f.instruction_pointer = x86_64::VirtAddr::new(resume)) };
+            return;
+        }
+    }
     fatal("Page Fault (#PF)", &frame, format_args!("address {:#x}, {:?}", addr, code));
 }
 
 extern "x86-interrupt" fn timer(frame: InterruptStackFrame) {
-    crate::time::tick();
     crate::telemetry::irq(crate::telemetry::Irq::Timer);
     apic::eoi();
     crate::sched::on_timer_tick();
@@ -146,3 +163,20 @@ extern "x86-interrupt" fn mouse(_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn ignored_irq(_frame: InterruptStackFrame) {}
+
+extern "x86-interrupt" fn reschedule_ipi(frame: InterruptStackFrame) {
+    apic::eoi();
+    crate::sched::on_reschedule_ipi();
+    if from_user(&frame) {
+        crate::proc::check_killed();
+    }
+}
+
+extern "x86-interrupt" fn tlb_ipi(_frame: InterruptStackFrame) {
+    crate::mm::vmm::service_shootdown();
+    apic::eoi();
+}
+
+extern "x86-interrupt" fn halt_ipi(_frame: InterruptStackFrame) {
+    crate::arch::cpu::halt_forever();
+}

@@ -259,24 +259,12 @@ fn user_str(ptr: u64, len: u64) -> Result<String, isize> {
     if len > 256 {
         return Err(ENAMETOOLONG);
     }
-    let p = proc::current().ok_or(EPERM)?;
-    let ok = p.aspace.lock().as_ref().is_some_and(|a| a.check(ptr, len, false));
-    if !ok {
-        return Err(EFAULT);
-    }
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    Ok(String::from_utf8_lossy(bytes).into_owned())
+    let bytes = crate::syscall::user::slice(ptr, len)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn put<T: Copy>(ptr: u64, v: &T) -> Result<(), isize> {
-    let size = core::mem::size_of::<T>() as u64;
-    let p = proc::current().ok_or(EPERM)?;
-    let ok = p.aspace.lock().as_ref().is_some_and(|a| a.check(ptr, size, true));
-    if !ok {
-        return Err(EFAULT);
-    }
-    unsafe { (ptr as *mut T).write_unaligned(*v) };
-    Ok(())
+    crate::syscall::user::put(ptr, v)
 }
 
 fn clamp_size(w: u64, h: u64) -> (u32, u32) {
@@ -357,7 +345,9 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
         nr::WIN_CLOSE => {
             let id = a[0] as u32;
             owned(id, pid)?;
-            if let Some(c) = CLIENTS.lock().remove(&id) {
+            // Unmapping needs other CPUs to answer an IPI: never under the clients lock.
+            let removed = CLIENTS.lock().remove(&id);
+            if let Some(c) = removed {
                 free_surface(c.surface, pid, true);
             }
             send(Command::Closed(id));
