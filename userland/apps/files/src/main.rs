@@ -1425,10 +1425,9 @@ impl Files {
                     s.push_str(" · System image (read-only)");
                 } else if self.cwd.starts_with("/Boot") {
                     s.push_str(" · EFI System Partition");
-                } else {
-                    let i = aurora::process::sys_info();
-                    if i.disk_total > 0 {
-                        s.push_str(&format!(" · {} MB available", i.disk_free >> 20));
+                } else if let Ok((total, free)) = fs::space(&self.cwd) {
+                    if total > 0 {
+                        s.push_str(&format!(" · {} MB available", free >> 20));
                     }
                 }
                 s

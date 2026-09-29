@@ -17,9 +17,13 @@ cargo xtask run --monitor           # same, plus the live System Explorer at htt
 cargo xtask run --disk nvme         # same, with the disk on NVMe (or: ahci, virtio)
 cargo xtask run --fresh-disk        # start over with a new disk (erases files saved in WaveOS)
 cargo xtask run --debug             # unoptimised kernel (slower, better backtraces)
-cargo xtask run --headless          # no window; serial log on stdout
-cargo xtask test [--disk virtio]    # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
-cargo test -p wavefs -p fat32       # filesystem library tests on the host
+cargo xtask run --headless          # no window; serial log on stdout (and no sound)
+cargo xtask run --smp 1             # number of CPUs (default 4)
+cargo xtask run --battery           # add a test laptop battery, power adapter and lid (ACPI)
+cargo xtask run --usb-stick         # plug in a 64 MiB FAT32 USB stick (target/usb-stick.img)
+cargo xtask run --no-sound          # no host audio (sound goes nowhere)
+cargo xtask test [--disk virtio] [--smp 1]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
+cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p xtask   # host-side tests
 cargo xtask image                   # target/waveos-aurora-usb.img for USB boot
 ```
 
@@ -27,30 +31,18 @@ cargo xtask image                   # target/waveos-aurora-usb.img for USB boot
 - **Partition 1** is a FAT32 EFI System Partition with the bootloader, the kernel and `system.tar`. Each build rewrites it.
 - **Partition 2** is **"Aurora HD"**, a WaveFS volume that holds your files. It is created once from `assets/home/` and then kept, so notes, folders and settings survive rebuilds.
 
-In a QEMU window with the absolute pointer, your mouse moves freely in and out of the guest. The keyboard follows focus.
+The virtual machine has 4 CPUs, Intel HD Audio (played through your Mac's speakers with Core Audio), a USB 3 controller with a tablet and, behind a hub, a keyboard, and S3 sleep enabled. In a QEMU window the absolute pointer lets your mouse move freely in and out of the guest; the keyboard follows focus. To wake WaveOS from sleep, press a key, or run `tools/qmp.py qmp:system_wakeup`.
+
+`cargo xtask test` also attaches a USB stick, the test battery, and records the sound output to `target/test-audio.wav`. Its sleep test puts the VM to sleep and wakes it over QMP. Some OVMF builds (Ubuntu's, for one) fault while resuming, before WaveOS gets control: the harness notices and runs the suite again with `sleep=off`. Set `AURORA_TEST_SLEEP=off` to skip it from the start.
 
 ## Booting on real hardware (experimental)
 
-1. Run `cargo xtask image`.
-2. Write the image to a USB stick. **This erases the stick.**
-   - macOS: find the disk with `diskutil list`, then run:
-     ```sh
-     diskutil unmountDisk /dev/diskN
-     sudo dd if=target/waveos-aurora-usb.img of=/dev/rdiskN bs=4m
-     ```
-   - Linux: `sudo dd if=target/waveos-aurora-usb.img of=/dev/sdX bs=4M conv=fsync`
-3. Boot the PC from the stick in **UEFI mode**. Disable Secure Boot, because the loader is unsigned.
-
-Current hardware limits:
-
-- Input needs a PS/2 controller, or USB legacy emulation of one; native USB arrives in M5.
-- Only one CPU core is used.
-- The USB stick boots, but its storage isn't visible yet: USB mass storage arrives with xHCI in M5. Internal SATA (AHCI) and NVMe disks are detected; the OS uses a WaveFS partition if it finds one, and otherwise keeps your files in memory.
+`cargo xtask image` writes `target/waveos-aurora-usb.img`, a complete system to put on a USB stick. [HARDWARE.md](HARDWARE.md) explains how to write it, the boot options, what to check, and the known limits.
 
 ## Debugging
 
 - **System Explorer.** `cargo xtask run --monitor` streams kernel telemetry to `docs/explorer/index.html`: boot stages, the CPU timeline, processes, memory, disk I/O and syscalls. The session is also recorded to `target/telemetry.jsonl`. To refresh the demo that plays when the page is opened on its own, regenerate `docs/explorer/demo.js` from that file.
-- **Serial log.** Every subsystem logs to COM1, which `xtask` wires to your terminal.
+- **Serial log.** Every subsystem logs to COM1, which `xtask` wires to your terminal. The kernel also keeps the last 64 KiB: `dmesg` in Terminal, and `\aurora\boot.log` on the EFI partition (written a few seconds after the desktop appears, with `lspci`, `lsusb` and `cpuinfo` reports).
 - **Crash screen.** On a kernel panic or CPU exception, the kernel shows a crash screen with the details and also prints them to serial. Crashes in apps are contained: `crashtest` in Terminal, or `open /System/Bin/crashtest`, shows how.
 - **Interrupt trace.** `cargo xtask run --int` writes QEMU's interrupt and CPU-reset trace to `target/qemu-int.log`. It's useful for triple faults.
 - **GDB.** Run `cargo xtask run --gdb` to start QEMU paused with a GDB stub on `:1234`. Then:

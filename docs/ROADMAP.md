@@ -45,13 +45,17 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - **Settings:** Appearance, Display (live resolution changes on Bochs/QEMU VGA, boot-time modes elsewhere), Keyboard (six layouts, key repeat), Date & Time, Sound, Notifications and About.
 - **Deferred:** complex-script shaping (Arabic, Indic) and a user-space font server; Sound pane controls take effect with the audio driver in M5.
 
-## M5: Real hardware
+## ✅ M5: Real hardware
 
-- **Multiprocessor:** SMP bring-up of the application processors and a per-CPU scheduler.
-- **Timers:** HPET and TSC-deadline timers.
-- **USB:** an xHCI host controller driver with HID keyboard and mouse.
-- **Power:** proper ACPI through an AML interpreter, battery status, sleep and resume.
-- **Validation:** test USB boots on several real laptops and desktops.
+- **Multiprocessor:** the other CPUs start through a real-mode trampoline (INIT-SIPI-SIPI); per-CPU run queues with work stealing, reschedule IPIs and TLB shootdowns. System calls copy user memory through a fault-recoverable routine, so threads can't crash the kernel by unmapping buffers.
+- **Clocks:** the HPET, and the TSC calibrated against it as the clock.
+- **Interrupts:** MSI and MSI-X; the AHCI, NVMe and virtio disks sleep until their completion interrupt.
+- **USB:** an xHCI driver with hubs, keyboards (the shared layouts, software key repeat), mice and tablets (report descriptors), and mass storage mounted at `/Volumes` with eject. Booting from a USB stick keeps your files on it.
+- **Sound:** an Intel HD Audio driver, a mixer, playback streams for programs, system sounds, the volume keys and a menu-bar volume control.
+- **ACPI:** the `acpi` crate's AML interpreter on its own task (a failure there only turns ACPI off): the power button, batteries, the power adapter, the lid, and sleep states.
+- **Sleep:** S3 suspend to RAM and resume, with every driver brought back and the other CPUs restarted.
+- **Tools:** `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play` and `volume`; a boot log on the EFI partition; [HARDWARE.md](HARDWARE.md) for testing on real machines.
+- **Deferred:** tickless idle with TSC-deadline timers; I²C touchpads; USB keyboard LEDs; Modern Standby (S0ix); a native GPU driver; per-CPU NVMe queues.
 
 ## M6: Networking
 

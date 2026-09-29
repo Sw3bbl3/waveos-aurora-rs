@@ -2,7 +2,7 @@
 
 **A 64-bit operating system built from scratch in Rust, aiming to feel as intuitive as macOS and Windows.**
 
-Every layer is original: the UEFI bootloader, the **Tide** kernel, the storage drivers, the **WaveFS** filesystem, the **Crest** window server, the desktop shell and the apps. There is no Linux, no BSD and no borrowed userland underneath.
+Every layer is original: the UEFI bootloader, the **Tide** kernel, the storage, USB and sound drivers, the **WaveFS** filesystem, the **Crest** window server, the desktop shell and the apps. There is no Linux, no BSD and no borrowed userland underneath.
 
 ![WaveOS Aurora in dark mode, with Preview and a notification](docs/screenshots/preview-dark.png)
 
@@ -11,6 +11,8 @@ Every layer is original: the UEFI bootloader, the **Tide** kernel, the storage d
 | ![Spotlight finding an app, a settings pane and a picture](docs/screenshots/spotlight.png) | ![The Notification Center with its calendar](docs/screenshots/notification-center.png) |
 | **Settings** | **Activity Monitor** |
 | ![Settings, Appearance pane](docs/screenshots/settings.png) | ![Activity Monitor, CPU tab](docs/screenshots/activity-monitor.png) |
+| **A USB stick and the battery** | **Hardware reports in Terminal** |
+| ![Files showing a USB stick under Locations, with the battery popover open](docs/screenshots/usb-and-battery.png) | ![Terminal running cpuinfo, lsusb and df](docs/screenshots/hardware-reports.png) |
 
 ## System Explorer
 
@@ -24,24 +26,25 @@ cargo xtask run --monitor     # boots WaveOS and opens http://127.0.0.1:7777
 
 While WaveOS runs, the explorer streams what the kernel is doing:
 - **Boot progress**, stage by stage
-- **The scheduler's decisions** as a CPU timeline, one lane per task
+- **The scheduler's decisions** as a timeline: a strip per CPU, and one lane per task
 - **Per-task and per-process CPU time**, memory, system calls, interrupts, disk I/O and open windows
 
 Every part of the architecture map glows with its real activity. Click a part to see what it does, its live numbers and the source files behind it. Opened on its own, the page replays a recorded session instead.
 
-## What works today (Milestones 1–4)
+## What works today (Milestones 1–5)
 
 - **Boots on UEFI x86_64** with its own bootloader (`aurora-boot`). It loads the kernel and a read-only system image.
 - **Tide kernel** (hybrid design):
   - memory management, with per-process address spaces and no-execute pages
-  - ACPI, APIC timer and interrupts
-  - a preemptive scheduler
-  - `syscall`/`sysret`
-  - PS/2 and VMware absolute pointer input
-  - ACPI shutdown and restart
+  - **multicore**: every CPU runs tasks, with per-CPU run queues, work stealing and TLB shootdowns
+  - HPET and TSC clocks, APIC timers, MSI/MSI-X interrupts
+  - `syscall`/`sysret`, with fault-safe copies of user memory
+  - PS/2, VMware absolute pointer and USB input
+  - **ACPI** through an AML interpreter: the power button, battery, power adapter and lid, shutdown and restart
+  - **Sleep** (S3 suspend to RAM) and resume
 - **Real user space.** Every app is its own **ring-3 process** with its own address space:
   - **Crash isolation:** an app that crashes gets a "quit unexpectedly" report, and everything else keeps running.
-  - **System calls:** about 50 of them, covering processes, threads, files, pipes, windows, events, the clipboard, drag and drop, notifications and preferences. Every pointer is validated.
+  - **System calls:** about 55 of them, covering processes, threads, files, pipes, windows, events, the clipboard, drag and drop, notifications, preferences, sound and power. Every pointer is validated.
   - **Libraries:** the `libaurora` runtime, and the **Ripple** UI toolkit.
 - **Crest window server**, in the kernel like Windows NT's:
   - apps draw into shared-memory surfaces that Crest composites
@@ -52,9 +55,10 @@ Every part of the architecture map glows with its real activity. Click a part to
   - light and dark mode, broadcast live to every app
   - three procedurally generated wallpapers
 - **Apps:** Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome.
-- **aurora-sh**, the Terminal shell. It runs about 20 programs from `/System/Bin` as separate processes (`ls`, `cat`, `grep`, `wc`, `ps`, `kill`, `cp`, `mv`, `neofetch`…). It supports pipelines (`ls -l | grep txt`), redirection (`>`, `>>`), Ctrl+C and Tab completion.
+- **aurora-sh**, the Terminal shell. It runs about 30 programs from `/System/Bin` as separate processes (`ls`, `cat`, `grep`, `wc`, `ps`, `kill`, `cp`, `mv`, `neofetch`, `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play`, `volume`…). It supports pipelines (`ls -l | grep txt`), redirection (`>`, `>>`), Ctrl+C and Tab completion.
 - **Storage:**
-  - PCI enumeration, plus **AHCI** (SATA), **virtio-blk** and **NVMe** drivers
+  - PCI enumeration, plus interrupt-driven **AHCI** (SATA), **virtio-blk** and **NVMe** drivers
+  - **USB sticks** appear in Files under Locations and can be ejected; booted from a USB stick, WaveOS keeps your files on it
   - your files live on **WaveFS**, our own journaled filesystem, and survive reboots and power cuts
   - the EFI partition is readable and writable at `/Boot` (FAT32 with long file names)
   - `/System` is the read-only system image
@@ -66,6 +70,9 @@ Every part of the architecture map glows with its real activity. Click a part to
 - **Notes** is a proper editor: selection, the system clipboard, undo, find, fonts, Save As. **Preview** opens PNG and BMP pictures (our own codecs), **Paint** draws and saves PNGs, **Clock** has world clocks, alarms, a stopwatch and timers, and **Activity Monitor** shows every process, CPU, memory and disk.
 - **Settings:** appearance with accent colours and any picture as wallpaper, display resolution (live on QEMU), six keyboard layouts with dead keys, date and time, and more. Everything is remembered.
 - **Threads** in user space, with futex-based locks, and SSE for apps.
+- **USB:** an xHCI (USB 3) driver with hubs, keyboards, mice, tablets and storage, plugged in at any time.
+- **Sound:** an Intel HD Audio driver and a mixer. System sounds, a menu-bar volume control, volume keys, headphone detection, and programs can play audio.
+- **Laptop-ready:** a battery indicator with time remaining, low-battery warnings, the power button, and sleep from the menu, Spotlight or the lid.
 
 ## Quick start
 
@@ -88,12 +95,12 @@ The first build takes a minute or two. After that you boot straight to the deskt
 |---|---|
 | `cargo xtask build` | Builds the bootloader, kernel and user space into `target/esp/` |
 | `cargo xtask run --monitor` | Same as `run`, plus the live System Explorer in your browser |
-| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU. Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
-| `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller |
+| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--smp N` the CPUs, `--battery` adds a laptop battery, `--usb-stick` plugs in a USB stick, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
+| `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller, `--smp 1` for one CPU |
 | `cargo xtask image` | Creates `target/waveos-aurora-usb.img` (ESP plus WaveFS), ready to `dd` onto a USB stick |
-| `cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image` | Host-side tests: filesystems (with crash recovery), the TrueType engine and the image codecs |
+| `cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p xtask` | Host-side tests: filesystems (with crash recovery), the TrueType engine, the image and sound codecs, and the test ACPI table |
 
-The kernel log streams to your terminal over the serial port. See [docs/BUILDING.md](docs/BUILDING.md) for real hardware, debugging and troubleshooting.
+The kernel log streams to your terminal over the serial port. See [docs/BUILDING.md](docs/BUILDING.md) for debugging and troubleshooting, and [docs/HARDWARE.md](docs/HARDWARE.md) to try WaveOS on a real PC.
 
 ### Using the desktop
 
@@ -110,9 +117,10 @@ The kernel log streams to your terminal over the serial port. See [docs/BUILDING
   - `Ctrl+W` or `Alt+F4` closes the front window
   - `Print Screen` or `Super+Shift+3` saves a screenshot to Pictures
   - in text: `Ctrl+A/C/X/V`, `Ctrl+Z` / `Ctrl+Shift+Z`, `Ctrl+F` to find, `Ctrl+S` to save
-- **Aurora menu** (the wave at top-left): About, Settings, Restart, Shut Down.
+- **Aurora menu** (the wave at top-left): About, Settings, Sleep, Restart, Shut Down.
+- **Menu bar**: click the speaker for the volume, the battery (on laptops) for its details, and the clock for the Notification Center. The volume keys work anywhere.
 - **Files**: drag items onto folders, the sidebar, another Files window, a dock app or the Trash (hold Ctrl to copy). Right-click for more; Space opens Quick Look, F2 renames, Delete moves to the Trash, Ctrl+1/2 switch views, Ctrl+F searches.
-- **Terminal**: try `help`, `ps`, `df`, `neofetch`, `ls -l | grep txt`, `echo hi > hi.txt`, `cat hi.txt | wc`, `ls /Boot`, `open notes`, `theme dark`.
+- **Terminal**: try `help`, `ps`, `df`, `neofetch`, `cpuinfo`, `lsusb`, `play --tone 440 500`, `ls -l | grep txt`, `echo hi > hi.txt`, `cat hi.txt | wc`, `ls /Boot`, `open notes`, `theme dark`.
 
 ## How it fits together
 
@@ -120,10 +128,13 @@ The kernel log streams to your terminal over the serial port. See [docs/BUILDING
  UEFI firmware
    └─ aurora-boot (bootloader/)     GOP mode, load kernel.elf, page tables, exit boot services
         └─ Tide kernel (kernel/)    higher half at 0xffffffff80000000
-             ├─ arch/     GDT, IDT, APIC, context switch
-             ├─ mm/       frames, heap, paging
-             ├─ sched/    preemptive kernel threads
-             ├─ drivers/  serial, PS/2 + keyboard layouts, vmmouse, RTC, PCI, display modes, block (AHCI, virtio-blk, NVMe, GPT)
+             ├─ arch/     GDT/TSS per CPU, IDT, APIC, MSI vectors, SMP start-up, context switch
+             ├─ mm/       frames, heap, paging, TLB shootdowns
+             ├─ sched/    per-CPU run queues, kernel threads and user threads
+             ├─ acpi/     tables, AML runtime (power button, battery, lid), SCI
+             ├─ power/    shutdown, restart, S3 sleep and resume
+             ├─ drivers/  serial, PS/2 + keyboard layouts, vmmouse, RTC, HPET, PCI, display modes,
+             │            block (AHCI, virtio-blk, NVMe, GPT, MBR), USB (xHCI, hubs, HID, storage), audio (HDA, mixer)
              ├─ proc/     processes, pipes, reaper
              ├─ syscall/  system call dispatch
              ├─ fs/       VFS, block cache, WaveFS (/), FAT32 (/Boot), TarFS (/System), RamFS
@@ -142,7 +153,7 @@ The full tour, covering the boot handoff, memory layout, processes and syscalls,
 | **M2** ✅ | User space: ring 3, syscalls, ELF loader, pipes, shared-memory windows, and the "Ripple" UI toolkit |
 | **M3** ✅ | Storage: AHCI, virtio-blk, NVMe, a VFS, FAT32, and our own journaled **WaveFS** |
 | **M4** ✅ | Apps and polish: TrueType text, Preview, Paint, Clock, Activity Monitor, drag and drop, Spotlight, notifications, animations, Settings |
-| M5 | Real hardware: SMP, HPET, USB (xHCI), power management |
+| **M5** ✅ | Real hardware: SMP, HPET and TSC, MSI, USB (xHCI, HID, storage), HD Audio, ACPI (AML), sleep and resume |
 | M6 | Networking: virtio-net and e1000, TCP/IP, DHCP, DNS, HTTP |
 
 Details are in [docs/ROADMAP.md](docs/ROADMAP.md).

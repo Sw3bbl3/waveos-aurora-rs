@@ -16,7 +16,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "app-about"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "ripple",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "app-activity"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "ripple",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "app-calculator"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "ripple",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "app-clock"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "ripple",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "app-files"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "aurora-image",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "app-notes"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "ripple",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "app-paint"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "aurora-image",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "app-preview"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "aurora-image",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "app-settings"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "aurora-image",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "app-terminal"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "ripple",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "app-welcome"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "ripple",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "aurora"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora-abi",
  "aurora-wav",
@@ -118,11 +118,11 @@ dependencies = [
 
 [[package]]
 name = "aurora-abi"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "aurora-gfx"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "fontdue",
  "spin",
@@ -130,14 +130,14 @@ dependencies = [
 
 [[package]]
 name = "aurora-image"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "miniz_oxide",
 ]
 
 [[package]]
 name = "aurora-wav"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "core_maths"
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "coreutils"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "libm",
@@ -158,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "crashtest"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
 ]
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "hello"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
 ]
@@ -238,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "ripple"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
  "aurora-gfx",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "usertest"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aurora",
 ]

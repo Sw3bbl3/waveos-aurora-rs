@@ -103,12 +103,13 @@ pub fn cpu() -> String {
     if hz != 0 {
         let _ = writeln!(s, "TSC:        {}.{:03} GHz", hz / 1_000_000_000, hz / 1_000_000 % 1000);
     }
-    let _ = writeln!(
-        s,
-        "Clock:      {:?}{}",
-        crate::time::source(),
-        if crate::drivers::hpet::present() { ", HPET present" } else { "" }
-    );
+    let clock = match crate::time::source() {
+        crate::time::Source::Tsc => "TSC",
+        crate::time::Source::Hpet => "HPET",
+        crate::time::Source::Tick => "timer ticks",
+    };
+    let hpet = if crate::drivers::hpet::present() { " (HPET present)" } else { "" };
+    let _ = writeln!(s, "Clock:      {clock}{hpet}");
     let _ = writeln!(s, "Features:   {}", flags.join(" "));
     let times = crate::sched::cpu_times();
     for (i, (busy, idle)) in times.iter().enumerate() {

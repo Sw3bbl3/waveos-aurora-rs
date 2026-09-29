@@ -248,6 +248,11 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             out.commit(n)?;
             Ok(text.len() as u64)
         }
+        nr::STATFS => {
+            let path = user::path(a[0], a[1])?;
+            let (total, free) = fs::space_of(&path).ok_or(ENOSYS)?;
+            user::put(a[2], &[total, free]).map(|_| 0)
+        }
         nr::POWER_INFO => user::put(a[0], &crate::acpi::power_info()).map(|_| 0),
         nr::AUDIO_OPEN => {
             let stream = crate::drivers::audio::open()?;

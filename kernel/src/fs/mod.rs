@@ -133,6 +133,12 @@ pub fn mount(path: &str, fs: Arc<dyn Filesystem>) {
     m.push(Mount { path: String::from(path), fs });
 }
 
+/// (total, free) bytes of the filesystem holding `path`, if it reports them.
+pub fn space_of(path: &str) -> Option<(u64, u64)> {
+    let (fs, _) = mount_for(&resolve("/", path)).ok()?;
+    fs.space()
+}
+
 /// Detaches the filesystem at `path` after writing out what it has cached.
 pub fn unmount(path: &str) -> FsResult<()> {
     let fs = MOUNTS.lock().iter().find(|m| m.path == path).map(|m| m.fs.clone()).ok_or(ENOENT)?;

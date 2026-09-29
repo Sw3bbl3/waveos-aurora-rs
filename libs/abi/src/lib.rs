@@ -116,7 +116,10 @@ pub mod nr {
     pub const POWER_INFO: usize = 54;
     /// `sys_report(kind, buf, len) -> full length` — plain text, see [`super::report`]
     pub const SYS_REPORT: usize = 55;
-    pub const COUNT: usize = 56;
+    /// `statfs(path, len, *mut [u64; 2])` — total and free bytes of the volume holding `path`
+    /// (`-ENOSYS` if it doesn't say, e.g. the read-only system image)
+    pub const STATFS: usize = 56;
+    pub const COUNT: usize = 57;
 }
 
 /// `sys_report` kinds.

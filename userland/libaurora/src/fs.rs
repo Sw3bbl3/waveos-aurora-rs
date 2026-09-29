@@ -59,6 +59,14 @@ impl Drop for File {
     }
 }
 
+/// (total, free) bytes of the volume holding `path`.
+pub fn space(path: &str) -> Result<(u64, u64)> {
+    let [p, l] = str_args(path);
+    let mut out = [0u64; 2];
+    call(nr::STATFS, &[p, l, out.as_mut_ptr() as u64])?;
+    Ok((out[0], out[1]))
+}
+
 pub fn read(path: &str) -> Result<Vec<u8>> {
     File::open(path, open::READ)?.read_to_end()
 }
