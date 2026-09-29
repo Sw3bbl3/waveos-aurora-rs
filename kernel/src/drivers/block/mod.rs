@@ -6,6 +6,7 @@
 
 pub mod ahci;
 pub mod gpt;
+pub mod mbr;
 pub mod nvme;
 pub mod virtio;
 
@@ -134,6 +135,20 @@ pub fn register(dev: Arc<dyn BlockDevice>) {
         dev.describe()
     );
     DEVICES.lock().push(dev);
+}
+
+/// Registers `dev` and returns the registered handle (with I/O counters).
+pub fn register_counted(dev: Arc<dyn BlockDevice>) -> Arc<dyn BlockDevice> {
+    register(dev);
+    DEVICES.lock().last().cloned().unwrap()
+}
+
+/// Forgets a removed device and its partitions.
+pub fn unregister(name: &str) {
+    let part_prefix = alloc::format!("{name}p");
+    let gone = |d: &str| d == name || d.starts_with(part_prefix.as_str());
+    DEVICES.lock().retain(|d| !gone(&d.name()));
+    COUNTED.lock().retain(|d| !gone(&d.name()));
 }
 
 pub fn devices() -> Vec<Arc<dyn BlockDevice>> {

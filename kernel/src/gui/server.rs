@@ -412,6 +412,12 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
             send(Command::TrashChanged);
             Ok(0)
         }
+        EJECT => {
+            let path = crate::fs::resolve("/", &user_str(ptr, len)?);
+            crate::drivers::usb::msc::eject(&path)?;
+            super::notify::system("Safe to remove", path.trim_start_matches("/Volumes/"));
+            Ok(0)
+        }
         PLAY_SOUND => {
             let name = user_str(ptr, len)?;
             if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {

@@ -77,6 +77,13 @@ fn mouse_cmd(b: u8) -> bool {
 }
 
 pub fn init() {
+    // Machines without an i8042 (many recent laptops, USB-only desktops)
+    // float the status port. (The FADT's "8042 present" flag is too often
+    // wrong to rely on.)
+    if status() == 0xFF {
+        log!("ps2", "no PS/2 controller; keyboard and pointer come from USB");
+        return;
+    }
     command(0xAD); // disable keyboard port
     command(0xA7); // disable mouse port
     flush();

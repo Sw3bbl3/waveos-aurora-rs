@@ -180,6 +180,11 @@ fn run() {
             ready = true;
             log!("boot", "Aurora desktop ready");
             crate::drivers::audio::play_sound("startup");
+            // Written a moment later, off the compositor, so it includes late devices.
+            sched::spawn("bootlog", || {
+                sched::sleep_ms(3000);
+                crate::report::save_boot_log();
+            });
             crate::telemetry::stage("desktop", "Desktop ready");
         }
         if let Some(action) = desktop.power {

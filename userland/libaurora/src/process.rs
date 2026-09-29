@@ -124,6 +124,11 @@ pub mod desktop {
         req(abi::desktop::PUT_BACK, name).map(|_| ())
     }
 
+    /// Safely removes a USB volume (`/Volumes/NAME`).
+    pub fn eject(path: &str) -> Result<()> {
+        req(abi::desktop::EJECT, path).map(|_| ())
+    }
+
     pub fn empty_trash() -> Result<()> {
         req(abi::desktop::EMPTY_TRASH, "").map(|_| ())
     }

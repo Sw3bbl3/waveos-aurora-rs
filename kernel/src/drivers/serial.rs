@@ -66,16 +66,50 @@ pub fn init() {
     COM1.lock().init();
 }
 
+/// The last 64 KiB of console output, for `dmesg` and the boot log.
+struct Ring {
+    buf: [u8; 1 << 16],
+    head: usize,
+    len: usize,
+}
+
+impl fmt::Write for Ring {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for &b in s.as_bytes() {
+            let i = (self.head + self.len) % self.buf.len();
+            self.buf[i] = b;
+            if self.len < self.buf.len() {
+                self.len += 1;
+            } else {
+                self.head = (self.head + 1) % self.buf.len();
+            }
+        }
+        Ok(())
+    }
+}
+
+static RING: Mutex<Ring> = Mutex::new(Ring { buf: [0; 1 << 16], head: 0, len: 0 });
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     x86_64::instructions::interrupts::without_interrupts(|| {
         let _ = COM1.lock().write_fmt(args);
+        let _ = RING.lock().write_fmt(args);
     });
+}
+
+/// Everything the kernel printed recently, oldest first.
+pub fn history() -> alloc::vec::Vec<u8> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let r = RING.lock();
+        (0..r.len).map(|i| r.buf[(r.head + i) % r.buf.len()]).collect()
+    })
 }
 
 /// Used by the panic handler, which may fire while COM1 is locked.
 pub unsafe fn force_unlock() {
     COM1.force_unlock();
+    RING.force_unlock();
 }
 
 #[macro_export]

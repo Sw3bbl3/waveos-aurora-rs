@@ -234,6 +234,20 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             out.commit(n)?;
             Ok(n as u64)
         }
+        nr::SYS_REPORT => {
+            let text: Vec<u8> = match a[0] {
+                aurora_abi::report::PCI => crate::report::pci().into_bytes(),
+                aurora_abi::report::USB => crate::report::usb().into_bytes(),
+                aurora_abi::report::CPU => crate::report::cpu().into_bytes(),
+                aurora_abi::report::LOG => crate::report::log(),
+                _ => return Err(EINVAL),
+            };
+            let mut out = user::slice_mut(a[1], a[2])?;
+            let n = text.len().min(out.len());
+            out[..n].copy_from_slice(&text[..n]);
+            out.commit(n)?;
+            Ok(text.len() as u64)
+        }
         nr::POWER_INFO => user::put(a[0], &crate::acpi::power_info()).map(|_| 0),
         nr::AUDIO_OPEN => {
             let stream = crate::drivers::audio::open()?;

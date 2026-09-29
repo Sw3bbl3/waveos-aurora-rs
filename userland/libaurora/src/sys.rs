@@ -37,3 +37,18 @@ pub fn call(n: usize, args: &[u64]) -> Result<u64> {
 pub fn str_args(s: &str) -> [u64; 2] {
     [s.as_ptr() as u64, s.len() as u64]
 }
+
+/// A system report as text (`aurora_abi::report`: PCI, USB, CPU, LOG).
+pub fn report(kind: u64) -> alloc::string::String {
+    let mut buf = alloc::vec![0u8; 16 * 1024];
+    loop {
+        let Ok(n) = call(crate::abi::nr::SYS_REPORT, &[kind, buf.as_mut_ptr() as u64, buf.len() as u64]) else {
+            return alloc::string::String::new();
+        };
+        if n as usize <= buf.len() {
+            buf.truncate(n as usize);
+            return alloc::string::String::from_utf8_lossy(&buf).into_owned();
+        }
+        buf.resize(n as usize, 0);
+    }
+}

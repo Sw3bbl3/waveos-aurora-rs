@@ -45,7 +45,22 @@ pub fn set_consumer(task: crate::sched::TaskId) {
     CONSUMER.store(task, Ordering::Relaxed);
 }
 
+/// Where the pointer is (relative devices move it from here).
+static POINTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn pointer_position() -> (i32, i32) {
+    let v = POINTER.load(Ordering::Relaxed);
+    if v == 0 {
+        return (SCREEN_W.load(Ordering::Relaxed) / 2, SCREEN_H.load(Ordering::Relaxed) / 2);
+    }
+    // Bit 63 only marks "set"; coordinates are never negative.
+    (((v >> 32) & 0x7FFF_FFFF) as i32, v as u32 as i32)
+}
+
 pub fn push(ev: InputEvent) {
+    if let InputEvent::Pointer { x, y, .. } = ev {
+        POINTER.store((x as u32 as u64) << 32 | y as u32 as u64 | 1 << 63, Ordering::Relaxed);
+    }
     {
         let mut q = QUEUE.lock();
         // Coalesce consecutive pointer motion with identical buttons to keep the queue short.

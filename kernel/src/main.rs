@@ -17,6 +17,7 @@ mod gui;
 mod mm;
 mod power;
 mod proc;
+mod report;
 mod sched;
 mod sync;
 mod syscall;
@@ -89,6 +90,8 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::display::init(boot_info);
     drivers::block::init();
     fs::mount_disks();
+    telemetry::stage("usb", "USB controllers and devices");
+    drivers::usb::init();
     telemetry::stage("sound", "Sound output");
     drivers::audio::init();
     telemetry::stage("acpi", "ACPI runtime (AML, power button, battery)");

@@ -92,6 +92,34 @@ fn read_boot_conf(file: &mut File, start: u64, sectors: u64) -> Option<Vec<u8>> 
     Some(data)
 }
 
+/// A 64 MiB "USB stick" for the tests: an MBR with one FAT32 partition
+/// labelled AURORA-USB, holding `Hello.txt`.
+pub fn create_usb_stick(out: &Path) -> io::Result<()> {
+    const SIZE: u64 = 64 * 1024 * 1024;
+    const START: u64 = 2048;
+    let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(out)?;
+    file.set_len(SIZE)?;
+    let sectors = SIZE / SECTOR - START;
+    let mut mbr = [0u8; 512];
+    let e = &mut mbr[446..462];
+    e[4] = 0x0C; // FAT32 (LBA)
+    e[8..12].copy_from_slice(&(START as u32).to_le_bytes());
+    e[12..16].copy_from_slice(&(sectors as u32).to_le_bytes());
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+    file.write_all(&mbr)?;
+    let mut part = Region { file: &mut file, start: START * SECTOR, len: sectors * SECTOR, pos: 0 };
+    fatfs::format_volume(
+        &mut part,
+        fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat32).volume_label(*b"AURORA-USB "),
+    )?;
+    part.pos = 0;
+    let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new())?;
+    fs.root_dir().create_file("Hello.txt")?.write_all(b"Hello from a USB stick!\n")?;
+    fs.unmount()?;
+    Ok(())
+}
+
 fn format_esp(file: &mut File, start: u64, sectors: u64, esp: &Path) -> io::Result<()> {
     let mut part = Region { file, start: start * SECTOR, len: sectors * SECTOR, pos: 0 };
     fatfs::format_volume(

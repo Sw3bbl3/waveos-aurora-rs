@@ -10,4 +10,5 @@ pub mod keymap;
 pub mod pci;
 pub mod ps2;
 pub mod rtc;
+pub mod usb;
 pub mod vmmouse;

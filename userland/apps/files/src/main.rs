@@ -61,6 +61,23 @@ const LOCATIONS: [Place; 4] = [
     Place { label: "Trash", path: TRASH, icon: Icon::Trash },
 ];
 
+/// A sidebar entry: a fixed place or a mounted volume.
+struct PlaceRef<'a> {
+    label: &'a str,
+    path: &'a str,
+    icon: Icon,
+    /// A removable volume (shows an eject button).
+    volume: bool,
+}
+
+impl<'a> From<&'a Place> for PlaceRef<'a> {
+    fn from(p: &'a Place) -> Self {
+        PlaceRef { label: p.label, path: p.path, icon: p.icon, volume: false }
+    }
+}
+
+const VOLUMES: &str = "/Volumes";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Icons,
@@ -205,6 +222,8 @@ pub struct Files {
     thumbs: BTreeMap<String, Option<Image>>,
     typed: (String, u64),
     last_refresh: u64,
+    /// Mounted volumes under /Volumes: (name, path).
+    volumes: Vec<(String, String)>,
     area: Rect,
 }
 
@@ -330,8 +349,10 @@ impl Files {
             thumbs: BTreeMap::new(),
             typed: (String::new(), 0),
             last_refresh: 0,
+            volumes: Vec::new(),
             area: Rect::new(0, 0, 860, 520),
         };
+        f.refresh_volumes();
         f.navigate(start, false);
         f
     }
@@ -543,7 +564,7 @@ impl Files {
 
     // ------------------------------------------------------------ layout
 
-    fn place_rects(area: Rect) -> (Vec<Rect>, Vec<Rect>) {
+    fn place_rects(&self, area: Rect) -> (Vec<Rect>, Vec<Rect>) {
         let mut y = area.y + 38;
         let fav = (0..FAVORITES.len())
             .map(|_| {
@@ -553,7 +574,7 @@ impl Files {
             })
             .collect();
         y += 34;
-        let loc = (0..LOCATIONS.len())
+        let loc = (0..LOCATIONS.len() + self.volumes.len())
             .map(|_| {
                 let r = Rect::new(area.x + 10, y, SIDEBAR_W - 20, 28);
                 y += 30;
@@ -563,20 +584,51 @@ impl Files {
         (fav, loc)
     }
 
-    fn place_at(area: Rect, x: i32, y: i32) -> Option<(usize, usize)> {
-        let (fav, loc) = Self::place_rects(area);
+    fn place_at(&self, area: Rect, x: i32, y: i32) -> Option<(usize, usize)> {
+        let (fav, loc) = self.place_rects(area);
         if let Some(i) = fav.iter().position(|r| r.contains(x, y)) {
             return Some((0, i));
         }
         loc.iter().position(|r| r.contains(x, y)).map(|i| (1, i))
     }
 
-    fn place(section: usize, i: usize) -> &'static Place {
-        if section == 0 {
-            &FAVORITES[i]
-        } else {
-            &LOCATIONS[i]
+    /// Locations: the fixed places, then volumes, then the Trash last.
+    fn place(&self, section: usize, i: usize) -> PlaceRef<'_> {
+        let fixed = LOCATIONS.len() - 1;
+        match (section, i) {
+            (0, i) => (&FAVORITES[i]).into(),
+            (_, i) if i < fixed => (&LOCATIONS[i]).into(),
+            (_, i) if i < fixed + self.volumes.len() => {
+                let (name, path) = &self.volumes[i - fixed];
+                PlaceRef { label: name, path, icon: Icon::Files, volume: true }
+            }
+            _ => (&LOCATIONS[fixed]).into(),
         }
+    }
+
+    /// The eject button on a volume's sidebar row.
+    fn eject_rect(row: Rect) -> Rect {
+        Rect::new(row.right() - 26, row.y + 4, 20, 20)
+    }
+
+    /// Re-reads /Volumes; leaves a volume that has gone away.
+    fn refresh_volumes(&mut self) -> bool {
+        let mut v: Vec<(String, String)> = fs::read_dir(VOLUMES)
+            .map(|es| {
+                es.into_iter().filter(|e| e.is_dir).map(|e| (e.name.clone(), format!("{VOLUMES}/{}", e.name))).collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        if v == self.volumes {
+            return false;
+        }
+        self.volumes = v;
+        let inside_gone = self.cwd.starts_with(VOLUMES)
+            && !self.volumes.iter().any(|(_, p)| self.cwd == *p || self.cwd.starts_with(&format!("{p}/")));
+        if inside_gone {
+            self.navigate("/", true);
+        }
+        true
     }
 
     fn toolbar(&self, area: Rect) -> Vec<(Hover, Rect)> {
@@ -1061,17 +1113,18 @@ impl Files {
         let side = Rect::new(area.x, area.y, SIDEBAR_W, area.h);
         cv.fill_rect(side, t.window_bg_alt);
         cv.fill_rect(Rect::new(area.x + SIDEBAR_W - 1, area.y, 1, area.h), t.separator);
-        let (fav, loc) = Self::place_rects(area);
+        let (fav, loc) = self.place_rects(area);
         cv.text(area.x + 18, area.y + 27, "Favorites", theme::ui_bold(12), t.text_secondary);
         cv.text(area.x + 18, loc[0].y - 10, "Locations", theme::ui_bold(12), t.text_secondary);
         for (section, rects) in [(0usize, &fav), (1, &loc)] {
             for (i, r) in rects.iter().enumerate() {
-                let p = Self::place(section, i);
+                let p = self.place(section, i);
                 let inside =
                     |root: &str| self.cwd == root || (root != "/" && self.cwd.starts_with(&format!("{root}/")));
                 let active = if p.path == "/" {
                     !self.cwd.starts_with("/System")
                         && !self.cwd.starts_with("/Boot")
+                        && !inside(VOLUMES)
                         && !inside(TRASH)
                         && !FAVORITES.iter().any(|f| inside(f.path))
                 } else {
@@ -1085,7 +1138,18 @@ impl Files {
                     cv.fill_round_rect(*r, 7, t.hover);
                 }
                 icons::draw(cv, p.icon, Rect::new(r.x + 8, r.y + 5, 18, 18));
-                cv.text(r.x + 34, r.y + 19, p.label, theme::ui(13), t.text);
+                let label_w = if p.volume { r.w - 66 } else { r.w - 40 };
+                cv.text_clipped(r.x + 34, r.y + 19, p.label, theme::ui(13), t.text, label_w);
+                if p.volume {
+                    // ⏏: a triangle over a bar.
+                    let e = Self::eject_rect(*r);
+                    let c = if self.hover == Some(Hover::Place(section, i)) { t.text } else { t.text_secondary };
+                    let (cx, top) = (e.x + e.w / 2, e.y + 5);
+                    for row in 0..6 {
+                        cv.fill_rect(Rect::new(cx - row, top + row, 2 * row + 1, 1), c);
+                    }
+                    cv.fill_rect(Rect::new(cx - 5, top + 8, 11, 2), c);
+                }
             }
         }
     }
@@ -1603,9 +1667,20 @@ impl App for Files {
             return true;
         }
         self.search_focused = false;
-        if let Some((s, i)) = Self::place_at(area, x, y) {
-            let path = Self::place(s, i).path;
-            self.navigate(path, true);
+        if let Some((s, i)) = self.place_at(area, x, y) {
+            let p = self.place(s, i);
+            let (path, volume) = (String::from(p.path), p.volume);
+            let row = self.place_rects(area).1[i];
+            if volume && Self::eject_rect(row).contains(x, y) {
+                let name = String::from(p.label);
+                match aurora::process::desktop::eject(&path) {
+                    Ok(()) => self.flash(format!("“{name}” can now be removed.")),
+                    Err(e) => self.flash(format!("Couldn't eject “{name}”: {e}")),
+                }
+                self.refresh_volumes();
+                return true;
+            }
+            self.navigate(&path, true);
             return true;
         }
         if let Some((h, _)) = self.toolbar(area).into_iter().find(|(_, r)| r.contains(x, y)) {
@@ -1780,7 +1855,7 @@ impl App for Files {
         }
         let h = if x < 0 {
             None
-        } else if let Some((s, i)) = Self::place_at(area, x, y) {
+        } else if let Some((s, i)) = self.place_at(area, x, y) {
             Some(Hover::Place(s, i))
         } else if let Some((h, _)) = self.toolbar(area).into_iter().find(|(_, r)| r.contains(x, y)) {
             Some(h)
@@ -1808,8 +1883,8 @@ impl App for Files {
         self.drop_place = None;
         self.drop_here = false;
         if x >= 0 {
-            if let Some((s, i)) = Self::place_at(area, x, y) {
-                if !read_only(Self::place(s, i).path) {
+            if let Some((s, i)) = self.place_at(area, x, y) {
+                if !read_only(self.place(s, i).path) {
                     self.drop_place = Some((s, i));
                 }
             } else if self.content(area).contains(x, y) {
@@ -1828,7 +1903,7 @@ impl App for Files {
 
     fn drop(&mut self, x: i32, y: i32, kind: u32, area: Rect, env: &mut Env) -> bool {
         let target = if let Some((s, i)) = self.drop_place {
-            Some(String::from(Self::place(s, i).path))
+            Some(String::from(self.place(s, i).path))
         } else if let Some(i) = self.drop_target {
             self.items.get(i).map(|e| e.path.clone())
         } else if self.drop_here {
@@ -2046,6 +2121,7 @@ impl App for Files {
         // Pick up changes made elsewhere (other windows, Terminal).
         let busy = self.rename.is_some() || self.press.is_some() || self.menu.is_some();
         if !busy && env.now_ms - self.last_refresh > 2000 && !self.searching() {
+            changed |= self.refresh_volumes();
             let before: Vec<(String, u64, u64)> =
                 self.items.iter().map(|e| (e.name.clone(), e.size, e.mtime)).collect();
             self.refresh();

@@ -33,6 +33,7 @@ const TESTS: &[Test] = &[
     ("user copies recover from faults", user_copy_fault),
     ("sound: HDA playback", sound),
     ("ACPI: AML, sleep states, battery", acpi_runtime),
+    ("USB: hub, keyboard, tablet, storage", usb),
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
@@ -653,4 +654,21 @@ fn acpi_isolation() {
     assert_eq!(crate::acpi::power_info().flags & aurora_abi::power::ACPI, 0);
     crate::sched::sleep_ms(20);
     assert!(crate::acpi::sleep_type(5).is_some(), "sleep types found earlier stay usable");
+}
+
+fn usb() {
+    use crate::fs;
+    let file = "/Volumes/AURORA-USB/Hello.txt";
+    let mounted = wait_for(|| fs::stat(file).is_ok(), 10_000);
+    let devices = crate::drivers::usb::list();
+    assert!(mounted, "the USB stick was not mounted; devices: {:?}", devices);
+    assert_eq!(fs::read_all(file).unwrap(), b"Hello from a USB stick!\n");
+    // A write larger than one bulk transfer, flushed and read back.
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    fs::write_all("/Volumes/AURORA-USB/Written.bin", &data).unwrap();
+    fs::sync_all();
+    assert!(fs::read_all("/Volumes/AURORA-USB/Written.bin").unwrap() == data, "data read back from USB differs");
+    let has = |what: &str| devices.iter().any(|d| d.contains(what));
+    assert!(has("keyboard") && has("tablet") && has("hub") && has("storage"), "missing drivers: {:?}", devices);
+    crate::kprint!("[{} devices] ", devices.len());
 }

@@ -69,6 +69,11 @@ fn pit_wait(f: impl Fn() -> u64, ms: u64) -> (u64, u64) {
     }
 }
 
+/// The calibrated TSC frequency (0 if the TSC is not the clock).
+pub fn tsc_hz() -> u64 {
+    TSC_HZ.load(Ordering::Relaxed)
+}
+
 pub fn source() -> Source {
     if TSC_HZ.load(Ordering::Relaxed) != 0 {
         Source::Tsc

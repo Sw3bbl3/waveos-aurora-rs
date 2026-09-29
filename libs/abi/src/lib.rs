@@ -114,7 +114,21 @@ pub mod nr {
     pub const AUDIO_VOLUME: usize = 53;
     /// `power_info(*mut PowerInfo)` — battery, power adapter and lid (from ACPI)
     pub const POWER_INFO: usize = 54;
-    pub const COUNT: usize = 55;
+    /// `sys_report(kind, buf, len) -> full length` — plain text, see [`super::report`]
+    pub const SYS_REPORT: usize = 55;
+    pub const COUNT: usize = 56;
+}
+
+/// `sys_report` kinds.
+pub mod report {
+    /// PCI devices (`lspci`).
+    pub const PCI: u64 = 0;
+    /// USB devices (`lsusb`).
+    pub const USB: u64 = 1;
+    /// Processors and clocks (`cpuinfo`).
+    pub const CPU: u64 = 2;
+    /// The kernel log (`dmesg`).
+    pub const LOG: u64 = 3;
 }
 
 /// Power sources, from ACPI (`power_info`).
@@ -535,6 +549,8 @@ pub mod desktop {
     /// Plays a system sound by name ("notify", "timer", "error", …; see
     /// `/System/Sounds`) without blocking.
     pub const PLAY_SOUND: usize = 12;
+    /// Writes out and unmounts a removable volume (a path under /Volumes).
+    pub const EJECT: usize = 13;
 }
 
 /// Where user programs are linked and where the kernel places things.

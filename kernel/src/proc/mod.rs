@@ -392,7 +392,10 @@ pub fn wait(pid: Pid, timeout_ms: u64) -> Result<i64, isize> {
 fn reaper() {
     loop {
         sched::wait_until(1000, || !REAP_QUEUE.lock().is_empty());
-        while let Some(pid) = REAP_QUEUE.lock().pop_front() {
+        // (Pop in its own statement: a `while let` would hold the lock — with
+        // interrupts off — for the whole body.)
+        loop {
+            let Some(pid) = REAP_QUEUE.lock().pop_front() else { break };
             let Some(p) = get(pid) else { continue };
             // Closing handles signals EOF/EPIPE to pipe peers.
             p.fds.lock().clear();

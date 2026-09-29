@@ -92,6 +92,15 @@ pub fn mount(path: &str, fs: Arc<dyn Filesystem>) {
     m.push(Mount { path: String::from(path), fs });
 }
 
+/// Detaches the filesystem at `path` after writing out what it has cached.
+pub fn unmount(path: &str) -> FsResult<()> {
+    let fs = MOUNTS.lock().iter().find(|m| m.path == path).map(|m| m.fs.clone()).ok_or(ENOENT)?;
+    let synced = fs.sync();
+    MOUNTS.lock().retain(|m| m.path != path);
+    log!("vfs", "unmounted {}", path);
+    synced
+}
+
 /// (mount point, description, (total, free) bytes) for every mounted filesystem.
 pub fn mounts() -> Vec<(String, String, Option<(u64, u64)>)> {
     let list: Vec<(String, Arc<dyn Filesystem>)> =

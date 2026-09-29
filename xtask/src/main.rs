@@ -58,6 +58,11 @@ fn main() {
                 smp,
                 audio: if flag("--no-sound") || flag("--headless") { String::from("none") } else { host_audio() },
                 battery: flag("--battery"),
+                usb_stick: flag("--usb-stick").then(|| {
+                    let stick = root().join("target/usb-stick.img");
+                    image::create_usb_stick(&stick).expect("USB stick image");
+                    stick
+                }),
             };
             let mut cmd = qemu(&img, &opts);
             let Some(mon) = mon else {
@@ -308,6 +313,8 @@ struct RunOpts<'a> {
     audio: String,
     /// Add a test SSDT with a laptop battery, power adapter and lid.
     battery: bool,
+    /// A raw disk image to attach as a USB stick.
+    usb_stick: Option<PathBuf>,
 }
 
 /// The host's own sound output, for interactive runs.
@@ -344,6 +351,13 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     };
     cmd.arg("-audiodev").arg(backend);
     cmd.args(["-device", "ich9-intel-hda", "-device", "hda-output,audiodev=snd"]);
+    // USB 3 controller: a tablet (absolute pointer) and, behind a hub, a keyboard.
+    cmd.args(["-device", "qemu-xhci,id=xhci", "-device", "usb-tablet,bus=xhci.0,port=1"]);
+    cmd.args(["-device", "usb-hub,bus=xhci.0,port=3", "-device", "usb-kbd,bus=xhci.0,port=3.1"]);
+    if let Some(stick) = &opts.usb_stick {
+        cmd.arg("-drive").arg(format!("id=stick,if=none,format=raw,file={}", stick.display()));
+        cmd.args(["-device", "usb-storage,bus=xhci.0,port=2,drive=stick"]);
+    }
     if opts.battery {
         let ssdt = root().join("target/battery-ssdt.aml");
         fs::write(&ssdt, aml::battery_ssdt()).expect("write battery SSDT");
@@ -427,6 +441,11 @@ fn run_tests_once(img: &Path, disk: &str, smp: u32) -> String {
         smp,
         audio: format!("wav:{}", audio.display()),
         battery: true,
+        usb_stick: Some({
+            let stick = root().join("target/test-usb-stick.img");
+            image::create_usb_stick(&stick).expect("USB stick image");
+            stick
+        }),
     };
     let mut cmd = qemu(img, &opts);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped());
