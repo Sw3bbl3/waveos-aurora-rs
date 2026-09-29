@@ -80,6 +80,14 @@ fn wake() {
     }
 }
 
+/// Modifier keys as of the last key event handed to the consumer, so pointer
+/// events carry the modifiers held when they are processed (Shift+click, …).
+static MODIFIERS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub fn modifiers() -> Modifiers {
+    Modifiers::from_bits(MODIFIERS.load(Ordering::Relaxed))
+}
+
 pub fn pop() -> Option<InputEvent> {
     let mut q = QUEUE.lock();
     if q.len == 0 {
@@ -89,6 +97,9 @@ pub fn pop() -> Option<InputEvent> {
     let ev = q.buf[head].take();
     q.head = (q.head + 1) % CAPACITY;
     q.len -= 1;
+    if let Some(InputEvent::Key(k)) = ev {
+        MODIFIERS.store(k.mods.bits(), Ordering::Relaxed);
+    }
     ev
 }
 

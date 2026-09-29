@@ -153,6 +153,30 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         }
         nr::FUTEX_WAIT => proc::futex::wait(a[0], a[1] as u32, a[2]),
         nr::FUTEX_WAKE => proc::futex::wake(a[0], a[1]),
+        nr::CLIPBOARD_SET => {
+            let data = user::slice(a[1], a[2].min(aurora_abi::clip::MAX_LEN as u64 + 1))?;
+            crate::gui::clipboard::set(a[0] as usize, data).map(|_| 0)
+        }
+        nr::CLIPBOARD_GET => {
+            let out = user::slice_mut(a[1], a[2].min(aurora_abi::clip::MAX_LEN as u64))?;
+            crate::gui::clipboard::get(a[0] as usize, out).map(|n| n as u64)
+        }
+        nr::DRAG_START => {
+            let data = user::slice(a[1], a[2].min(aurora_abi::clip::MAX_LEN as u64 + 1))?;
+            crate::gui::server::drag_start(sched::current_pid(), a[0] as usize, data, a[3] as u32, a[4] as usize)
+                .map(|_| 0)
+        }
+        nr::NOTIFY => {
+            let title = user::str(a[0], a[1].min(512))?;
+            let body = user::str(a[2], a[3].min(2048))?;
+            let p = proc::current().ok_or(EPERM)?;
+            crate::gui::notify::post(p.pid, &p.path, title, body);
+            Ok(0)
+        }
+        nr::DRAG_DATA => {
+            let out = user::slice_mut(a[0], a[1].min(aurora_abi::clip::MAX_LEN as u64))?;
+            crate::gui::dnd::data(sched::current_pid(), out).map(|n| n as u64)
+        }
         nr::DESKTOP => crate::gui::server::desktop_request(a[0] as usize, a[1], a[2]),
         nr::WIN_CREATE
         | nr::WIN_SURFACE

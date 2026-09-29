@@ -18,6 +18,14 @@ pub enum Icon {
     Welcome,
     Folder,
     Document,
+    Preview,
+    Paint,
+    Clock,
+    Activity,
+    /// A picture file (PNG/BMP) in Files.
+    Picture,
+    Trash,
+    TrashFull,
 }
 
 fn radius(size: i32) -> i32 {
@@ -125,6 +133,9 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
             let f = theme::ui_bold(if s >= 40 { 20 } else { 14 });
             cv.text_centered(r, "Hi", f, 0xFFFF_FFFF);
         }
+        Icon::Preview | Icon::Paint | Icon::Clock | Icon::Activity | Icon::Picture | Icon::Trash | Icon::TrashFull => {
+            draw_more(cv, icon, r)
+        }
         Icon::Document => {
             let page = Rect::new(r.x + u(8), r.y + u(3), s - u(16), s - u(6));
             cv.fill_round_rect(page, u(3), 0xFFFF_FFFF);
@@ -137,6 +148,100 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
                 );
             }
         }
+    }
+}
+
+/// A landscape: sky, sun and two hills, clipped to `r` with corner radius `rad`.
+fn landscape(cv: &mut Canvas, r: Rect, rad: i32, u: &dyn Fn(i32) -> i32) {
+    cv.fill_round_rect_vgradient(r, rad, rgb(0x6C, 0xC4, 0xFF), rgb(0xC8, 0xEC, 0xFF));
+    cv.with_clip(r, |cv| {
+        cv.fill_circle(r.x + r.w * 7 / 10, r.y + r.h * 3 / 10, u(5).max(2), rgb(0xFF, 0xD3, 0x4D));
+        let hill = |cx: i32, cy: i32, rr: i32, c: u32, cv: &mut Canvas| cv.fill_circle(cx, cy, rr, c);
+        hill(r.x + r.w / 4, r.bottom() + r.h / 5, r.h * 3 / 5, rgb(0x34, 0xC7, 0x59), cv);
+        hill(r.x + r.w * 3 / 4, r.bottom() + r.h / 3, r.h * 3 / 5, rgb(0x24, 0xA1, 0x48), cv);
+    });
+}
+
+/// Draws the icons added with the M4 apps.
+fn draw_more(cv: &mut Canvas, icon: Icon, r: Rect) {
+    let s = r.w;
+    let rad = radius(s);
+    let u = |v: i32| v * s / 48;
+    match icon {
+        Icon::Preview => {
+            cv.fill_round_rect_vgradient(r, rad, rgb(0xF4, 0xF6, 0xFA), rgb(0xD9, 0xDE, 0xE8));
+            let photo = Rect::new(r.x + u(8), r.y + u(10), s - u(16), s - u(20));
+            cv.fill_round_rect(photo.inset(-u(2)), u(4), 0xFFFF_FFFF);
+            landscape(cv, photo, u(3), &u);
+        }
+        Icon::Picture => {
+            let page = Rect::new(r.x + u(5), r.y + u(9), s - u(10), s - u(18));
+            cv.fill_round_rect(page.inset(-u(2)), u(4), 0xFFFF_FFFF);
+            cv.stroke_round_rect(page.inset(-u(2)), u(4), 0x30000000);
+            landscape(cv, page, u(2), &u);
+        }
+        Icon::Paint => {
+            cv.fill_round_rect_dgradient(r, rad, rgb(0xFF, 0xF3, 0xE0), rgb(0xFF, 0xD6, 0xA5));
+            let (cx, cy) = r.center();
+            // Palette: a disc with paint dots.
+            cv.fill_circle(cx - u(2), cy + u(1), u(15), 0xFFFF_FFFF);
+            cv.fill_circle(cx + u(6), cy + u(8), u(4), rgb(0xFF, 0xE8, 0xC8));
+            let dots =
+                [(-9, -3, 0xFF3B30u32), (-3, -10, 0xFFCC00), (6, -8, 0x34C759), (9, 0, 0x007AFF), (-8, 7, 0xAF52DE)];
+            for (dx, dy, c) in dots {
+                cv.fill_circle(cx - u(2) + u(dx), cy + u(1) + u(dy), u(3).max(2), 0xFF00_0000 | c);
+            }
+            // Brush.
+            cv.line(cx + u(4), cy + u(2), cx + u(17), cy - u(14), u(3).max(2), rgb(0x8B, 0x5A, 0x2B));
+            cv.fill_circle(cx + u(4), cy + u(2), u(3).max(2), rgb(0x1D, 0x1D, 0x24));
+        }
+        Icon::Clock => {
+            cv.fill_round_rect_vgradient(r, rad, rgb(0x2C, 0x2C, 0x34), rgb(0x10, 0x10, 0x16));
+            let (cx, cy) = r.center();
+            let rr = u(17);
+            cv.fill_circle(cx, cy, rr, 0xFFFF_FFFF);
+            for k in 0..12 {
+                let a = k * 1024 / 12;
+                let (x0, y0) = (cx + (rr - u(2)) * sin(a + 256) / 16384, cy + (rr - u(2)) * sin(a) / 16384);
+                let (x1, y1) = (cx + (rr - u(4)) * sin(a + 256) / 16384, cy + (rr - u(4)) * sin(a) / 16384);
+                cv.line(x0, y0, x1, y1, if k % 3 == 0 { 2 } else { 1 }, 0xFF1D_1D24);
+            }
+            // 10:10, the watchmaker's smile.
+            let hand = |a: i32, len: i32, w: i32, c: u32, cv: &mut Canvas| {
+                cv.line(cx, cy, cx + len * sin(a + 256) / 16384, cy + len * sin(a) / 16384, w, c)
+            };
+            hand(-256 + 1024 * 10 / 12 + 1024 * 10 / 60 / 12, u(9), u(3).max(2), 0xFF1D_1D24, cv);
+            hand(-256 + 1024 * 10 / 60, u(13), u(2).max(1), 0xFF1D_1D24, cv);
+            hand(-256 + 1024 * 40 / 60, u(14), 1, rgb(0xFF, 0x95, 0x00), cv);
+            cv.fill_circle(cx, cy, u(2).max(2), rgb(0xFF, 0x95, 0x00));
+        }
+        Icon::Activity => {
+            cv.fill_round_rect_vgradient(r, rad, rgb(0x1F, 0x24, 0x2E), rgb(0x0B, 0x0E, 0x14));
+            let g = Rect::new(r.x + u(7), r.y + u(12), s - u(14), s - u(24));
+            for i in 1..4 {
+                cv.fill_rect(Rect::new(g.x, g.y + g.h * i / 4, g.w, 1), 0x30FF_FFFF);
+            }
+            let ys = [70, 55, 62, 30, 42, 18, 36, 25, 50, 40];
+            let pts: Vec<(i32, i32)> =
+                ys.iter().enumerate().map(|(i, &v)| (g.x + g.w * i as i32 / 9, g.y + g.h * v / 80)).collect();
+            cv.polyline(&pts, u(3).max(2), rgb(0x30, 0xD1, 0x58));
+        }
+        Icon::Trash | Icon::TrashFull => {
+            let body = Rect::new(r.x + u(11), r.y + u(12), s - u(22), s - u(16));
+            cv.fill_round_rect_vgradient(body, u(4), 0xE8F4_F6FA, 0xD0C8_CCD6);
+            cv.stroke_round_rect(body, u(4), 0x50000000);
+            for i in 1..4 {
+                let x = body.x + body.w * i / 4;
+                cv.fill_rect(Rect::new(x, body.y + u(5), 1, body.h - u(10)), 0x40000000);
+            }
+            if icon == Icon::TrashFull {
+                let paper = Rect::new(body.x + u(3), r.y + u(6), body.w - u(6), u(9));
+                cv.fill_round_rect(paper, u(2), 0xFFFF_FFFF);
+                cv.stroke_round_rect(paper, u(2), 0x40000000);
+            }
+            cv.fill_round_rect(Rect::new(r.x + u(9), r.y + u(9), s - u(18), u(4)), u(2), 0xF0B8_BEC8);
+        }
+        _ => {}
     }
 }
 

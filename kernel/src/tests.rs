@@ -25,6 +25,8 @@ const TESTS: &[Test] = &[
     ("scheduler", scheduler),
     ("wallpaper + blur", wallpaper),
     ("TrueType text", truetype),
+    ("Spotlight: calculator and file index", spotlight),
+    ("clipboard and Trash", clipboard_and_trash),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
     ("storage: disk + GPT", storage_devices),
@@ -367,4 +369,59 @@ fn truetype() {
     assert!(ink > 50 * 255 && adv > 0);
     // Characters outside ASCII resolve (Inter covers Latin, Greek and Cyrillic).
     assert!(small.width("éΩЖ") > 0);
+}
+
+fn spotlight() {
+    use crate::gui::desktop::calc_for_test as calc;
+    assert_eq!(calc("12*7+1"), Some(85.0));
+    assert_eq!(calc("(1+2)*3 - 4/2"), Some(7.0));
+    assert_eq!(calc("2^10"), Some(1024.0));
+    assert_eq!(calc("1/0"), None);
+    assert_eq!(calc("hello"), None);
+    assert_eq!(calc("42"), None, "a bare number is not a calculation");
+
+    use crate::fs::{self, index};
+    fs::write_all("/Documents/Zebra Stripes.txt", b"z").unwrap();
+    let hit = |q: &str, p: &str| index::search(q, 20).iter().any(|(path, _)| path == p);
+    assert!(hit("zebra", "/Documents/Zebra Stripes.txt"));
+    assert!(hit("stripes", "/Documents/Zebra Stripes.txt"), "word-start match");
+    fs::mkdir("/Documents/Savanna").unwrap();
+    fs::rename("/Documents/Zebra Stripes.txt", "/Documents/Savanna/Zebra Stripes.txt").unwrap();
+    assert!(hit("zebra", "/Documents/Savanna/Zebra Stripes.txt"));
+    assert!(!hit("zebra", "/Documents/Zebra Stripes.txt"));
+    fs::rename("/Documents/Savanna", "/Documents/Plains").unwrap();
+    assert!(hit("zebra", "/Documents/Plains/Zebra Stripes.txt"), "folder renames move their contents");
+    fs::remove_tree("/Documents/Plains").unwrap();
+    assert!(!hit("zebra", "/Documents/Plains/Zebra Stripes.txt"));
+    // Hidden and system paths stay out of the index.
+    assert!(index::search("kernel", 50).iter().all(|(p, _)| !p.starts_with("/System")));
+}
+
+fn clipboard_and_trash() {
+    use crate::gui::clipboard;
+    use aurora_abi::clip;
+    clipboard::set(clip::TEXT, "héllo".as_bytes()).unwrap();
+    let mut buf = [0u8; 16];
+    let n = clipboard::get(clip::TEXT, &mut buf).unwrap();
+    assert_eq!(&buf[..n], "héllo".as_bytes());
+    assert!(clipboard::get(clip::FILES, &mut buf).is_err(), "text is not a file list");
+    clipboard::set(clip::FILES, b"/Documents/a.txt\n/Documents/b.txt").unwrap();
+    assert!(clipboard::get(clip::TEXT, &mut buf).is_ok(), "files paste as text");
+    assert!(clipboard::set(clip::TEXT, &[0xFF, 0xFE]).is_err(), "must be UTF-8");
+
+    use crate::fs::{self, trash};
+    fs::write_all("/Documents/old.txt", b"bye").unwrap();
+    let name = trash::move_to_trash("/Documents/old.txt").unwrap();
+    assert!(fs::stat("/Documents/old.txt").is_err());
+    assert!(trash::count() >= 1);
+    fs::write_all("/Documents/old.txt", b"new").unwrap();
+    // Putting back next to a file of the same name keeps both.
+    let back = trash::put_back(&name).unwrap();
+    assert_eq!(back, "/Documents/old 2.txt");
+    assert_eq!(fs::read_all(&back).unwrap(), b"bye");
+    fs::unlink("/Documents/old.txt").unwrap();
+    fs::unlink(&back).unwrap();
+    assert!(trash::move_to_trash("/System/version.txt").is_err(), "the system image can't be trashed");
+    trash::empty().unwrap();
+    assert_eq!(trash::count(), 0);
 }

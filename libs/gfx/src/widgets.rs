@@ -56,6 +56,75 @@ pub fn text_field(cv: &mut Canvas, r: Rect, text: &str, placeholder: &str, focus
     }
 }
 
+/// An on/off switch (about 42×22).
+pub fn toggle(cv: &mut Canvas, r: Rect, on: bool) {
+    let t = theme::current();
+    let track = if on {
+        ACCENT
+    } else if t.dark {
+        0xFF4A_4A55
+    } else {
+        0xFFD6_D6DD
+    };
+    cv.fill_round_rect(r, r.h / 2, track);
+    let d = r.h - 4;
+    let x = if on { r.right() - 2 - d } else { r.x + 2 };
+    cv.fill_circle(x + d / 2, r.y + r.h / 2 + 1, d / 2, 0x30000000);
+    cv.fill_circle(x + d / 2, r.y + r.h / 2, d / 2, 0xFFFF_FFFF);
+}
+
+/// A horizontal slider; `value` in 0..=1000. Returns the knob rectangle.
+pub fn slider(cv: &mut Canvas, r: Rect, value: i32, hovered: bool) -> Rect {
+    let t = theme::current();
+    let v = value.clamp(0, 1000);
+    let cy = r.y + r.h / 2;
+    let track = Rect::new(r.x, cy - 2, r.w, 4);
+    cv.fill_round_rect(track, 2, if t.dark { 0xFF4A_4A55 } else { 0xFFD6_D6DD });
+    let filled = Rect::new(r.x, cy - 2, r.w * v / 1000, 4);
+    cv.fill_round_rect(filled, 2, ACCENT);
+    let kx = r.x + r.w * v / 1000;
+    let rad = if hovered { 10 } else { 9 };
+    cv.fill_circle(kx, cy + 1, rad, 0x28000000);
+    cv.fill_circle(kx, cy, rad, 0xFFFF_FFFF);
+    cv.stroke_round_rect(Rect::new(kx - rad, cy - rad, 2 * rad, 2 * rad), rad, t.control_border);
+    Rect::new(kx - rad, cy - rad, 2 * rad, 2 * rad)
+}
+
+/// Slider value (0..=1000) for pointer x over the slider rectangle `r`.
+pub fn slider_value(r: Rect, x: i32) -> i32 {
+    ((x - r.x) * 1000 / r.w.max(1)).clamp(0, 1000)
+}
+
+/// Segment rectangles of a segmented control.
+pub fn segments(r: Rect, n: usize) -> Vec<Rect> {
+    let n = n.max(1) as i32;
+    let w = (r.w - 4) / n;
+    (0..n).map(|i| Rect::new(r.x + 2 + i * w, r.y + 2, w, r.h - 4)).collect()
+}
+
+/// A segmented control (like a row of radio buttons).
+pub fn segmented(cv: &mut Canvas, r: Rect, labels: &[&str], selected: usize, hovered: Option<usize>) {
+    let t = theme::current();
+    cv.fill_round_rect(r, 8, if t.dark { 0xFF2E_2E38 } else { 0xFFE6_E6EC });
+    let f = theme::ui(12);
+    for (i, s) in segments(r, labels.len()).into_iter().enumerate() {
+        if i == selected {
+            cv.fill_round_rect(s, 6, if t.dark { 0xFF5A_5A68 } else { 0xFFFF_FFFF });
+        } else if hovered == Some(i) {
+            cv.fill_round_rect(s, 6, t.hover);
+        }
+        cv.text_centered(s, labels[i], f, t.text);
+    }
+}
+
+/// A thin progress/usage bar; `value` in 0..=1000.
+pub fn progress(cv: &mut Canvas, r: Rect, value: i32, color: u32) {
+    let t = theme::current();
+    cv.fill_round_rect(r, r.h / 2, if t.dark { 0xFF3A_3A44 } else { 0xFFE3_E3EA });
+    let w = (r.w * value.clamp(0, 1000) / 1000).max(if value > 0 { r.h } else { 0 });
+    cv.fill_round_rect(Rect::new(r.x, r.y, w, r.h), r.h / 2, color);
+}
+
 /// Splits `text` into visual lines no wider than `max_w`, returning byte ranges.
 /// Hard newlines always break; long lines wrap at spaces when possible.
 pub fn wrap(text: &str, font: Font, max_w: i32) -> Vec<(usize, usize)> {

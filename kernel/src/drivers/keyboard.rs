@@ -51,8 +51,15 @@ impl Decoder {
                 0x53 => KeyCode::Delete,
                 0x5B | 0x5C => KeyCode::Super,
                 0x5D => KeyCode::Menu,
-                0x35 => KeyCode::Char,      // keypad '/'
-                0x2A | 0x37 => return None, // fake shifts around PrintScreen
+                0x35 => KeyCode::Char, // keypad '/'
+                0x37 => KeyCode::PrintScreen,
+                0x2A | 0x36 => return None, // fake shifts around PrintScreen
+                0x20 => KeyCode::Mute,
+                0x2E => KeyCode::VolumeDown,
+                0x30 => KeyCode::VolumeUp,
+                0x22 => KeyCode::PlayPause,
+                0x19 => KeyCode::NextTrack,
+                0x10 => KeyCode::PrevTrack,
                 _ => KeyCode::Unknown,
             }
         } else {

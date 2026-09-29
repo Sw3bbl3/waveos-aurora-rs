@@ -10,8 +10,10 @@
 
 pub mod cache;
 pub mod fat;
+pub mod index;
 pub mod ramfs;
 pub mod tarfs;
+pub mod trash;
 pub mod wavefs;
 
 use crate::sync::IrqMutex;
@@ -234,7 +236,9 @@ pub fn mkdir(path: &str) -> FsResult<()> {
     if fs.lookup(dir, &name).is_ok() {
         return Err(EEXIST);
     }
-    fs.create(dir, &name, Kind::Dir).map(|_| ())
+    fs.create(dir, &name, Kind::Dir)?;
+    index::added(&resolve("/", path), true);
+    Ok(())
 }
 
 pub fn unlink(path: &str) -> FsResult<()> {
@@ -242,7 +246,45 @@ pub fn unlink(path: &str) -> FsResult<()> {
     if fs.read_only() {
         return Err(EROFS);
     }
-    fs.unlink(dir, &name)
+    fs.unlink(dir, &name)?;
+    index::removed(&resolve("/", path));
+    Ok(())
+}
+
+/// Deletes a file, or a directory and everything in it.
+pub fn remove_tree(path: &str) -> FsResult<()> {
+    if is_dir(path) {
+        for e in readdir(path)? {
+            remove_tree(&join(path, &e.name))?;
+        }
+    }
+    unlink(path)
+}
+
+/// Copies a file or a whole directory tree (works across volumes).
+pub fn copy_tree(from: &str, to: &str) -> FsResult<()> {
+    let from_n = resolve("/", from);
+    let to_n = resolve("/", to);
+    if to_n.starts_with(&from_n) && to_n.as_bytes().get(from_n.len()) == Some(&b'/') {
+        return Err(EINVAL);
+    }
+    if is_dir(from) {
+        mkdir(to)?;
+        for e in readdir(from)? {
+            copy_tree(&join(from, &e.name), &join(to, &e.name))?;
+        }
+        Ok(())
+    } else {
+        write_all(to, &read_all(from)?)
+    }
+}
+
+pub fn join(dir: &str, name: &str) -> String {
+    if dir.ends_with('/') {
+        alloc::format!("{dir}{name}")
+    } else {
+        alloc::format!("{dir}/{name}")
+    }
 }
 
 pub fn rename(from: &str, to: &str) -> FsResult<()> {
@@ -260,7 +302,9 @@ pub fn rename(from: &str, to: &str) -> FsResult<()> {
     if to_n.starts_with(&from_n) && to_n.as_bytes().get(from_n.len()) == Some(&b'/') {
         return Err(EINVAL);
     }
-    fs_a.rename(dir_a, &name_a, dir_b, &name_b)
+    fs_a.rename(dir_a, &name_a, dir_b, &name_b)?;
+    index::renamed(&from_n, &to_n);
+    Ok(())
 }
 
 pub fn sync_all() {
@@ -298,6 +342,7 @@ pub fn open(path: &str, flags: usize) -> FsResult<OpenFile> {
                 return Err(EROFS);
             }
             let ino = fs.create(dir, &name, Kind::File)?;
+            index::added(&resolve("/", path), false);
             (fs, ino)
         }
         Err(e) => return Err(e),
@@ -445,6 +490,7 @@ pub fn mount_disks() {
     }
     ramfs::seed();
     crate::sched::spawn("flusher", flusher);
+    crate::sched::spawn("indexer", index::build);
 }
 
 /// Commits filesystem changes to disk every few seconds.

@@ -29,7 +29,8 @@ impl ClientApp {
     }
 
     fn pointer_button(&self, kind: u32, x: i32, y: i32, area: Rect, clicks: u32, button: u32) {
-        let ev = Event { kind, x: x - area.x, y: y - area.y, a: button, b: clicks, ..Default::default() };
+        let d = crate::drivers::input::modifiers().bits();
+        let ev = Event { kind, x: x - area.x, y: y - area.y, a: button, b: clicks, d, ..Default::default() };
         server::push_event(self.id, ev);
     }
 }
@@ -87,9 +88,13 @@ impl App for ClientApp {
     fn release(&mut self, x: i32, y: i32, area: Rect) {
         self.pointer(event::POINTER_UP, x, y, area, 0);
     }
+    fn drag(&mut self, x: i32, y: i32, area: Rect) -> bool {
+        self.pointer_button(event::POINTER_MOVE, x, y, area, 0, 1);
+        false
+    }
     fn hover(&mut self, x: i32, y: i32, area: Rect) -> bool {
         if x >= 0 {
-            self.pointer(event::POINTER_MOVE, x, y, area, 0);
+            self.pointer_button(event::POINTER_MOVE, x, y, area, 0, 0);
         } else {
             // Pointer left the window.
             server::push_event(self.id, Event { kind: event::POINTER_MOVE, x: -1, y: -1, ..Default::default() });

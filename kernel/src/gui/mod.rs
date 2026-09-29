@@ -5,9 +5,13 @@
 //! copies those regions to the GOP framebuffer.
 
 pub mod apps;
+pub mod clipboard;
 pub mod cursor;
 pub mod desktop;
+pub mod dnd;
+pub mod notify;
 pub mod server;
+pub mod settings;
 
 pub use aurora_gfx::{canvas, geom, icons, theme, wallpaper, widgets};
 
@@ -90,10 +94,15 @@ fn run() {
     let mut next_tick = 0;
     loop {
         let now = time::uptime_ms();
+        desktop.set_now(now);
         while let Some(ev) = input::pop() {
             desktop.handle(ev, now);
         }
         desktop.process_commands();
+        // Something started moving: draw the next frame promptly.
+        if desktop.wants_frames() {
+            next_tick = next_tick.min(now + 16);
+        }
         if now >= next_tick {
             next_tick = now + desktop.tick(now);
         }
@@ -107,6 +116,9 @@ fn run() {
             cv.clip = r;
             desktop.paint(&mut cv);
             flush(front, &back, &fb, r);
+        }
+        if core::mem::take(&mut desktop.screenshot) {
+            take_screenshot(&back, w as u32, h as u32);
         }
         if !ready {
             ready = true;
@@ -122,38 +134,59 @@ fn run() {
             }
         }
         let wait = next_tick.saturating_sub(time::uptime_ms()).max(1);
-        sched::wait_until(wait, || input::pending() || server::pending());
+        sched::wait_until(wait, || input::pending() || server::pending() || notify::pending());
     }
 }
 
-const SETTINGS: &str = "/Settings/aurora.conf";
+static SCREENSHOT: crate::sync::IrqMutex<Option<(alloc::vec::Vec<u32>, u32, u32)>> = crate::sync::IrqMutex::new(None);
 
-/// Restores appearance settings saved by [`save_settings`].
-fn load_settings() {
-    let Ok(data) = crate::fs::read_all(SETTINGS) else { return };
-    for line in core::str::from_utf8(&data).unwrap_or("").lines() {
-        match line.split_once('=') {
-            Some(("dark", v)) => theme::set_dark(v.trim() == "1"),
-            Some(("wallpaper", v)) => {
-                theme::set_wallpaper(v.trim().parse().unwrap_or(0) % wallpaper::NAMES.len() as u8)
-            }
-            _ => {}
-        }
+/// Saves the screen to `/Pictures` as PNG (encoded on a background task).
+fn take_screenshot(back: &[u32], w: u32, h: u32) {
+    let mut slot = SCREENSHOT.lock();
+    if slot.is_some() {
+        return; // one at a time
     }
+    *slot = Some((back.to_vec(), w, h));
+    drop(slot);
+    sched::spawn("screenshot", || {
+        let Some((pixels, w, h)) = SCREENSHOT.lock().take() else { return };
+        let t0 = time::uptime_ms();
+        let png = aurora_image::png::encode(&aurora_image::Image { width: w, height: h, pixels });
+        let d = crate::drivers::rtc::now();
+        let path = alloc::format!(
+            "/Pictures/Screenshot {}-{:02}-{:02} at {:02}.{:02}.{:02}.png",
+            d.year,
+            d.month,
+            d.day,
+            d.hour,
+            d.minute,
+            d.second
+        );
+        let _ = crate::fs::mkdir("/Pictures");
+        match crate::fs::write_all(&path, &png) {
+            Ok(()) => {
+                log!("gui", "saved {} ({} KiB, {} ms)", path, png.len() / 1024, time::uptime_ms() - t0);
+                notify::system("Screenshot saved", path.trim_start_matches("/Pictures/"));
+            }
+            Err(e) => log!("gui", "could not save a screenshot: {}", aurora_abi::err::name(e)),
+        }
+    });
+}
+
+/// Restores appearance settings.
+fn load_settings() {
+    settings::load();
+    theme::set_dark(settings::get_bool("dark", false));
+    let wp = settings::get_int("wallpaper", 0) as u8;
+    let valid = (wp as usize) < wallpaper::NAMES.len() || wp == wallpaper::CUSTOM;
+    theme::set_wallpaper(if valid { wp } else { 0 });
     log!("gui", "restored settings (dark: {}, wallpaper: {})", theme::current().dark, theme::wallpaper());
 }
 
 /// Persists appearance settings to the home volume.
 pub fn save_settings() {
-    let text = alloc::format!(
-        "# WaveOS Aurora appearance — written by Settings\ndark={}\nwallpaper={}\n",
-        theme::current().dark as u8,
-        theme::wallpaper()
-    );
-    let _ = crate::fs::mkdir("/Settings");
-    if let Err(e) = crate::fs::write_all(SETTINGS, text.as_bytes()) {
-        log!("gui", "could not save settings: {}", aurora_abi::err::name(e));
-    }
+    settings::set_bool("dark", theme::current().dark);
+    settings::set_int("wallpaper", theme::wallpaper() as i64);
 }
 
 /// Fixed-size text buffer for formatting without the heap.

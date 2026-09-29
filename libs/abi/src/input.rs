@@ -36,6 +36,13 @@ pub enum KeyCode {
     Super,
     CapsLock,
     Menu,
+    PrintScreen,
+    Mute,
+    VolumeDown,
+    VolumeUp,
+    PlayPause,
+    NextTrack,
+    PrevTrack,
     Unknown,
 }
 

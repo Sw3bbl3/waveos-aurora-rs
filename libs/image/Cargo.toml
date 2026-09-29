@@ -1,0 +1,11 @@
+[package]
+name = "aurora-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
+[dev-dependencies]
+png = "0.17"

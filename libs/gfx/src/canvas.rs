@@ -286,6 +286,66 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Draws a `src_w`×`src_h` image with straight alpha scaled into `dst`
+    /// (bilinear filtering, premultiplied so transparent edges don't fringe),
+    /// at `opacity` 0..=255. For large reductions, draw a thumbnail instead.
+    pub fn draw_image(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, opacity: u32) {
+        if dst.w <= 0 || dst.h <= 0 || src_w == 0 || src_h == 0 {
+            return;
+        }
+        let vis = dst.intersect(&self.clip);
+        if vis.is_empty() {
+            return;
+        }
+        let (sw, sh) = (src_w as i64, src_h as i64);
+        // Source position of a destination pixel centre, 16.16, minus half a texel.
+        let step_x = (sw << 16) / dst.w as i64;
+        let step_y = (sh << 16) / dst.h as i64;
+        let exact = dst.w as u32 == src_w && dst.h as u32 == src_h;
+        let texel = |x: i64, y: i64| -> u32 { src[(y.clamp(0, sh - 1) * sw + x.clamp(0, sw - 1)) as usize] };
+        for y in vis.y..vis.bottom() {
+            let fy = (y - dst.y) as i64 * step_y + step_y / 2 - 32768;
+            let (y0, ty) = (fy >> 16, (fy & 0xFFFF) >> 8);
+            for x in vis.x..vis.right() {
+                let p = if exact {
+                    src[((y - dst.y) as u32 * src_w + (x - dst.x) as u32) as usize]
+                } else {
+                    let fx = (x - dst.x) as i64 * step_x + step_x / 2 - 32768;
+                    let (x0, tx) = (fx >> 16, (fx & 0xFFFF) >> 8);
+                    let w = [(256 - tx) * (256 - ty), tx * (256 - ty), (256 - tx) * ty, tx * ty];
+                    let t = [texel(x0, y0), texel(x0 + 1, y0), texel(x0, y0 + 1), texel(x0 + 1, y0 + 1)];
+                    let (mut a, mut r, mut g, mut b) = (0i64, 0i64, 0i64, 0i64);
+                    for k in 0..4 {
+                        let pa = (t[k] >> 24) as i64 * w[k];
+                        a += pa;
+                        r += (t[k] >> 16 & 0xFF) as i64 * pa;
+                        g += (t[k] >> 8 & 0xFF) as i64 * pa;
+                        b += (t[k] & 0xFF) as i64 * pa;
+                    }
+                    if a == 0 {
+                        continue;
+                    }
+                    ((a >> 16) as u32) << 24 | ((r / a) as u32) << 16 | ((g / a) as u32) << 8 | (b / a) as u32
+                };
+                let pa = (p >> 24) * opacity / 255;
+                if pa != 0 {
+                    self.put(x, y, p, pa);
+                }
+            }
+        }
+    }
+
+    /// The grey checkerboard shown behind transparent images.
+    pub fn checkerboard(&mut self, r: Rect, cell: i32, light: u32, dark: u32) {
+        let vis = r.intersect(&self.clip);
+        for y in vis.y..vis.bottom() {
+            for x in vis.x..vis.right() {
+                let odd = ((x - r.x) / cell + (y - r.y) / cell) & 1 == 1;
+                self.buf[(y * self.width + x) as usize] = if odd { dark } else { light };
+            }
+        }
+    }
+
     /// Frosted glass: the pre-blurred wallpaper under a rounded rect, tinted.
     pub fn glass(&mut self, blurred: &[u32], r: Rect, radius: i32, tint: u32) {
         let w = self.width;

@@ -9,6 +9,9 @@ use alloc::vec::Vec;
 
 pub const NAMES: [&str; 3] = ["Aurora", "Ocean", "Sunset"];
 
+/// Wallpaper index meaning "the user's own picture" (see `desktop::SET_WALLPAPER_IMAGE`).
+pub const CUSTOM: u8 = 255;
+
 struct Ribbon {
     color: u32,
     /// Base height, per mille of screen height.

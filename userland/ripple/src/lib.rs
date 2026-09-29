@@ -9,6 +9,8 @@
 
 extern crate alloc;
 
+pub mod text;
+
 pub use aurora::abi::input::{KeyCode, KeyEvent, Modifiers};
 pub use aurora_gfx::{canvas, font, geom, icons, math, theme, wallpaper, widgets};
 
@@ -31,6 +33,8 @@ pub enum Request {
     Reboot,
     SetDark(bool),
     SetWallpaper(u8),
+    /// Use a picture file as the wallpaper.
+    SetWallpaperImage(String),
 }
 
 pub struct Env {
@@ -38,6 +42,8 @@ pub struct Env {
     pub focused: bool,
     pub screen: (i32, i32),
     pub requests: Vec<Request>,
+    /// Modifier keys currently held (as last reported by the keyboard).
+    pub mods: Modifiers,
 }
 
 pub trait App {
@@ -70,8 +76,30 @@ pub trait App {
     fn hover(&mut self, _x: i32, _y: i32, _area: Rect) -> bool {
         false
     }
+    /// Pointer moved with the left button held since a press in this window.
+    /// Coordinates may lie outside the window.
+    fn drag(&mut self, x: i32, y: i32, area: Rect, _env: &mut Env) -> bool {
+        self.hover(x, y, area)
+    }
     fn scroll(&mut self, _delta: i32, _area: Rect) -> bool {
         false
+    }
+    /// Something is dragged over the window (`x < 0`: it left). Return true to redraw.
+    fn drag_over(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
+        false
+    }
+    /// Something was dropped at (x, y); read it with `aurora::dnd::dropped(kind)`.
+    fn drop(&mut self, _x: i32, _y: i32, _kind: u32, _area: Rect, _env: &mut Env) -> bool {
+        false
+    }
+    /// A drag that started in this window ended (`dropped` = it landed somewhere).
+    fn drag_end(&mut self, _dropped: bool, _env: &mut Env) -> bool {
+        false
+    }
+    /// The close button (or Ctrl+W) was used. Return false to keep the window
+    /// open, e.g. to ask about unsaved changes (then push `Request::Close`).
+    fn close_requested(&mut self, _env: &mut Env) -> bool {
+        true
     }
     /// Called about ten times a second.
     fn tick(&mut self, _env: &mut Env) -> bool {
@@ -127,6 +155,9 @@ fn apply(requests: Vec<Request>) {
             Request::Reboot => desktop::reboot(),
             Request::SetDark(d) => desktop::set_dark(d),
             Request::SetWallpaper(i) => desktop::set_wallpaper(i),
+            Request::SetWallpaperImage(p) => {
+                let _ = desktop::set_wallpaper_image(&p);
+            }
         }
     }
 }
@@ -164,7 +195,13 @@ pub fn run<A: App>(mut app: A) -> i32 {
         }
     };
     let mut win = Window { id, surface: Window::surface(id) };
-    let mut env = Env { now_ms: aurora::time::uptime_ms(), focused: true, screen, requests: Vec::new() };
+    let mut env = Env {
+        now_ms: aurora::time::uptime_ms(),
+        focused: true,
+        screen,
+        requests: Vec::new(),
+        mods: Modifiers::default(),
+    };
     let mut dirty = true;
     let mut next_tick = 0;
 
@@ -197,6 +234,12 @@ pub fn run<A: App>(mut app: A) -> i32 {
             continue;
         }
         env.now_ms = aurora::time::uptime_ms();
+        if matches!(
+            ev.kind,
+            event::KEY | event::POINTER_DOWN | event::POINTER_UP | event::POINTER_MOVE | event::DRAG_OVER | event::DROP
+        ) {
+            env.mods = Modifiers::from_bits(ev.d);
+        }
         let area = Rect::new(0, 0, win.surface.width as i32, win.surface.height as i32);
         dirty |= match ev.kind {
             event::KEY => app.key(&KeyEvent::from_event(&ev), &mut env),
@@ -204,8 +247,13 @@ pub fn run<A: App>(mut app: A) -> i32 {
             event::POINTER_DOWN if ev.b >= 2 => app.double_click(ev.x, ev.y, area, &mut env),
             event::POINTER_DOWN => app.click(ev.x, ev.y, area, &mut env),
             event::POINTER_UP => app.release(ev.x, ev.y, area, &mut env),
+            event::POINTER_MOVE if ev.a != 0 => app.drag(ev.x, ev.y, area, &mut env),
             event::POINTER_MOVE => app.hover(ev.x, ev.y, area),
             event::SCROLL => app.scroll(ev.a as i32, area),
+            event::DRAG_OVER => app.drag_over(ev.x, ev.y, area, &mut env),
+            event::DRAG_LEAVE => app.drag_over(-1, -1, area, &mut env),
+            event::DROP => app.drop(ev.x, ev.y, ev.a, area, &mut env),
+            event::DRAG_END => app.drag_end(ev.a != 0, &mut env),
             event::RESIZE => {
                 if (ev.x as u32, ev.y as u32) != (win.surface.width, win.surface.height) {
                     let _ = call(nr::WIN_RESIZE, &[id, ev.x as u64, ev.y as u64]);
@@ -223,8 +271,11 @@ pub fn run<A: App>(mut app: A) -> i32 {
                 true
             }
             event::CLOSE_REQUESTED => {
-                let _ = call(nr::WIN_CLOSE, &[id]);
-                return 0;
+                if app.close_requested(&mut env) {
+                    let _ = call(nr::WIN_CLOSE, &[id]);
+                    return 0;
+                }
+                true
             }
             _ => false,
         };

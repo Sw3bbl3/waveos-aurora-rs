@@ -4,7 +4,14 @@
 //! rectangles it affects, and `render` repaints only those, back to front:
 //! wallpaper → windows → dock → menu bar → launcher → menus → cursor.
 
+mod anim;
+mod dragdrop;
+mod notifications;
 mod shell;
+mod spotlight;
+
+#[cfg(feature = "ktest")]
+pub use spotlight::calc_for_test;
 
 use super::apps::{self, App, AppKind, ClientApp, CrashDialog, Env, Request};
 use super::canvas::Canvas;
@@ -20,6 +27,29 @@ use alloc::vec::Vec;
 
 pub use shell::{Launcher, Menu};
 
+/// Decodes a picture and scales it to cover `w`×`h` (cropping the overflow).
+fn picture_wallpaper(path: &str, w: i32, h: i32) -> Option<Vec<u32>> {
+    let data = crate::fs::read_all(path).ok()?;
+    let img = aurora_image::decode(&data).ok()?;
+    let (iw, ih) = (img.width as i64, img.height as i64);
+    // The largest centred crop with the screen's aspect ratio.
+    let (cw, ch) =
+        if iw * h as i64 > ih * w as i64 { (ih * w as i64 / h as i64, ih) } else { (iw, iw * h as i64 / w as i64) };
+    let (cx, cy) = ((iw - cw) / 2, (ih - ch) / 2);
+    let mut crop = aurora_image::Image::new(cw.max(1) as u32, ch.max(1) as u32, 0);
+    for y in 0..crop.height as i64 {
+        let src = ((cy + y) * iw + cx) as usize;
+        let dst = (y * crop.width as i64) as usize;
+        crop.pixels[dst..dst + crop.width as usize].copy_from_slice(&img.pixels[src..src + crop.width as usize]);
+    }
+    drop(img);
+    let src = if crop.width as i32 > w * 2 { crop.thumbnail(w as u32 * 2, h as u32 * 2) } else { crop };
+    let mut out = alloc::vec![0xFF00_0000u32; (w * h) as usize];
+    let mut cv = Canvas::new(&mut out, w, h);
+    cv.draw_image(&src.pixels, src.width, src.height, Rect::new(0, 0, w, h), 255);
+    Some(out)
+}
+
 const SHADOW_BLUR: i32 = 30;
 const SHADOW_OFFSET: i32 = 10;
 const RESIZE_GRIP: i32 = 14;
@@ -31,6 +61,10 @@ pub struct Window {
     pub rect: Rect,
     pub minimized: bool,
     pub saved: Option<Rect>,
+    /// Hidden while an animation stands in for it.
+    pub animating: bool,
+    /// A client window waits (up to a moment) for its first frame before it appears.
+    pub awaiting_frame: Option<u64>,
 }
 
 impl Window {
@@ -103,9 +137,24 @@ pub struct Desktop {
     clock: String,
     now_ms: u64,
     pub power: Option<PowerAction>,
+    /// Set when the user asks for a screenshot; the compositor takes it after the next frame.
+    pub screenshot: bool,
     /// Apps started but whose window hasn't appeared yet (to ignore double launches).
     launching: Vec<(AppKind, u64)>,
     last_focus: Option<u32>,
+    /// Window whose content was pressed: it receives the pointer until release.
+    grab: Option<u32>,
+    /// A drag-and-drop in progress.
+    dnd: Option<dragdrop::Session>,
+    trash_full: bool,
+    ghosts: Vec<anim::Ghost>,
+    banners: Vec<notifications::Banner>,
+    banner_hover: Option<u32>,
+    history: Vec<super::notify::Notification>,
+    center: Option<notifications::Center>,
+    spotlight: Option<spotlight::Spotlight>,
+    /// Super is held and nothing else was pressed since.
+    super_alone: bool,
 }
 
 impl Desktop {
@@ -130,8 +179,19 @@ impl Desktop {
             clock: String::new(),
             now_ms: 0,
             power: None,
+            screenshot: false,
             launching: Vec::new(),
             last_focus: None,
+            grab: None,
+            dnd: None,
+            trash_full: crate::fs::trash::count() > 0,
+            ghosts: Vec::new(),
+            banners: Vec::new(),
+            banner_hover: None,
+            history: Vec::new(),
+            center: None,
+            spotlight: None,
+            super_alone: false,
         };
         d.open(AppKind::Welcome);
         d.damage_all();
@@ -139,9 +199,17 @@ impl Desktop {
     }
 
     fn make_wallpaper(w: i32, h: i32) -> (Vec<u32>, Vec<u32>) {
-        let wp = wallpaper::generate(theme::wallpaper(), w, h);
+        let custom = (theme::wallpaper() == wallpaper::CUSTOM)
+            .then(|| super::settings::get("wallpaper_image"))
+            .flatten()
+            .and_then(|p| picture_wallpaper(&p, w, h));
+        let wp = custom.unwrap_or_else(|| wallpaper::generate(theme::wallpaper(), w, h));
         let blurred = wallpaper::blur(&wp, w, h, 18);
         (wp, blurred)
+    }
+
+    pub fn set_now(&mut self, now_ms: u64) {
+        self.now_ms = now_ms;
     }
 
     pub fn screen(&self) -> Rect {
@@ -216,9 +284,10 @@ impl Desktop {
         }
     }
 
-    /// Opens a document in Notes.
+    /// Opens a document in the app for its type (pictures in Preview, the rest in Notes).
     pub fn open_file(&mut self, path: &str) {
-        self.spawn_program(apps::info(AppKind::Notes).path, &[path]);
+        let kind = if aurora_image::is_image_name(path) { AppKind::Preview } else { AppKind::Notes };
+        self.spawn_program(apps::info(kind).path, &[path]);
     }
 
     fn add_window(&mut self, app: Box<dyn App>) {
@@ -233,12 +302,38 @@ impl Desktop {
         let id = self.next_id;
         self.next_id += 1;
         let prev = self.focused_id();
-        self.windows.push(Window { id, app, rect, minimized: false, saved: None });
+        // Client windows appear (animated) once they have drawn their first frame.
+        let client = app.client_id().is_some();
+        let awaiting_frame = client.then_some(self.now_ms);
+        self.windows.push(Window { id, app, rect, minimized: false, saved: None, animating: client, awaiting_frame });
         if let Some(p) = prev {
             self.damage_window(p);
         }
+        if !client {
+            self.animate_open(id);
+        }
         self.damage_window(id);
         self.damage_shell();
+    }
+
+    /// Shows a client window that has drawn its first frame (or took too long).
+    fn reveal_window(&mut self, id: u32) {
+        let Some(i) = self.index_of(id) else { return };
+        if self.windows[i].awaiting_frame.take().is_some() {
+            self.windows[i].animating = false;
+            self.animate_open(id);
+        }
+    }
+
+    /// The dock icon of the app owning window `id` (for minimize/restore).
+    fn dock_icon_of(&self, id: u32) -> Rect {
+        let kind = self.index_of(id).map(|i| self.windows[i].app.kind());
+        let (dock, items) = self.dock_layout();
+        items
+            .into_iter()
+            .find(|(it, _)| matches!(it, shell::DockItem::App(k) if Some(*k) == kind))
+            .map(|(_, r)| r)
+            .unwrap_or(Rect::new(dock.x + dock.w / 2 - 24, dock.y + 8, 48, 48))
     }
 
     fn damage_window(&mut self, id: u32) {
@@ -259,8 +354,12 @@ impl Desktop {
         let Some(i) = self.index_of(id) else { return };
         let prev = self.focused_id();
         let mut w = self.windows.remove(i);
-        w.minimized = false;
+        let was_minimized = core::mem::replace(&mut w.minimized, false);
         self.windows.push(w);
+        if was_minimized {
+            let from = self.dock_icon_of(id);
+            self.animate_restore(id, from);
+        }
         if let Some(p) = prev {
             self.damage_window(p);
         }
@@ -282,6 +381,7 @@ impl Desktop {
     }
 
     pub fn close(&mut self, id: u32) {
+        self.animate_close(id);
         if let Some(i) = self.index_of(id) {
             let b = self.windows[i].bounds();
             self.windows.remove(i);
@@ -297,6 +397,8 @@ impl Desktop {
     }
 
     pub fn minimize(&mut self, id: u32) {
+        let target = self.dock_icon_of(id);
+        self.animate_minimize(id, target);
         if let Some(i) = self.index_of(id) {
             self.windows[i].minimized = true;
             let b = self.windows[i].bounds();
@@ -319,6 +421,7 @@ impl Desktop {
             }
             self.damage_window(id);
             let w = &mut self.windows[i];
+            let old = w.rect;
             match w.saved.take() {
                 Some(r) => w.rect = r,
                 None => {
@@ -326,6 +429,7 @@ impl Desktop {
                     w.rect = wa;
                 }
             }
+            self.animate_zoom(id, old);
             self.damage_window(id);
         }
     }
@@ -376,6 +480,12 @@ impl Desktop {
         self.damage_all();
     }
 
+    /// Uses a picture file as the wallpaper.
+    pub fn set_wallpaper_image(&mut self, path: &str) {
+        super::settings::set("wallpaper_image", path);
+        self.set_wallpaper(wallpaper::CUSTOM);
+    }
+
     // ------------------------------------------------------ window server
 
     /// Applies requests from client processes and shows crash reports.
@@ -399,6 +509,9 @@ impl Desktop {
                     }
                 }
                 Command::Present(id, r) => {
+                    if let Some(w) = self.window_of_client(id) {
+                        self.reveal_window(w);
+                    }
                     if let Some(i) = self.window_of_client(id).and_then(|w| self.index_of(w)) {
                         if !self.windows[i].minimized {
                             let c = self.windows[i].content();
@@ -420,8 +533,11 @@ impl Desktop {
                 Command::OpenFile(path) => self.open_file(&path),
                 Command::SetDark(d) => self.set_dark(d),
                 Command::SetWallpaper(i) => self.set_wallpaper(i),
+                Command::SetWallpaperImage(p) => self.set_wallpaper_image(&p),
                 Command::Shutdown => self.power = Some(PowerAction::Shutdown),
                 Command::Reboot => self.power = Some(PowerAction::Reboot),
+                Command::DragStart => self.begin_drag(),
+                Command::TrashChanged => self.refresh_trash(),
             }
         }
         while let Some(c) = crate::proc::take_crash() {
@@ -433,9 +549,18 @@ impl Desktop {
             let name = app.map(|a| String::from(a.name)).unwrap_or(c.name);
             self.add_window(Box::new(CrashDialog::new(name, c.reason, app.map(|a| a.kind))));
         }
+        self.take_notifications();
         if self.power.is_some() {
             self.damage_all();
         }
+    }
+
+    /// True when the compositor should draw at full frame rate.
+    pub fn wants_frames(&self) -> bool {
+        self.animating()
+            || !self.banners.is_empty()
+            || self.center.is_some()
+            || self.launching.iter().any(|&(_, t)| self.now_ms < t + 3000)
     }
 
     /// Runs `f` against window `id`'s app and applies its requests.
@@ -490,7 +615,11 @@ impl Desktop {
         if pressed & BUTTON_RIGHT != 0 {
             self.right_press(x, y);
         }
-        if released & BUTTON_LEFT != 0 {
+        if released & BUTTON_LEFT != 0 && self.dnd.is_some() {
+            self.grab = None;
+            self.drop_drag(x, y);
+        } else if released & BUTTON_LEFT != 0 {
+            self.grab = None;
             if self.drag.take().is_none() {
                 if let Some(f) = self.focused_id() {
                     self.with_app(f, |app, area, _| {
@@ -509,10 +638,14 @@ impl Desktop {
     }
 
     fn window_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.windows.iter().rposition(|w| !w.minimized && w.rect.contains(x, y))
+        self.windows.iter().rposition(|w| !w.minimized && w.awaiting_frame.is_none() && w.rect.contains(x, y))
     }
 
     fn pointer_moved(&mut self, x: i32, y: i32) {
+        if self.dnd.is_some() {
+            self.drag_moved(x, y);
+            return;
+        }
         if let Some(d) = self.drag {
             let Some(i) = self.index_of(d.window) else {
                 self.drag = None;
@@ -538,6 +671,21 @@ impl Desktop {
             return;
         }
 
+        // A pressed window content keeps the pointer (drawing, selecting, dragging).
+        if let Some(g) = self.grab {
+            if self.index_of(g).is_some() && self.buttons & BUTTON_LEFT != 0 {
+                self.with_app(g, |app, area, _| app.drag(x, y, area));
+                return;
+            }
+            self.grab = None;
+        }
+
+        self.update_banner_hover(x, y);
+        self.update_center_hover(x, y);
+        if self.spotlight_open() {
+            self.spotlight_hover(x, y);
+            return;
+        }
         self.update_shell_hover(x, y);
 
         // Traffic-light hover glyphs.
@@ -567,6 +715,18 @@ impl Desktop {
             && (y - self.last_click.2).abs() < 5;
         self.last_click = if double { (0, x, y) } else { (self.now_ms, x, y) };
 
+        if self.spotlight_press(x, y) || self.center_press(x, y) {
+            return;
+        }
+        if let Some(i) = self.banner_at(x, y) {
+            self.banner_click(i);
+            return;
+        }
+        // The clock opens the Notification Center.
+        if y < MENUBAR_H && x > self.w - 250 && self.menu.is_none() && self.launcher.is_none() {
+            self.toggle_center();
+            return;
+        }
         if self.shell_press(x, y) {
             return;
         }
@@ -592,8 +752,10 @@ impl Desktop {
         } else if w.app.resizable() && w.grip().contains(x, y) {
             self.drag = Some(Drag { window: id, kind: DragKind::Resize, start_x: x, start_y: y, start_rect: w.rect });
         } else if double {
+            self.grab = Some(id);
             self.with_app(id, |app, area, env| app.double_click(x, y, area, env));
         } else {
+            self.grab = Some(id);
             self.with_app(id, |app, area, env| app.click(x, y, area, env));
         }
     }
@@ -615,10 +777,49 @@ impl Desktop {
     }
 
     fn key(&mut self, k: KeyEvent) {
+        if self.dnd.is_some() {
+            if k.pressed && k.code == KeyCode::Escape {
+                self.cancel_drag();
+            }
+            return;
+        }
+        // The Super key alone (pressed and released) opens the launcher; with
+        // another key it is a modifier (Super+Space, Super+Shift+3, …).
+        if k.code == KeyCode::Super {
+            if k.pressed {
+                self.super_alone = true;
+            } else if core::mem::take(&mut self.super_alone) {
+                if self.spotlight_open() {
+                    self.toggle_spotlight();
+                }
+                self.toggle_launcher();
+            }
+            return;
+        }
+        if k.pressed {
+            self.super_alone = false;
+        }
+        if k.pressed && (k.mods.super_key || k.mods.ctrl) && k.ch == Some(' ') {
+            self.toggle_spotlight();
+            return;
+        }
+        if self.spotlight_open() {
+            self.spotlight_key(&k);
+            return;
+        }
+        if k.pressed && k.code == KeyCode::Escape && self.center_open() {
+            self.toggle_center();
+            return;
+        }
         if k.pressed {
             // Global shortcuts.
-            if k.code == KeyCode::Super || (k.mods.ctrl && k.code == KeyCode::Escape) {
+            if k.mods.ctrl && k.code == KeyCode::Escape {
                 self.toggle_launcher();
+                return;
+            }
+            let shot_combo = k.mods.super_key && k.mods.shift && matches!(k.ch, Some('3') | Some('#'));
+            if k.code == KeyCode::PrintScreen || shot_combo {
+                self.screenshot = true;
                 return;
             }
             if k.mods.alt && k.code == KeyCode::Tab {
@@ -680,7 +881,25 @@ impl Desktop {
             self.last_focus = focus;
         }
         self.launching.retain(|&(_, t)| now_ms < t + 5000);
-        100
+        // Client windows that never drew still appear after a moment.
+        let late: Vec<u32> =
+            self.windows.iter().filter(|w| w.awaiting_frame.is_some_and(|t| now_ms > t + 600)).map(|w| w.id).collect();
+        for id in late {
+            self.reveal_window(id);
+        }
+        let mut busy = self.step_animations();
+        busy |= self.step_notifications();
+        // Dock icons bounce while their app starts.
+        if self.launching.iter().any(|&(_, t)| now_ms < t + 3000) {
+            let d = self.dock_rect();
+            self.damage(d.inset(-44));
+            busy = true;
+        }
+        if busy {
+            16
+        } else {
+            100
+        }
     }
 
     // ------------------------------------------------------------- painting
@@ -718,15 +937,21 @@ impl Desktop {
         let focused = self.focused_id();
         let clip = cv.clip;
         for i in 0..self.windows.len() {
-            if self.windows[i].minimized || !self.windows[i].bounds().intersects(&clip) {
+            let w = &self.windows[i];
+            if w.minimized || w.animating || !w.bounds().intersects(&clip) {
                 continue;
             }
             let is_focused = Some(self.windows[i].id) == focused;
             let env = self.env(is_focused);
             let hover = self.traffic_hover == Some(self.windows[i].id);
-            paint_window(cv, &mut self.windows[i], is_focused, hover, &env);
+            paint_window(cv, &mut self.windows[i], is_focused, hover, &env, true);
         }
+        self.paint_ghosts(cv);
         self.paint_shell(cv);
+        self.paint_banners(cv);
+        self.paint_center(cv);
+        self.paint_spotlight(cv);
+        self.paint_drag(cv);
         if let Some(p) = self.power {
             self.paint_power_overlay(cv, p);
         }
@@ -743,11 +968,13 @@ impl Desktop {
     }
 }
 
-fn paint_window(cv: &mut Canvas, w: &mut Window, focused: bool, hover: bool, env: &Env) {
+fn paint_window(cv: &mut Canvas, w: &mut Window, focused: bool, hover: bool, env: &Env, shadow: bool) {
     let t = theme::current();
     let r = w.rect;
-    let strength = if focused { t.shadow } else { t.shadow * 6 / 10 };
-    cv.shadow(r, WINDOW_RADIUS, SHADOW_BLUR, if focused { SHADOW_OFFSET } else { 6 }, strength);
+    if shadow {
+        let strength = if focused { t.shadow } else { t.shadow * 6 / 10 };
+        cv.shadow(r, WINDOW_RADIUS, SHADOW_BLUR, if focused { SHADOW_OFFSET } else { 6 }, strength);
+    }
     cv.fill_round_rect(r, WINDOW_RADIUS, t.window_bg);
 
     // Title bar.

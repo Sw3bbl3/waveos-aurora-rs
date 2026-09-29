@@ -52,8 +52,26 @@ pub enum Command {
     OpenFile(String),
     SetDark(bool),
     SetWallpaper(u8),
+    SetWallpaperImage(String),
     Shutdown,
     Reboot,
+    /// An app called `drag_start` (the payload waits in `dnd`).
+    DragStart,
+    /// Items went into or out of the Trash (the dock icon may change).
+    TrashChanged,
+}
+
+/// Starts a drag from one of `pid`'s windows (see [`super::dnd`]).
+pub fn drag_start(pid: u32, kind: usize, data: &[u8], count: u32, icon: usize) -> Result<(), isize> {
+    let window = CLIENTS.lock().iter().find(|(_, c)| c.pid == pid).map(|(&id, _)| id).ok_or(EBADF)?;
+    super::dnd::start(pid, window, kind, data, count, icon)?;
+    send(Command::DragStart);
+    Ok(())
+}
+
+/// The process owning client window `id`.
+pub fn pid_of(id: u32) -> Option<u32> {
+    CLIENTS.lock().get(&id).map(|c| c.pid)
 }
 
 static CLIENTS: IrqMutex<BTreeMap<u32, Client>> = IrqMutex::new(BTreeMap::new());
@@ -69,6 +87,14 @@ pub fn set_compositor(task: u64) {
 
 fn send(cmd: Command) {
     COMMANDS.lock().push_back(cmd);
+    let t = COMPOSITOR.load(Ordering::Relaxed);
+    if t != u64::MAX {
+        sched::wake(t);
+    }
+}
+
+/// Wakes the compositor (e.g. a notification arrived).
+pub fn poke() {
     let t = COMPOSITOR.load(Ordering::Relaxed);
     if t != u64::MAX {
         sched::wake(t);
@@ -367,6 +393,32 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
         }
         SET_WALLPAPER => {
             send(Command::SetWallpaper(len as u8));
+            Ok(0)
+        }
+        TRASH => {
+            let raw = user_str(ptr, len)?;
+            let cwd = proc::current().map(|p| p.cwd.lock().clone()).unwrap_or_else(|| String::from("/"));
+            crate::fs::trash::move_to_trash(&crate::fs::resolve(&cwd, &raw))?;
+            send(Command::TrashChanged);
+            Ok(0)
+        }
+        PUT_BACK => {
+            let name = user_str(ptr, len)?;
+            crate::fs::trash::put_back(&name)?;
+            send(Command::TrashChanged);
+            Ok(0)
+        }
+        EMPTY_TRASH => {
+            crate::fs::trash::empty()?;
+            send(Command::TrashChanged);
+            Ok(0)
+        }
+        SET_WALLPAPER_IMAGE => {
+            let raw = user_str(ptr, len)?;
+            let cwd = proc::current().map(|p| p.cwd.lock().clone()).unwrap_or_else(|| String::from("/"));
+            let path = crate::fs::resolve(&cwd, &raw);
+            crate::fs::stat(&path)?;
+            send(Command::SetWallpaperImage(path));
             Ok(0)
         }
         SHUTDOWN => {

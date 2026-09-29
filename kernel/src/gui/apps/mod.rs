@@ -29,6 +29,7 @@ pub enum AppKind {
     Notes,
     Calculator,
     Settings,
+    Preview,
     Power,
     Crash,
     /// A program not in the catalog.
@@ -94,6 +95,15 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Settings.elf",
         single: true,
+    },
+    AppInfo {
+        kind: AppKind::Preview,
+        name: "Preview",
+        icon: Icon::Preview,
+        pinned: false,
+        listed: true,
+        path: "/System/Apps/Preview.elf",
+        single: false,
     },
     AppInfo {
         kind: AppKind::Welcome,
@@ -196,6 +206,10 @@ pub trait App {
     fn release(&mut self, _x: i32, _y: i32, _area: Rect) {}
     fn hover(&mut self, _x: i32, _y: i32, _area: Rect) -> bool {
         false
+    }
+    /// Pointer moved with the button held after a press in this window (may be outside it).
+    fn drag(&mut self, x: i32, y: i32, area: Rect) -> bool {
+        self.hover(x, y, area)
     }
     fn scroll(&mut self, _delta: i32, _area: Rect) -> bool {
         false

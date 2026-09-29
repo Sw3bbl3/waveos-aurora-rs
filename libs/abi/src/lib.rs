@@ -82,7 +82,19 @@ pub mod nr {
     pub const FUTEX_WAIT: usize = 39;
     /// `futex_wake(addr, count) -> woken`
     pub const FUTEX_WAKE: usize = 40;
-    pub const COUNT: usize = 41;
+    /// `clipboard_set(kind, ptr, len)` — replaces the clipboard (see [`super::clip`])
+    pub const CLIPBOARD_SET: usize = 41;
+    /// `clipboard_get(kind, buf, len) -> full length` (`-ENOENT` if nothing of that kind)
+    pub const CLIPBOARD_GET: usize = 42;
+    /// `drag_start(kind, ptr, len, count, icon)` — begins dragging `count` items (payload as for
+    /// the clipboard, see [`super::clip`]) while the left button is held in one of the caller's
+    /// windows; `icon` is one of [`super::drag`]
+    pub const DRAG_START: usize = 43;
+    /// `drag_data(buf, len) -> full length` — the payload of the last drop delivered to the caller
+    pub const DRAG_DATA: usize = 44;
+    /// `notify(title, title_len, body, body_len)` — shows a notification from the calling app
+    pub const NOTIFY: usize = 45;
+    pub const COUNT: usize = 46;
 }
 
 /// Error numbers (returned negated).
@@ -265,6 +277,24 @@ pub struct SurfaceInfo {
     pub _pad: u32,
 }
 
+/// Clipboard content kinds.
+pub mod clip {
+    /// UTF-8 text.
+    pub const TEXT: usize = 1;
+    /// Absolute paths, one per line (copied files).
+    pub const FILES: usize = 2;
+    /// Largest clipboard content accepted.
+    pub const MAX_LEN: usize = 4 << 20;
+}
+
+/// Drag images for `drag_start`.
+pub mod drag {
+    pub const DOCUMENT: usize = 0;
+    pub const FOLDER: usize = 1;
+    pub const PICTURE: usize = 2;
+    pub const TEXT: usize = 3;
+}
+
 /// Window creation flags.
 pub mod win {
     pub const RESIZABLE: usize = 1;
@@ -284,10 +314,19 @@ pub mod event {
     pub const FOCUS: u32 = 8;
     /// `a` = 1 for dark mode, `b` = wallpaper index.
     pub const THEME: u32 = 9;
+    /// Something is being dragged over the window: `x`, `y`, `a` = kind, `b` = item count, `d` = modifiers.
+    pub const DRAG_OVER: u32 = 10;
+    /// The drag left the window (or was cancelled).
+    pub const DRAG_LEAVE: u32 = 11;
+    /// Dropped on the window at `x`, `y` (`a`, `b`, `d` as for `DRAG_OVER`); fetch it with `drag_data`.
+    pub const DROP: u32 = 12;
+    /// Sent to the window a drag started from: `a` = 1 if it was dropped somewhere.
+    pub const DRAG_END: u32 = 13;
 }
 
 /// A single input/window event. Field meaning depends on `kind`:
-/// - pointer events: `x`, `y` (window-local), `a` = button (1 left, 2 right), `b` = click count
+/// - pointer events: `x`, `y` (window-local), `a` = button (1 left, 2 right), `b` = click count;
+///   for `POINTER_MOVE`, `a` = 1 while the left button is held (a drag, delivered even outside the window)
 /// - `SCROLL`: `a` = wheel delta (positive = down)
 /// - `KEY`: `a` = [`input::KeyCode`] as u32, `b` = char (0 = none), `c` = pressed, `d` = modifier bits
 /// - `RESIZE`: `x` = width, `y` = height
@@ -318,6 +357,14 @@ pub mod desktop {
     pub const REBOOT: usize = 6;
     /// Returns `(dark << 8) | wallpaper`.
     pub const GET_THEME: usize = 7;
+    /// Use a picture as the wallpaper (arg = path of a PNG or BMP).
+    pub const SET_WALLPAPER_IMAGE: usize = 8;
+    /// Move a file or folder to the Trash (arg = path).
+    pub const TRASH: usize = 9;
+    /// Return an item from the Trash to where it came from (arg = its name in /Trash).
+    pub const PUT_BACK: usize = 10;
+    /// Permanently delete everything in the Trash.
+    pub const EMPTY_TRASH: usize = 11;
 }
 
 /// Where user programs are linked and where the kernel places things.

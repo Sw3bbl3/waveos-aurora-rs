@@ -104,6 +104,24 @@ pub mod desktop {
         let _ = call(nr::DESKTOP, &[abi::desktop::SET_WALLPAPER as u64, 0, i as u64]);
     }
 
+    pub fn set_wallpaper_image(path: &str) -> Result<()> {
+        req(abi::desktop::SET_WALLPAPER_IMAGE, path).map(|_| ())
+    }
+
+    /// Moves a file or folder to the Trash.
+    pub fn trash(path: &str) -> Result<()> {
+        req(abi::desktop::TRASH, path).map(|_| ())
+    }
+
+    /// Returns an item (by its name in /Trash) to where it came from.
+    pub fn put_back(name: &str) -> Result<()> {
+        req(abi::desktop::PUT_BACK, name).map(|_| ())
+    }
+
+    pub fn empty_trash() -> Result<()> {
+        req(abi::desktop::EMPTY_TRASH, "").map(|_| ())
+    }
+
     /// (dark, wallpaper index)
     pub fn theme() -> (bool, u8) {
         let v = call(nr::DESKTOP, &[abi::desktop::GET_THEME as u64, 0, 0]).unwrap_or(0);

@@ -21,10 +21,11 @@ const TILE: i32 = 92;
 const MENU_ITEM_H: i32 = 26;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DockItem {
+pub(super) enum DockItem {
     Launcher,
     App(AppKind),
     Separator,
+    Trash,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -140,10 +141,12 @@ impl Desktop {
             v.push(DockItem::Separator);
             v.extend(extra.into_iter().map(DockItem::App));
         }
+        v.push(DockItem::Separator);
+        v.push(DockItem::Trash);
         v
     }
 
-    fn dock_layout(&self) -> (Rect, Vec<(DockItem, Rect)>) {
+    pub(super) fn dock_layout(&self) -> (Rect, Vec<(DockItem, Rect)>) {
         let items = self.dock_items();
         let width: i32 =
             items.iter().map(|i| if *i == DockItem::Separator { SEPARATOR_W } else { DOCK_ICON }).sum::<i32>()
@@ -184,6 +187,10 @@ impl Desktop {
                     Some((id, _)) => self.raise(id),
                     None => self.open(kind),
                 }
+            }
+            DockItem::Trash => {
+                let files = apps::info(AppKind::Files).path;
+                self.spawn_program(files, &["/Trash"]);
             }
             DockItem::Separator => {}
         }
@@ -467,6 +474,7 @@ impl Desktop {
                             cv.fill_circle(r.x + r.w / 2, dock.bottom() - 5, 2, t.text_on_glass);
                         }
                     }
+                    DockItem::Trash => icons::draw(cv, if self.trash_full { Icon::TrashFull } else { Icon::Trash }, r),
                 }
             }
             // Tooltip.
@@ -474,6 +482,7 @@ impl Desktop {
                 let label = match item {
                     DockItem::Launcher => "Launcher",
                     DockItem::App(k) => apps::info(*k).name,
+                    DockItem::Trash => "Trash",
                     DockItem::Separator => "",
                 };
                 let f = theme::ui(12);
