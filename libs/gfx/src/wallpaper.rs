@@ -2,8 +2,8 @@
 //! Pure integer math, resolution independent (the same code renders the
 //! full-screen wallpaper and the thumbnails in Settings).
 
-use super::canvas::{blend, mix, rgb};
-use super::math::{sin, Rng};
+use crate::canvas::{blend, mix, rgb};
+use crate::math::{sin, Rng};
 use alloc::vec;
 use alloc::vec::Vec;
 

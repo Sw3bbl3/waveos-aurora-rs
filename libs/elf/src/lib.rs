@@ -1,11 +1,24 @@
-//! A tiny ELF64 reader: just enough to find PT_LOAD segments and the entry point.
+//! A tiny ELF64 reader: just enough to find PT_LOAD segments and the entry
+//! point. Shared by the bootloader (loading the kernel) and the kernel
+//! (loading user programs).
+
+#![no_std]
+
+extern crate alloc;
 
 use alloc::vec::Vec;
+
+pub const PF_X: u32 = 1;
+pub const PF_W: u32 = 2;
+pub const PF_R: u32 = 4;
 
 pub struct Segment {
     pub offset: u64,
     pub vaddr: u64,
     pub filesz: u64,
+    pub memsz: u64,
+    /// `PF_R | PF_W | PF_X` bits.
+    pub flags: u32,
 }
 
 pub struct Image {
@@ -41,14 +54,18 @@ pub fn parse(file: &[u8]) -> Option<Image> {
     let phoff = u64_at(file, 32) as usize;
     let phentsize = u16_at(file, 54) as usize;
     let phnum = u16_at(file, 56) as usize;
+    if phentsize < 56 {
+        return None;
+    }
 
     let mut segments = Vec::new();
     let (mut lo, mut hi) = (u64::MAX, 0u64);
     for i in 0..phnum {
-        let ph = phoff + i * phentsize;
-        if ph + 56 > file.len() || u32_at(file, ph) != PT_LOAD {
+        let ph = phoff.checked_add(i.checked_mul(phentsize)?)?;
+        if ph.checked_add(56)? > file.len() || u32_at(file, ph) != PT_LOAD {
             continue;
         }
+        let flags = u32_at(file, ph + 4);
         let offset = u64_at(file, ph + 8);
         let vaddr = u64_at(file, ph + 16);
         let filesz = u64_at(file, ph + 32);
@@ -56,12 +73,15 @@ pub fn parse(file: &[u8]) -> Option<Image> {
         if memsz == 0 {
             continue;
         }
-        if (offset + filesz) as usize > file.len() {
+        // Untrusted input (user programs): reject anything that overflows.
+        let file_end = offset.checked_add(filesz)?;
+        let mem_end = vaddr.checked_add(memsz)?.checked_add(0xFFF)?;
+        if filesz > memsz || file_end > file.len() as u64 {
             return None;
         }
         lo = lo.min(vaddr & !0xFFF);
-        hi = hi.max((vaddr + memsz + 0xFFF) & !0xFFF);
-        segments.push(Segment { offset, vaddr, filesz });
+        hi = hi.max(mem_end & !0xFFF);
+        segments.push(Segment { offset, vaddr, filesz, memsz, flags });
     }
     if segments.is_empty() {
         return None;

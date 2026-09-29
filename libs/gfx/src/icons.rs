@@ -1,9 +1,9 @@
 //! Vector app icons drawn from canvas primitives (no image assets).
 
-use super::canvas::{rgb, Canvas};
-use super::geom::Rect;
-use super::math::sin;
-use super::theme;
+use crate::canvas::{rgb, Canvas};
+use crate::geom::Rect;
+use crate::math::sin;
+use crate::theme;
 use alloc::vec::Vec;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

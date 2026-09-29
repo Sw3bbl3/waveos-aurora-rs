@@ -5,16 +5,10 @@
 //! copies those regions to the GOP framebuffer.
 
 pub mod apps;
-pub mod canvas;
 pub mod cursor;
 pub mod desktop;
-pub mod font;
-pub mod geom;
-pub mod icons;
-pub mod math;
-pub mod theme;
-pub mod wallpaper;
-pub mod widgets;
+
+pub use aurora_gfx::{canvas, font, geom, icons, theme, wallpaper, widgets};
 
 use crate::drivers::input;
 use crate::mm::phys_to_virt;

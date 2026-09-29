@@ -1,7 +1,7 @@
 //! Aurora design tokens: colors, radii and fonts, in light and dark variants.
 
-use super::canvas::rgb;
-use super::font::{self, Face, Font};
+use crate::canvas::rgb;
+use crate::font::{self, Face, Font};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 pub const MENUBAR_H: i32 = 30;

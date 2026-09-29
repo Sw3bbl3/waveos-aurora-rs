@@ -21,9 +21,21 @@ dependencies = [
 name = "aurora-boot"
 version = "0.1.0"
 dependencies = [
+ "aurora-elf",
  "bootinfo",
  "log",
  "uefi",
+]
+
+[[package]]
+name = "aurora-elf"
+version = "0.1.0"
+
+[[package]]
+name = "aurora-gfx"
+version = "0.1.0"
+dependencies = [
+ "fontdue",
 ]
 
 [[package]]
@@ -389,8 +401,8 @@ dependencies = [
 name = "tide"
 version = "0.1.0"
 dependencies = [
+ "aurora-gfx",
  "bootinfo",
- "fontdue",
  "linked_list_allocator",
  "spin",
  "x86_64",

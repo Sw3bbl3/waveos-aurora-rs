@@ -4,9 +4,9 @@
 //! compositor sets to the damaged region being repainted. Anti-aliasing uses
 //! 8-bit coverage computed from integer distance fields.
 
-use super::font::Font;
-use super::geom::Rect;
-use super::math::isqrt;
+use crate::font::Font;
+use crate::geom::Rect;
+use crate::math::isqrt;
 
 pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
     0xFF00_0000 | (r as u32) << 16 | (g as u32) << 8 | b as u32

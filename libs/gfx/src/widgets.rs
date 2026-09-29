@@ -1,9 +1,9 @@
 //! Reusable controls drawn in the Aurora style.
 
-use super::canvas::{with_alpha, Canvas};
-use super::font::Font;
-use super::geom::Rect;
-use super::theme::{self, ACCENT};
+use crate::canvas::{with_alpha, Canvas};
+use crate::font::Font;
+use crate::geom::Rect;
+use crate::theme::{self, ACCENT};
 use alloc::vec::Vec;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -20,9 +20,9 @@ pub fn button(cv: &mut Canvas, r: Rect, label: &str, style: ButtonStyle, hovered
         ButtonStyle::Primary | ButtonStyle::Danger => {
             let base = if style == ButtonStyle::Primary { ACCENT } else { theme::CLOSE };
             let top = if hovered {
-                super::canvas::mix(base, 0xFFFF_FFFF, 40)
+                crate::canvas::mix(base, 0xFFFF_FFFF, 40)
             } else {
-                super::canvas::mix(base, 0xFFFF_FFFF, 20)
+                crate::canvas::mix(base, 0xFFFF_FFFF, 20)
             };
             cv.fill_round_rect_vgradient(r, 8, top, base);
             cv.text_centered(r, label, font, 0xFFFF_FFFF);

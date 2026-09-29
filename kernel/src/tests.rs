@@ -5,10 +5,10 @@
 use crate::drivers::input::KeyCode;
 use crate::drivers::keyboard::Decoder;
 use crate::gui::geom::Rect;
-use crate::gui::math::isqrt;
 use crate::{fs, mm, power, sched, time};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use aurora_gfx::math::isqrt;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 type Test = (&'static str, fn());

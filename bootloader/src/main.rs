@@ -15,7 +15,6 @@
 
 extern crate alloc;
 
-mod elf;
 mod paging;
 
 use alloc::vec::Vec;
@@ -52,7 +51,7 @@ fn main() -> Status {
 
     // --- Load the kernel image -------------------------------------------------
     let kernel_file = read_kernel();
-    let image = elf::parse(&kernel_file).expect("kernel.elf is not a valid x86_64 ELF");
+    let image = aurora_elf::parse(&kernel_file).expect("kernel.elf is not a valid x86_64 ELF");
     let span = image.virt_end - image.virt_start;
     let kernel_pages = (span.div_ceil(PAGE)) as usize;
     let kernel_phys = alloc_pages(kernel_pages);

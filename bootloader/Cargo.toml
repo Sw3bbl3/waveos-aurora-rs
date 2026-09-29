@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 bootinfo = { path = "../libs/bootinfo" }
+aurora-elf = { path = "../libs/elf" }
 uefi = { version = "0.36", features = ["alloc", "panic_handler", "logger", "global_allocator"] }
 log = "0.4"
