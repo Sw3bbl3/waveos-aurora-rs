@@ -201,7 +201,21 @@ The same crate formats volumes on the host (`xtask/src/image.rs`). Its tests (`c
 
 The driver reads and writes FAT32 with VFAT long file names, generating `NAME~N.EXT` aliases. Since FAT has no inodes, the driver assigns stable inode numbers from each entry's location. Its tests cross-check against the independent `fatfs` crate in both directions.
 
-## 6. Testing
+## 6. Telemetry and the System Explorer (`telemetry.rs`, `xtask/src/monitor.rs`)
+
+When QEMU attaches a second UART (COM2), `telemetry::init` detects it with a scratch-register test and the kernel starts streaming newline-delimited JSON:
+
+- **Events:** `stage` (boot progress), `proc` (start, exit, crash), `win` (open, close), `mount`, `dev`.
+- **Snapshots:** a `telemetry` task writes one every 250 ms. It carries every task with its CPU ticks, the scheduler's switch log since the last snapshot, processes, memory, per-syscall and per-IRQ counters, per-device I/O counters, mounted filesystems, and the window list.
+
+Lines are written while holding the port lock and without allocating, so events are safe before the heap exists. Without COM2 the hooks cost one relaxed atomic increment.
+
+`cargo xtask run --monitor` works like this:
+- QEMU connects COM2 to a Unix socket owned by xtask, and xtask turns the COM1 console into `console` events.
+- xtask serves `docs/explorer/index.html` plus a Server-Sent Events stream at `/events`. The stream replays history, so a page opened late still sees the boot.
+- The page is a single self-contained file with no dependencies. With no server it plays `docs/explorer/demo.js`, a recorded session.
+
+## 7. Testing
 
 - **`cargo xtask test`.** It builds the kernel with `--features ktest`. The tests in `kernel/src/tests.rs` cover:
   - the frame allocator and the heap

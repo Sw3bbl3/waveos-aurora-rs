@@ -20,6 +20,7 @@ mod proc;
 mod sched;
 mod sync;
 mod syscall;
+mod telemetry;
 #[cfg(feature = "ktest")]
 mod tests;
 mod time;
@@ -34,22 +35,28 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[link_section = ".text._start"]
 pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::serial::init();
+    telemetry::init();
+    telemetry::stage("kernel", "Tide kernel entry");
     kprintln!("\nWaveOS Aurora — Tide kernel {}", VERSION);
     assert_eq!(boot_info.magic, BOOTINFO_MAGIC, "bad BootInfo magic");
     assert_eq!(boot_info.version, bootinfo::BOOTINFO_VERSION, "bootloader/kernel version mismatch");
 
+    telemetry::stage("cpu", "CPU tables: GDT, TSS, IDT, syscall");
     arch::gdt::init();
     arch::idt::init();
     arch::syscall::init();
     log!("boot", "GDT, TSS and IDT loaded");
 
+    telemetry::stage("memory", "Memory: frames, heap, page tables");
     mm::init(boot_info);
 
+    telemetry::stage("interrupts", "ACPI, APIC timer and interrupt routing");
     let acpi = acpi::parse(boot_info.rsdp_phys);
     arch::apic::init(&acpi);
 
     let fb = boot_info.framebuffer;
     input::set_screen_size(fb.width as i32, fb.height as i32);
+    telemetry::stage("input", "Keyboard and mouse");
     drivers::ps2::init();
     arch::apic::route_isa_irq(&acpi, 1, arch::idt::KEYBOARD_VECTOR);
     arch::apic::route_isa_irq(&acpi, 12, arch::idt::MOUSE_VECTOR);
@@ -57,18 +64,22 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     power::init(acpi);
 
     time::init_wall_clock();
+    telemetry::stage("vfs", "Virtual filesystem and system image");
     fs::init(initrd(boot_info));
     gui::init(fb);
 
+    telemetry::stage("scheduler", "Scheduler and process manager");
     sched::init();
     proc::init();
     x86_64::instructions::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
 
     // Storage needs a running clock (timeouts) and scheduler (drivers yield while polling).
+    telemetry::stage("storage", "PCI, disk drivers and filesystems");
     drivers::pci::init(ecam);
     drivers::block::init();
     fs::mount_disks();
+    telemetry::start();
 
     #[cfg(feature = "ktest")]
     sched::spawn("ktest", tests::run);

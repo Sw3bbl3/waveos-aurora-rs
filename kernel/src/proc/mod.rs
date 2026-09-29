@@ -222,6 +222,7 @@ pub fn spawn(path: &str, argv: &[&str], stdio: [Option<Arc<Handle>>; 3], parent:
     let task = sched::spawn_task(&name, user_main, pid as u64, pid, process.cr3);
     process.main_task.store(task, Ordering::Relaxed);
     log!("proc", "started pid {} '{}' ({} KiB)", pid, path, process.resident_kib.load(Ordering::Relaxed));
+    crate::telemetry::process("start", pid, &name, path);
     Ok(pid)
 }
 
@@ -335,6 +336,9 @@ fn reaper() {
             p.aspace.lock().take();
             let code = p.exit_code().unwrap_or(0);
             log!("proc", "pid {} '{}' exited with code {}", pid, p.name, code);
+            let mut detail = String::new();
+            let _ = core::fmt::Write::write_fmt(&mut detail, format_args!("{code}"));
+            crate::telemetry::process(if code == CRASH_CODE { "crash" } else { "exit" }, pid, &p.name, &detail);
             // Nobody will wait for children of the kernel or of dead parents.
             let orphan = p.parent == 0 || get(p.parent).is_none_or(|pp| pp.exit_code().is_some());
             if orphan {

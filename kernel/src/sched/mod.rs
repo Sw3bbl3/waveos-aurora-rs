@@ -182,6 +182,7 @@ fn schedule() {
             return;
         }
         s.current = next;
+        crate::telemetry::switched(s.tasks[next].id);
         let save = &mut s.tasks[cur].rsp as *mut u64;
         let load = s.tasks[next].rsp;
         let (next_cr3, kstack) = (s.tasks[next].cr3, s.tasks[next].kstack_top);

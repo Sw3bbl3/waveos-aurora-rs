@@ -9,11 +9,22 @@ pub struct Serial {
 }
 
 impl Serial {
-    const fn new(base: u16) -> Self {
+    pub const fn new(base: u16) -> Self {
         Self { base }
     }
 
-    fn init(&mut self) {
+    /// True if a UART answers at this address (scratch-register test).
+    pub fn present(&self) -> bool {
+        unsafe {
+            let mut scratch = Port::<u8>::new(self.base + 7);
+            scratch.write(0xA5);
+            let a = scratch.read();
+            scratch.write(0x5A);
+            a == 0xA5 && scratch.read() == 0x5A
+        }
+    }
+
+    pub fn init(&mut self) {
         unsafe {
             Port::<u8>::new(self.base + 1).write(0x00); // disable UART interrupts
             Port::<u8>::new(self.base + 3).write(0x80); // DLAB on
@@ -25,7 +36,7 @@ impl Serial {
         }
     }
 
-    fn write_byte(&mut self, b: u8) {
+    pub fn write_byte(&mut self, b: u8) {
         unsafe {
             let mut lsr = Port::<u8>::new(self.base + 5);
             let mut spins = 0;

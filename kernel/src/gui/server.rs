@@ -145,6 +145,11 @@ pub fn info(id: u32) -> Option<(u32, String, bool, (i32, i32))> {
     CLIENTS.lock().get(&id).map(|c| (c.pid, c.title.clone(), c.resizable, c.initial))
 }
 
+/// (window id, owning pid, title) of every client window.
+pub fn windows() -> Vec<(u32, u32, String)> {
+    CLIENTS.lock().iter().map(|(&id, c)| (id, c.pid, c.title.clone())).collect()
+}
+
 pub fn title(id: u32) -> String {
     CLIENTS.lock().get(&id).map(|c| c.title.clone()).unwrap_or_default()
 }
@@ -197,11 +202,16 @@ pub fn process_exited(pid: u32) {
     for (id, c) in gone {
         free_surface(c.surface, pid, false);
         send(Command::Closed(id));
+        crate::telemetry::window("close", id, pid, &c.title);
     }
     WAITERS.lock().remove(&pid);
 }
 
 // ------------------------------------------------------------- syscalls
+
+fn title_of(id: u32) -> String {
+    CLIENTS.lock().get(&id).map(|c| c.title.clone()).unwrap_or_default()
+}
 
 fn owned(id: u32, pid: u32) -> Result<(), isize> {
     match CLIENTS.lock().get(&id) {
@@ -265,6 +275,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
                 },
             );
             send(Command::Created(id));
+            crate::telemetry::window("open", id, pid, &title_of(id));
             Ok(id as u64)
         }
         nr::WIN_SURFACE => {
@@ -315,6 +326,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
                 free_surface(c.surface, pid, true);
             }
             send(Command::Closed(id));
+            crate::telemetry::window("close", id, pid, "");
             Ok(0)
         }
         nr::NEXT_EVENT => {

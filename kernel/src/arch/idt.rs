@@ -121,6 +121,7 @@ extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, code: PageFault
 
 extern "x86-interrupt" fn timer(frame: InterruptStackFrame) {
     crate::time::tick();
+    crate::telemetry::irq(crate::telemetry::Irq::Timer);
     apic::eoi();
     crate::sched::on_timer_tick();
     if from_user(&frame) {
@@ -133,11 +134,13 @@ fn from_user(frame: &InterruptStackFrame) -> bool {
 }
 
 extern "x86-interrupt" fn keyboard(_frame: InterruptStackFrame) {
+    crate::telemetry::irq(crate::telemetry::Irq::Keyboard);
     crate::drivers::ps2::keyboard_irq();
     apic::eoi();
 }
 
 extern "x86-interrupt" fn mouse(_frame: InterruptStackFrame) {
+    crate::telemetry::irq(crate::telemetry::Irq::Mouse);
     crate::drivers::ps2::mouse_irq();
     apic::eoi();
 }

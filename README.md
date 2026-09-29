@@ -10,6 +10,23 @@ Every layer is original: the UEFI bootloader, the **Tide** kernel, the storage d
 |---|---|
 | ![Files with a context menu](docs/screenshots/files.png) | ![Dark mode with Files and Terminal](docs/screenshots/dark-mode.png) |
 
+## System Explorer
+
+A live, interactive map of the whole OS: [`docs/explorer/`](docs/explorer/index.html).
+
+![Aurora System Explorer](docs/screenshots/explorer.png)
+
+```sh
+cargo xtask run --monitor     # boots WaveOS and opens http://127.0.0.1:7777
+```
+
+While WaveOS runs, the explorer streams what the kernel is doing:
+- **Boot progress**, stage by stage
+- **The scheduler's decisions** as a CPU timeline, one lane per task
+- **Per-task and per-process CPU time**, memory, system calls, interrupts, disk I/O and open windows
+
+Every part of the architecture map glows with its real activity. Click a part to see what it does, its live numbers and the source files behind it. Opened on its own, the page replays a recorded session instead.
+
 ## What works today (Milestones 1–3)
 
 - **Boots on UEFI x86_64** with its own bootloader (`aurora-boot`). It loads the kernel and a read-only system image.
@@ -62,6 +79,7 @@ The first build takes a minute or two. After that you boot straight to the deskt
 | Command | What it does |
 |---|---|
 | `cargo xtask build` | Builds the bootloader, kernel and user space into `target/esp/` |
+| `cargo xtask run --monitor` | Same as `run`, plus the live System Explorer in your browser |
 | `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU. Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
 | `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller |
 | `cargo xtask image` | Creates `target/waveos-aurora-usb.img` (ESP plus WaveFS), ready to `dd` onto a USB stick |

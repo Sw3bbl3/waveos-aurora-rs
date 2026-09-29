@@ -64,6 +64,7 @@ fn run() {
     input::set_consumer(sched::current_id());
     server::set_compositor(sched::current_id());
 
+    crate::telemetry::stage("gui", "Crest window server");
     load_settings();
     let t0 = time::uptime_ms();
     let mut desktop = Desktop::new(w, h);
@@ -82,7 +83,12 @@ fn run() {
         if now >= next_tick {
             next_tick = now + desktop.tick(now);
         }
-        for r in desktop.take_damage() {
+        let damage = desktop.take_damage();
+        if !damage.is_empty() {
+            crate::telemetry::FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        for r in damage {
+            crate::telemetry::PIXELS.fetch_add(r.area() as u64, core::sync::atomic::Ordering::Relaxed);
             let mut cv = Canvas::new(&mut back, w, h);
             cv.clip = r;
             desktop.paint(&mut cv);
@@ -91,6 +97,7 @@ fn run() {
         if !ready {
             ready = true;
             log!("boot", "Aurora desktop ready");
+            crate::telemetry::stage("desktop", "Desktop ready");
         }
         if let Some(action) = desktop.power {
             crate::fs::sync_all();

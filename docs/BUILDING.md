@@ -13,6 +13,7 @@
 
 ```sh
 cargo xtask run                     # release build + boot in a QEMU window
+cargo xtask run --monitor           # same, plus the live System Explorer at http://127.0.0.1:7777
 cargo xtask run --disk nvme         # same, with the disk on NVMe (or: ahci, virtio)
 cargo xtask run --fresh-disk        # start over with a new disk (erases files saved in WaveOS)
 cargo xtask run --debug             # unoptimised kernel (slower, better backtraces)
@@ -48,6 +49,7 @@ Current hardware limits:
 
 ## Debugging
 
+- **System Explorer.** `cargo xtask run --monitor` streams kernel telemetry to `docs/explorer/index.html`: boot stages, the CPU timeline, processes, memory, disk I/O and syscalls. The session is also recorded to `target/telemetry.jsonl`. To refresh the demo that plays when the page is opened on its own, regenerate `docs/explorer/demo.js` from that file.
 - **Serial log.** Every subsystem logs to COM1, which `xtask` wires to your terminal.
 - **Crash screen.** On a kernel panic or CPU exception, the kernel shows a crash screen with the details and also prints them to serial. Crashes in apps are contained: `crashtest` in Terminal, or `open /System/Bin/crashtest`, shows how.
 - **Interrupt trace.** `cargo xtask run --int` writes QEMU's interrupt and CPU-reset trace to `target/qemu-int.log`. It's useful for triple faults.

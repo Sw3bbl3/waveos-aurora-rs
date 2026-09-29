@@ -84,9 +84,17 @@ static MOUNTS: IrqMutex<Vec<Mount>> = IrqMutex::new(Vec::new());
 
 pub fn mount(path: &str, fs: Arc<dyn Filesystem>) {
     log!("vfs", "mounted {} at {}", fs.describe(), path);
+    crate::telemetry::mount(path, &fs.describe());
     let mut m = MOUNTS.lock();
     m.retain(|x| x.path != path);
     m.push(Mount { path: String::from(path), fs });
+}
+
+/// (mount point, description, (total, free) bytes) for every mounted filesystem.
+pub fn mounts() -> Vec<(String, String, Option<(u64, u64)>)> {
+    let list: Vec<(String, Arc<dyn Filesystem>)> =
+        MOUNTS.lock().iter().map(|m| (m.path.clone(), m.fs.clone())).collect();
+    list.into_iter().map(|(p, fs)| (p, fs.describe(), fs.space())).collect()
 }
 
 /// Normalises `path` relative to `cwd` (handles `.`, `..`, repeated slashes).

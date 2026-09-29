@@ -17,6 +17,7 @@ type SysResult = Result<u64, isize>;
 /// Entry from the assembly stub (`arch::syscall`), with interrupts enabled.
 pub extern "sysv64" fn dispatch(f: &mut SyscallFrame) {
     let a = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
+    crate::telemetry::syscall(f.rax as usize);
     let result = handle(f.rax as usize, a);
     f.rax = match result {
         Ok(v) => v,

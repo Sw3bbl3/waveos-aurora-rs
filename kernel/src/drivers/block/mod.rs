@@ -37,7 +37,93 @@ pub trait BlockDevice: Send + Sync {
 
 static DEVICES: IrqMutex<Vec<Arc<dyn BlockDevice>>> = IrqMutex::new(Vec::new());
 
+/// I/O counters kept for every registered device (shown by the System Explorer).
+pub struct DeviceStats {
+    pub name: String,
+    pub desc: String,
+    pub bytes: u64,
+    pub reads: u64,
+    pub writes: u64,
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub flushes: u64,
+}
+
+/// Wraps a device and counts its I/O.
+struct Counted {
+    inner: Arc<dyn BlockDevice>,
+    reads: core::sync::atomic::AtomicU64,
+    writes: core::sync::atomic::AtomicU64,
+    read_bytes: core::sync::atomic::AtomicU64,
+    write_bytes: core::sync::atomic::AtomicU64,
+    flushes: core::sync::atomic::AtomicU64,
+}
+
+impl BlockDevice for Counted {
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn sector_size(&self) -> u32 {
+        self.inner.sector_size()
+    }
+    fn sectors(&self) -> u64 {
+        self.inner.sectors()
+    }
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn read(&self, lba: u64, buf: &mut [u8]) -> BlockResult<()> {
+        use core::sync::atomic::Ordering::Relaxed;
+        self.reads.fetch_add(1, Relaxed);
+        self.read_bytes.fetch_add(buf.len() as u64, Relaxed);
+        self.inner.read(lba, buf)
+    }
+    fn write(&self, lba: u64, buf: &[u8]) -> BlockResult<()> {
+        use core::sync::atomic::Ordering::Relaxed;
+        self.writes.fetch_add(1, Relaxed);
+        self.write_bytes.fetch_add(buf.len() as u64, Relaxed);
+        self.inner.write(lba, buf)
+    }
+    fn flush(&self) -> BlockResult<()> {
+        self.flushes.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        self.inner.flush()
+    }
+}
+
+static COUNTED: IrqMutex<Vec<Arc<Counted>>> = IrqMutex::new(Vec::new());
+
+pub fn stats() -> Vec<DeviceStats> {
+    use core::sync::atomic::Ordering::Relaxed;
+    COUNTED
+        .lock()
+        .clone()
+        .iter()
+        .map(|c| DeviceStats {
+            name: c.name(),
+            desc: c.describe(),
+            bytes: c.sectors() * c.sector_size() as u64,
+            reads: c.reads.load(Relaxed),
+            writes: c.writes.load(Relaxed),
+            read_bytes: c.read_bytes.load(Relaxed),
+            write_bytes: c.write_bytes.load(Relaxed),
+            flushes: c.flushes.load(Relaxed),
+        })
+        .collect()
+}
+
 pub fn register(dev: Arc<dyn BlockDevice>) {
+    use core::sync::atomic::AtomicU64;
+    let counted = Arc::new(Counted {
+        inner: dev,
+        reads: AtomicU64::new(0),
+        writes: AtomicU64::new(0),
+        read_bytes: AtomicU64::new(0),
+        write_bytes: AtomicU64::new(0),
+        flushes: AtomicU64::new(0),
+    });
+    COUNTED.lock().push(counted.clone());
+    let dev: Arc<dyn BlockDevice> = counted;
+    crate::telemetry::device(&dev.name(), &dev.describe(), dev.sectors() * dev.sector_size() as u64);
     log!(
         "block",
         "{}: {} MiB ({} × {} B) — {}",

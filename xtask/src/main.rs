@@ -4,11 +4,13 @@
 //!   cargo xtask run [options]           boot the persistent disk target/waveos-aurora.img in QEMU
 //!       --disk ahci|virtio|nvme           storage controller for the disk (default: ahci)
 //!       --fresh-disk                      recreate the disk (erases files saved inside WaveOS)
+//!       --monitor                         open the live System Explorer (http://127.0.0.1:7777)
 //!       --headless --no-build --debug --gdb --int
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 
 mod image;
+mod monitor;
 mod tar;
 
 use std::env;
@@ -39,14 +41,29 @@ fn main() {
             let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let img = root().join("target/waveos-aurora.img");
             prepare_disk(&esp, &img, flag("--fresh-disk"));
+            let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
             let opts = RunOpts {
                 headless: flag("--headless"),
                 gdb: flag("--gdb"),
                 log_int: flag("--int"),
                 disk,
                 allow_reboot: true,
+                telemetry: mon.as_ref().map(|m| m.socket.clone()),
             };
-            let status = qemu(&img, &opts).status().expect("failed to launch qemu");
+            let mut cmd = qemu(&img, &opts);
+            let Some(mon) = mon else {
+                let status = cmd.status().expect("failed to launch qemu");
+                exit(status.code().unwrap_or(1));
+            };
+            cmd.stdout(Stdio::piped());
+            let mut child = cmd.spawn().expect("failed to launch qemu");
+            mon.pump_console(&mut child);
+            eprintln!("\n  System Explorer: {}\n", mon.url);
+            if !flag("--no-open") {
+                monitor::open_browser(&mon.url);
+            }
+            let status = child.wait().expect("qemu failed");
+            mon.finish();
             exit(status.code().unwrap_or(1));
         }
         Some("image") => {
@@ -258,6 +275,8 @@ struct RunOpts<'a> {
     /// Storage controller: ahci, virtio or nvme.
     disk: &'a str,
     allow_reboot: bool,
+    /// Unix socket for the kernel's COM2 telemetry stream (System Explorer).
+    telemetry: Option<PathBuf>,
 }
 
 fn qemu(img: &Path, opts: &RunOpts) -> Command {
@@ -284,6 +303,10 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     cmd.args(["-rtc", "base=localtime"]);
     cmd.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     cmd.args(["-serial", "stdio"]);
+    if let Some(sock) = &opts.telemetry {
+        cmd.arg("-chardev").arg(format!("socket,id=telemetry,path={}", sock.display()));
+        cmd.args(["-serial", "chardev:telemetry"]);
+    }
     cmd.arg("-monitor").arg(format!("unix:{},server,nowait", monitor.display()));
     cmd.arg("-qmp").arg(format!("unix:{},server,nowait", qmp.display()));
     cmd.args(["-name", "WaveOS Aurora"]);
@@ -322,7 +345,7 @@ fn test(profile: Profile, disk: &str) {
 /// Boots the test kernel once, echoing its serial output; exits on failure.
 fn run_tests_once(img: &Path, disk: &str) -> String {
     use std::io::{BufRead, BufReader};
-    let opts = RunOpts { headless: true, gdb: false, log_int: false, disk, allow_reboot: false };
+    let opts = RunOpts { headless: true, gdb: false, log_int: false, disk, allow_reboot: false, telemetry: None };
     let mut cmd = qemu(img, &opts);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped());
     let mut child = cmd.spawn().expect("failed to launch qemu");
