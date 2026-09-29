@@ -120,7 +120,10 @@ impl Desktop {
     /// Takes new notifications from apps and the system.
     pub(super) fn take_notifications(&mut self) {
         let dnd = settings::get_bool("dnd", false);
+        let mut chime = false;
         while let Some(n) = notify::take() {
+            // Apps' notifications chime; the system's own (screenshots, …) have their own sounds.
+            chime |= !dnd && n.pid != 0;
             if !dnd && self.center.is_none() {
                 // At most three at once: the oldest leaves.
                 if self.banners.iter().filter(|b| b.leaving_at.is_none()).count() >= 3 {
@@ -138,6 +141,9 @@ impl Desktop {
                 let r = self.center_rect();
                 self.damage(r);
             }
+        }
+        if chime {
+            crate::drivers::audio::play_sound("notify");
         }
     }
 

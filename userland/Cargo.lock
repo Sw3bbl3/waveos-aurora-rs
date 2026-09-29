@@ -112,6 +112,7 @@ name = "aurora"
 version = "0.4.0"
 dependencies = [
  "aurora-abi",
+ "aurora-wav",
  "linked_list_allocator",
 ]
 
@@ -135,6 +136,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-wav"
+version = "0.4.0"
+
+[[package]]
 name = "core_maths"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -148,6 +153,7 @@ name = "coreutils"
 version = "0.4.0"
 dependencies = [
  "aurora",
+ "libm",
 ]
 
 [[package]]

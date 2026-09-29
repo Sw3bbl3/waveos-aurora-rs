@@ -398,6 +398,7 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
             let raw = user_str(ptr, len)?;
             let cwd = proc::current().map(|p| p.cwd.lock().clone()).unwrap_or_else(|| String::from("/"));
             crate::fs::trash::move_to_trash(&crate::fs::resolve(&cwd, &raw))?;
+            crate::drivers::audio::play_sound("trash");
             send(Command::TrashChanged);
             Ok(0)
         }
@@ -407,8 +408,17 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
             send(Command::TrashChanged);
             Ok(0)
         }
+        PLAY_SOUND => {
+            let name = user_str(ptr, len)?;
+            if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+                return Err(EINVAL);
+            }
+            crate::drivers::audio::play_sound(&name);
+            Ok(0)
+        }
         EMPTY_TRASH => {
             crate::fs::trash::empty()?;
+            crate::drivers::audio::play_sound("trash");
             send(Command::TrashChanged);
             Ok(0)
         }

@@ -20,6 +20,7 @@ aurora-elf = { path = "../libs/elf" }
 wavefs = { path = "../libs/wavefs" }
 fat32 = { path = "../libs/fat32" }
 aurora-image = { path = "../libs/image" }
+aurora-wav = { path = "../libs/wav" }
 x86_64 = "0.15"
 spin = "0.9"
 linked_list_allocator = "0.10"

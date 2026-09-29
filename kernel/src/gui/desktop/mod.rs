@@ -9,6 +9,7 @@ mod dragdrop;
 mod notifications;
 mod shell;
 mod spotlight;
+mod volume;
 
 #[cfg(feature = "ktest")]
 pub use spotlight::calc_for_test;
@@ -161,6 +162,7 @@ pub struct Desktop {
     previous_resolution: Option<(u32, u32)>,
     /// Ask "Keep this resolution?" after the next resize.
     confirm_resolution: bool,
+    volume: volume::VolumeUi,
 }
 
 impl Desktop {
@@ -201,6 +203,7 @@ impl Desktop {
             resolution_request: None,
             previous_resolution: None,
             confirm_resolution: false,
+            volume: volume::VolumeUi::default(),
         };
         d.open(AppKind::Welcome);
         d.damage_all();
@@ -696,7 +699,9 @@ impl Desktop {
         if pressed & BUTTON_RIGHT != 0 {
             self.right_press(x, y);
         }
-        if released & BUTTON_LEFT != 0 && self.dnd.is_some() {
+        if released & BUTTON_LEFT != 0 && self.volume_release() {
+            // The volume slider had the pointer.
+        } else if released & BUTTON_LEFT != 0 && self.dnd.is_some() {
             self.grab = None;
             self.drop_drag(x, y);
         } else if released & BUTTON_LEFT != 0 {
@@ -723,6 +728,9 @@ impl Desktop {
     }
 
     fn pointer_moved(&mut self, x: i32, y: i32) {
+        if self.buttons & BUTTON_LEFT != 0 && self.volume_drag(x) {
+            return;
+        }
         if self.dnd.is_some() {
             self.drag_moved(x, y);
             return;
@@ -796,7 +804,7 @@ impl Desktop {
             && (y - self.last_click.2).abs() < 5;
         self.last_click = if double { (0, x, y) } else { (self.now_ms, x, y) };
 
-        if self.spotlight_press(x, y) || self.center_press(x, y) {
+        if self.volume_press(x, y) || self.spotlight_press(x, y) || self.center_press(x, y) {
             return;
         }
         if let Some(i) = self.banner_at(x, y) {
@@ -862,6 +870,14 @@ impl Desktop {
             if k.pressed && k.code == KeyCode::Escape {
                 self.cancel_drag();
             }
+            return;
+        }
+        // Volume keys work everywhere.
+        if k.pressed && self.volume_key(k.code) {
+            return;
+        }
+        if k.pressed && k.code == KeyCode::Escape && self.volume_popover_open() {
+            self.close_volume_popover();
             return;
         }
         // The Super key alone (pressed and released) opens the launcher; with
@@ -970,6 +986,7 @@ impl Desktop {
         }
         let mut busy = self.step_animations();
         busy |= self.step_notifications();
+        self.step_volume();
         // Dock icons bounce while their app starts.
         if self.launching.iter().any(|&(_, t)| now_ms < t + 3000) {
             let d = self.dock_rect();
@@ -1031,6 +1048,7 @@ impl Desktop {
         self.paint_shell(cv);
         self.paint_banners(cv);
         self.paint_center(cv);
+        self.paint_volume(cv);
         self.paint_spotlight(cv);
         self.paint_drag(cv);
         if let Some(p) = self.power {

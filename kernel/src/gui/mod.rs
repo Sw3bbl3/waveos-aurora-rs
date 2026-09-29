@@ -149,6 +149,7 @@ fn run() {
         if !ready {
             ready = true;
             log!("boot", "Aurora desktop ready");
+            crate::drivers::audio::play_sound("startup");
             crate::telemetry::stage("desktop", "Desktop ready");
         }
         if let Some(action) = desktop.power {
@@ -174,6 +175,7 @@ fn take_screenshot(back: &[u32], w: u32, h: u32) {
     }
     *slot = Some((back.to_vec(), w, h));
     drop(slot);
+    crate::drivers::audio::play_sound("screenshot");
     sched::spawn("screenshot", || {
         let Some((pixels, w, h)) = SCREENSHOT.lock().take() else { return };
         let t0 = time::uptime_ms();

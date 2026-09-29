@@ -89,6 +89,8 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::display::init(boot_info);
     drivers::block::init();
     fs::mount_disks();
+    telemetry::stage("sound", "Sound output");
+    drivers::audio::init();
     telemetry::start();
 
     #[cfg(feature = "ktest")]

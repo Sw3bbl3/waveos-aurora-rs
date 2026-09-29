@@ -14,6 +14,7 @@
 
 extern crate alloc;
 
+pub mod audio;
 pub mod clipboard;
 pub mod dnd;
 pub mod fs;

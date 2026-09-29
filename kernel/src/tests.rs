@@ -31,6 +31,7 @@ const TESTS: &[Test] = &[
     ("SMP: TLB shootdown", smp_shootdown),
     ("clock: TSC/HPET monotonic", clock),
     ("user copies recover from faults", user_copy_fault),
+    ("sound: HDA playback", sound),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
     ("storage: disk + GPT", storage_devices),
@@ -585,4 +586,35 @@ fn user_copy_fault() {
     }
     // Addresses outside the user half are refused before copying.
     assert_eq!(user::read_u32(0xffff_8000_0000_0000), Err(aurora_abi::err::EFAULT));
+}
+
+fn sound() {
+    use crate::drivers::audio;
+    if !audio::present() {
+        crate::kprint!("[no sound device] ");
+        return;
+    }
+    crate::kprint!("[{}] ", audio::describe().unwrap_or_default());
+    // A 440 Hz triangle wave (integer maths: the kernel has no floats), 0.4 s.
+    let period = audio::RATE / 440;
+    let mut tone = Vec::with_capacity(audio::RATE * 2 * 2 / 5);
+    for i in 0..audio::RATE * 2 / 5 {
+        let phase = (i % period) as i32 * 4 * 12_000 / period as i32;
+        let v = if phase < 2 * 12_000 { phase - 12_000 } else { 3 * 12_000 - phase };
+        tone.push(v as i16);
+        tone.push(v as i16);
+    }
+    let (played0, _, _) = audio::counters();
+    audio::play(&tone);
+    let mut loudest = 0;
+    let start = time::uptime_ms();
+    while time::uptime_ms() - start < 600 {
+        loudest = loudest.max(audio::counters().2);
+        crate::sched::sleep_ms(10);
+    }
+    let (played1, underruns, _) = audio::counters();
+    let frames = played1 - played0;
+    assert!(frames > audio::RATE as u64 / 4, "the device played only {} frames in 600 ms", frames);
+    assert!(loudest > 1000, "the mixer never produced the tone (peak {})", loudest);
+    crate::kprint!("[{} frames, {} underruns] ", frames, underruns);
 }

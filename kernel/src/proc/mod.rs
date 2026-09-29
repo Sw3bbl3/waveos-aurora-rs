@@ -43,6 +43,8 @@ pub enum Handle {
     PipeWrite(Arc<Pipe>),
     /// Writes go to the kernel serial log, prefixed with the process name.
     Log,
+    /// A sound playback stream.
+    Audio(Arc<crate::drivers::audio::Stream>),
 }
 
 impl Drop for Handle {
@@ -50,6 +52,7 @@ impl Drop for Handle {
         match self {
             Handle::PipeRead { pipe, .. } => pipe.close_reader(),
             Handle::PipeWrite(pipe) => pipe.close_writer(),
+            Handle::Audio(stream) => stream.close(),
             _ => {}
         }
     }

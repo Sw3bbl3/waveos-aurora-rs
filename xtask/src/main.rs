@@ -12,6 +12,7 @@
 
 mod image;
 mod monitor;
+mod sounds;
 mod tar;
 
 use std::env;
@@ -54,6 +55,7 @@ fn main() {
                 allow_reboot: true,
                 telemetry: mon.as_ref().map(|m| m.socket.clone()),
                 smp,
+                audio: if flag("--no-sound") || flag("--headless") { String::from("none") } else { host_audio() },
             };
             let mut cmd = qemu(&img, &opts);
             let Some(mon) = mon else {
@@ -234,6 +236,10 @@ fn system_image(programs: &[Program], out: &Path) {
         let name = f.file_name().unwrap().to_string_lossy().into_owned();
         t.file(&format!("Fonts/{name}"), &fs::read(&f).unwrap());
     }
+    t.dir("Sounds");
+    for (name, wav) in sounds::all() {
+        t.file(&format!("Sounds/{name}"), &wav);
+    }
     for (dest, src) in programs {
         t.file(dest, &fs::read(src).unwrap());
     }
@@ -295,6 +301,14 @@ struct RunOpts<'a> {
     /// Unix socket for the kernel's COM2 telemetry stream (System Explorer).
     telemetry: Option<PathBuf>,
     smp: u32,
+    /// Where the guest's sound goes: a QEMU audio backend ("coreaudio", "none"),
+    /// or "wav:PATH" to record it.
+    audio: String,
+}
+
+/// The host's own sound output, for interactive runs.
+fn host_audio() -> String {
+    String::from(if cfg!(target_os = "macos") { "coreaudio" } else { "none" })
 }
 
 fn qemu(img: &Path, opts: &RunOpts) -> Command {
@@ -319,6 +333,13 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         "nvme" => "nvme,drive=disk,serial=aurora0,bootindex=0",
         _ => "ide-hd,drive=disk,bus=ide.0,bootindex=0",
     });
+    // Intel HD Audio with a line-out codec.
+    let backend = match opts.audio.strip_prefix("wav:") {
+        Some(path) => format!("wav,id=snd,path={path}"),
+        None => format!("{},id=snd", opts.audio),
+    };
+    cmd.arg("-audiodev").arg(backend);
+    cmd.args(["-device", "ich9-intel-hda", "-device", "hda-output,audiodev=snd"]);
     cmd.args(["-rtc", "base=localtime"]);
     cmd.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     cmd.args(["-serial", "stdio"]);
@@ -357,15 +378,46 @@ fn test(profile: Profile, disk: &str, smp: u32) {
             eprintln!("\npersistence check FAILED: the second boot did not find the first boot's file");
             exit(1);
         }
+        if output.contains("audio: output:") {
+            // The guest played a test tone; QEMU recorded everything it output.
+            let peak = recorded_peak(&root().join("target/test-audio.wav"));
+            if peak < 1000 {
+                eprintln!("\nsound check FAILED: the recording is silent (peak {peak})");
+                exit(1);
+            }
+            println!("sound check: recorded audio peaks at {peak}");
+        }
     }
     println!("\nall kernel tests passed (both boots)");
+}
+
+/// The loudest sample in a 16-bit PCM WAV recording (0 if unreadable). The
+/// header is skipped by size, since QEMU may not have finalized it.
+fn recorded_peak(path: &Path) -> i32 {
+    let data = fs::read(path).unwrap_or_default();
+    data.get(44..)
+        .unwrap_or_default()
+        .chunks_exact(2)
+        .map(|s| (i16::from_le_bytes([s[0], s[1]]) as i32).abs())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Boots the test kernel once, echoing its serial output; exits on failure.
 fn run_tests_once(img: &Path, disk: &str, smp: u32) -> String {
     use std::io::{BufRead, BufReader};
-    let opts =
-        RunOpts { headless: true, gdb: false, log_int: false, disk, allow_reboot: false, telemetry: None, smp };
+    let audio = root().join("target/test-audio.wav");
+    let _ = fs::remove_file(&audio);
+    let opts = RunOpts {
+        headless: true,
+        gdb: false,
+        log_int: false,
+        disk,
+        allow_reboot: false,
+        telemetry: None,
+        smp,
+        audio: format!("wav:{}", audio.display()),
+    };
     let mut cmd = qemu(img, &opts);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped());
     let mut child = cmd.spawn().expect("failed to launch qemu");

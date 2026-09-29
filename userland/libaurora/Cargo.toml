@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 aurora-abi.workspace = true
+aurora-wav.workspace = true
 linked_list_allocator = "0.10"

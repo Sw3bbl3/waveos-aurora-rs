@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/wavefs", "libs/fat32", "libs/image"]
+members = ["xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/wavefs", "libs/fat32", "libs/image", "libs/wav"]
 default-members = ["xtask"]
 
 [workspace.package]

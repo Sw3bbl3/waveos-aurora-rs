@@ -1,5 +1,6 @@
 #[macro_use]
 pub mod serial;
+pub mod audio;
 pub mod block;
 pub mod display;
 pub mod hpet;

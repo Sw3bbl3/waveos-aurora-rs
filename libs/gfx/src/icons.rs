@@ -254,3 +254,47 @@ pub fn power(cv: &mut Canvas, cx: i32, cy: i32, size: i32, c: u32, bg: u32) {
     cv.fill_rect(Rect::new(cx - t * 2, cy - r - 1, t * 4, r), bg);
     cv.line(cx, cy - r + 1, cx, cy - 1, t, c);
 }
+
+/// Speaker glyph fitted to `r`: 0–3 sound waves for `level` (0–100), or a
+/// cross when `level` is `None` (muted).
+pub fn speaker(cv: &mut Canvas, r: Rect, level: Option<u32>, c: u32) {
+    let h = r.h;
+    let cy = r.y + h / 2;
+    // Body, then a cone widening to the right.
+    let body_w = (h * 2 / 9).max(2);
+    let body_h = (h * 2 / 5).max(3);
+    let x0 = r.x + h / 12;
+    cv.fill_rect(Rect::new(x0, cy - body_h / 2, body_w, body_h), c);
+    let cone_w = (h * 3 / 10).max(3);
+    for i in 0..cone_w {
+        let half = body_h / 2 + (h * 2 / 5 - body_h / 2) * (i + 1) / cone_w;
+        cv.fill_rect(Rect::new(x0 + body_w + i, cy - half, 1, half * 2), c);
+    }
+    let cx = x0 + body_w + cone_w;
+    let stroke = (h / 11).max(1);
+    match level {
+        None => {
+            let s = h / 5;
+            let mx = cx + h / 4 + s;
+            cv.line(mx - s, cy - s, mx + s, cy + s, stroke, c);
+            cv.line(mx - s, cy + s, mx + s, cy - s, stroke, c);
+        }
+        Some(level) => {
+            let waves = match level {
+                0 => 0,
+                1..=33 => 1,
+                34..=66 => 2,
+                _ => 3,
+            };
+            for k in 1..=waves {
+                let radius = h * (1 + 2 * k) / 10;
+                // An arc from −50° to +50° (1024 phase units per turn).
+                let pts: Vec<(i32, i32)> = (-142..=142)
+                    .step_by(20)
+                    .map(|p| (cx + radius * sin(p + 256) / 16384, cy + radius * sin(p) / 16384))
+                    .collect();
+                cv.polyline(&pts, stroke, c);
+            }
+        }
+    }
+}

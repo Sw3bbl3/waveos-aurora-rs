@@ -3,7 +3,7 @@
 
 use super::server::{self, Command};
 use super::settings;
-use crate::drivers::{display, keymap, ps2};
+use crate::drivers::{audio, display, keymap, ps2};
 use alloc::string::String;
 use aurora_abi::{err::*, pref};
 
@@ -26,6 +26,10 @@ fn default(key: &str) -> Option<&'static str> {
 }
 
 pub fn get(key: &str) -> Option<String> {
+    // Read-only facts about the system, answered live.
+    if key == "audio_device" {
+        return audio::describe();
+    }
     settings::get(key).or_else(|| default(key).map(String::from))
 }
 
@@ -60,12 +64,24 @@ pub fn apply_system(key: &str) {
             let rate = get(pref::REPEAT_RATE).and_then(|v| v.parse().ok()).unwrap_or(8u8);
             ps2::set_typematic(delay.min(3), rate.min(31));
         }
+        pref::VOLUME | pref::MUTED => {
+            let volume = get(pref::VOLUME).and_then(|v| v.parse().ok()).unwrap_or(70u32);
+            audio::set_volume(volume.min(100), get_bool(pref::MUTED));
+        }
         _ => {}
     }
 }
 
+/// `audio_volume(SET, …)`: the menu-bar slider and volume keys.
+pub fn set_volume(volume: u32, muted: bool) {
+    let _ = set(pref::VOLUME, &alloc::format!("{}", volume.min(100)));
+    let _ = set(pref::MUTED, if muted { "1" } else { "0" });
+    // Apply now as well, so the next `audio_volume(GET)` already reflects it.
+    apply_system(pref::VOLUME);
+}
+
 pub fn apply_all_system() {
-    for k in [pref::KEYBOARD, pref::REPEAT_DELAY] {
+    for k in [pref::KEYBOARD, pref::REPEAT_DELAY, pref::VOLUME] {
         apply_system(k);
     }
 }

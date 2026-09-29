@@ -596,6 +596,7 @@ impl Clock {
                     tm.left_ms = 0;
                     tm.running_since = None;
                     aurora::notify::post("Timer done", &format!("Your {} timer has ended.", tm.label));
+                    aurora::audio::play_system("timer");
                     changed = true;
                 }
             }
@@ -608,6 +609,7 @@ impl Clock {
                 a.rang = Some((d.hour, d.minute, day));
                 let label = if a.label.is_empty() { String::from("Alarm") } else { a.label.clone() };
                 aurora::notify::post(&label, &format!("It's {:02}:{:02}.", d.hour, d.minute));
+                aurora::audio::play_system("timer");
                 fired = true;
             }
         }

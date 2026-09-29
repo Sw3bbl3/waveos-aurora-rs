@@ -106,7 +106,29 @@ pub mod nr {
     pub const SET_DISPLAY: usize = 50;
     /// `sys_stats(*mut SysStats)` — counters for Activity Monitor
     pub const SYS_STATS: usize = 51;
-    pub const COUNT: usize = 52;
+    /// `audio_open() -> fd` — a playback stream: write interleaved stereo `i16` samples at
+    /// [`super::audio::RATE`]; writes block while the stream's buffer is full (`-ENODEV` without
+    /// an output device)
+    pub const AUDIO_OPEN: usize = 52;
+    /// `audio_volume(op, volume, muted) -> state` — see [`super::audio`]
+    pub const AUDIO_VOLUME: usize = 53;
+    pub const COUNT: usize = 54;
+}
+
+/// Sound output.
+pub mod audio {
+    /// Sample rate of every playback stream (frames per second).
+    pub const RATE: u32 = 48_000;
+    pub const CHANNELS: u32 = 2;
+    /// `audio_volume` operations.
+    pub const GET: u64 = 0;
+    pub const SET: u64 = 1;
+    /// `audio_volume` result: the volume (0–100) in the low byte, plus these flags.
+    pub const MUTED: u64 = 1 << 8;
+    /// An output device exists.
+    pub const PRESENT: u64 = 1 << 9;
+    /// Headphones are plugged in (speakers muted).
+    pub const HEADPHONES: u64 = 1 << 10;
 }
 
 /// Error numbers (returned negated).
@@ -114,6 +136,7 @@ pub mod err {
     pub const EPERM: isize = 1;
     pub const ENOENT: isize = 2;
     pub const ESRCH: isize = 3;
+    pub const EINTR: isize = 4;
     pub const EIO: isize = 5;
     pub const EBADF: isize = 9;
     pub const ECHILD: isize = 10;
@@ -121,6 +144,7 @@ pub mod err {
     pub const ENOMEM: isize = 12;
     pub const EFAULT: isize = 14;
     pub const EEXIST: isize = 17;
+    pub const ENODEV: isize = 19;
     pub const ENOTDIR: isize = 20;
     pub const EISDIR: isize = 21;
     pub const EINVAL: isize = 22;
@@ -139,6 +163,7 @@ pub mod err {
             EPERM => "operation not permitted",
             ENOENT => "no such file or directory",
             ESRCH => "no such process",
+            EINTR => "interrupted",
             EIO => "input/output error",
             EBADF => "bad file descriptor",
             ECHILD => "no child process",
@@ -146,6 +171,7 @@ pub mod err {
             ENOMEM => "out of memory",
             EFAULT => "bad address",
             EEXIST => "already exists",
+            ENODEV => "no such device",
             ENOTDIR => "not a directory",
             EISDIR => "is a directory",
             EINVAL => "invalid argument",
@@ -451,6 +477,9 @@ pub mod desktop {
     pub const PUT_BACK: usize = 10;
     /// Permanently delete everything in the Trash.
     pub const EMPTY_TRASH: usize = 11;
+    /// Plays a system sound by name ("notify", "timer", "error", …; see
+    /// `/System/Sounds`) without blocking.
+    pub const PLAY_SOUND: usize = 12;
 }
 
 /// Where user programs are linked and where the kernel places things.

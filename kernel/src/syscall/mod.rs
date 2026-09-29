@@ -234,6 +234,17 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             out.commit(n)?;
             Ok(n as u64)
         }
+        nr::AUDIO_OPEN => {
+            let stream = crate::drivers::audio::open()?;
+            let p = proc::current().ok_or(EPERM)?;
+            p.install_fd(Arc::new(Handle::Audio(stream))).map(|fd| fd as u64)
+        }
+        nr::AUDIO_VOLUME => {
+            if a[0] == aurora_abi::audio::SET {
+                crate::gui::prefs::set_volume(a[1].min(100) as u32, a[2] != 0);
+            }
+            Ok(crate::drivers::audio::state())
+        }
         nr::DESKTOP => crate::gui::server::desktop_request(a[0] as usize, a[1], a[2]),
         nr::WIN_CREATE
         | nr::WIN_SURFACE
@@ -281,7 +292,7 @@ fn read(fd: usize, ptr: u64, len: u64) -> SysResult {
     let n = match &*h {
         Handle::File(f) => f.lock().read(&mut buf)?,
         Handle::PipeRead { pipe, nonblocking } => pipe.read(&mut buf, *nonblocking)?,
-        Handle::PipeWrite(_) | Handle::Log => return Err(EBADF),
+        Handle::PipeWrite(_) | Handle::Log | Handle::Audio(_) => return Err(EBADF),
     };
     buf.commit(n)?;
     Ok(n as u64)
@@ -297,6 +308,7 @@ fn write(fd: usize, ptr: u64, len: u64) -> SysResult {
             log_line(&buf);
             buf.len()
         }
+        Handle::Audio(stream) => stream.write(&buf)?,
         Handle::PipeRead { .. } => return Err(EBADF),
     };
     Ok(n as u64)

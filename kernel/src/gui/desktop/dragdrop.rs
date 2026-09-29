@@ -182,6 +182,9 @@ impl Desktop {
                     }
                 }
                 self.refresh_trash();
+                if moved > 0 {
+                    crate::drivers::audio::play_sound("trash");
+                }
                 moved > 0
             }
             Target::Nothing => false,

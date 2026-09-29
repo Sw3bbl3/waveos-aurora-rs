@@ -8,3 +8,4 @@ publish = false
 [dependencies]
 fatfs = "0.3"
 wavefs = { path = "../libs/wavefs" }
+aurora-wav = { path = "../libs/wav" }
