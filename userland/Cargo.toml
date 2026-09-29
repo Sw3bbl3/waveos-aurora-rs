@@ -1,0 +1,27 @@
+# WaveOS Aurora user space. Built by `cargo xtask build` (never directly):
+# xtask supplies the target, linker script and flags for ring-3 programs.
+[workspace]
+resolver = "2"
+members = ["libaurora", "bin/*"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+aurora = { path = "libaurora" }
+ripple = { path = "ripple" }
+aurora-abi = { path = "../libs/abi" }
+aurora-gfx = { path = "../libs/gfx" }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+codegen-units = 1
+lto = true
+strip = true

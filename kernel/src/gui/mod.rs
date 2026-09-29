@@ -7,6 +7,7 @@
 pub mod apps;
 pub mod cursor;
 pub mod desktop;
+pub mod server;
 
 pub use aurora_gfx::{canvas, font, geom, icons, theme, wallpaper, widgets};
 
@@ -25,6 +26,10 @@ static FB: Once<Framebuffer> = Once::new();
 
 pub fn init(fb: Framebuffer) {
     FB.call_once(|| fb);
+}
+
+pub fn screen_size() -> (i32, i32) {
+    FB.get().map(|f| (f.width as i32, f.height as i32)).unwrap_or((1024, 768))
 }
 
 pub fn start() {
@@ -57,6 +62,7 @@ fn run() {
     let fb = *FB.get().expect("gui::init not called");
     let (w, h) = (fb.width as i32, fb.height as i32);
     input::set_consumer(sched::current_id());
+    server::set_compositor(sched::current_id());
 
     let t0 = time::uptime_ms();
     let mut desktop = Desktop::new(w, h);

@@ -45,7 +45,7 @@ pub mod nr {
     pub const UNLINK: usize = 20;
     /// `rename(from, from_len, to, to_len)`
     pub const RENAME: usize = 21;
-    /// `pipe(*mut [i32; 2])` — `[read_end, write_end]`
+    /// `pipe(*mut [i32; 2], flags)` — `[read_end, write_end]`; flags bit 0 = non-blocking reads
     pub const PIPE: usize = 22;
     /// `sys_info(*mut SysInfo)`
     pub const SYS_INFO: usize = 23;
@@ -69,7 +69,11 @@ pub mod nr {
     pub const TRUNCATE: usize = 33;
     /// `win_resize(window, width, height)` — reallocates the surface
     pub const WIN_RESIZE: usize = 34;
-    pub const COUNT: usize = 35;
+    /// `chdir(path, len)`
+    pub const CHDIR: usize = 35;
+    /// `getcwd(buf, len) -> length`
+    pub const GETCWD: usize = 36;
+    pub const COUNT: usize = 37;
 }
 
 /// Error numbers (returned negated).

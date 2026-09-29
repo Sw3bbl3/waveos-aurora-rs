@@ -30,6 +30,7 @@ global_asm!(
     "aurora_task_trampoline:",
     "sti",
     "mov rdi, r12",
+    "mov rsi, r13",
     "call {entry}",
     "ud2",
     entry = sym crate::sched::task_entry,
@@ -50,14 +51,14 @@ pub unsafe fn switch(save_rsp: *mut u64, load_rsp: u64) {
 }
 
 /// Prepares a fresh stack so the first switch into it "returns" into the
-/// trampoline, which enables interrupts and calls `task_entry(arg)`.
-pub fn init_stack(stack_top: u64, arg: u64) -> u64 {
+/// trampoline, which enables interrupts and calls `task_entry(f, arg)`.
+pub fn init_stack(stack_top: u64, f: u64, arg: u64) -> u64 {
     let top = stack_top & !0xF;
     let frame: [u64; 7] = [
         0,   // r15
         0,   // r14
-        0,   // r13
-        arg, // r12 -> rdi
+        arg, // r13 -> rsi
+        f,   // r12 -> rdi
         0,   // rbx
         0,   // rbp
         aurora_task_trampoline as *const () as u64,

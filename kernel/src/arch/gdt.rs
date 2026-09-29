@@ -21,13 +21,23 @@ struct Stack([u8; IST_STACK_SIZE]);
 static mut DOUBLE_FAULT_STACK: Stack = Stack([0; IST_STACK_SIZE]);
 static mut PAGE_FAULT_STACK: Stack = Stack([0; IST_STACK_SIZE]);
 
-static TSS: Lazy<TaskStateSegment> = Lazy::new(|| {
-    let mut tss = TaskStateSegment::new();
-    let top = |s: *const Stack| VirtAddr::from_ptr(s) + IST_STACK_SIZE as u64;
-    tss.interrupt_stack_table[DOUBLE_FAULT_IST as usize] = top(&raw const DOUBLE_FAULT_STACK);
-    tss.interrupt_stack_table[PAGE_FAULT_IST as usize] = top(&raw const PAGE_FAULT_STACK);
-    tss
-});
+pub const KERNEL_CS: u16 = 0x08;
+pub const KERNEL_SS: u16 = 0x10;
+pub const USER_SS: u16 = 0x18 | 3;
+pub const USER_CS: u16 = 0x20 | 3;
+
+/// Mutable because `rsp0` (the stack used when an interrupt arrives in ring 3)
+/// changes on every switch to a user task. Single CPU: no concurrent access.
+static mut TSS: TaskStateSegment = TaskStateSegment::new();
+
+fn tss() -> &'static TaskStateSegment {
+    unsafe { &*(&raw const TSS) }
+}
+
+/// Sets the kernel stack used for interrupts and exceptions taken in ring 3.
+pub fn set_kernel_stack(top: u64) {
+    unsafe { (*(&raw mut TSS)).privilege_stack_table[0] = VirtAddr::new(top) };
+}
 
 struct Selectors {
     code: SegmentSelector,
@@ -41,11 +51,17 @@ static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
     let data = gdt.append(Descriptor::kernel_data_segment());
     gdt.append(Descriptor::user_data_segment());
     gdt.append(Descriptor::user_code_segment());
-    let tss = gdt.append(Descriptor::tss_segment(&TSS));
+    let tss = gdt.append(Descriptor::tss_segment(tss()));
     (gdt, Selectors { code, data, tss })
 });
 
 pub fn init() {
+    let top = |s: *const Stack| VirtAddr::from_ptr(s) + IST_STACK_SIZE as u64;
+    unsafe {
+        let t = &mut *(&raw mut TSS);
+        t.interrupt_stack_table[DOUBLE_FAULT_IST as usize] = top(&raw const DOUBLE_FAULT_STACK);
+        t.interrupt_stack_table[PAGE_FAULT_IST as usize] = top(&raw const PAGE_FAULT_STACK);
+    }
     GDT.0.load();
     unsafe {
         CS::set_reg(GDT.1.code);

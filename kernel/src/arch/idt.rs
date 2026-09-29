@@ -50,6 +50,15 @@ pub fn init() {
 }
 
 fn fatal(name: &str, frame: &InterruptStackFrame, detail: core::fmt::Arguments) -> ! {
+    if from_user(frame) {
+        crate::proc::crash_current(format_args!(
+            "{} at {:#x}{}{}",
+            name,
+            frame.instruction_pointer.as_u64(),
+            if detail.as_str() == Some("") { "" } else { " — " },
+            detail
+        ));
+    }
     panic!(
         "CPU exception: {}\n{}\nRIP={:#x} CS={:#x} RFLAGS={:#x} RSP={:#x}",
         name,
@@ -110,10 +119,17 @@ extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, code: PageFault
     fatal("Page Fault (#PF)", &frame, format_args!("address {:#x}, {:?}", addr, code));
 }
 
-extern "x86-interrupt" fn timer(_frame: InterruptStackFrame) {
+extern "x86-interrupt" fn timer(frame: InterruptStackFrame) {
     crate::time::tick();
     apic::eoi();
     crate::sched::on_timer_tick();
+    if from_user(&frame) {
+        crate::proc::check_killed();
+    }
+}
+
+fn from_user(frame: &InterruptStackFrame) -> bool {
+    frame.code_segment.0 & 3 == 3
 }
 
 extern "x86-interrupt" fn keyboard(_frame: InterruptStackFrame) {

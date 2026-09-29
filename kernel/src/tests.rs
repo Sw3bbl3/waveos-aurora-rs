@@ -24,6 +24,8 @@ const TESTS: &[Test] = &[
     ("timer", timer),
     ("scheduler", scheduler),
     ("wallpaper + blur", wallpaper),
+    ("address spaces", address_spaces),
+    ("user processes (usertest)", user_processes),
 ];
 
 pub fn run() {
@@ -161,4 +163,38 @@ fn wallpaper() {
     assert!(img.iter().all(|p| p >> 24 == 0xFF));
     let blurred = crate::gui::wallpaper::blur(&img, 160, 100, 4);
     assert_eq!(blurred.len(), img.len());
+}
+
+fn address_spaces() {
+    use crate::mm::vmm::{AddressSpace, Prot};
+    let (_, before) = mm::frame::counts();
+    {
+        let mut a = AddressSpace::new().unwrap();
+        a.map_anon(0x40_0000, 4, Prot::ReadWrite).unwrap();
+        assert!(a.check(0x40_0000, 4 * 4096, true));
+        assert!(!a.check(0x40_0000, 5 * 4096, false));
+        assert!(!a.check(0xffff_8000_0000_0000, 8, false), "kernel memory must not be user-accessible");
+        a.write_bytes(0x40_0ffe, b"span").unwrap();
+        a.unmap(0x40_1000, 1);
+        assert!(!a.check(0x40_1000, 1, false));
+        a.map_anon(0x40_0000, 1, Prot::ReadExec).unwrap(); // widening an existing page
+    }
+    let (_, after) = mm::frame::counts();
+    assert_eq!(before, after, "address space teardown leaked frames");
+}
+
+fn user_processes() {
+    let (_, before) = mm::frame::counts();
+    let pid = crate::proc::spawn("/System/Bin/usertest", &["usertest"], [None, None, None], 0).expect("spawn usertest");
+    let p = crate::proc::get(pid).unwrap();
+    let deadline = time::ticks() + 60_000;
+    while p.exit_code().is_none() && time::ticks() < deadline {
+        sched::sleep_ms(10);
+    }
+    assert_eq!(p.exit_code(), Some(0), "usertest reported failures (see log above)");
+    drop(p);
+    // Give the reaper a moment, then make sure the processes' memory came back.
+    sched::sleep_ms(100);
+    let (_, after) = mm::frame::counts();
+    assert!(after + 8 >= before, "user processes leaked {} frames", before - after);
 }

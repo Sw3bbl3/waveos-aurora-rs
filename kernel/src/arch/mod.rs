@@ -5,3 +5,4 @@ pub mod cpu;
 pub mod gdt;
 pub mod idt;
 pub mod switch;
+pub mod syscall;

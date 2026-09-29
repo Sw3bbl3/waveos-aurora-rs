@@ -3,6 +3,7 @@
 pub mod frame;
 pub mod heap;
 pub mod paging;
+pub mod vmm;
 
 use bootinfo::{BootInfo, PHYS_OFFSET};
 
@@ -18,6 +19,7 @@ pub fn init(boot_info: &'static BootInfo) {
     frame::init(unsafe { boot_info.memory_map() });
     heap::init();
     paging::init(boot_info);
+    vmm::init();
 }
 
 pub struct MemStats {

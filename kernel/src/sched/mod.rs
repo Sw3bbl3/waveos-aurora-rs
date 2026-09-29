@@ -1,10 +1,13 @@
-//! Preemptive round-robin scheduler for kernel threads.
+//! Preemptive round-robin scheduler.
 //!
-//! Task 0 is the boot context, which becomes the idle task. Timer ticks drive
-//! preemption every `QUANTUM_MS`; tasks can also sleep, yield, or block until
-//! woken (e.g. the compositor waiting for input).
+//! Every thread of execution is a task: kernel threads (pid 0) and the threads
+//! of user processes, which run in ring 3 and enter the kernel through
+//! interrupts and `syscall` on their own kernel stack. Task 0 is the boot
+//! context, which becomes the idle task. Timer ticks drive preemption every
+//! `QUANTUM_MS`; tasks can also sleep, yield, or block until woken.
 
-use crate::arch::switch;
+use crate::arch::{switch, syscall};
+use crate::mm::vmm;
 use crate::sync::IrqMutex;
 use crate::time;
 use alloc::boxed::Box;
@@ -34,6 +37,12 @@ struct Task {
     state: State,
     _stack: Option<Box<[u8]>>,
     cpu_ticks: u64,
+    /// Owning process (0 = kernel).
+    pid: u32,
+    /// Page table root to run with.
+    cr3: u64,
+    /// Top of this task's kernel stack (for syscalls and ring-3 interrupts).
+    kstack_top: u64,
 }
 
 struct Scheduler {
@@ -47,8 +56,17 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
-    let boot =
-        Box::new(Task { id: 0, name: String::from("idle"), rsp: 0, state: State::Running, _stack: None, cpu_ticks: 0 });
+    let boot = Box::new(Task {
+        id: 0,
+        name: String::from("idle"),
+        rsp: 0,
+        state: State::Running,
+        _stack: None,
+        cpu_ticks: 0,
+        pid: 0,
+        cr3: vmm::kernel_pml4(),
+        kstack_top: 0,
+    });
     *SCHED.lock() = Some(Scheduler { tasks: alloc::vec![boot], current: 0, slice_start: 0 });
     STARTED.store(true, Ordering::Release);
     log!("sched", "scheduler online (quantum {} ms)", QUANTUM_MS);
@@ -56,26 +74,39 @@ pub fn init() {
 
 /// Spawns a kernel thread running `f`.
 pub fn spawn(name: &str, f: fn()) -> TaskId {
-    let stack = alloc::vec![0u8; STACK_SIZE].into_boxed_slice();
-    let top = stack.as_ptr() as u64 + STACK_SIZE as u64;
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let task = Box::new(Task {
-        id,
-        name: String::from(name),
-        rsp: switch::init_stack(top, f as usize as u64),
-        state: State::Ready,
-        _stack: Some(stack),
-        cpu_ticks: 0,
-    });
-    SCHED.lock().as_mut().unwrap().tasks.push(task);
+    fn call(f: u64) {
+        let f: fn() = unsafe { core::mem::transmute(f as usize) };
+        f();
+    }
+    let id = spawn_task(name, call, f as usize as u64, 0, vmm::kernel_pml4());
     log!("sched", "spawned task {} '{}'", id, name);
     id
 }
 
+/// Spawns a task running `f(arg)` in process `pid` with page tables `cr3`.
+pub fn spawn_task(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64) -> TaskId {
+    let stack = alloc::vec![0u8; STACK_SIZE].into_boxed_slice();
+    let top = (stack.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let task = Box::new(Task {
+        id,
+        name: String::from(name),
+        rsp: switch::init_stack(top, f as usize as u64, arg),
+        state: State::Ready,
+        _stack: Some(stack),
+        cpu_ticks: 0,
+        pid,
+        cr3,
+        kstack_top: top,
+    });
+    SCHED.lock().as_mut().unwrap().tasks.push(task);
+    id
+}
+
 /// First code run by a new task (called from the asm trampoline).
-pub extern "sysv64" fn task_entry(f: u64) -> ! {
-    let f: fn() = unsafe { core::mem::transmute(f as usize) };
-    f();
+pub extern "sysv64" fn task_entry(f: u64, arg: u64) -> ! {
+    let f: fn(u64) = unsafe { core::mem::transmute(f as usize) };
+    f(arg);
     exit();
 }
 
@@ -91,6 +122,23 @@ pub fn exit() -> ! {
 
 pub fn current_id() -> TaskId {
     SCHED.lock().as_ref().map(|s| s.tasks[s.current].id).unwrap_or(0)
+}
+
+/// Process owning the running task (0 for kernel threads).
+pub fn current_pid() -> u32 {
+    SCHED.lock().as_ref().map(|s| s.tasks[s.current].pid).unwrap_or(0)
+}
+
+/// Marks every task of `pid` except the caller as dead (they never run again).
+pub fn kill_process_tasks(pid: u32) {
+    if let Some(s) = SCHED.lock().as_mut() {
+        let cur = s.current;
+        for (i, t) in s.tasks.iter_mut().enumerate() {
+            if t.pid == pid && i != cur {
+                t.state = State::Dead;
+            }
+        }
+    }
 }
 
 /// Picks the next runnable task and switches to it. Must be called with interrupts disabled.
@@ -136,6 +184,13 @@ fn schedule() {
         s.current = next;
         let save = &mut s.tasks[cur].rsp as *mut u64;
         let load = s.tasks[next].rsp;
+        let (next_cr3, kstack) = (s.tasks[next].cr3, s.tasks[next].kstack_top);
+        if next_cr3 != s.tasks[cur].cr3 {
+            unsafe { vmm::load(next_cr3) };
+        }
+        if kstack != 0 {
+            syscall::set_kernel_stack(kstack);
+        }
         (save, load)
         // The lock guard drops here; interrupts stay off because the caller disabled them.
     };
@@ -193,7 +248,7 @@ pub fn yield_now() {
 
 pub fn sleep_ms(ms: u64) {
     interrupts::without_interrupts(|| {
-        let until = time::ticks() + ms * time::HZ / 1000;
+        let until = time::ticks().saturating_add(ms.saturating_mul(time::HZ) / 1000);
         if let Some(s) = SCHED.lock().as_mut() {
             let cur = s.current;
             s.tasks[cur].state = State::Sleeping(until);
@@ -209,7 +264,7 @@ pub fn wait_until(ms: u64, ready: impl Fn() -> bool) {
         if ready() {
             return;
         }
-        let until = time::ticks() + ms * time::HZ / 1000;
+        let until = time::ticks().saturating_add(ms.saturating_mul(time::HZ) / 1000);
         if let Some(s) = SCHED.lock().as_mut() {
             let cur = s.current;
             s.tasks[cur].state = State::Sleeping(until);
@@ -242,6 +297,7 @@ pub struct TaskInfo {
     pub name: String,
     pub state: State,
     pub cpu_ticks: u64,
+    pub pid: u32,
 }
 
 pub fn list() -> Vec<TaskInfo> {
@@ -251,7 +307,13 @@ pub fn list() -> Vec<TaskInfo> {
         .map(|s| {
             s.tasks
                 .iter()
-                .map(|t| TaskInfo { id: t.id, name: t.name.clone(), state: t.state, cpu_ticks: t.cpu_ticks })
+                .map(|t| TaskInfo {
+                    id: t.id,
+                    name: t.name.clone(),
+                    state: t.state,
+                    cpu_ticks: t.cpu_ticks,
+                    pid: t.pid,
+                })
                 .collect()
         })
         .unwrap_or_default()

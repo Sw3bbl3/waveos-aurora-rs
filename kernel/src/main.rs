@@ -16,8 +16,10 @@ mod fs;
 mod gui;
 mod mm;
 mod power;
+mod proc;
 mod sched;
 mod sync;
+mod syscall;
 #[cfg(feature = "ktest")]
 mod tests;
 mod time;
@@ -34,9 +36,11 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::serial::init();
     kprintln!("\nWaveOS Aurora — Tide kernel {}", VERSION);
     assert_eq!(boot_info.magic, BOOTINFO_MAGIC, "bad BootInfo magic");
+    assert_eq!(boot_info.version, bootinfo::BOOTINFO_VERSION, "bootloader/kernel version mismatch");
 
     arch::gdt::init();
     arch::idt::init();
+    arch::syscall::init();
     log!("boot", "GDT, TSS and IDT loaded");
 
     mm::init(boot_info);
@@ -56,6 +60,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     gui::init(fb);
 
     sched::init();
+    proc::init();
     x86_64::instructions::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
 
