@@ -21,7 +21,7 @@ jobs:
           cargo fmt --all -- --check
           (cd userland && cargo fmt --all -- --check)
       - name: Filesystem library tests
-        run: cargo test -p wavefs -p fat32
+        run: cargo test -p wavefs -p fat32 -p aurora-gfx
 
   kernel:
     name: Kernel tests (${{ matrix.disk }})

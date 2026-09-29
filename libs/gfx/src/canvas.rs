@@ -296,27 +296,21 @@ impl<'a> Canvas<'a> {
     /// Draws `s` with its baseline at `y`. Returns the advance in pixels.
     pub fn text(&mut self, x: i32, y: i32, s: &str, font: Font, c: u32) -> i32 {
         let base_a = alpha(c);
-        let mut pen = x << 6;
-        for ch in s.chars() {
-            let g = font.glyph(ch);
-            let gx = (pen + 32 >> 6) + g.xmin as i32;
-            let gy = y - g.ymin as i32 - g.h as i32;
-            let gr = Rect::new(gx, gy, g.w as i32, g.h as i32);
-            let vis = gr.intersect(&self.clip);
-            if !vis.is_empty() {
-                let bmp = font.bitmap_of(g);
-                for py in vis.y..vis.bottom() {
-                    for px in vis.x..vis.right() {
-                        let cov = bmp[((py - gy) * g.w as i32 + (px - gx)) as usize] as u32;
-                        if cov != 0 {
-                            self.put(px, py, c, cov * base_a / 255);
-                        }
+        let clip = self.clip;
+        let adv = font.layout(s, |g| {
+            let gr = Rect::new(x + g.x, y + g.y, g.w as i32, g.h as i32);
+            let vis = gr.intersect(&clip);
+            for py in vis.y..vis.bottom() {
+                let row = ((py - gr.y) * g.w as i32) as usize;
+                for px in vis.x..vis.right() {
+                    let cov = g.coverage[row + (px - gr.x) as usize] as u32;
+                    if cov != 0 {
+                        self.put(px, py, c, cov * base_a / 255);
                     }
                 }
             }
-            pen += g.adv64 as i32;
-        }
-        ((pen + 32) >> 6) - x
+        });
+        (adv + 32) >> 6
     }
 
     /// Draws text centred horizontally in `r`, vertically centred on its cap height.

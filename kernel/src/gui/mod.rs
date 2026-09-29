@@ -26,6 +26,20 @@ static FB: Once<Framebuffer> = Once::new();
 
 pub fn init(fb: Framebuffer) {
     FB.call_once(|| fb);
+    load_fonts();
+}
+
+/// Installs the TrueType UI faces from the system image (text falls back to
+/// a few built-in sizes without them).
+fn load_fonts() {
+    use aurora_gfx::font::{self, Face};
+    for face in [Face::Regular, Face::SemiBold, Face::Mono] {
+        let ok = crate::fs::read_all(face.file())
+            .is_ok_and(|data| font::install(face, alloc::boxed::Box::leak(data.into_boxed_slice())));
+        if !ok {
+            log!("gui", "font {} unavailable; using built-in sizes", face.file());
+        }
+    }
 }
 
 pub fn screen_size() -> (i32, i32) {

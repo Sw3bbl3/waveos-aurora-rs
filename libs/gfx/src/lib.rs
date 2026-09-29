@@ -2,7 +2,7 @@
 //! widgets and wallpapers shared by the Crest window server (kernel) and the
 //! Ripple toolkit (user space). Pure integer math; `no_std` + `alloc`.
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 
@@ -12,5 +12,6 @@ pub mod geom;
 pub mod icons;
 pub mod math;
 pub mod theme;
+pub mod ttf;
 pub mod wallpaper;
 pub mod widgets;

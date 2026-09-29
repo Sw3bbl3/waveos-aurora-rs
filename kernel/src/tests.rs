@@ -24,6 +24,7 @@ const TESTS: &[Test] = &[
     ("timer", timer),
     ("scheduler", scheduler),
     ("wallpaper + blur", wallpaper),
+    ("TrueType text", truetype),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
     ("storage: disk + GPT", storage_devices),
@@ -345,4 +346,25 @@ fn persistence() {
             crate::kprint!("[marker written] ");
         }
     }
+}
+
+fn truetype() {
+    use aurora_gfx::font::{self, Face};
+    for face in [Face::Regular, Face::SemiBold, Face::Mono] {
+        assert!(font::installed(face), "{} not installed from the system image", face.file());
+    }
+    // Any size works, and text scales with it.
+    let small = font::get(Face::Regular, 13);
+    let big = font::get(Face::Regular, 37);
+    assert_eq!((small.size, big.size), (13, 37));
+    let (ws, wb) = (small.width("Aurora"), big.width("Aurora"));
+    assert!(ws > 30 && (wb * 13 - ws * 37).abs() < 37 * 3, "widths {ws} / {wb}");
+    // Kerning pulls "AV" together.
+    assert!(big.width("AV") < big.width("A") + big.width("V"));
+    // Rendered coverage lands where the layout says.
+    let mut ink = 0u32;
+    let adv = big.layout("Hi", |g| ink += g.coverage.iter().map(|&c| c as u32).sum::<u32>());
+    assert!(ink > 50 * 255 && adv > 0);
+    // Characters outside ASCII resolve (Inter covers Latin, Greek and Cyrillic).
+    assert!(small.width("éΩЖ") > 0);
 }

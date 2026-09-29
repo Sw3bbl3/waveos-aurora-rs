@@ -131,8 +131,21 @@ fn apply(requests: Vec<Request>) {
     }
 }
 
+/// Installs the system's TrueType faces (once per process).
+pub fn load_fonts() {
+    use font::Face;
+    for face in [Face::Regular, Face::SemiBold, Face::Mono] {
+        if !font::installed(face) {
+            if let Ok(data) = aurora::fs::read(face.file()) {
+                font::install(face, alloc::boxed::Box::leak(data.into_boxed_slice()));
+            }
+        }
+    }
+}
+
 /// Runs `app` until its window is closed. Returns the process exit code.
 pub fn run<A: App>(mut app: A) -> i32 {
+    load_fonts();
     let (dark, wallpaper) = aurora::process::desktop::theme();
     theme::set_dark(dark);
     theme::set_wallpaper(wallpaper);

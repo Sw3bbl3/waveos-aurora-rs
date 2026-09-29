@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+spin = "0.9"
+
+[dev-dependencies]
+fontdue = "0.9"
 
 [build-dependencies]
 fontdue = "0.9"

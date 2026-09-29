@@ -222,6 +222,14 @@ fn system_image(programs: &[Program], out: &Path) {
     );
     t.dir("Apps");
     t.dir("Bin");
+    t.dir("Fonts");
+    let fonts = root().join("assets/fonts");
+    let mut font_files: Vec<_> = fs::read_dir(&fonts).unwrap().map(|e| e.unwrap().path()).collect();
+    font_files.sort();
+    for f in font_files {
+        let name = f.file_name().unwrap().to_string_lossy().into_owned();
+        t.file(&format!("Fonts/{name}"), &fs::read(&f).unwrap());
+    }
     for (dest, src) in programs {
         t.file(dest, &fs::read(src).unwrap());
     }
