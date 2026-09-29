@@ -56,7 +56,7 @@ pub struct WaveFs {
 
 impl WaveFs {
     pub fn mount(dev: Arc<dyn BlockDevice>) -> Result<WaveFs, isize> {
-        let device = dev.describe();
+        let device = super::short_device(dev.as_ref());
         let cache = BlockCache::new(dev, 4096)?;
         let vol = Volume::mount(CachedDisk(cache), crate::time::wall_seconds).map_err(errno)?;
         Ok(WaveFs { vol: Mutex::new(vol), device })
@@ -65,7 +65,7 @@ impl WaveFs {
     /// Formats `dev` (used by tests).
     #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     pub fn format(dev: Arc<dyn BlockDevice>, label: &str) -> Result<WaveFs, isize> {
-        let device = dev.describe();
+        let device = super::short_device(dev.as_ref());
         let cache = BlockCache::new(dev, 1024)?;
         let uuid = (crate::time::wall_seconds() as u128 * 0x9E37_79B9_7F4A_7C15).to_le_bytes();
         let vol = Volume::format(CachedDisk(cache), label, uuid, crate::time::wall_seconds).map_err(errno)?;
@@ -80,7 +80,7 @@ impl WaveFs {
 impl Filesystem for WaveFs {
     fn describe(&self) -> String {
         let label = self.label();
-        alloc::format!("WaveFS \"{}\" on {}", label, self.device)
+        alloc::format!("WaveFS “{}” · {}", label, self.device)
     }
     fn root(&self) -> Ino {
         ::wavefs::ROOT

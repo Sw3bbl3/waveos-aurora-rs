@@ -387,6 +387,14 @@ pub fn is_dir(path: &str) -> bool {
     stat(path).is_ok_and(|(m, _)| m.kind == Kind::Dir)
 }
 
+/// A compact description of the controller behind a (partition) device,
+/// e.g. "AHCI SATA" or "NVMe".
+pub fn short_device(dev: &dyn crate::drivers::block::BlockDevice) -> String {
+    let d = dev.describe();
+    let d = d.rsplit(" on ").next().unwrap_or(&d);
+    String::from(d.split(" — ").next().unwrap_or(d))
+}
+
 /// Mounts the boot-time filesystems. Called once during kernel init.
 pub fn init(initrd: &'static [u8]) {
     mount("/", Arc::new(ramfs::RamFs::new()));

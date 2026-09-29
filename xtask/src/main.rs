@@ -307,12 +307,37 @@ fn test(profile: Profile, disk: &str) {
     let img = root().join("target/test-disk.img");
     image::create(&esp, &root().join("assets/home"), &img, 128 * 1024 * 1024).expect("test disk creation failed");
     println!("running kernel tests with the disk on {disk}");
+    // Boot twice on the same disk: the second boot checks what the first one saved.
+    for boot in 1..=2 {
+        println!("\n=== boot {boot} of 2 ===");
+        let output = run_tests_once(&img, disk);
+        if boot == 2 && !output.contains("verified from previous boot") {
+            eprintln!("\npersistence check FAILED: the second boot did not find the first boot's file");
+            exit(1);
+        }
+    }
+    println!("\nall kernel tests passed (both boots)");
+}
+
+/// Boots the test kernel once, echoing its serial output; exits on failure.
+fn run_tests_once(img: &Path, disk: &str) -> String {
+    use std::io::{BufRead, BufReader};
     let opts = RunOpts { headless: true, gdb: false, log_int: false, disk, allow_reboot: false };
-    let mut cmd = qemu(&img, &opts);
-    cmd.stdin(Stdio::null());
+    let mut cmd = qemu(img, &opts);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped());
     let mut child = cmd.spawn().expect("failed to launch qemu");
+    let stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut all = String::new();
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            println!("{line}");
+            all.push_str(&line);
+            all.push('\n');
+        }
+        all
+    });
     let start = Instant::now();
-    let timeout = Duration::from_secs(180);
+    let timeout = Duration::from_secs(240);
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
             break Some(s);
@@ -323,8 +348,9 @@ fn test(profile: Profile, disk: &str) {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
+    let output = reader.join().unwrap_or_default();
     match status.and_then(|s| s.code()) {
-        Some(33) => println!("\nall kernel tests passed"),
+        Some(33) => output,
         Some(code) => {
             eprintln!("\nkernel tests FAILED (qemu exit status {code})");
             exit(1);

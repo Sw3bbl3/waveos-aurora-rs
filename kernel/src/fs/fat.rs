@@ -59,7 +59,7 @@ pub struct FatFs {
 
 impl FatFs {
     pub fn mount(dev: Arc<dyn BlockDevice>) -> Result<FatFs, isize> {
-        let device = dev.describe();
+        let device = super::short_device(dev.as_ref());
         let fs = Fat32::mount(Sectors(dev), crate::time::wall_seconds).map_err(errno)?;
         Ok(FatFs { fs: Mutex::new(fs), device })
     }
@@ -67,7 +67,7 @@ impl FatFs {
 
 impl Filesystem for FatFs {
     fn describe(&self) -> String {
-        alloc::format!("FAT32 on {}", self.device)
+        alloc::format!("FAT32 · {}", self.device)
     }
     fn root(&self) -> Ino {
         ::fat32::ROOT

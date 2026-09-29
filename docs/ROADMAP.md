@@ -21,15 +21,22 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - **Tests:** the `usertest` syscall conformance suite runs as part of `cargo xtask test`.
 - **Deferred:** message-port IPC and a user-space window server are planned together with multi-threaded processes.
 
-## M3: Storage and WaveFS
+## ✅ M3: Storage and WaveFS
 
-- **Block drivers:** virtio-blk first, then AHCI (SATA) and NVMe.
-- **VFS:** a virtual filesystem layer, a page cache, and FAT32 read/write so the ESP can be used.
-- **WaveFS:** our own journaled filesystem, with extents and copy-on-write metadata.
-- **Files app:** real volumes, copy, move and rename, and drag and drop.
-- **Persistence:** saved settings, such as theme and wallpaper.
+- **Hardware:** PCI/PCIe enumeration (ECAM via ACPI MCFG). Polled drivers for **AHCI**, **virtio-blk** (modern virtio-pci) and **NVMe**, plus GPT partitions.
+- **VFS:** a mount table and a write-back block cache, with a background flusher every 5 s and a sync on shutdown and restart.
+- **WaveFS:** our journaled, extent-based filesystem.
+  - Metadata goes through a physical write-ahead journal in ordered mode, with revoke-on-free and checksummed commits.
+  - It's a `no_std` library shared by the kernel and the host `mkfs`, with crash-recovery tests.
+- **FAT32:** read/write with long file names, mounted at `/Boot`, and cross-checked against the `fatfs` crate.
+- **Disk images:** `xtask` builds GPT images with an ESP plus a WaveFS home volume, and keeps the home volume across rebuilds.
+- **Files:** volumes in the sidebar, New Folder, inline Rename, Delete, Copy/Cut/Paste and context menus. The theme and wallpaper persist.
+- **Tests:** the kernel suite runs on all three controllers in CI, and boots twice to verify persistence.
+- **Deferred:** interrupt-driven I/O (MSI/MSI-X) moves to M5, and drag and drop moves to M4.
 
 ## M4: Apps and polish
+
+- **Files:** drag and drop, a list view, and search.
 
 - **Notes:** a richer editor with selection, the clipboard and undo.
 - **Image Viewer:** PNG decoding.

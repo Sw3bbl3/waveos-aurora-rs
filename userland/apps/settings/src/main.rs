@@ -122,7 +122,7 @@ impl App for Settings {
             aurora::process::fixed_str(&i.root, i.root_len)
         );
         cv.fill_rect(Rect::new(x, area.bottom() - 48, area.w - 56, 1), t.separator);
-        cv.text(x, area.bottom() - 22, &info, theme::ui(12), t.text_secondary);
+        cv.text_clipped(x, area.bottom() - 22, &info, theme::ui(12), t.text_secondary, area.w - 56);
     }
 
     fn click(&mut self, x: i32, y: i32, area: Rect, env: &mut Env) -> bool {

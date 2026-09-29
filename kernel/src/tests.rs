@@ -31,6 +31,7 @@ const TESTS: &[Test] = &[
     ("WaveFS on RAM disk (kernel adapter)", wavefs_ramdisk),
     ("WaveFS home volume", wavefs_home),
     ("FAT32 /Boot", fat_boot),
+    ("persistence across reboot", persistence),
 ];
 
 pub fn run() {
@@ -324,4 +325,24 @@ fn fat_boot() {
     assert_eq!(fs::read_all("/Boot/aurora test FILE.txt").unwrap(), b"written by Tide"); // FAT is case-insensitive
     fs::unlink("/Boot/Aurora test file.txt").unwrap();
     fs::sync_all();
+}
+
+/// `cargo xtask test` boots the same disk twice: the first boot leaves a
+/// marker file, the second must find it intact.
+fn persistence() {
+    const MARKER: &str = "/Documents/.ktest-persist";
+    const DATA: &[u8] = b"written by the previous boot";
+    match fs::read_all(MARKER) {
+        Ok(d) => {
+            assert_eq!(d, DATA, "marker corrupted across reboot");
+            fs::unlink(MARKER).unwrap();
+            fs::sync_all();
+            crate::kprint!("[verified from previous boot] ");
+        }
+        Err(_) => {
+            fs::write_all(MARKER, DATA).unwrap();
+            fs::sync_all();
+            crate::kprint!("[marker written] ");
+        }
+    }
 }
