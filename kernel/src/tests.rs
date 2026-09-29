@@ -32,6 +32,8 @@ const TESTS: &[Test] = &[
     ("clock: TSC/HPET monotonic", clock),
     ("user copies recover from faults", user_copy_fault),
     ("sound: HDA playback", sound),
+    ("ACPI: AML, sleep states, battery", acpi_runtime),
+    ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
     ("storage: disk + GPT", storage_devices),
@@ -623,4 +625,32 @@ fn sound() {
     assert!(frames > audio::RATE as u64 / 4, "the device played only {} frames in 600 ms", frames);
     assert!(loudest > 1000, "the mixer never produced the tone (peak {})", loudest);
     crate::kprint!("[{} frames, {} underruns] ", frames, underruns);
+}
+
+fn acpi_runtime() {
+    use aurora_abi::power::*;
+    // The AML task starts during boot; give it a moment.
+    let ready = wait_for(|| crate::acpi::power_info().flags & ACPI != 0, 5000);
+    assert!(ready, "the ACPI runtime did not come up");
+    assert!(crate::acpi::sleep_type(5).is_some(), "no \\_S5 from AML");
+    // xtask adds a test SSDT: battery 35 040 of 48 000 mWh, discharging at 9.5 W,
+    // adapter unplugged, lid open.
+    let p = crate::acpi::power_info();
+    assert!(p.flags & BATTERY != 0, "the test battery was not found");
+    assert_eq!(p.percent, 73);
+    assert!(p.flags & DISCHARGING != 0 && p.flags & CHARGING == 0);
+    assert_eq!(p.minutes, 35_040 * 60 / 9_500);
+    assert!(p.flags & AC_PRESENT != 0 && p.flags & AC_ONLINE == 0);
+    assert!(p.flags & LID_PRESENT != 0 && p.flags & LID_OPEN != 0);
+    assert_eq!(&p.model[..p.model_len as usize], b"Aurora Test Cell");
+    crate::kprint!("[battery {}%, {} min left] ", p.percent, p.minutes);
+}
+
+fn acpi_isolation() {
+    crate::acpi::test_panic();
+    assert!(wait_for(|| !crate::acpi::running(), 2000), "the ACPI task did not stop");
+    // Everything else carries on; ACPI answers "unknown" from now on.
+    assert_eq!(crate::acpi::power_info().flags & aurora_abi::power::ACPI, 0);
+    crate::sched::sleep_ms(20);
+    assert!(crate::acpi::sleep_type(5).is_some(), "sleep types found earlier stay usable");
 }

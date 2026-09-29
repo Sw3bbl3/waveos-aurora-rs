@@ -7,7 +7,7 @@ Usage: tools/qmp.py STEP [STEP...]
   res:W,H (the guest's screen size, if it isn't 1280x800)
   type:TEXT (\\n = Enter)  key:QCODE[+QCODE]  wheel:N  sleep:SECONDS
   shot:PATH (PNG screenshot)  wait-log:TEXT (wait for a serial log line, from target/serial.log)
-  quit
+  qmp:COMMAND (e.g. system_powerdown = the power button, system_wakeup)  quit
 Coordinates are screen pixels (1280x800).
 """
 import json, os, socket, sys, time
@@ -95,6 +95,8 @@ for step in sys.argv[1:]:
             time.sleep(0.1)
         else:
             sys.exit(f"timed out waiting for log line: {v}")
+    elif k == "qmp":
+        cmd(v)  # a raw QMP command without arguments, e.g. qmp:system_powerdown
     elif k == "quit":
         cmd("quit")
     else:

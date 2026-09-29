@@ -91,6 +91,8 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     fs::mount_disks();
     telemetry::stage("sound", "Sound output");
     drivers::audio::init();
+    telemetry::stage("acpi", "ACPI runtime (AML, power button, battery)");
+    acpi::start(boot_info.rsdp_phys);
     telemetry::start();
 
     #[cfg(feature = "ktest")]
@@ -113,6 +115,12 @@ fn initrd(boot_info: &BootInfo) -> &'static [u8] {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     x86_64::instructions::interrupts::disable();
+    // The AML interpreter runs on its own task; if it fails, only ACPI stops.
+    if acpi::is_acpi_task() {
+        unsafe { drivers::serial::force_unlock() };
+        kprintln!("\n*** ACPI task panicked: {}", info);
+        acpi::on_panic();
+    }
     arch::smp::halt_others();
     unsafe { drivers::serial::force_unlock() };
     kprintln!("\n*** KERNEL PANIC: {}", info);

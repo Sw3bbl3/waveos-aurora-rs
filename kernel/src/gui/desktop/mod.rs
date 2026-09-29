@@ -5,6 +5,7 @@
 //! wallpaper → windows → dock → menu bar → launcher → menus → cursor.
 
 mod anim;
+mod battery;
 mod dragdrop;
 mod notifications;
 mod shell;
@@ -163,6 +164,7 @@ pub struct Desktop {
     /// Ask "Keep this resolution?" after the next resize.
     confirm_resolution: bool,
     volume: volume::VolumeUi,
+    battery_popover: bool,
 }
 
 impl Desktop {
@@ -204,6 +206,7 @@ impl Desktop {
             previous_resolution: None,
             confirm_resolution: false,
             volume: volume::VolumeUi::default(),
+            battery_popover: false,
         };
         d.open(AppKind::Welcome);
         d.damage_all();
@@ -615,6 +618,8 @@ impl Desktop {
                 Command::DragStart => self.begin_drag(),
                 Command::TrashChanged => self.refresh_trash(),
                 Command::Pref(key) => self.pref_changed(&key),
+                Command::PowerButton => self.open(AppKind::Power),
+                Command::PowerChanged => self.damage(Rect::new(0, 0, self.w, MENUBAR_H)),
                 Command::SetResolution(w, h) => {
                     if (w as i32, h as i32) != (self.w, self.h) {
                         self.previous_resolution.get_or_insert((self.w as u32, self.h as u32));
@@ -804,7 +809,8 @@ impl Desktop {
             && (y - self.last_click.2).abs() < 5;
         self.last_click = if double { (0, x, y) } else { (self.now_ms, x, y) };
 
-        if self.volume_press(x, y) || self.spotlight_press(x, y) || self.center_press(x, y) {
+        if self.battery_press(x, y) || self.volume_press(x, y) || self.spotlight_press(x, y) || self.center_press(x, y)
+        {
             return;
         }
         if let Some(i) = self.banner_at(x, y) {
@@ -874,6 +880,9 @@ impl Desktop {
         }
         // Volume keys work everywhere.
         if k.pressed && self.volume_key(k.code) {
+            return;
+        }
+        if k.pressed && k.code == KeyCode::Escape && self.close_battery_popover() {
             return;
         }
         if k.pressed && k.code == KeyCode::Escape && self.volume_popover_open() {
@@ -1049,6 +1058,7 @@ impl Desktop {
         self.paint_banners(cv);
         self.paint_center(cv);
         self.paint_volume(cv);
+        self.paint_battery_popover(cv);
         self.paint_spotlight(cv);
         self.paint_drag(cv);
         if let Some(p) = self.power {

@@ -63,6 +63,10 @@ pub enum Command {
     Pref(String),
     /// Switch the screen resolution (live-capable displays only).
     SetResolution(u32, u32),
+    /// The hardware power button (ACPI).
+    PowerButton,
+    /// Battery / power adapter / lid state changed (ACPI).
+    PowerChanged,
 }
 
 /// Queues a command for the compositor.

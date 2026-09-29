@@ -59,6 +59,36 @@ pub fn start() {
     sched::spawn("crest", run);
 }
 
+/// The ACPI power button was pressed: ask what to do, like the menu's Shut Down….
+pub fn power_button() {
+    server::command(server::Command::PowerButton);
+}
+
+/// Battery or power adapter state changed (from ACPI): update the menu bar,
+/// and warn once each time the charge falls to 10 % and 5 %.
+pub fn power_changed(old: Option<aurora_abi::PowerInfo>, new: aurora_abi::PowerInfo) {
+    use aurora_abi::power::*;
+    server::command(server::Command::PowerChanged);
+    let discharging = new.flags & DISCHARGING != 0;
+    let before = old.filter(|o| o.flags & BATTERY != 0).map_or(101, |o| o.percent);
+    for level in [10, 5] {
+        if discharging && new.percent <= level && before > level {
+            let body = alloc::format!("{}% remaining. Connect your computer to power soon.", new.percent);
+            notify::system("Low Battery", &body);
+            crate::drivers::audio::play_sound("error");
+            break;
+        }
+    }
+    if let Some(o) = old {
+        if o.flags & AC_ONLINE != new.flags & AC_ONLINE && new.flags & AC_PRESENT != 0 {
+            log!("power", "power adapter {}", if new.flags & AC_ONLINE != 0 { "connected" } else { "disconnected" });
+        }
+        if o.flags & LID_OPEN != new.flags & LID_OPEN && new.flags & LID_PRESENT != 0 {
+            log!("power", "lid {}", if new.flags & LID_OPEN != 0 { "opened" } else { "closed" });
+        }
+    }
+}
+
 fn front_buffer(fb: &Framebuffer) -> &'static mut [u32] {
     unsafe { core::slice::from_raw_parts_mut(phys_to_virt(fb.phys_addr) as *mut u32, (fb.stride * fb.height) as usize) }
 }

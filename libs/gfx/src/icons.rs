@@ -298,3 +298,25 @@ pub fn speaker(cv: &mut Canvas, r: Rect, level: Option<u32>, c: u32) {
         }
     }
 }
+
+/// Battery glyph in `r` (about 2:1): an outline with its terminal, filled to
+/// `percent`; `fill` colours the charge (e.g. red when low). `charging` adds a bolt.
+pub fn battery(cv: &mut Canvas, r: Rect, percent: u32, charging: bool, c: u32, fill: u32) {
+    let tip = (r.w / 12).max(2);
+    let body = Rect::new(r.x, r.y, r.w - tip - 1, r.h);
+    let radius = (r.h / 4).max(2);
+    cv.stroke_round_rect(body, radius, c);
+    cv.fill_round_rect(Rect::new(body.right() + 1, r.y + r.h / 3, tip, r.h - 2 * (r.h / 3)), 1, c);
+    let inner = body.inset(2);
+    let w = inner.w * percent.min(100) as i32 / 100;
+    if w > 0 {
+        cv.fill_round_rect(Rect::new(inner.x, inner.y, w.max(2), inner.h), (radius - 1).max(1), fill);
+    }
+    if charging {
+        // A lightning bolt across the middle.
+        let (cx, cy, s) = (body.x + body.w / 2, body.y + body.h / 2, body.h * 2 / 5);
+        let bolt = [(cx + s / 3, cy - s), (cx - s / 2, cy + s / 6), (cx + s / 2, cy - s / 6), (cx - s / 3, cy + s)];
+        cv.polyline(&bolt, (r.h / 8).max(2), 0xFF1C_1C1E);
+        cv.polyline(&bolt, (r.h / 14).max(1), 0xFFFF_FFFF);
+    }
+}

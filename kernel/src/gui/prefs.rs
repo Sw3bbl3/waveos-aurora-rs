@@ -86,12 +86,20 @@ pub fn apply_all_system() {
     }
 }
 
-/// The resolution the bootloader will use next time (from boot.conf).
-pub fn boot_resolution() -> Option<(u32, u32)> {
+/// A `key=value` option from `\aurora\boot.conf` on the EFI partition.
+pub fn boot_option(key: &str) -> Option<String> {
     let data = crate::fs::read_all("/Boot/aurora/boot.conf").ok()?;
     let text = core::str::from_utf8(&data).ok()?;
-    let v = text.lines().find_map(|l| l.trim().strip_prefix("resolution="))?;
-    let (w, h) = v.trim().split_once('x')?;
+    text.lines().find_map(|l| {
+        let (k, v) = l.trim().split_once('=')?;
+        (k.trim() == key).then(|| String::from(v.trim()))
+    })
+}
+
+/// The resolution the bootloader will use next time (from boot.conf).
+pub fn boot_resolution() -> Option<(u32, u32)> {
+    let v = boot_option("resolution")?;
+    let (w, h) = v.split_once('x')?;
     Some((w.parse().ok()?, h.parse().ok()?))
 }
 

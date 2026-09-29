@@ -10,6 +10,7 @@
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 
+mod aml;
 mod image;
 mod monitor;
 mod sounds;
@@ -56,6 +57,7 @@ fn main() {
                 telemetry: mon.as_ref().map(|m| m.socket.clone()),
                 smp,
                 audio: if flag("--no-sound") || flag("--headless") { String::from("none") } else { host_audio() },
+                battery: flag("--battery"),
             };
             let mut cmd = qemu(&img, &opts);
             let Some(mon) = mon else {
@@ -304,6 +306,8 @@ struct RunOpts<'a> {
     /// Where the guest's sound goes: a QEMU audio backend ("coreaudio", "none"),
     /// or "wav:PATH" to record it.
     audio: String,
+    /// Add a test SSDT with a laptop battery, power adapter and lid.
+    battery: bool,
 }
 
 /// The host's own sound output, for interactive runs.
@@ -340,6 +344,11 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     };
     cmd.arg("-audiodev").arg(backend);
     cmd.args(["-device", "ich9-intel-hda", "-device", "hda-output,audiodev=snd"]);
+    if opts.battery {
+        let ssdt = root().join("target/battery-ssdt.aml");
+        fs::write(&ssdt, aml::battery_ssdt()).expect("write battery SSDT");
+        cmd.arg("-acpitable").arg(format!("file={}", ssdt.display()));
+    }
     cmd.args(["-rtc", "base=localtime"]);
     cmd.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     cmd.args(["-serial", "stdio"]);
@@ -417,6 +426,7 @@ fn run_tests_once(img: &Path, disk: &str, smp: u32) -> String {
         telemetry: None,
         smp,
         audio: format!("wav:{}", audio.display()),
+        battery: true,
     };
     let mut cmd = qemu(img, &opts);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped());

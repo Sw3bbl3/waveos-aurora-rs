@@ -1,6 +1,7 @@
-//! Minimal ACPI table parsing: MADT (interrupt controllers) and FADT/DSDT
-//! (power management). No AML interpreter — `\_S5` is found by pattern scan,
-//! which is what every hobby OS (and plenty of real ones) get away with.
+//! Static ACPI tables, parsed early in boot (before the heap-hungry AML
+//! runtime): MADT (interrupt controllers), FADT (power management
+//! registers), MCFG (PCIe configuration space) and HPET. `\_S5` is also found
+//! by a pattern scan of the DSDT, as a fallback for when AML is unavailable.
 
 use crate::mm::phys_to_virt;
 use alloc::vec::Vec;
@@ -40,6 +41,9 @@ pub struct AcpiInfo {
     pub facs: u64,
     pub boot_arch: u16,
     pub fadt_flags: u32,
+    /// General-purpose event block 0 (status bytes, then enable bytes).
+    pub gpe0_blk: u16,
+    pub gpe0_blk_len: u8,
 }
 
 impl AcpiInfo {
@@ -173,6 +177,10 @@ unsafe fn parse_fadt(table: u64, info: &mut AcpiInfo) {
     if len >= 129 && flags & (1 << 10) != 0 && read::<u8>(table + 116) == 1 {
         // RESET_REG in system I/O space.
         info.reset_port = Some((read::<u64>(table + 120) as u16, read::<u8>(table + 128)));
+    }
+    if len >= 96 {
+        info.gpe0_blk = read::<u32>(table + 80) as u16;
+        info.gpe0_blk_len = read::<u8>(table + 92);
     }
     let mut dsdt = read::<u32>(table + 40) as u64;
     if len >= 148 && read::<u64>(table + 140) != 0 {

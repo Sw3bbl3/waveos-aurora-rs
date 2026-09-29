@@ -234,6 +234,7 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             out.commit(n)?;
             Ok(n as u64)
         }
+        nr::POWER_INFO => user::put(a[0], &crate::acpi::power_info()).map(|_| 0),
         nr::AUDIO_OPEN => {
             let stream = crate::drivers::audio::open()?;
             let p = proc::current().ok_or(EPERM)?;

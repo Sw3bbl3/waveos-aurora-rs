@@ -50,7 +50,7 @@ impl App for PowerDialog {
             crate::gui::canvas::mix(theme::ACCENT, theme::ACCENT_2, 128),
         );
         cv.text(area.x + 84, area.y + 34, "Shut down or restart?", theme::ui_bold(16), t.text);
-        cv.text(area.x + 84, area.y + 56, "Files on the RAM disk will be lost.", theme::ui(13), t.text_secondary);
+        cv.text(area.x + 84, area.y + 56, "Your files are saved to disk first.", theme::ui(13), t.text_secondary);
         let [shut, restart, cancel] = Self::buttons(area);
         button(cv, shut, "Shut Down", ButtonStyle::Danger, self.hovered == Some(0));
         button(cv, restart, "Restart", ButtonStyle::Secondary, self.hovered == Some(1));

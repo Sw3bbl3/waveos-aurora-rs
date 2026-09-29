@@ -112,7 +112,62 @@ pub mod nr {
     pub const AUDIO_OPEN: usize = 52;
     /// `audio_volume(op, volume, muted) -> state` — see [`super::audio`]
     pub const AUDIO_VOLUME: usize = 53;
-    pub const COUNT: usize = 54;
+    /// `power_info(*mut PowerInfo)` — battery, power adapter and lid (from ACPI)
+    pub const POWER_INFO: usize = 54;
+    pub const COUNT: usize = 55;
+}
+
+/// Power sources, from ACPI (`power_info`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PowerInfo {
+    /// Bits: [`power::BATTERY`], [`power::CHARGING`], …
+    pub flags: u32,
+    /// Charge, 0–100.
+    pub percent: u32,
+    /// Estimated minutes until empty (discharging) or full (charging); 0 if unknown.
+    pub minutes: u32,
+    /// Present charge / discharge rate in mW (0 if unknown).
+    pub rate_mw: u32,
+    pub remaining_mwh: u32,
+    pub full_mwh: u32,
+    pub design_mwh: u32,
+    pub model_len: u32,
+    pub model: [u8; 32],
+}
+
+impl Default for PowerInfo {
+    fn default() -> Self {
+        PowerInfo {
+            flags: 0,
+            percent: 0,
+            minutes: 0,
+            rate_mw: 0,
+            remaining_mwh: 0,
+            full_mwh: 0,
+            design_mwh: 0,
+            model_len: 0,
+            model: [0; 32],
+        }
+    }
+}
+
+/// [`PowerInfo::flags`].
+pub mod power {
+    /// A battery is present (the other battery fields are valid).
+    pub const BATTERY: u32 = 1 << 0;
+    pub const CHARGING: u32 = 1 << 1;
+    pub const DISCHARGING: u32 = 1 << 2;
+    /// The battery reports a critical level.
+    pub const CRITICAL: u32 = 1 << 3;
+    /// A power adapter is known to exist; [`AC_ONLINE`] says whether it is plugged in.
+    pub const AC_PRESENT: u32 = 1 << 4;
+    pub const AC_ONLINE: u32 = 1 << 5;
+    /// A lid switch exists; [`LID_OPEN`] is its state.
+    pub const LID_PRESENT: u32 = 1 << 6;
+    pub const LID_OPEN: u32 = 1 << 7;
+    /// The ACPI runtime (AML) is working; without it nothing above is known.
+    pub const ACPI: u32 = 1 << 8;
 }
 
 /// Sound output.

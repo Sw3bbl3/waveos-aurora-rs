@@ -21,6 +21,7 @@ pub mod fs;
 pub mod heap;
 pub mod io;
 pub mod notify;
+pub mod power;
 pub mod prefs;
 pub mod process;
 pub mod rt;

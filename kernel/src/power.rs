@@ -10,6 +10,11 @@ pub fn init(info: AcpiInfo) {
     ACPI.call_once(|| info);
 }
 
+/// The static ACPI facts found at boot.
+pub fn info() -> Option<&'static AcpiInfo> {
+    ACPI.get()
+}
+
 pub fn shutdown() -> ! {
     log!("power", "shutting down");
     x86_64::instructions::interrupts::disable();
@@ -26,9 +31,11 @@ pub fn shutdown() -> ! {
                         }
                     }
                 }
-                cnt.write((a.slp_typa << 10) | (1 << 13));
+                // \_S5 from AML when the runtime is up, else from the DSDT scan.
+                let (typa, typb) = crate::acpi::sleep_type(5).unwrap_or((a.slp_typa, a.slp_typb));
+                cnt.write((typa << 10) | (1 << 13));
                 if a.pm1b_cnt != 0 {
-                    Port::<u16>::new(a.pm1b_cnt).write((a.slp_typb << 10) | (1 << 13));
+                    Port::<u16>::new(a.pm1b_cnt).write((typb << 10) | (1 << 13));
                 }
             }
         }

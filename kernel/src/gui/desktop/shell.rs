@@ -526,6 +526,7 @@ impl Desktop {
             let f = theme::ui(13);
             cv.text(self.w - 18 - f.width(&self.clock), 20, &self.clock, f, t.text_on_glass);
             self.paint_volume_icon(cv);
+            self.paint_battery_item(cv);
         }
 
         // Launcher.
