@@ -373,7 +373,7 @@ table.grid tbody tr.sel td { background: var(--accent-soft); }
       <canvas id="timeline" height="300"></canvas>
       <div class="timeline-tip" id="tip" hidden></div>
     </div>
-    <div class="hint">Each lane is a task; a coloured block means that task had the CPU. The scheduler switches every 10 ms or when a task sleeps. Hover a block for details, click a lane to inspect the task.</div>
+    <div class="hint">The strips at the top show each CPU; below, each lane is a task and a coloured block means that task was running (hover to see on which CPU). The scheduler switches every 10 ms or when a task sleeps. Hover a block for details, click a lane to inspect the task.</div>
   </div>
   <div class="panel" data-panel="procs" hidden><div class="table-wrap" id="procs"></div></div>
   <div class="panel" data-panel="memory" hidden><div id="memory"></div></div>
@@ -546,8 +546,9 @@ function freshState() {
     t: 0, version: "", stagesAt: {}, stage: null, ready: false, bootConsole: false,
     snaps: [],            // recent snapshots (for rates and history)
     tasks: new Map(),     // id -> {id, name, pid, st, cpu, color, lastSeen}
-    segments: [],         // {task, start, end}
-    lastSwitch: null,     // [t, task]
+    segments: [],         // {task, start, end, cpu}
+    lastSwitch: {},       // cpu -> [t, task]
+    cpuBusy: [],          // per-CPU busy % over the last snapshot
     procs: [], mem: null, blk: [], fs: [], win: [], sys: [], irq: {},
     rates: { sys: 0, switches: 0, timer: 0, input: 0, frames: 0, px: 0, diskOps: 0, diskBytes: 0, file: 0, winCalls: 0, mmap: 0, procCalls: 0, busy: 0, userBusy: 0 },
     sysRates: [], blkRates: {}, cpuPct: {}, history: [], events: [], colorIndex: 0,
@@ -668,9 +669,11 @@ function snapshot(ev) {
   for (const [id, t] of S.tasks) if (!seen.has(id)) { t.st = "dead"; if (ev.t - t.lastSeen > 15000) S.tasks.delete(id); }
 
   // Scheduler decisions -> timeline segments.
-  for (const [t, id] of ev.sched) {
-    if (S.lastSwitch) S.segments.push({ task: S.lastSwitch[1], start: S.lastSwitch[0], end: t });
-    S.lastSwitch = [t, id];
+  // Each CPU switches on its own: a segment runs to that CPU's next switch.
+  for (const [t, id, cpu = 0] of ev.sched) {
+    const last = S.lastSwitch[cpu];
+    if (last) S.segments.push({ task: last[1], start: last[0], end: t, cpu });
+    S.lastSwitch[cpu] = [t, id];
   }
   const horizon = ev.t - 30000;
   while (S.segments.length && S.segments[0].end < horizon) S.segments.shift();
@@ -699,6 +702,18 @@ function snapshot(ev) {
       const pct = p ? Math.min(100, Math.max(0, (t.cpu - p.cpu) / total * 100)) : 0;
       S.cpuPct[t.id] = pct;
       if (t.n === "idle") idle += pct; else if (t.pid) user += pct;
+    }
+    // Per-CPU busy time (cumulative [busy, idle] ms per CPU in each snapshot).
+    const cpus = ev.cpus || [], pcpus = prev.cpus || [];
+    S.cpuBusy = cpus.map((c, i) => {
+      const p = pcpus[i] || [0, 0];
+      const b = Math.max(0, c[0] - p[0]), n = Math.max(0, c[1] - p[1]);
+      return b + n > 0 ? b / (b + n) * 100 : 0;
+    });
+    if (cpus.length) {
+      // Machine-wide: the average over CPUs (idle tasks run on every CPU).
+      idle = 100 - S.cpuBusy.reduce((a, b) => a + b, 0) / cpus.length;
+      user = user / cpus.length;
     }
     S.rates = {
       sys: sum(sysDelta), switches: d(ev.switches, prev.switches), timer: d(ev.irq.timer, prev.irq.timer),
@@ -986,7 +1001,8 @@ function updateKpis() {
   document.getElementById("k-uptime").textContent = S.t ? fmtMs(S.t) : "—";
   document.getElementById("k-cpu").textContent = S.snaps.length > 1 ? r.busy.toFixed(0) + "%" : "—";
   let running = "—";
-  if (S.lastSwitch) { const t = S.tasks.get(S.lastSwitch[1]); running = t ? t.name : "—"; }
+  const busyNow = Object.values(S.lastSwitch).map(l => S.tasks.get(l[1])).filter(t => t && t.name !== "idle");
+  if (Object.keys(S.lastSwitch).length) running = busyNow.length ? [...new Set(busyNow.map(t => t.name))].join(", ") : "idle";
   document.getElementById("k-running").textContent = running;
   document.getElementById("k-mem").textContent = S.mem ? fmtBytes(S.mem.used) : "—";
   document.getElementById("k-sys").textContent = S.snaps.length > 1 ? Math.round(r.sys).toLocaleString() : "—";
@@ -1015,7 +1031,9 @@ function drawTimeline() {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;
   const ls = lanes();
-  const laneH = 22, top = 26, labelW = Math.min(170, Math.max(110, w * 0.16));
+  const ncpu = Math.max(1, S.cpuBusy.length, ...Object.keys(S.lastSwitch).map(c => +c + 1));
+  const cpuRowH = 14, cpuTop = 26;
+  const laneH = 22, top = cpuTop + ncpu * cpuRowH + 14, labelW = Math.min(170, Math.max(110, w * 0.16));
   const h = Math.max(160, top + ls.length * laneH + 64);
   if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
     canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); canvas.style.height = h + "px";
@@ -1033,8 +1051,27 @@ function drawTimeline() {
   ctx.fillStyle = ink3; ctx.strokeStyle = hair; ctx.lineWidth = 1;
   for (let s = Math.ceil(start / 1000) * 1000; s <= end; s += 1000) {
     const x = Math.round(X(s)) + 0.5;
-    ctx.beginPath(); ctx.moveTo(x, top - 6); ctx.lineTo(x, top + ls.length * laneH); ctx.stroke();
-    ctx.fillText(fmtMs(s).replace(" s", "s"), x + 3, top - 10);
+    ctx.beginPath(); ctx.moveTo(x, cpuTop - 6); ctx.lineTo(x, top + ls.length * laneH); ctx.stroke();
+    ctx.fillText(fmtMs(s).replace(" s", "s"), x + 3, cpuTop - 10);
+  }
+  // One strip per CPU: whose code it ran, and how busy it was lately.
+  const segsAll = S.segments.concat(Object.entries(S.lastSwitch).map(([c, l]) => ({ task: l[1], start: l[0], end, cpu: +c })));
+  for (let c = 0; c < ncpu; c++) {
+    const y = cpuTop + c * cpuRowH;
+    ctx.fillStyle = ink2; ctx.font = "11px " + cssVar("--font");
+    const pct = S.cpuBusy[c] != null ? ` · ${S.cpuBusy[c].toFixed(0)}%` : "";
+    ctx.fillText(`CPU ${c}${pct}`, 8, y + 11);
+    ctx.fillStyle = lane; ctx.fillRect(plotX, y + 2, plotW, cpuRowH - 4);
+    for (const sg of segsAll) {
+      if (sg.cpu !== c || sg.end < start) continue;
+      const t = S.tasks.get(sg.task);
+      if (!t || t.name === "idle") continue;
+      const x0 = Math.max(plotX, X(sg.start)), x1 = Math.min(plotX + plotW, X(sg.end));
+      if (x1 <= x0) continue;
+      ctx.fillStyle = t.color; ctx.globalAlpha = 0.9;
+      ctx.fillRect(x0, y + 2, Math.max(1, x1 - x0), cpuRowH - 4);
+    }
+    ctx.globalAlpha = 1;
   }
   laneLayout = [];
   ls.forEach((t, i) => {
@@ -1050,8 +1087,7 @@ function drawTimeline() {
   });
   // Segments.
   const index = new Map(ls.map((t, i) => [t.id, i]));
-  const segs = S.segments.concat(S.lastSwitch ? [{ task: S.lastSwitch[1], start: S.lastSwitch[0], end }] : []);
-  for (const s of segs) {
+  for (const s of segsAll) {
     if (s.end < start) continue;
     const i = index.get(s.task); if (i == null) continue;
     const t = ls[i];
@@ -1092,11 +1128,11 @@ canvas.addEventListener("mousemove", e => {
   const w = canvas.clientWidth, labelW = Math.min(170, Math.max(110, w * 0.16)), plotW = w - labelW - 8;
   if (!lane || x < labelW) { tip.hidden = true; return; }
   const t = Math.max(0, S.t - WINDOW_MS) + (x - labelW) / plotW * WINDOW_MS;
-  const segs = S.segments.concat(S.lastSwitch ? [{ task: S.lastSwitch[1], start: S.lastSwitch[0], end: S.t }] : []);
+  const segs = S.segments.concat(Object.entries(S.lastSwitch).map(([c, l]) => ({ task: l[1], start: l[0], end: S.t, cpu: +c })));
   const seg = segs.find(s => s.task === lane.t.id && t >= s.start && t <= s.end);
   if (!seg) { tip.hidden = true; return; }
   tip.hidden = false;
-  tip.innerHTML = `<strong>${esc(lane.t.name)}</strong>${lane.t.pid ? " · pid " + lane.t.pid : " · kernel task"}<br><span class="num">${fmtMs(seg.start)} → ${(seg.end - seg.start).toFixed(0)} ms on CPU</span>`;
+  tip.innerHTML = `<strong>${esc(lane.t.name)}</strong>${lane.t.pid ? " · pid " + lane.t.pid : " · kernel task"}<br><span class="num">${fmtMs(seg.start)} → ${(seg.end - seg.start).toFixed(0)} ms on CPU ${seg.cpu ?? 0}</span>`;
   tip.style.left = Math.min(x + 12, w - 220) + "px"; tip.style.top = (y + 12) + "px";
 });
 canvas.addEventListener("mouseleave", () => { tip.hidden = true; });

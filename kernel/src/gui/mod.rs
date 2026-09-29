@@ -85,6 +85,10 @@ pub fn power_changed(old: Option<aurora_abi::PowerInfo>, new: aurora_abi::PowerI
         }
         if o.flags & LID_OPEN != new.flags & LID_OPEN && new.flags & LID_PRESENT != 0 {
             log!("power", "lid {}", if new.flags & LID_OPEN != 0 { "opened" } else { "closed" });
+            // Closing the lid puts the computer to sleep, as on any laptop.
+            if new.flags & LID_OPEN == 0 && crate::power::s3::available() {
+                crate::power::sleep();
+            }
         }
     }
 }

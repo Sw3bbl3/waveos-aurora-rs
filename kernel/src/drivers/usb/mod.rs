@@ -303,6 +303,14 @@ pub fn list() -> Vec<String> {
     xhci::controllers().iter().flat_map(|c| c.describe_devices()).collect()
 }
 
+/// Waits (up to `ms`) until the devices present at boot are set up.
+pub fn settle(ms: u64) {
+    let deadline = crate::time::uptime_ms() + ms;
+    while crate::time::uptime_ms() < deadline && !xhci::controllers().iter().all(|c| c.announce()) {
+        crate::sched::sleep_ms(20);
+    }
+}
+
 /// After sleep: every controller starts over and re-enumerates.
 pub fn resume() {
     for c in xhci::controllers() {

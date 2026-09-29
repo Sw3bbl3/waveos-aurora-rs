@@ -92,6 +92,10 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     fs::mount_disks();
     telemetry::stage("usb", "USB controllers and devices");
     drivers::usb::init();
+    if !fs::root_persistent() {
+        // Perhaps we booted from a USB stick that holds the home volume.
+        drivers::usb::settle(4000);
+    }
     telemetry::stage("sound", "Sound output");
     drivers::audio::init();
     telemetry::stage("acpi", "ACPI runtime (AML, power button, battery)");

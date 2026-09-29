@@ -15,11 +15,12 @@ This document is for someone about to read or change the code. It follows the ma
 | `libs/elf/` | `aurora-elf` | bootloader + kernel | Overflow-checked ELF64 reader |
 | `libs/wavefs/` | `wavefs` | kernel + host | The WaveFS filesystem engine (also used by `mkfs` in xtask) |
 | `libs/fat32/` | `fat32` | kernel | FAT32 with long file names |
+| `libs/wav/` | `aurora-wav` | kernel + user + host | WAV decoding (any rate → 48 kHz stereo) and encoding |
 | `userland/libaurora/` | `aurora` | user | Runtime: entry point, heap, `print!`, files, processes, threads, clipboard, drag and drop, preferences |
 | `userland/ripple/` | `ripple` | user | UI toolkit: windows, event loop, the `App` trait, the `text` editing engine |
 | `userland/apps/*` | `app-*` | user | Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome |
 | `userland/bin/*` | — | user | Command-line tools (`coreutils`), `usertest`, `crashtest` |
-| `xtask/` | `xtask` | host | Build, run, image and test orchestration |
+| `xtask/` | `xtask` | host | Build, run, image and test orchestration; system sounds, a test SSDT (battery, lid) and a USB-stick image |
 | `assets/fonts/` | — | — | Inter and JetBrains Mono, shipped in `/System/Fonts` |
 | `assets/home/` | — | — | Default folders, documents and pictures for a new home volume |
 | `tools/qmp.py` | — | host | Scripted clicks, drags, typing and screenshots for a running VM |
@@ -48,9 +49,12 @@ Everything the loader allocates is `LOADER_DATA`. That memory is reported as `Me
 ## 2. Kernel bring-up (`kernel/src/main.rs`)
 
 ```
-serial → GDT/TSS → IDT → syscall MSRs → mm (frames, heap, drop identity map, vmm)
-      → ACPI → APIC → PS/2 + IRQ routing → VFS (RamFS at /, TarFS at /System)
-      → scheduler → reaper → sti → PCI → block drivers + GPT → mount WaveFS at /, FAT32 at /Boot
+serial → GDT/TSS → IDT → syscall MSRs → FPU → mm (frames, heap, drop identity map, vmm)
+      → ACPI tables → HPET → TSC calibration → APIC → per-CPU data → PS/2 + IRQ routing
+      → VFS (RamFS at /, TarFS at /System) → scheduler → reaper → sti
+      → start the other CPUs (trampoline, INIT-SIPI-SIPI)
+      → PCI → display → block drivers + GPT (MSI/MSI-X) → mount WaveFS at /, FAT32 at /Boot
+      → USB (xHCI) → sound (HDA + mixer) → ACPI runtime (AML task)
       → flusher → spawn "crest" (restores settings, launches Welcome) → idle
 ```
 
@@ -69,25 +73,41 @@ serial → GDT/TSS → IDT → syscall MSRs → mm (frames, heap, drop identity 
 - **Heap** (`mm/heap.rs`): a quarter of RAM, clamped to between 16 and 128 MiB. It is taken as one contiguous run and used through the physical window, so it needs no extra mappings. It is managed by `linked_list_allocator`, with interrupts disabled around each allocation.
 - **Paging** (`mm/paging.rs`): removes the identity map. It also provides `map_mmio` for devices beyond the physical window.
 
+### Clocks
+
+- **HPET** (`drivers/hpet.rs`), found through the ACPI `HPET` table, is the reference clock.
+- **TSC.** When it runs at a constant rate (invariant TSC, or under a hypervisor), it is calibrated against the HPET (or PIT channel 2) and becomes the clock: `time::now_ns()` is a `rdtsc` and a multiply. Otherwise the HPET counter is the clock. An offset keeps time monotonic across sleep, when the counters may restart.
+- **Local APIC timers** are calibrated against the HPET and tick every CPU at **1 kHz**.
+
 ### Interrupts
 
-- **Exceptions.** All exceptions have handlers. Double faults and page faults run on their own IST stacks, so a kernel stack overflow still produces a readable crash screen.
+- **Exceptions.** All exceptions have handlers. Double faults, page faults and NMIs run on their own IST stacks, so a kernel stack overflow still produces a readable crash screen. A kernel page fault inside the user-copy routine is not a crash: it resumes at the routine's error exit (`syscall/user.rs`).
 - **Legacy PIC.** It is remapped to vectors `0xE0`–`0xEF` and fully masked.
-- **Local APIC timer.** It is calibrated against PIT channel 2 and runs periodically at **1 kHz** (vector 32).
-- **I/O APIC.** It routes ISA IRQ1 (keyboard, vector 33) and IRQ12 (mouse, vector 44). It honours the MADT interrupt source overrides, which cover polarity and trigger mode.
+- **I/O APIC.** It routes ISA IRQ1 (keyboard, vector 33) and IRQ12 (mouse, vector 44) and the ACPI SCI, honouring the MADT interrupt source overrides (polarity, trigger mode).
+- **MSI and MSI-X** (`arch/irq.rs`, `pci::Device::enable_msi`). 64 vectors from `0x50` are handed out to devices, each with a handler and argument. Disk, USB and sound controllers use them; a driver whose device has neither falls back to polling.
+- **IPIs.** Reschedule (`0xF0`), TLB shootdown (`0xF1`) and halt-on-panic (`0xF2`).
+
+### Multiprocessing (`arch/smp.rs`, `arch/percpu.rs`)
+
+- **Start-up.** The bootloader reserves a page below 1 MiB. `smp::start_aps` copies a 16→32→64-bit trampoline there, with a small page table (low memory identity-mapped plus the kernel half), and wakes each CPU from the MADT with INIT-SIPI-SIPI. Each gets its own TSS and IST stacks, loads the shared IDT, `syscall` MSRs and FPU setup, starts its APIC timer and joins the scheduler with its own idle task.
+- **Which CPU am I?** Every CPU loads its own TSS selector, so `str` answers anywhere, even in an exception handler. GS is only swapped for a few instructions in the `syscall` entry stub, to find this CPU's kernel stack.
+- **TLB shootdowns.** `vmm::kunmap` and unmapping a multi-threaded address space ask every CPU using those page tables to flush, and wait (servicing their own requests meanwhile).
 
 ### Scheduling (`sched/`)
 
-- **Model.** Kernel threads, with a 128 KiB heap-allocated stack each. The boot context becomes task 0, the idle task.
-- **Policy.** Round-robin with a **10 ms quantum**, preempted from the timer interrupt. Tasks can `sleep_ms`, `yield_now`, or `wait_until(timeout, condition)`. The last is how the compositor sleeps until input arrives: IRQ handlers call `sched::wake`.
-- **Context switch.** In `arch/switch.rs`, it saves only callee-saved registers, because every switch happens inside a function call. The kernel is built soft-float, so there is no FPU state to save.
-- **Locking rule.** On one core with preemption, a plain spinlock held across a preemption deadlocks. Shared state therefore uses `sync::IrqMutex`, which keeps interrupts off while it is held.
+- **Model.** Tasks are kernel threads (128 KiB stacks) and the threads of user processes. Each CPU has a run queue and an idle task (the context that brought it up).
+- **Policy.** Round-robin with a **10 ms quantum**, preempted from each CPU's timer. New tasks go to the least-loaded CPU; woken ones prefer their last CPU, or an idle one, which is kicked with an IPI. An idle CPU steals from the busiest queue.
+- **Switching** is split: under the scheduler lock a CPU picks the next task and records the switch; then it swaps stacks. A task leaving a CPU keeps its `on_cpu` flag until that CPU has switched away (`finish_switch`), and another CPU only reads its saved stack pointer after taking the flag. Dead tasks are freed after the switch.
+- **Waiting.** `wait_until(timeout, condition)` marks the task sleeping *before* testing the condition, so a wakeup from another CPU is never lost. `sync::WaitQueue` builds on it for devices: a driver's interrupt handler wakes the task waiting for its completion.
+- **Pinning and parking.** `spawn_on_bsp` keeps a task on CPU 0 (sleep must start there). `park_aps` moves all work to CPU 0 and halts the others before sleep.
+- **Locking rule.** A spinlock held across a preemption deadlocks, so shared state uses `sync::IrqMutex`, which keeps interrupts off while held. Beware `while let Some(x) = q.lock().pop()`: the guard lives for the whole loop body. Longer critical sections that may block use `sync::Mutex`, which yields.
 
 ### Input
 
 The IRQ handlers decode input straight into a fixed-size, allocation-free ring buffer (`drivers/input.rs`):
 
-- **Keyboard.** Scancode set 1 is translated to USB HID usages (`drivers/keyboard.rs`), and the chosen layout turns usages into characters (`drivers/keymap.rs`: U.S., British, German, French, Spanish, Swedish, with AltGr and dead keys). USB keyboards will share the same tables.
+- **Keyboard.** Scancode set 1 is translated to USB HID usages (`drivers/keyboard.rs`), and the chosen layout turns usages into characters (`drivers/keymap.rs`: U.S., British, German, French, Spanish, Swedish, with AltGr and dead keys). USB keyboards report usages directly and share the same tables; their key repeat is done in software.
+- **USB pointers.** Mice, tablets and VM pointers are read through their HID report descriptors (see below).
 - **Mouse, emulated.** Under QEMU and VMware, the **vmmouse** backdoor gives an absolute pointer, so the guest cursor tracks the host cursor without grabbing it.
 - **Mouse, real hardware.** Standard PS/2 relative packets, with IntelliMouse wheel support.
 
@@ -217,12 +237,40 @@ The same crate formats volumes on the host (`xtask/src/image.rs`). Its tests (`c
 
 The driver reads and writes FAT32 with VFAT long file names, generating `NAME~N.EXT` aliases. Since FAT has no inodes, the driver assigns stable inode numbers from each entry's location. Its tests cross-check against the independent `fatfs` crate in both directions.
 
-## 6. Telemetry and the System Explorer (`telemetry.rs`, `xtask/src/monitor.rs`)
+## 6. Devices and power
+
+### USB (`drivers/usb/`)
+
+- **xHCI** (`xhci.rs`). After taking the controller from the firmware (USB legacy support) and resetting it, the driver works from rings of 16-byte TRBs: a command ring, a transfer ring per endpoint, and an event ring on which the controller reports completions and port changes (with an MSI). Device state lives in contexts; the driver fills in input contexts to address and configure devices.
+- **Two tasks per controller.** `xhci-events` drains the event ring: it completes waiting transfers, feeds interrupt pipes (key presses, pointer motion, hub changes) to their drivers, and reports port changes. `usb` handles those changes: it resets ports, enumerates new devices (address, descriptors, configuration) and hands them to class drivers, or tears down unplugged ones. Transfers may be issued from any task; the controller lock is held only while TRBs are queued.
+- **Class drivers.** `hub.rs` (USB 2 and 3 hubs, with routes and transaction translators), `hid.rs` (boot keyboards; mice and absolute tablets from a report-descriptor parser), `msc.rs` (SCSI over Bulk-Only Transport as a `BlockDevice`; FAT volumes on GPT, MBR or whole-disk media mount at `/Volumes/<label>` and are unmounted on unplug or eject).
+
+### Sound (`drivers/audio/`)
+
+- **Intel HDA** (`hda.rs`). The controller talks to codecs over the CORB/RIRB rings (with the immediate-command registers as fallback). In the audio function group the driver walks the widget graph from every output pin (speaker, headphones, line out) back to a DAC, selects, unmutes and powers that route, and binds every DAC to one output stream: a looping ring of eight 1024-frame buffers at 48 kHz, 16-bit stereo, interrupting (MSI) after each. Headphone jacks with presence detection mute the speakers.
+- **Mixer** (`mod.rs`). Programs write samples to playback streams (`AUDIO_OPEN` gives a file descriptor with back-pressure). The `audio` task sums the streams, applies the master volume (a square curve) and a soft knee, and keeps the ring filled about 64 ms ahead of the device. System sounds are WAV files synthesized at build time into `/System/Sounds`.
+
+### ACPI (`acpi/`)
+
+- **Static tables** (`tables.rs`) are parsed early: MADT, FADT, MCFG, HPET, and `\_S5` by a pattern scan as a fallback.
+- **The runtime** (`runtime.rs`) runs the `acpi` crate's AML interpreter on its own `acpi` task, with a kernel `Handler` (`handler.rs`: physical memory, ports, PCI configuration, time, AML mutexes). It loads the DSDT and SSDTs, initializes devices, reads the sleep states and finds batteries (`_BIX`/`_BIF`, `_BST`), the power adapter (`_PSR`) and the lid (`_LID`). It then waits for SCI events or a 30-second timer to refresh them.
+- **Isolation.** All AML runs on that task. If the interpreter panics on unusual firmware, the panic handler ends only that task: ACPI features switch off and the system keeps running.
+- **The SCI** (`events.rs`) acknowledges the power and sleep buttons and masks fired general-purpose events; the task runs their `\_GPE._Lxx`/`_Exx` methods and re-enables them.
+
+### Sleep (`power/s3.rs`)
+
+1. On CPU 0, after syncing the filesystems and running `\_PTS(3)`, the other CPUs are parked.
+2. The IOAPIC routes and the PCI configuration of every device are saved, the FACS waking vector is pointed at the trampoline page, and the CPU context is saved like `setjmp`.
+3. `SLP_TYP`/`SLP_EN` power everything down but RAM.
+4. On wake, the firmware starts CPU 0 in real mode at the trampoline, which enters long mode and calls `resume_entry`. That reloads the kernel page tables, the GDT and TSS (clearing its busy bit), the IDT, `syscall` and FPU setup, and returns into `suspend` as if the save had just returned.
+5. `suspend` then restores the clocks, the APICs, PCI configuration and MSI/MSI-X routes, each driver's hardware (`drivers::resume`: AHCI, NVMe, virtio, HDA, xHCI, display mode, PS/2), ACPI events and `\_WAK`, and finally restarts the other CPUs.
+
+## 7. Telemetry and the System Explorer (`telemetry.rs`, `xtask/src/monitor.rs`)
 
 When QEMU attaches a second UART (COM2), `telemetry::init` detects it with a scratch-register test and the kernel starts streaming newline-delimited JSON:
 
 - **Events:** `stage` (boot progress), `proc` (start, exit, crash), `win` (open, close), `mount`, `dev`.
-- **Snapshots:** a `telemetry` task writes one every 250 ms. It carries every task with its CPU ticks, the scheduler's switch log since the last snapshot, processes, memory, per-syscall and per-IRQ counters, per-device I/O counters, mounted filesystems, and the window list.
+- **Snapshots:** a `telemetry` task writes one every 250 ms. It carries every task with its CPU time and CPU, the scheduler's switch log since the last snapshot (with the CPU of each switch), per-CPU busy and idle time, device interrupt vectors, processes, memory, per-syscall and per-IRQ counters, per-device I/O counters, mounted filesystems, and the window list.
 
 Lines are written while holding the port lock and without allocating, so events are safe before the heap exists. Without COM2 the hooks cost one relaxed atomic increment.
 
@@ -231,7 +279,7 @@ Lines are written while holding the port lock and without allocating, so events 
 - xtask serves `docs/explorer/index.html` plus a Server-Sent Events stream at `/events`. The stream replays history, so a page opened late still sees the boot.
 - The page is a single self-contained file with no dependencies. With no server it plays `docs/explorer/demo.js`, a recorded session.
 
-## 7. Testing
+## 8. Testing
 
 - **`cargo xtask test`.** It builds the kernel with `--features ktest`. The tests in `kernel/src/tests.rs` cover:
   - the frame allocator and the heap
@@ -245,12 +293,18 @@ Lines are written while holding the port lock and without allocating, so events 
   - keyboard layouts, AltGr and dead keys
   - the TrueType engine with the installed faces
   - Spotlight's calculator and file index, the clipboard, and the Trash with Put Back
-  - storage: a GPT read, a write-and-verify round trip on the real controller, WaveFS through the kernel adapter on a RAM disk, WaveFS on the home volume checked with `fsck`, and FAT32 on `/Boot`
+  - storage: a GPT read, a write-and-verify round trip on the real controller (checking that completions arrive by interrupt), WaveFS through the kernel adapter on a RAM disk, WaveFS on the home volume checked with `fsck`, and FAT32 on `/Boot`
+  - SMP: work on every CPU with lock stress, TLB shootdowns, the TSC against the HPET
+  - user copies that fault, recovering with `EFAULT`
+  - sound: a tone through HDA (the host also checks that QEMU's WAV recording isn't silent)
+  - ACPI: AML, sleep types, the test battery, adapter and lid; and that a failing AML task leaves the system running
+  - USB: a hub with a keyboard behind it, a tablet, and a FAT32 stick mounted, read and written
+  - sleep: S3 (the harness wakes the VM over QMP), then CPUs, work on every CPU, disk I/O, sound and USB after waking
 
   `usertest` also covers threads, futexes and SIMD state surviving preemption.
 
   The kernel reports through QEMU's `isa-debug-exit` device. `xtask test` boots the same fresh disk **twice**: the first boot leaves a file, and the second must find it intact.
 - **Headless boots.** `cargo xtask run --headless` exposes QEMU's HMP monitor at `target/qemu-monitor.sock` and QMP at `target/qemu-qmp.sock`. That makes it possible to script screenshots and input (`screendump`, `input-send-event`).
-- **Host tests.** `cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling) and the image codecs (against the `png` crate).
+- **Host tests.** `cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p xtask` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling), the image codecs (against the `png` crate), WAV decoding and the AML assembler for the test SSDT.
 - **Scripted UI.** `tools/qmp.py` clicks, types and takes screenshots in a running VM.
-- **CI.** On every push, CI runs the host tests, the kernel suite on AHCI, virtio-blk and NVMe, and a headless boot to the desktop.
+- **CI.** On every push, CI runs the host tests, the kernel suite on AHCI, virtio-blk and NVMe with 4 CPUs (and AHCI with 1 CPU), and a headless boot to the desktop.

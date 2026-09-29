@@ -67,7 +67,11 @@ static SLEEPING: AtomicBool = AtomicBool::new(false);
 
 /// Whether this machine can sleep (AML gave `\_S3`, and we have a FACS and a trampoline page).
 pub fn available() -> bool {
-    crate::acpi::sleep_type(3).is_some() && crate::power::info().is_some_and(|a| a.facs != 0) && smp::trampoline() != 0
+    // `sleep=off` in boot.conf: for machines whose firmware can't resume.
+    crate::gui::prefs::boot_option("sleep").as_deref() != Some("off")
+        && crate::acpi::sleep_type(3).is_some()
+        && crate::power::info().is_some_and(|a| a.facs != 0)
+        && smp::trampoline() != 0
 }
 
 /// First code after waking, on the boot CPU with the trampoline's page tables.

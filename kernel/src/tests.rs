@@ -47,6 +47,9 @@ const TESTS: &[Test] = &[
 ];
 
 pub fn run() {
+    // Devices present at boot finish setting up first (the frame counts
+    // some tests compare would otherwise move underneath them).
+    crate::drivers::usb::settle(10_000);
     crate::kprintln!("\nrunning {} kernel tests", TESTS.len());
     for (name, test) in TESTS {
         crate::kprint!("test {name} ... ");

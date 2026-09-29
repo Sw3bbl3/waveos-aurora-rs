@@ -84,6 +84,26 @@ pub fn refresh_esp(esp: &Path, img: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Sets `key=value` in `\aurora\boot.conf` on a fresh image's ESP.
+pub fn set_boot_option(img: &Path, key: &str, value: &str) -> io::Result<()> {
+    let mut file = OpenOptions::new().read(true).write(true).open(img)?;
+    let old = read_boot_conf(&mut file, ESP_START, ESP_SECTORS).unwrap_or_default();
+    let mut text: String = String::from_utf8_lossy(&old)
+        .lines()
+        .filter(|l| l.split_once('=').is_none_or(|(k, _)| k.trim() != key))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    text.push_str(&format!("{key}={value}\n"));
+    let part = Region { file: &mut file, start: ESP_START * SECTOR, len: ESP_SECTORS * SECTOR, pos: 0 };
+    let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new())?;
+    let mut f = fs.root_dir().create_file("aurora/boot.conf")?;
+    f.truncate()?;
+    f.write_all(text.as_bytes())?;
+    drop(f);
+    fs.unmount()?;
+    Ok(())
+}
+
 fn read_boot_conf(file: &mut File, start: u64, sectors: u64) -> Option<Vec<u8>> {
     let part = Region { file, start: start * SECTOR, len: sectors * SECTOR, pos: 0 };
     let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new()).ok()?;

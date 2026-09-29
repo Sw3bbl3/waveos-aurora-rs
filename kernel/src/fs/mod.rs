@@ -83,6 +83,47 @@ struct Mount {
 }
 
 static MOUNTS: IrqMutex<Vec<Mount>> = IrqMutex::new(Vec::new());
+/// `/` is a WaveFS volume (files persist), not the in-memory fallback.
+static PERSISTENT_ROOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn root_persistent() -> bool {
+    PERSISTENT_ROOT.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Mounts an EFI System Partition found later (on a USB disk) at `/Boot`
+/// when boot found none. Returns whether it did.
+pub fn adopt_boot(dev: Arc<dyn crate::drivers::block::BlockDevice>) -> bool {
+    if MOUNTS.lock().iter().any(|m| m.path == "/Boot") {
+        return false;
+    }
+    match fat::FatFs::mount(dev) {
+        Ok(fs) => {
+            mount("/Boot", Arc::new(fs));
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Makes a WaveFS volume found later (on a USB disk) the home volume, when
+/// boot found none. Returns whether it did.
+pub fn adopt_home(dev: Arc<dyn crate::drivers::block::BlockDevice>) -> bool {
+    if root_persistent() {
+        return false;
+    }
+    match wavefs::WaveFs::mount(dev.clone()) {
+        Ok(fs) => {
+            mount("/", Arc::new(fs));
+            PERSISTENT_ROOT.store(true, core::sync::atomic::Ordering::Release);
+            log!("vfs", "home volume on {} ({})", dev.name(), dev.describe());
+            true
+        }
+        Err(e) => {
+            log!("vfs", "{}: WaveFS mount failed: {}", dev.name(), aurora_abi::err::name(e));
+            false
+        }
+    }
+}
 
 pub fn mount(path: &str, fs: Arc<dyn Filesystem>) {
     log!("vfs", "mounted {} at {}", fs.describe(), path);
@@ -489,6 +530,7 @@ pub fn mount_disks() {
                 Ok(fs) => {
                     mount("/", Arc::new(fs));
                     root_found = true;
+                    PERSISTENT_ROOT.store(true, core::sync::atomic::Ordering::Release);
                 }
                 Err(e) => log!("vfs", "{}: WaveFS mount failed: {}", dev.name(), aurora_abi::err::name(e)),
             }
