@@ -36,6 +36,13 @@ pub fn init(phys: Option<u64>) {
     log!("hpet", "HPET at {:#x}, {} MHz", phys, 1_000_000_000_000_000 / period / 1_000_000);
 }
 
+/// Restarts the main counter after sleep (its configuration is lost).
+pub fn resume() {
+    if present() {
+        write(REG_CONFIG, read(REG_CONFIG) | 1);
+    }
+}
+
 pub fn present() -> bool {
     PERIOD_FS.load(Ordering::Relaxed) != 0
 }

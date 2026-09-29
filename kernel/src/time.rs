@@ -15,6 +15,10 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 /// TSC frequency in Hz (0 = not used as the clock).
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 static TSC_BASE: AtomicU64 = AtomicU64::new(0);
+/// Added to the hardware clock, so time continues across sleep (the TSC or
+/// HPET may restart from zero when the machine wakes).
+static OFFSET_NS: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+static SUSPENDED_AT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Source {
@@ -84,8 +88,29 @@ pub fn source() -> Source {
     }
 }
 
-/// Nanoseconds since the clock started.
+/// Nanoseconds since the clock started (sleep excluded).
 pub fn now_ns() -> u64 {
+    (raw_ns() as i64 + OFFSET_NS.load(Ordering::Relaxed)).max(0) as u64
+}
+
+/// Before sleeping: remember where time stands.
+pub fn suspend() {
+    SUSPENDED_AT.store(now_ns(), Ordering::Release);
+}
+
+/// After waking: restart the counters and continue from where time stood.
+pub fn resume() {
+    crate::drivers::hpet::resume();
+    if TSC_HZ.load(Ordering::Relaxed) != 0 {
+        TSC_BASE.store(unsafe { _rdtsc() }, Ordering::Relaxed);
+    }
+    let at = SUSPENDED_AT.load(Ordering::Acquire) as i64;
+    OFFSET_NS.store(at - raw_ns() as i64, Ordering::Release);
+    // The date moved on while asleep.
+    init_wall_clock_at(uptime_ms());
+}
+
+fn raw_ns() -> u64 {
     let hz = TSC_HZ.load(Ordering::Relaxed);
     if hz != 0 {
         let d = unsafe { _rdtsc() }.wrapping_sub(TSC_BASE.load(Ordering::Relaxed));
@@ -110,7 +135,12 @@ static BOOT_WALL: AtomicU64 = AtomicU64::new(0);
 
 /// Records the RTC time at boot so wall-clock time can be derived from uptime.
 pub fn init_wall_clock() {
-    BOOT_WALL.store(seconds_since_2000(&crate::drivers::rtc::now()), Ordering::Relaxed);
+    init_wall_clock_at(0);
+}
+
+fn init_wall_clock_at(uptime_ms: u64) {
+    let now = seconds_since_2000(&crate::drivers::rtc::now());
+    BOOT_WALL.store(now.saturating_sub(uptime_ms / 1000), Ordering::Relaxed);
 }
 
 /// Sets the date and time (hardware clock and the kernel's wall clock).

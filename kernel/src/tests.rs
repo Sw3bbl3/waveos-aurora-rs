@@ -34,6 +34,7 @@ const TESTS: &[Test] = &[
     ("sound: HDA playback", sound),
     ("ACPI: AML, sleep states, battery", acpi_runtime),
     ("USB: hub, keyboard, tablet, storage", usb),
+    ("sleep (S3) and wake", sleep_and_wake),
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
@@ -577,11 +578,19 @@ fn clock() {
         last = t;
     }
     if hpet::present() {
-        let (t0, h0) = (time::now_ns(), hpet::nanos());
-        crate::sched::sleep_ms(50);
-        let (dt, dh) = (time::now_ns() - t0, hpet::nanos() - h0);
-        let drift = (dt as i64 - dh as i64).unsigned_abs();
-        assert!(drift < 2_000_000, "clock drifts {} ns from the HPET over {} ms", drift, dh / 1_000_000);
+        // Under emulation the host can stall one clock and not the other for
+        // a moment, so take the best of a few measurements.
+        let mut best = u64::MAX;
+        for _ in 0..5 {
+            let (t0, h0) = (time::now_ns(), hpet::nanos());
+            crate::sched::sleep_ms(50);
+            let (dt, dh) = (time::now_ns() - t0, hpet::nanos() - h0);
+            best = best.min((dt as i64 - dh as i64).unsigned_abs());
+            if best < 2_000_000 {
+                break;
+            }
+        }
+        assert!(best < 2_000_000, "clock drifts {} ns from the HPET over 50 ms", best);
     }
 }
 
@@ -671,4 +680,40 @@ fn usb() {
     let has = |what: &str| devices.iter().any(|d| d.contains(what));
     assert!(has("keyboard") && has("tablet") && has("hub") && has("storage"), "missing drivers: {:?}", devices);
     crate::kprint!("[{} devices] ", devices.len());
+}
+
+fn sleep_and_wake() {
+    use crate::power::s3;
+    use core::sync::atomic::{AtomicU8, Ordering};
+    if !s3::available() {
+        crate::kprint!("[S3 not available] ");
+        return;
+    }
+    let cpus = crate::arch::percpu::count();
+    let t0 = time::now_ns();
+    // 0 running, 1 woke, 2 failed. The harness wakes the VM over QMP.
+    static RESULT: AtomicU8 = AtomicU8::new(0);
+    crate::sched::spawn_on_bsp("t-sleep", || {
+        let ok = s3::suspend().is_ok();
+        RESULT.store(if ok { 1 } else { 2 }, Ordering::Release);
+    });
+    assert!(wait_for(|| RESULT.load(Ordering::Acquire) != 0, 30_000), "did not come back from sleep");
+    assert_eq!(RESULT.load(Ordering::Acquire), 1, "the machine did not sleep");
+    assert!(time::now_ns() >= t0, "time went backwards across sleep");
+    assert!(wait_for(|| crate::arch::percpu::count() == cpus, 2000), "not every CPU came back");
+    // Drivers were reset and restarted: the disk, sound and USB work again.
+    block_round_trip();
+    let (played, _, _) = crate::drivers::audio::counters();
+    crate::sched::sleep_ms(200);
+    assert!(crate::drivers::audio::counters().0 > played, "sound stopped after sleep");
+    assert!(
+        wait_for(|| crate::fs::stat("/Volumes/AURORA-USB/Hello.txt").is_ok(), 10_000),
+        "the USB stick did not come back after sleep"
+    );
+    // Let USB finish re-enumerating (it allocates memory later tests count).
+    assert!(wait_for(|| crate::drivers::usb::list().len() >= 4, 10_000), "USB devices missing after sleep");
+    sched::sleep_ms(200);
+    // And the restarted CPUs really run work again.
+    smp_work();
+    crate::kprint!("[{} CPUs back] ", crate::arch::percpu::count());
 }

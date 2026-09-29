@@ -122,6 +122,7 @@ impl Queue {
 
 pub struct VirtioBlk {
     index: usize,
+    common: Common,
     queue: Mutex<Queue>,
     sectors: u64,
 }
@@ -164,6 +165,83 @@ impl BlockDevice for VirtioBlk {
 
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// The common configuration structure (feature negotiation, queues, status).
+#[derive(Clone, Copy)]
+struct Common(u64);
+
+impl Common {
+    fn r8(&self, o: u64) -> u8 {
+        unsafe { ((self.0 + o) as *const u8).read_volatile() }
+    }
+    fn w8(&self, o: u64, v: u8) {
+        unsafe { ((self.0 + o) as *mut u8).write_volatile(v) }
+    }
+    fn r16(&self, o: u64) -> u16 {
+        unsafe { ((self.0 + o) as *const u16).read_volatile() }
+    }
+    fn w16(&self, o: u64, v: u16) {
+        unsafe { ((self.0 + o) as *mut u16).write_volatile(v) }
+    }
+    fn r32(&self, o: u64) -> u32 {
+        unsafe { ((self.0 + o) as *const u32).read_volatile() }
+    }
+    fn w32(&self, o: u64, v: u32) {
+        unsafe { ((self.0 + o) as *mut u32).write_volatile(v) }
+    }
+    fn w64(&self, o: u64, v: u64) {
+        self.w32(o, v as u32);
+        self.w32(o + 4, (v >> 32) as u32);
+    }
+
+    /// Resets the device and negotiates VIRTIO_F_VERSION_1 (feature bit 32), nothing else.
+    fn negotiate(&self) -> bool {
+        self.w8(DEVICE_STATUS, 0);
+        if wait_for(500, || self.r8(DEVICE_STATUS) == 0).is_err() {
+            return false;
+        }
+        self.w8(DEVICE_STATUS, STATUS_ACK);
+        self.w8(DEVICE_STATUS, STATUS_ACK | STATUS_DRIVER);
+        self.w32(DEVICE_FEATURE_SELECT, 1);
+        if self.r32(DEVICE_FEATURE) & 1 == 0 {
+            log!("virtio", "device is not virtio 1.0");
+            return false;
+        }
+        self.w32(DRIVER_FEATURE_SELECT, 0);
+        self.w32(DRIVER_FEATURE, 0);
+        self.w32(DRIVER_FEATURE_SELECT, 1);
+        self.w32(DRIVER_FEATURE, 1);
+        self.w8(DEVICE_STATUS, STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK);
+        if self.r8(DEVICE_STATUS) & STATUS_FEATURES_OK == 0 {
+            log!("virtio", "feature negotiation failed");
+            return false;
+        }
+        self.w16(QUEUE_SELECT, 0);
+        self.r16(QUEUE_SIZE) >= QSIZE
+    }
+
+    /// Points queue 0 at `ring`, routes it to MSI-X entry 0 if `msix`, and
+    /// starts the device. Returns whether the device took the vector.
+    fn start_queue(&self, ring: u64, msix: bool) -> bool {
+        self.w16(QUEUE_SELECT, 0);
+        self.w16(QUEUE_SIZE, QSIZE);
+        self.w64(QUEUE_DESC, ring + DESC_OFF as u64);
+        self.w64(QUEUE_DRIVER, ring + AVAIL_OFF as u64);
+        self.w64(QUEUE_DEVICE, ring + USED_OFF as u64);
+        // Configuration changes need no interrupt.
+        self.w16(MSIX_CONFIG, NO_VECTOR);
+        let vector = msix && {
+            self.w16(QUEUE_MSIX_VECTOR, 0);
+            self.r16(QUEUE_MSIX_VECTOR) == 0
+        };
+        self.w16(QUEUE_ENABLE, 1);
+        self.w8(DEVICE_STATUS, STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
+        vector
+    }
+}
+
+static DISKS: crate::sync::IrqMutex<alloc::vec::Vec<Arc<VirtioBlk>>> =
+    crate::sync::IrqMutex::new(alloc::vec::Vec::new());
+
 pub fn probe(dev: &pci::Device) {
     dev.enable();
     let mut common = 0;
@@ -188,65 +266,38 @@ pub fn probe(dev: &pci::Device) {
         log!("virtio", "device {:04x} lacks modern virtio capabilities", dev.device);
         return;
     }
-    let r8 = |o: u64| unsafe { ((common + o) as *const u8).read_volatile() };
-    let w8 = |o: u64, v: u8| unsafe { ((common + o) as *mut u8).write_volatile(v) };
-    let r16 = |o: u64| unsafe { ((common + o) as *const u16).read_volatile() };
-    let w16 = |o: u64, v: u16| unsafe { ((common + o) as *mut u16).write_volatile(v) };
-    let r32 = |o: u64| unsafe { ((common + o) as *const u32).read_volatile() };
-    let w32 = |o: u64, v: u32| unsafe { ((common + o) as *mut u32).write_volatile(v) };
-    let w64 = |o: u64, v: u64| {
-        w32(o, v as u32);
-        w32(o + 4, (v >> 32) as u32);
-    };
-
-    // Reset and negotiate: we only need VIRTIO_F_VERSION_1 (feature bit 32).
-    w8(DEVICE_STATUS, 0);
-    if wait_for(500, || r8(DEVICE_STATUS) == 0).is_err() {
+    let c = Common(common);
+    if !c.negotiate() {
         return;
     }
-    w8(DEVICE_STATUS, STATUS_ACK);
-    w8(DEVICE_STATUS, STATUS_ACK | STATUS_DRIVER);
-    w32(DEVICE_FEATURE_SELECT, 1);
-    if r32(DEVICE_FEATURE) & 1 == 0 {
-        log!("virtio", "device is not virtio 1.0");
-        return;
-    }
-    w32(DRIVER_FEATURE_SELECT, 0);
-    w32(DRIVER_FEATURE, 0);
-    w32(DRIVER_FEATURE_SELECT, 1);
-    w32(DRIVER_FEATURE, 1);
-    w8(DEVICE_STATUS, STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK);
-    if r8(DEVICE_STATUS) & STATUS_FEATURES_OK == 0 {
-        log!("virtio", "feature negotiation failed");
-        return;
-    }
-
-    w16(QUEUE_SELECT, 0);
-    if r16(QUEUE_SIZE) < QSIZE {
-        return;
-    }
-    w16(QUEUE_SIZE, QSIZE);
     let (Some(ring), Some(io)) = (Dma::new(8192), Dma::new(DATA_OFF + MAX_BYTES)) else { return };
-    w64(QUEUE_DESC, ring.phys + DESC_OFF as u64);
-    w64(QUEUE_DRIVER, ring.phys + AVAIL_OFF as u64);
-    w64(QUEUE_DEVICE, ring.phys + USED_OFF as u64);
-    let notify_addr = notify.0 + r16(QUEUE_NOTIFY_OFF) as u64 * notify.1 as u64;
-    // Queue interrupts on MSI-X entry 0; configuration changes need none.
+    let notify_addr = notify.0 + c.r16(QUEUE_NOTIFY_OFF) as u64 * notify.1 as u64;
     let waitq: &'static WaitQueue = Box::leak(Box::new(WaitQueue::new()));
-    let mut irq = None;
-    w16(MSIX_CONFIG, NO_VECTOR);
-    if dev.enable_msi("virtio-blk", interrupt, waitq as *const WaitQueue as usize).is_some() {
-        w16(QUEUE_MSIX_VECTOR, 0);
-        if r16(QUEUE_MSIX_VECTOR) == 0 {
-            irq = Some(waitq);
-            log!("virtio", "interrupts via MSI-X");
-        }
+    let msix = dev.enable_msi("virtio-blk", interrupt, waitq as *const WaitQueue as usize).is_some();
+    let irq = c.start_queue(ring.phys, msix).then_some(waitq);
+    if irq.is_some() {
+        log!("virtio", "interrupts via MSI-X");
     }
-    w16(QUEUE_ENABLE, 1);
-    w8(DEVICE_STATUS, STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
-
     let sectors = unsafe { (device_cfg as *const u64).read_volatile() };
     let index = COUNT.fetch_add(1, Ordering::Relaxed);
     let q = Queue { notify_addr, ring, io, avail_idx: 0, last_used: 0, irq };
-    register(Arc::new(VirtioBlk { index, queue: Mutex::new(q), sectors }));
+    let disk = Arc::new(VirtioBlk { index, common: c, queue: Mutex::new(q), sectors });
+    DISKS.lock().push(disk.clone());
+    register(disk);
+}
+
+/// After sleep: the device was reset; negotiate again and restart its queue.
+pub fn resume() {
+    let disks: alloc::vec::Vec<Arc<VirtioBlk>> = DISKS.lock().clone();
+    for d in disks {
+        let mut q = d.queue.lock();
+        q.ring.bytes_mut().fill(0);
+        q.avail_idx = 0;
+        q.last_used = 0;
+        if !d.common.negotiate() {
+            log!("virtio", "vd{}: device did not come back after sleep", (b'a' + d.index as u8) as char);
+            continue;
+        }
+        d.common.start_queue(q.ring.phys, q.irq.is_some());
+    }
 }

@@ -464,6 +464,12 @@ impl Desktop {
                 }
                 Request::Shutdown => self.power = Some(PowerAction::Shutdown),
                 Request::Reboot => self.power = Some(PowerAction::Reboot),
+                Request::Sleep => {
+                    if let Some(id) = source {
+                        self.close(id);
+                    }
+                    crate::power::sleep();
+                }
                 Request::KeepDisplay | Request::RevertDisplay => {
                     let revert = matches!(req, Request::RevertDisplay);
                     if let Some(prev) = self.previous_resolution.take() {
@@ -620,6 +626,8 @@ impl Desktop {
                 Command::Pref(key) => self.pref_changed(&key),
                 Command::PowerButton => self.open(AppKind::Power),
                 Command::PowerChanged => self.damage(Rect::new(0, 0, self.w, MENUBAR_H)),
+                // The screen lost its contents while asleep.
+                Command::Resumed => self.damage_all(),
                 Command::SetResolution(w, h) => {
                     if (w as i32, h as i32) != (self.w, self.h) {
                         self.previous_resolution.get_or_insert((self.w as u32, self.h as u32));

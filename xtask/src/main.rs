@@ -363,6 +363,8 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         fs::write(&ssdt, aml::battery_ssdt()).expect("write battery SSDT");
         cmd.arg("-acpitable").arg(format!("file={}", ssdt.display()));
     }
+    // Allow S3 (suspend to RAM); wake with QMP `system_wakeup` or a key press.
+    cmd.args(["-global", "ICH9-LPC.disable_s3=0"]);
     cmd.args(["-rtc", "base=localtime"]);
     cmd.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     cmd.args(["-serial", "stdio"]);
@@ -414,6 +416,22 @@ fn test(profile: Profile, disk: &str, smp: u32) {
     println!("\nall kernel tests passed (both boots)");
 }
 
+/// Sends one QMP command to the running VM.
+fn qmp_command(command: &str) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    let sock = std::os::unix::net::UnixStream::connect(root().join("target/qemu-qmp.sock"))?;
+    let mut reader = BufReader::new(sock.try_clone()?);
+    let mut greeting = String::new();
+    reader.read_line(&mut greeting)?;
+    let mut w = sock;
+    for c in ["qmp_capabilities", command] {
+        writeln!(w, "{{\"execute\": \"{c}\"}}")?;
+        let mut reply = String::new();
+        reader.read_line(&mut reply)?;
+    }
+    Ok(())
+}
+
 /// The loudest sample in a 16-bit PCM WAV recording (0 if unreadable). The
 /// header is skipped by size, since QEMU may not have finalized it.
 fn recorded_peak(path: &Path) -> i32 {
@@ -455,6 +473,15 @@ fn run_tests_once(img: &Path, disk: &str, smp: u32) -> String {
         let mut all = String::new();
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             println!("{line}");
+            if line.contains("power: entering S3") {
+                // The sleep test: wake the machine like a key press would.
+                std::thread::spawn(|| {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    if let Err(e) = qmp_command("system_wakeup") {
+                        eprintln!("could not wake the VM: {e}");
+                    }
+                });
+            }
             all.push_str(&line);
             all.push('\n');
         }

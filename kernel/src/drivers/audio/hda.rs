@@ -228,6 +228,8 @@ pub struct Hda {
     pins: Vec<Pin>,
     headphones: AtomicBool,
     name: String,
+    /// The codec configuration verbs, replayed after sleep.
+    setup: Mutex<Vec<u32>>,
 }
 
 /// MSI handler: acknowledges the stream's buffer-complete status and wakes the mixer.
@@ -241,6 +243,12 @@ fn interrupt(arg: usize) {
 impl Hda {
     fn command(&self, v: u32) -> u32 {
         self.cmd.lock().send(v).unwrap_or(0)
+    }
+
+    /// Sends a configuration verb and remembers it for resume.
+    fn configure(&self, v: u32) {
+        self.command(v);
+        self.setup.lock().push(v);
     }
 
     fn param(&self, nid: u32, p: u32) -> u32 {
@@ -304,26 +312,26 @@ impl Hda {
         let cad = self.cad;
         for &(nid, input) in path {
             let w = &widgets[&nid];
-            self.command(verb(cad, nid, SET_POWER, 0));
+            self.configure(verb(cad, nid, SET_POWER, 0));
             if w.kind != W_MIXER && w.conns.len() > 1 {
-                self.command(verb(cad, nid, SET_CONN_SELECT, input as u32));
+                self.configure(verb(cad, nid, SET_CONN_SELECT, input as u32));
             }
             if w.caps & (1 << 1) != 0 {
                 // Input amp: bit 14 input, 13/12 left/right, 11:8 index.
                 let gain = Self::unmuted(w.in_amp);
-                self.command(verb4(cad, nid, SET_AMP4, 0x7000 | (input as u32) << 8 | gain));
+                self.configure(verb4(cad, nid, SET_AMP4, 0x7000 | (input as u32) << 8 | gain));
             }
             if w.caps & (1 << 2) != 0 {
                 // Output amp: bit 15 output, 13/12 left/right.
-                self.command(verb4(cad, nid, SET_AMP4, 0xB000 | Self::unmuted(w.out_amp)));
+                self.configure(verb4(cad, nid, SET_AMP4, 0xB000 | Self::unmuted(w.out_amp)));
             }
         }
         let d = &widgets[&dac];
-        self.command(verb(cad, dac, SET_POWER, 0));
-        self.command(verb4(cad, dac, SET_FORMAT4, FORMAT as u32));
-        self.command(verb(cad, dac, SET_CHANNEL_STREAM, STREAM_TAG << 4));
+        self.configure(verb(cad, dac, SET_POWER, 0));
+        self.configure(verb4(cad, dac, SET_FORMAT4, FORMAT as u32));
+        self.configure(verb(cad, dac, SET_CHANNEL_STREAM, STREAM_TAG << 4));
         if d.caps & (1 << 2) != 0 {
-            self.command(verb4(cad, dac, SET_AMP4, 0xB000 | Self::unmuted(d.out_amp)));
+            self.configure(verb4(cad, dac, SET_AMP4, 0xB000 | Self::unmuted(d.out_amp)));
         }
     }
 
@@ -450,6 +458,7 @@ pub fn probe(dev: &pci::Device) -> Option<Arc<dyn Output>> {
         pins: Vec::new(),
         headphones: AtomicBool::new(false),
         name: String::new(),
+        setup: Mutex::new(Vec::new()),
     };
     for cad in 0..15 {
         if codecs & (1 << cad) != 0 {
@@ -465,11 +474,37 @@ pub fn probe(dev: &pci::Device) -> Option<Arc<dyn Output>> {
     }
     start_stream(&hda);
     let hda: &'static Hda = Box::leak(Box::new(hda));
+    DEVICE.call_once(|| hda);
     if dev.enable_msi("hda", interrupt, hda as *const Hda as usize).is_some() {
         hda.has_irq.store(true, Ordering::Relaxed);
         regs.w32(INTCTL, 1 << 31 | 1 << inputs); // global + this stream
     }
     Some(Arc::new(HdaRef(hda)))
+}
+
+static DEVICE: spin::Once<&'static Hda> = spin::Once::new();
+
+/// After sleep: reset the controller, replay the codec setup, restart the stream.
+pub fn resume() {
+    let Some(&h) = DEVICE.get() else { return };
+    let Some(cmd) = reset(h.regs) else {
+        log!("hda", "controller did not come back after sleep");
+        return;
+    };
+    *h.cmd.lock() = cmd;
+    let verbs = h.setup.lock().clone();
+    for v in verbs {
+        h.command(v);
+    }
+    // Outputs on; the next jack check mutes speakers if headphones are in.
+    h.headphones.store(false, Ordering::Relaxed);
+    for p in &h.pins {
+        h.enable_pin(p, true);
+    }
+    start_stream(h);
+    if h.has_irq.load(Ordering::Relaxed) {
+        h.regs.w32(INTCTL, 1 << 31 | 1 << ((h.sd - 0x80) / 0x20));
+    }
 }
 
 /// The mixer's handle to the controller (which lives as long as the system).
@@ -508,7 +543,7 @@ fn set_up_codec(hda: &mut Hda) -> bool {
     else {
         return false;
     };
-    hda.command(verb(hda.cad, afg, SET_POWER, 0));
+    hda.configure(verb(hda.cad, afg, SET_POWER, 0));
     delay_us(1000);
     let afg_in_amp = hda.param(afg, P_IN_AMP);
     let afg_out_amp = hda.param(afg, P_OUT_AMP);

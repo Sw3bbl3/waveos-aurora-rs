@@ -61,6 +61,8 @@ struct Task {
     on_cpu: AtomicBool,
     /// Idle tasks never go on a queue.
     idle: bool,
+    /// Runs only on CPU 0 (suspend: firmware resumes on the boot CPU).
+    bsp_only: bool,
 }
 
 struct Cpu {
@@ -83,6 +85,10 @@ struct Scheduler {
 static SCHED: IrqMutex<Option<Scheduler>> = IrqMutex::new(None);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static STARTED: AtomicBool = AtomicBool::new(false);
+/// The application processors are being parked (before sleep): they run
+/// nothing but their idle task, which halts.
+static PARKING: AtomicBool = AtomicBool::new(false);
+static PARKED: AtomicU64 = AtomicU64::new(0);
 
 fn new_task(
     name: &str,
@@ -107,6 +113,7 @@ fn new_task(
         running_on: None,
         on_cpu: AtomicBool::new(false),
         idle: false,
+        bsp_only: false,
     })
 }
 
@@ -130,9 +137,14 @@ fn adopt_idle(s: &mut Scheduler, cpu: usize, id: TaskId) {
         });
     }
     let c = &mut s.cpus[cpu];
+    // A CPU restarted after sleep: its old idle context is gone.
+    let old = core::mem::replace(&mut c.idle, id);
     c.current = id;
-    c.idle = id;
+    c.prev = None;
     c.slice_start = time::now_ns();
+    if old != id && old != 0 && s.tasks.get(&old).is_some_and(|t| t.idle) {
+        s.tasks.remove(&old);
+    }
     let pc = &percpu::CPUS[cpu];
     pc.idle.store(true, Ordering::Relaxed);
     pc.task.store(id, Ordering::Relaxed);
@@ -178,11 +190,12 @@ fn least_loaded(s: &Scheduler) -> usize {
 
 /// Queues a ready task on `cpu`; returns the CPU to kick with an IPI, if any.
 fn enqueue(s: &mut Scheduler, id: TaskId, mut cpu: usize) -> Option<usize> {
-    if cpu >= s.cpus.len() || !percpu::CPUS[cpu].online.load(Ordering::Acquire) {
+    let bsp_only = s.tasks.get(&id).is_some_and(|t| t.bsp_only);
+    if bsp_only || cpu >= s.cpus.len() || !percpu::CPUS[cpu].online.load(Ordering::Acquire) {
         cpu = 0;
     }
     // Prefer an idle CPU over waiting behind a busy one.
-    if s.cpus[cpu].current != s.cpus[cpu].idle || !s.cpus[cpu].queue.is_empty() {
+    if !bsp_only && (s.cpus[cpu].current != s.cpus[cpu].idle || !s.cpus[cpu].queue.is_empty()) {
         if let Some(idle) = percpu::online()
             .find(|&c| c < s.cpus.len() && s.cpus[c].current == s.cpus[c].idle && s.cpus[c].queue.is_empty())
         {
@@ -202,8 +215,21 @@ fn kick(cpu: Option<usize>) {
     }
 }
 
+/// Spawns a kernel thread that only ever runs on CPU 0.
+pub fn spawn_on_bsp(name: &str, f: fn()) -> TaskId {
+    fn call(f: u64) {
+        let f: fn() = unsafe { core::mem::transmute(f as usize) };
+        f();
+    }
+    spawn_inner(name, call, f as usize as u64, 0, vmm::kernel_pml4(), true)
+}
+
 /// Spawns a task running `f(arg)` in process `pid` with page tables `cr3`.
 pub fn spawn_task(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64) -> TaskId {
+    spawn_inner(name, f, arg, pid, cr3, false)
+}
+
+fn spawn_inner(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64, bsp_only: bool) -> TaskId {
     let stack = alloc::vec![0u8; STACK_SIZE].into_boxed_slice();
     let top = (stack.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -211,8 +237,10 @@ pub fn spawn_task(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64) -> TaskI
     let target = interrupts::without_interrupts(|| {
         let mut guard = SCHED.lock();
         let s = guard.as_mut().unwrap();
-        let cpu = least_loaded(s);
-        s.tasks.insert(id, new_task(name, rsp, Some(stack), pid, cr3, top, cpu));
+        let cpu = if bsp_only { 0 } else { least_loaded(s) };
+        let mut t = new_task(name, rsp, Some(stack), pid, cr3, top, cpu);
+        t.bsp_only = bsp_only;
+        s.tasks.insert(id, t);
         enqueue(s, id, cpu)
     });
     kick(target);
@@ -263,6 +291,9 @@ pub fn wake_process(pid: u32) {
 
 /// Takes the next task for `cpu`: its own queue first, then the busiest other queue.
 fn pick_next(s: &mut Scheduler, cpu: usize) -> Option<TaskId> {
+    if cpu != 0 && PARKING.load(Ordering::Acquire) {
+        return None;
+    }
     while let Some(id) = s.cpus[cpu].queue.pop_front() {
         if s.tasks.get(&id).is_some_and(|t| t.state == State::Ready && t.running_on.is_none()) {
             return Some(id);
@@ -270,8 +301,9 @@ fn pick_next(s: &mut Scheduler, cpu: usize) -> Option<TaskId> {
     }
     let victim = (0..s.cpus.len()).filter(|&c| c != cpu).max_by_key(|&c| s.cpus[c].queue.len())?;
     let q = &mut s.cpus[victim].queue;
-    let pos =
-        q.iter().position(|id| s.tasks.get(id).is_some_and(|t| t.state == State::Ready && t.running_on.is_none()))?;
+    let pos = q.iter().position(|id| {
+        s.tasks.get(id).is_some_and(|t| t.state == State::Ready && t.running_on.is_none() && (cpu == 0 || !t.bsp_only))
+    })?;
     q.remove(pos)
 }
 
@@ -308,9 +340,11 @@ fn schedule() {
                 _ => false,
             }
         };
+        // A parking AP gives up even a runnable task (it moves to CPU 0).
+        let parking = cpu != 0 && PARKING.load(Ordering::Acquire);
         let next_id = match pick_next(s, cpu) {
             Some(id) => id,
-            None if requeue => cur_id,
+            None if requeue && !parking => cur_id,
             None => s.cpus[cpu].idle,
         };
         if next_id == cur_id {
@@ -318,7 +352,9 @@ fn schedule() {
             return;
         }
         if requeue {
-            s.cpus[cpu].queue.push_back(cur_id);
+            // While the APs park, their tasks move to the boot CPU.
+            let home = if cpu != 0 && PARKING.load(Ordering::Acquire) { 0 } else { cpu };
+            s.cpus[home].queue.push_back(cur_id);
         }
         // Record the switch.
         let (cur_cr3, save) = {
@@ -412,7 +448,8 @@ pub fn on_timer_tick() {
         let Some(c) = s.cpus.get(cpu) else { return };
         let others = !c.queue.is_empty();
         let expired = now.saturating_sub(c.slice_start) >= QUANTUM_MS * 1_000_000;
-        (c.current == c.idle && others) || (expired && others)
+        let parking = cpu != 0 && c.current != c.idle && PARKING.load(Ordering::Acquire);
+        (c.current == c.idle && others) || (expired && others) || parking
     };
     if need {
         schedule();
@@ -509,7 +546,58 @@ pub fn idle() -> ! {
     loop {
         interrupts::enable_and_hlt();
         yield_now();
+        let cpu = percpu::cpu_id();
+        if cpu != 0 && PARKING.load(Ordering::Acquire) {
+            // Parked for sleep: nothing of ours is on this CPU any more.
+            interrupts::disable();
+            PARKED.fetch_or(1 << cpu, Ordering::AcqRel);
+            loop {
+                x86_64::instructions::hlt();
+            }
+        }
     }
+}
+
+/// Moves all work to CPU 0 and parks the other CPUs (halted, interrupts
+/// off, running only their idle context). Returns once they are parked.
+pub fn park_aps() -> bool {
+    let aps: Vec<usize> = percpu::online().filter(|&c| c != 0).collect();
+    if aps.is_empty() {
+        return true;
+    }
+    PARKED.store(0, Ordering::Release);
+    PARKING.store(true, Ordering::Release);
+    interrupts::without_interrupts(|| {
+        if let Some(s) = SCHED.lock().as_mut() {
+            for &c in &aps {
+                percpu::CPUS[c].online.store(false, Ordering::Release);
+                if c < s.cpus.len() {
+                    let moved: Vec<TaskId> = s.cpus[c].queue.drain(..).collect();
+                    s.cpus[0].queue.extend(moved);
+                }
+            }
+        }
+    });
+    for &c in &aps {
+        kick(Some(c));
+    }
+    let want: u64 = aps.iter().map(|&c| 1u64 << c).sum();
+    let deadline = time::uptime_ms() + 2000;
+    while PARKED.load(Ordering::Acquire) & want != want {
+        if time::uptime_ms() > deadline {
+            log!("sched", "CPUs did not park (mask {:#x} of {:#x})", PARKED.load(Ordering::Acquire), want);
+            return false;
+        }
+        yield_now();
+    }
+    percpu::set_count(1);
+    true
+}
+
+/// After the APs were restarted: normal scheduling everywhere again.
+pub fn unpark() {
+    PARKING.store(false, Ordering::Release);
+    PARKED.store(0, Ordering::Release);
 }
 
 pub struct TaskInfo {

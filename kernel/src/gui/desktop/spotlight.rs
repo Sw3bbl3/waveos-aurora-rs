@@ -23,15 +23,17 @@ enum Command {
     LightMode,
     Restart,
     ShutDown,
+    Sleep,
     EmptyTrash,
     Screenshot,
 }
 
-const COMMANDS: [(Command, &str, &str); 6] = [
+const COMMANDS: [(Command, &str, &str); 7] = [
     (Command::DarkMode, "Dark Mode", "Switch the appearance to dark"),
     (Command::LightMode, "Light Mode", "Switch the appearance to light"),
     (Command::Screenshot, "Take Screenshot", "Save the screen to Pictures"),
     (Command::EmptyTrash, "Empty Trash", "Permanently delete the items in the Trash"),
+    (Command::Sleep, "Sleep", "Put the computer to sleep"),
     (Command::Restart, "Restart", "Restart WaveOS Aurora"),
     (Command::ShutDown, "Shut Down", "Turn off the computer"),
 ];
@@ -303,6 +305,7 @@ impl Desktop {
                 Command::LightMode => self.set_dark(false),
                 Command::Restart => self.power = Some(PowerAction::Reboot),
                 Command::ShutDown => self.power = Some(PowerAction::Shutdown),
+                Command::Sleep => crate::power::sleep(),
                 Command::EmptyTrash => {
                     let _ = crate::fs::trash::empty();
                     self.refresh_trash();

@@ -48,6 +48,45 @@ pub fn test_panic() {
 
 type Interp = Interpreter<KernelHandler>;
 
+/// Work other tasks hand to the ACPI task (all AML runs there).
+#[derive(Clone, Copy)]
+enum Request {
+    /// `\_PTS(state)`: the firmware prepares to sleep.
+    PrepareSleep(u8),
+    /// Back from sleep: ACPI mode and events again, then `\_WAK(state)`.
+    FinishSleep(u8),
+}
+
+static REQUEST: IrqMutex<Option<Request>> = IrqMutex::new(None);
+static REQUEST_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Runs `r` on the ACPI task and waits (up to `timeout_ms`) for it.
+fn request(r: Request, timeout_ms: u64) -> bool {
+    if !running() {
+        return false;
+    }
+    REQUEST_DONE.store(false, Ordering::Release);
+    *REQUEST.lock() = Some(r);
+    kick();
+    let deadline = crate::time::uptime_ms() + timeout_ms;
+    while !REQUEST_DONE.load(Ordering::Acquire) {
+        if crate::time::uptime_ms() > deadline {
+            log!("acpi", "the AML task did not answer");
+            return false;
+        }
+        sched::sleep_ms(2);
+    }
+    true
+}
+
+pub fn prepare_sleep(state: u8) {
+    request(Request::PrepareSleep(state), 2000);
+}
+
+pub fn finish_sleep(state: u8) {
+    request(Request::FinishSleep(state), 5000);
+}
+
 /// Starts the ACPI task (unless `acpi=off` is in boot.conf).
 pub fn start(rsdp: u64) {
     if rsdp == 0 || crate::gui::prefs::boot_option("acpi").as_deref() == Some("off") {
@@ -364,6 +403,26 @@ fn worker() {
     loop {
         WAKE.wait(30_000, || KICKED.load(Ordering::Acquire));
         KICKED.store(false, Ordering::Release);
+        if let Some(r) = REQUEST.lock().take() {
+            let arg = |s: u8| vec![Object::Integer(s as u64).wrap()];
+            match r {
+                Request::PrepareSleep(s) => {
+                    if let Err(e) = interp.evaluate_if_present(name("\\_PTS"), arg(s)) {
+                        log!("acpi", "_PTS failed: {:?}", e);
+                    }
+                }
+                Request::FinishSleep(s) => {
+                    // The platform woke in legacy mode with every event disabled.
+                    if crate::power::info().is_some_and(events::init) {
+                        enable_gpes(&interp);
+                    }
+                    if let Err(e) = interp.evaluate_if_present(name("\\_WAK"), arg(s)) {
+                        log!("acpi", "_WAK failed: {:?}", e);
+                    }
+                }
+            }
+            REQUEST_DONE.store(true, Ordering::Release);
+        }
         #[cfg(feature = "ktest")]
         if TEST_PANIC.load(Ordering::Acquire) {
             panic!("self-test: a failure inside the AML task");

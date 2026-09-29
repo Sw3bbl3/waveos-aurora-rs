@@ -1,4 +1,6 @@
-//! Shutdown, restart, and the QEMU test-exit device.
+//! Shutdown, restart, sleep ([`s3`]), and the QEMU test-exit device.
+
+pub mod s3;
 
 use crate::acpi::AcpiInfo;
 use spin::Once;
@@ -13,6 +15,23 @@ pub fn init(info: AcpiInfo) {
 /// The static ACPI facts found at boot.
 pub fn info() -> Option<&'static AcpiInfo> {
     ACPI.get()
+}
+
+/// Puts the machine to sleep, from a task on the boot CPU (where the firmware
+/// resumes); the desktop repaints when it wakes.
+pub fn sleep() {
+    if !s3::available() {
+        crate::gui::notify::system("Sleep isn't available", "This computer's firmware doesn't offer sleep (S3).");
+        return;
+    }
+    crate::sched::spawn_on_bsp("sleep", || match s3::suspend() {
+        Ok(()) => crate::gui::server::command(crate::gui::server::Command::Resumed),
+        Err(e) => {
+            log!("power", "sleep failed: {}", e);
+            crate::gui::notify::system("Couldn't sleep", e);
+            crate::gui::server::command(crate::gui::server::Command::Resumed);
+        }
+    });
 }
 
 pub fn shutdown() -> ! {

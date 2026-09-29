@@ -27,6 +27,7 @@ struct Blocks {
 
 static BLOCKS: Once<Blocks> = Once::new();
 static FIXED: AtomicU32 = AtomicU32::new(0);
+static VECTOR: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 static GPES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
 fn inb(p: u16) -> u8 {
@@ -95,7 +96,15 @@ pub fn init(info: &AcpiInfo) -> bool {
     let overridden = info.overrides.iter().any(|o| o.source as u16 == info.sci_irq);
     let active_low = !overridden || flags & 0b11 != 0b01;
     let level = !overridden || (flags >> 2) & 0b11 != 0b01;
-    let Some(vector) = crate::arch::irq::alloc("acpi-sci", sci, 0) else { return false };
+    // The vector is allocated once; after sleep the IOAPIC route is set again.
+    let vector = match VECTOR.load(Ordering::Acquire) {
+        0 => {
+            let Some(v) = crate::arch::irq::alloc("acpi-sci", sci, 0) else { return false };
+            VECTOR.store(v, Ordering::Release);
+            v
+        }
+        v => v,
+    };
     if !crate::arch::apic::route_gsi(gsi, vector, level, active_low) {
         log!("acpi", "cannot route the SCI (GSI {})", gsi);
         return false;

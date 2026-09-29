@@ -208,6 +208,7 @@ pub enum Request {
     Close,
     Shutdown,
     Reboot,
+    Sleep,
     /// Keep the display mode just chosen.
     KeepDisplay,
     /// Go back to the previous display mode.

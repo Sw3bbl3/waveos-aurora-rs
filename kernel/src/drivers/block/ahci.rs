@@ -236,23 +236,77 @@ fn ata_string(id: &[u8], words: core::ops::Range<usize>) -> String {
     String::from(s.trim())
 }
 
+/// Resets the HBA and switches it to AHCI mode.
+fn reset_hba(hba: &Hba) -> bool {
+    hba.w(GHC, hba.r(GHC) | GHC_AE);
+    hba.w(GHC, hba.r(GHC) | GHC_HR);
+    if wait_for(1000, || hba.r(GHC) & GHC_HR == 0).is_err() {
+        log!("ahci", "HBA reset timed out");
+        return false;
+    }
+    hba.w(GHC, hba.r(GHC) | GHC_AE);
+    true
+}
+
+/// Brings a port's link up and starts its command engine; false if no ATA
+/// disk answers.
+fn start_port(port: &Port) -> bool {
+    // Ports with nothing attached never establish a link; don't spend time resetting them.
+    if wait_for(20, || port.r(P_SSTS) & 0xF != 0).is_err() || port.stop().is_err() {
+        return false;
+    }
+    // Command list and FIS receive area first, so the device's signature FIS lands somewhere.
+    let clb = port.mem.phys + CLB_OFF as u64;
+    let fb = port.mem.phys + FB_OFF as u64;
+    port.w(P_CLB, clb as u32);
+    port.w(P_CLB + 4, (clb >> 32) as u32);
+    port.w(P_FB, fb as u32);
+    port.w(P_FB + 4, (fb >> 32) as u32);
+    port.w(P_IE, 0);
+    port.w(P_CMD, port.r(P_CMD) | CMD_FRE | CMD_POD | CMD_SUD);
+    // Reset the link (COMRESET) and wait for the device to report in.
+    port.w(P_SCTL, (port.r(P_SCTL) & !0xF) | 1);
+    let t = crate::time::uptime_ms();
+    while crate::time::uptime_ms() < t + 2 {
+        core::hint::spin_loop();
+    }
+    port.w(P_SCTL, port.r(P_SCTL) & !0xF);
+    let _ = wait_for(300, || port.r(P_SSTS) & 0xF == 3);
+    let _ = wait_for(500, || port.r(P_TFD) & (TFD_BSY | TFD_DRQ) == 0);
+    port.w(P_SERR, !0);
+    port.w(P_IS, !0);
+    if port.r(P_SSTS) & 0xF != 3 || port.r(P_SIG) != 0x0000_0101 {
+        if port.r(P_SSTS) & 0xF != 0 {
+            log!("ahci", "port {}: skipping (SSTS {:#x}, signature {:#x})", port.index, port.r(P_SSTS), port.r(P_SIG));
+        }
+        return false; // no device, or not an ATA disk (e.g. ATAPI CD-ROM)
+    }
+    if port.start().is_err() {
+        return false;
+    }
+    if port.hba.has_irq {
+        port.w(P_IE, IE_MASK);
+    }
+    true
+}
+
+fn enable_interrupts(hba: &Hba) {
+    if hba.has_irq {
+        hba.w(IS, !0);
+        hba.w(GHC, hba.r(GHC) | GHC_IE);
+    }
+}
+
+/// Every controller and its disks, for resume after sleep.
+static CONTROLLERS: crate::sync::IrqMutex<alloc::vec::Vec<(&'static Hba, alloc::vec::Vec<Arc<AhciDisk>>)>> =
+    crate::sync::IrqMutex::new(alloc::vec::Vec::new());
+
 pub fn probe(dev: &pci::Device) {
     dev.enable();
     let Some(abar) = dev.map_bar(5) else {
         log!("ahci", "controller without ABAR");
         return;
     };
-    let hba = |reg: usize| unsafe { ((abar + reg as u64) as *mut u32).read_volatile() };
-    let hba_w = |reg: usize, v: u32| unsafe { ((abar + reg as u64) as *mut u32).write_volatile(v) };
-    // Reset the HBA to a known state, then enable AHCI mode.
-    hba_w(GHC, hba(GHC) | GHC_AE);
-    hba_w(GHC, hba(GHC) | GHC_HR);
-    if wait_for(1000, || hba(GHC) & GHC_HR == 0).is_err() {
-        log!("ahci", "HBA reset timed out");
-        return;
-    }
-    hba_w(GHC, hba(GHC) | GHC_AE);
-    let implemented = hba(PI);
     // Interrupts: one MSI for the whole controller.
     let shared: &'static mut Hba = Box::leak(Box::new(Hba {
         abar,
@@ -260,9 +314,13 @@ pub fn probe(dev: &pci::Device) {
         irq: WaitQueue::new(),
         has_irq: false,
     }));
+    if !reset_hba(shared) {
+        return;
+    }
+    let implemented = shared.r(PI);
     shared.has_irq = dev.enable_msi("ahci", interrupt, shared as *const Hba as usize).is_some();
     let shared: &'static Hba = shared;
-    let mut index = 0;
+    let mut disks = alloc::vec::Vec::new();
     for p in 0..32 {
         if implemented & (1 << p) == 0 {
             continue;
@@ -270,46 +328,7 @@ pub fn probe(dev: &pci::Device) {
         let regs = abar + 0x100 + p as u64 * 0x80;
         let (Some(mem), Some(buf)) = (Dma::new(4096), Dma::new(MAX_SECTORS * 512)) else { return };
         let port = Port { hba: shared, index: p, regs, mem, buf };
-        // Ports with nothing attached never establish a link; don't spend time resetting them.
-        if wait_for(20, || port.r(P_SSTS) & 0xF != 0).is_err() {
-            continue;
-        }
-        if port.stop().is_err() {
-            continue;
-        }
-        // Command list and FIS receive area first, so the device's signature FIS lands somewhere.
-        let clb = port.mem.phys + CLB_OFF as u64;
-        let fb = port.mem.phys + FB_OFF as u64;
-        port.w(P_CLB, clb as u32);
-        port.w(P_CLB + 4, (clb >> 32) as u32);
-        port.w(P_FB, fb as u32);
-        port.w(P_FB + 4, (fb >> 32) as u32);
-        port.w(P_IE, 0);
-        port.w(P_CMD, port.r(P_CMD) | CMD_FRE | CMD_POD | CMD_SUD);
-        // Reset the link (COMRESET) and wait for the device to report in.
-        port.w(P_SCTL, (port.r(P_SCTL) & !0xF) | 1);
-        let t = crate::time::uptime_ms();
-        while crate::time::uptime_ms() < t + 2 {
-            core::hint::spin_loop();
-        }
-        port.w(P_SCTL, port.r(P_SCTL) & !0xF);
-        let _ = wait_for(300, || port.r(P_SSTS) & 0xF == 3);
-        let _ = wait_for(500, || port.r(P_TFD) & (TFD_BSY | TFD_DRQ) == 0);
-        port.w(P_SERR, !0);
-        port.w(P_IS, !0);
-        if port.r(P_SSTS) & 0xF != 3 || port.r(P_SIG) != 0x0000_0101 {
-            if port.r(P_SSTS) & 0xF != 0 {
-                log!("ahci", "port {}: skipping (SSTS {:#x}, signature {:#x})", p, port.r(P_SSTS), port.r(P_SIG));
-            }
-            continue; // no device, or not an ATA disk (e.g. ATAPI CD-ROM)
-        }
-        if port.start().is_err() {
-            continue;
-        }
-        if shared.has_irq {
-            port.w(P_IE, IE_MASK);
-        }
-        if port.command(ATA_IDENTIFY, 0, 0, 512, false).is_err() {
+        if !start_port(&port) || port.command(ATA_IDENTIFY, 0, 0, 512, false).is_err() {
             continue;
         }
         let id = &port.buf.bytes_mut()[..512];
@@ -324,12 +343,30 @@ pub fn probe(dev: &pci::Device) {
         if sectors == 0 {
             continue;
         }
-        register(Arc::new(AhciDisk { index, port: Mutex::new(port), sectors, model }));
-        index += 1;
+        let disk = Arc::new(AhciDisk { index: disks.len(), port: Mutex::new(port), sectors, model });
+        register(disk.clone());
+        disks.push(disk);
     }
+    enable_interrupts(shared);
     if shared.has_irq {
-        hba_w(IS, !0);
-        hba_w(GHC, hba(GHC) | GHC_IE);
         log!("ahci", "interrupts via MSI");
+    }
+    CONTROLLERS.lock().push((shared, disks));
+}
+
+/// After sleep: the controller was reset, so bring it and its ports up again.
+pub fn resume() {
+    let controllers: alloc::vec::Vec<_> = CONTROLLERS.lock().iter().map(|(h, d)| (*h, d.clone())).collect();
+    for (hba, disks) in controllers {
+        if !reset_hba(hba) {
+            continue;
+        }
+        for disk in disks {
+            let port = disk.port.lock();
+            if !start_port(&port) {
+                log!("ahci", "port {}: disk did not come back after sleep", port.index);
+            }
+        }
+        enable_interrupts(hba);
     }
 }

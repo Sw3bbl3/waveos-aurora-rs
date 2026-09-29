@@ -60,6 +60,14 @@ impl QueuePair {
         })
     }
 
+    /// Empties the queue (after the controller was reset).
+    fn reset(&mut self) {
+        self.sq_tail = 0;
+        self.cq_head = 0;
+        self.phase = 1;
+        self.cq.bytes_mut().fill(0);
+    }
+
     /// Submits a command (16 dwords; CID is filled in) and waits for its completion.
     fn run(&mut self, mut cmd: [u32; 16]) -> BlockResult<u32> {
         self.cid = self.cid.wrapping_add(1);
@@ -100,6 +108,11 @@ struct Io {
 
 pub struct NvmeDisk {
     index: usize,
+    regs: u64,
+    /// Controller ready timeout (ms).
+    timeout: u64,
+    irq: Option<&'static WaitQueue>,
+    admin: Mutex<QueuePair>,
     io: Mutex<Io>,
     sectors: u64,
     sector_size: u32,
@@ -179,36 +192,72 @@ impl BlockDevice for NvmeDisk {
 
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 
+fn r32(regs: u64, o: u64) -> u32 {
+    unsafe { ((regs + o) as *const u32).read_volatile() }
+}
+
+fn w32(regs: u64, o: u64, v: u32) {
+    unsafe { ((regs + o) as *mut u32).write_volatile(v) }
+}
+
+fn w64(regs: u64, o: u64, v: u64) {
+    w32(regs, o, v as u32);
+    w32(regs, o + 4, (v >> 32) as u32);
+}
+
+/// Disables the controller, points it at the admin queues and enables it.
+fn enable(regs: u64, admin: &QueuePair, timeout: u64) -> bool {
+    w32(regs, REG_CC, r32(regs, REG_CC) & !1);
+    if wait_for(timeout, || r32(regs, REG_CSTS) & 1 == 0).is_err() {
+        log!("nvme", "controller did not disable");
+        return false;
+    }
+    w32(regs, REG_AQA, ((QDEPTH as u32 - 1) << 16) | (QDEPTH as u32 - 1));
+    w64(regs, REG_ASQ, admin.sq.phys);
+    w64(regs, REG_ACQ, admin.cq.phys);
+    // 4 KiB pages, NVM command set, 64-byte SQEs, 16-byte CQEs.
+    w32(regs, REG_CC, (6 << 16) | (4 << 20) | 1);
+    if wait_for(timeout, || r32(regs, REG_CSTS) & 1 == 1).is_err() || r32(regs, REG_CSTS) & 2 != 0 {
+        log!("nvme", "controller did not become ready");
+        return false;
+    }
+    true
+}
+
+/// I/O completion queue 1, then submission queue 1 bound to it.
+fn create_io_queues(admin: &mut QueuePair, queue: &QueuePair, irq: bool) -> bool {
+    let mut cmd = [0u32; 16];
+    cmd[0] = ADMIN_CREATE_CQ as u32;
+    cmd[6] = queue.cq.phys as u32;
+    cmd[7] = (queue.cq.phys >> 32) as u32;
+    cmd[10] = ((QDEPTH as u32 - 1) << 16) | 1;
+    // Physically contiguous; interrupts on MSI-X vector 0 when we have it.
+    cmd[11] = 1 | if irq { 1 << 1 } else { 0 };
+    if admin.run(cmd).is_err() {
+        return false;
+    }
+    let mut cmd = [0u32; 16];
+    cmd[0] = ADMIN_CREATE_SQ as u32;
+    cmd[6] = queue.sq.phys as u32;
+    cmd[7] = (queue.sq.phys >> 32) as u32;
+    cmd[10] = ((QDEPTH as u32 - 1) << 16) | 1;
+    cmd[11] = (1 << 16) | 1; // CQ 1, physically contiguous
+    admin.run(cmd).is_ok()
+}
+
+static DISKS: crate::sync::IrqMutex<alloc::vec::Vec<Arc<NvmeDisk>>> =
+    crate::sync::IrqMutex::new(alloc::vec::Vec::new());
+
 pub fn probe(dev: &pci::Device) {
     dev.enable();
     let Some(regs) = dev.map_bar(0) else { return };
-    let r32 = |o: u64| unsafe { ((regs + o) as *const u32).read_volatile() };
-    let w32 = |o: u64, v: u32| unsafe { ((regs + o) as *mut u32).write_volatile(v) };
-    let r64 = |o: u64| r32(o) as u64 | (r32(o + 4) as u64) << 32;
-    let w64 = |o: u64, v: u64| {
-        w32(o, v as u32);
-        w32(o + 4, (v >> 32) as u32);
-    };
-    let cap = r64(REG_CAP);
+    let cap = r32(regs, REG_CAP) as u64 | (r32(regs, REG_CAP + 4) as u64) << 32;
     let stride = 4u64 << ((cap >> 32) & 0xF);
     let timeout = ((cap >> 24) & 0xFF).max(1) * 500;
-
-    // Disable, set up the admin queues, enable.
-    w32(REG_CC, r32(REG_CC) & !1);
-    if wait_for(timeout, || r32(REG_CSTS) & 1 == 0).is_err() {
-        log!("nvme", "controller did not disable");
-        return;
-    }
     let queue: &'static WaitQueue = Box::leak(Box::new(WaitQueue::new()));
     let irq = dev.enable_msi("nvme", interrupt, queue as *const WaitQueue as usize).map(|_| queue);
     let Some(mut admin) = QueuePair::new(regs, 0, stride, irq) else { return };
-    w32(REG_AQA, ((QDEPTH as u32 - 1) << 16) | (QDEPTH as u32 - 1));
-    w64(REG_ASQ, admin.sq.phys);
-    w64(REG_ACQ, admin.cq.phys);
-    // 4 KiB pages, NVM command set, 64-byte SQEs, 16-byte CQEs.
-    w32(REG_CC, (6 << 16) | (4 << 20) | 1);
-    if wait_for(timeout, || r32(REG_CSTS) & 1 == 1).is_err() || r32(REG_CSTS) & 2 != 0 {
-        log!("nvme", "controller did not become ready");
+    if !enable(regs, &admin, timeout) {
         return;
     }
 
@@ -237,26 +286,8 @@ pub fn probe(dev: &pci::Device) {
         log!("nvme", "namespace 1 unusable (size {}, lbads {})", sectors, lbads);
         return;
     }
-
-    // I/O completion queue 1, then submission queue 1 bound to it.
     let Some(queue) = QueuePair::new(regs, 1, stride, irq) else { return };
-    let mut cmd = [0u32; 16];
-    cmd[0] = ADMIN_CREATE_CQ as u32;
-    cmd[6] = queue.cq.phys as u32;
-    cmd[7] = (queue.cq.phys >> 32) as u32;
-    cmd[10] = ((QDEPTH as u32 - 1) << 16) | 1;
-    // Physically contiguous; interrupts on MSI-X vector 0 when we have it.
-    cmd[11] = 1 | if irq.is_some() { 1 << 1 } else { 0 };
-    if admin.run(cmd).is_err() {
-        return;
-    }
-    let mut cmd = [0u32; 16];
-    cmd[0] = ADMIN_CREATE_SQ as u32;
-    cmd[6] = queue.sq.phys as u32;
-    cmd[7] = (queue.sq.phys >> 32) as u32;
-    cmd[10] = ((QDEPTH as u32 - 1) << 16) | 1;
-    cmd[11] = (1 << 16) | 1; // CQ 1, physically contiguous
-    if admin.run(cmd).is_err() {
+    if !create_io_queues(&mut admin, &queue, irq.is_some()) {
         return;
     }
     let (Some(buf), Some(prp_list)) = (Dma::new(MAX_BYTES), Dma::new(4096)) else { return };
@@ -264,6 +295,31 @@ pub fn probe(dev: &pci::Device) {
     if irq.is_some() {
         log!("nvme", "interrupts via MSI-X");
     }
-    core::mem::forget(admin); // the admin queue stays live for the controller's lifetime
-    register(Arc::new(NvmeDisk { index, io: Mutex::new(Io { queue, buf, prp_list }), sectors, sector_size, model }));
+    let disk = Arc::new(NvmeDisk {
+        index,
+        regs,
+        timeout,
+        irq,
+        admin: Mutex::new(admin),
+        io: Mutex::new(Io { queue, buf, prp_list }),
+        sectors,
+        sector_size,
+        model,
+    });
+    DISKS.lock().push(disk.clone());
+    register(disk);
+}
+
+/// After sleep: the controller was reset; set up its queues again.
+pub fn resume() {
+    let disks: alloc::vec::Vec<Arc<NvmeDisk>> = DISKS.lock().clone();
+    for d in disks {
+        let mut admin = d.admin.lock();
+        let mut io = d.io.lock();
+        admin.reset();
+        io.queue.reset();
+        if !enable(d.regs, &admin, d.timeout) || !create_io_queues(&mut admin, &io.queue, d.irq.is_some()) {
+            log!("nvme", "nvme{}: controller did not come back after sleep", d.index);
+        }
+    }
 }

@@ -12,6 +12,18 @@ use x86_64::instructions::port::Port;
 static ECAM: AtomicU64 = AtomicU64::new(0);
 static DEVICES: IrqMutex<Vec<Device>> = IrqMutex::new(Vec::new());
 
+/// An interrupt message a driver set up, re-applied after sleep.
+#[derive(Clone, Copy)]
+struct MsiRoute {
+    dev: (u8, u8, u8),
+    /// MSI-X table entry 0 (kernel virtual address), or `None` for MSI.
+    msix_entry: Option<u64>,
+    cap: u16,
+    vector: u8,
+}
+
+static MSI_ROUTES: IrqMutex<Vec<MsiRoute>> = IrqMutex::new(Vec::new());
+
 pub const CMD_IO: u16 = 1 << 0;
 pub const CMD_MEMORY: u16 = 1 << 1;
 pub const CMD_BUS_MASTER: u16 = 1 << 2;
@@ -117,39 +129,20 @@ impl Device {
     /// driver then polls). Further MSI-X table entries stay masked.
     pub fn enable_msi(&self, name: &str, handler: fn(usize), arg: usize) -> Option<u8> {
         let caps = self.capabilities();
-        let address = 0xFEE0_0000 | crate::arch::apic::boot_apic_id() << 12;
-        if let Some(&(_, cap)) = caps.iter().find(|c| c.0 == CAP_MSIX) {
-            let control = self.read16(cap + 2);
+        let route = if let Some(&(_, cap)) = caps.iter().find(|c| c.0 == CAP_MSIX) {
             let table = self.read32(cap + 4);
             let base = self.map_bar((table & 7) as usize)?;
             let vector = crate::arch::irq::alloc(name, handler, arg)?;
-            let entry = (base + (table & !7) as u64) as *mut u32;
-            unsafe {
-                entry.write_volatile(address);
-                entry.add(1).write_volatile(0);
-                entry.add(2).write_volatile(vector as u32);
-                entry.add(3).write_volatile(0); // unmasked
-            }
-            // Enable MSI-X and clear the function-wide mask.
-            self.write16(cap + 2, (control | 1 << 15) & !(1 << 14));
-            return Some(vector);
-        }
-        if let Some(&(_, cap)) = caps.iter().find(|c| c.0 == CAP_MSI) {
-            let control = self.read16(cap + 2);
+            MsiRoute { dev: (self.bus, self.dev, self.func), msix_entry: Some(base + (table & !7) as u64), cap, vector }
+        } else if let Some(&(_, cap)) = caps.iter().find(|c| c.0 == CAP_MSI) {
             let vector = crate::arch::irq::alloc(name, handler, arg)?;
-            self.write32(cap + 4, address);
-            let data = if control & (1 << 7) != 0 {
-                self.write32(cap + 8, 0); // upper address (64-bit capable)
-                cap + 12
-            } else {
-                cap + 8
-            };
-            self.write16(data, vector as u16);
-            // One message (MME = 0), enabled.
-            self.write16(cap + 2, (control & !(0x7 << 4)) | 1);
-            return Some(vector);
-        }
-        None
+            MsiRoute { dev: (self.bus, self.dev, self.func), msix_entry: None, cap, vector }
+        } else {
+            return None;
+        };
+        program_msi(&route);
+        MSI_ROUTES.lock().push(route);
+        Some(route.vector)
     }
 
     /// Iterates the capability list: (capability id, config offset).
@@ -166,6 +159,69 @@ impl Device {
             guard += 1;
         }
         out
+    }
+}
+
+/// Points a device's interrupt message at its vector on the boot CPU.
+fn program_msi(r: &MsiRoute) {
+    let (b, d, f) = r.dev;
+    let rd16 = |off: u16| (read32(b, d, f, off & !3) >> ((off & 2) * 8)) as u16;
+    let wr16 = |off: u16, v: u16| {
+        let shift = (off & 2) * 8;
+        let old = read32(b, d, f, off & !3);
+        write32(b, d, f, off & !3, (old & !(0xFFFF << shift)) | (v as u32) << shift);
+    };
+    let address = 0xFEE0_0000 | crate::arch::apic::boot_apic_id() << 12;
+    let cap = r.cap;
+    match r.msix_entry {
+        Some(entry) => {
+            let e = entry as *mut u32;
+            unsafe {
+                e.write_volatile(address);
+                e.add(1).write_volatile(0);
+                e.add(2).write_volatile(r.vector as u32);
+                e.add(3).write_volatile(0); // unmasked
+            }
+            // Enable MSI-X and clear the function-wide mask.
+            wr16(cap + 2, (rd16(cap + 2) | 1 << 15) & !(1 << 14));
+        }
+        None => {
+            let control = rd16(cap + 2);
+            write32(b, d, f, cap + 4, address);
+            let data = if control & (1 << 7) != 0 {
+                write32(b, d, f, cap + 8, 0); // upper address (64-bit capable)
+                cap + 12
+            } else {
+                cap + 8
+            };
+            wr16(data, r.vector as u16);
+            // One message (MME = 0), enabled.
+            wr16(cap + 2, (control & !(0x7 << 4)) | 1);
+        }
+    }
+}
+
+/// The first 64 bytes of every device's configuration space (BARs, command,
+/// interrupt line), saved before sleep: devices lose it when powered off.
+pub fn save() -> Vec<((u8, u8, u8), [u32; 16])> {
+    devices()
+        .iter()
+        .map(|d| ((d.bus, d.dev, d.func), core::array::from_fn(|i| read32(d.bus, d.dev, d.func, i as u16 * 4))))
+        .collect()
+}
+
+/// Restores what `save` recorded, then the interrupt messages.
+pub fn restore(saved: &[((u8, u8, u8), [u32; 16])]) {
+    for &((b, d, f), regs) in saved {
+        // BARs and the rest with decoding off, then the command register.
+        write32(b, d, f, 0x04, regs[1] & !0x7);
+        for i in [3usize, 4, 5, 6, 7, 8, 9, 15] {
+            write32(b, d, f, i as u16 * 4, regs[i]);
+        }
+        write32(b, d, f, 0x04, regs[1] & 0xFFFF);
+    }
+    for r in MSI_ROUTES.lock().iter() {
+        program_msi(r);
     }
 }
 

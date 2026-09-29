@@ -160,6 +160,26 @@ fn ioapic_write(reg: u32, value: u32) {
     }
 }
 
+/// The IOAPIC's routing table, saved before sleep (the chip loses it).
+pub fn save_ioapic() -> alloc::vec::Vec<(u32, u32)> {
+    let max = (ioapic_read(1) >> 16) & 0xFF;
+    (0..=max).map(|i| (ioapic_read(0x10 + 2 * i), ioapic_read(0x10 + 2 * i + 1))).collect()
+}
+
+/// After sleep on the boot CPU: legacy PICs off again, local APIC and its
+/// timer back on, and the IOAPIC routes as they were.
+pub fn resume(ioapic: &[(u32, u32)]) {
+    disable_legacy_pic();
+    enable_local();
+    start_timer();
+    for (i, &(low, high)) in ioapic.iter().enumerate() {
+        let i = i as u32;
+        ioapic_write(0x10 + 2 * i, LVT_MASKED);
+        ioapic_write(0x10 + 2 * i + 1, high);
+        ioapic_write(0x10 + 2 * i, low);
+    }
+}
+
 /// Routes a legacy ISA IRQ (honouring ACPI interrupt source overrides) to `vector` on this CPU.
 pub fn route_isa_irq(acpi: &AcpiInfo, irq: u8, vector: u8) {
     let (gsi, flags) = acpi.isa_irq_to_gsi(irq);

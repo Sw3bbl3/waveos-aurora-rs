@@ -112,6 +112,16 @@ impl Ring {
         self.dma.phys
     }
 
+    /// Empty again, as after `new` (the controller was reset).
+    fn reset(&mut self) {
+        self.dma.bytes_mut().fill(0);
+        let link = (RING_TRBS - 1) * 16;
+        self.dma.write::<u64>(link, self.dma.phys);
+        self.dma.write::<u32>(link + 12, TRB_LINK << 10 | 1 << 1);
+        self.enqueue = 0;
+        self.cycle = true;
+    }
+
     /// Queues a TRB; returns its physical address.
     fn push(&mut self, param: u64, status: u32, control: u32) -> u64 {
         let off = self.enqueue * 16;
@@ -200,6 +210,7 @@ pub struct Controller {
     db: u64,
     ctx_size: usize,
     max_ports: u8,
+    max_slots: u8,
     /// USB major revision of each root port (from the supported-protocol capabilities).
     port_major: [u8; 256],
     inner: Mutex<Inner>,
@@ -345,6 +356,7 @@ pub fn probe(dev: &pci::Device) {
         db,
         ctx_size,
         max_ports,
+        max_slots,
         port_major,
         inner: Mutex::new(Inner { cmd, dcbaa, slots: BTreeMap::new() }),
         events: spin::Mutex::new(EventRing { segment, _table: table, dequeue: 0, cycle: true }),
@@ -699,6 +711,72 @@ impl Controller {
             }
             self.settled.store(true, Ordering::Release);
         }
+    }
+
+    /// After sleep the controller was reset and every device lost power: drop
+    /// them all (their drivers see an unplug), start the controller again on
+    /// the same memory, and enumerate what is attached now.
+    pub fn resume(&'static self) {
+        let all: Vec<DeviceRecord> = self.devices.lock().drain(..).collect();
+        for d in &all {
+            let hooks: Vec<_> = {
+                let mut hooks = self.detach.lock();
+                let (mine, rest): (Vec<_>, Vec<_>) = hooks.drain(..).partition(|(s, _)| *s == d.slot);
+                *hooks = rest;
+                mine
+            };
+            for (_, hook) in hooks {
+                hook();
+            }
+        }
+        self.pipes.lock().clear();
+        self.completions.lock().clear();
+        self.port_events.lock().clear();
+        self.hub_events.lock().clear();
+        let op = self.op;
+        w32(op + USBCMD, r32(op + USBCMD) & !CMD_RUN);
+        wait_until(100, || r32(op + USBSTS) & STS_HALTED != 0);
+        w32(op + USBCMD, CMD_RESET);
+        if !wait_until(1000, || r32(op + USBCMD) & CMD_RESET == 0 && r32(op + USBSTS) & STS_NOT_READY == 0) {
+            log!("xhci", "controller {} did not come back after sleep", self.index);
+            return;
+        }
+        w32(op + CONFIG, self.max_slots as u32);
+        {
+            let mut inner = self.inner.lock();
+            inner.slots.clear();
+            for i in 1..=self.max_slots as usize {
+                inner.dcbaa.write::<u64>(i * 8, 0);
+            }
+            w64(op + DCBAAP, inner.dcbaa.phys);
+            inner.cmd.reset();
+            w64(op + CRCR, inner.cmd.phys() | 1);
+        }
+        {
+            let mut ev = self.events.lock();
+            ev.segment.bytes_mut().fill(0);
+            ev.dequeue = 0;
+            ev.cycle = true;
+            w32(self.rt + ERSTSZ, 1);
+            w64(self.rt + ERDP, ev.segment.phys);
+            w64(self.rt + ERSTBA, ev._table.phys);
+        }
+        w32(self.rt + IMOD, 1000);
+        w32(self.rt + IMAN, 0b11);
+        w32(op + USBCMD, CMD_RUN | CMD_INTE);
+        if !wait_until(100, || r32(op + USBSTS) & STS_HALTED == 0) {
+            log!("xhci", "controller {} did not restart", self.index);
+            return;
+        }
+        self.settled.store(false, Ordering::Release);
+        for p in 1..=self.max_ports {
+            let sc = self.portsc(p);
+            if sc & PORT_POWER == 0 {
+                self.set_portsc(p, (sc & PORT_KEEP) | PORT_POWER);
+            }
+            self.port_events.lock().push_back(p);
+        }
+        self.enum_wake.wake_all();
     }
 
     /// Called by the hub driver's status pipe.

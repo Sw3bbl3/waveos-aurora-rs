@@ -8,7 +8,7 @@ mod handler;
 mod runtime;
 mod tables;
 
-pub use runtime::{is_acpi_task, on_panic, power_info, sleep_type, start};
+pub use runtime::{finish_sleep, is_acpi_task, on_panic, power_info, prepare_sleep, sleep_type, start};
 #[cfg(feature = "ktest")]
 pub use runtime::{running, test_panic};
 pub use tables::*;

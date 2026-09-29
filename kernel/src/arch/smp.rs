@@ -111,6 +111,13 @@ extern "C" {
 static AP_READY: AtomicBool = AtomicBool::new(false);
 /// The page table APs start with (identity map of low memory + kernel half).
 static AP_PML4: AtomicU64 = AtomicU64::new(0);
+/// Physical address of the trampoline page (below 1 MiB), 0 if none.
+static TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
+
+/// The trampoline page, also the waking vector after sleep.
+pub fn trampoline() -> u64 {
+    TRAMPOLINE.load(Ordering::Relaxed)
+}
 
 fn offset(sym: &u8) -> usize {
     sym as *const u8 as usize - unsafe { &aurora_trampoline_start as *const u8 as usize }
@@ -146,23 +153,20 @@ fn boot_page_table() -> Option<u64> {
     Some(pml4)
 }
 
-/// Starts every other CPU listed in the ACPI MADT. Returns how many are up.
-pub fn start_aps(apic_ids: &[u8], trampoline: u64) -> usize {
-    let bsp = super::apic::lapic_id();
-    let others: alloc::vec::Vec<u8> = apic_ids.iter().copied().filter(|&id| id as u32 != bsp).collect();
-    if others.is_empty() {
-        return 1;
-    }
+/// Copies the trampoline into its page and points it at `entry`.
+fn install(trampoline: u64, entry: u64) -> Option<*mut u8> {
     if trampoline == 0 || trampoline >= 0x10_0000 {
-        log!("smp", "no trampoline page below 1 MiB; running on one CPU");
-        return 1;
+        return None;
     }
-    let Some(pml4) = boot_page_table() else {
-        log!("smp", "no memory below 4 GiB for the AP page table; running on one CPU");
-        return 1;
+    let pml4 = match AP_PML4.load(Ordering::Relaxed) {
+        0 => {
+            let p = boot_page_table()?;
+            AP_PML4.store(p, Ordering::Relaxed);
+            p
+        }
+        p => p,
     };
-    AP_PML4.store(pml4, Ordering::Relaxed);
-
+    TRAMPOLINE.store(trampoline, Ordering::Relaxed);
     // Copy the trampoline and patch its absolute fields.
     let len = unsafe { &aurora_trampoline_end as *const u8 as usize - &aurora_trampoline_start as *const u8 as usize };
     let page = phys_to_virt(trampoline) as *mut u8;
@@ -171,8 +175,34 @@ pub fn start_aps(apic_ids: &[u8], trampoline: u64) -> usize {
         let gdt_base = trampoline as u32 + offset(&aurora_tr_gdtr) as u32 - 32;
         (page.add(offset(&aurora_tr_gdtr) + 2) as *mut u32).write_unaligned(gdt_base);
         (page.add(offset(&aurora_tr_cr3)) as *mut u64).write(pml4);
-        (page.add(offset(&aurora_tr_entry)) as *mut u64).write(ap_entry as *const () as u64);
+        (page.add(offset(&aurora_tr_entry)) as *mut u64).write(entry);
     }
+    Some(page)
+}
+
+/// Makes the trampoline the way back from sleep: the boot CPU arrives at
+/// `entry(0)` in long mode on `stack`.
+pub fn prepare_wake(entry: extern "sysv64" fn(u64) -> !, stack: u64) -> bool {
+    let Some(page) = install(TRAMPOLINE.load(Ordering::Relaxed), entry as *const () as u64) else { return false };
+    unsafe {
+        (page.add(offset(&aurora_tr_stack)) as *mut u64).write_volatile(stack);
+        (page.add(offset(&aurora_tr_arg)) as *mut u64).write_volatile(0);
+    }
+    true
+}
+
+/// Starts every other CPU listed in the ACPI MADT. Returns how many are up.
+pub fn start_aps(apic_ids: &[u8], trampoline: u64) -> usize {
+    let bsp = super::apic::lapic_id();
+    let others: alloc::vec::Vec<u8> = apic_ids.iter().copied().filter(|&id| id as u32 != bsp).collect();
+    TRAMPOLINE.store(trampoline, Ordering::Relaxed);
+    if others.is_empty() {
+        return 1;
+    }
+    let Some(page) = install(trampoline, ap_entry as *const () as u64) else {
+        log!("smp", "no trampoline page below 1 MiB (or no memory below 4 GiB); running on one CPU");
+        return 1;
+    };
 
     let mut up = 1;
     for (i, &apic) in others.iter().enumerate() {

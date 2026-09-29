@@ -126,6 +126,15 @@ pub fn modes(current: (u32, u32), at_boot: Option<(u32, u32)>) -> Vec<DisplayMod
     out
 }
 
+/// After sleep the adapter is back in a firmware mode: restore `w`×`h`.
+/// (With only a firmware framebuffer there is nothing we can do; on real
+/// machines without a native driver the screen may stay dark.)
+pub fn resume(w: u32, h: u32) {
+    if live() && set_mode(w, h).is_none() {
+        log!("display", "could not restore {}x{} after sleep", w, h);
+    }
+}
+
 /// Switches to `w`×`h` now (Bochs VBE only). Returns the new framebuffer.
 pub fn set_mode(w: u32, h: u32) -> Option<Framebuffer> {
     let (phys, vram) = STATE.lock().bochs?;
@@ -141,6 +150,13 @@ pub fn set_mode(w: u32, h: u32) -> Option<Framebuffer> {
     dispi_write(REG_X_OFFSET, 0);
     dispi_write(REG_Y_OFFSET, 0);
     dispi_write(REG_ENABLE, ENABLED | LFB);
+    // Display output on: the attribute controller's "palette address source"
+    // bit (firmware sets it at boot; after sleep the adapter is reset).
+    unsafe {
+        use x86_64::instructions::port::Port;
+        let _ = Port::<u8>::new(0x3DA).read(); // reset the index/data flip-flop
+        Port::<u8>::new(0x3C0).write(0x20);
+    }
     if (dispi_read(REG_XRES), dispi_read(REG_YRES)) != (w as u16, h as u16) {
         return None;
     }

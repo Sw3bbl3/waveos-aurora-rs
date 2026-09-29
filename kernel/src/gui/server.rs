@@ -67,6 +67,8 @@ pub enum Command {
     PowerButton,
     /// Battery / power adapter / lid state changed (ACPI).
     PowerChanged,
+    /// Back from sleep.
+    Resumed,
 }
 
 /// Queues a command for the compositor.

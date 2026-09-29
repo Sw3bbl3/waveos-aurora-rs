@@ -89,9 +89,19 @@ pub fn init(cpu: usize) {
         t.interrupt_stack_table[PAGE_FAULT_IST as usize] = tops[1];
         t.interrupt_stack_table[NMI_IST as usize] = tops[2];
     }
+    reload(cpu);
+}
+
+/// Loads the GDT and this CPU's TSS. After sleep (or when a CPU is restarted)
+/// the TSS descriptor is still marked busy, which `ltr` would refuse, so the
+/// busy bit is cleared first.
+pub fn reload(cpu: usize) {
     let gdt = GDT.call_once(build);
     gdt.table.load();
+    let base = x86_64::instructions::tables::sgdt().base.as_u64();
+    let access = (base + (FIRST_TSS as u64 + 16 * cpu as u64) + 5) as *mut u8;
     unsafe {
+        access.write_volatile(access.read_volatile() & !0x02);
         CS::set_reg(gdt.code);
         DS::set_reg(gdt.data);
         ES::set_reg(gdt.data);

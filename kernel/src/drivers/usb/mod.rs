@@ -303,6 +303,13 @@ pub fn list() -> Vec<String> {
     xhci::controllers().iter().flat_map(|c| c.describe_devices()).collect()
 }
 
+/// After sleep: every controller starts over and re-enumerates.
+pub fn resume() {
+    for c in xhci::controllers() {
+        c.resume();
+    }
+}
+
 pub fn init() {
     for d in crate::drivers::pci::devices() {
         if d.class == 0x0C && d.subclass == 0x03 && d.prog_if == 0x30 {

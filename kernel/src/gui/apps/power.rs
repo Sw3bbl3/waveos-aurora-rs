@@ -8,18 +8,22 @@ use crate::gui::widgets::{button, ButtonStyle};
 
 pub struct PowerDialog {
     hovered: Option<usize>,
+    /// The firmware supports sleep (S3).
+    can_sleep: bool,
 }
 
 impl PowerDialog {
     pub fn new() -> Self {
-        Self { hovered: None }
+        Self { hovered: None, can_sleep: crate::power::s3::available() }
     }
-    fn buttons(area: Rect) -> [Rect; 3] {
+    /// Shut Down, Restart, Cancel, and Sleep (an empty rect when unavailable).
+    fn buttons(&self, area: Rect) -> [Rect; 4] {
         let y = area.bottom() - 56;
         [
             Rect::new(area.right() - 132, y, 112, 34),
             Rect::new(area.right() - 256, y, 112, 34),
             Rect::new(area.x + 20, y, 96, 34),
+            if self.can_sleep { Rect::new(area.right() - 380, y, 112, 34) } else { Rect::default() },
         ]
     }
 }
@@ -32,7 +36,7 @@ impl App for PowerDialog {
         "Power".into()
     }
     fn size(&self) -> (i32, i32) {
-        (400, 170)
+        (if self.can_sleep { 520 } else { 400 }, 170)
     }
     fn resizable(&self) -> bool {
         false
@@ -49,18 +53,23 @@ impl App for PowerDialog {
             0xFFFF_FFFF,
             crate::gui::canvas::mix(theme::ACCENT, theme::ACCENT_2, 128),
         );
-        cv.text(area.x + 84, area.y + 34, "Shut down or restart?", theme::ui_bold(16), t.text);
+        let question = if self.can_sleep { "Shut down, restart or sleep?" } else { "Shut down or restart?" };
+        cv.text(area.x + 84, area.y + 34, question, theme::ui_bold(16), t.text);
         cv.text(area.x + 84, area.y + 56, "Your files are saved to disk first.", theme::ui(13), t.text_secondary);
-        let [shut, restart, cancel] = Self::buttons(area);
+        let [shut, restart, cancel, sleep] = self.buttons(area);
         button(cv, shut, "Shut Down", ButtonStyle::Danger, self.hovered == Some(0));
         button(cv, restart, "Restart", ButtonStyle::Secondary, self.hovered == Some(1));
         button(cv, cancel, "Cancel", ButtonStyle::Secondary, self.hovered == Some(2));
+        if self.can_sleep {
+            button(cv, sleep, "Sleep", ButtonStyle::Secondary, self.hovered == Some(3));
+        }
     }
     fn click(&mut self, x: i32, y: i32, area: Rect, env: &mut Env) -> bool {
-        match hit(&Self::buttons(area), x, y) {
+        match hit(&self.buttons(area), x, y) {
             Some(0) => env.requests.push(Request::Shutdown),
             Some(1) => env.requests.push(Request::Reboot),
             Some(2) => env.requests.push(Request::Close),
+            Some(3) => env.requests.push(Request::Sleep),
             _ => {}
         }
         false
@@ -72,7 +81,7 @@ impl App for PowerDialog {
         false
     }
     fn hover(&mut self, x: i32, y: i32, area: Rect) -> bool {
-        let h = hit(&Self::buttons(area), x, y);
+        let h = hit(&self.buttons(area), x, y);
         core::mem::replace(&mut self.hovered, h) != h
     }
 }

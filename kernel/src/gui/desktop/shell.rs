@@ -34,6 +34,7 @@ enum MenuAction {
     Settings,
     Launcher,
     Power,
+    Sleep,
     Minimize,
     Zoom,
     Close,
@@ -313,6 +314,7 @@ impl Desktop {
                 SEPARATOR,
                 item("Launcher", "Super", MenuAction::Launcher),
                 SEPARATOR,
+                item("Sleep", "", MenuAction::Sleep),
                 item("Restart…", "", MenuAction::Power),
                 item("Shut Down…", "", MenuAction::Power),
             ],
@@ -348,6 +350,7 @@ impl Desktop {
             MenuAction::Settings => self.open(AppKind::Settings),
             MenuAction::Launcher => self.toggle_launcher(),
             MenuAction::Power => self.open(AppKind::Power),
+            MenuAction::Sleep => crate::power::sleep(),
             MenuAction::Open(k) => self.open(k),
             MenuAction::Minimize => {
                 if let Some(id) = focused {

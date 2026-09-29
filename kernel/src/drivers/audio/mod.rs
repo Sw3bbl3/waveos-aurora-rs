@@ -272,6 +272,13 @@ fn mixer() {
     }
 }
 
+/// After sleep.
+pub fn resume() {
+    if present() {
+        hda::resume();
+    }
+}
+
 /// Finds a sound device and starts the mixer.
 pub fn init() {
     for d in crate::drivers::pci::devices() {
