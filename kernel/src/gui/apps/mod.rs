@@ -7,10 +7,12 @@
 
 mod client;
 mod crash;
+mod display;
 mod power;
 
 pub use client::ClientApp;
 pub use crash::CrashDialog;
+pub use display::DisplayConfirm;
 
 use super::canvas::Canvas;
 use super::geom::Rect;
@@ -32,6 +34,7 @@ pub enum AppKind {
     Preview,
     Power,
     Crash,
+    DisplayConfirm,
     /// A program not in the catalog.
     Other,
 }
@@ -142,6 +145,15 @@ pub static CATALOG: &[AppInfo] = &[
         single: false,
     },
     AppInfo {
+        kind: AppKind::DisplayConfirm,
+        name: "Display",
+        icon: Icon::Settings,
+        pinned: false,
+        listed: false,
+        path: "",
+        single: true,
+    },
+    AppInfo {
         kind: AppKind::Other,
         name: "App",
         icon: Icon::Aurora,
@@ -166,6 +178,10 @@ pub enum Request {
     Close,
     Shutdown,
     Reboot,
+    /// Keep the display mode just chosen.
+    KeepDisplay,
+    /// Go back to the previous display mode.
+    RevertDisplay,
 }
 
 /// Context passed to built-in dialogs.

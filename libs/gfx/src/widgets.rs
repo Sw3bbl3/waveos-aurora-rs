@@ -3,7 +3,7 @@
 use crate::canvas::{with_alpha, Canvas};
 use crate::font::Font;
 use crate::geom::Rect;
-use crate::theme::{self, ACCENT};
+use crate::theme;
 use alloc::vec::Vec;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub fn button(cv: &mut Canvas, r: Rect, label: &str, style: ButtonStyle, hovered
     let font = theme::ui_bold(13);
     match style {
         ButtonStyle::Primary | ButtonStyle::Danger => {
-            let base = if style == ButtonStyle::Primary { ACCENT } else { theme::CLOSE };
+            let base = if style == ButtonStyle::Primary { theme::accent() } else { theme::CLOSE };
             let top = if hovered {
                 crate::canvas::mix(base, 0xFFFF_FFFF, 40)
             } else {
@@ -42,7 +42,7 @@ pub fn text_field(cv: &mut Canvas, r: Rect, text: &str, placeholder: &str, focus
     let t = theme::current();
     let font = theme::ui(14);
     cv.fill_round_rect(r, 8, t.control_bg);
-    cv.stroke_round_rect(r, 8, if focused { with_alpha(ACCENT, 0xC0) } else { t.control_border });
+    cv.stroke_round_rect(r, 8, if focused { with_alpha(theme::accent(), 0xC0) } else { t.control_border });
     let base = r.y + (r.h + font.ascent as i32 + font.descent as i32) / 2;
     let x = r.x + 12;
     let w = if text.is_empty() {
@@ -52,7 +52,7 @@ pub fn text_field(cv: &mut Canvas, r: Rect, text: &str, placeholder: &str, focus
         cv.text_clipped(x, base, text, font, t.text, r.w - 24)
     };
     if focused && caret {
-        cv.fill_rect(Rect::new(x + w + 1, r.y + 8, 2, r.h - 16), ACCENT);
+        cv.fill_rect(Rect::new(x + w + 1, r.y + 8, 2, r.h - 16), theme::accent());
     }
 }
 
@@ -60,7 +60,7 @@ pub fn text_field(cv: &mut Canvas, r: Rect, text: &str, placeholder: &str, focus
 pub fn toggle(cv: &mut Canvas, r: Rect, on: bool) {
     let t = theme::current();
     let track = if on {
-        ACCENT
+        theme::accent()
     } else if t.dark {
         0xFF4A_4A55
     } else {
@@ -81,7 +81,7 @@ pub fn slider(cv: &mut Canvas, r: Rect, value: i32, hovered: bool) -> Rect {
     let track = Rect::new(r.x, cy - 2, r.w, 4);
     cv.fill_round_rect(track, 2, if t.dark { 0xFF4A_4A55 } else { 0xFFD6_D6DD });
     let filled = Rect::new(r.x, cy - 2, r.w * v / 1000, 4);
-    cv.fill_round_rect(filled, 2, ACCENT);
+    cv.fill_round_rect(filled, 2, theme::accent());
     let kx = r.x + r.w * v / 1000;
     let rad = if hovered { 10 } else { 9 };
     cv.fill_circle(kx, cy + 1, rad, 0x28000000);

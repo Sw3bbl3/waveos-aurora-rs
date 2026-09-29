@@ -17,7 +17,7 @@ use ripple::canvas::{with_alpha, Canvas};
 use ripple::font::Font;
 use ripple::geom::Rect;
 use ripple::text::{TextField, TextView};
-use ripple::theme::{self, ACCENT};
+use ripple::theme;
 use ripple::widgets::{button, ButtonStyle};
 use ripple::{App, Env, KeyCode, KeyEvent, Request};
 
@@ -400,7 +400,7 @@ impl Notes {
             Hit::Folder(i) => {
                 let selected = matches!(&self.sheet, Some(Sheet::SaveAs { folder, .. }) if *folder == i);
                 if selected {
-                    cv.fill_round_rect(r, 7, ACCENT);
+                    cv.fill_round_rect(r, 7, theme::accent());
                 } else {
                     cv.fill_round_rect(r, 7, if hovered { t.hover } else { t.window_bg_alt });
                 }
@@ -416,7 +416,7 @@ impl Notes {
                 match h {
                     Hit::Mono => {
                         if self.mono {
-                            cv.fill_round_rect(r, 7, with_alpha(ACCENT, 0x30));
+                            cv.fill_round_rect(r, 7, with_alpha(theme::accent(), 0x30));
                         }
                         let label = if self.mono { "Mono" } else { "Sans" };
                         cv.text_centered(r, label, if self.mono { theme::mono(13) } else { theme::ui_bold(13) }, c);

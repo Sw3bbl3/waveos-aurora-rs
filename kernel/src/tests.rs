@@ -98,6 +98,29 @@ fn keyboard() {
     assert!(d.feed(0xE0).is_none());
     assert_eq!(d.feed(0x48).unwrap().code, KeyCode::Up);
     assert!(!d.feed(0x9E).unwrap().pressed);
+
+    // Layouts: the same physical keys under German QWERTZ.
+    use crate::drivers::keymap;
+    keymap::validate();
+    assert!(keymap::set("de"));
+    assert_eq!(d.feed(0x15).unwrap().ch, Some('z'), "QWERTZ swaps Y and Z");
+    assert_eq!(d.feed(0x0C).unwrap().ch, Some('ß'));
+    // AltGr (right Alt) + Q = @.
+    d.feed(0xE0);
+    d.feed(0x38);
+    assert_eq!(d.feed(0x10).unwrap().ch, Some('@'));
+    d.feed(0xE0);
+    d.feed(0xB8);
+    // Dead circumflex then e = ê; dead key then space = the accent itself.
+    assert!(d.feed(0x29).is_none());
+    assert_eq!(d.feed(0x12).unwrap().ch, Some('ê'));
+    assert!(d.feed(0x29).is_none());
+    assert_eq!(d.feed(0x39).unwrap().ch, Some('^'));
+    assert!(keymap::set("fr"));
+    assert_eq!(d.feed(0x10).unwrap().ch, Some('a'), "AZERTY");
+    assert_eq!(d.feed(0x03).unwrap().ch, Some('é'));
+    assert!(keymap::set("us"));
+    assert_eq!(d.feed(0x10).unwrap().ch, Some('q'));
 }
 
 fn ramfs() {

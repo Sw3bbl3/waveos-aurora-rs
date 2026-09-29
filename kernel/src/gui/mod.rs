@@ -10,6 +10,7 @@ pub mod cursor;
 pub mod desktop;
 pub mod dnd;
 pub mod notify;
+pub mod prefs;
 pub mod server;
 pub mod settings;
 
@@ -24,13 +25,17 @@ use canvas::{rgb, Canvas};
 use core::fmt::Write;
 use desktop::{Desktop, PowerAction};
 use geom::Rect;
-use spin::Once;
 
-static FB: Once<Framebuffer> = Once::new();
+/// The framebuffer in use (replaced when the resolution changes).
+static FB: spin::Mutex<Option<Framebuffer>> = spin::Mutex::new(None);
 
 pub fn init(fb: Framebuffer) {
-    FB.call_once(|| fb);
+    *FB.lock() = Some(fb);
     load_fonts();
+}
+
+fn current_fb() -> Option<Framebuffer> {
+    *FB.lock()
 }
 
 /// Installs the TrueType UI faces from the system image (text falls back to
@@ -47,7 +52,7 @@ fn load_fonts() {
 }
 
 pub fn screen_size() -> (i32, i32) {
-    FB.get().map(|f| (f.width as i32, f.height as i32)).unwrap_or((1024, 768))
+    current_fb().map(|f| (f.width as i32, f.height as i32)).unwrap_or((1024, 768))
 }
 
 pub fn start() {
@@ -77,8 +82,8 @@ fn flush(front: &mut [u32], back: &[u32], fb: &Framebuffer, r: Rect) {
 }
 
 fn run() {
-    let fb = *FB.get().expect("gui::init not called");
-    let (w, h) = (fb.width as i32, fb.height as i32);
+    let mut fb = current_fb().expect("gui::init not called");
+    let (mut w, mut h) = (fb.width as i32, fb.height as i32);
     input::set_consumer(sched::current_id());
     server::set_compositor(sched::current_id());
 
@@ -89,7 +94,7 @@ fn run() {
     log!("gui", "desktop composed in {} ms ({}x{})", time::uptime_ms() - t0, w, h);
 
     let mut back = vec![0u32; (w * h) as usize];
-    let front = front_buffer(&fb);
+    let mut front = front_buffer(&fb);
     let mut ready = false;
     let mut next_tick = 0;
     loop {
@@ -99,6 +104,27 @@ fn run() {
             desktop.handle(ev, now);
         }
         desktop.process_commands();
+        // A new resolution: new framebuffer, back buffer and layout.
+        if let Some((nw, nh)) = desktop.resolution_request.take() {
+            match crate::drivers::display::set_mode(nw, nh) {
+                Some(new_fb) => {
+                    fb = new_fb;
+                    *FB.lock() = Some(fb);
+                    (w, h) = (fb.width as i32, fb.height as i32);
+                    back = vec![0u32; (w * h) as usize];
+                    front = front_buffer(&fb);
+                    input::set_screen_size(w, h);
+                    desktop.resize(w, h);
+                    server::broadcast(aurora_abi::Event {
+                        kind: aurora_abi::event::SCREEN,
+                        x: w,
+                        y: h,
+                        ..Default::default()
+                    });
+                }
+                None => log!("gui", "the display can't show {}x{}", nw, nh),
+            }
+        }
         // Something started moving: draw the next frame promptly.
         if desktop.wants_frames() {
             next_tick = next_tick.min(now + 16);
@@ -173,10 +199,12 @@ fn take_screenshot(back: &[u32], w: u32, h: u32) {
     });
 }
 
-/// Restores appearance settings.
+/// Restores appearance and system preferences.
 fn load_settings() {
     settings::load();
     theme::set_dark(settings::get_bool("dark", false));
+    theme::set_accent(settings::get_int("accent", 0) as u8);
+    prefs::apply_all_system();
     let wp = settings::get_int("wallpaper", 0) as u8;
     let valid = (wp as usize) < wallpaper::NAMES.len() || wp == wallpaper::CUSTOM;
     theme::set_wallpaper(if valid { wp } else { 0 });
@@ -219,8 +247,9 @@ impl<const N: usize> Write for StackText<N> {
 /// Paints the "Aurora ran into a problem" screen straight onto the
 /// framebuffer. Uses no heap, so it works even if the allocator is wedged.
 pub fn panic_screen(details: &str) {
-    let Some(fb) = FB.get() else { return };
-    let front = front_buffer(fb);
+    // Never block here: the panic may have hit while the lock was held.
+    let Some(fb) = FB.try_lock().and_then(|g| *g) else { return };
+    let front = front_buffer(&fb);
     let mut cv = Canvas::new(front, fb.stride as i32, fb.height as i32);
     cv.clip = Rect::new(0, 0, fb.width as i32, fb.height as i32);
     let (w, h) = (fb.width as i32, fb.height as i32);

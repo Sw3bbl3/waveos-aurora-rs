@@ -4,6 +4,7 @@
 Usage: tools/qmp.py STEP [STEP...]
   move:X,Y  click:X,Y  dclick:X,Y  rclick:X,Y  drag:X1,Y1,X2,Y2
   down:X,Y  up:X,Y  glide:X1,Y1,X2,Y2 (move in steps, e.g. while a button is held)
+  res:W,H (the guest's screen size, if it isn't 1280x800)
   type:TEXT (\\n = Enter)  key:QCODE[+QCODE]  wheel:N  sleep:SECONDS
   shot:PATH (PNG screenshot)  wait-log:TEXT (wait for a serial log line, from target/serial.log)
   quit
@@ -59,6 +60,8 @@ for step in sys.argv[1:]:
         b = "right" if k == "rclick" else "left"
         for _ in range(2 if k == "dclick" else 1):
             btn(True, b); btn(False, b)
+    elif k == "res":
+        W, H = map(int, v.split(","))
     elif k in ("down", "up"):
         x, y = map(int, v.split(",")); pos(x, y); btn(k == "down")
     elif k == "glide":

@@ -12,7 +12,7 @@ use crate::gui::geom::Rect;
 use crate::gui::icons::{self, Icon};
 use crate::gui::notify::{self, Notification};
 use crate::gui::settings;
-use crate::gui::theme::{self, ACCENT, DOCK_H, DOCK_MARGIN, MENUBAR_H};
+use crate::gui::theme::{self, DOCK_H, DOCK_MARGIN, MENUBAR_H};
 use crate::gui::widgets;
 use alloc::format;
 use alloc::string::String;
@@ -423,7 +423,7 @@ impl Desktop {
                     if hovered {
                         cv.fill_round_rect(r, 7, t.hover);
                     }
-                    cv.text_centered(r, "Clear", theme::ui(12), ACCENT);
+                    cv.text_centered(r, "Clear", theme::ui(12), theme::accent());
                 }
                 _ => {}
             }
@@ -443,7 +443,7 @@ impl Desktop {
             let label = format!("{day}");
             if today == Some(day) {
                 let (cx, cy) = r.center();
-                cv.fill_circle(cx, cy, 13, ACCENT);
+                cv.fill_circle(cx, cy, 13, theme::accent());
                 cv.text_centered(r, &label, theme::ui_bold(13), 0xFFFF_FFFF);
             } else {
                 let weekend = slot % 7 == 0 || slot % 7 == 6;

@@ -7,7 +7,7 @@ use crate::gui::apps::{self, AppKind, CATALOG};
 use crate::gui::canvas::{mix, with_alpha, Canvas};
 use crate::gui::geom::Rect;
 use crate::gui::icons::{self, Icon};
-use crate::gui::theme::{self, ACCENT, DOCK_H, DOCK_ICON, DOCK_MARGIN, DOCK_PAD, MENUBAR_H};
+use crate::gui::theme::{self, DOCK_H, DOCK_ICON, DOCK_MARGIN, DOCK_PAD, MENUBAR_H};
 use crate::gui::widgets;
 use alloc::format;
 use alloc::string::String;
@@ -110,15 +110,28 @@ impl Launcher {
     }
 }
 
+/// The menu-bar clock, as the Date & Time preferences ask.
 pub fn clock_text() -> String {
+    use crate::gui::prefs::get_bool;
+    use aurora_abi::pref;
     let d = rtc::now();
-    let (h12, ampm) = match d.hour {
-        0 => (12, "AM"),
-        1..=11 => (d.hour, "AM"),
-        12 => (12, "PM"),
-        h => (h - 12, "PM"),
+    let secs = if get_bool(pref::CLOCK_SECONDS) { format!(":{:02}", d.second) } else { String::new() };
+    let time = if get_bool(pref::CLOCK_24H) {
+        format!("{:02}:{:02}{}", d.hour, d.minute, secs)
+    } else {
+        let (h12, ampm) = match d.hour {
+            0 => (12, "AM"),
+            1..=11 => (d.hour, "AM"),
+            12 => (12, "PM"),
+            h => (h - 12, "PM"),
+        };
+        format!("{}:{:02}{} {}", h12, d.minute, secs, ampm)
     };
-    format!("{} {} {}   {}:{:02} {}", d.weekday_name(), d.month_name(), d.day, h12, d.minute, ampm)
+    if get_bool(pref::CLOCK_DATE) {
+        format!("{} {} {}   {}", d.weekday_name(), d.month_name(), d.day, time)
+    } else {
+        time
+    }
 }
 
 impl Desktop {
@@ -131,7 +144,7 @@ impl Desktop {
         for w in &self.windows {
             let k = w.app.kind();
             if !apps::info(k).pinned
-                && !matches!(k, AppKind::Power | AppKind::Crash | AppKind::Other)
+                && !matches!(k, AppKind::Power | AppKind::Crash | AppKind::Other | AppKind::DisplayConfirm)
                 && !extra.contains(&k)
             {
                 extra.push(k);
@@ -544,7 +557,7 @@ impl Desktop {
                 let foot_y = p.bottom() - 64;
                 cv.fill_rect(Rect::new(p.x + 1, foot_y, p.w - 2, 1), t.separator);
                 let av = Rect::new(p.x + 24, foot_y + 16, 32, 32);
-                cv.fill_round_rect_dgradient(av, 16, ACCENT, theme::ACCENT_2);
+                cv.fill_round_rect_dgradient(av, 16, theme::accent(), theme::ACCENT_2);
                 cv.text_centered(av, "A", theme::ui_bold(14), 0xFFFF_FFFF);
                 cv.text(p.x + 66, foot_y + 37, "Aurora User", theme::ui_bold(13), t.text);
                 let pw = self.launcher_power();
@@ -572,7 +585,7 @@ impl Desktop {
                     }
                     let hovered = m.hover == Some(i);
                     if hovered {
-                        cv.fill_round_rect(ir, 6, mix(ACCENT, 0xFFFF_FFFF, 20));
+                        cv.fill_round_rect(ir, 6, mix(theme::accent(), 0xFFFF_FFFF, 20));
                     }
                     let fg = if hovered { 0xFFFF_FFFF } else { t.text };
                     cv.text(ir.x + 12, ir.y + 18, it.label, f, fg);

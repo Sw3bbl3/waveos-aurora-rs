@@ -94,7 +94,17 @@ pub mod nr {
     pub const DRAG_DATA: usize = 44;
     /// `notify(title, title_len, body, body_len)` — shows a notification from the calling app
     pub const NOTIFY: usize = 45;
-    pub const COUNT: usize = 46;
+    /// `pref_get(key, key_len, buf, buf_len) -> full length` (`-ENOENT` if unset; see [`super::pref`])
+    pub const PREF_GET: usize = 46;
+    /// `pref_set(key, key_len, value, value_len)` — changes a system preference (applied at once)
+    pub const PREF_SET: usize = 47;
+    /// `set_datetime(*const DateTime)` — sets the clock
+    pub const SET_DATETIME: usize = 48;
+    /// `display_modes(*mut DisplayMode, max) -> count`
+    pub const DISPLAY_MODES: usize = 49;
+    /// `set_display(width, height)` — switches resolution now (`-ENOSYS` if only possible at boot)
+    pub const SET_DISPLAY: usize = 50;
+    pub const COUNT: usize = 51;
 }
 
 /// Error numbers (returned negated).
@@ -287,6 +297,44 @@ pub mod clip {
     pub const MAX_LEN: usize = 4 << 20;
 }
 
+/// System preference keys (values are text; booleans are "0"/"1").
+pub mod pref {
+    pub const DARK: &str = "dark";
+    /// Index into the accent palette.
+    pub const ACCENT: &str = "accent";
+    /// Keyboard layout id: us, uk, de, fr, es, se.
+    pub const KEYBOARD: &str = "keyboard";
+    /// Key repeat: delay before repeating (0–3 = 250–1000 ms) and rate (0 fastest – 31 slowest).
+    pub const REPEAT_DELAY: &str = "repeat_delay";
+    pub const REPEAT_RATE: &str = "repeat_rate";
+    pub const CLOCK_24H: &str = "clock24";
+    pub const CLOCK_SECONDS: &str = "clock_seconds";
+    pub const CLOCK_DATE: &str = "clock_date";
+    pub const DND: &str = "dnd";
+    pub const VOLUME: &str = "volume";
+    pub const MUTED: &str = "muted";
+}
+
+/// A screen resolution.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayMode {
+    pub width: u32,
+    pub height: u32,
+    /// [`display`] flags.
+    pub flags: u32,
+    pub _pad: u32,
+}
+
+pub mod display {
+    /// The mode in use.
+    pub const CURRENT: u32 = 1;
+    /// Can be switched to right away (otherwise it applies at the next start).
+    pub const LIVE: u32 = 2;
+    /// Chosen for the next start (in `\aurora\boot.conf`).
+    pub const AT_BOOT: u32 = 4;
+}
+
 /// Drag images for `drag_start`.
 pub mod drag {
     pub const DOCUMENT: usize = 0;
@@ -312,7 +360,7 @@ pub mod event {
     pub const CLOSE_REQUESTED: u32 = 7;
     /// `a` = 1 when focused, 0 when unfocused.
     pub const FOCUS: u32 = 8;
-    /// `a` = 1 for dark mode, `b` = wallpaper index.
+    /// `a` = 1 for dark mode, `b` = wallpaper index, `c` = accent index.
     pub const THEME: u32 = 9;
     /// Something is being dragged over the window: `x`, `y`, `a` = kind, `b` = item count, `d` = modifiers.
     pub const DRAG_OVER: u32 = 10;
@@ -322,6 +370,8 @@ pub mod event {
     pub const DROP: u32 = 12;
     /// Sent to the window a drag started from: `a` = 1 if it was dropped somewhere.
     pub const DRAG_END: u32 = 13;
+    /// The screen changed size: `x` = width, `y` = height.
+    pub const SCREEN: u32 = 14;
 }
 
 /// A single input/window event. Field meaning depends on `kind`:
@@ -355,7 +405,7 @@ pub mod desktop {
     pub const SET_WALLPAPER: usize = 4;
     pub const SHUTDOWN: usize = 5;
     pub const REBOOT: usize = 6;
-    /// Returns `(dark << 8) | wallpaper`.
+    /// Returns `(accent << 16) | (dark << 8) | wallpaper`.
     pub const GET_THEME: usize = 7;
     /// Use a picture as the wallpaper (arg = path of a PNG or BMP).
     pub const SET_WALLPAPER_IMAGE: usize = 8;

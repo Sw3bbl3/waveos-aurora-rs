@@ -8,7 +8,7 @@ use crate::gui::dnd::{self, Payload};
 use crate::gui::geom::Rect;
 use crate::gui::icons::{self, Icon};
 use crate::gui::server;
-use crate::gui::theme::{self, ACCENT};
+use crate::gui::theme;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aurora_abi::{clip, drag, event, Event};
@@ -248,7 +248,11 @@ impl Desktop {
             let f = theme::ui(12);
             let w = f.width(&s.label).min(170) + 16;
             let pill = Rect::new(icon_r.x + IMAGE / 2 - w / 2, icon_r.bottom() + 4, w, 20);
-            let bg = if s.target == Target::Nothing { with_alpha(0x202028, 0xC8) } else { with_alpha(ACCENT, 0xE8) };
+            let bg = if s.target == Target::Nothing {
+                with_alpha(0x202028, 0xC8)
+            } else {
+                with_alpha(theme::accent(), 0xE8)
+            };
             cv.fill_round_rect(pill, 10, bg);
             cv.text_clipped(pill.x + 8, pill.y + 14, &s.label, f, 0xFFFF_FFFF, w - 16);
         }

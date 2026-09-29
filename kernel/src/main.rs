@@ -58,6 +58,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     let fb = boot_info.framebuffer;
     input::set_screen_size(fb.width as i32, fb.height as i32);
     telemetry::stage("input", "Keyboard and mouse");
+    drivers::keymap::validate();
     drivers::ps2::init();
     arch::apic::route_isa_irq(&acpi, 1, arch::idt::KEYBOARD_VECTOR);
     arch::apic::route_isa_irq(&acpi, 12, arch::idt::MOUSE_VECTOR);
@@ -78,6 +79,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     // Storage needs a running clock (timeouts) and scheduler (drivers yield while polling).
     telemetry::stage("storage", "PCI, disk drivers and filesystems");
     drivers::pci::init(ecam);
+    drivers::display::init(boot_info);
     drivers::block::init();
     fs::mount_disks();
     telemetry::start();

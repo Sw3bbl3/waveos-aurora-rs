@@ -170,3 +170,13 @@ pub fn mouse_irq() {
     let wheel = if m.size == 4 { ((b3 << 4) as i8) >> 4 } else { 0 };
     input::push(InputEvent::Pointer { x: m.x, y: m.y, buttons: m.buttons, wheel });
 }
+
+/// Sets the keyboard's auto-repeat: `delay` 0–3 (250–1000 ms), `rate` 0 (30/s) – 31 (2/s).
+pub fn set_typematic(delay: u8, rate: u8) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        write_data(0xF3);
+        let _ = read_data(); // ACK
+        write_data((delay & 3) << 5 | (rate & 31));
+        let _ = read_data();
+    });
+}

@@ -11,7 +11,7 @@
 use crate::canvas::{with_alpha, Canvas};
 use crate::font::Font;
 use crate::geom::Rect;
-use crate::theme::{self, ACCENT};
+use crate::theme;
 use crate::{KeyCode, KeyEvent};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -592,7 +592,8 @@ impl TextView {
             if self.edit.text().is_empty() && !self.placeholder.is_empty() {
                 cv.text(r.x, r.y + baseline, &self.placeholder, f, t.text_secondary);
             }
-            let sel_color = if focused { with_alpha(ACCENT, 0x55) } else { with_alpha(t.text_secondary, 0x40) };
+            let sel_color =
+                if focused { with_alpha(theme::accent(), 0x55) } else { with_alpha(t.text_secondary, 0x40) };
             for (i, &(s, e)) in self.layout.iter().enumerate().skip(first).take(count) {
                 let y = r.y + i as i32 * self.line_h - self.scroll;
                 let line = &self.edit.text()[s..e];
@@ -630,7 +631,7 @@ impl TextView {
             if focused && self.caret_on && sel.is_none() {
                 let line = self.line_of(self.edit.caret()) as i32;
                 let y = r.y + line * self.line_h - self.scroll;
-                cv.fill_rect(Rect::new(r.x + self.x_of(self.edit.caret()), y + 1, 2, self.line_h - 2), ACCENT);
+                cv.fill_rect(Rect::new(r.x + self.x_of(self.edit.caret()), y + 1, 2, self.line_h - 2), theme::accent());
             }
         });
         // Scroll indicator.
@@ -848,7 +849,7 @@ impl TextField {
         let t = theme::current();
         let f = Self::font();
         cv.fill_round_rect(r, 8, t.control_bg);
-        cv.stroke_round_rect(r, 8, if focused { with_alpha(ACCENT, 0xC0) } else { t.control_border });
+        cv.stroke_round_rect(r, 8, if focused { with_alpha(theme::accent(), 0xC0) } else { t.control_border });
         let inner = Rect::new(r.x + 12, r.y, r.w - 24, r.h);
         let base = r.y + (r.h + f.ascent as i32 + f.descent as i32) / 2;
         let text = self.edit.text();
@@ -866,13 +867,13 @@ impl TextField {
                 cv.text(inner.x, base, &self.placeholder, f, t.text_secondary);
             }
             if let Some((a, b)) = self.edit.selection() {
-                let c = if focused { with_alpha(ACCENT, 0x55) } else { with_alpha(t.text_secondary, 0x40) };
+                let c = if focused { with_alpha(theme::accent(), 0x55) } else { with_alpha(t.text_secondary, 0x40) };
                 let (x0, x1) = (at(a), at(b));
                 cv.fill_rect(Rect::new(inner.x + x0 - self.scroll_x, r.y + 6, x1 - x0, r.h - 12), c);
             }
             cv.text(inner.x - self.scroll_x, base, text, f, t.text);
             if focused && self.caret_on && self.edit.selection().is_none() {
-                cv.fill_rect(Rect::new(inner.x + cx - self.scroll_x, r.y + 8, 2, r.h - 16), ACCENT);
+                cv.fill_rect(Rect::new(inner.x + cx - self.scroll_x, r.y + 8, 2, r.h - 16), theme::accent());
             }
         });
     }

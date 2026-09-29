@@ -59,6 +59,15 @@ pub enum Command {
     DragStart,
     /// Items went into or out of the Trash (the dock icon may change).
     TrashChanged,
+    /// A preference changed (see `prefs`).
+    Pref(String),
+    /// Switch the screen resolution (live-capable displays only).
+    SetResolution(u32, u32),
+}
+
+/// Queues a command for the compositor.
+pub fn command(cmd: Command) {
+    send(cmd);
 }
 
 /// Starts a drag from one of `pid`'s windows (see [`super::dnd`]).
@@ -429,7 +438,9 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
             send(Command::Reboot);
             Ok(0)
         }
-        GET_THEME => Ok(((super::theme::current().dark as u64) << 8) | super::theme::wallpaper() as u64),
+        GET_THEME => Ok((super::theme::accent_index() as u64) << 16
+            | ((super::theme::current().dark as u64) << 8)
+            | super::theme::wallpaper() as u64),
         _ => Err(EINVAL),
     }
 }

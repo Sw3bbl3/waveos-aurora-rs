@@ -17,7 +17,7 @@ use aurora_image::Image;
 use ripple::canvas::{with_alpha, Canvas};
 use ripple::geom::Rect;
 use ripple::icons::{self, Icon};
-use ripple::theme::{self, ACCENT};
+use ripple::theme;
 use ripple::widgets::{button, ButtonStyle};
 use ripple::{App, Env, KeyCode, KeyEvent, Request};
 
@@ -321,7 +321,7 @@ impl App for Preview {
                 Tool::Fit => {
                     button(cv, r, "Fit", ButtonStyle::Secondary, hovered);
                     if self.zoom.is_none() && has {
-                        cv.stroke_round_rect(r, 8, with_alpha(ACCENT, 0xC0));
+                        cv.stroke_round_rect(r, 8, with_alpha(theme::accent(), 0xC0));
                     }
                 }
                 Tool::Wallpaper => button(cv, r, "Set as Wallpaper", ButtonStyle::Secondary, hovered && has),

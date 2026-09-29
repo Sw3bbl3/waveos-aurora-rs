@@ -12,7 +12,34 @@ pub const DOCK_PAD: i32 = 9;
 pub const DOCK_H: i32 = DOCK_ICON + 2 * DOCK_PAD + 4;
 pub const DOCK_MARGIN: i32 = 10;
 
+/// The default accent (Aurora violet); see [`accent`] for the user's choice.
 pub const ACCENT: u32 = rgb(0x7C, 0x5C, 0xFF);
+
+/// Accent colours offered in Settings: (name, colour).
+pub const ACCENTS: [(&str, u32); 7] = [
+    ("Violet", ACCENT),
+    ("Blue", rgb(0x0A, 0x84, 0xFF)),
+    ("Teal", rgb(0x14, 0xB8, 0xA6)),
+    ("Green", rgb(0x30, 0xB0, 0x50)),
+    ("Orange", rgb(0xFF, 0x8A, 0x00)),
+    ("Pink", rgb(0xF0, 0x3E, 0x7A)),
+    ("Graphite", rgb(0x7A, 0x7A, 0x86)),
+];
+
+static ACCENT_INDEX: AtomicU8 = AtomicU8::new(0);
+
+/// The accent colour for selection, focus rings and primary buttons.
+pub fn accent() -> u32 {
+    ACCENTS[ACCENT_INDEX.load(Ordering::Relaxed) as usize % ACCENTS.len()].1
+}
+
+pub fn accent_index() -> u8 {
+    ACCENT_INDEX.load(Ordering::Relaxed)
+}
+
+pub fn set_accent(i: u8) {
+    ACCENT_INDEX.store(i % ACCENTS.len() as u8, Ordering::Relaxed);
+}
 pub const ACCENT_2: u32 = rgb(0x2D, 0xD4, 0xBF);
 pub const CLOSE: u32 = rgb(0xFF, 0x5F, 0x57);
 pub const MINIMIZE: u32 = rgb(0xFE, 0xBC, 0x2E);

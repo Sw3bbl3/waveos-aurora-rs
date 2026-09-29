@@ -79,3 +79,39 @@ impl DateTime {
             [(self.month.clamp(1, 12) - 1) as usize]
     }
 }
+
+fn cmos_write(reg: u8, value: u8) {
+    unsafe {
+        Port::<u8>::new(0x70).write(reg | 0x80);
+        Port::<u8>::new(0x71).write(value);
+    }
+}
+
+/// Sets the hardware clock (local time).
+pub fn set(d: &DateTime) {
+    without_interrupts(|| {
+        let status_b = cmos(0x0B);
+        let binary = status_b & 0x04 != 0;
+        let enc = |v: u8| if binary { v } else { (v / 10) << 4 | (v % 10) };
+        let hour = if status_b & 0x02 == 0 {
+            // 12-hour mode: 12 AM = 12, PM flag in bit 7.
+            let h12 = match d.hour % 12 {
+                0 => 12,
+                h => h,
+            };
+            enc(h12) | if d.hour >= 12 { 0x80 } else { 0 }
+        } else {
+            enc(d.hour)
+        };
+        // Halt updates while writing (SET bit), then resume.
+        cmos_write(0x0B, status_b | 0x80);
+        cmos_write(0x00, enc(d.second));
+        cmos_write(0x02, enc(d.minute));
+        cmos_write(0x04, hour);
+        cmos_write(0x07, enc(d.day));
+        cmos_write(0x08, enc(d.month));
+        cmos_write(0x09, enc((d.year % 100) as u8));
+        cmos_write(0x32, enc((d.year / 100) as u8));
+        cmos_write(0x0B, status_b & !0x80);
+    });
+}

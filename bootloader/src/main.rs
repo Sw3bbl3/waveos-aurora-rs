@@ -19,8 +19,8 @@ mod paging;
 
 use alloc::vec::Vec;
 use bootinfo::{
-    BootInfo, Framebuffer, MemoryKind, MemoryRegion, PixelFormat, BOOTINFO_MAGIC, BOOTINFO_VERSION, KERNEL_BASE,
-    PHYS_OFFSET,
+    BootInfo, Framebuffer, MemoryKind, MemoryRegion, PixelFormat, VideoMode, BOOTINFO_MAGIC, BOOTINFO_VERSION,
+    BOOT_VERBOSE, KERNEL_BASE, MAX_MODES, PHYS_OFFSET,
 };
 use core::arch::asm;
 use log::info;
@@ -40,7 +40,8 @@ fn main() -> Status {
     uefi::helpers::init().expect("uefi helpers");
     info!("aurora-boot {} starting", env!("CARGO_PKG_VERSION"));
 
-    let framebuffer = init_graphics();
+    let conf = BootConf::read();
+    let (framebuffer, modes, mode_count) = init_graphics(conf.resolution);
     info!(
         "graphics: {}x{} stride {} @ {:#x}",
         framebuffer.width, framebuffer.height, framebuffer.stride, framebuffer.phys_addr
@@ -87,6 +88,15 @@ fn main() -> Status {
             (0, 0)
         }
     };
+
+    // --- A page below 1 MiB for real-mode start-up code (SMP, S3 resume) ----------
+    let trampoline_phys = boot::allocate_pages(AllocateType::MaxAddress(0x9_F000), MemoryType::LOADER_DATA, 1)
+        .map(|p| {
+            unsafe { core::ptr::write_bytes(p.as_ptr(), 0, PAGE as usize) };
+            p.as_ptr() as u64
+        })
+        .unwrap_or(0);
+    info!("trampoline page at {:#x}", trampoline_phys);
 
     // --- Stack, BootInfo and memory map storage --------------------------------
     let stack_phys = alloc_pages(KERNEL_STACK_PAGES);
@@ -175,6 +185,10 @@ fn main() -> Status {
             phys_mapped_end: phys_end,
             initrd_phys,
             initrd_len,
+            modes,
+            mode_count,
+            flags: if conf.verbose { BOOT_VERBOSE } else { 0 },
+            trampoline_phys,
         });
     }
 
@@ -227,22 +241,61 @@ fn classify(ty: MemoryType) -> MemoryKind {
     }
 }
 
-/// Choose a graphics mode: 1280x800 if offered (the Aurora design size),
-/// otherwise the largest mode no wider than 1920 pixels.
-fn init_graphics() -> Framebuffer {
+/// Options from `\aurora\boot.conf` (`key=value` lines; Settings writes it).
+#[derive(Default)]
+struct BootConf {
+    resolution: Option<(usize, usize)>,
+    verbose: bool,
+}
+
+impl BootConf {
+    fn read() -> BootConf {
+        let mut conf = BootConf::default();
+        let Some(data) = read_file(cstr16!("\\aurora\\boot.conf")) else { return conf };
+        for line in core::str::from_utf8(&data).unwrap_or("").lines() {
+            match line.trim().split_once('=') {
+                Some(("resolution", v)) => {
+                    conf.resolution =
+                        v.trim().split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+                }
+                Some(("verbose", v)) => conf.verbose = v.trim() == "1",
+                _ => {}
+            }
+        }
+        conf
+    }
+}
+
+/// Chooses a graphics mode: the one boot.conf asks for, else 1280x800 (the
+/// Aurora design size) if offered, else the largest mode no wider than 1920.
+/// Returns the framebuffer and the list of usable modes.
+fn init_graphics(wanted: Option<(usize, usize)>) -> (Framebuffer, [VideoMode; MAX_MODES], u32) {
     let handle = boot::get_handle_for_protocol::<GraphicsOutput>().expect("no GOP device");
     let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(handle).expect("open GOP");
 
     let usable = |m: &gop::Mode| matches!(m.info().pixel_format(), gop::PixelFormat::Rgb | gop::PixelFormat::Bgr);
+    let mut list = [VideoMode::default(); MAX_MODES];
+    let mut count = 0;
     let mut best: Option<gop::Mode> = None;
+    let mut exact: Option<gop::Mode> = None;
+    let mut design: Option<gop::Mode> = None;
     for mode in gop.modes() {
         if !usable(&mode) {
             continue;
         }
         let (w, h) = mode.info().resolution();
-        if (w, h) == (1280, 800) {
-            best = Some(mode);
-            break;
+        let vm = VideoMode { width: w as u32, height: h as u32 };
+        if count < MAX_MODES && !list[..count].contains(&vm) {
+            list[count] = vm;
+            count += 1;
+        }
+        if Some((w, h)) == wanted && exact.is_none() {
+            exact = Some(mode);
+            continue;
+        }
+        if (w, h) == (1280, 800) && design.is_none() {
+            design = Some(mode);
+            continue;
         }
         if w > 1920 {
             continue;
@@ -258,9 +311,10 @@ fn init_graphics() -> Framebuffer {
             best = Some(mode);
         }
     }
-    if let Some(mode) = best {
+    if let Some(mode) = exact.or(design).or(best) {
         gop.set_mode(&mode).expect("set GOP mode");
     }
+    list[..count].sort_by_key(|m| (m.width, m.height));
 
     let info = gop.current_mode_info();
     let (width, height) = info.resolution();
@@ -269,14 +323,15 @@ fn init_graphics() -> Framebuffer {
         _ => PixelFormat::Bgr,
     };
     let mut fb = gop.frame_buffer();
-    Framebuffer {
+    let framebuffer = Framebuffer {
         phys_addr: fb.as_mut_ptr() as u64,
         size: fb.size() as u64,
         width: width as u32,
         height: height as u32,
         stride: info.stride() as u32,
         format,
-    }
+    };
+    (framebuffer, list, count as u32)
 }
 
 fn find_rsdp() -> u64 {

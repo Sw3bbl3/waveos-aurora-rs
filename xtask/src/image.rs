@@ -72,8 +72,24 @@ pub fn refresh_esp(esp: &Path, img: &Path) -> io::Result<bool> {
     if entry[0..16] != ESP_TYPE || start != ESP_START {
         return Ok(false);
     }
+    // Options written inside WaveOS (Settings → Display) survive the refresh.
+    let boot_conf = read_boot_conf(&mut file, start, end - start + 1);
     format_esp(&mut file, start, end - start + 1, esp)?;
+    if let Some(conf) = boot_conf {
+        let part = Region { file: &mut file, start: start * SECTOR, len: (end - start + 1) * SECTOR, pos: 0 };
+        let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new())?;
+        fs.root_dir().create_file("aurora/boot.conf")?.write_all(&conf)?;
+        fs.unmount()?;
+    }
     Ok(true)
+}
+
+fn read_boot_conf(file: &mut File, start: u64, sectors: u64) -> Option<Vec<u8>> {
+    let part = Region { file, start: start * SECTOR, len: sectors * SECTOR, pos: 0 };
+    let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new()).ok()?;
+    let mut data = Vec::new();
+    fs.root_dir().open_file("aurora/boot.conf").ok()?.read_to_end(&mut data).ok()?;
+    Some(data)
 }
 
 fn format_esp(file: &mut File, start: u64, sectors: u64, esp: &Path) -> io::Result<()> {

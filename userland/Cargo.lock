@@ -61,6 +61,7 @@ name = "app-settings"
 version = "0.3.0"
 dependencies = [
  "aurora",
+ "aurora-image",
  "ripple",
 ]
 

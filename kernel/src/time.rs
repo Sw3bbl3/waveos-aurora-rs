@@ -26,6 +26,12 @@ pub fn init_wall_clock() {
     BOOT_WALL.store(seconds_since_2000(&crate::drivers::rtc::now()), Ordering::Relaxed);
 }
 
+/// Sets the date and time (hardware clock and the kernel's wall clock).
+pub fn set_wall_clock(d: &crate::drivers::rtc::DateTime) {
+    crate::drivers::rtc::set(d);
+    BOOT_WALL.store(seconds_since_2000(d).saturating_sub(uptime_ms() / 1000), Ordering::Relaxed);
+}
+
 /// Local wall-clock time in seconds since 2000-01-01 00:00.
 pub fn wall_seconds() -> u64 {
     BOOT_WALL.load(Ordering::Relaxed) + uptime_ms() / 1000

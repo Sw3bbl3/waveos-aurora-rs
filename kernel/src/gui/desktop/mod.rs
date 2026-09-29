@@ -155,6 +155,12 @@ pub struct Desktop {
     spotlight: Option<spotlight::Spotlight>,
     /// Super is held and nothing else was pressed since.
     super_alone: bool,
+    /// A resolution change for the compositor to carry out.
+    pub resolution_request: Option<(u32, u32)>,
+    /// The resolution to go back to if a new one isn't confirmed.
+    previous_resolution: Option<(u32, u32)>,
+    /// Ask "Keep this resolution?" after the next resize.
+    confirm_resolution: bool,
 }
 
 impl Desktop {
@@ -192,6 +198,9 @@ impl Desktop {
             center: None,
             spotlight: None,
             super_alone: false,
+            resolution_request: None,
+            previous_resolution: None,
+            confirm_resolution: false,
         };
         d.open(AppKind::Welcome);
         d.damage_all();
@@ -447,6 +456,20 @@ impl Desktop {
                 }
                 Request::Shutdown => self.power = Some(PowerAction::Shutdown),
                 Request::Reboot => self.power = Some(PowerAction::Reboot),
+                Request::KeepDisplay | Request::RevertDisplay => {
+                    let revert = matches!(req, Request::RevertDisplay);
+                    if let Some(prev) = self.previous_resolution.take() {
+                        if revert {
+                            self.resolution_request = Some(prev);
+                        } else if let Err(e) = super::prefs::set_boot_resolution(self.w as u32, self.h as u32) {
+                            // Kept for this session; the next start uses the firmware's choice.
+                            log!("gui", "could not save the resolution: {}", aurora_abi::err::name(e));
+                        }
+                    }
+                    if let Some(id) = source {
+                        self.close(id);
+                    }
+                }
             }
         }
         if self.power.is_some() {
@@ -454,11 +477,59 @@ impl Desktop {
         }
     }
 
+    /// Applies a preference changed through `pref_set`.
+    fn pref_changed(&mut self, key: &str) {
+        use aurora_abi::pref;
+        match key {
+            pref::DARK => self.set_dark(super::prefs::get_bool(pref::DARK)),
+            pref::ACCENT => {
+                theme::set_accent(super::prefs::get(pref::ACCENT).and_then(|v| v.parse().ok()).unwrap_or(0));
+                self.broadcast_theme();
+                self.damage_all();
+            }
+            pref::CLOCK_24H | pref::CLOCK_SECONDS | pref::CLOCK_DATE => {
+                self.clock = shell::clock_text();
+                self.damage(Rect::new(0, 0, self.w, MENUBAR_H));
+            }
+            other => super::prefs::apply_system(other),
+        }
+    }
+
+    /// Adapts the desktop to a new screen size.
+    pub fn resize(&mut self, w: i32, h: i32) {
+        self.w = w;
+        self.h = h;
+        let (wp, bl) = Self::make_wallpaper(w, h);
+        self.wallpaper = wp;
+        self.blurred = bl;
+        self.cursor = (self.cursor.0.min(w - 1), self.cursor.1.min(h - 1));
+        let wa = self.work_area();
+        for win in &mut self.windows {
+            let r = &mut win.rect;
+            r.w = r.w.min(wa.w);
+            r.h = r.h.min(wa.h);
+            r.x = r.x.clamp(wa.x, (wa.right() - r.w).max(wa.x));
+            r.y = r.y.clamp(wa.y, (wa.bottom() - r.h).max(wa.y));
+            if win.saved.is_some() {
+                *r = wa; // zoomed windows stay zoomed
+            }
+        }
+        self.ghosts.clear();
+        for win in &mut self.windows {
+            win.animating = win.awaiting_frame.is_some();
+        }
+        if core::mem::take(&mut self.confirm_resolution) {
+            self.add_window(Box::new(apps::DisplayConfirm::new((w, h))));
+        }
+        self.damage_all();
+    }
+
     fn broadcast_theme(&self) {
         server::broadcast(aurora_abi::Event {
             kind: aurora_abi::event::THEME,
             a: theme::current().dark as u32,
             b: theme::wallpaper() as u32,
+            c: theme::accent_index() as u32,
             ..Default::default()
         });
     }
@@ -538,6 +609,14 @@ impl Desktop {
                 Command::Reboot => self.power = Some(PowerAction::Reboot),
                 Command::DragStart => self.begin_drag(),
                 Command::TrashChanged => self.refresh_trash(),
+                Command::Pref(key) => self.pref_changed(&key),
+                Command::SetResolution(w, h) => {
+                    if (w as i32, h as i32) != (self.w, self.h) {
+                        self.previous_resolution.get_or_insert((self.w as u32, self.h as u32));
+                        self.resolution_request = Some((w, h));
+                        self.confirm_resolution = true;
+                    }
+                }
             }
         }
         while let Some(c) = crate::proc::take_crash() {

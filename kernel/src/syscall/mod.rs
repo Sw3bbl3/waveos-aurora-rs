@@ -173,6 +173,54 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             crate::gui::notify::post(p.pid, &p.path, title, body);
             Ok(0)
         }
+        nr::PREF_GET => {
+            let key = user::str(a[0], a[1].min(64))?;
+            let v = crate::gui::prefs::get(key).ok_or(ENOENT)?;
+            let out = user::slice_mut(a[2], a[3].min(4096))?;
+            let n = v.len().min(out.len());
+            out[..n].copy_from_slice(&v.as_bytes()[..n]);
+            Ok(v.len() as u64)
+        }
+        nr::PREF_SET => {
+            let key = user::str(a[0], a[1].min(64))?;
+            let value = user::str(a[2], a[3].min(1024))?;
+            crate::gui::prefs::set(key, value).map(|_| 0)
+        }
+        nr::SET_DATETIME => {
+            let d: DateTime = user::get(a[0])?;
+            let ok = (2000..2100).contains(&d.year)
+                && (1..=12).contains(&d.month)
+                && (1..=31).contains(&d.day)
+                && d.hour < 24
+                && d.minute < 60
+                && d.second < 60;
+            if !ok {
+                return Err(EINVAL);
+            }
+            let rd = crate::drivers::rtc::DateTime {
+                year: d.year,
+                month: d.month,
+                day: d.day,
+                hour: d.hour,
+                minute: d.minute,
+                second: d.second,
+            };
+            time::set_wall_clock(&rd);
+            Ok(0)
+        }
+        nr::DISPLAY_MODES => {
+            let (w, h) = crate::gui::screen_size();
+            let modes = crate::drivers::display::modes((w as u32, h as u32), crate::gui::prefs::boot_resolution());
+            let max = (a[1] as usize).min(64);
+            let size = core::mem::size_of::<aurora_abi::DisplayMode>();
+            let out = user::slice_mut(a[0], (max * size) as u64)?;
+            for (i, m) in modes.iter().take(max).enumerate() {
+                let bytes = unsafe { core::slice::from_raw_parts(m as *const _ as *const u8, size) };
+                out[i * size..(i + 1) * size].copy_from_slice(bytes);
+            }
+            Ok(modes.len() as u64)
+        }
+        nr::SET_DISPLAY => crate::gui::prefs::set_display(a[0] as u32, a[1] as u32),
         nr::DRAG_DATA => {
             let out = user::slice_mut(a[0], a[1].min(aurora_abi::clip::MAX_LEN as u64))?;
             crate::gui::dnd::data(sched::current_pid(), out).map(|n| n as u64)

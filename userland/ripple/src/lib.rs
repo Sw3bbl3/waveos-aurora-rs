@@ -177,9 +177,10 @@ pub fn load_fonts() {
 /// Runs `app` until its window is closed. Returns the process exit code.
 pub fn run<A: App>(mut app: A) -> i32 {
     load_fonts();
-    let (dark, wallpaper) = aurora::process::desktop::theme();
+    let (dark, wallpaper, accent) = aurora::process::desktop::theme();
     theme::set_dark(dark);
     theme::set_wallpaper(wallpaper);
+    theme::set_accent(accent);
     let info = aurora::process::sys_info();
     let screen = (info.screen_w as i32, info.screen_h as i32);
 
@@ -268,6 +269,11 @@ pub fn run<A: App>(mut app: A) -> i32 {
             event::THEME => {
                 theme::set_dark(ev.a != 0);
                 theme::set_wallpaper(ev.b as u8);
+                theme::set_accent(ev.c as u8);
+                true
+            }
+            event::SCREEN => {
+                env.screen = (ev.x, ev.y);
                 true
             }
             event::CLOSE_REQUESTED => {

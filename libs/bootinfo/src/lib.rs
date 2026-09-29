@@ -16,7 +16,7 @@ pub const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 pub const BOOTINFO_MAGIC: u64 = 0x2121_4152_4F52_5541;
 
 /// Bumped whenever the layout of [`BootInfo`] changes.
-pub const BOOTINFO_VERSION: u32 = 2;
+pub const BOOTINFO_VERSION: u32 = 3;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +100,26 @@ pub struct BootInfo {
     /// The system image (`\aurora\system.tar`), or 0/0 if it was not found.
     pub initrd_phys: u64,
     pub initrd_len: u64,
+    /// Resolutions the firmware (GOP) offers; the first `mode_count` are valid.
+    pub modes: [VideoMode; MAX_MODES],
+    pub mode_count: u32,
+    /// Boot options ([`BOOT_VERBOSE`], …), from `\aurora\boot.conf`.
+    pub flags: u32,
+    /// A zeroed 4 KiB page below 1 MiB for real-mode start-up code (application
+    /// processors, S3 resume), or 0 if the firmware had none free.
+    pub trampoline_phys: u64,
+}
+
+pub const MAX_MODES: usize = 32;
+
+/// `verbose=1` in boot.conf: show the kernel log on screen while booting.
+pub const BOOT_VERBOSE: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VideoMode {
+    pub width: u32,
+    pub height: u32,
 }
 
 impl BootInfo {

@@ -7,7 +7,7 @@ use crate::gui::apps::{self, AppKind, CATALOG};
 use crate::gui::canvas::{with_alpha, Canvas};
 use crate::gui::geom::Rect;
 use crate::gui::icons::{self, Icon};
-use crate::gui::theme::{self, ACCENT, MENUBAR_H};
+use crate::gui::theme::{self, MENUBAR_H};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -402,7 +402,7 @@ impl Desktop {
             cv.text(r.x + 56, base, "Spotlight Search", f, t.text_secondary);
         } else {
             let w = cv.text(r.x + 56, base, &s.query, f, t.text);
-            cv.fill_rect(Rect::new(r.x + 58 + w, r.y + 14, 2, FIELD_H - 28), ACCENT);
+            cv.fill_rect(Rect::new(r.x + 58 + w, r.y + 14, 2, FIELD_H - 28), theme::accent());
         }
         if s.results.is_empty() {
             return;
@@ -412,7 +412,7 @@ impl Desktop {
         for (i, (res, row)) in s.results.iter().zip(self.spotlight_rows()).enumerate() {
             let sel = i == s.selected;
             if sel {
-                cv.fill_round_rect(row, 10, ACCENT);
+                cv.fill_round_rect(row, 10, theme::accent());
             }
             let fg = if sel { 0xFFFF_FFFF } else { t.text };
             let fg2 = if sel { 0xDDFF_FFFF } else { t.text_secondary };

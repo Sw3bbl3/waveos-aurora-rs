@@ -122,10 +122,10 @@ pub mod desktop {
         req(abi::desktop::EMPTY_TRASH, "").map(|_| ())
     }
 
-    /// (dark, wallpaper index)
-    pub fn theme() -> (bool, u8) {
+    /// (dark, wallpaper index, accent index)
+    pub fn theme() -> (bool, u8, u8) {
         let v = call(nr::DESKTOP, &[abi::desktop::GET_THEME as u64, 0, 0]).unwrap_or(0);
-        (v >> 8 != 0, v as u8)
+        (v >> 8 & 0xFF != 0, v as u8, (v >> 16) as u8)
     }
 
     pub fn shutdown() {

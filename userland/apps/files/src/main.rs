@@ -26,7 +26,7 @@ use ripple::canvas::{with_alpha, Canvas};
 use ripple::geom::Rect;
 use ripple::icons::{self, Icon};
 use ripple::text::TextField;
-use ripple::theme::{self, ACCENT};
+use ripple::theme;
 use ripple::widgets::{button, ButtonStyle};
 use ripple::{App, Env, KeyCode, KeyEvent, Request};
 
@@ -1078,9 +1078,9 @@ impl Files {
                     inside(p.path)
                 };
                 if self.drop_place == Some((section, i)) {
-                    cv.fill_round_rect(*r, 7, with_alpha(ACCENT, 0x70));
+                    cv.fill_round_rect(*r, 7, with_alpha(theme::accent(), 0x70));
                 } else if active {
-                    cv.fill_round_rect(*r, 7, with_alpha(ACCENT, 0x30));
+                    cv.fill_round_rect(*r, 7, with_alpha(theme::accent(), 0x30));
                 } else if self.hover == Some(Hover::Place(section, i)) {
                     cv.fill_round_rect(*r, 7, t.hover);
                 }
@@ -1114,11 +1114,11 @@ impl Files {
                 Hover::ViewIcons | Hover::ViewList => {
                     let on = (*h == Hover::ViewIcons) == (self.view == View::Icons);
                     if on {
-                        cv.fill_round_rect(*r, 7, with_alpha(ACCENT, 0x30));
+                        cv.fill_round_rect(*r, 7, with_alpha(theme::accent(), 0x30));
                     } else if hovered {
                         cv.fill_round_rect(*r, 7, t.hover);
                     }
-                    let c = if on { ACCENT } else { t.text };
+                    let c = if on { theme::accent() } else { t.text };
                     if *h == Hover::ViewIcons {
                         for k in 0..4 {
                             cv.fill_round_rect(Rect::new(cx - 7 + (k % 2) * 8, cy - 7 + (k / 2) * 8, 6, 6), 2, c);
@@ -1136,7 +1136,7 @@ impl Files {
                         cv.fill_round_rect(*r, 7, t.hover);
                     }
                     icons::draw(cv, Icon::Folder, Rect::new(cx - 10, cy - 9, 20, 20));
-                    cv.fill_circle(cx + 8, cy + 6, 6, ACCENT);
+                    cv.fill_circle(cx + 8, cy + 6, 6, theme::accent());
                     cv.fill_rect(Rect::new(cx + 5, cy + 5, 7, 2), 0xFFFF_FFFF);
                     cv.fill_rect(Rect::new(cx + 7, cy + 3, 2, 7), 0xFFFF_FFFF);
                     title_right = title_right.min(r.x - 8);
@@ -1175,7 +1175,7 @@ impl Files {
         let main = Self::main_area(area);
         let content = self.content(area);
         if self.drop_here {
-            cv.stroke_round_rect(main.inset(3), 8, with_alpha(ACCENT, 0xC0));
+            cv.stroke_round_rect(main.inset(3), 8, with_alpha(theme::accent(), 0xC0));
         }
         if self.view == View::List {
             let hdr = Rect::new(main.x, main.y, main.w, HEADER_H);
@@ -1229,9 +1229,9 @@ impl Files {
                 let selected = self.selection.contains(&i);
                 let drop = self.drop_target == Some(i);
                 let sel_bg = if drop {
-                    with_alpha(ACCENT, 0x70)
+                    with_alpha(theme::accent(), 0x70)
                 } else if focused_view {
-                    with_alpha(ACCENT, 0x34)
+                    with_alpha(theme::accent(), 0x34)
                 } else {
                     with_alpha(t.text_secondary, 0x30)
                 };
@@ -1269,7 +1269,7 @@ impl Files {
                                 cv.fill_round_rect(
                                     lr,
                                     6,
-                                    if focused_view { ACCENT } else { with_alpha(t.text_secondary, 0x60) },
+                                    if focused_view { theme::accent() } else { with_alpha(t.text_secondary, 0x60) },
                                 );
                             }
                             let fg = if selected && focused_view { 0xFFFF_FFFF } else { t.text };
@@ -1281,7 +1281,7 @@ impl Files {
                             cv.fill_rect(r, with_alpha(t.text_secondary, 0x0C));
                         }
                         if selected || drop {
-                            cv.fill_round_rect(r, 6, if focused_view && !drop { ACCENT } else { sel_bg });
+                            cv.fill_round_rect(r, 6, if focused_view && !drop { theme::accent() } else { sel_bg });
                         }
                         let fg = if selected && focused_view && !drop { 0xFFFF_FFFF } else { t.text };
                         let fg2 = if selected && focused_view && !drop { 0xDDFF_FFFF } else { t.text_secondary };
@@ -1313,8 +1313,8 @@ impl Files {
             }
             if let Some((x0, y0, x1, y1)) = self.band {
                 let r = Rect::new(x0.min(x1), y0.min(y1) - self.scroll, (x1 - x0).abs(), (y1 - y0).abs());
-                cv.fill_rect(r, with_alpha(ACCENT, 0x28));
-                cv.stroke_round_rect(r, 1, with_alpha(ACCENT, 0x90));
+                cv.fill_rect(r, with_alpha(theme::accent(), 0x28));
+                cv.stroke_round_rect(r, 1, with_alpha(theme::accent(), 0x90));
             }
         });
         // Inline rename field (drawn on top, may overflow the tile).
@@ -1463,7 +1463,7 @@ impl Files {
                 };
                 let hovered = m.hover == Some(i);
                 if hovered {
-                    cv.fill_round_rect(row, 6, ACCENT);
+                    cv.fill_round_rect(row, 6, theme::accent());
                 }
                 cv.text(row.x + 12, row.y + 19, label, theme::ui(13), if hovered { 0xFFFF_FFFF } else { t.text });
             }
