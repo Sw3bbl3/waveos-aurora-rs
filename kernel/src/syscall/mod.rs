@@ -221,6 +221,7 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             Ok(modes.len() as u64)
         }
         nr::SET_DISPLAY => crate::gui::prefs::set_display(a[0] as u32, a[1] as u32),
+        nr::SYS_STATS => user::put(a[0], &sys_stats()).map(|_| 0),
         nr::DRAG_DATA => {
             let out = user::slice_mut(a[0], a[1].min(aurora_abi::clip::MAX_LEN as u64))?;
             crate::gui::dnd::data(sched::current_pid(), out).map(|n| n as u64)
@@ -402,6 +403,29 @@ fn state_of(s: sched::State) -> u32 {
         sched::State::Sleeping(_) => aurora_abi::PROC_SLEEPING,
         sched::State::Dead => aurora_abi::PROC_EXITED,
     }
+}
+
+fn sys_stats() -> aurora_abi::SysStats {
+    let mut s = aurora_abi::SysStats { uptime_ms: time::uptime_ms(), cpus: 1, ..Default::default() };
+    let tasks = sched::list();
+    s.tasks = tasks.len() as u32;
+    // Tick counts are milliseconds (1 kHz timer); the idle task's time is idle time.
+    let idle: u64 = tasks.iter().filter(|t| t.id == 0).map(|t| t.cpu_ticks).sum();
+    let busy: u64 = tasks.iter().filter(|t| t.id != 0).map(|t| t.cpu_ticks).sum();
+    s.cpu[0] = aurora_abi::CpuTime { busy_ms: busy, idle_ms: idle };
+    let m = mm::stats();
+    (s.mem_total, s.mem_used, s.heap_size, s.heap_used) = (m.total_bytes, m.used_bytes, m.heap_size, m.heap_used);
+    (s.interrupts, s.syscalls, s.context_switches) = crate::telemetry::totals();
+    for d in crate::drivers::block::stats() {
+        s.disk_reads += d.reads;
+        s.disk_writes += d.writes;
+        s.disk_read_bytes += d.read_bytes;
+        s.disk_write_bytes += d.write_bytes;
+    }
+    s.frames = crate::telemetry::FRAMES.load(Ordering::Relaxed);
+    s.windows = crate::gui::server::windows().len() as u32;
+    s.processes = proc::all().iter().filter(|p| p.exit_code().is_none()).count() as u32;
+    s
 }
 
 fn sys_info() -> SysInfo {

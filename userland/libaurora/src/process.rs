@@ -73,6 +73,12 @@ pub fn sys_info() -> SysInfo {
     unsafe { info.assume_init() }
 }
 
+pub fn sys_stats() -> abi::SysStats {
+    let mut s = abi::SysStats::default();
+    let _ = call(nr::SYS_STATS, &[&mut s as *mut abi::SysStats as u64]);
+    s
+}
+
 pub fn fixed_str(bytes: &[u8], len: u32) -> String {
     String::from_utf8_lossy(&bytes[..(len as usize).min(bytes.len())]).into_owned()
 }

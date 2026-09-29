@@ -307,7 +307,9 @@ impl Desktop {
         let cascade = (self.windows.len() as i32 % 6) * 28;
         let x = wa.x + (wa.w - w) / 2 + cascade - 56;
         let y = wa.y + (wa.h - h) / 3 + cascade - 28;
-        let rect = Rect::new(x.max(wa.x), y.max(wa.y), w, h);
+        let x = x.min(wa.right() - w).max(wa.x);
+        let y = y.min(wa.bottom() - h).max(wa.y);
+        let rect = Rect::new(x, y, w, h);
         let id = self.next_id;
         self.next_id += 1;
         let prev = self.focused_id();

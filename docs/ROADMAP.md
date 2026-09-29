@@ -34,15 +34,16 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - **Tests:** the kernel suite runs on all three controllers in CI, and boots twice to verify persistence.
 - **Deferred:** interrupt-driven I/O (MSI/MSI-X) moves to M5, and drag and drop moves to M4.
 
-## M4: Apps and polish
+## ✅ M4: Apps and polish
 
-- **Files:** drag and drop, a list view, and search.
-
-- **Notes:** a richer editor with selection, the clipboard and undo.
-- **Image Viewer:** PNG decoding.
-- **Settings:** display modes, keyboard layouts, date and time.
-- **Desktop:** window animations, notification center, and Spotlight-style search in the launcher.
-- **Text:** runtime TrueType rendering for arbitrary sizes and scripts.
+- **Text:** our own TrueType engine (outlines, kerning, exact-area anti-aliasing in fixed point) renders any size, in the kernel and in apps.
+- **User space:** SSE2 for programs, threads, futexes, `Mutex`/`Condvar`.
+- **New apps:** Preview (our own PNG and BMP codecs), Paint, Clock (world clock, alarms, stopwatch, timers) and Activity Monitor.
+- **Notes:** selection, the clipboard, undo/redo, find, fonts and sizes, Save As, and an unsaved-changes prompt, on a shared `ripple::text` engine.
+- **Files:** drag and drop, icon and sortable list views, multi-select, search, Quick Look, picture thumbnails and a Trash with Put Back.
+- **Desktop:** window animations, notifications and a Notification Center with a calendar, Spotlight (apps, indexed files, settings, calculations, commands), a system clipboard, screenshots, pictures as wallpaper, and a dynamic accent colour.
+- **Settings:** Appearance, Display (live resolution changes on Bochs/QEMU VGA, boot-time modes elsewhere), Keyboard (six layouts, key repeat), Date & Time, Sound, Notifications and About.
+- **Deferred:** complex-script shaping (Arabic, Indic) and a user-space font server; Sound pane controls take effect with the audio driver in M5.
 
 ## M5: Real hardware
 

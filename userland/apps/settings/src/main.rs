@@ -72,6 +72,7 @@ enum Hit {
     Toggle(&'static str),
     Field(usize, i32),
     SetClock,
+    Zone(i32),
     Volume,
     AboutMore,
 }
@@ -210,6 +211,9 @@ impl Settings {
                     x += w + 10 + if i == 2 { 24 } else { 0 };
                 }
                 v.push((Hit::SetClock, Rect::new(c.right() - 120, y + 34, 110, 30)));
+                let zy = y + 104;
+                v.push((Hit::Zone(-30), Rect::new(c.right() - 150, zy + 8, 28, 28)));
+                v.push((Hit::Zone(30), Rect::new(c.right() - 38, zy + 8, 28, 28)));
             }
             Pane::Sound => {
                 v.push((Hit::Volume, Rect::new(c.x + 110, c.y + 70 + 12, c.w - 140, 20)));
@@ -300,6 +304,10 @@ impl Settings {
                     }
                     Err(e) => self.flash(format!("Couldn't set the clock: {e}")),
                 }
+            }
+            Hit::Zone(d) => {
+                let v = (prefs::get_int("utc_offset", 0) + d as i64).clamp(-12 * 60, 14 * 60);
+                let _ = prefs::set("utc_offset", &format!("{v}"));
             }
             Hit::Volume => self.slide(h, x),
             Hit::AboutMore => env.requests.push(Request::OpenApp(String::from("About"))),
@@ -549,6 +557,26 @@ impl Settings {
                 let sr = rect_of(Hit::SetClock).unwrap();
                 let style = if self.clock_edited { ButtonStyle::Primary } else { ButtonStyle::Secondary };
                 button(cv, sr, "Set", style, self.hover == Some(Hit::SetClock));
+                // Time zone (used by the world clock).
+                let zy = y + 104;
+                let zr = Rect::new(c.x, zy, c.w, ROW_H);
+                Self::card(cv, zr, 1);
+                cv.text(zr.x + 16, zr.y + 27, "Time zone", theme::ui(14), t.text);
+                let off = prefs::get_int("utc_offset", 0) as i32;
+                let zone = if off == 0 {
+                    String::from("UTC")
+                } else {
+                    format!("UTC{}{}:{:02}", if off < 0 { "−" } else { "+" }, off.abs() / 60, off.abs() % 60)
+                };
+                let zf = theme::ui_bold(14);
+                cv.text(zr.right() - 94 - zf.width(&zone) / 2, zr.y + 27, &zone, zf, t.text);
+                for (d, glyph) in [(-30, "−"), (30, "+")] {
+                    let r = rect_of(Hit::Zone(d)).unwrap();
+                    if self.hover == Some(Hit::Zone(d)) {
+                        cv.fill_round_rect(r, 6, t.hover);
+                    }
+                    cv.text_centered(r, glyph, theme::ui(16), t.text_secondary);
+                }
             }
             Pane::Sound => {
                 let card = Rect::new(c.x, c.y + 70, c.w, 3 * ROW_H);

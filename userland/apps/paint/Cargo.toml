@@ -1,0 +1,15 @@
+[package]
+name = "app-paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "app-paint"
+path = "src/main.rs"
+
+[dependencies]
+aurora.workspace = true
+ripple.workspace = true
+aurora-image.workspace = true
+libm = "0.2"

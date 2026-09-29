@@ -104,7 +104,9 @@ pub mod nr {
     pub const DISPLAY_MODES: usize = 49;
     /// `set_display(width, height)` — switches resolution now (`-ENOSYS` if only possible at boot)
     pub const SET_DISPLAY: usize = 50;
-    pub const COUNT: usize = 51;
+    /// `sys_stats(*mut SysStats)` — counters for Activity Monitor
+    pub const SYS_STATS: usize = 51;
+    pub const COUNT: usize = 52;
 }
 
 /// Error numbers (returned negated).
@@ -273,6 +275,40 @@ pub struct SysInfo {
     pub root: [u8; 48],
     pub disk_total: u64,
     pub disk_free: u64,
+}
+
+pub const MAX_CPUS: usize = 16;
+
+/// Time a CPU spent busy and idle since boot (milliseconds).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CpuTime {
+    pub busy_ms: u64,
+    pub idle_ms: u64,
+}
+
+/// Live counters (all cumulative since boot, so callers compute rates).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SysStats {
+    pub uptime_ms: u64,
+    pub cpus: u32,
+    pub tasks: u32,
+    pub cpu: [CpuTime; MAX_CPUS],
+    pub mem_total: u64,
+    pub mem_used: u64,
+    pub heap_size: u64,
+    pub heap_used: u64,
+    pub interrupts: u64,
+    pub syscalls: u64,
+    pub context_switches: u64,
+    pub disk_reads: u64,
+    pub disk_writes: u64,
+    pub disk_read_bytes: u64,
+    pub disk_write_bytes: u64,
+    pub frames: u64,
+    pub windows: u32,
+    pub processes: u32,
 }
 
 /// A window's pixel buffer, mapped into the owning process.

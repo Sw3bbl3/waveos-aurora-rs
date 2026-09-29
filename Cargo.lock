@@ -25,11 +25,11 @@ dependencies = [
 
 [[package]]
 name = "aurora-abi"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "aurora-boot"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aurora-elf",
  "bootinfo",
@@ -39,11 +39,11 @@ dependencies = [
 
 [[package]]
 name = "aurora-elf"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "aurora-gfx"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fontdue",
  "spin",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "aurora-image"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "miniz_oxide 0.8.9",
  "png",
@@ -83,7 +83,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "bootinfo"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "bumpalo"
@@ -164,7 +164,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "fat32"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fatfs",
 ]
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "tide"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aurora-abi",
  "aurora-elf",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "wavefs"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "windows-core"
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fatfs",
  "wavefs",

@@ -10,20 +10,22 @@ This document is for someone about to read or change the code. It follows the ma
 | `kernel/` | `tide` | `x86_64-unknown-none` | The kernel and the Crest window server |
 | `libs/bootinfo/` | `bootinfo` | both | `#[repr(C)]` handoff contract |
 | `libs/abi/` | `aurora-abi` | kernel + user | System call numbers, errors, `#[repr(C)]` structs, key types |
-| `libs/gfx/` | `aurora-gfx` | kernel + user | Rasterizer, fonts, theme, icons, widgets, wallpapers |
+| `libs/gfx/` | `aurora-gfx` | kernel + user | Rasterizer, our TrueType engine, theme, icons, widgets, wallpapers |
+| `libs/image/` | `aurora-image` | kernel + user + host | PNG decoder and encoder, BMP decoder |
 | `libs/elf/` | `aurora-elf` | bootloader + kernel | Overflow-checked ELF64 reader |
 | `libs/wavefs/` | `wavefs` | kernel + host | The WaveFS filesystem engine (also used by `mkfs` in xtask) |
 | `libs/fat32/` | `fat32` | kernel | FAT32 with long file names |
-| `userland/libaurora/` | `aurora` | user | Runtime: entry point, heap, `print!`, files, processes |
-| `userland/ripple/` | `ripple` | user | UI toolkit: windows, event loop, the `App` trait |
-| `userland/apps/*` | `app-*` | user | Files, Terminal, Notes, Calculator, Settings, About, Welcome |
+| `userland/libaurora/` | `aurora` | user | Runtime: entry point, heap, `print!`, files, processes, threads, clipboard, drag and drop, preferences |
+| `userland/ripple/` | `ripple` | user | UI toolkit: windows, event loop, the `App` trait, the `text` editing engine |
+| `userland/apps/*` | `app-*` | user | Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome |
 | `userland/bin/*` | — | user | Command-line tools (`coreutils`), `usertest`, `crashtest` |
 | `xtask/` | `xtask` | host | Build, run, image and test orchestration |
-| `assets/fonts/` | — | — | TTFs rasterized at build time |
-| `assets/home/` | — | — | Default folders and documents for a new home volume |
-| `tools/qmp.py` | — | host | Scripted clicks, typing and screenshots for a running VM |
+| `assets/fonts/` | — | — | Inter and JetBrains Mono, shipped in `/System/Fonts` |
+| `assets/home/` | — | — | Default folders, documents and pictures for a new home volume |
+| `tools/qmp.py` | — | host | Scripted clicks, drags, typing and screenshots for a running VM |
+| `tools/make_sample_pictures.py` | — | host | Generates the sample pictures (procedural) |
 
-The root workspace's `default-members` is only `xtask`, so a plain `cargo build` never tries to build the kernel for your host. `userland/` is a separate workspace. `xtask` builds it with the user linker script (`userland/libaurora/user.ld`, base `0x40_0000`) and packs the binaries into `system.tar`:
+The root workspace's `default-members` is only `xtask`, so a plain `cargo build` never tries to build the kernel for your host. `userland/` is a separate workspace. `xtask` builds it for our own target, `userland/x86_64-aurora-user.json` (ring 3 with SSE2; the kernel stays soft-float), rebuilding `core` and `alloc` with `-Zbuild-std`, links it with `userland/libaurora/user.ld` (base `0x40_0000`), and packs the binaries and fonts into `system.tar`:
 - `app-*` binaries become `/System/Apps/<Name>.elf`
 - everything else becomes `/System/Bin/<name>`
 
@@ -85,7 +87,7 @@ serial → GDT/TSS → IDT → syscall MSRs → mm (frames, heap, drop identity 
 
 The IRQ handlers decode input straight into a fixed-size, allocation-free ring buffer (`drivers/input.rs`):
 
-- **Keyboard.** Scancode set 1, US layout (`drivers/keyboard.rs`).
+- **Keyboard.** Scancode set 1 is translated to USB HID usages (`drivers/keyboard.rs`), and the chosen layout turns usages into characters (`drivers/keymap.rs`: U.S., British, German, French, Spanish, Swedish, with AltGr and dead keys). USB keyboards will share the same tables.
 - **Mouse, emulated.** Under QEMU and VMware, the **vmmouse** backdoor gives an absolute pointer, so the guest cursor tracks the host cursor without grabbing it.
 - **Mouse, real hardware.** Standard PS/2 relative packets, with IntelliMouse wheel support.
 
@@ -108,6 +110,10 @@ Every process has its own PML4:
 
 There is no `fork`. The model is spawn-style, like Windows' CreateProcess.
 
+**Threads.** A process can run several threads (`thread_spawn`/`thread_exit`): tasks that share its address space and handles. `futex_wait`/`futex_wake` put contended threads to sleep, keyed by (address space, address); libaurora builds `sync::Mutex`, `Condvar` and `thread::spawn`/`join` on them. `thread_exit` can store 1 into a word and wake it, which is how `join` knows the thread has left its stack.
+
+**SIMD state.** User code uses SSE2; the kernel is soft-float and never touches those registers. So only user tasks carry an FXSAVE area, saved and restored eagerly on every switch between them (`arch/fpu.rs`).
+
 Each process has an fd table of `Handle`s:
 - open files
 - pipe ends (bounded 64 KiB queues)
@@ -124,13 +130,14 @@ Each process has an fd table of `Handle`s:
 Syscall numbers and structs live in `libs/abi`. They cover processes, memory, files, pipes, system info, windows and events.
 
 **Exit and crashes:**
-- **CPU faults in ring 3** kill only the faulting process (`proc::crash_current`), and the desktop shows a Problem Report.
-- **`kill`** is cooperative. The target exits itself at a safe point (syscall return, a timer tick in ring 3, or a blocking wait), so it never dies while holding a kernel lock.
-- **The `reaper` kernel task** frees exited processes: it closes handles (so pipe peers see EOF), closes windows, and drops the address space.
+- **Termination is cooperative for every thread.** `exit`, a crash or `kill` records the exit code (the first one wins) and flags the process; each thread leaves at its next safe point (syscall return, a timer tick in ring 3, or a blocking wait), so none dies while holding a kernel lock.
+- **CPU faults in ring 3** end only the faulting process (`proc::crash_current`), and the desktop shows a Problem Report.
+- **The `reaper` kernel task** frees a process once the scheduler has retired its last thread: it closes handles (so pipe peers see EOF), closes windows, and drops the address space.
 
 ### libaurora and Ripple
 - **libaurora:** the runtime. It provides `_start`, a heap that grows by `mmap`-ing new arenas, and `print!`, which formats into one buffer and writes it once. It also has file, process and time APIs.
-- **Ripple:** the UI toolkit. An app implements `ripple::App` (draw/key/click/hover/scroll/tick) and calls `ripple::run`. Ripple creates the window, draws the app with `aurora-gfx` into the shared surface, calls `win_present`, and turns window-server events into method calls.
+- **Ripple:** the UI toolkit. An app implements `ripple::App` (draw/key/click/drag/hover/scroll/tick, drop targets, close requests) and calls `ripple::run`. Ripple creates the window, draws the app with `aurora-gfx` into the shared surface, calls `win_present`, and turns window-server events into method calls.
+- **`ripple::text`:** one editing engine for every text box: `TextEdit` (caret, selection, word and line motion, undo grouped by typing bursts, the clipboard), a word-wrapping `TextView` with mouse selection (double-click a word, triple-click a line, drag with auto-scroll), and a single-line `TextField`.
 
 ## 4. Crest window server (`kernel/src/gui/`)
 
@@ -143,14 +150,23 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
   - **Surface:** each window owned by a process has a surface, which is frames mapped both into the kernel (`vmm::kmap`) and into the process (`map_shared`).
   - **Compositing:** `ClientApp` adapts it to the window manager. It blits the surface with rounded bottom corners, and turns clicks, keys, scrolls, focus and resizes into `aurora_abi::Event`s on the window's queue.
   - **Events:** the process receives events through the blocking `next_event` syscall.
-- **Built-in dialogs.** A few system dialogs (Power, Problem Report) are built into the server and implement the kernel-side `App` trait directly.
+- **Built-in dialogs.** A few system dialogs (Power, Problem Report, "Keep this resolution?") are built into the server and implement the kernel-side `App` trait directly.
 - **Rendering primitives.** Rendering is `aurora-gfx`:
   - integer anti-aliased shapes, SDF shadows and frosted glass
   - glass samples a wallpaper blurred once at startup
-  - fonts are pre-rasterized at build time (Inter and JetBrains Mono)
-  - wallpapers are procedural
-- **Desktop** (`desktop/mod.rs`): the window stack, focus, drag and resize, zoom and minimize.
-- **Shell** (`desktop/shell.rs`): the menu bar, dock, launcher and menus. The catalog in `apps/mod.rs` maps app names and icons to program paths.
+  - bilinear image scaling with correct transparent edges (`draw_image`)
+  - wallpapers are procedural, or any picture
+- **Text** (`libs/gfx/src/ttf`, `font.rs`) is our own TrueType engine. It reads `cmap`, `glyf` outlines (simple and composite), `hmtx`, OS/2 metrics and pair kerning (`kern` and GPOS), and rasterizes by exact signed-area accumulation in 16.16 fixed point, so the soft-float kernel can use it too. Glyphs are cached per face, size and quarter-pixel offset. Crest and every app install the faces from `/System/Fonts`; a few build-time sizes cover the time before that (and the panic screen).
+- **Desktop** (`desktop/mod.rs`): the window stack, focus, drag and resize, zoom and minimize. A press in a window's content captures the pointer until release, so apps get drags even outside their window.
+- **Animations** (`desktop/anim.rs`): opening, closing, minimizing into the dock, restoring and zooming draw a snapshot of the window scaled and faded between two rectangles while the real window stays hidden. Client windows appear once they've drawn their first frame. Crest runs at 60 Hz only while something moves.
+- **Shell** (`desktop/shell.rs`): the menu bar, dock (with the Trash), launcher and menus. The catalog in `apps/mod.rs` maps app names and icons to program paths.
+- **Clipboard** (`clipboard.rs`): one item, text or a list of files; files paste as their paths where text is wanted.
+- **Drag and drop** (`dnd.rs`, `desktop/dragdrop.rs`): an app calls `drag_start` during a press; Crest takes the pointer, draws the drag image, sends `DRAG_OVER`/`DRAG_LEAVE` to windows underneath, and on release delivers `DROP` (the target fetches the payload with `drag_data`) and `DRAG_END` to the source. Dock apps open dropped files, and the dock Trash takes them.
+- **Notifications** (`notify.rs`, `desktop/notifications.rs`): `notify` from apps, or the system; banners slide in at the top right, and the Notification Center (click the clock) keeps the history next to a calendar and Do Not Disturb.
+- **Spotlight** (`desktop/spotlight.rs`, `fs/index.rs`): apps, files, settings panes, calculations and commands. The file index is built by a background task at boot and kept current by hooks in the VFS (create, mkdir, rename, unlink).
+- **Preferences** (`settings.rs`, `prefs.rs`): `key=value` lines in `/Settings/aurora.conf`, read and written with `pref_get`/`pref_set` and applied at once: dark mode, the accent colour, keyboard layout and key repeat, clock format, Do Not Disturb, volume.
+- **Display modes** (`drivers/display.rs`): on Bochs/QEMU VGA the resolution switches live (new framebuffer and back buffer, every window clamped, a `SCREEN` event to apps, then a 15-second "Keep this resolution?"). Elsewhere the firmware's GOP modes (passed in BootInfo v3) are offered and the choice goes to `\aurora\boot.conf` for the bootloader.
+- **Screenshots:** Print Screen or Super+Shift+3 saves a PNG to Pictures, encoded on a background task.
 
 ## 5. Storage (`drivers/pci.rs`, `drivers/block/`, `fs/`)
 
@@ -226,10 +242,15 @@ Lines are written while holding the port lock and without allocating, so events 
   - wallpaper generation
   - address-space teardown, checked for frame leaks
   - the user-space `usertest` suite, which exercises every syscall: bad pointers, pipes, child processes, exit codes, and a crashing child
+  - keyboard layouts, AltGr and dead keys
+  - the TrueType engine with the installed faces
+  - Spotlight's calculator and file index, the clipboard, and the Trash with Put Back
   - storage: a GPT read, a write-and-verify round trip on the real controller, WaveFS through the kernel adapter on a RAM disk, WaveFS on the home volume checked with `fsck`, and FAT32 on `/Boot`
+
+  `usertest` also covers threads, futexes and SIMD state surviving preemption.
 
   The kernel reports through QEMU's `isa-debug-exit` device. `xtask test` boots the same fresh disk **twice**: the first boot leaves a file, and the second must find it intact.
 - **Headless boots.** `cargo xtask run --headless` exposes QEMU's HMP monitor at `target/qemu-monitor.sock` and QMP at `target/qemu-qmp.sock`. That makes it possible to script screenshots and input (`screendump`, `input-send-event`).
-- **Host tests.** `cargo test -p wavefs -p fat32` covers the filesystem libraries, including crash-recovery and `fatfs` cross-checks.
+- **Host tests.** `cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling) and the image codecs (against the `png` crate).
 - **Scripted UI.** `tools/qmp.py` clicks, types and takes screenshots in a running VM.
 - **CI.** On every push, CI runs the host tests, the kernel suite on AHCI, virtio-blk and NVMe, and a headless boot to the desktop.
