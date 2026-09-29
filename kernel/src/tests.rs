@@ -498,6 +498,12 @@ fn smp_work() {
         }
         DONE.fetch_add(1, Ordering::SeqCst);
     }
+    // (Also run again after sleep: start from zero.)
+    SEEN.store(0, Ordering::SeqCst);
+    DONE.store(0, Ordering::SeqCst);
+    *COUNT.lock() = 0;
+    *SLOW.lock() = 0;
+    ATOMIC.store(0, Ordering::SeqCst);
     let n = 8;
     for _ in 0..n {
         crate::sched::spawn("t-smp", worker);
@@ -677,8 +683,13 @@ fn usb() {
     fs::write_all("/Volumes/AURORA-USB/Written.bin", &data).unwrap();
     fs::sync_all();
     assert!(fs::read_all("/Volumes/AURORA-USB/Written.bin").unwrap() == data, "data read back from USB differs");
-    let has = |what: &str| devices.iter().any(|d| d.contains(what));
-    assert!(has("keyboard") && has("tablet") && has("hub") && has("storage"), "missing drivers: {:?}", devices);
+    // Enumeration goes on in the background (slowly on one CPU).
+    let all = || {
+        let d = crate::drivers::usb::list();
+        ["keyboard", "tablet", "hub", "storage"].iter().all(|w| d.iter().any(|l| l.contains(w)))
+    };
+    assert!(wait_for(all, 10_000), "missing drivers: {:?}", crate::drivers::usb::list());
+    let devices = crate::drivers::usb::list();
     crate::kprint!("[{} devices] ", devices.len());
 }
 
