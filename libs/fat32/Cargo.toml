@@ -1,10 +1,10 @@
 [package]
-name = "xtask"
+name = "fat32"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
 
 [dependencies]
+
+[dev-dependencies]
 fatfs = "0.3"
-wavefs = { path = "../libs/wavefs" }

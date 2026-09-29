@@ -139,6 +139,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "fat32"
+version = "0.2.0"
+dependencies = [
+ "fatfs",
+]
+
+[[package]]
 name = "fatfs"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -409,8 +416,10 @@ dependencies = [
  "aurora-elf",
  "aurora-gfx",
  "bootinfo",
+ "fat32",
  "linked_list_allocator",
  "spin",
+ "wavefs",
  "x86_64",
 ]
 
@@ -533,6 +542,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wavefs"
+version = "0.2.0"
+
+[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -609,4 +622,5 @@ name = "xtask"
 version = "0.2.0"
 dependencies = [
  "fatfs",
+ "wavefs",
 ]

@@ -26,6 +26,11 @@ const TESTS: &[Test] = &[
     ("wallpaper + blur", wallpaper),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
+    ("storage: disk + GPT", storage_devices),
+    ("storage: controller round trip", block_round_trip),
+    ("WaveFS on RAM disk (kernel adapter)", wavefs_ramdisk),
+    ("WaveFS home volume", wavefs_home),
+    ("FAT32 /Boot", fat_boot),
 ];
 
 pub fn run() {
@@ -197,4 +202,126 @@ fn user_processes() {
     sched::sleep_ms(100);
     let (_, after) = mm::frame::counts();
     assert!(after + 8 >= before, "user processes leaked {} frames", before - after);
+}
+
+use crate::drivers::block::{self, BlockDevice, BlockResult};
+use alloc::string::String;
+use alloc::sync::Arc;
+
+fn main_disk() -> Arc<dyn BlockDevice> {
+    block::devices().into_iter().find(|d| !d.name().contains('p')).expect("no disk found — is a disk attached?")
+}
+
+fn storage_devices() {
+    let disk = main_disk();
+    crate::kprint!("[{}] ", disk.describe());
+    let mut hdr = alloc::vec![0u8; disk.sector_size() as usize];
+    disk.read(1, &mut hdr).unwrap();
+    assert_eq!(&hdr[0..8], b"EFI PART");
+    assert!(
+        block::devices().iter().filter(|d| d.name().starts_with(&disk.name())).count() >= 3,
+        "expected 2 partitions"
+    );
+}
+
+fn block_round_trip() {
+    let disk = main_disk();
+    let ss = disk.sector_size() as u64;
+    // The image leaves an unpartitioned 1 MiB scratch area just before the backup GPT.
+    let scratch = disk.sectors() - 33 - (1 << 20) / ss;
+    let len = 200 * 1024; // larger than one DMA chunk
+    let pattern: Vec<u8> = (0..len).map(|i| (i as u32).wrapping_mul(2654435761).to_le_bytes()[1]).collect();
+    disk.write(scratch, &pattern).unwrap();
+    disk.flush().unwrap();
+    let mut back = alloc::vec![0u8; len];
+    disk.read(scratch, &mut back).unwrap();
+    assert!(back == pattern, "data read back differs");
+    assert!(disk.read(disk.sectors(), &mut back[..ss as usize]).is_err(), "out-of-range read must fail");
+}
+
+/// A block device in RAM.
+struct RamDisk(crate::sync::Mutex<Vec<u8>>);
+
+impl BlockDevice for RamDisk {
+    fn name(&self) -> String {
+        String::from("ram0")
+    }
+    fn sector_size(&self) -> u32 {
+        512
+    }
+    fn sectors(&self) -> u64 {
+        self.0.lock().len() as u64 / 512
+    }
+    fn read(&self, lba: u64, buf: &mut [u8]) -> BlockResult<()> {
+        let d = self.0.lock();
+        let o = lba as usize * 512;
+        buf.copy_from_slice(d.get(o..o + buf.len()).ok_or(aurora_abi::err::EINVAL)?);
+        Ok(())
+    }
+    fn write(&self, lba: u64, buf: &[u8]) -> BlockResult<()> {
+        let mut d = self.0.lock();
+        let o = lba as usize * 512;
+        d.get_mut(o..o + buf.len()).ok_or(aurora_abi::err::EINVAL)?.copy_from_slice(buf);
+        Ok(())
+    }
+    fn flush(&self) -> BlockResult<()> {
+        Ok(())
+    }
+}
+
+fn wavefs_ramdisk() {
+    use crate::fs::{wavefs::WaveFs, Filesystem, Kind};
+    let dev: Arc<dyn BlockDevice> = Arc::new(RamDisk(crate::sync::Mutex::new(alloc::vec![0u8; 8 << 20])));
+    {
+        let fs = WaveFs::format(dev.clone(), "Test").unwrap();
+        let docs = fs.create(fs.root(), "Documents", Kind::Dir).unwrap();
+        let f = fs.create(docs, "note.txt", Kind::File).unwrap();
+        fs.write(f, 0, b"kept across remount").unwrap();
+        let big: Vec<u8> = (0..300_000u32).map(|i| i as u8).collect();
+        let b = fs.create(docs, "big.bin", Kind::File).unwrap();
+        fs.write(b, 0, &big).unwrap();
+        fs.sync().unwrap();
+        fs.check().unwrap();
+    }
+    let fs = WaveFs::mount(dev).unwrap();
+    let docs = fs.lookup(fs.root(), "Documents").unwrap();
+    let f = fs.lookup(docs, "note.txt").unwrap();
+    let mut buf = [0u8; 19];
+    fs.read(f, 0, &mut buf).unwrap();
+    assert_eq!(&buf, b"kept across remount");
+    let b = fs.lookup(docs, "big.bin").unwrap();
+    assert_eq!(fs.metadata(b).unwrap().size, 300_000);
+    fs.check().unwrap();
+}
+
+fn wavefs_home() {
+    let (root, _) = fs::lookup("/").unwrap();
+    assert!(root.describe().contains("WaveFS"), "root is {}", root.describe());
+    assert!(fs::read_all("/Desktop/Read Me.txt").unwrap().starts_with(b"Welcome to WaveOS Aurora"));
+    fs::mkdir("/Documents/ktest").unwrap();
+    for i in 0..20 {
+        fs::write_all(&alloc::format!("/Documents/ktest/{i}.txt"), &alloc::vec![b'x'; 1000 + i * 100]).unwrap();
+    }
+    fs::rename("/Documents/ktest/3.txt", "/Documents/renamed.txt").unwrap();
+    fs::sync_all();
+    root.check().unwrap();
+    for i in (0..20).filter(|&i| i != 3) {
+        fs::unlink(&alloc::format!("/Documents/ktest/{i}.txt")).unwrap();
+    }
+    fs::unlink("/Documents/ktest").unwrap();
+    fs::unlink("/Documents/renamed.txt").unwrap();
+    fs::sync_all();
+    root.check().unwrap();
+    let (total, free) = root.space().unwrap();
+    assert!(free > 0 && free < total);
+}
+
+fn fat_boot() {
+    let kernel = fs::read_all("/Boot/aurora/kernel.elf").expect("kernel on the ESP");
+    assert_eq!(&kernel[0..4], b"\x7fELF");
+    assert!(fs::read_all("/Boot/EFI/BOOT/BOOTX64.EFI").unwrap().starts_with(b"MZ"));
+    fs::write_all("/Boot/Aurora test file.txt", b"written by Tide").unwrap();
+    assert_eq!(fs::read_all("/Boot/aurora test FILE.txt").unwrap(), b"written by Tide"); // FAT is case-insensitive
+    fs::unlink("/Boot/Aurora test file.txt").unwrap();
+    fs::sync_all();
 }

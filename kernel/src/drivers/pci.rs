@@ -18,6 +18,7 @@ pub const CMD_BUS_MASTER: u16 = 1 << 2;
 pub const CMD_INTX_DISABLE: u16 = 1 << 10;
 
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // I/O BARs are recorded for completeness; no driver uses one yet
 pub enum Bar {
     None,
     Memory { phys: u64, size: u64 },

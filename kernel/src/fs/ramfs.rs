@@ -136,37 +136,24 @@ impl Filesystem for RamFs {
     }
 }
 
-/// Default folders and sample documents for a fresh home volume.
+/// Default folders and sample documents (shared with the disk image builder).
 pub const SEED_DIRS: &[&str] = &["/Desktop", "/Documents", "/Downloads", "/Pictures", "/Settings"];
 
 pub const SEED_FILES: &[(&str, &str)] = &[
-    (
-        "/Desktop/Read Me.txt",
-        "Welcome to WaveOS Aurora!\n\nEvery app you open is now its own user-space process, drawing into a shared \
-         surface that the Crest window server composites.\n\nTry:\n  • Opening apps from the launcher (or press the \
-         Windows/Super key)\n  • Typing `ps` in Terminal to see the running processes\n  • Editing this file in Notes \
-         and saving it\n",
-    ),
-    (
-        "/Documents/Roadmap.txt",
-        "WaveOS Aurora roadmap\n\nM1  Boot to a graphical desktop            (done)\nM2  User space: processes, \
-         syscalls, IPC   (done)\nM3  Storage: AHCI/virtio/NVMe, VFS, WaveFS\nM4  Apps: editor, image viewer, more \
-         settings\nM5  Real hardware: SMP, USB, power management\nM6  Networking: TCP/IP, DHCP, DNS, HTTP\n",
-    ),
-    (
-        "/Documents/Ideas.txt",
-        "- Smooth window animations\n- Notification center\n- Spotlight-style search in the launcher\n",
-    ),
+    ("/Desktop/Read Me.txt", include_str!("../../../assets/home/Desktop/Read Me.txt")),
+    ("/Documents/Roadmap.txt", include_str!("../../../assets/home/Documents/Roadmap.txt")),
+    ("/Documents/Ideas.txt", include_str!("../../../assets/home/Documents/Ideas.txt")),
 ];
 
-/// Populates the root volume with the default layout (idempotent).
+/// Populates the root volume with the default layout if it is empty.
 pub fn seed() {
+    if super::readdir("/").is_ok_and(|e| e.iter().any(|e| e.name == "Documents")) {
+        return;
+    }
     for d in SEED_DIRS {
         let _ = super::mkdir(d);
     }
     for (path, text) in SEED_FILES {
-        if super::stat(path).is_err() {
-            let _ = super::write_all(path, text.as_bytes());
-        }
+        let _ = super::write_all(path, text.as_bytes());
     }
 }

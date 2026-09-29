@@ -1,0 +1,4 @@
+- Smooth window animations
+- Notification center
+- Spotlight-style search in the launcher
+- Drag and drop between Files windows

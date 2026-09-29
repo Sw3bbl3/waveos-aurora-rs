@@ -54,6 +54,23 @@ pub fn devices() -> Vec<Arc<dyn BlockDevice>> {
     DEVICES.lock().clone()
 }
 
+/// Partition metadata, if `dev` is a GPT partition.
+pub struct PartitionInfo {
+    pub type_guid: [u8; 16],
+    pub label: String,
+}
+
+static PARTS: IrqMutex<Vec<(String, PartitionInfo)>> = IrqMutex::new(Vec::new());
+
+pub fn partition_info(dev: &Arc<dyn BlockDevice>) -> Option<PartitionInfo> {
+    let name = dev.name();
+    PARTS
+        .lock()
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, p)| PartitionInfo { type_guid: p.type_guid, label: p.label.clone() })
+}
+
 /// Probes PCI for storage controllers and registers their disks and partitions.
 pub fn init() {
     for d in crate::drivers::pci::devices() {
@@ -67,6 +84,7 @@ pub fn init() {
     let disks = devices();
     for disk in disks {
         for p in gpt::partitions(&disk) {
+            PARTS.lock().push((p.name(), PartitionInfo { type_guid: p.type_guid, label: p.label.clone() }));
             register(Arc::new(p));
         }
     }

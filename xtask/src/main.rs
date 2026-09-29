@@ -1,9 +1,12 @@
 //! `cargo xtask` — the WaveOS Aurora build orchestrator.
 //!
-//!   cargo xtask build [--debug]          build bootloader + kernel, assemble target/esp
-//!   cargo xtask run [--headless] [--debug] [--no-build] [--gdb] [--int]
-//!   cargo xtask image                     build target/waveos-aurora.img (GPT + FAT32 ESP)
-//!   cargo xtask test                      boot the kernel self-tests headless in QEMU
+//!   cargo xtask build [--debug]         build bootloader, kernel and user space into target/esp
+//!   cargo xtask run [options]           boot the persistent disk target/waveos-aurora.img in QEMU
+//!       --disk ahci|virtio|nvme           storage controller for the disk (default: ahci)
+//!       --fresh-disk                      recreate the disk (erases files saved inside WaveOS)
+//!       --headless --no-build --debug --gdb --int
+//!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
+//!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 
 mod image;
 mod tar;
@@ -21,6 +24,12 @@ fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let flag = |f: &str| args.iter().any(|a| a == f);
     let profile = if flag("--debug") { Profile::Debug } else { Profile::Release };
+    let disk =
+        args.iter().position(|a| a == "--disk").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("ahci");
+    if !["ahci", "virtio", "nvme"].contains(&disk) {
+        eprintln!("--disk must be ahci, virtio or nvme");
+        exit(2);
+    }
 
     match args.first().map(String::as_str) {
         Some("build") => {
@@ -28,18 +37,26 @@ fn main() {
         }
         Some("run") => {
             let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
-            let opts = RunOpts { headless: flag("--headless"), gdb: flag("--gdb"), log_int: flag("--int") };
-            let status = qemu(&esp, &opts).status().expect("failed to launch qemu");
+            let img = root().join("target/waveos-aurora.img");
+            prepare_disk(&esp, &img, flag("--fresh-disk"));
+            let opts = RunOpts {
+                headless: flag("--headless"),
+                gdb: flag("--gdb"),
+                log_int: flag("--int"),
+                disk,
+                allow_reboot: true,
+            };
+            let status = qemu(&img, &opts).status().expect("failed to launch qemu");
             exit(status.code().unwrap_or(1));
         }
         Some("image") => {
             let esp = build(profile, false);
-            let out = root().join("target/waveos-aurora.img");
-            image::create(&esp, &out, 128 * 1024 * 1024).expect("image creation failed");
+            let out = root().join("target/waveos-aurora-usb.img");
+            image::create(&esp, &root().join("assets/home"), &out, DISK_SIZE).expect("image creation failed");
             println!("wrote {}", out.display());
             println!("flash to a USB stick with: sudo dd if={} of=/dev/rdiskN bs=4m", out.display());
         }
-        Some("test") => test(profile),
+        Some("test") => test(profile, disk),
         _ => {
             eprintln!("usage: cargo xtask <build|run|image|test> [--debug] [--headless] [--no-build] [--gdb] [--int]");
             exit(2);
@@ -64,6 +81,22 @@ impl Profile {
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+}
+
+const DISK_SIZE: u64 = 256 * 1024 * 1024;
+
+/// Creates the persistent disk if needed; otherwise refreshes only its ESP so
+/// files saved on the WaveFS volume survive rebuilds.
+fn prepare_disk(esp: &Path, img: &Path, fresh: bool) {
+    let home = root().join("assets/home");
+    if !fresh && img.exists() {
+        match image::refresh_esp(esp, img) {
+            Ok(true) => return,
+            Ok(false) => eprintln!("{} has an old layout; recreating it", img.display()),
+            Err(e) => eprintln!("could not update {}: {e}; recreating it", img.display()),
+        }
+    }
+    image::create(esp, &home, img, DISK_SIZE).expect("disk image creation failed");
 }
 
 fn esp_dir(test: bool) -> PathBuf {
@@ -218,13 +251,16 @@ fn ovmf_vars(code: &Path) -> PathBuf {
     vars
 }
 
-struct RunOpts {
+struct RunOpts<'a> {
     headless: bool,
     gdb: bool,
     log_int: bool,
+    /// Storage controller: ahci, virtio or nvme.
+    disk: &'a str,
+    allow_reboot: bool,
 }
 
-fn qemu(esp: &Path, opts: &RunOpts) -> Command {
+fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let code = find_ovmf();
     let vars = ovmf_vars(&code);
     let monitor = root().join("target/qemu-monitor.sock");
@@ -233,10 +269,18 @@ fn qemu(esp: &Path, opts: &RunOpts) -> Command {
     let _ = fs::remove_file(&qmp);
 
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-m", "512M", "-smp", "1", "-vga", "std", "-no-reboot"]);
+    cmd.args(["-machine", "q35", "-m", "512M", "-smp", "1", "-vga", "std"]);
+    if !opts.allow_reboot {
+        cmd.arg("-no-reboot");
+    }
     cmd.arg("-drive").arg(format!("if=pflash,format=raw,readonly=on,file={}", code.display()));
     cmd.arg("-drive").arg(format!("if=pflash,format=raw,file={}", vars.display()));
-    cmd.arg("-drive").arg(format!("format=raw,file=fat:rw:{}", esp.display()));
+    cmd.arg("-drive").arg(format!("id=disk,if=none,format=raw,file={}", img.display()));
+    cmd.arg("-device").arg(match opts.disk {
+        "virtio" => "virtio-blk-pci,drive=disk,disable-legacy=on,bootindex=0",
+        "nvme" => "nvme,drive=disk,serial=aurora0,bootindex=0",
+        _ => "ide-hd,drive=disk,bus=ide.0,bootindex=0",
+    });
     cmd.args(["-rtc", "base=localtime"]);
     cmd.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     cmd.args(["-serial", "stdio"]);
@@ -258,9 +302,13 @@ fn qemu(esp: &Path, opts: &RunOpts) -> Command {
 /// Boots the kernel with the `ktest` feature. The kernel runs its self-tests
 /// and reports through `isa-debug-exit`: exit code 0x10 means success, which
 /// QEMU turns into process status (0x10 << 1) | 1 = 33.
-fn test(profile: Profile) {
+fn test(profile: Profile, disk: &str) {
     let esp = build(profile, true);
-    let mut cmd = qemu(&esp, &RunOpts { headless: true, gdb: false, log_int: false });
+    let img = root().join("target/test-disk.img");
+    image::create(&esp, &root().join("assets/home"), &img, 128 * 1024 * 1024).expect("test disk creation failed");
+    println!("running kernel tests with the disk on {disk}");
+    let opts = RunOpts { headless: true, gdb: false, log_int: false, disk, allow_reboot: false };
+    let mut cmd = qemu(&img, &opts);
     cmd.stdin(Stdio::null());
     let mut child = cmd.spawn().expect("failed to launch qemu");
     let start = Instant::now();

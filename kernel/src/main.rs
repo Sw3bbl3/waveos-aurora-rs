@@ -68,6 +68,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     // Storage needs a running clock (timeouts) and scheduler (drivers yield while polling).
     drivers::pci::init(ecam);
     drivers::block::init();
+    fs::mount_disks();
 
     #[cfg(feature = "ktest")]
     sched::spawn("ktest", tests::run);

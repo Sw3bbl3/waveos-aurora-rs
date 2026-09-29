@@ -8,8 +8,11 @@
 //! Filesystems implement [`Filesystem`] with interior locking (`sync::Mutex`,
 //! which may be held across disk I/O). Errors are `aurora_abi::err` numbers.
 
+pub mod cache;
+pub mod fat;
 pub mod ramfs;
 pub mod tarfs;
+pub mod wavefs;
 
 use crate::sync::IrqMutex;
 use alloc::string::{String, ToString};
@@ -64,6 +67,10 @@ pub trait Filesystem: Send + Sync {
     /// (total bytes, free bytes), if meaningful.
     fn space(&self) -> Option<(u64, u64)> {
         None
+    }
+    /// Verifies on-disk consistency (filesystems that support it).
+    fn check(&self) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -381,11 +388,52 @@ pub fn is_dir(path: &str) -> bool {
 
 /// Mounts the boot-time filesystems. Called once during kernel init.
 pub fn init(initrd: &'static [u8]) {
-    let root = Arc::new(ramfs::RamFs::new());
-    mount("/", root);
-    ramfs::seed();
+    mount("/", Arc::new(ramfs::RamFs::new()));
     match tarfs::TarFs::parse(initrd) {
         Some(t) => mount("/System", Arc::new(t)),
         None => log!("vfs", "no system image (initrd) — /System is unavailable"),
+    }
+}
+
+/// Mounts volumes found on disks: the first WaveFS partition becomes `/`
+/// (otherwise the RamFS root stays, seeded with default folders). Starts the
+/// background flusher.
+pub fn mount_disks() {
+    let mut root_found = false;
+    let mut boot_found = false;
+    for dev in crate::drivers::block::devices() {
+        let Some(part) = crate::drivers::block::partition_info(&dev) else { continue };
+        if part.type_guid == crate::drivers::block::gpt::ESP_TYPE && !boot_found {
+            match fat::FatFs::mount(dev.clone()) {
+                Ok(fs) => {
+                    mount("/Boot", Arc::new(fs));
+                    boot_found = true;
+                }
+                Err(e) => log!("vfs", "{}: FAT32 mount failed: {}", dev.name(), aurora_abi::err::name(e)),
+            }
+            continue;
+        }
+        if part.type_guid == ::wavefs::PARTITION_TYPE && !root_found {
+            match wavefs::WaveFs::mount(dev.clone()) {
+                Ok(fs) => {
+                    mount("/", Arc::new(fs));
+                    root_found = true;
+                }
+                Err(e) => log!("vfs", "{}: WaveFS mount failed: {}", dev.name(), aurora_abi::err::name(e)),
+            }
+        }
+    }
+    if !root_found {
+        log!("vfs", "no WaveFS volume found — files are kept in memory only");
+    }
+    ramfs::seed();
+    crate::sched::spawn("flusher", flusher);
+}
+
+/// Commits filesystem changes to disk every few seconds.
+fn flusher() {
+    loop {
+        crate::sched::sleep_ms(5000);
+        sync_all();
     }
 }
