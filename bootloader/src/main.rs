@@ -50,7 +50,8 @@ fn main() -> Status {
     info!("ACPI RSDP at {:#x}", rsdp_phys);
 
     // --- Load the kernel image -------------------------------------------------
-    let kernel_file = read_kernel();
+    let kernel_file =
+        read_file(cstr16!("\\aurora\\kernel.elf")).expect("could not read \\aurora\\kernel.elf from the boot volume");
     let image = aurora_elf::parse(&kernel_file).expect("kernel.elf is not a valid x86_64 ELF");
     let span = image.virt_end - image.virt_start;
     let kernel_pages = (span.div_ceil(PAGE)) as usize;
@@ -71,6 +72,21 @@ fn main() -> Status {
         image.entry
     );
     assert!(image.virt_start >= KERNEL_BASE, "kernel must be linked in the higher half");
+    drop(kernel_file);
+
+    // --- System image (initrd) ----------------------------------------------------
+    let (initrd_phys, initrd_len) = match read_file(cstr16!("\\aurora\\system.tar")) {
+        Some(data) => {
+            let phys = alloc_pages(data.len().div_ceil(PAGE as usize).max(1));
+            unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), phys as *mut u8, data.len()) };
+            info!("system image: {} KiB at phys {:#x}", data.len() / 1024, phys);
+            (phys, data.len() as u64)
+        }
+        None => {
+            log::warn!("no \\aurora\\system.tar found; booting without a system image");
+            (0, 0)
+        }
+    };
 
     // --- Stack, BootInfo and memory map storage --------------------------------
     let stack_phys = alloc_pages(KERNEL_STACK_PAGES);
@@ -157,6 +173,8 @@ fn main() -> Status {
             kernel_size: kernel_pages as u64 * PAGE,
             pml4_phys,
             phys_mapped_end: phys_end,
+            initrd_phys,
+            initrd_len,
         });
     }
 
@@ -268,8 +286,8 @@ fn find_rsdp() -> u64 {
     })
 }
 
-fn read_kernel() -> Vec<u8> {
+fn read_file(path: &uefi::CStr16) -> Option<Vec<u8>> {
     let sfs = boot::get_image_file_system(boot::image_handle()).expect("boot volume");
     let mut fs = uefi::fs::FileSystem::new(sfs);
-    fs.read(cstr16!("\\aurora\\kernel.elf")).expect("could not read \\aurora\\kernel.elf from the boot volume")
+    fs.read(path).ok()
 }

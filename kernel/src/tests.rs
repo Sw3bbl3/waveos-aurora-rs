@@ -19,7 +19,8 @@ const TESTS: &[Test] = &[
     ("isqrt", sqrt),
     ("rect math", rects),
     ("keyboard decoder", keyboard),
-    ("ramfs", ramfs),
+    ("ramfs + vfs", ramfs),
+    ("system image", system_image),
     ("timer", timer),
     ("scheduler", scheduler),
     ("wallpaper + blur", wallpaper),
@@ -89,15 +90,33 @@ fn keyboard() {
 }
 
 fn ramfs() {
-    assert!(fs::write("/Documents/test.txt", b"hello"));
-    assert_eq!(fs::read("/Documents/test.txt").unwrap(), b"hello");
-    assert!(fs::list("/Documents").unwrap().iter().any(|e| e.name == "test.txt"));
-    assert!(fs::mkdir("/Documents/sub"));
-    assert!(!fs::remove("/Documents"));
-    assert!(fs::remove("/Documents/test.txt"));
-    assert!(fs::remove("/Documents/sub"));
+    assert!(fs::write_all("/Documents/test.txt", b"hello").is_ok());
+    assert_eq!(fs::read_all("/Documents/test.txt").unwrap(), b"hello");
+    assert!(fs::readdir("/Documents").unwrap().iter().any(|e| e.name == "test.txt"));
+    assert!(fs::mkdir("/Documents/sub").is_ok());
+    assert_eq!(fs::mkdir("/Documents/sub"), Err(fs::EEXIST));
+    assert_eq!(fs::unlink("/Documents"), Err(fs::ENOTEMPTY));
+    assert!(fs::rename("/Documents/test.txt", "/Documents/sub/moved.txt").is_ok());
+    assert_eq!(fs::read_all("/Documents/sub/moved.txt").unwrap(), b"hello");
+    assert_eq!(fs::rename("/Documents", "/Documents/sub/x"), Err(fs::EINVAL));
+    assert!(fs::unlink("/Documents/sub/moved.txt").is_ok());
+    assert!(fs::unlink("/Documents/sub").is_ok());
     assert_eq!(fs::resolve("/Documents", "../System/./version.txt"), "/System/version.txt");
-    assert!(!fs::write("/nope/x.txt", b""));
+    assert_eq!(fs::write_all("/nope/x.txt", b""), Err(fs::ENOENT));
+    let mut f = fs::open("/Documents/seek.txt", aurora_abi::open::WRITE | aurora_abi::open::CREATE).unwrap();
+    f.write(b"0123456789").unwrap();
+    f.seek(2, aurora_abi::seek::SET).unwrap();
+    f.write(b"ab").unwrap();
+    assert_eq!(fs::read_all("/Documents/seek.txt").unwrap(), b"01ab456789");
+    fs::unlink("/Documents/seek.txt").unwrap();
+}
+
+fn system_image() {
+    assert!(fs::is_dir("/System"));
+    assert!(fs::readdir("/").unwrap().iter().any(|e| e.name == "System"));
+    assert_eq!(fs::write_all("/System/x", b"no"), Err(fs::EROFS));
+    let version = fs::read_all("/System/version.txt").expect("version.txt in system image");
+    assert!(version.starts_with(b"WaveOS Aurora"));
 }
 
 fn timer() {

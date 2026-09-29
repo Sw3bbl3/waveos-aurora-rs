@@ -4,50 +4,7 @@
 use crate::sync::IrqMutex;
 use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeyCode {
-    Char,
-    Escape,
-    Enter,
-    Backspace,
-    Tab,
-    Left,
-    Right,
-    Up,
-    Down,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    Insert,
-    Delete,
-    F(u8),
-    Shift,
-    Ctrl,
-    Alt,
-    Super,
-    CapsLock,
-    Menu,
-    Unknown,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Modifiers {
-    pub shift: bool,
-    pub ctrl: bool,
-    pub alt: bool,
-    pub super_key: bool,
-    pub caps: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct KeyEvent {
-    pub code: KeyCode,
-    /// The character this key produces with the current modifiers, if any.
-    pub ch: Option<char>,
-    pub pressed: bool,
-    pub mods: Modifiers,
-}
+pub use aurora_abi::input::{KeyCode, KeyEvent, Modifiers};
 
 pub const BUTTON_LEFT: u8 = 1;
 pub const BUTTON_RIGHT: u8 = 2;

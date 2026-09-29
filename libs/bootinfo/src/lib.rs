@@ -16,7 +16,7 @@ pub const KERNEL_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 pub const BOOTINFO_MAGIC: u64 = 0x2121_4152_4F52_5541;
 
 /// Bumped whenever the layout of [`BootInfo`] changes.
-pub const BOOTINFO_VERSION: u32 = 1;
+pub const BOOTINFO_VERSION: u32 = 2;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +97,9 @@ pub struct BootInfo {
     pub pml4_phys: u64,
     /// Highest physical address covered by the physical-memory map.
     pub phys_mapped_end: u64,
+    /// The system image (`\aurora\system.tar`), or 0/0 if it was not found.
+    pub initrd_phys: u64,
+    pub initrd_len: u64,
 }
 
 impl BootInfo {

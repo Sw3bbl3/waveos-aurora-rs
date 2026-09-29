@@ -51,7 +51,8 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     arch::apic::route_isa_irq(&acpi, 12, arch::idt::MOUSE_VECTOR);
     power::init(acpi);
 
-    fs::init();
+    time::init_wall_clock();
+    fs::init(initrd(boot_info));
     gui::init(fb);
 
     sched::init();
@@ -64,6 +65,15 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     gui::start();
 
     sched::idle();
+}
+
+/// The system image loaded by the bootloader (empty if none).
+fn initrd(boot_info: &BootInfo) -> &'static [u8] {
+    if boot_info.initrd_len == 0 {
+        return &[];
+    }
+    let ptr = mm::phys_to_virt(boot_info.initrd_phys) as *const u8;
+    unsafe { core::slice::from_raw_parts(ptr, boot_info.initrd_len as usize) }
 }
 
 #[panic_handler]

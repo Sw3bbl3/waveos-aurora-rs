@@ -50,3 +50,51 @@ impl<T> Drop for IrqMutexGuard<'_, T> {
         }
     }
 }
+
+/// A mutex for task context that may be held across blocking operations
+/// (disk I/O, sleeping). Contenders yield to the scheduler instead of
+/// spinning with interrupts off. Never take it from an interrupt handler.
+pub struct Mutex<T> {
+    locked: core::sync::atomic::AtomicBool,
+    value: core::cell::UnsafeCell<T>,
+}
+
+unsafe impl<T: Send> Sync for Mutex<T> {}
+unsafe impl<T: Send> Send for Mutex<T> {}
+
+pub struct MutexGuard<'a, T> {
+    lock: &'a Mutex<T>,
+}
+
+impl<T> Mutex<T> {
+    pub const fn new(value: T) -> Self {
+        Self { locked: core::sync::atomic::AtomicBool::new(false), value: core::cell::UnsafeCell::new(value) }
+    }
+
+    pub fn lock(&self) -> MutexGuard<'_, T> {
+        use core::sync::atomic::Ordering;
+        while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            crate::sched::yield_now();
+        }
+        MutexGuard { lock: self }
+    }
+}
+
+impl<T> Deref for MutexGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        unsafe { &*self.lock.value.get() }
+    }
+}
+
+impl<T> DerefMut for MutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.lock.value.get() }
+    }
+}
+
+impl<T> Drop for MutexGuard<'_, T> {
+    fn drop(&mut self) {
+        self.lock.locked.store(false, core::sync::atomic::Ordering::Release);
+    }
+}

@@ -6,6 +6,7 @@
 //!   cargo xtask test                      boot the kernel self-tests headless in QEMU
 
 mod image;
+mod tar;
 
 use std::env;
 use std::fs;
@@ -97,7 +98,79 @@ fn build(profile: Profile, test: bool) -> PathBuf {
         .expect("copy bootloader");
     fs::copy(target.join(KERNEL_TARGET).join(profile.dir()).join("tide"), esp.join("aurora/kernel.elf"))
         .expect("copy kernel");
+    let programs = build_userland(profile);
+    system_image(&programs, &esp.join("aurora/system.tar"));
     esp
+}
+
+/// A user program to place in the system image: (path inside /System, ELF file).
+type Program = (String, PathBuf);
+
+/// Builds the user-space workspace. Programs whose package name starts with
+/// `app-` go to `/System/Apps/<Name>.elf`; everything else to `/System/Bin/<name>`.
+fn build_userland(profile: Profile) -> Vec<Program> {
+    let manifest = root().join("userland/Cargo.toml");
+    if !manifest.exists() {
+        return Vec::new();
+    }
+    let user_ld = root().join("userland/libaurora/user.ld");
+    let target_dir = root().join("target/user");
+    let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    cmd.current_dir(root().join("userland"))
+        .args(["build", "--workspace", "--target", KERNEL_TARGET])
+        .arg("--target-dir")
+        .arg(&target_dir)
+        // Overrides the kernel's `code-model=kernel` flags from .cargo/config.toml.
+        .env(
+            "CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS",
+            format!(
+                "-C relocation-model=static -C link-arg=--script={} -C force-frame-pointers=yes",
+                user_ld.display()
+            ),
+        );
+    if profile == Profile::Release {
+        cmd.arg("--release");
+    }
+    let status = cmd.status().expect("failed to run cargo for userland");
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+
+    let out_dir = target_dir.join(KERNEL_TARGET).join(profile.dir());
+    let mut programs = Vec::new();
+    for entry in fs::read_dir(&out_dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !path.is_file() || name.contains('.') || name.starts_with("lib") {
+            continue;
+        }
+        let dest = match name.strip_prefix("app-") {
+            Some(app) => {
+                let mut chars = app.chars();
+                let title: String = chars.next().map(|c| c.to_ascii_uppercase()).into_iter().chain(chars).collect();
+                format!("Apps/{title}.elf")
+            }
+            None => format!("Bin/{name}"),
+        };
+        programs.push((dest, path));
+    }
+    programs.sort();
+    programs
+}
+
+/// Packs the read-only system image mounted at /System.
+fn system_image(programs: &[Program], out: &Path) {
+    let mut t = tar::Tar::new();
+    t.file(
+        "version.txt",
+        format!("WaveOS Aurora {}\nKernel: Tide\nWindow server: Crest\n", env!("CARGO_PKG_VERSION")).as_bytes(),
+    );
+    t.dir("Apps");
+    t.dir("Bin");
+    for (dest, src) in programs {
+        t.file(dest, &fs::read(src).unwrap());
+    }
+    t.finish(out).expect("write system.tar");
 }
 
 fn find_ovmf() -> PathBuf {

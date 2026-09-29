@@ -15,6 +15,8 @@ ktest = []
 [dependencies]
 bootinfo = { path = "../libs/bootinfo" }
 aurora-gfx = { path = "../libs/gfx" }
+aurora-abi = { path = "../libs/abi" }
+aurora-elf = { path = "../libs/elf" }
 x86_64 = "0.15"
 spin = "0.9"
 linked_list_allocator = "0.10"

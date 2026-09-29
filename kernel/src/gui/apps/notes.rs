@@ -1,6 +1,6 @@
 use super::{App, AppKind, Env};
 use crate::drivers::input::{KeyCode, KeyEvent};
-use crate::fs;
+use crate::fs::compat as fs;
 use crate::gui::canvas::Canvas;
 use crate::gui::font::Font;
 use crate::gui::geom::Rect;

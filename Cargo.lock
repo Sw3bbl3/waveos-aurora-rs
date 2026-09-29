@@ -18,6 +18,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-abi"
+version = "0.1.0"
+
+[[package]]
 name = "aurora-boot"
 version = "0.1.0"
 dependencies = [
@@ -401,6 +405,8 @@ dependencies = [
 name = "tide"
 version = "0.1.0"
 dependencies = [
+ "aurora-abi",
+ "aurora-elf",
  "aurora-gfx",
  "bootinfo",
  "linked_list_allocator",

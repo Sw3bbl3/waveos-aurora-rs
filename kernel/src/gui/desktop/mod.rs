@@ -478,7 +478,7 @@ impl Desktop {
                 self.cycle_windows();
                 return;
             }
-            if (k.mods.alt && k.code == KeyCode::F(4)) || (k.mods.ctrl && matches!(k.ch, Some('w') | Some('W'))) {
+            if (k.mods.alt && k.code == KeyCode::F4) || (k.mods.ctrl && matches!(k.ch, Some('w') | Some('W'))) {
                 if let Some(id) = self.focused_id() {
                     self.close(id);
                 }
