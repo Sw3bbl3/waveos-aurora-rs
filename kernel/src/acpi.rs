@@ -27,6 +27,8 @@ pub struct AcpiInfo {
     pub slp_typa: u16,
     pub slp_typb: u16,
     pub reset_port: Option<(u16, u8)>,
+    /// PCIe enhanced configuration space: (base, first bus, last bus) for segment 0.
+    pub ecam: Option<(u64, u8, u8)>,
 }
 
 impl AcpiInfo {
@@ -71,6 +73,7 @@ pub fn parse(rsdp_phys: u64) -> AcpiInfo {
             match bytes(table, 4) {
                 b"APIC" => parse_madt(table, &mut info),
                 b"FACP" => parse_fadt(table, &mut info),
+                b"MCFG" => parse_mcfg(table, &mut info),
                 _ => {}
             }
         }
@@ -120,6 +123,19 @@ unsafe fn parse_madt(table: u64, info: &mut AcpiInfo) {
             _ => {}
         }
         off += size;
+    }
+}
+
+unsafe fn parse_mcfg(table: u64, info: &mut AcpiInfo) {
+    let len = table_len(table) as u64;
+    let mut off = 44;
+    while off + 16 <= len {
+        let e = table + off;
+        if read::<u16>(e + 8) == 0 {
+            info.ecam = Some((read::<u64>(e), read::<u8>(e + 10), read::<u8>(e + 11)));
+            return;
+        }
+        off += 16;
     }
 }
 

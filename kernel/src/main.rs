@@ -53,6 +53,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::ps2::init();
     arch::apic::route_isa_irq(&acpi, 1, arch::idt::KEYBOARD_VECTOR);
     arch::apic::route_isa_irq(&acpi, 12, arch::idt::MOUSE_VECTOR);
+    let ecam = acpi.ecam;
     power::init(acpi);
 
     time::init_wall_clock();
@@ -63,6 +64,10 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     proc::init();
     x86_64::instructions::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
+
+    // Storage needs a running clock (timeouts) and scheduler (drivers yield while polling).
+    drivers::pci::init(ecam);
+    drivers::block::init();
 
     #[cfg(feature = "ktest")]
     sched::spawn("ktest", tests::run);
