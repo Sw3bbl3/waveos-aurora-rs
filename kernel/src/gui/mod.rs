@@ -64,6 +64,7 @@ fn run() {
     input::set_consumer(sched::current_id());
     server::set_compositor(sched::current_id());
 
+    load_settings();
     let t0 = time::uptime_ms();
     let mut desktop = Desktop::new(w, h);
     log!("gui", "desktop composed in {} ms ({}x{})", time::uptime_ms() - t0, w, h);
@@ -101,6 +102,36 @@ fn run() {
         }
         let wait = next_tick.saturating_sub(time::uptime_ms()).max(1);
         sched::wait_until(wait, || input::pending() || server::pending());
+    }
+}
+
+const SETTINGS: &str = "/Settings/aurora.conf";
+
+/// Restores appearance settings saved by [`save_settings`].
+fn load_settings() {
+    let Ok(data) = crate::fs::read_all(SETTINGS) else { return };
+    for line in core::str::from_utf8(&data).unwrap_or("").lines() {
+        match line.split_once('=') {
+            Some(("dark", v)) => theme::set_dark(v.trim() == "1"),
+            Some(("wallpaper", v)) => {
+                theme::set_wallpaper(v.trim().parse().unwrap_or(0) % wallpaper::NAMES.len() as u8)
+            }
+            _ => {}
+        }
+    }
+    log!("gui", "restored settings (dark: {}, wallpaper: {})", theme::current().dark, theme::wallpaper());
+}
+
+/// Persists appearance settings to the home volume.
+pub fn save_settings() {
+    let text = alloc::format!(
+        "# WaveOS Aurora appearance — written by Settings\ndark={}\nwallpaper={}\n",
+        theme::current().dark as u8,
+        theme::wallpaper()
+    );
+    let _ = crate::fs::mkdir("/Settings");
+    if let Err(e) = crate::fs::write_all(SETTINGS, text.as_bytes()) {
+        log!("gui", "could not save settings: {}", aurora_abi::err::name(e));
     }
 }
 

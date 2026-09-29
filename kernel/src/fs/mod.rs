@@ -69,6 +69,7 @@ pub trait Filesystem: Send + Sync {
         None
     }
     /// Verifies on-disk consistency (filesystems that support it).
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     fn check(&self) -> Result<(), String> {
         Ok(())
     }

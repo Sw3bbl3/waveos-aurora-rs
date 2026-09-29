@@ -190,6 +190,9 @@ pub trait App {
     fn double_click(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
         false
     }
+    fn right_click(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
+        false
+    }
     fn release(&mut self, _x: i32, _y: i32, _area: Rect) {}
     fn hover(&mut self, _x: i32, _y: i32, _area: Rect) -> bool {
         false

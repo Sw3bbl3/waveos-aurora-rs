@@ -25,10 +25,12 @@ impl ClientApp {
     }
 
     fn pointer(&self, kind: u32, x: i32, y: i32, area: Rect, clicks: u32) {
-        server::push_event(
-            self.id,
-            Event { kind, x: x - area.x, y: y - area.y, a: 1, b: clicks, ..Default::default() },
-        );
+        self.pointer_button(kind, x, y, area, clicks, 1);
+    }
+
+    fn pointer_button(&self, kind: u32, x: i32, y: i32, area: Rect, clicks: u32, button: u32) {
+        let ev = Event { kind, x: x - area.x, y: y - area.y, a: button, b: clicks, ..Default::default() };
+        server::push_event(self.id, ev);
     }
 }
 
@@ -76,6 +78,10 @@ impl App for ClientApp {
     }
     fn double_click(&mut self, x: i32, y: i32, area: Rect, _env: &mut Env) -> bool {
         self.pointer(event::POINTER_DOWN, x, y, area, 2);
+        false
+    }
+    fn right_click(&mut self, x: i32, y: i32, area: Rect, _env: &mut Env) -> bool {
+        self.pointer_button(event::POINTER_DOWN, x, y, area, 1, 2);
         false
     }
     fn release(&mut self, x: i32, y: i32, area: Rect) {

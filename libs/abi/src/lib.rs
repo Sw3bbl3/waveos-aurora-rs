@@ -276,7 +276,7 @@ pub mod event {
 }
 
 /// A single input/window event. Field meaning depends on `kind`:
-/// - pointer events: `x`, `y` (window-local), `a` = buttons, `b` = click count
+/// - pointer events: `x`, `y` (window-local), `a` = button (1 left, 2 right), `b` = click count
 /// - `SCROLL`: `a` = wheel delta (positive = down)
 /// - `KEY`: `a` = [`input::KeyCode`] as u32, `b` = char (0 = none), `c` = pressed, `d` = modifier bits
 /// - `RESIZE`: `x` = width, `y` = height

@@ -59,6 +59,10 @@ pub trait App {
     fn double_click(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
         false
     }
+    /// Secondary (right) click — e.g. to show a context menu.
+    fn right_click(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
+        false
+    }
     fn release(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
         false
     }
@@ -183,6 +187,7 @@ pub fn run<A: App>(mut app: A) -> i32 {
         let area = Rect::new(0, 0, win.surface.width as i32, win.surface.height as i32);
         dirty |= match ev.kind {
             event::KEY => app.key(&KeyEvent::from_event(&ev), &mut env),
+            event::POINTER_DOWN if ev.a == 2 => app.right_click(ev.x, ev.y, area, &mut env),
             event::POINTER_DOWN if ev.b >= 2 => app.double_click(ev.x, ev.y, area, &mut env),
             event::POINTER_DOWN => app.click(ev.x, ev.y, area, &mut env),
             event::POINTER_UP => app.release(ev.x, ev.y, area, &mut env),

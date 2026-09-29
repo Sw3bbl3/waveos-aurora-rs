@@ -13,7 +13,7 @@ use super::geom::Rect;
 use super::server::{self, Command};
 use super::theme::{self, MENUBAR_H, TITLEBAR_H, WINDOW_RADIUS};
 use super::wallpaper;
-use crate::drivers::input::{InputEvent, KeyCode, KeyEvent, BUTTON_LEFT};
+use crate::drivers::input::{InputEvent, KeyCode, KeyEvent, BUTTON_LEFT, BUTTON_RIGHT};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -361,12 +361,14 @@ impl Desktop {
 
     pub fn set_dark(&mut self, dark: bool) {
         theme::set_dark(dark);
+        super::save_settings();
         self.broadcast_theme();
         self.damage_all();
     }
 
     pub fn set_wallpaper(&mut self, index: u8) {
         theme::set_wallpaper(index);
+        super::save_settings();
         let (wp, bl) = Self::make_wallpaper(self.w, self.h);
         self.wallpaper = wp;
         self.blurred = bl;
@@ -485,6 +487,9 @@ impl Desktop {
         if pressed & BUTTON_LEFT != 0 {
             self.press(x, y);
         }
+        if pressed & BUTTON_RIGHT != 0 {
+            self.right_press(x, y);
+        }
         if released & BUTTON_LEFT != 0 {
             if self.drag.take().is_none() {
                 if let Some(f) = self.focused_id() {
@@ -590,6 +595,22 @@ impl Desktop {
             self.with_app(id, |app, area, env| app.double_click(x, y, area, env));
         } else {
             self.with_app(id, |app, area, env| app.click(x, y, area, env));
+        }
+    }
+
+    /// Right-click: focuses the window under the pointer and forwards the click to its content.
+    fn right_press(&mut self, x: i32, y: i32) {
+        if self.menu.is_some() || self.launcher.is_some() || y < MENUBAR_H || self.dock_rect().contains(x, y) {
+            return;
+        }
+        let Some(i) = self.window_at(x, y) else { return };
+        let id = self.windows[i].id;
+        if self.focused_id() != Some(id) {
+            self.raise(id);
+        }
+        let Some(i) = self.index_of(id) else { return };
+        if self.windows[i].content().contains(x, y) {
+            self.with_app(id, |app, area, env| app.right_click(x, y, area, env));
         }
     }
 
