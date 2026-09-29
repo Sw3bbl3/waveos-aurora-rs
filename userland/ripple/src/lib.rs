@@ -1,0 +1,220 @@
+//! Ripple — the WaveOS Aurora UI toolkit for user-space apps.
+//!
+//! An app implements [`App`] and calls [`run`]. Ripple creates the window,
+//! draws the app into its shared surface with the Aurora drawing library
+//! (`aurora-gfx`, the same code the window server uses), presents it, and
+//! turns window-server events into `key`/`click`/`hover`/… calls.
+
+#![no_std]
+
+extern crate alloc;
+
+pub use aurora::abi::input::{KeyCode, KeyEvent, Modifiers};
+pub use aurora_gfx::{canvas, font, geom, icons, math, theme, wallpaper, widgets};
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use aurora::abi::{event, nr, win, Event, SurfaceInfo};
+use aurora::sys::{call, str_args};
+use canvas::Canvas;
+use geom::Rect;
+
+/// Things an app can ask the system to do.
+pub enum Request {
+    /// Open an app by name ("About") or program path.
+    OpenApp(String),
+    /// Open a document with its default app.
+    OpenFile(String),
+    /// Close this window (and exit the app).
+    Close,
+    Shutdown,
+    Reboot,
+    SetDark(bool),
+    SetWallpaper(u8),
+}
+
+pub struct Env {
+    pub now_ms: u64,
+    pub focused: bool,
+    pub screen: (i32, i32),
+    pub requests: Vec<Request>,
+}
+
+pub trait App {
+    fn title(&self) -> String;
+    /// Initial content size.
+    fn size(&self) -> (i32, i32);
+    fn resizable(&self) -> bool {
+        true
+    }
+    /// Draws the whole content area.
+    fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env);
+    /// Handlers return true when the app needs to be redrawn.
+    fn key(&mut self, _ev: &KeyEvent, _env: &mut Env) -> bool {
+        false
+    }
+    fn click(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
+        false
+    }
+    fn double_click(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
+        false
+    }
+    fn release(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
+        false
+    }
+    /// Pointer moved inside the window (`x < 0` when it left).
+    fn hover(&mut self, _x: i32, _y: i32, _area: Rect) -> bool {
+        false
+    }
+    fn scroll(&mut self, _delta: i32, _area: Rect) -> bool {
+        false
+    }
+    /// Called about ten times a second.
+    fn tick(&mut self, _env: &mut Env) -> bool {
+        false
+    }
+    /// Lets apps do background work (e.g. reading a pipe) between events.
+    /// Return the longest time (ms) Ripple may sleep before calling `tick` again.
+    fn tick_interval(&self) -> u64 {
+        100
+    }
+}
+
+struct Window {
+    id: u64,
+    surface: SurfaceInfo,
+}
+
+impl Window {
+    fn surface(id: u64) -> SurfaceInfo {
+        let mut s = SurfaceInfo::default();
+        let _ = call(nr::WIN_SURFACE, &[id, &mut s as *mut SurfaceInfo as u64]);
+        s
+    }
+
+    fn pixels(&mut self) -> &mut [u32] {
+        let s = &self.surface;
+        unsafe { core::slice::from_raw_parts_mut(s.addr as *mut u32, (s.stride * s.height) as usize) }
+    }
+
+    fn present(&self) {
+        let s = &self.surface;
+        let _ = call(nr::WIN_PRESENT, &[self.id, 0, 0, s.width as u64, s.height as u64]);
+    }
+
+    fn set_title(&self, title: &str) {
+        let [p, l] = str_args(title);
+        let _ = call(nr::WIN_SET_TITLE, &[self.id, p, l]);
+    }
+}
+
+fn apply(requests: Vec<Request>) {
+    use aurora::process::desktop;
+    for r in requests {
+        match r {
+            Request::OpenApp(name) => {
+                let _ = desktop::open_app(&name);
+            }
+            Request::OpenFile(path) => {
+                let _ = desktop::open_file(&path);
+            }
+            Request::Close => aurora::process::exit(0),
+            Request::Shutdown => desktop::shutdown(),
+            Request::Reboot => desktop::reboot(),
+            Request::SetDark(d) => desktop::set_dark(d),
+            Request::SetWallpaper(i) => desktop::set_wallpaper(i),
+        }
+    }
+}
+
+/// Runs `app` until its window is closed. Returns the process exit code.
+pub fn run<A: App>(mut app: A) -> i32 {
+    let (dark, wallpaper) = aurora::process::desktop::theme();
+    theme::set_dark(dark);
+    theme::set_wallpaper(wallpaper);
+    let info = aurora::process::sys_info();
+    let screen = (info.screen_w as i32, info.screen_h as i32);
+
+    let (w, h) = app.size();
+    let mut title = app.title();
+    let [tp, tl] = str_args(&title);
+    let flags = if app.resizable() { win::RESIZABLE } else { 0 };
+    let id = match call(nr::WIN_CREATE, &[w as u64, h as u64, tp, tl, flags as u64]) {
+        Ok(id) => id,
+        Err(e) => {
+            aurora::eprintln!("could not create window: {}", e);
+            return 1;
+        }
+    };
+    let mut win = Window { id, surface: Window::surface(id) };
+    let mut env = Env { now_ms: aurora::time::uptime_ms(), focused: true, screen, requests: Vec::new() };
+    let mut dirty = true;
+    let mut next_tick = 0;
+
+    loop {
+        env.now_ms = aurora::time::uptime_ms();
+        if env.now_ms >= next_tick {
+            dirty |= app.tick(&mut env);
+            next_tick = env.now_ms + app.tick_interval();
+        }
+        if dirty {
+            let (sw, sh) = (win.surface.width as i32, win.surface.height as i32);
+            let stride = win.surface.stride as i32;
+            let area = Rect::new(0, 0, sw, sh);
+            let mut cv = Canvas::new(win.pixels(), stride, sh);
+            cv.fill_rect(area, theme::current().window_bg);
+            app.draw(&mut cv, area, &env);
+            win.present();
+            dirty = false;
+        }
+        let new_title = app.title();
+        if new_title != title {
+            win.set_title(&new_title);
+            title = new_title;
+        }
+        apply(core::mem::take(&mut env.requests));
+
+        let timeout = next_tick.saturating_sub(aurora::time::uptime_ms()).max(1);
+        let mut ev = Event::default();
+        if call(nr::NEXT_EVENT, &[&mut ev as *mut Event as u64, timeout]).unwrap_or(0) == 0 {
+            continue;
+        }
+        env.now_ms = aurora::time::uptime_ms();
+        let area = Rect::new(0, 0, win.surface.width as i32, win.surface.height as i32);
+        dirty |= match ev.kind {
+            event::KEY => app.key(&KeyEvent::from_event(&ev), &mut env),
+            event::POINTER_DOWN if ev.b >= 2 => app.double_click(ev.x, ev.y, area, &mut env),
+            event::POINTER_DOWN => app.click(ev.x, ev.y, area, &mut env),
+            event::POINTER_UP => app.release(ev.x, ev.y, area, &mut env),
+            event::POINTER_MOVE => app.hover(ev.x, ev.y, area),
+            event::SCROLL => app.scroll(ev.a as i32, area),
+            event::RESIZE => {
+                if (ev.x as u32, ev.y as u32) != (win.surface.width, win.surface.height) {
+                    let _ = call(nr::WIN_RESIZE, &[id, ev.x as u64, ev.y as u64]);
+                    win.surface = Window::surface(id);
+                }
+                true
+            }
+            event::FOCUS => {
+                env.focused = ev.a != 0;
+                true
+            }
+            event::THEME => {
+                theme::set_dark(ev.a != 0);
+                theme::set_wallpaper(ev.b as u8);
+                true
+            }
+            event::CLOSE_REQUESTED => {
+                let _ = call(nr::WIN_CLOSE, &[id]);
+                return 0;
+            }
+            _ => false,
+        };
+        apply(core::mem::take(&mut env.requests));
+    }
+}
+
+/// Hit-test helper: which of `rects` contains the point.
+pub fn hit(rects: &[Rect], x: i32, y: i32) -> Option<usize> {
+    rects.iter().position(|r| r.contains(x, y))
+}

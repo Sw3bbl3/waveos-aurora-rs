@@ -8,7 +8,6 @@
 //! Filesystems implement [`Filesystem`] with interior locking (`sync::Mutex`,
 //! which may be held across disk I/O). Errors are `aurora_abi::err` numbers.
 
-pub mod compat;
 pub mod ramfs;
 pub mod tarfs;
 
@@ -80,11 +79,6 @@ pub fn mount(path: &str, fs: Arc<dyn Filesystem>) {
     let mut m = MOUNTS.lock();
     m.retain(|x| x.path != path);
     m.push(Mount { path: String::from(path), fs });
-}
-
-/// Filesystem mounted at exactly `path`.
-pub fn mounted(path: &str) -> Option<Arc<dyn Filesystem>> {
-    MOUNTS.lock().iter().find(|m| m.path == path).map(|m| m.fs.clone())
 }
 
 /// Normalises `path` relative to `cwd` (handles `.`, `..`, repeated slashes).

@@ -68,7 +68,6 @@ pub struct Process {
     exit: AtomicI64,
     pub killed: AtomicBool,
     pub main_task: AtomicU64,
-    pub start_ms: u64,
     pub resident_kib: AtomicU64,
     entry: u64,
     user_sp: u64,
@@ -106,7 +105,8 @@ static REAPER: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// A crash report for the window server to show to the user.
 pub struct Crash {
-    pub pid: Pid,
+    /// Parent pid (0 = launched by the desktop).
+    pub parent: Pid,
     pub name: String,
     pub path: String,
     pub reason: String,
@@ -214,7 +214,6 @@ pub fn spawn(path: &str, argv: &[&str], stdio: [Option<Arc<Handle>>; 3], parent:
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
         main_task: AtomicU64::new(0),
-        start_ms: crate::time::uptime_ms(),
         entry: image.entry,
         user_sp,
         arg: block_va,
@@ -265,7 +264,7 @@ pub fn crash_current(reason: core::fmt::Arguments) -> ! {
     if let Some(p) = get(pid) {
         log!("proc", "pid {} '{}' crashed: {}", pid, p.name, text.as_str());
         CRASHES.lock().push_back(Crash {
-            pid,
+            parent: p.parent,
             name: p.name.clone(),
             path: p.path.clone(),
             reason: String::from(text.as_str()),

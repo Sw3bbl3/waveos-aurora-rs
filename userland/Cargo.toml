@@ -2,7 +2,7 @@
 # xtask supplies the target, linker script and flags for ring-3 programs.
 [workspace]
 resolver = "2"
-members = ["libaurora", "bin/*"]
+members = ["libaurora", "ripple", "apps/*", "bin/*"]
 
 [workspace.package]
 version = "0.2.0"

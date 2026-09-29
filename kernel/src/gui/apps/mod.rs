@@ -1,17 +1,16 @@
-//! Built-in applications.
+//! Applications as seen by the window server.
 //!
-//! In Milestone 1 apps run inside the compositor task and talk to it through
-//! the [`App`] trait. In Milestone 2 the same trait moves behind IPC so apps
-//! become separate user-space processes.
+//! Real apps are user-space programs in `/System/Apps`; the window server
+//! shows their windows through [`ClientApp`], which composites the process's
+//! shared surface and forwards input as events. A few system dialogs (power,
+//! crash reports) are built into the server and implement [`App`] directly.
 
-mod about;
-mod calculator;
-mod files;
-mod notes;
+mod client;
+mod crash;
 mod power;
-mod settings;
-mod terminal;
-mod welcome;
+
+pub use client::ClientApp;
+pub use crash::CrashDialog;
 
 use super::canvas::Canvas;
 use super::geom::Rect;
@@ -31,6 +30,9 @@ pub enum AppKind {
     Calculator,
     Settings,
     Power,
+    Crash,
+    /// A program not in the catalog.
+    Other,
 }
 
 pub struct AppInfo {
@@ -41,34 +43,123 @@ pub struct AppInfo {
     pub pinned: bool,
     /// Listed in the launcher grid.
     pub listed: bool,
+    /// Program to run; empty for dialogs built into the window server.
+    pub path: &'static str,
+    /// Only one window of this app may exist (opening it again focuses it).
+    pub single: bool,
 }
 
 pub static CATALOG: &[AppInfo] = &[
-    AppInfo { kind: AppKind::Files, name: "Files", icon: Icon::Files, pinned: true, listed: true },
-    AppInfo { kind: AppKind::Terminal, name: "Terminal", icon: Icon::Terminal, pinned: true, listed: true },
-    AppInfo { kind: AppKind::Notes, name: "Notes", icon: Icon::Notes, pinned: true, listed: true },
-    AppInfo { kind: AppKind::Calculator, name: "Calculator", icon: Icon::Calculator, pinned: true, listed: true },
-    AppInfo { kind: AppKind::Settings, name: "Settings", icon: Icon::Settings, pinned: true, listed: true },
-    AppInfo { kind: AppKind::Welcome, name: "Welcome", icon: Icon::Welcome, pinned: false, listed: true },
-    AppInfo { kind: AppKind::About, name: "About Aurora", icon: Icon::Aurora, pinned: false, listed: true },
-    AppInfo { kind: AppKind::Power, name: "Power", icon: Icon::Aurora, pinned: false, listed: false },
+    AppInfo {
+        kind: AppKind::Files,
+        name: "Files",
+        icon: Icon::Files,
+        pinned: true,
+        listed: true,
+        path: "/System/Apps/Files.elf",
+        single: true,
+    },
+    AppInfo {
+        kind: AppKind::Terminal,
+        name: "Terminal",
+        icon: Icon::Terminal,
+        pinned: true,
+        listed: true,
+        path: "/System/Apps/Terminal.elf",
+        single: false,
+    },
+    AppInfo {
+        kind: AppKind::Notes,
+        name: "Notes",
+        icon: Icon::Notes,
+        pinned: true,
+        listed: true,
+        path: "/System/Apps/Notes.elf",
+        single: false,
+    },
+    AppInfo {
+        kind: AppKind::Calculator,
+        name: "Calculator",
+        icon: Icon::Calculator,
+        pinned: true,
+        listed: true,
+        path: "/System/Apps/Calculator.elf",
+        single: true,
+    },
+    AppInfo {
+        kind: AppKind::Settings,
+        name: "Settings",
+        icon: Icon::Settings,
+        pinned: true,
+        listed: true,
+        path: "/System/Apps/Settings.elf",
+        single: true,
+    },
+    AppInfo {
+        kind: AppKind::Welcome,
+        name: "Welcome",
+        icon: Icon::Welcome,
+        pinned: false,
+        listed: true,
+        path: "/System/Apps/Welcome.elf",
+        single: true,
+    },
+    AppInfo {
+        kind: AppKind::About,
+        name: "About Aurora",
+        icon: Icon::Aurora,
+        pinned: false,
+        listed: true,
+        path: "/System/Apps/About.elf",
+        single: true,
+    },
+    AppInfo {
+        kind: AppKind::Power,
+        name: "Power",
+        icon: Icon::Aurora,
+        pinned: false,
+        listed: false,
+        path: "",
+        single: true,
+    },
+    AppInfo {
+        kind: AppKind::Crash,
+        name: "Problem Report",
+        icon: Icon::Aurora,
+        pinned: false,
+        listed: false,
+        path: "",
+        single: false,
+    },
+    AppInfo {
+        kind: AppKind::Other,
+        name: "App",
+        icon: Icon::Aurora,
+        pinned: false,
+        listed: false,
+        path: "",
+        single: false,
+    },
 ];
 
 pub fn info(kind: AppKind) -> &'static AppInfo {
     CATALOG.iter().find(|a| a.kind == kind).unwrap()
 }
 
+pub fn by_path(path: &str) -> Option<&'static AppInfo> {
+    CATALOG.iter().find(|a| !a.path.is_empty() && a.path == path)
+}
+
 /// Things an app can ask the desktop to do.
 pub enum Request {
     Open(AppKind),
-    OpenFile(String),
     Close,
     Shutdown,
     Reboot,
-    SetDark(bool),
-    SetWallpaper(u8),
 }
 
+/// Context passed to built-in dialogs.
+#[allow(dead_code)] // not every dialog uses every field
 pub struct Env {
     pub now_ms: u64,
     pub focused: bool,
@@ -84,7 +175,7 @@ pub trait App {
     /// Initial content size (excluding the title bar).
     fn size(&self) -> (i32, i32);
     fn min_size(&self) -> (i32, i32) {
-        (320, 200)
+        (240, 160)
     }
     fn resizable(&self) -> bool {
         true
@@ -99,37 +190,35 @@ pub trait App {
     fn double_click(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
         false
     }
+    fn release(&mut self, _x: i32, _y: i32, _area: Rect) {}
     fn hover(&mut self, _x: i32, _y: i32, _area: Rect) -> bool {
         false
     }
     fn scroll(&mut self, _delta: i32, _area: Rect) -> bool {
         false
     }
-    /// Called periodically (caret blink, clocks). Return true to repaint.
+    fn focus(&mut self, _focused: bool) {}
+    /// Periodic work. Return true to repaint.
     fn tick(&mut self, _env: &mut Env) -> bool {
         false
     }
-    /// Only one window of this app may exist.
-    fn single_instance(&self) -> bool {
+    /// The close button was pressed. Return true to close the window now;
+    /// client apps return false and close themselves.
+    fn request_close(&mut self) -> bool {
         true
     }
-}
-
-pub fn create(kind: AppKind) -> Box<dyn App> {
-    match kind {
-        AppKind::Welcome => Box::new(welcome::Welcome::new()),
-        AppKind::About => Box::new(about::About::new()),
-        AppKind::Files => Box::new(files::Files::new()),
-        AppKind::Terminal => Box::new(terminal::Terminal::new()),
-        AppKind::Notes => Box::new(notes::Notes::new(None)),
-        AppKind::Calculator => Box::new(calculator::Calculator::new()),
-        AppKind::Settings => Box::new(settings::Settings::new()),
-        AppKind::Power => Box::new(power::PowerDialog::new()),
+    /// The window-server id of a client window.
+    fn client_id(&self) -> Option<u32> {
+        None
     }
 }
 
-pub fn open_file(path: &str) -> Box<dyn App> {
-    Box::new(notes::Notes::new(Some(String::from(path))))
+/// Creates a dialog built into the window server.
+pub fn create_builtin(kind: AppKind) -> Option<Box<dyn App>> {
+    match kind {
+        AppKind::Power => Some(Box::new(power::PowerDialog::new())),
+        _ => None,
+    }
 }
 
 /// Hit-test helper: which of `rects` contains the point.

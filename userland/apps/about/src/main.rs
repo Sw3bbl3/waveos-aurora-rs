@@ -1,31 +1,29 @@
-use super::{App, AppKind, Env};
-use crate::gui::canvas::Canvas;
-use crate::gui::geom::Rect;
-use crate::gui::icons::{self, Icon};
-use crate::gui::theme;
+//! About WaveOS Aurora — version and system information.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
 use alloc::format;
 use alloc::string::String;
+use ripple::canvas::Canvas;
+use ripple::geom::Rect;
+use ripple::icons::{self, Icon};
+use ripple::theme;
+use ripple::{App, Env};
+
+use aurora::abi::SysInfo;
+use aurora::process::fixed_str;
 
 pub struct About {
-    cpu: String,
+    info: SysInfo,
     last_second: u64,
 }
 
 impl About {
     pub fn new() -> Self {
-        Self { cpu: crate::arch::cpu::brand(), last_second: 0 }
-    }
-}
-
-pub fn format_uptime(ms: u64) -> String {
-    let s = ms / 1000;
-    let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
-    if h > 0 {
-        format!("{h}h {m:02}m {s:02}s")
-    } else if m > 0 {
-        format!("{m}m {s:02}s")
-    } else {
-        format!("{s}s")
+        Self { info: aurora::process::sys_info(), last_second: 0 }
     }
 }
 
@@ -34,14 +32,11 @@ pub fn mib(bytes: u64) -> String {
 }
 
 impl App for About {
-    fn kind(&self) -> AppKind {
-        AppKind::About
-    }
     fn title(&self) -> String {
         "About WaveOS Aurora".into()
     }
     fn size(&self) -> (i32, i32) {
-        (520, 400)
+        (520, 420)
     }
     fn resizable(&self) -> bool {
         false
@@ -54,18 +49,20 @@ impl App for About {
         let title = "WaveOS Aurora";
         let f = theme::ui_bold(28);
         cv.text(cx - f.width(title) / 2, area.y + 138, title, f, t.text);
-        let ver = format!("Version {} · Milestone 1", crate::VERSION);
+        let i = &self.info;
+        let version = fixed_str(&i.version, i.version_len);
+        let ver = format!("Version {} · Milestone 2", version);
         let f2 = theme::ui(13);
         cv.text(cx - f2.width(&ver) / 2, area.y + 160, &ver, f2, t.text_secondary);
 
-        let mem = crate::mm::stats();
         let rows = [
-            ("Kernel", format!("Tide {} (x86_64, hybrid)", crate::VERSION)),
-            ("Processor", self.cpu.clone()),
-            ("Memory", format!("{} total · {} in use", mib(mem.total_bytes), mib(mem.used_bytes))),
-            ("Kernel heap", format!("{} of {} used", mib(mem.heap_used.max(1 << 20)), mib(mem.heap_size))),
+            ("Kernel", format!("Tide {} (x86_64, hybrid)", version)),
+            ("Processor", fixed_str(&i.cpu, i.cpu_len)),
+            ("Memory", format!("{} total · {} in use", mib(i.mem_total), mib(i.mem_used))),
+            ("Processes", format!("{} running", i.processes)),
+            ("Home volume", fixed_str(&i.root, i.root_len)),
             ("Display", format!("{} × {}", env.screen.0, env.screen.1)),
-            ("Uptime", format_uptime(env.now_ms)),
+            ("Uptime", aurora::time::format_uptime(env.now_ms)),
         ];
         let mut y = area.y + 196;
         let label_x = cx - 16;
@@ -82,6 +79,16 @@ impl App for About {
 
     fn tick(&mut self, env: &mut Env) -> bool {
         let s = env.now_ms / 1000;
-        core::mem::replace(&mut self.last_second, s) != s
+        if core::mem::replace(&mut self.last_second, s) != s {
+            self.info = aurora::process::sys_info();
+            return true;
+        }
+        false
     }
+}
+
+aurora::entry!(main);
+
+fn main(_: aurora::Args) -> i32 {
+    ripple::run(About::new())
 }

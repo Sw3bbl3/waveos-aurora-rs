@@ -176,6 +176,24 @@ pub fn cwd() -> String {
     }
 }
 
+/// Normalises `path` relative to `cwd` (handles `.`, `..`, repeated slashes).
+pub fn resolve(cwd: &str, path: &str) -> String {
+    let mut parts: Vec<&str> =
+        if path.starts_with('/') { Vec::new() } else { cwd.split('/').filter(|s| !s.is_empty()).collect() };
+    for p in path.split('/') {
+        match p {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    let mut out = String::from("/");
+    out.push_str(&parts.join("/"));
+    out
+}
+
 pub fn join(dir: &str, name: &str) -> String {
     if dir.ends_with('/') {
         alloc::format!("{dir}{name}")

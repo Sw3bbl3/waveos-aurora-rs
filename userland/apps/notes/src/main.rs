@@ -1,14 +1,21 @@
-use super::{App, AppKind, Env};
-use crate::drivers::input::{KeyCode, KeyEvent};
-use crate::fs::compat as fs;
-use crate::gui::canvas::Canvas;
-use crate::gui::font::Font;
-use crate::gui::geom::Rect;
-use crate::gui::theme::{self, ACCENT};
-use crate::gui::widgets::{button, wrap, ButtonStyle};
+//! Notes — a simple text editor.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use aurora::fs;
+use ripple::canvas::Canvas;
+use ripple::font::Font;
+use ripple::geom::Rect;
+use ripple::theme::{self, ACCENT};
+use ripple::widgets::{button, wrap, ButtonStyle};
+use ripple::{App, Env};
+use ripple::{KeyCode, KeyEvent};
 
 const TOOLBAR_H: i32 = 44;
 const PAD: i32 = 18;
@@ -32,8 +39,11 @@ pub struct Notes {
 
 impl Notes {
     pub fn new(path: Option<String>) -> Self {
-        let text =
-            path.as_deref().and_then(fs::read).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let text = path
+            .as_deref()
+            .and_then(|p| fs::read(p).ok())
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
         Self {
             caret: text.len(),
             text,
@@ -70,7 +80,7 @@ impl Notes {
 
     fn save(&mut self, now: u64) {
         let path = self.path.clone().unwrap_or_else(|| fs::unique_name("/Documents", "Untitled", ".txt"));
-        if fs::write(&path, self.text.as_bytes()) {
+        if fs::write(&path, self.text.as_bytes()).is_ok() {
             self.status = Some((format!("Saved to {path}"), now));
             self.path = Some(path);
             self.dirty = false;
@@ -114,17 +124,11 @@ impl Notes {
 }
 
 impl App for Notes {
-    fn kind(&self) -> AppKind {
-        AppKind::Notes
-    }
     fn title(&self) -> String {
         format!("{}{} — Notes", self.name(), if self.dirty { " •" } else { "" })
     }
     fn size(&self) -> (i32, i32) {
         (560, 440)
-    }
-    fn single_instance(&self) -> bool {
-        false
     }
 
     fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
@@ -271,4 +275,10 @@ impl App for Notes {
         }
         changed
     }
+}
+
+aurora::entry!(main);
+
+fn main(args: aurora::Args) -> i32 {
+    ripple::run(Notes::new(args.get(1).cloned()))
 }

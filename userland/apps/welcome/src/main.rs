@@ -1,9 +1,16 @@
-use super::{hit, App, AppKind, Env, Request};
-use crate::gui::canvas::{rgb, Canvas};
-use crate::gui::geom::Rect;
-use crate::gui::icons::{self, Icon};
-use crate::gui::theme;
-use crate::gui::widgets::{button, ButtonStyle};
+//! Welcome — first-run introduction.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use ripple::canvas::{rgb, Canvas};
+use ripple::geom::Rect;
+use ripple::icons::{self, Icon};
+use ripple::theme;
+use ripple::widgets::{button, ButtonStyle};
+use ripple::{hit, App, Env, Request};
 
 pub struct Welcome {
     hovered: Option<usize>,
@@ -20,7 +27,11 @@ const TIPS: [(Icon, &str, &str); 3] = [
         "Windows feel familiar",
         "Drag the title bar to move, double-click it to zoom, drag a corner to resize.",
     ),
-    (Icon::Terminal, "Explore under the hood", "Open Terminal and type help. Try neofetch, ps and ls."),
+    (
+        Icon::Terminal,
+        "Explore under the hood",
+        "Every app is its own process. Open Terminal and try ps, neofetch or ls.",
+    ),
 ];
 
 impl Welcome {
@@ -35,9 +46,6 @@ impl Welcome {
 }
 
 impl App for Welcome {
-    fn kind(&self) -> AppKind {
-        AppKind::Welcome
-    }
     fn title(&self) -> alloc::string::String {
         "Welcome to WaveOS Aurora".into()
     }
@@ -55,8 +63,8 @@ impl App for Welcome {
         cv.fill_round_rect_with(hero, 14, |x, y| {
             let tx = (x - hero.x) * 256 / hero.w;
             let ty = (y - hero.y) * 256 / hero.h;
-            let a = crate::gui::canvas::mix(rgb(0x5B, 0x3F, 0xE0), rgb(0x16, 0xB8, 0xA6), tx);
-            crate::gui::canvas::mix(a, rgb(0x0B, 0x12, 0x33), ty / 2)
+            let a = ripple::canvas::mix(rgb(0x5B, 0x3F, 0xE0), rgb(0x16, 0xB8, 0xA6), tx);
+            ripple::canvas::mix(a, rgb(0x0B, 0x12, 0x33), ty / 2)
         });
         icons::wave(cv, Rect::new(hero.right() - 190, hero.y + 30, 160, 70), 2, 5, 0x50FF_FFFF);
         icons::wave(cv, Rect::new(hero.right() - 170, hero.y + 52, 130, 50), 2, 3, 0x38FF_FFFF);
@@ -85,7 +93,7 @@ impl App for Welcome {
     fn click(&mut self, x: i32, y: i32, area: Rect, env: &mut Env) -> bool {
         match hit(&Self::buttons(area), x, y) {
             Some(0) => env.requests.push(Request::Close),
-            Some(1) => env.requests.push(Request::Open(AppKind::About)),
+            Some(1) => env.requests.push(Request::OpenApp("About".into())),
             _ => {}
         }
         false
@@ -95,4 +103,10 @@ impl App for Welcome {
         let h = hit(&Self::buttons(area), x, y);
         core::mem::replace(&mut self.hovered, h) != h
     }
+}
+
+aurora::entry!(main);
+
+fn main(_: aurora::Args) -> i32 {
+    ripple::run(Welcome::new())
 }

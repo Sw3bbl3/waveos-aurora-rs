@@ -129,7 +129,10 @@ impl Desktop {
         let mut extra: Vec<AppKind> = Vec::new();
         for w in &self.windows {
             let k = w.app.kind();
-            if !apps::info(k).pinned && k != AppKind::Power && !extra.contains(&k) {
+            if !apps::info(k).pinned
+                && !matches!(k, AppKind::Power | AppKind::Crash | AppKind::Other)
+                && !extra.contains(&k)
+            {
                 extra.push(k);
             }
         }

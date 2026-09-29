@@ -16,7 +16,7 @@ const FACES: &[(&str, &str, &[u32])] = &[
     ("Mono", "JetBrainsMono-Regular.ttf", &[13, 14]),
 ];
 
-const EXTRA_CHARS: &str = "•©…·—–−→←↑↓°×÷±✓⌘⇧éèàüöäñç€£";
+const EXTRA_CHARS: &str = "“”‘’•©…·—–−→←↑↓°×÷±✓⌘⇧éèàüöäñç€£";
 
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();

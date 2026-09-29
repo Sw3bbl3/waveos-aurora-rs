@@ -1,0 +1,13 @@
+[package]
+name = "app-welcome"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "app-welcome"
+path = "src/main.rs"
+
+[dependencies]
+aurora.workspace = true
+ripple.workspace = true

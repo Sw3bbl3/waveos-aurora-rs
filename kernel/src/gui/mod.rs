@@ -9,7 +9,7 @@ pub mod cursor;
 pub mod desktop;
 pub mod server;
 
-pub use aurora_gfx::{canvas, font, geom, icons, theme, wallpaper, widgets};
+pub use aurora_gfx::{canvas, geom, icons, theme, wallpaper, widgets};
 
 use crate::drivers::input;
 use crate::mm::phys_to_virt;
@@ -77,6 +77,7 @@ fn run() {
         while let Some(ev) = input::pop() {
             desktop.handle(ev, now);
         }
+        desktop.process_commands();
         if now >= next_tick {
             next_tick = now + desktop.tick(now);
         }
@@ -91,6 +92,7 @@ fn run() {
             log!("boot", "Aurora desktop ready");
         }
         if let Some(action) = desktop.power {
+            crate::fs::sync_all();
             sched::sleep_ms(800);
             match action {
                 PowerAction::Shutdown => crate::power::shutdown(),
@@ -98,7 +100,7 @@ fn run() {
             }
         }
         let wait = next_tick.saturating_sub(time::uptime_ms()).max(1);
-        sched::wait_until(wait, input::pending);
+        sched::wait_until(wait, || input::pending() || server::pending());
     }
 }
 

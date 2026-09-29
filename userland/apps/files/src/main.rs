@@ -1,13 +1,20 @@
-use super::{App, AppKind, Env, Request};
-use crate::drivers::input::{KeyCode, KeyEvent};
-use crate::fs::compat::{self as fs, Entry};
-use crate::gui::canvas::{with_alpha, Canvas};
-use crate::gui::geom::Rect;
-use crate::gui::icons::{self, Icon};
-use crate::gui::theme::{self, ACCENT};
+//! Files — browse and manage the filesystem.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use aurora::fs::{self, Entry};
+use ripple::canvas::{with_alpha, Canvas};
+use ripple::geom::Rect;
+use ripple::icons::{self, Icon};
+use ripple::theme::{self, ACCENT};
+use ripple::{App, Env, Request};
+use ripple::{KeyCode, KeyEvent};
 
 const SIDEBAR_W: i32 = 170;
 const TOOLBAR_H: i32 = 46;
@@ -41,7 +48,7 @@ impl Files {
     }
 
     fn refresh(&mut self) {
-        self.entries = fs::list(&self.cwd).unwrap_or_default();
+        self.entries = fs::read_dir(&self.cwd).unwrap_or_default();
     }
 
     fn main_area(area: Rect) -> Rect {
@@ -70,26 +77,20 @@ impl Files {
     fn open(&mut self, i: usize, env: &mut Env) {
         let e = self.entries[i].clone();
         if e.is_dir {
-            self.navigate(&e.path, true);
+            self.navigate(&fs::join(&self.cwd, &e.name), true);
         } else {
-            env.requests.push(Request::OpenFile(e.path));
+            env.requests.push(Request::OpenFile(fs::join(&self.cwd, &e.name)));
         }
     }
 }
 
 impl App for Files {
-    fn kind(&self) -> AppKind {
-        AppKind::Files
-    }
     fn title(&self) -> String {
         let name = self.cwd.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("RAM Disk");
         format!("{name} — Files")
     }
     fn size(&self) -> (i32, i32) {
         (760, 470)
-    }
-    fn min_size(&self) -> (i32, i32) {
-        (480, 300)
     }
 
     fn draw(&mut self, cv: &mut Canvas, area: Rect, _env: &Env) {
@@ -208,4 +209,14 @@ impl App for Files {
         }
         true
     }
+}
+
+aurora::entry!(main);
+
+fn main(args: aurora::Args) -> i32 {
+    let mut app = Files::new();
+    if let Some(dir) = args.get(1) {
+        app.navigate(dir, false);
+    }
+    ripple::run(app)
 }

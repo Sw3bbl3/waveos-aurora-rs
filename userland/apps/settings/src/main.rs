@@ -1,10 +1,18 @@
-use super::{App, AppKind, Env, Request};
-use crate::gui::canvas::{with_alpha, Canvas};
-use crate::gui::geom::Rect;
-use crate::gui::theme::{self, ACCENT};
-use crate::gui::wallpaper;
+//! Settings — appearance and wallpaper.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
+use ripple::canvas::{with_alpha, Canvas};
+use ripple::geom::Rect;
+use ripple::theme::{self, ACCENT};
+use ripple::wallpaper;
+use ripple::{App, Env, Request};
 
 const THUMB_W: i32 = 150;
 const THUMB_H: i32 = 94;
@@ -63,8 +71,8 @@ fn mode_preview(cv: &mut Canvas, r: Rect, dark: bool) {
 }
 
 impl App for Settings {
-    fn kind(&self) -> AppKind {
-        AppKind::Settings
+    fn title(&self) -> String {
+        "Settings".into()
     }
     fn size(&self) -> (i32, i32) {
         (560, 470)
@@ -104,12 +112,14 @@ impl App for Settings {
             cv.text(r.x + (r.w - lw) / 2, r.bottom() + 22, label, f, if selected { t.text } else { t.text_secondary });
         }
 
+        let i = aurora::process::sys_info();
         let info = format!(
-            "WaveOS Aurora {} · {}×{} · {} MiB RAM",
-            crate::VERSION,
+            "WaveOS Aurora {} · {}×{} · {} MiB RAM · {}",
+            aurora::process::fixed_str(&i.version, i.version_len),
             env.screen.0,
             env.screen.1,
-            crate::mm::stats().total_bytes >> 20
+            i.mem_total >> 20,
+            aurora::process::fixed_str(&i.root, i.root_len)
         );
         cv.fill_rect(Rect::new(x, area.bottom() - 48, area.w - 56, 1), t.separator);
         cv.text(x, area.bottom() - 22, &info, theme::ui(12), t.text_secondary);
@@ -129,4 +139,10 @@ impl App for Settings {
         let h = Self::target_at(area, x, y);
         core::mem::replace(&mut self.hovered, h) != h
     }
+}
+
+aurora::entry!(main);
+
+fn main(_: aurora::Args) -> i32 {
+    ripple::run(Settings::new())
 }

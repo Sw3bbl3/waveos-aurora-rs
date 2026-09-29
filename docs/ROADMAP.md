@@ -10,14 +10,16 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - The apps: Files, Terminal, Notes, Calculator, Settings, About and Welcome, all on an in-memory RamFS.
 - A kernel self-test suite, headless CI boots, and a USB-bootable GPT image.
 
-## M2: User space
+## ✅ M2: User space
 
-- **Protection:** ring 3 and a per-process address space. Use the upper half for the kernel and the lower half for user space, with guard pages.
-- **System calls:** a `syscall`/`sysret` entry, a syscall table, and an ELF loader for user programs.
-- **IPC:** ports, message passing and shared-memory surfaces, which is the hybrid-kernel core.
-- **Window server:** Crest moves into a user-space window server, as macOS's WindowServer does. Apps draw into shared buffers.
-- **Toolkit:** "Ripple", a UI toolkit library, provides the controls and theming apps use today, for use by user programs.
-- **App migration:** Terminal becomes a real shell process, and the built-in apps become separate programs.
+- **Ring 3:** per-process address spaces with NX, `syscall`/`sysret`, and a validated user-pointer ABI (`libs/abi`).
+- **Processes:** an ELF loader and spawn/wait/kill. Kills are cooperative, and a reaper task frees exited processes.
+- **IPC and isolation:** fd tables and pipes. A CPU fault in ring 3 kills only the faulting process, and the desktop shows a crash report.
+- **Crest:** stays in the kernel, like NT's win32k. Apps draw into shared-memory surfaces and receive events through `next_event`.
+- **Userland:** the libaurora runtime and the Ripple UI toolkit. All seven apps now run in user space.
+- **Terminal:** a real shell. Programs in `/System/Bin` run as separate processes, with pipelines and redirection.
+- **Tests:** the `usertest` syscall conformance suite runs as part of `cargo xtask test`.
+- **Deferred:** message-port IPC and a user-space window server are planned together with multi-threaded processes.
 
 ## M3: Storage and WaveFS
 

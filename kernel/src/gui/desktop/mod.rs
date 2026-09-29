@@ -6,10 +6,11 @@
 
 mod shell;
 
-use super::apps::{self, App, AppKind, Env, Request};
+use super::apps::{self, App, AppKind, ClientApp, CrashDialog, Env, Request};
 use super::canvas::Canvas;
 use super::cursor;
 use super::geom::Rect;
+use super::server::{self, Command};
 use super::theme::{self, MENUBAR_H, TITLEBAR_H, WINDOW_RADIUS};
 use super::wallpaper;
 use crate::drivers::input::{InputEvent, KeyCode, KeyEvent, BUTTON_LEFT};
@@ -102,6 +103,9 @@ pub struct Desktop {
     clock: String,
     now_ms: u64,
     pub power: Option<PowerAction>,
+    /// Apps started but whose window hasn't appeared yet (to ignore double launches).
+    launching: Vec<(AppKind, u64)>,
+    last_focus: Option<u32>,
 }
 
 impl Desktop {
@@ -126,6 +130,8 @@ impl Desktop {
             clock: String::new(),
             now_ms: 0,
             power: None,
+            launching: Vec::new(),
+            last_focus: None,
         };
         d.open(AppKind::Welcome);
         d.damage_all();
@@ -179,14 +185,40 @@ impl Desktop {
     }
 
     pub fn open(&mut self, kind: AppKind) {
-        let app = apps::create(kind);
-        if app.single_instance() {
-            if let Some(id) = self.windows.iter().find(|w| w.app.kind() == kind).map(|w| w.id) {
+        let info = apps::info(kind);
+        if info.single {
+            if let Some(id) = self.windows.iter().rev().find(|w| w.app.kind() == kind).map(|w| w.id) {
                 self.raise(id);
                 return;
             }
         }
-        self.add_window(app);
+        if let Some(app) = apps::create_builtin(kind) {
+            self.add_window(app);
+            return;
+        }
+        if info.path.is_empty() {
+            return;
+        }
+        let now = self.now_ms;
+        if self.launching.iter().any(|&(k, t)| k == kind && now < t + 3000) {
+            return;
+        }
+        self.launching.push((kind, now));
+        self.spawn_program(info.path, &[]);
+    }
+
+    /// Starts a program (its window appears when it calls `win_create`).
+    fn spawn_program(&mut self, path: &str, args: &[&str]) {
+        let mut argv = alloc::vec![path];
+        argv.extend_from_slice(args);
+        if let Err(e) = crate::proc::spawn(path, &argv, [None, None, None], 0) {
+            log!("gui", "could not start {}: {}", path, aurora_abi::err::name(e));
+        }
+    }
+
+    /// Opens a document in Notes.
+    pub fn open_file(&mut self, path: &str) {
+        self.spawn_program(apps::info(AppKind::Notes).path, &[path]);
     }
 
     fn add_window(&mut self, app: Box<dyn App>) {
@@ -234,6 +266,19 @@ impl Desktop {
         }
         self.damage_window(id);
         self.damage_shell();
+    }
+
+    /// Asks the window's app to close (client apps decide for themselves).
+    pub fn request_close(&mut self, id: u32) {
+        if let Some(i) = self.index_of(id) {
+            if self.windows[i].app.request_close() {
+                self.close(id);
+            }
+        }
+    }
+
+    fn window_of_client(&self, client: u32) -> Option<u32> {
+        self.windows.iter().find(|w| w.app.client_id() == Some(client)).map(|w| w.id)
     }
 
     pub fn close(&mut self, id: u32) {
@@ -291,7 +336,6 @@ impl Desktop {
         for req in env.requests {
             match req {
                 Request::Open(kind) => self.open(kind),
-                Request::OpenFile(path) => self.add_window(apps::open_file(&path)),
                 Request::Close => {
                     if let Some(id) = source {
                         self.close(id);
@@ -299,18 +343,93 @@ impl Desktop {
                 }
                 Request::Shutdown => self.power = Some(PowerAction::Shutdown),
                 Request::Reboot => self.power = Some(PowerAction::Reboot),
-                Request::SetDark(d) => {
-                    theme::set_dark(d);
-                    self.damage_all();
-                }
-                Request::SetWallpaper(i) => {
-                    theme::set_wallpaper(i);
-                    let (wp, bl) = Self::make_wallpaper(self.w, self.h);
-                    self.wallpaper = wp;
-                    self.blurred = bl;
-                    self.damage_all();
-                }
             }
+        }
+        if self.power.is_some() {
+            self.damage_all();
+        }
+    }
+
+    fn broadcast_theme(&self) {
+        server::broadcast(aurora_abi::Event {
+            kind: aurora_abi::event::THEME,
+            a: theme::current().dark as u32,
+            b: theme::wallpaper() as u32,
+            ..Default::default()
+        });
+    }
+
+    pub fn set_dark(&mut self, dark: bool) {
+        theme::set_dark(dark);
+        self.broadcast_theme();
+        self.damage_all();
+    }
+
+    pub fn set_wallpaper(&mut self, index: u8) {
+        theme::set_wallpaper(index);
+        let (wp, bl) = Self::make_wallpaper(self.w, self.h);
+        self.wallpaper = wp;
+        self.blurred = bl;
+        self.broadcast_theme();
+        self.damage_all();
+    }
+
+    // ------------------------------------------------------ window server
+
+    /// Applies requests from client processes and shows crash reports.
+    pub fn process_commands(&mut self) {
+        for cmd in server::take_commands() {
+            match cmd {
+                Command::Created(id) => {
+                    let kind = server::info(id)
+                        .and_then(|(pid, ..)| crate::proc::get(pid))
+                        .and_then(|p| apps::by_path(&p.path))
+                        .map(|a| a.kind)
+                        .unwrap_or(AppKind::Other);
+                    self.launching.retain(|(k, _)| *k != kind);
+                    if let Some(app) = ClientApp::new(id, kind) {
+                        self.add_window(Box::new(app));
+                    }
+                }
+                Command::Closed(id) => {
+                    if let Some(w) = self.window_of_client(id) {
+                        self.close(w);
+                    }
+                }
+                Command::Present(id, r) => {
+                    if let Some(i) = self.window_of_client(id).and_then(|w| self.index_of(w)) {
+                        if !self.windows[i].minimized {
+                            let c = self.windows[i].content();
+                            self.damage(Rect::new(c.x + r.x, c.y + r.y, r.w, r.h).intersect(&c));
+                        }
+                    }
+                }
+                Command::Title(id) => {
+                    if let Some(i) = self.window_of_client(id).and_then(|w| self.index_of(w)) {
+                        let t = self.windows[i].titlebar();
+                        self.damage(t);
+                        self.damage(Rect::new(0, 0, self.w, MENUBAR_H));
+                    }
+                }
+                Command::OpenApp(path) => match apps::by_path(&path) {
+                    Some(a) => self.open(a.kind),
+                    None => self.spawn_program(&path, &[]),
+                },
+                Command::OpenFile(path) => self.open_file(&path),
+                Command::SetDark(d) => self.set_dark(d),
+                Command::SetWallpaper(i) => self.set_wallpaper(i),
+                Command::Shutdown => self.power = Some(PowerAction::Shutdown),
+                Command::Reboot => self.power = Some(PowerAction::Reboot),
+            }
+        }
+        while let Some(c) = crate::proc::take_crash() {
+            // Programs started from a shell are reported by that shell instead.
+            if c.parent != 0 && crate::proc::get(c.parent).is_some_and(|p| p.exit_code().is_none()) {
+                continue;
+            }
+            let app = apps::by_path(&c.path);
+            let name = app.map(|a| String::from(a.name)).unwrap_or(c.name);
+            self.add_window(Box::new(CrashDialog::new(name, c.reason, app.map(|a| a.kind))));
         }
         if self.power.is_some() {
             self.damage_all();
@@ -367,7 +486,14 @@ impl Desktop {
             self.press(x, y);
         }
         if released & BUTTON_LEFT != 0 {
-            self.drag = None;
+            if self.drag.take().is_none() {
+                if let Some(f) = self.focused_id() {
+                    self.with_app(f, |app, area, _| {
+                        app.release(x, y, area);
+                        false
+                    });
+                }
+            }
         }
         if wheel != 0 {
             if let Some(w) = self.window_at(x, y) {
@@ -449,7 +575,7 @@ impl Desktop {
         let w = &self.windows[i];
         if w.titlebar().contains(x, y) {
             match w.traffic_hit(x, y) {
-                Some(0) => self.close(id),
+                Some(0) => self.request_close(id),
                 Some(1) => self.minimize(id),
                 Some(2) => self.toggle_zoom(id),
                 _ if double => self.toggle_zoom(id),
@@ -480,7 +606,7 @@ impl Desktop {
             }
             if (k.mods.alt && k.code == KeyCode::F4) || (k.mods.ctrl && matches!(k.ch, Some('w') | Some('W'))) {
                 if let Some(id) = self.focused_id() {
-                    self.close(id);
+                    self.request_close(id);
                 }
                 return;
             }
@@ -519,6 +645,20 @@ impl Desktop {
         for id in ids {
             self.with_app(id, |app, _, env| app.tick(env));
         }
+        // Tell apps when they gain or lose focus (caret blinking, etc.).
+        let focus = self.focused_id();
+        if focus != self.last_focus {
+            for (id, on) in [(self.last_focus, false), (focus, true)] {
+                if let Some(id) = id {
+                    self.with_app(id, |app, _, _| {
+                        app.focus(on);
+                        false
+                    });
+                }
+            }
+            self.last_focus = focus;
+        }
+        self.launching.retain(|&(_, t)| now_ms < t + 5000);
         100
     }
 

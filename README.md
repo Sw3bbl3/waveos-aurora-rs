@@ -10,46 +10,33 @@ Every layer is original: the UEFI bootloader, the **Tide** kernel, the **Crest**
 |---|---|
 | ![Launcher](docs/screenshots/launcher.png) | ![Dark mode with Files and Terminal](docs/screenshots/dark-mode.png) |
 
-## What works today (Milestone 1)
+## What works today (Milestones 1 and 2)
 
-- **Boots on UEFI x86_64** with its own bootloader (`aurora-boot`). The bootloader:
-  - picks a graphics mode
-  - loads the kernel ELF
-  - builds the page tables
-  - hands the kernel a memory map
+- **Boots on UEFI x86_64** with its own bootloader (`aurora-boot`). It loads the kernel and a read-only system image.
 - **Tide kernel** (hybrid design):
-  - GDT/TSS/IDT, with exception handling
-  - a bitmap frame allocator and a 125 MiB kernel heap
-  - a higher-half address space
-  - ACPI table parsing
-  - Local and I/O APIC, with a calibrated 1 kHz timer
-  - a preemptive round-robin scheduler
-  - PS/2 keyboard and mouse, with a VMware/QEMU absolute pointer
-  - a CMOS clock
+  - memory management, with per-process address spaces and no-execute pages
+  - ACPI, APIC timer and interrupts
+  - a preemptive scheduler
+  - `syscall`/`sysret`
+  - PS/2 and VMware absolute pointer input
   - ACPI shutdown and restart
-- **Crest compositor**, which does:
-  - damage-tracked software rendering
-  - anti-aliased shapes
-  - soft window shadows
-  - frosted-glass panels
-  - text from pre-rasterized Inter and JetBrains Mono
-- **Aurora desktop**, with:
-  - a macOS-style menu bar with dropdown menus
-  - a centered dock, with tooltips and running indicators
-  - a Windows-style launcher with search
+- **Real user space.** Every app is its own **ring-3 process** with its own address space:
+  - **Crash isolation:** an app that crashes gets a "quit unexpectedly" report, and everything else keeps running.
+  - **System calls:** about 37 of them, covering processes, files, pipes, windows and events. Every pointer is validated.
+  - **Libraries:** the `libaurora` runtime, and the **Ripple** UI toolkit.
+- **Crest window server**, in the kernel like Windows NT's:
+  - apps draw into shared-memory surfaces that Crest composites
+  - rendering is damage-tracked, with anti-aliased shapes, soft shadows and frosted glass
+- **Aurora desktop:**
+  - a menu bar, dock and searchable launcher
   - windows you can drag, resize, minimize and zoom
-  - light and dark mode
+  - light and dark mode, broadcast live to every app
   - three procedurally generated wallpapers
-- **Apps**:
-  - Files
-  - Terminal, with about 20 commands including `neofetch`
-  - Notes, a text editor that can save
-  - Calculator
-  - Settings
-  - About
-  - Welcome
-- **RamFS**: an in-memory filesystem, so Files, Notes and Terminal share real files. It isn't persistent yet; that arrives with Milestone 3.
-- **A friendly crash screen**, which needs no heap and so works even if the allocator is broken.
+- **Apps:** Files, Terminal, Notes, Calculator, Settings, About, Welcome.
+- **aurora-sh**, the Terminal shell. It runs about 20 programs from `/System/Bin` as separate processes (`ls`, `cat`, `grep`, `wc`, `ps`, `kill`, `cp`, `mv`, `neofetch`…). It supports pipelines (`ls -l | grep txt`), redirection (`>`, `>>`), Ctrl+C and Tab completion.
+- **VFS:**
+  - `/System` is the read-only system image
+  - `/` holds your files, in memory for now; persistent storage arrives in Milestone 3
 
 ## Quick start
 
@@ -90,7 +77,7 @@ The kernel log streams to your terminal over the serial port. See [docs/BUILDING
   - `Ctrl+W` or `Alt+F4` closes the front window
   - `Ctrl+S` saves in Notes
 - **Aurora menu** (the wave at top-left): About, Settings, Restart, Shut Down.
-- **Terminal**: try `help`, `neofetch`, `ls /Documents`, `echo hi > /Desktop/hi.txt`, `open notes`, `theme dark`.
+- **Terminal**: try `help`, `ps`, `neofetch`, `ls -l | grep txt`, `echo hi > hi.txt`, `cat hi.txt | wc`, `open notes`, `theme dark`.
 
 ## How it fits together
 
@@ -102,8 +89,12 @@ The kernel log streams to your terminal over the serial port. See [docs/BUILDING
              ├─ mm/       frames, heap, paging
              ├─ sched/    preemptive kernel threads
              ├─ drivers/  serial, PS/2, vmmouse, RTC, input queue
-             ├─ fs.rs     RamFS
-             └─ gui/      Crest compositor, desktop shell, apps
+             ├─ proc/     processes, pipes, reaper
+             ├─ syscall/  system call dispatch
+             ├─ fs/       VFS, RamFS, TarFS (/System)
+             └─ gui/      Crest window server, desktop shell
+                  ↕ syscalls, shared-memory surfaces
+ User space (userland/)     libaurora runtime · Ripple toolkit · apps · /System/Bin tools
 ```
 
 The full tour, covering the boot handoff, memory layout, interrupt routing, scheduling and rendering, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -113,7 +104,7 @@ The full tour, covering the boot handoff, memory layout, interrupt routing, sche
 | Milestone | Focus |
 |---|---|
 | **M1** ✅ | Boot to a graphical desktop |
-| M2 | User space: ring 3, syscalls, ELF loader, IPC, a user-space window server, and the "Ripple" UI toolkit |
+| **M2** ✅ | User space: ring 3, syscalls, ELF loader, pipes, shared-memory windows, and the "Ripple" UI toolkit |
 | M3 | Storage: virtio-blk, AHCI, NVMe, a VFS, FAT32, and our own **WaveFS** |
 | M4 | More apps: a richer editor, an image viewer, more Settings |
 | M5 | Real hardware: SMP, HPET, USB (xHCI), power management |

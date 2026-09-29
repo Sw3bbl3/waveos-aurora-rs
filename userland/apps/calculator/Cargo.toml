@@ -1,0 +1,13 @@
+[package]
+name = "app-calculator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "app-calculator"
+path = "src/main.rs"
+
+[dependencies]
+aurora.workspace = true
+ripple.workspace = true

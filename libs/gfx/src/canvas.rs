@@ -262,6 +262,30 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Copies an opaque `src_w`×`src_h` image (row stride = `src_w`) to `dst`'s
+    /// top-left corner, clipped to `dst` and the canvas clip. With `radius > 0`
+    /// the bottom corners are rounded (anti-aliased) — used for window contents.
+    pub fn blit(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, radius: i32) {
+        let img = Rect::new(dst.x, dst.y, (src_w as i32).min(dst.w), (src_h as i32).min(dst.h));
+        let straight = if radius > 0 { Rect::new(img.x, img.y, img.w, dst.h - radius) } else { img };
+        let area = img.intersect(&straight).intersect(&self.clip);
+        for y in area.y..area.bottom() {
+            let s0 = ((y - dst.y) as u32 * src_w + (area.x - dst.x) as u32) as usize;
+            let d0 = (y * self.width + area.x) as usize;
+            let n = area.w as usize;
+            self.buf[d0..d0 + n].copy_from_slice(&src[s0..s0 + n]);
+        }
+        if radius > 0 {
+            let band = Rect::new(dst.x, dst.bottom() - radius, dst.w, radius);
+            let shape = Rect::new(dst.x, dst.bottom() - 2 * radius, dst.w, 2 * radius);
+            self.with_clip(band.intersect(&img), |cv| {
+                cv.fill_round_rect_with(shape, radius, |x, y| {
+                    0xFF00_0000 | src[((y - dst.y) as u32 * src_w + (x - dst.x) as u32) as usize]
+                })
+            });
+        }
+    }
+
     /// Frosted glass: the pre-blurred wallpaper under a rounded rect, tinted.
     pub fn glass(&mut self, blurred: &[u32], r: Rect, radius: i32, tint: u32) {
         let w = self.width;

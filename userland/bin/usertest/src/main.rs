@@ -60,7 +60,7 @@ fn main(args: aurora::Args) -> i32 {
         let r = call(nr::STAT, &[p, 4, 0]);
         check("stat with bad path pointer → EFAULT", errno(r) == EFAULT);
     }
-    let code_addr = main as usize as u64;
+    let code_addr = main as *const () as u64;
     let r = call(nr::READ, &[0, code_addr, 8]);
     check("read into read-only code page → EFAULT", errno(r) == EFAULT);
     check("unknown syscall → ENOSYS", errno(call(9999, &[])) == ENOSYS);

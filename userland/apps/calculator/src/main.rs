@@ -1,10 +1,17 @@
-use super::{App, AppKind, Env};
-use crate::drivers::input::{KeyCode, KeyEvent};
-use crate::gui::canvas::{mix, rgb, Canvas};
-use crate::gui::geom::Rect;
-use crate::gui::theme;
+//! Calculator.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
 use alloc::format;
 use alloc::string::{String, ToString};
+use ripple::canvas::{mix, rgb, Canvas};
+use ripple::geom::Rect;
+use ripple::theme;
+use ripple::{App, Env};
+use ripple::{KeyCode, KeyEvent};
 
 const KEYS: [[&str; 4]; 5] =
     [["C", "±", "%", "÷"], ["7", "8", "9", "×"], ["4", "5", "6", "−"], ["1", "2", "3", "+"], ["0", "", ".", "="]];
@@ -135,8 +142,8 @@ impl Calculator {
 }
 
 impl App for Calculator {
-    fn kind(&self) -> AppKind {
-        AppKind::Calculator
+    fn title(&self) -> String {
+        "Calculator".into()
     }
     fn size(&self) -> (i32, i32) {
         (300, 440)
@@ -249,4 +256,10 @@ impl App for Calculator {
         self.press(key);
         true
     }
+}
+
+aurora::entry!(main);
+
+fn main(_: aurora::Args) -> i32 {
+    ripple::run(Calculator::new())
 }
