@@ -1,8 +1,10 @@
-//! virtio-blk over modern virtio-pci (virtio 1.0), one split virtqueue, polled.
+//! virtio-blk over modern virtio-pci (virtio 1.0), one split virtqueue.
+//! Completions are signalled by MSI-X (the issuing task sleeps), or polled.
 
-use super::{check_io, register, wait_for, BlockDevice, BlockResult, Dma};
+use super::{check_io, register, wait_for, wait_irq, BlockDevice, BlockResult, Dma};
 use crate::drivers::pci;
-use crate::sync::Mutex;
+use crate::sync::{Mutex, WaitQueue};
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -19,10 +21,13 @@ const DEVICE_FEATURE_SELECT: u64 = 0x00;
 const DEVICE_FEATURE: u64 = 0x04;
 const DRIVER_FEATURE_SELECT: u64 = 0x08;
 const DRIVER_FEATURE: u64 = 0x0C;
+const MSIX_CONFIG: u64 = 0x10;
 const DEVICE_STATUS: u64 = 0x14;
 const QUEUE_SELECT: u64 = 0x16;
 const QUEUE_SIZE: u64 = 0x18;
+const QUEUE_MSIX_VECTOR: u64 = 0x1A;
 const QUEUE_ENABLE: u64 = 0x1C;
+const NO_VECTOR: u16 = 0xFFFF;
 const QUEUE_NOTIFY_OFF: u64 = 0x1E;
 const QUEUE_DESC: u64 = 0x20;
 const QUEUE_DRIVER: u64 = 0x28;
@@ -58,6 +63,12 @@ struct Queue {
     io: Dma,
     avail_idx: u16,
     last_used: u16,
+    irq: Option<&'static WaitQueue>,
+}
+
+/// MSI-X handler for the queue: the waiting task checks the used ring.
+fn interrupt(arg: usize) {
+    unsafe { &*(arg as *const WaitQueue) }.wake_all();
 }
 
 impl Queue {
@@ -96,7 +107,7 @@ impl Queue {
         // Wait for the used ring to advance.
         let ring = &self.ring;
         let target = self.last_used.wrapping_add(1);
-        wait_for(5000, || ring.read::<u16>(USED_OFF + 2) == target)?;
+        wait_irq(self.irq, 5000, || ring.read::<u16>(USED_OFF + 2) == target)?;
         self.last_used = target;
         fence(Ordering::SeqCst);
         match self.io.read::<u8>(STATUS_OFF) {
@@ -220,11 +231,22 @@ pub fn probe(dev: &pci::Device) {
     w64(QUEUE_DRIVER, ring.phys + AVAIL_OFF as u64);
     w64(QUEUE_DEVICE, ring.phys + USED_OFF as u64);
     let notify_addr = notify.0 + r16(QUEUE_NOTIFY_OFF) as u64 * notify.1 as u64;
+    // Queue interrupts on MSI-X entry 0; configuration changes need none.
+    let waitq: &'static WaitQueue = Box::leak(Box::new(WaitQueue::new()));
+    let mut irq = None;
+    w16(MSIX_CONFIG, NO_VECTOR);
+    if dev.enable_msi("virtio-blk", interrupt, waitq as *const WaitQueue as usize).is_some() {
+        w16(QUEUE_MSIX_VECTOR, 0);
+        if r16(QUEUE_MSIX_VECTOR) == 0 {
+            irq = Some(waitq);
+            log!("virtio", "interrupts via MSI-X");
+        }
+    }
     w16(QUEUE_ENABLE, 1);
     w8(DEVICE_STATUS, STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
 
     let sectors = unsafe { (device_cfg as *const u64).read_volatile() };
     let index = COUNT.fetch_add(1, Ordering::Relaxed);
-    let q = Queue { notify_addr, ring, io, avail_idx: 0, last_used: 0 };
+    let q = Queue { notify_addr, ring, io, avail_idx: 0, last_used: 0, irq };
     register(Arc::new(VirtioBlk { index, queue: Mutex::new(q), sectors }));
 }

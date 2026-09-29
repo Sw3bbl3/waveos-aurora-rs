@@ -5,6 +5,7 @@ pub mod cpu;
 pub mod fpu;
 pub mod gdt;
 pub mod idt;
+pub mod irq;
 pub mod percpu;
 pub mod smp;
 pub mod switch;

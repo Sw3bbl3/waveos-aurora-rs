@@ -41,8 +41,10 @@ static SWITCH_RING: IrqMutex<SwitchLog> =
 
 /// Totals for Activity Monitor: (interrupts, system calls, context switches).
 pub fn totals() -> (u64, u64, u64) {
-    let irqs =
-        IRQ_TIMER.load(Ordering::Relaxed) + IRQ_KEYBOARD.load(Ordering::Relaxed) + IRQ_MOUSE.load(Ordering::Relaxed);
+    let irqs = IRQ_TIMER.load(Ordering::Relaxed)
+        + IRQ_KEYBOARD.load(Ordering::Relaxed)
+        + IRQ_MOUSE.load(Ordering::Relaxed)
+        + crate::arch::irq::total();
     let sys = SYSCALL_COUNT.iter().map(|c| c.load(Ordering::Relaxed)).sum();
     (irqs, sys, SWITCHES.load(Ordering::Relaxed))
 }
@@ -289,6 +291,12 @@ fn snapshot() -> String {
         IRQ_KEYBOARD.load(Ordering::Relaxed),
         IRQ_MOUSE.load(Ordering::Relaxed)
     );
+    // Device (MSI/MSI-X) vectors: [owner, vector, count].
+    let _ = write!(o, ",\"msi\":[");
+    for (i, (vector, name, count)) in crate::arch::irq::list().iter().enumerate() {
+        let _ = write!(o, "{}[\"{}\",{},{}]", if i > 0 { "," } else { "" }, name, vector, count);
+    }
+    let _ = write!(o, "]");
 
     // Block devices.
     let _ = write!(o, ",\"blk\":[");

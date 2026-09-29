@@ -106,3 +106,52 @@ impl<T> Drop for MutexGuard<'_, T> {
         self.lock.locked.store(false, core::sync::atomic::Ordering::Release);
     }
 }
+
+/// Tasks waiting for an event signalled from an interrupt handler (a disk
+/// completion, a USB transfer). The waiter sleeps; [`WaitQueue::wake_all`]
+/// (safe in interrupt context) makes it runnable to re-check its condition.
+pub struct WaitQueue {
+    waiters: IrqMutex<alloc::vec::Vec<crate::sched::TaskId>>,
+}
+
+impl WaitQueue {
+    pub const fn new() -> Self {
+        Self { waiters: IrqMutex::new(alloc::vec::Vec::new()) }
+    }
+
+    /// Waits until `done()` holds, for at most `timeout_ms`; returns whether
+    /// it did. Polls briefly first — fast devices often finish within
+    /// microseconds, cheaper than a round trip through the scheduler.
+    pub fn wait(&self, timeout_ms: u64, done: impl Fn() -> bool) -> bool {
+        for _ in 0..200 {
+            if done() {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        let me = crate::sched::current_id();
+        let deadline = crate::time::uptime_ms() + timeout_ms;
+        loop {
+            if done() {
+                return true;
+            }
+            let now = crate::time::uptime_ms();
+            if now > deadline {
+                return done();
+            }
+            self.waiters.lock().push(me);
+            // Sleeps unless `done()` holds once the task is marked sleeping, so
+            // an interrupt between the check and the sleep is not lost. The
+            // idle task (early boot) cannot sleep and simply polls.
+            crate::sched::wait_until((deadline - now).max(1), &done);
+            self.waiters.lock().retain(|&t| t != me);
+        }
+    }
+
+    pub fn wake_all(&self) {
+        let waiters = core::mem::take(&mut *self.waiters.lock());
+        for t in waiters {
+            crate::sched::wake(t);
+        }
+    }
+}

@@ -11,6 +11,7 @@ static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 /// LAPIC timer count for one tick (divide-by-16), measured once on the BSP.
 static TIMER_COUNT: AtomicU64 = AtomicU64::new(0);
 static IOAPIC_BASE: AtomicU64 = AtomicU64::new(0);
+static IOAPIC_GSI_BASE: AtomicU64 = AtomicU64::new(0);
 
 const LAPIC_ID: u32 = 0x20;
 const LAPIC_ICR_LOW: u32 = 0x300;
@@ -135,6 +136,7 @@ pub fn init(acpi: &AcpiInfo) {
     start_timer();
 
     IOAPIC_BASE.store(phys_to_virt(acpi.ioapic_phys), Ordering::Relaxed);
+    IOAPIC_GSI_BASE.store(acpi.ioapic_gsi_base as u64, Ordering::Relaxed);
     let max_entry = (ioapic_read(1) >> 16) & 0xFF;
     for i in 0..=max_entry {
         ioapic_write(0x10 + 2 * i, LVT_MASKED);
@@ -171,6 +173,24 @@ pub fn route_isa_irq(acpi: &AcpiInfo, irq: u8, vector: u8) {
     let pin = gsi - acpi.ioapic_gsi_base;
     ioapic_write(0x10 + 2 * pin + 1, lapic_id() << 24);
     ioapic_write(0x10 + 2 * pin, low);
+}
+
+/// Routes global system interrupt `gsi` (e.g. a PCI INTx line from `_PRT`, or
+/// the ACPI SCI) to `vector` on the boot CPU.
+#[allow(dead_code)] // first user: the ACPI SCI
+pub fn route_gsi(gsi: u32, vector: u8, level: bool, active_low: bool) -> bool {
+    let base = IOAPIC_GSI_BASE.load(Ordering::Relaxed) as u32;
+    let max = (ioapic_read(1) >> 16) & 0xFF;
+    let Some(pin) = gsi.checked_sub(base).filter(|&p| p <= max) else { return false };
+    let low = vector as u32 | (active_low as u32) << 13 | (level as u32) << 15;
+    ioapic_write(0x10 + 2 * pin + 1, boot_apic_id() << 24);
+    ioapic_write(0x10 + 2 * pin, low);
+    true
+}
+
+/// The local APIC id of CPU 0, where device interrupts are delivered.
+pub fn boot_apic_id() -> u32 {
+    super::percpu::CPUS[0].lapic_id.load(Ordering::Relaxed)
 }
 
 // -------------------------------------------------------------------- IPIs

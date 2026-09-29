@@ -1,8 +1,10 @@
-//! NVMe controller driver: admin queue + one I/O queue pair, polled.
+//! NVMe controller driver: admin queue + one I/O queue pair. Completions
+//! arrive by MSI-X (the issuing task sleeps meanwhile), or are polled.
 
-use super::{check_io, register, wait_for, BlockDevice, BlockResult, Dma};
+use super::{check_io, register, wait_for, wait_irq, BlockDevice, BlockResult, Dma};
 use crate::drivers::pci;
-use crate::sync::Mutex;
+use crate::sync::{Mutex, WaitQueue};
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -35,10 +37,16 @@ struct QueuePair {
     sq_doorbell: u64,
     cq_doorbell: u64,
     cid: u16,
+    irq: Option<&'static WaitQueue>,
+}
+
+/// MSI-X handler: completions are read by the waiting task itself.
+fn interrupt(arg: usize) {
+    unsafe { &*(arg as *const WaitQueue) }.wake_all();
 }
 
 impl QueuePair {
-    fn new(regs: u64, qid: u16, stride: u64) -> Option<QueuePair> {
+    fn new(regs: u64, qid: u16, stride: u64, irq: Option<&'static WaitQueue>) -> Option<QueuePair> {
         Some(QueuePair {
             sq: Dma::new(QDEPTH as usize * 64)?,
             cq: Dma::new(QDEPTH as usize * 16)?,
@@ -48,6 +56,7 @@ impl QueuePair {
             sq_doorbell: regs + 0x1000 + (2 * qid as u64) * stride,
             cq_doorbell: regs + 0x1000 + (2 * qid as u64 + 1) * stride,
             cid: 0,
+            irq,
         })
     }
 
@@ -66,7 +75,7 @@ impl QueuePair {
         let entry = self.cq_head as usize * 16;
         let phase = self.phase;
         let cq = &self.cq;
-        wait_for(5000, || (cq.read::<u16>(entry + 14) & 1) == phase)?;
+        wait_irq(self.irq, 5000, || (cq.read::<u16>(entry + 14) & 1) == phase)?;
         let status = self.cq.read::<u16>(entry + 14) >> 1;
         let result = self.cq.read::<u32>(entry);
         self.cq_head = (self.cq_head + 1) % QDEPTH;
@@ -190,7 +199,9 @@ pub fn probe(dev: &pci::Device) {
         log!("nvme", "controller did not disable");
         return;
     }
-    let Some(mut admin) = QueuePair::new(regs, 0, stride) else { return };
+    let queue: &'static WaitQueue = Box::leak(Box::new(WaitQueue::new()));
+    let irq = dev.enable_msi("nvme", interrupt, queue as *const WaitQueue as usize).map(|_| queue);
+    let Some(mut admin) = QueuePair::new(regs, 0, stride, irq) else { return };
     w32(REG_AQA, ((QDEPTH as u32 - 1) << 16) | (QDEPTH as u32 - 1));
     w64(REG_ASQ, admin.sq.phys);
     w64(REG_ACQ, admin.cq.phys);
@@ -228,13 +239,14 @@ pub fn probe(dev: &pci::Device) {
     }
 
     // I/O completion queue 1, then submission queue 1 bound to it.
-    let Some(queue) = QueuePair::new(regs, 1, stride) else { return };
+    let Some(queue) = QueuePair::new(regs, 1, stride, irq) else { return };
     let mut cmd = [0u32; 16];
     cmd[0] = ADMIN_CREATE_CQ as u32;
     cmd[6] = queue.cq.phys as u32;
     cmd[7] = (queue.cq.phys >> 32) as u32;
     cmd[10] = ((QDEPTH as u32 - 1) << 16) | 1;
-    cmd[11] = 1; // physically contiguous, no interrupts
+    // Physically contiguous; interrupts on MSI-X vector 0 when we have it.
+    cmd[11] = 1 | if irq.is_some() { 1 << 1 } else { 0 };
     if admin.run(cmd).is_err() {
         return;
     }
@@ -249,6 +261,9 @@ pub fn probe(dev: &pci::Device) {
     }
     let (Some(buf), Some(prp_list)) = (Dma::new(MAX_BYTES), Dma::new(4096)) else { return };
     let index = COUNT.fetch_add(1, Ordering::Relaxed);
+    if irq.is_some() {
+        log!("nvme", "interrupts via MSI-X");
+    }
     core::mem::forget(admin); // the admin queue stays live for the controller's lifetime
     register(Arc::new(NvmeDisk { index, io: Mutex::new(Io { queue, buf, prp_list }), sectors, sector_size, model }));
 }

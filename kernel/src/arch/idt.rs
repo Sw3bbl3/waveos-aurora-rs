@@ -51,6 +51,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt[RESCHEDULE_VECTOR].set_handler_fn(reschedule_ipi);
     idt[TLB_VECTOR].set_handler_fn(tlb_ipi);
     idt[HALT_VECTOR].set_handler_fn(halt_ipi);
+    super::irq::install(&mut idt);
     idt
 });
 

@@ -1,16 +1,21 @@
-//! AHCI (SATA) host controller driver — polled, one command slot per port.
+//! AHCI (SATA) host controller driver: one command slot per port. With MSI
+//! the issuing task sleeps until the completion interrupt; without, it polls.
 
-use super::{check_io, register, wait_for, BlockDevice, BlockResult, Dma};
+use super::{check_io, register, wait_for, wait_irq, BlockDevice, BlockResult, Dma};
 use crate::drivers::pci;
-use crate::sync::Mutex;
+use crate::sync::{Mutex, WaitQueue};
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use aurora_abi::err::*;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // HBA registers
 const GHC: usize = 0x04;
+const IS: usize = 0x08;
 const PI: usize = 0x0C;
+const GHC_IE: u32 = 1 << 1;
 const GHC_AE: u32 = 1 << 31;
 const GHC_HR: u32 = 1 << 0;
 
@@ -34,6 +39,9 @@ const CMD_FRE: u32 = 1 << 4;
 const CMD_FR: u32 = 1 << 14;
 const CMD_CR: u32 = 1 << 15;
 const IS_TFES: u32 = 1 << 30;
+/// Port interrupts we enable: D2H register / PIO setup / DMA setup / set
+/// device bits FIS, descriptor processed, and every error condition.
+const IE_MASK: u32 = 0xF | 1 << 5 | 1 << 27 | 1 << 28 | 1 << 29 | IS_TFES;
 const TFD_BSY: u32 = 0x80;
 const TFD_DRQ: u32 = 0x08;
 const TFD_ERR: u32 = 0x01;
@@ -46,7 +54,44 @@ const ATA_FLUSH_EXT: u8 = 0xEA;
 /// Bounce buffer size (sectors per command).
 const MAX_SECTORS: usize = 128;
 
+/// Controller state shared with the interrupt handler.
+struct Hba {
+    abar: u64,
+    /// PxIS bits the interrupt handler cleared, per port, for the waiter to see.
+    seen: [AtomicU32; 32],
+    irq: WaitQueue,
+    has_irq: bool,
+}
+
+impl Hba {
+    fn r(&self, reg: usize) -> u32 {
+        unsafe { ((self.abar + reg as u64) as *const u32).read_volatile() }
+    }
+    fn w(&self, reg: usize, v: u32) {
+        unsafe { ((self.abar + reg as u64) as *mut u32).write_volatile(v) }
+    }
+}
+
+/// MSI handler: acknowledges every port that raised an interrupt (PxIS, then
+/// IS — otherwise no further message is sent) and wakes the waiting tasks.
+fn interrupt(arg: usize) {
+    let hba = unsafe { &*(arg as *const Hba) };
+    let pending = hba.r(IS);
+    for p in 0..32 {
+        if pending & (1 << p) != 0 {
+            let port_is = hba.abar + 0x100 + p as u64 * 0x80 + P_IS as u64;
+            let bits = unsafe { (port_is as *const u32).read_volatile() };
+            hba.seen[p].fetch_or(bits, Ordering::AcqRel);
+            unsafe { (port_is as *mut u32).write_volatile(bits) };
+        }
+    }
+    hba.w(IS, pending);
+    hba.irq.wake_all();
+}
+
 struct Port {
+    hba: &'static Hba,
+    index: usize,
     regs: u64,
     /// Command list (1 KiB) + received FIS (256 B) + one command table.
     mem: Dma,
@@ -63,6 +108,11 @@ impl Port {
     }
     fn w(&self, reg: usize, v: u32) {
         unsafe { ((self.regs + reg as u64) as *mut u32).write_volatile(v) }
+    }
+
+    /// Interrupt status: what is still set plus what the handler already cleared.
+    fn status(&self) -> u32 {
+        self.r(P_IS) | self.hba.seen[self.index].load(Ordering::Acquire)
     }
 
     fn stop(&self) -> BlockResult<()> {
@@ -83,6 +133,7 @@ impl Port {
     fn command(&self, cmd: u8, lba: u64, count: u16, bytes: usize, write: bool) -> BlockResult<()> {
         wait_for(1000, || self.r(P_TFD) & (TFD_BSY | TFD_DRQ) == 0)?;
         self.w(P_IS, !0);
+        self.hba.seen[self.index].store(0, Ordering::Release);
         // Command header 0: CFL = 5 dwords, W bit, PRDTL = 1 (or 0 for no data).
         let prdtl: u32 = if bytes > 0 { 1 } else { 0 };
         let flags = 5 | if write { 1 << 6 } else { 0 } | prdtl << 16;
@@ -121,9 +172,10 @@ impl Port {
             self.mem.write::<u32>(prd + 12, (bytes as u32 - 1) & 0x3F_FFFF);
         }
         self.w(P_CI, 1);
-        let r = wait_for(5000, || self.r(P_CI) & 1 == 0 || self.r(P_IS) & IS_TFES != 0);
-        if r.is_err() || self.r(P_IS) & IS_TFES != 0 || self.r(P_TFD) & TFD_ERR != 0 {
-            log!("ahci", "command {:#x} failed: IS={:#x} TFD={:#x}", cmd, self.r(P_IS), self.r(P_TFD));
+        let irq = self.hba.has_irq.then_some(&self.hba.irq);
+        let r = wait_irq(irq, 5000, || self.r(P_CI) & 1 == 0 || self.status() & IS_TFES != 0);
+        if r.is_err() || self.status() & IS_TFES != 0 || self.r(P_TFD) & TFD_ERR != 0 {
+            log!("ahci", "command {:#x} failed: IS={:#x} TFD={:#x}", cmd, self.status(), self.r(P_TFD));
             return Err(EIO);
         }
         Ok(())
@@ -201,6 +253,15 @@ pub fn probe(dev: &pci::Device) {
     }
     hba_w(GHC, hba(GHC) | GHC_AE);
     let implemented = hba(PI);
+    // Interrupts: one MSI for the whole controller.
+    let shared: &'static mut Hba = Box::leak(Box::new(Hba {
+        abar,
+        seen: [const { AtomicU32::new(0) }; 32],
+        irq: WaitQueue::new(),
+        has_irq: false,
+    }));
+    shared.has_irq = dev.enable_msi("ahci", interrupt, shared as *const Hba as usize).is_some();
+    let shared: &'static Hba = shared;
     let mut index = 0;
     for p in 0..32 {
         if implemented & (1 << p) == 0 {
@@ -208,7 +269,7 @@ pub fn probe(dev: &pci::Device) {
         }
         let regs = abar + 0x100 + p as u64 * 0x80;
         let (Some(mem), Some(buf)) = (Dma::new(4096), Dma::new(MAX_SECTORS * 512)) else { return };
-        let port = Port { regs, mem, buf };
+        let port = Port { hba: shared, index: p, regs, mem, buf };
         // Ports with nothing attached never establish a link; don't spend time resetting them.
         if wait_for(20, || port.r(P_SSTS) & 0xF != 0).is_err() {
             continue;
@@ -245,6 +306,9 @@ pub fn probe(dev: &pci::Device) {
         if port.start().is_err() {
             continue;
         }
+        if shared.has_irq {
+            port.w(P_IE, IE_MASK);
+        }
         if port.command(ATA_IDENTIFY, 0, 0, 512, false).is_err() {
             continue;
         }
@@ -262,5 +326,10 @@ pub fn probe(dev: &pci::Device) {
         }
         register(Arc::new(AhciDisk { index, port: Mutex::new(port), sectors, model }));
         index += 1;
+    }
+    if shared.has_irq {
+        hba_w(IS, !0);
+        hba_w(GHC, hba(GHC) | GHC_IE);
+        log!("ahci", "interrupts via MSI");
     }
 }

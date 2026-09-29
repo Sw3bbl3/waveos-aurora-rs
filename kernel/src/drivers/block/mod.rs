@@ -236,6 +236,16 @@ pub fn wait_for(timeout_ms: u64, mut done: impl FnMut() -> bool) -> BlockResult<
     }
 }
 
+/// Waits for a device completion: sleeps on `irq` (woken by the device's
+/// interrupt handler) when there is one, else polls like [`wait_for`].
+pub fn wait_irq(irq: Option<&crate::sync::WaitQueue>, timeout_ms: u64, done: impl Fn() -> bool) -> BlockResult<()> {
+    match irq {
+        Some(q) if q.wait(timeout_ms, &done) => Ok(()),
+        Some(_) => Err(EIO),
+        None => wait_for(timeout_ms, done),
+    }
+}
+
 /// Validates a transfer against a device's geometry.
 pub fn check_io(dev: &dyn BlockDevice, lba: u64, len: usize) -> BlockResult<u64> {
     let ss = dev.sector_size() as usize;

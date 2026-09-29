@@ -17,6 +17,9 @@ pub const CMD_MEMORY: u16 = 1 << 1;
 pub const CMD_BUS_MASTER: u16 = 1 << 2;
 pub const CMD_INTX_DISABLE: u16 = 1 << 10;
 
+pub const CAP_MSI: u8 = 0x05;
+pub const CAP_MSIX: u8 = 0x11;
+
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)] // I/O BARs are recorded for completeness; no driver uses one yet
 pub enum Bar {
@@ -93,7 +96,8 @@ impl Device {
         self.write32(off & !3, (old & !(0xFFFF << shift)) | (v as u32) << shift);
     }
 
-    /// Enables memory decoding and bus mastering; masks legacy INTx (we poll).
+    /// Enables memory decoding and bus mastering; masks legacy INTx (drivers
+    /// use MSI/MSI-X, or poll).
     pub fn enable(&self) {
         let cmd = self.read16(0x04);
         self.write16(0x04, cmd | CMD_MEMORY | CMD_IO | CMD_BUS_MASTER | CMD_INTX_DISABLE);
@@ -105,6 +109,47 @@ impl Device {
             Bar::Memory { phys, size } if phys != 0 => Some(paging::map_mmio(phys, size.max(4096))),
             _ => None,
         }
+    }
+
+    /// Sends the device's first interrupt message to a newly allocated vector
+    /// that runs `handler(arg)` on the boot CPU, preferring MSI-X over MSI.
+    /// Returns the vector, or `None` if the device supports neither (the
+    /// driver then polls). Further MSI-X table entries stay masked.
+    pub fn enable_msi(&self, name: &str, handler: fn(usize), arg: usize) -> Option<u8> {
+        let caps = self.capabilities();
+        let address = 0xFEE0_0000 | crate::arch::apic::boot_apic_id() << 12;
+        if let Some(&(_, cap)) = caps.iter().find(|c| c.0 == CAP_MSIX) {
+            let control = self.read16(cap + 2);
+            let table = self.read32(cap + 4);
+            let base = self.map_bar((table & 7) as usize)?;
+            let vector = crate::arch::irq::alloc(name, handler, arg)?;
+            let entry = (base + (table & !7) as u64) as *mut u32;
+            unsafe {
+                entry.write_volatile(address);
+                entry.add(1).write_volatile(0);
+                entry.add(2).write_volatile(vector as u32);
+                entry.add(3).write_volatile(0); // unmasked
+            }
+            // Enable MSI-X and clear the function-wide mask.
+            self.write16(cap + 2, (control | 1 << 15) & !(1 << 14));
+            return Some(vector);
+        }
+        if let Some(&(_, cap)) = caps.iter().find(|c| c.0 == CAP_MSI) {
+            let control = self.read16(cap + 2);
+            let vector = crate::arch::irq::alloc(name, handler, arg)?;
+            self.write32(cap + 4, address);
+            let data = if control & (1 << 7) != 0 {
+                self.write32(cap + 8, 0); // upper address (64-bit capable)
+                cap + 12
+            } else {
+                cap + 8
+            };
+            self.write16(data, vector as u16);
+            // One message (MME = 0), enabled.
+            self.write16(cap + 2, (control & !(0x7 << 4)) | 1);
+            return Some(vector);
+        }
+        None
     }
 
     /// Iterates the capability list: (capability id, config offset).

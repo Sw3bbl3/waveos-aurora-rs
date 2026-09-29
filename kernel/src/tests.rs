@@ -262,12 +262,19 @@ fn block_round_trip() {
     let scratch = disk.sectors() - 33 - (1 << 20) / ss;
     let len = 200 * 1024; // larger than one DMA chunk
     let pattern: Vec<u8> = (0..len).map(|i| (i as u32).wrapping_mul(2654435761).to_le_bytes()[1]).collect();
+    // Every controller QEMU emulates here supports MSI or MSI-X.
+    let name = disk.name();
+    let owner = if name.starts_with("sata") { "ahci" } else if name.starts_with("nvme") { "nvme" } else { "virtio-blk" };
+    let interrupts = || -> u64 { crate::arch::irq::list().iter().filter(|v| v.1 == owner).map(|v| v.2).sum() };
+    let before = interrupts();
     disk.write(scratch, &pattern).unwrap();
     disk.flush().unwrap();
     let mut back = alloc::vec![0u8; len];
     disk.read(scratch, &mut back).unwrap();
     assert!(back == pattern, "data read back differs");
     assert!(disk.read(disk.sectors(), &mut back[..ss as usize]).is_err(), "out-of-range read must fail");
+    let after = interrupts();
+    assert!(after > before, "no {} completion interrupts ({} → {})", owner, before, after);
 }
 
 /// A block device in RAM.
