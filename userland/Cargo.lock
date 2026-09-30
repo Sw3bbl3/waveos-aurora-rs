@@ -211,6 +211,9 @@ version = "0.5.0"
 [[package]]
 name = "aurora-web"
 version = "0.5.0"
+dependencies = [
+ "miniz_oxide",
+]
 
 [[package]]
 name = "autocfg"

@@ -3,7 +3,7 @@
 #![no_main]
 extern crate alloc;
 use aurora::net;
-use aurora_web::http::{self, Error};
+use aurora_web::http::Error;
 use aurora_web::Url;
 aurora::entry!(main);
 
@@ -20,7 +20,7 @@ fn main(args: aurora::Args) -> i32 {
         return 2;
     };
     let t0 = aurora::time::uptime_ms();
-    let resp = match http::fetch(&url, &mut aurora::web::connect) {
+    let resp = match aurora::web::fetch(&url) {
         Ok(r) => r,
         Err(Error::Io(e)) => {
             aurora::eprintln!("fetch: {}: {}", url.host, net::describe(aurora::Error(e)));

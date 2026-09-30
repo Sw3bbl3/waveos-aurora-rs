@@ -75,7 +75,7 @@ fn content_type_for(path: &str) -> &'static str {
 /// GETs a URL (http, https or file).
 fn get(url: &Url) -> Result<Response, String> {
     match url.scheme.as_str() {
-        "http" | "https" => http::fetch(url, &mut aurora::web::connect).map_err(describe),
+        "http" | "https" => aurora::web::fetch(url).map_err(describe),
         "file" => {
             let path = aurora_web::url::percent_decode(&url.path, false);
             let body = aurora::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
