@@ -30,7 +30,15 @@ fn main() {
         }
     }
     let t2 = Instant::now();
-    let l = page.layout(1000, 700, &Fake);
+    if std::env::var("SURF_LOOP").is_ok() {
+        for _ in 0..60 {
+            let _ = page.styles(1000, 700);
+        }
+    }
+    let styles = page.styles(1000, 700);
+    let styled = t2.elapsed();
+    let l = page.layout_with(&styles, 1000, &Fake);
+    println!("cascade {styled:?}");
     if let Some(pos) = args.iter().position(|a| a == "--grep") {
         let word = &args[pos + 1];
         let texts: Vec<_> = l.items.iter().filter_map(|i| if let aurora_surf::Item::Text { x, y, text, .. } = i { Some((*x, *y, text.clone())) } else { None }).collect();

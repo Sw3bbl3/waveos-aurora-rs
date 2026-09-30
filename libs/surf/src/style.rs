@@ -417,7 +417,7 @@ impl<'a> Cascade<'a> {
 
     /// The matching declarations for `node` (tagged with the pseudo-element
     /// they target: 0 = the element, 1 = ::before, 2 = ::after).
-    fn declarations(&self, doc: &Document, node: NodeId) -> Vec<(u8, Decl<'a>)> {
+    fn declarations(&self, doc: &Document, node: NodeId, bloom: &css::Bloom) -> Vec<(u8, Decl<'a>)> {
         let Some(e) = doc.element(node) else { return Vec::new() };
         let mut candidates: Vec<usize> = self.universal.clone();
         if let Some(id) = e.id() {
@@ -441,7 +441,7 @@ impl<'a> Cascade<'a> {
             let (sheet, _) = self.sheets[ent.sheet];
             let rule = &sheet.rules[ent.rule];
             let sel = &rule.selectors[ent.selector];
-            if css::matches(doc, node, sel) {
+            if sel.ancestor_hashes.iter().all(|h| bloom.may_contain(*h)) && css::matches(doc, node, sel) {
                 let pe = sel.parts[0].0.pseudo_element;
                 for d in &rule.decls {
                     // Order: sheet, then rule, then declaration position.
@@ -502,6 +502,8 @@ fn cascade_into(s: &mut Style, decls: &[Decl], parent: &Style, root_font: f32, v
 pub fn compute(doc: &Document, cascade: &Cascade, viewport: (i32, i32)) -> Computed {
     let mut styles: Vec<Option<Rc<Style>>> = alloc::vec![None; doc.nodes.len()];
     let mut pseudo = BTreeMap::new();
+    // Per element: the ancestor filter its children see (its ancestors' keys and its own).
+    let mut blooms: Vec<css::Bloom> = alloc::vec![css::Bloom::default(); doc.nodes.len()];
     let root = Rc::new(Style::root());
     let mut root_font = 16.0;
     let order = doc.descendants(Document::ROOT);
@@ -515,7 +517,17 @@ pub fn compute(doc: &Document, cascade: &Cascade, viewport: (i32, i32)) -> Compu
                     styles[n] = Some(parent_style);
                     continue;
                 }
-                let all = cascade.declarations(doc, n);
+                let above = doc.parent(n).map(|p| blooms[p]).unwrap_or_default();
+                let mut mine = above;
+                if let Some(id) = e.id() {
+                    mine.insert(css::key_hash(0, id));
+                }
+                for cl in e.classes() {
+                    mine.insert(css::key_hash(1, cl));
+                }
+                mine.insert(css::key_hash(2, &e.tag));
+                blooms[n] = mine;
+                let all = cascade.declarations(doc, n, &above);
                 let mut decls: Vec<Decl> = all.iter().filter(|d| d.0 == 0).map(|d| d.1).collect();
                 let hints = hints(doc, n);
                 for (i, d) in hints.iter().enumerate() {

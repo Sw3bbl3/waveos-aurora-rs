@@ -79,6 +79,33 @@ pub enum Pseudo {
 pub struct Selector {
     pub parts: Vec<(Compound, Option<Combinator>)>,
     pub specificity: (u16, u16, u16),
+    /// Hashes of ids, classes and tags some ancestor must have (for a quick
+    /// rejection against an element's ancestor filter).
+    pub ancestor_hashes: Vec<u32>,
+}
+
+/// A hash for the ancestor filter: kind 0 = id, 1 = class, 2 = tag.
+pub fn key_hash(kind: u8, s: &str) -> u32 {
+    let mut h: u32 = 0x811C_9DC5 ^ kind as u32;
+    for b in s.bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// 256 bits of "some ancestor has this key".
+#[derive(Clone, Copy, Default)]
+pub struct Bloom(pub [u64; 4]);
+
+impl Bloom {
+    pub fn insert(&mut self, h: u32) {
+        for bit in [h & 255, (h >> 8) & 255] {
+            self.0[(bit >> 6) as usize] |= 1 << (bit & 63);
+        }
+    }
+    pub fn may_contain(&self, h: u32) -> bool {
+        [h & 255, (h >> 8) & 255].iter().all(|bit| self.0[(bit >> 6) as usize] & (1 << (bit & 63)) != 0)
+    }
 }
 
 // ------------------------------------------------------------------ parsing
@@ -302,7 +329,24 @@ pub fn parse_selector(s: &str) -> Option<Selector> {
     for (c, _) in &parts {
         add_specificity(c, &mut spec);
     }
-    Some(Selector { parts, specificity: spec })
+    // Compounds reached through child/descendant combinators must be ancestors.
+    let mut ancestor_hashes = Vec::new();
+    for k in 1..parts.len() {
+        if !matches!(parts[k - 1].1, Some(Combinator::Child | Combinator::Descendant)) {
+            break;
+        }
+        let c = &parts[k].0;
+        if let Some(id) = &c.id {
+            ancestor_hashes.push(key_hash(0, id));
+        }
+        for cl in &c.classes {
+            ancestor_hashes.push(key_hash(1, cl));
+        }
+        if let Some(t) = &c.tag {
+            ancestor_hashes.push(key_hash(2, t));
+        }
+    }
+    Some(Selector { parts, specificity: spec, ancestor_hashes })
 }
 
 fn add_specificity(c: &Compound, spec: &mut (u16, u16, u16)) {

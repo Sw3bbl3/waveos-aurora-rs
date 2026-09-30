@@ -357,7 +357,21 @@ struct Surf {
     focus: Option<NodeId>,
     fragment: Option<String>,
     press: Option<(i32, i32)>,
+    /// Page zoom in percent.
+    zoom: i32,
+    /// The cascade for the current viewport (reused when only images change).
+    styles: Option<((i32, i32), aurora_surf::style::Computed)>,
+    find: Option<Find>,
 }
+
+/// Find in page: the query and its matches as (text item, byte range).
+struct Find {
+    edit: TextEdit,
+    matches: Vec<(usize, usize, usize)>,
+    current: usize,
+}
+
+const ZOOMS: [i32; 12] = [50, 67, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300];
 
 impl Surf {
     fn new(start: &str) -> Surf {
@@ -385,6 +399,9 @@ impl Surf {
             focus: None,
             fragment: None,
             press: None,
+            zoom: aurora::prefs::get_int("surf.zoom", 100).clamp(50, 300) as i32,
+            styles: None,
+            find: None,
         };
         s.go(start, true);
         s
@@ -481,6 +498,8 @@ impl Surf {
     }
 
     fn install(&mut self, loaded: Loaded) {
+        self.find = None;
+        self.styles = None;
         let Loaded { page, url, images } = loaded;
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.queue.lock().queue.clear();
@@ -543,15 +562,105 @@ impl Surf {
         let Some(page) = &self.page else { return };
         let base = self.url.as_ref().map(|u| document_base(page, u));
         let host = Fonts { images: &self.images, base };
-        let w = self.view.w.max(200);
-        let l = page.layout(w, self.view.h.max(200), &host);
-        self.laid_out_width = w;
+        let w = (self.view.w * 100 / self.zoom).max(200);
+        let h = (self.view.h * 100 / self.zoom).max(200);
+        if self.styles.as_ref().is_none_or(|(size, _)| *size != (w, h)) {
+            self.styles = Some(((w, h), page.styles(w, h)));
+        }
+        let l = page.layout_with(&self.styles.as_ref().unwrap().1, w, &host);
+        self.laid_out_width = self.view.w;
         self.layout = Some(l);
+        self.clamp_scroll();
+        if self.find.is_some() {
+            self.search(false);
+        }
+    }
+
+    /// Page (CSS) pixels to screen pixels.
+    fn z(&self, v: i32) -> i32 {
+        v * self.zoom / 100
+    }
+
+    fn set_zoom(&mut self, zoom: i32) {
+        let zoom = zoom.clamp(50, 300);
+        if zoom == self.zoom {
+            return;
+        }
+        // Keep the same part of the page in view.
+        let frac = if self.max_scroll() > 0 { self.scroll as i64 * 1000 / self.max_scroll() as i64 } else { 0 };
+        self.zoom = zoom;
+        let _ = aurora::prefs::set("surf.zoom", &format!("{zoom}"));
+        self.relayout();
+        self.scroll = (frac * self.max_scroll() as i64 / 1000) as i32;
         self.clamp_scroll();
     }
 
+    fn zoom_step(&mut self, dir: i32) {
+        let i = ZOOMS.iter().position(|z| *z >= self.zoom).unwrap_or(4) as i32;
+        let i = if ZOOMS[i as usize] != self.zoom && dir < 0 { i - 1 } else { i + dir };
+        self.set_zoom(ZOOMS[i.clamp(0, ZOOMS.len() as i32 - 1) as usize]);
+    }
+
+    /// Finds the query in the page's text; `jump` scrolls to the first match below the view's top.
+    fn search(&mut self, jump: bool) {
+        let Some(f) = &mut self.find else { return };
+        f.matches.clear();
+        let q = f.edit.text().to_ascii_lowercase();
+        if q.is_empty() {
+            return;
+        }
+        let Some(l) = &self.layout else { return };
+        for (i, item) in l.items.iter().enumerate() {
+            if let Item::Text { text, .. } = item {
+                let lower = text.to_ascii_lowercase();
+                let mut from = 0;
+                while let Some(p) = lower[from..].find(&q) {
+                    f.matches.push((i, from + p, from + p + q.len()));
+                    from += p + q.len().max(1);
+                }
+            }
+        }
+        if jump {
+            let top = self.scroll * 100 / self.zoom;
+            let y_of = |m: &(usize, usize, usize)| match &l.items[m.0] {
+                Item::Text { y, .. } => *y,
+                _ => 0,
+            };
+            f.current = f.matches.iter().position(|m| y_of(m) >= top).unwrap_or(0);
+            self.reveal_match();
+        } else if f.current >= f.matches.len() {
+            f.current = 0;
+        }
+    }
+
+    fn reveal_match(&mut self) {
+        let Some(f) = &self.find else { return };
+        let Some(&(i, _, _)) = f.matches.get(f.current) else { return };
+        if let Some(Item::Text { y, .. }) = self.layout.as_ref().map(|l| &l.items[i]) {
+            let sy = self.z(*y);
+            if sy < self.scroll + 20 || sy > self.scroll + self.view.h - 20 {
+                self.scroll = sy - self.view.h / 3;
+                self.clamp_scroll();
+            }
+        }
+    }
+
+    fn find_step(&mut self, dir: i32) {
+        if let Some(f) = &mut self.find {
+            let n = f.matches.len() as i32;
+            if n > 0 {
+                f.current = (f.current as i32 + dir).rem_euclid(n) as usize;
+            }
+        }
+        self.reveal_match();
+    }
+
+    fn find_rect(&self) -> Rect {
+        Rect::new(self.view.right() - 372, self.view.y + 8, 360, 36)
+    }
+
     fn max_scroll(&self) -> i32 {
-        self.layout.as_ref().map_or(0, |l| (l.height - self.view.h).max(0))
+        self.layout.as_ref().map_or(0, |l| (self.z(l.height) - self.view.h).max(0))
     }
 
     fn clamp_scroll(&mut self) {
@@ -561,7 +670,7 @@ impl Surf {
     fn scroll_to_fragment(&mut self, frag: &str) {
         let name = aurora_web::url::percent_decode(frag, false);
         if let Some(y) = self.layout.as_ref().and_then(|l| l.anchor(&name)) {
-            self.scroll = y;
+            self.scroll = self.z(y);
             self.clamp_scroll();
         } else if frag.is_empty() || frag == "top" {
             self.scroll = 0;
@@ -709,7 +818,7 @@ impl Surf {
 
     /// Page coordinates of a window point in the content area.
     fn page_point(&self, x: i32, y: i32) -> Option<(i32, i32)> {
-        (self.view.contains(x, y)).then(|| (x - self.view.x, y - self.view.y + self.scroll))
+        (self.view.contains(x, y)).then(|| ((x - self.view.x) * 100 / self.zoom, (y - self.view.y + self.scroll) * 100 / self.zoom))
     }
 
     // ------------------------------------------------------------ painting
@@ -726,6 +835,15 @@ impl Surf {
         let (ox, oy) = (v.x, v.y - self.scroll);
         let base = self.page.as_ref().zip(self.url.as_ref()).map(|(p, u)| document_base(p, u));
         let visible = |r: Rect| r.y + r.h >= v.y && r.y < v.bottom();
+        let zm = self.zoom;
+        let z = |v: i32| v * zm / 100;
+        // A page rectangle on screen (never collapsing a visible one to nothing).
+        let zr = |r: &aurora_surf::Rect| {
+            let (x0, y0) = (ox + z(r.x), oy + z(r.y));
+            let (x1, y1) = (ox + z(r.x + r.w), oy + z(r.y + r.h));
+            Rect::new(x0, y0, (x1 - x0).max((r.w > 0) as i32), (y1 - y0).max((r.h > 0) as i32))
+        };
+        let zfont = |f: FontSpec| FontSpec { size: ((f.size as i32 * zm / 100).max(1)) as u16, ..f };
         cv.with_clip(v, |cv| {
             for item in &l.items {
                 match item {
@@ -733,24 +851,25 @@ impl Surf {
                         if *color >> 24 == 0 {
                             continue;
                         }
-                        let r = Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h);
+                        let r = zr(rect);
                         if !visible(r) {
                             continue;
                         }
                         if *radius > 0 {
-                            cv.fill_round_rect(r, (*radius).min(r.h / 2).min(r.w / 2), *color);
+                            cv.fill_round_rect(r, z(*radius).min(r.h / 2).min(r.w / 2), *color);
                         } else {
                             cv.fill_rect(r, *color);
                         }
                     }
                     Item::Text { x, y, text, font, color, underline, strike } => {
-                        let by = oy + y;
+                        let by = oy + z(*y);
+                        let font = &zfont(*font);
                         let size = font.size as i32;
                         if by + size < v.y || by - size * 2 > v.bottom() {
                             continue;
                         }
                         let f = font_for(*font);
-                        let bx = ox + x;
+                        let bx = ox + z(*x);
                         let w = if font.italic { cv.text_slanted(bx, by, text, f, *color) } else { cv.text(bx, by, text, f, *color) };
                         let t = (size / 14).max(1);
                         if *underline {
@@ -761,7 +880,7 @@ impl Surf {
                         }
                     }
                     Item::Image { rect, src } => {
-                        let r = Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h);
+                        let r = zr(rect);
                         if !visible(r) {
                             continue;
                         }
@@ -774,7 +893,7 @@ impl Surf {
                         }
                     }
                     Item::Bullet { rect, color, kind } => {
-                        let r = Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h);
+                        let r = zr(rect);
                         if !visible(r) {
                             continue;
                         }
@@ -789,12 +908,13 @@ impl Surf {
             // Typed text in form fields.
             for (node, edit) in &self.fields {
                 let Some(f) = l.fields.iter().find(|f| f.node == *node) else { continue };
-                let r = Rect::new(ox + f.rect.x + 2, oy + f.rect.y + 2, f.rect.w - 4, f.rect.h - 4);
+                let fr = zr(&f.rect);
+                let r = Rect::new(fr.x + 2, fr.y + 2, fr.w - 4, fr.h - 4);
                 if !visible(r) {
                     continue;
                 }
                 cv.fill_rect(r, 0xFFFF_FFFF);
-                let font = theme::ui(((f.rect.h - 8).clamp(10, 18)) as u16);
+                let font = theme::ui(((fr.h - 8).clamp(10, 36)) as u16);
                 let base_y = r.y + (r.h + font.ascent as i32 + font.descent as i32) / 2;
                 cv.with_clip(r, |cv| {
                     let caret_x = font.width(&edit.text()[..edit.caret()]);
@@ -811,10 +931,28 @@ impl Surf {
                 });
             }
         });
+        // Find highlights.
+        if let Some(f) = &self.find {
+            cv.with_clip(v, |cv| {
+                for (k, &(i, a, b)) in f.matches.iter().enumerate() {
+                    let Item::Text { x, y, text, font, .. } = &l.items[i] else { continue };
+                    let by = oy + z(*y);
+                    if by < v.y - 40 || by > v.bottom() + 40 {
+                        continue;
+                    }
+                    let ft = font_for(zfont(*font));
+                    let hx = ox + z(*x) + ft.width(&text[..a]);
+                    let hw = ft.width(&text[a..b]);
+                    let color = if k == f.current { 0xB0FF_9500 } else { 0x80FF_E14D };
+                    cv.fill_round_rect(Rect::new(hx - 1, by - ft.ascent as i32 - 1, hw + 2, ft.ascent as i32 - ft.descent as i32 + 2), 3, color);
+                }
+            });
+        }
         // A slim scroll indicator.
         if let Some(l) = &self.layout {
-            if l.height > v.h {
-                let h = (v.h * v.h / l.height).max(24);
+            let height = self.z(l.height);
+            if height > v.h {
+                let h = (v.h * v.h / height).max(24);
                 let y = v.y + (v.h - h) * self.scroll / self.max_scroll().max(1);
                 cv.fill_round_rect(Rect::new(v.right() - 7, y + 2, 5, h - 4), 2, 0x60000000);
             }
@@ -900,6 +1038,43 @@ impl Surf {
         }
     }
 
+    fn paint_find(&self, cv: &mut Canvas, env: &Env) {
+        let Some(f) = &self.find else { return };
+        let t = theme::current();
+        let r = self.find_rect();
+        cv.shadow(r, 10, 14, 4, t.shadow);
+        cv.fill_round_rect(r, 10, t.window_bg);
+        cv.stroke_round_rect(r, 10, t.separator);
+        let font = theme::ui(13);
+        let base_y = r.y + (r.h + font.ascent as i32 + font.descent as i32) / 2;
+        let count = if f.edit.text().is_empty() {
+            String::new()
+        } else if f.matches.is_empty() {
+            String::from("No matches")
+        } else {
+            format!("{} of {}", f.current + 1, f.matches.len())
+        };
+        let cw = font.width(&count);
+        let field = Rect::new(r.x + 10, r.y + 5, r.w - 40 - cw - 16, r.h - 10);
+        cv.with_clip(field, |cv| {
+            let text = f.edit.text();
+            if text.is_empty() {
+                cv.text(field.x, base_y, "Find on page", font, t.text_secondary);
+            } else {
+                cv.text(field.x, base_y, text, font, t.text);
+            }
+            if env.focused {
+                let cx = field.x + font.width(&text[..f.edit.caret()]);
+                cv.fill_rect(Rect::new(cx, field.y + 4, 2, field.h - 8), theme::accent());
+            }
+        });
+        cv.text(r.right() - 34 - cw, base_y, &count, font, if f.matches.is_empty() && !count.is_empty() { 0xFFFF_453A } else { t.text_secondary });
+        // Close (×).
+        let (xx, xy) = (r.right() - 18, r.y + r.h / 2);
+        cv.line(xx - 5, xy - 5, xx + 5, xy + 5, 2, t.text_secondary);
+        cv.line(xx - 5, xy + 5, xx + 5, xy - 5, 2, t.text_secondary);
+    }
+
     fn paint_status(&self, cv: &mut Canvas) {
         let text = match (&self.hover, &self.job) {
             (Some(h), _) => h.clone(),
@@ -960,6 +1135,7 @@ impl App for Surf {
         }
         self.paint_page(cv);
         self.paint_toolbar(cv, area, env);
+        self.paint_find(cv, env);
         self.paint_status(cv);
     }
 
@@ -971,7 +1147,31 @@ impl App for Surf {
         // Browser shortcuts.
         if ctrl && ev.code == KeyCode::Char {
             match ev.ch.map(|c| c.to_ascii_lowercase()) {
+                Some('f') => {
+                    let f = self.find.get_or_insert_with(|| Find { edit: TextEdit::new("", false), matches: Vec::new(), current: 0 });
+                    f.edit.select_all();
+                    self.editing = false;
+                    self.focus = None;
+                    return true;
+                }
+                Some('=') | Some('+') => {
+                    self.zoom_step(1);
+                    return true;
+                }
+                Some('-') => {
+                    self.zoom_step(-1);
+                    return true;
+                }
+                Some('0') => {
+                    self.set_zoom(100);
+                    return true;
+                }
+                Some('g') => {
+                    self.find_step(if ev.mods.shift { -1 } else { 1 });
+                    return true;
+                }
                 Some('l') => {
+                    self.find = None;
                     self.editing = true;
                     self.focus = None;
                     self.address.select_all();
@@ -1003,6 +1203,28 @@ impl App for Surf {
         if alt && ev.code == KeyCode::Right {
             self.forward();
             return true;
+        }
+        if let (Some(f), false, None) = (&mut self.find, self.editing, self.focus) {
+            match ev.code {
+                KeyCode::Enter => {
+                    self.find_step(if ev.mods.shift { -1 } else { 1 });
+                    return true;
+                }
+                KeyCode::Escape => {
+                    self.find = None;
+                    return true;
+                }
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {}
+                _ => {
+                    let r = f.edit.handle_key(ev, env.now_ms);
+                    if r.edited {
+                        self.search(true);
+                    }
+                    if r.handled {
+                        return true;
+                    }
+                }
+            }
         }
         if self.editing {
             match ev.code {
@@ -1073,6 +1295,15 @@ impl App for Surf {
             }
             return true;
         }
+        if self.find.is_some() && self.find_rect().contains(x, y) {
+            let r = self.find_rect();
+            if x >= r.right() - 30 {
+                self.find = None;
+            }
+            self.focus = None;
+            self.editing = false;
+            return true;
+        }
         let was_editing = core::mem::take(&mut self.editing);
         if was_editing {
             let cur = self.history.get(self.pos).cloned().unwrap_or_default();
@@ -1113,6 +1344,7 @@ impl App for Surf {
                             el.attrs.push((String::from("checked"), String::new()));
                         }
                     }
+                    self.styles = None;
                     self.relayout();
                 }
                 ("input", "hidden") => {}

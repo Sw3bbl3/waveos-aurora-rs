@@ -100,6 +100,18 @@ impl Page {
 
     /// Lays the page out `width` × `height` CSS pixels wide (the viewport).
     pub fn layout(&self, width: i32, height: i32, host: &dyn Host) -> Layout {
+        let styles = self.styles(width, height);
+        self.layout_with(&styles, width, host)
+    }
+
+    /// Lays out with styles computed earlier by [`Page::styles`] (for the same
+    /// viewport): relayouts after images arrive needn't redo the cascade.
+    pub fn layout_with(&self, styles: &style::Computed, width: i32, host: &dyn Host) -> Layout {
+        layout::layout(&self.doc, &styles.styles, &styles.pseudo, host, width)
+    }
+
+    /// Runs the cascade for a viewport.
+    pub fn styles(&self, width: i32, height: i32) -> style::Computed {
         let author: Vec<&Stylesheet> = self
             .sheets
             .iter()
@@ -109,8 +121,7 @@ impl Page {
             })
             .collect();
         let cascade = style::Cascade::new(&self.ua, &author, width, height);
-        let computed = style::compute(&self.doc, &cascade, (width, height));
-        layout::layout(&self.doc, &computed.styles, &computed.pseudo, host, width)
+        style::compute(&self.doc, &cascade, (width, height))
     }
 
     pub fn element(&self, n: NodeId) -> Option<&dom::Element> {
