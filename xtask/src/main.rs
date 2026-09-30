@@ -110,7 +110,7 @@ fn main() {
             let status = Command::new("xorriso")
                 .args(["-as", "mkisofs", "-iso-level", "3", "-R", "-J", "-V", "WAVEOS_AURORA"])
                 .arg("-o").arg(&out)
-                .args(["-e", "EFI/BOOT/efiboot.img", "-no-emul-boot", "-isohybrid-gpt-basdat"])
+                .args(["-e", "EFI/BOOT/efiboot.img", "-no-emul-boot"])
                 .arg(&staging)
                 .status()
                 .expect("failed to run xorriso; install xorriso to create an ISO");

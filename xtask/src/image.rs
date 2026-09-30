@@ -54,12 +54,15 @@ pub fn create(esp: &Path, home: &Path, out: &Path, size: u64) -> io::Result<()> 
     Ok(())
 }
 
-/// Creates a FAT32 EFI boot image for an optical disc's El Torito entry.
+/// Creates a FAT16 EFI boot image for an optical disc's El Torito entry.
 /// UEFI firmware mounts this image as the boot volume.
 pub fn create_efi_boot_image(esp: &Path, out: &Path) -> io::Result<()> {
+    // El Torito stores the load size in a 16-bit count of 512-byte sectors.
+    // Keep the image below that limit for firmware that cannot handle size 0.
+    const ISO_ESP_SECTORS: u64 = 32 * 1024 * 1024 / SECTOR - 4;
     let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(out)?;
-    file.set_len(ESP_SECTORS * SECTOR)?;
-    format_esp(&mut file, 0, ESP_SECTORS, esp)?;
+    file.set_len(ISO_ESP_SECTORS * SECTOR)?;
+    format_esp_with_type(&mut file, 0, ISO_ESP_SECTORS, esp, fatfs::FatType::Fat16)?;
     file.sync_all()
 }
 
@@ -150,10 +153,14 @@ pub fn create_usb_stick(out: &Path) -> io::Result<()> {
 }
 
 fn format_esp(file: &mut File, start: u64, sectors: u64, esp: &Path) -> io::Result<()> {
+    format_esp_with_type(file, start, sectors, esp, fatfs::FatType::Fat32)
+}
+
+fn format_esp_with_type(file: &mut File, start: u64, sectors: u64, esp: &Path, fat_type: fatfs::FatType) -> io::Result<()> {
     let mut part = Region { file, start: start * SECTOR, len: sectors * SECTOR, pos: 0 };
     fatfs::format_volume(
         &mut part,
-        fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat32).volume_label(*b"AURORA-BOOT"),
+        fatfs::FormatVolumeOptions::new().fat_type(fat_type).volume_label(*b"AURORA-BOOT"),
     )?;
     part.pos = 0;
     let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new())?;

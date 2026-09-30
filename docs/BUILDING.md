@@ -46,6 +46,8 @@ The virtual machine has 4 CPUs, Intel HD Audio (played through your Mac's speake
 
 `cargo xtask iso` builds `target/waveos-aurora.iso` with a UEFI El Torito boot image. In VirtualBox, create a 64-bit VM, enable **EFI** under System > Motherboard, attach the ISO to the optical drive, and boot it. Give the VM at least 2 GiB of RAM. The ISO is read-only, so files created in a session are kept in memory unless you also attach a WaveOS disk image with a WaveFS partition. This image boots via UEFI; legacy BIOS mode is unsupported.
 
+If VirtualBox says **No bootable medium found**, check that the VM firmware is set to EFI and that its optical drive points to the newly generated ISO. Changing an existing VM from BIOS to EFI may also require enabling 64-bit mode. Run `cargo xtask iso` again after code changes; an older copied ISO will not update automatically.
+
 ## Debugging
 
 - **System Explorer.** `cargo xtask run --monitor` streams kernel telemetry to `docs/explorer/index.html`: boot stages, the CPU timeline, processes, memory, disk I/O and syscalls. The session is also recorded to `target/telemetry.jsonl`. To refresh the demo that plays when the page is opened on its own, regenerate `docs/explorer/demo.js` from that file.
