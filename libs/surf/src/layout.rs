@@ -450,6 +450,7 @@ impl<'a> Engine<'a> {
         let saved_baseline = self.first_baseline.take();
         let content_h = match st.display {
             Display::Table => self.table(node, cx, cy, width),
+            Display::Grid => self.grid(node, cx, cy, width),
             Display::Flex | Display::InlineFlex if !st.flex_column => {
                 let kids: Vec<NodeId> = self.doc.nodes[node]
                     .children
@@ -671,6 +672,197 @@ impl<'a> Engine<'a> {
             cy += line_h + if wrap { gap } else { 0 };
         }
         (cy - y - if wrap { gap } else { 0 }).max(0)
+    }
+
+    // ----------------------------------------------------------- grids
+
+    /// Lays out a grid container's items; returns the content height.
+    fn grid(&mut self, node: NodeId, x: i32, y: i32, w: i32) -> i32 {
+        let st = self.style(node);
+        let items: Vec<NodeId> = self.doc.nodes[node]
+            .children
+            .iter()
+            .copied()
+            .filter(|k| !self.hidden(*k) && !self.is_blank_text(*k) && self.doc.element(*k).is_some())
+            .collect();
+        let (cgap, rgap) = (round_i(st.gap), round_i(st.row_gap));
+        let units = crate::values::Units { em: st.font_size, rem: 16.0, vw: self.out.width as f32, vh: 800.0 };
+        let mut tracks = st.grid_columns.as_deref().map(|t| parse_tracks(t, w, cgap, &units)).unwrap_or_default();
+        let areas = st.grid_areas.clone();
+        if tracks.is_empty() {
+            let n = areas.as_ref().map_or(1, |a| a.iter().map(|r| r.len()).max().unwrap_or(1));
+            tracks = alloc::vec![Track::Auto; n];
+        }
+        // Placement: (row, col, row span, col span) per item.
+        let mut placed: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(items.len());
+        let mut used: Vec<Vec<bool>> = Vec::new();
+        let mut ncols = tracks.len();
+        let occupy = |used: &mut Vec<Vec<bool>>, r: usize, c: usize, rs: usize, cs: usize, ncols: usize| {
+            while used.len() < r + rs {
+                used.push(alloc::vec![false; ncols]);
+            }
+            for row in used.iter_mut().skip(r).take(rs) {
+                if row.len() < c + cs {
+                    row.resize(c + cs, false);
+                }
+                for cell in row.iter_mut().skip(c).take(cs) {
+                    *cell = true;
+                }
+            }
+        };
+        let free = |used: &Vec<Vec<bool>>, r: usize, c: usize, rs: usize, cs: usize| {
+            (r..r + rs).all(|rr| (c..c + cs).all(|cc| !used.get(rr).and_then(|row| row.get(cc)).copied().unwrap_or(false)))
+        };
+        let (mut cur_r, mut cur_c) = (0usize, 0usize);
+        for &it in &items {
+            let is = self.style(it);
+            let mut col = is.grid_column.as_deref().map(|v| line_span(v, ncols)).unwrap_or((None, 1));
+            let mut row = is.grid_row.as_deref().map(|v| line_span(v, usize::MAX / 4)).unwrap_or((None, 1));
+            if let Some(area) = is.grid_area.as_deref() {
+                if let Some((r0, c0, r1, c1)) = areas.as_ref().and_then(|a| area_bounds(a, area)) {
+                    row = (Some(r0), r1 - r0);
+                    col = (Some(c0), c1 - c0);
+                } else if area.contains('/') {
+                    let parts: Vec<&str> = area.split('/').map(str::trim).collect();
+                    let n = |i: usize| parts.get(i).and_then(|p| p.parse::<i32>().ok());
+                    if let (Some(r0), Some(c0)) = (n(0), n(1)) {
+                        let r0 = (r0.max(1) - 1) as usize;
+                        let c0 = (c0.max(1) - 1) as usize;
+                        let r1 = n(2).map_or(r0 + 1, |v| (v.max(1) - 1) as usize).max(r0 + 1);
+                        let c1 = n(3).map_or(c0 + 1, |v| if v < 0 { ncols } else { (v.max(1) - 1) as usize }).max(c0 + 1);
+                        row = (Some(r0), r1 - r0);
+                        col = (Some(c0), c1 - c0);
+                    }
+                }
+            }
+            let cs = col.1.clamp(1, 64);
+            let rs = row.1.clamp(1, 64);
+            if let Some(c0) = col.0 {
+                ncols = ncols.max(c0 + cs);
+            }
+            let (r, c) = match (row.0, col.0) {
+                (Some(r), Some(c)) => (r, c),
+                (None, Some(c)) => {
+                    let mut r = 0;
+                    while !free(&used, r, c, rs, cs) {
+                        r += 1;
+                    }
+                    (r, c)
+                }
+                (Some(r), None) => {
+                    let mut c = 0;
+                    while c + cs <= ncols.max(cs) && !free(&used, r, c, rs, cs) {
+                        c += 1;
+                    }
+                    (r, c)
+                }
+                (None, None) => {
+                    let cs = cs.min(ncols.max(1));
+                    loop {
+                        if cur_c + cs > ncols.max(1) {
+                            cur_c = 0;
+                            cur_r += 1;
+                        }
+                        if free(&used, cur_r, cur_c, rs, cs) {
+                            break;
+                        }
+                        cur_c += 1;
+                    }
+                    let p = (cur_r, cur_c);
+                    cur_c += cs;
+                    p
+                }
+            };
+            occupy(&mut used, r, c, rs, cs, ncols);
+            placed.push((r, c, rs, cs));
+            ncols = ncols.max(c + cs);
+        }
+        while tracks.len() < ncols {
+            tracks.push(Track::Auto);
+        }
+        // Column widths.
+        let avail = (w - cgap * (ncols as i32 - 1)).max(0);
+        let mut widths = alloc::vec![0i32; ncols];
+        let mut auto_max = alloc::vec![0i32; ncols];
+        let mut auto_min = alloc::vec![0i32; ncols];
+        for (k, &(_, c, _, cs)) in placed.iter().enumerate() {
+            if cs == 1 {
+                let (mn, mx) = self.pref(items[k]);
+                auto_max[c] = auto_max[c].max(mx);
+                auto_min[c] = auto_min[c].max(mn);
+            }
+        }
+        let mut fr_total = 0.0f32;
+        let mut fixed = 0;
+        for (i, t) in tracks.iter().enumerate() {
+            match *t {
+                Track::Px(px) => widths[i] = px,
+                Track::Auto => widths[i] = auto_max[i],
+                Track::Fr(f, min) => {
+                    fr_total += f;
+                    widths[i] = min.max(0);
+                }
+            }
+            fixed += widths[i];
+        }
+        let free_space = avail - fixed;
+        if fr_total > 0.0 && free_space > 0 {
+            // Fractions share what's left (on top of their minimums).
+            let base: i32 = tracks.iter().enumerate().filter(|(_, t)| matches!(t, Track::Fr(..))).map(|(i, _)| widths[i]).sum();
+            let pool = (free_space + base) as f32;
+            for (i, t) in tracks.iter().enumerate() {
+                if let Track::Fr(f, min) = *t {
+                    widths[i] = ((pool * f / fr_total) as i32).max(min.max(0));
+                }
+            }
+        } else if free_space < 0 {
+            // Too wide: shrink auto columns toward their minimum content.
+            let over = -free_space;
+            let shrinkable: i32 = (0..ncols).filter(|i| tracks[*i] == Track::Auto).map(|i| (widths[i] - auto_min[i]).max(0)).sum();
+            if shrinkable > 0 {
+                for i in (0..ncols).filter(|i| tracks[*i] == Track::Auto) {
+                    let share = (widths[i] - auto_min[i]).max(0) as i64 * over.min(shrinkable) as i64 / shrinkable as i64;
+                    widths[i] -= share as i32;
+                }
+            }
+        }
+        let col_x: Vec<i32> = (0..ncols).map(|i| x + widths[..i].iter().sum::<i32>() + cgap * i as i32).collect();
+        // Rows, top to bottom.
+        let nrows = placed.iter().map(|p| p.0 + p.2).max().unwrap_or(0);
+        let mut row_y = alloc::vec![y; nrows + 1];
+        let mut bottom = y;
+        let mut order: Vec<usize> = (0..items.len()).collect();
+        order.sort_by_key(|k| (placed[*k].0, placed[*k].1));
+        let mut done_rows = 0;
+        let mut row_h = alloc::vec![0i32; nrows];
+        let mut spanning: Vec<(usize, i32)> = Vec::new();
+        for k in order {
+            let (r, c, rs, cs) = placed[k];
+            // Finish rows above this one.
+            while done_rows < r {
+                row_y[done_rows + 1] = row_y[done_rows] + row_h[done_rows] + rgap;
+                done_rows += 1;
+            }
+            let cw: i32 = widths[c..c + cs].iter().sum::<i32>() + cgap * (cs as i32 - 1);
+            let ist = self.style(items[k]);
+            let mt = ist.margin[0].or_zero(w);
+            let mb = ist.margin[2].or_zero(w);
+            let out = self.block(items[k], col_x[c], row_y[r] + mt, cw, Some(cw));
+            let h = mt + out.height + mb;
+            if rs == 1 {
+                row_h[r] = row_h[r].max(h);
+            } else {
+                spanning.push((r + rs - 1, row_y[r] + h));
+            }
+            bottom = bottom.max(row_y[r] + h);
+        }
+        while done_rows < nrows {
+            row_y[done_rows + 1] = row_y[done_rows] + row_h[done_rows] + rgap;
+            done_rows += 1;
+        }
+        let end = if nrows > 0 { row_y[nrows] - rgap } else { y };
+        let _ = spanning;
+        end.max(bottom) - y
     }
 
     // ----------------------------------------------------------- tables
@@ -1553,6 +1745,132 @@ impl<'a> Engine<'a> {
         self.pending_y = baseline + below;
         baseline + below
     }
+}
+
+/// A grid column track after resolving lengths: fixed, auto, or a fraction (with a minimum).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Track {
+    Px(i32),
+    Auto,
+    Fr(f32, i32),
+}
+
+/// grid-template-columns → tracks, expanding repeat() (auto-fill/auto-fit against `w`).
+fn parse_tracks(t: &str, w: i32, gap: i32, u: &crate::values::Units) -> Vec<Track> {
+    let one = |tok: &str| -> Option<Track> {
+        let tok = tok.trim();
+        if let Some(f) = tok.strip_suffix("fr") {
+            return Some(Track::Fr(f.trim().parse().ok()?, 0));
+        }
+        if let Some(inner) = tok.strip_prefix("minmax(").and_then(|r| r.strip_suffix(')')) {
+            let (a, b) = inner.split_once(',')?;
+            let min = match crate::values::length(a.trim(), u) {
+                Some(Len::Calc(p, px)) => round_i(p * w as f32 / 100.0 + px),
+                _ => 0,
+            };
+            let b = b.trim();
+            if let Some(f) = b.strip_suffix("fr") {
+                return Some(Track::Fr(f.trim().parse().unwrap_or(1.0), min));
+            }
+            return Some(match crate::values::length(b, u) {
+                Some(Len::Calc(p, px)) => Track::Px(round_i(p * w as f32 / 100.0 + px).max(min)),
+                _ => if min > 0 { Track::Px(min) } else { Track::Auto },
+            });
+        }
+        if tok == "auto" || tok == "min-content" || tok == "max-content" || tok.starts_with("fit-content") {
+            return Some(Track::Auto);
+        }
+        match crate::values::length(tok, u)? {
+            Len::Calc(p, px) => Some(Track::Px(round_i(p * w as f32 / 100.0 + px))),
+            Len::Auto => Some(Track::Auto),
+        }
+    };
+    let mut out = Vec::new();
+    // Drop [line names].
+    let mut clean = String::new();
+    let mut depth = 0;
+    for c in t.chars() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            c if depth == 0 => clean.push(c),
+            _ => {}
+        }
+    }
+    for tok in crate::css::split_top(clean.trim(), b' ') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        if let Some(inner) = tok.strip_prefix("repeat(").and_then(|r| r.strip_suffix(')')) {
+            let Some((count, list)) = inner.split_once(',') else { continue };
+            let list: Vec<Track> = crate::css::split_top(list.trim(), b' ').iter().filter(|s| !s.trim().is_empty()).filter_map(|s| one(s)).collect();
+            if list.is_empty() {
+                continue;
+            }
+            let n = match count.trim() {
+                "auto-fill" | "auto-fit" => {
+                    // As many as fit, sized by their minimums.
+                    let each: i32 = list.iter().map(|t| match t {
+                        Track::Px(p) => *p,
+                        Track::Fr(_, min) => *min,
+                        Track::Auto => 0,
+                    }).sum::<i32>().max(1);
+                    (((w + gap) / (each + gap * list.len() as i32)).max(1)) as usize
+                }
+                c => c.parse::<usize>().unwrap_or(1).clamp(1, 64),
+            };
+            for _ in 0..n {
+                out.extend_from_slice(&list);
+            }
+        } else if let Some(t) = one(tok) {
+            out.push(t);
+        }
+    }
+    // With auto-fill minimums, fraction tracks stretch to fill.
+    out
+}
+
+/// "2", "1 / 3", "span 2", "1 / -1", "2 / span 3" → (start index, span).
+fn line_span(v: &str, ncols: usize) -> (Option<usize>, usize) {
+    let (a, b) = v.split_once('/').map_or((v.trim(), None), |(a, b)| (a.trim(), Some(b.trim())));
+    let num = |s: &str| s.parse::<i32>().ok();
+    let span_of = |s: &str| s.strip_prefix("span").and_then(|n| n.trim().parse::<usize>().ok());
+    let start = num(a).map(|n| if n < 0 { (ncols as i32 + 1 + n).max(0) as usize } else { (n.max(1) - 1) as usize });
+    let span = if let Some(s) = span_of(a) {
+        s
+    } else {
+        match b {
+            Some(b) => {
+                if let Some(s) = span_of(b) {
+                    s
+                } else if let (Some(st), Some(e)) = (start, num(b)) {
+                    let end = if e < 0 { (ncols as i32 + 1 + e).max(0) as usize } else { (e.max(1) - 1) as usize };
+                    end.saturating_sub(st).max(1)
+                } else {
+                    1
+                }
+            }
+            None => 1,
+        }
+    };
+    (start, span)
+}
+
+/// A named area's (row0, col0, row1, col1), exclusive ends.
+fn area_bounds(areas: &[Vec<String>], name: &str) -> Option<(usize, usize, usize, usize)> {
+    let mut b: Option<(usize, usize, usize, usize)> = None;
+    for (r, row) in areas.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            if cell == name {
+                b = Some(match b {
+                    None => (r, c, r + 1, c + 1),
+                    Some((r0, c0, r1, c1)) => (r0.min(r), c0.min(c), r1.max(r + 1), c1.max(c + 1)),
+                });
+            }
+        }
+    }
+    b
 }
 
 fn transform(t: &str, tr: Transform) -> String {

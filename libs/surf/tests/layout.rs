@@ -132,3 +132,42 @@ fn generated_content() {
     // The escape's trailing space ends the escape (CSS rules), so "→hi" is joined.
     assert_eq!(all, ["a", "·", "b", "·", "c", "\u{201C}→hi", "x", "\u{201D}"]);
 }
+
+fn positions(html: &str, width: i32) -> Vec<(String, i32, i32)> {
+    texts(html, width).into_iter().map(|(x, y, t)| (t, x, y)).collect()
+}
+
+#[test]
+fn grids() {
+    // 100px + 1fr + 1fr in 400 - 16 = 384 wide, gap 10 → fr columns (384 - 100 - 20) / 2 = 132.
+    let p = positions(
+        "<div style='display:grid;grid-template-columns:100px repeat(2, 1fr);gap:10px'><p style=margin:0>a<p style=margin:0>b<p style=margin:0>c<p style=margin:0>d</div>",
+        400,
+    );
+    let x = |t: &str| p.iter().find(|q| q.0 == t).unwrap().1;
+    let y = |t: &str| p.iter().find(|q| q.0 == t).unwrap().2;
+    assert_eq!((x("a"), x("b"), x("c"), x("d")), (8, 118, 260, 8));
+    assert_eq!(y("a"), y("c"));
+    assert_eq!(y("d") - y("a"), 20 + 10); // one row plus the row gap
+    // Named areas: the sidebar spans two rows, the header both columns.
+    let p = positions(
+        "<style>.g{display:grid;grid-template-columns:50px 1fr;grid-template-areas:'head head' 'side main' 'side foot'}
+         .g>*{margin:0}</style><div class=g><p style=grid-area:main>m<p style=grid-area:head>h<p style=grid-area:side>s<p style=grid-area:foot>f</div>",
+        400,
+    );
+    let at = |t: &str| p.iter().find(|q| q.0 == t).map(|q| (q.1, q.2)).unwrap();
+    assert_eq!(at("h").0, 8);
+    assert_eq!(at("s").0, 8);
+    assert_eq!(at("m").0, 58);
+    assert_eq!(at("m").1, at("s").1);
+    assert!(at("f").1 > at("m").1 && at("f").0 == 58);
+    // Spans and auto-fill.
+    let p = positions(
+        "<div style='display:grid;grid-template-columns:repeat(auto-fill, minmax(100px, 1fr))'><p style='margin:0;grid-column:1/-1'>wide<p style=margin:0>x<p style=margin:0>y<p style=margin:0>z</div>",
+        400,
+    );
+    let at = |t: &str| p.iter().find(|q| q.0 == t).map(|q| (q.1, q.2)).unwrap();
+    // 384 / 100 → 3 columns of 128.
+    assert_eq!((at("x").0, at("y").0, at("z").0), (8, 136, 264));
+    assert!(at("x").1 > at("wide").1);
+}

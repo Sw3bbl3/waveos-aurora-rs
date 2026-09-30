@@ -160,7 +160,17 @@ pub struct Style {
     pub flex_wrap: bool,
     pub justify: Justify,
     pub center_items: bool,
+    /// Column gap (flex rows, grids) and row gap (grids, wrapped flex lines).
     pub gap: f32,
+    pub row_gap: f32,
+    /// grid-template-columns as written (resolved at layout, which knows the width).
+    pub grid_columns: Option<String>,
+    /// grid-template-areas: rows of area names.
+    pub grid_areas: Option<Rc<Vec<Vec<String>>>>,
+    /// Item placement as written: grid-column, grid-row, grid-area.
+    pub grid_column: Option<String>,
+    pub grid_row: Option<String>,
+    pub grid_area: Option<String>,
     pub flex_grow: f32,
     pub vertical_middle: bool,
     pub background_image: bool,
@@ -218,6 +228,12 @@ impl Style {
             justify: Justify::Start,
             center_items: false,
             gap: 0.0,
+            row_gap: 0.0,
+            grid_columns: None,
+            grid_areas: None,
+            grid_column: None,
+            grid_row: None,
+            grid_area: None,
             flex_grow: 0.0,
             vertical_middle: false,
             background_image: false,
@@ -1157,13 +1173,48 @@ fn apply(s: &mut Style, name: &str, value: &str, parent: &Style, u: Units) {
             }
         }
         "align-items" => s.center_items = lv == "center",
-        "gap" | "column-gap" | "grid-gap" | "grid-column-gap" => {
-            if let Some(first) = side_values(v).last() {
-                if let Some(px) = values::px_length(first, &u) {
-                    s.gap = px;
+        "gap" | "grid-gap" => {
+            let parts = side_values(v);
+            let px = |p: &str| values::px_length(p, &u).or_else(|| values::length(p, &u).map(|l| l.or_zero(0) as f32));
+            if let Some(row) = parts.first().and_then(|p| px(p)) {
+                s.row_gap = row;
+                s.gap = parts.get(1).and_then(|p| px(p)).unwrap_or(row);
+            }
+        }
+        "column-gap" | "grid-column-gap" => {
+            if let Some(px) = values::px_length(v, &u) {
+                s.gap = px;
+            }
+        }
+        "row-gap" | "grid-row-gap" => {
+            if let Some(px) = values::px_length(v, &u) {
+                s.row_gap = px;
+            }
+        }
+        "grid-template-columns" => s.grid_columns = (lv != "none").then(|| String::from(v)),
+        "grid-template-areas" => {
+            let rows: Vec<Vec<String>> = v
+                .split(['"', '\''])
+                .skip(1)
+                .step_by(2)
+                .map(|r| r.split_whitespace().map(String::from).collect())
+                .filter(|r: &Vec<String>| !r.is_empty())
+                .collect();
+            s.grid_areas = (!rows.is_empty()).then(|| Rc::new(rows));
+        }
+        "grid-template" => {
+            // [areas and rows] / columns
+            if let Some((rows, cols)) = v.rsplit_once('/') {
+                s.grid_columns = Some(String::from(cols.trim()));
+                if rows.contains('"') {
+                    apply(s, "grid-template-areas", rows, parent, u);
                 }
             }
         }
+        "grid-column" => s.grid_column = Some(String::from(lv)),
+        "grid-row" => s.grid_row = Some(String::from(lv)),
+        "grid-area" => s.grid_area = Some(String::from(v.trim())),
+        "grid-column-start" => s.grid_column = Some(format!("{lv} / auto")),
         "flex" => {
             let first = lv.split_whitespace().next().unwrap_or("");
             s.flex_grow = match first {
