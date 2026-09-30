@@ -210,7 +210,8 @@ fn rejects_corruption() {
     let n = bytes.len();
     bytes[n - 20] ^= 0x55; // inside IDAT → CRC mismatch
     assert_eq!(decode(&bytes), Err(crate::Error::Corrupt));
-    assert_eq!(decode(b"GIF89a"), Err(crate::Error::Unsupported));
+    assert_eq!(decode(b"GIF89a"), Err(crate::Error::Corrupt)); // truncated
+    assert_eq!(decode(b"RIFF....WEBP"), Err(crate::Error::Unsupported));
     assert!(decode(&png::SIGNATURE).is_err());
 }
 
@@ -244,4 +245,104 @@ fn thumbnails_keep_aspect() {
     let t = img.thumbnail(128, 128);
     assert_eq!((t.width, t.height), (128, 32));
     assert!(t.pixels.iter().all(|&p| p == 0xFF336699));
+}
+
+/// A smooth test photo: gradients plus some texture.
+fn photo(w: u32, h: u32) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let t = ((x * 7 + y * 13) % 32) as u32;
+            rgb.push((x * 255 / w) as u8);
+            rgb.push((y * 255 / h) as u8);
+            rgb.push((128 + t * 2) as u8);
+        }
+    }
+    rgb
+}
+
+fn jpeg_with(w: u16, h: u16, rgb: &[u8], progressive: bool, sampling: jpeg_encoder::SamplingFactor, restart: Option<u16>, gray: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut enc = jpeg_encoder::Encoder::new(&mut out, 90);
+    enc.set_progressive(progressive);
+    enc.set_sampling_factor(sampling);
+    if let Some(r) = restart {
+        enc.set_restart_interval(r);
+    }
+    if gray {
+        let luma: Vec<u8> = rgb.chunks(3).map(|p| ((p[0] as u32 * 3 + p[1] as u32 * 6 + p[2] as u32) / 10) as u8).collect();
+        enc.encode(&luma, w, h, jpeg_encoder::ColorType::Luma).unwrap();
+    } else {
+        enc.encode(rgb, w, h, jpeg_encoder::ColorType::Rgb).unwrap();
+    }
+    out
+}
+
+/// Our decode against jpeg-decoder's: every channel within `tol`.
+fn check_jpeg(bytes: &[u8], tol: i32) {
+    let ours = decode(bytes).unwrap();
+    let mut dec = jpeg_decoder::Decoder::new(bytes);
+    let theirs = dec.decode().unwrap();
+    let info = dec.info().unwrap();
+    assert_eq!((ours.width, ours.height), (info.width as u32, info.height as u32));
+    let channels = theirs.len() / (info.width as usize * info.height as usize);
+    let mut worst = 0;
+    for (i, p) in ours.pixels.iter().enumerate() {
+        let t = &theirs[i * channels..];
+        let (r, g, b) = if channels == 1 { (t[0], t[0], t[0]) } else { (t[0], t[1], t[2]) };
+        for (a, b) in [((p >> 16) & 0xFF, r), ((p >> 8) & 0xFF, g), (p & 0xFF, b)] {
+            worst = worst.max((a as i32 - b as i32).abs());
+        }
+    }
+    assert!(worst <= tol, "channels differ by up to {worst}");
+}
+
+#[test]
+fn jpeg_baseline_progressive_and_subsampling() {
+    use jpeg_encoder::SamplingFactor as S;
+    let (w, h) = (61u16, 37u16); // not multiples of the MCU size
+    let rgb = photo(w as u32, h as u32);
+    for progressive in [false, true] {
+        for sampling in [S::F_1_1, S::F_2_1, S::F_2_2, S::F_1_2] {
+            // Chroma upsampling is bilinear here, "fancy" (triangular) there.
+            let tol = if sampling == S::F_1_1 { 3 } else { 12 };
+            check_jpeg(&jpeg_with(w, h, &rgb, progressive, sampling, None, false), tol);
+        }
+        check_jpeg(&jpeg_with(w, h, &rgb, progressive, S::F_2_2, Some(3), false), 12);
+        check_jpeg(&jpeg_with(w, h, &rgb, progressive, S::F_1_1, None, true), 3);
+    }
+}
+
+#[test]
+fn gif_frames_with_transparency_and_interlace() {
+    let (w, h) = (23u16, 17u16);
+    let palette: Vec<u8> = (0..16u8).flat_map(|i| [i * 16, 255 - i * 16, i * 7]).collect();
+    let indices: Vec<u8> = (0..(w as usize * h as usize)).map(|i| ((i * 7 + i / 23) % 16) as u8).collect();
+    for interlaced in [false, true] {
+        let mut out = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut out, w, h, &palette).unwrap();
+            // The encoder writes rows as given: put them in interlaced order ourselves.
+            let data = if interlaced {
+                let order = (0..h as usize).step_by(8).chain((4..h as usize).step_by(8)).chain((2..h as usize).step_by(4)).chain((1..h as usize).step_by(2));
+                order.flat_map(|r| indices[r * w as usize..(r + 1) * w as usize].to_vec()).collect()
+            } else {
+                indices.clone()
+            };
+            let mut frame = gif::Frame::from_indexed_pixels(w, h, data, Some(3));
+            frame.interlaced = interlaced;
+            enc.write_frame(&frame).unwrap();
+        }
+        let img = decode(&out).unwrap();
+        assert_eq!((img.width, img.height), (w as u32, h as u32));
+        for (i, &idx) in indices.iter().enumerate() {
+            let want = if idx == 3 {
+                0
+            } else {
+                let c = &palette[idx as usize * 3..];
+                0xFF00_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32
+            };
+            assert_eq!(img.pixels[i], want, "pixel {i} (interlaced {interlaced})");
+        }
+    }
 }

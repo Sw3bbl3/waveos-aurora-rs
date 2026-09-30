@@ -122,3 +122,13 @@ fn breaks_only_at_opportunities() {
     let t = texts("<p style='white-space:pre-wrap'>a   b</p>", 400);
     assert_eq!(t.iter().map(|t| (t.0, t.2.as_str())).collect::<Vec<_>>(), [(8, "a   b")]);
 }
+
+#[test]
+fn generated_content() {
+    let css = "<style>li { display: inline } li::after { content: \" · \" } li:last-child::after { content: none }
+               .q::before { content: open-quote \"\\2192 \" attr(data-x) } .q::after { content: close-quote }</style>";
+    let t = texts(&format!("{css}<ul><li>a</li><li>b</li><li>c</li></ul><p class=q data-x=hi>x</p>"), 400);
+    let all: Vec<&str> = t.iter().map(|t| t.2.as_str()).collect();
+    // The escape's trailing space ends the escape (CSS rules), so "→hi" is joined.
+    assert_eq!(all, ["a", "·", "b", "·", "c", "\u{201C}→hi", "x", "\u{201D}"]);
+}

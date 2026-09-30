@@ -109,8 +109,8 @@ impl Page {
             })
             .collect();
         let cascade = style::Cascade::new(&self.ua, &author, width, height);
-        let styles = style::compute(&self.doc, &cascade, (width, height));
-        layout::layout(&self.doc, &styles, host, width)
+        let computed = style::compute(&self.doc, &cascade, (width, height));
+        layout::layout(&self.doc, &computed.styles, &computed.pseudo, host, width)
     }
 
     pub fn element(&self, n: NodeId) -> Option<&dom::Element> {

@@ -166,6 +166,8 @@ pub struct Style {
     pub background_image: bool,
     /// A mask-image (icons drawn by masking a colour): we can't mask, so skip the fill.
     pub masked: bool,
+    /// The raw `content` value (for ::before / ::after).
+    pub content: Option<String>,
     /// Custom properties (inherited), shared until changed.
     pub vars: Rc<BTreeMap<String, String>>,
 }
@@ -220,6 +222,7 @@ impl Style {
             vertical_middle: false,
             background_image: false,
             masked: false,
+            content: None,
             vars: Rc::new(BTreeMap::new()),
         }
     }
@@ -396,8 +399,9 @@ impl<'a> Cascade<'a> {
         c
     }
 
-    /// The matching declarations for `node`, in cascade order (weakest first).
-    fn declarations(&self, doc: &Document, node: NodeId) -> Vec<(u32, (u16, u16, u16), usize, &'a Declaration)> {
+    /// The matching declarations for `node` (tagged with the pseudo-element
+    /// they target: 0 = the element, 1 = ::before, 2 = ::after).
+    fn declarations(&self, doc: &Document, node: NodeId) -> Vec<(u8, Decl<'a>)> {
         let Some(e) = doc.element(node) else { return Vec::new() };
         let mut candidates: Vec<usize> = self.universal.clone();
         if let Some(id) = e.id() {
@@ -422,9 +426,10 @@ impl<'a> Cascade<'a> {
             let rule = &sheet.rules[ent.rule];
             let sel = &rule.selectors[ent.selector];
             if css::matches(doc, node, sel) {
+                let pe = sel.parts[0].0.pseudo_element;
                 for d in &rule.decls {
                     // Order: sheet, then rule, then declaration position.
-                    out.push((rank(ent.origin, d.important), sel.specificity, (ent.sheet << 40) | (ent.rule << 12), d));
+                    out.push((pe, (rank(ent.origin, d.important), sel.specificity, (ent.sheet << 40) | (ent.rule << 12), d)));
                 }
             }
         }
@@ -432,14 +437,55 @@ impl<'a> Cascade<'a> {
     }
 }
 
+/// (rank, specificity, order, declaration)
+type Decl<'a> = (u32, (u16, u16, u16), usize, &'a Declaration);
+
 fn rank(origin: Origin, important: bool) -> u32 {
     // Important declarations beat normal ones; among them, author beats agent.
     origin as u32 + if important { 10 } else { 0 }
 }
 
+/// Styles for every node, plus generated content.
+pub struct Computed {
+    pub styles: Vec<Option<Rc<Style>>>,
+    /// Per element: its ::before and ::after, each (style, text).
+    pub pseudo: BTreeMap<NodeId, [Option<(Rc<Style>, String)>; 2]>,
+}
+
+/// Cascades sorted declarations onto `s` (whose inherited values come from `parent`).
+fn cascade_into(s: &mut Style, decls: &[Decl], parent: &Style, root_font: f32, viewport: (i32, i32)) {
+    let units = |s: &Style| Units { em: s.font_size, rem: root_font, vw: viewport.0 as f32, vh: viewport.1 as f32 };
+    // Custom properties first, so var() sees them.
+    let custom: Vec<&Declaration> = decls.iter().map(|d| d.3).filter(|d| d.name.starts_with("--")).collect();
+    if !custom.is_empty() {
+        let mut vars = (*s.vars).clone();
+        for d in custom {
+            vars.insert(d.name.clone(), d.value.clone());
+        }
+        s.vars = Rc::new(vars);
+    }
+    let vars = s.vars.clone();
+    let lookup = |name: &str| vars.get(name).cloned();
+    let resolved: Vec<(String, String)> = decls
+        .iter()
+        .map(|d| d.3)
+        .filter(|d| !d.name.starts_with("--"))
+        .filter_map(|d| Some((d.name.clone(), values::substitute_vars(&d.value, &lookup, 0)?)))
+        .collect();
+    // Font size first: em units depend on it.
+    for (name, value) in resolved.iter().filter(|(n, _)| n == "font-size" || n == "font") {
+        apply(s, name, value, parent, units(parent));
+    }
+    let own = units(s);
+    for (name, value) in resolved.iter().filter(|(n, _)| n != "font-size" && n != "font") {
+        apply(s, name, value, parent, own);
+    }
+}
+
 /// Computes every element's style. Text nodes share their parent's.
-pub fn compute(doc: &Document, cascade: &Cascade, viewport: (i32, i32)) -> Vec<Option<Rc<Style>>> {
+pub fn compute(doc: &Document, cascade: &Cascade, viewport: (i32, i32)) -> Computed {
     let mut styles: Vec<Option<Rc<Style>>> = alloc::vec![None; doc.nodes.len()];
+    let mut pseudo = BTreeMap::new();
     let root = Rc::new(Style::root());
     let mut root_font = 16.0;
     let order = doc.descendants(Document::ROOT);
@@ -453,7 +499,8 @@ pub fn compute(doc: &Document, cascade: &Cascade, viewport: (i32, i32)) -> Vec<O
                     styles[n] = Some(parent_style);
                     continue;
                 }
-                let mut decls = cascade.declarations(doc, n);
+                let all = cascade.declarations(doc, n);
+                let mut decls: Vec<Decl> = all.iter().filter(|d| d.0 == 0).map(|d| d.1).collect();
                 let hints = hints(doc, n);
                 for (i, d) in hints.iter().enumerate() {
                     decls.push((rank(Origin::Hint, false), (0, 0, 0), i, d));
@@ -465,47 +512,114 @@ pub fn compute(doc: &Document, cascade: &Cascade, viewport: (i32, i32)) -> Vec<O
                 // Stable sort keeps declaration order within a rule.
                 decls.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
                 let mut s = parent_style.inherit();
-                let units = |s: &Style, root_font: f32| Units {
-                    em: s.font_size,
-                    rem: root_font,
-                    vw: viewport.0 as f32,
-                    vh: viewport.1 as f32,
-                };
-                // Custom properties first, so var() sees them.
-                let custom: Vec<&Declaration> = decls.iter().map(|d| d.3).filter(|d| d.name.starts_with("--")).collect();
-                if !custom.is_empty() {
-                    let mut vars = (*s.vars).clone();
-                    for d in custom {
-                        vars.insert(d.name.clone(), d.value.clone());
-                    }
-                    s.vars = Rc::new(vars);
-                }
-                let vars = s.vars.clone();
-                let lookup = |name: &str| vars.get(name).cloned();
-                let resolved: Vec<(String, String)> = decls
-                    .iter()
-                    .map(|d| d.3)
-                    .filter(|d| !d.name.starts_with("--"))
-                    .filter_map(|d| Some((d.name.clone(), values::substitute_vars(&d.value, &lookup, 0)?)))
-                    .collect();
-                // Font size first: em units depend on it.
-                for (name, value) in resolved.iter().filter(|(n, _)| n == "font-size" || n == "font") {
-                    apply(&mut s, name, value, &parent_style, units(&parent_style, root_font));
-                }
+                cascade_into(&mut s, &decls, &parent_style, root_font, viewport);
                 if e.tag == "html" {
                     root_font = s.font_size;
                 }
-                let own = units(&s, root_font);
-                for (name, value) in resolved.iter().filter(|(n, _)| n != "font-size" && n != "font") {
-                    apply(&mut s, name, value, &parent_style, own);
-                }
                 fixups(&mut s, &e.tag, &parent_style);
-                styles[n] = Some(Rc::new(s));
+                let s = Rc::new(s);
+                // ::before and ::after with content.
+                if s.display != Display::None && all.iter().any(|d| d.0 != 0 && d.1 .3.name == "content") {
+                    let mut gen: [Option<(Rc<Style>, String)>; 2] = [None, None];
+                    for (k, slot) in gen.iter_mut().enumerate() {
+                        let mut pd: Vec<Decl> = all.iter().filter(|d| d.0 as usize == k + 1).map(|d| d.1).collect();
+                        if pd.is_empty() {
+                            continue;
+                        }
+                        pd.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+                        let mut ps = s.inherit();
+                        cascade_into(&mut ps, &pd, &s, root_font, viewport);
+                        if ps.display == Display::None {
+                            continue;
+                        }
+                        if let Some(text) = ps.content.as_deref().and_then(|c| content_text(c, e)) {
+                            ps.display = Display::Inline;
+                            *slot = Some((Rc::new(ps), text));
+                        }
+                    }
+                    if gen.iter().any(|g| g.is_some()) {
+                        pseudo.insert(n, gen);
+                    }
+                }
+                styles[n] = Some(s);
             }
             NodeData::Document => {}
         }
     }
-    styles
+    Computed { styles, pseudo }
+}
+
+/// The text of a `content` value: strings, quotes and attr(); None for none/normal.
+fn content_text(v: &str, e: &crate::dom::Element) -> Option<String> {
+    let v = v.trim();
+    if v == "none" || v == "normal" || v.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    let b = v.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    if b[i] == b'\\' && i + 1 < b.len() {
+                        // CSS escape: up to six hex digits (and one optional space), or a literal.
+                        let start = i + 1;
+                        let mut j = start;
+                        while j < b.len() && j - start < 6 && b[j].is_ascii_hexdigit() {
+                            j += 1;
+                        }
+                        if j > start {
+                            let cp = u32::from_str_radix(&v[start..j], 16).unwrap_or(0xFFFD);
+                            out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                            if j < b.len() && b[j] == b' ' {
+                                j += 1;
+                            }
+                            i = j;
+                        } else {
+                            let c = v[start..].chars().next().unwrap();
+                            out.push(c);
+                            i = start + c.len_utf8();
+                        }
+                        continue;
+                    }
+                    let c = v[i..].chars().next().unwrap();
+                    out.push(c);
+                    i += c.len_utf8();
+                }
+                i += 1;
+            }
+            _ => {
+                let rest = &v[i..];
+                if let Some(r) = rest.strip_prefix("attr(") {
+                    let end = r.find(')').unwrap_or(r.len());
+                    out.push_str(e.attr(r[..end].trim()).unwrap_or(""));
+                    i += 5 + end + 1;
+                } else if rest.starts_with("open-quote") {
+                    out.push('\u{201C}');
+                    i += 10;
+                } else if rest.starts_with("close-quote") {
+                    out.push('\u{201D}');
+                    i += 11;
+                } else {
+                    // counter(), url(), keywords: skip the token.
+                    let mut depth = 0;
+                    while i < b.len() {
+                        match b[i] {
+                            b'(' => depth += 1,
+                            b')' => depth -= 1,
+                            b' ' if depth == 0 => break,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// Post-cascade adjustments.
@@ -823,6 +937,7 @@ fn apply(s: &mut Style, name: &str, value: &str, parent: &Style, u: Units) {
             }
         }
         "background-image" => s.background_image = lv != "none",
+        "content" => s.content = Some(String::from(v)),
         "mask" | "mask-image" | "-webkit-mask" | "-webkit-mask-image" => s.masked = lv.contains("url("),
         "font-size" => {
             if let Some(px) = font_size(lv, parent, &u) {
@@ -1138,7 +1253,7 @@ mod tests {
         let ua = css::parse(UA_CSS);
         let author = css::parse(css_src);
         let cascade = Cascade::new(&ua, &[&author], 1000, 800);
-        let styles = compute(&doc, &cascade, (1000, 800));
+        let styles = compute(&doc, &cascade, (1000, 800)).styles;
         let n = doc.descendants(Document::ROOT).into_iter().find(|n| doc.element(*n).is_some_and(|e| e.id() == Some(id))).unwrap();
         (*styles[n].clone().unwrap()).clone()
     }

@@ -11,6 +11,8 @@
 extern crate alloc;
 
 pub mod bmp;
+pub mod gif;
+pub mod jpeg;
 pub mod png;
 
 use alloc::vec::Vec;
@@ -93,10 +95,14 @@ pub fn fit(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     }
 }
 
-/// Decodes a PNG or BMP, recognised by its signature.
+/// Decodes a PNG, JPEG, GIF or BMP, recognised by its signature.
 pub fn decode(data: &[u8]) -> Result<Image, Error> {
     if data.starts_with(&png::SIGNATURE) {
         png::decode(data)
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        jpeg::decode(data)
+    } else if data.starts_with(b"GIF8") {
+        gif::decode(data)
     } else if data.starts_with(b"BM") {
         bmp::decode(data)
     } else {
@@ -107,7 +113,7 @@ pub fn decode(data: &[u8]) -> Result<Image, Error> {
 /// True for file names we can open.
 pub fn is_image_name(name: &str) -> bool {
     let lower = |ext: &str| name.len() > ext.len() && name[name.len() - ext.len()..].eq_ignore_ascii_case(ext);
-    lower(".png") || lower(".bmp")
+    [".png", ".bmp", ".jpg", ".jpeg", ".gif"].iter().any(|e| lower(e))
 }
 
 #[cfg(test)]

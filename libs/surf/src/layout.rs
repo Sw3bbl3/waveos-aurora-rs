@@ -8,6 +8,7 @@
 use crate::dom::{Document, NodeData, NodeId};
 use crate::style::{Align, Display, Float, Justify, ListStyle, Style, Transform};
 use crate::values::{round_i, Len};
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -174,9 +175,16 @@ struct Placed {
     text: Option<String>,
 }
 
+/// Generated content (::before / ::after) gets ids with this bit set:
+/// `GEN | owner << 1 | side`.
+const GEN: usize = 1 << 62;
+
+pub type Generated = BTreeMap<NodeId, [Option<(Rc<Style>, String)>; 2]>;
+
 pub struct Engine<'a> {
     doc: &'a Document,
     styles: &'a [Option<Rc<Style>>],
+    generated: &'a Generated,
     host: &'a dyn Host,
     out: Layout,
     link: Option<NodeId>,
@@ -187,10 +195,11 @@ pub struct Engine<'a> {
     pending_y: i32,
 }
 
-pub fn layout(doc: &Document, styles: &[Option<Rc<Style>>], host: &dyn Host, width: i32) -> Layout {
+pub fn layout(doc: &Document, styles: &[Option<Rc<Style>>], generated: &Generated, host: &dyn Host, width: i32) -> Layout {
     let mut e = Engine {
         doc,
         styles,
+        generated,
         host,
         out: Layout { width, ..Default::default() },
         link: None,
@@ -220,11 +229,40 @@ pub fn layout(doc: &Document, styles: &[Option<Rc<Style>>], host: &dyn Host, wid
 }
 
 impl<'a> Engine<'a> {
+    /// A generated piece: its style and text.
+    fn gen(&self, n: NodeId) -> Option<&'a (Rc<Style>, String)> {
+        if n & GEN == 0 {
+            return None;
+        }
+        let owner = (n & !GEN) >> 1;
+        self.generated.get(&owner)?[n & 1].as_ref()
+    }
+
+    /// A node's children, with its ::before and ::after around them.
+    fn kids(&self, n: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let g = self.generated.get(&n);
+        if g.is_some_and(|g| g[0].is_some()) {
+            out.push(GEN | n << 1);
+        }
+        out.extend_from_slice(&self.doc.nodes[n].children);
+        if g.is_some_and(|g| g[1].is_some()) {
+            out.push(GEN | n << 1 | 1);
+        }
+        out
+    }
+
     fn style(&self, n: NodeId) -> Rc<Style> {
+        if let Some((st, _)) = self.gen(n) {
+            return st.clone();
+        }
         self.styles[n].clone().unwrap_or_else(|| Rc::new(Style::root()))
     }
 
     fn is_block_level(&self, n: NodeId) -> bool {
+        if n & GEN != 0 {
+            return false;
+        }
         match &self.doc.nodes[n].data {
             NodeData::Element(_) => {
                 let s = self.style(n);
@@ -235,6 +273,9 @@ impl<'a> Engine<'a> {
     }
 
     fn hidden(&self, n: NodeId) -> bool {
+        if n & GEN != 0 {
+            return false;
+        }
         match &self.doc.nodes[n].data {
             NodeData::Element(_) => self.style(n).hidden(),
             NodeData::Text(_) => false,
@@ -243,10 +284,14 @@ impl<'a> Engine<'a> {
     }
 
     fn is_blank_text(&self, n: NodeId) -> bool {
-        matches!(&self.doc.nodes[n].data, NodeData::Text(t) if t.chars().all(|c| c.is_ascii_whitespace()))
+        n & GEN == 0
+            && matches!(&self.doc.nodes[n].data, NodeData::Text(t) if t.chars().all(|c| c.is_ascii_whitespace()))
     }
 
     fn link_of(&self, n: NodeId) -> Option<NodeId> {
+        if n & GEN != 0 {
+            return None;
+        }
         let e = self.doc.element(n)?;
         (matches!(e.tag.as_str(), "a" | "area") && e.attr("href").is_some()).then_some(n)
     }
@@ -255,7 +300,7 @@ impl<'a> Engine<'a> {
 
     /// Lays out the children of `node` in its content box; returns the content height.
     fn children(&mut self, node: NodeId, x: i32, y: i32, w: i32) -> i32 {
-        let kids: Vec<NodeId> = self.doc.nodes[node].children.clone();
+        let kids: Vec<NodeId> = self.kids(node);
         let parent_style = self.style(node);
         let mut cursor = y;
         let mut pending_margin = 0i32;
@@ -833,6 +878,12 @@ impl<'a> Engine<'a> {
 
     /// (min-content, max-content) outer widths.
     fn pref(&mut self, n: NodeId) -> (i32, i32) {
+        if let Some((st, text)) = self.gen(n) {
+            let font = FontSpec::of(st);
+            let max = (self.host.measure64(font, text) + 63) >> 6;
+            let min = text.split_ascii_whitespace().map(|w| (self.host.measure64(font, w) + 63) >> 6).max().unwrap_or(0);
+            return (min, max);
+        }
         if let Some(v) = self.pref_cache[n] {
             return v;
         }
@@ -894,7 +945,7 @@ impl<'a> Engine<'a> {
                     "br" => return (0, 0),
                     _ => {}
                 }
-                let kids: Vec<NodeId> = doc.nodes[n].children.clone();
+                let kids: Vec<NodeId> = self.kids(n);
                 let horizontal = matches!(st.display, Display::TableRow)
                     || (matches!(st.display, Display::Flex | Display::InlineFlex) && !st.flex_column);
                 let (mut min, mut max, mut line) = (0, 0, 0);
@@ -1039,6 +1090,15 @@ impl<'a> Engine<'a> {
     }
 
     fn collect(&mut self, n: NodeId, out: &mut Vec<Atom>, bg: u32, space: &mut bool, avail: i32) {
+        if let Some((st, text)) = self.gen(n) {
+            let st = st.clone();
+            if st.white_space.keeps_spaces() {
+                self.spaced_words(text, &st, bg, out, space);
+            } else {
+                self.words(text, &st, bg, out, space);
+            }
+            return;
+        }
         let doc = self.doc;
         match &doc.nodes[n].data {
             NodeData::Text(t) => {
@@ -1149,7 +1209,7 @@ impl<'a> Engine<'a> {
                             let y = self.pending_y;
                             self.out.anchors.push((String::from(id), y));
                         }
-                        for c in doc.nodes[n].children.clone() {
+                        for c in self.kids(n) {
                             self.collect(c, out, bg, space, avail);
                         }
                         if trail > 0 {

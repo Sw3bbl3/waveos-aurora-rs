@@ -49,6 +49,8 @@ pub struct Compound {
     pub pseudos: Vec<Pseudo>,
     /// Contains something we don't support: never matches.
     pub never: bool,
+    /// Targets ::before (1) or ::after (2) of the element.
+    pub pseudo_element: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -416,9 +418,20 @@ fn parse_compound(s: &str) -> Option<(Compound, usize)> {
                     arg = Some(&s[i + 1..j.min(s.len())]);
                     i = (j + 1).min(s.len());
                 }
-                if element {
-                    c.never = true; // ::before, ::after, ::marker … generate no content here.
-                    continue;
+                match name.as_str() {
+                    "before" => {
+                        c.pseudo_element = 1;
+                        continue;
+                    }
+                    "after" => {
+                        c.pseudo_element = 2;
+                        continue;
+                    }
+                    _ if element => {
+                        c.never = true; // ::marker, ::placeholder … aren't generated here.
+                        continue;
+                    }
+                    _ => {}
                 }
                 match (name.as_str(), arg) {
                     ("link" | "any-link", _) => c.pseudos.push(Pseudo::Link),
@@ -722,7 +735,9 @@ mod tests {
         assert_eq!(select(h, "div > :nth-child(2n+1)"), ["b", "d"]);
         assert_eq!(select(h, "p:not(.x)"), ["d", "e"]);
         assert!(select(h, "p:hover").is_empty());
-        assert!(select(h, "p::before").is_empty());
+        assert!(select(h, "p::marker").is_empty());
+        assert_eq!(parse_selector("li:last-child::after").unwrap().parts[0].0.pseudo_element, 2);
+        assert_eq!(parse_selector("q:before").unwrap().parts[0].0.pseudo_element, 1);
         assert_eq!(parse_selector("#a .b c").unwrap().specificity, (1, 1, 1));
     }
 
