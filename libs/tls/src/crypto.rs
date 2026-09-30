@@ -82,6 +82,51 @@ impl Suite {
         }
     }
 
+    /// TLS 1.2's PRF (RFC 5246 §5): P_hash over label + seed.
+    pub fn prf(self, secret: &[u8], label: &[u8], seed: &[u8], len: usize) -> Vec<u8> {
+        let mut seed_all = label.to_vec();
+        seed_all.extend_from_slice(seed);
+        let mut a = self.hmac(secret, &seed_all);
+        let mut out = Vec::with_capacity(len + 48);
+        while out.len() < len {
+            let mut input = a.clone();
+            input.extend_from_slice(&seed_all);
+            out.extend_from_slice(&self.hmac(secret, &input));
+            a = self.hmac(secret, &a);
+        }
+        out.truncate(len);
+        out
+    }
+
+    /// The TLS 1.2 cipher suite with this AEAD (ECDHE with ECDSA or RSA).
+    pub fn from_tls12(code: u16) -> Option<Suite> {
+        Some(match code {
+            0xC02B | 0xC02F => Suite::Aes128Gcm,
+            0xC02C | 0xC030 => Suite::Aes256Gcm,
+            0xCCA9 | 0xCCA8 => Suite::ChaCha20Poly1305,
+            _ => return None,
+        })
+    }
+
+    /// TLS 1.2's fixed IV length: a 4-byte salt for GCM, a 12-byte IV for ChaCha20.
+    pub fn tls12_iv_len(self) -> usize {
+        if self == Suite::ChaCha20Poly1305 { 12 } else { 4 }
+    }
+
+    fn aead(self, key: &[u8], nonce: &[u8; 12], payload: Payload, seal: bool) -> Option<Vec<u8>> {
+        macro_rules! run {
+            ($cipher:ty) => {{
+                let c = <$cipher>::new_from_slice(key).ok()?;
+                if seal { c.encrypt(nonce.into(), payload).ok() } else { c.decrypt(nonce.into(), payload).ok() }
+            }};
+        }
+        match self {
+            Suite::Aes128Gcm => run!(aes_gcm::Aes128Gcm),
+            Suite::Aes256Gcm => run!(aes_gcm::Aes256Gcm),
+            Suite::ChaCha20Poly1305 => run!(chacha20poly1305::ChaCha20Poly1305),
+        }
+    }
+
     /// The Finished message's verify_data for a traffic secret.
     pub fn finished(self, traffic_secret: &[u8], transcript_hash: &[u8]) -> Vec<u8> {
         let key = self.expand_label(traffic_secret, b"finished", &[], self.hash_len());
@@ -96,13 +141,24 @@ pub struct Protection {
     key: Vec<u8>,
     iv: Vec<u8>,
     seq: u64,
+    /// TLS 1.2 record format (explicit nonces for GCM, no inner type).
+    legacy: bool,
 }
 
 impl Protection {
     pub fn new(suite: Suite, secret: Vec<u8>) -> Protection {
         let key = suite.expand_label(&secret, b"key", &[], suite.key_len());
         let iv = suite.expand_label(&secret, b"iv", &[], 12);
-        Protection { suite, secret, key, iv, seq: 0 }
+        Protection { suite, secret, key, iv, seq: 0, legacy: false }
+    }
+
+    /// TLS 1.2 keys from the key block.
+    pub fn tls12(suite: Suite, key: &[u8], iv: &[u8]) -> Protection {
+        Protection { suite, secret: Vec::new(), key: key.to_vec(), iv: iv.to_vec(), seq: 0, legacy: true }
+    }
+
+    pub fn legacy(&self) -> bool {
+        self.legacy
     }
 
     /// The next generation of keys (KeyUpdate).
@@ -111,6 +167,7 @@ impl Protection {
         Protection::new(self.suite, next)
     }
 
+    /// The IV XORed with the sequence number (TLS 1.3, and ChaCha20 in 1.2).
     fn nonce(&mut self) -> [u8; 12] {
         let mut n = [0u8; 12];
         n.copy_from_slice(&self.iv);
@@ -121,23 +178,70 @@ impl Protection {
         n
     }
 
+    /// TLS 1.2's additional data: sequence number, type, version, length.
+    fn aad12(&self, kind: u8, len: usize) -> [u8; 13] {
+        let mut a = [0u8; 13];
+        a[..8].copy_from_slice(&self.seq.to_be_bytes());
+        a[8..].copy_from_slice(&[kind, 3, 3, (len >> 8) as u8, len as u8]);
+        a
+    }
+
+    fn seal12(&mut self, kind: u8, content: &[u8]) -> Vec<u8> {
+        let aad = self.aad12(kind, content.len());
+        let explicit = self.suite != Suite::ChaCha20Poly1305;
+        let nonce = if explicit {
+            let mut n = [0u8; 12];
+            n[..4].copy_from_slice(&self.iv);
+            n[4..].copy_from_slice(&self.seq.to_be_bytes());
+            self.seq += 1;
+            n
+        } else {
+            self.nonce()
+        };
+        let sealed = self.suite.aead(&self.key, &nonce, Payload { msg: content, aad: &aad }, true).expect("AEAD seal");
+        let body_len = sealed.len() + if explicit { 8 } else { 0 };
+        let mut record = vec![kind, 3, 3, (body_len >> 8) as u8, body_len as u8];
+        if explicit {
+            record.extend_from_slice(&nonce[4..]);
+        }
+        record.extend_from_slice(&sealed);
+        record
+    }
+
+    fn open12(&mut self, header: &[u8], body: &[u8]) -> Option<(u8, Vec<u8>)> {
+        let kind = header[0];
+        let explicit = self.suite != Suite::ChaCha20Poly1305;
+        let (nonce, ct) = if explicit {
+            let mut n = [0u8; 12];
+            n[..4].copy_from_slice(&self.iv);
+            n[4..].copy_from_slice(body.get(..8)?);
+            (n, &body[8..])
+        } else {
+            let mut n = [0u8; 12];
+            n.copy_from_slice(&self.iv);
+            for (i, b) in self.seq.to_be_bytes().iter().enumerate() {
+                n[4 + i] ^= b;
+            }
+            (n, body)
+        };
+        let aad = self.aad12(kind, ct.len().checked_sub(16)?);
+        let plain = self.suite.aead(&self.key, &nonce, Payload { msg: ct, aad: &aad }, false)?;
+        self.seq += 1;
+        Some((kind, plain))
+    }
+
     /// Encrypts `content` of `kind` into a complete record.
     pub fn seal(&mut self, kind: u8, content: &[u8]) -> Vec<u8> {
+        if self.legacy {
+            return self.seal12(kind, content);
+        }
         let mut inner = Vec::with_capacity(content.len() + 1);
         inner.extend_from_slice(content);
         inner.push(kind);
         let len = inner.len() + 16;
         let header = [23u8, 3, 3, (len >> 8) as u8, len as u8];
         let nonce = self.nonce();
-        let payload = Payload { msg: &inner, aad: &header };
-        let sealed = match self.suite {
-            Suite::Aes128Gcm => aes_gcm::Aes128Gcm::new_from_slice(&self.key).unwrap().encrypt((&nonce).into(), payload),
-            Suite::Aes256Gcm => aes_gcm::Aes256Gcm::new_from_slice(&self.key).unwrap().encrypt((&nonce).into(), payload),
-            Suite::ChaCha20Poly1305 => {
-                chacha20poly1305::ChaCha20Poly1305::new_from_slice(&self.key).unwrap().encrypt((&nonce).into(), payload)
-            }
-        }
-        .expect("AEAD seal");
+        let sealed = self.suite.aead(&self.key, &nonce, Payload { msg: &inner, aad: &header }, true).expect("AEAD seal");
         let mut record = header.to_vec();
         record.extend_from_slice(&sealed);
         record
@@ -145,16 +249,11 @@ impl Protection {
 
     /// Decrypts a record body; returns (content type, content).
     pub fn open(&mut self, header: &[u8], body: &[u8]) -> Option<(u8, Vec<u8>)> {
-        let nonce = self.nonce();
-        let payload = Payload { msg: body, aad: header };
-        let mut plain = match self.suite {
-            Suite::Aes128Gcm => aes_gcm::Aes128Gcm::new_from_slice(&self.key).ok()?.decrypt((&nonce).into(), payload),
-            Suite::Aes256Gcm => aes_gcm::Aes256Gcm::new_from_slice(&self.key).ok()?.decrypt((&nonce).into(), payload),
-            Suite::ChaCha20Poly1305 => {
-                chacha20poly1305::ChaCha20Poly1305::new_from_slice(&self.key).ok()?.decrypt((&nonce).into(), payload)
-            }
+        if self.legacy {
+            return self.open12(header, body);
         }
-        .ok()?;
+        let nonce = self.nonce();
+        let mut plain = self.suite.aead(&self.key, &nonce, Payload { msg: body, aad: header }, false)?;
         // Strip padding: the content type is the last non-zero byte.
         while plain.last() == Some(&0) {
             plain.pop();
@@ -196,6 +295,19 @@ mod tests {
         let p = Protection::new(s, s_hs);
         assert_eq!(p.key, hex("3fce516009c21727d0f2e4e86ee403bc"));
         assert_eq!(p.iv, hex("5d313eb2671276ee13000b30"));
+    }
+
+    /// The widely used TLS 1.2 PRF (SHA-256) test vector.
+    #[test]
+    fn tls12_prf() {
+        let secret = hex("9bbe436ba940f017b17652849a71db35");
+        let seed = hex("a0ba9f936cda311827a6f796ffd5198c");
+        let out = Suite::Aes128Gcm.prf(&secret, b"test label", &seed, 100);
+        assert_eq!(
+            out,
+            hex("e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a6b301791e90d35c9c9a46b4e14baf9af0fa0\
+                 22f7077def17abfd3797c0564bab4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff70187347b66")
+        );
     }
 
     #[test]

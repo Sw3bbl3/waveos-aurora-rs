@@ -1,12 +1,14 @@
 //! The TLS 1.3 client (RFC 8446): the handshake, then an encrypted stream.
 //!
-//! Only TLS 1.3 is spoken, with certificate authentication of the server.
-//! Key exchange: X25519 first, P-256 after a HelloRetryRequest. There is
-//! no session resumption or early data; tickets the server sends are ignored.
+//! TLS 1.3 is preferred; TLS 1.2 is spoken to servers without it, limited
+//! to ECDHE key exchange, AEAD ciphers, the extended master secret and no
+//! renegotiation. The server is authenticated by its certificate. Key
+//! exchange: X25519 first, P-256 after a HelloRetryRequest (or when a 1.2
+//! server picks it). There is no session resumption or early data.
 
 use crate::crypto::{Protection, Suite};
 use crate::verify::{self, CertError, Roots};
-use crate::x509::{Certificate, Scheme};
+use crate::x509::{Certificate, PublicKey, Scheme};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -23,11 +25,15 @@ const SERVER_HELLO: u8 = 2;
 const NEW_SESSION_TICKET: u8 = 4;
 const ENCRYPTED_EXTENSIONS: u8 = 8;
 const CERTIFICATE: u8 = 11;
+const SERVER_KEY_EXCHANGE: u8 = 12;
 const CERTIFICATE_REQUEST: u8 = 13;
+const SERVER_HELLO_DONE: u8 = 14;
 const CERTIFICATE_VERIFY: u8 = 15;
+const CLIENT_KEY_EXCHANGE: u8 = 16;
 const FINISHED: u8 = 20;
 const KEY_UPDATE: u8 = 24;
 const MESSAGE_HASH: u8 = 254;
+const HELLO_REQUEST: u8 = 0;
 
 const X25519: u16 = 0x001D;
 const SECP256R1: u16 = 0x0017;
@@ -40,6 +46,12 @@ const RETRY_RANDOM: [u8; 32] = [
     0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11, 0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91, 0xC2, 0xA2, 0x11,
     0x16, 0x7A, 0xBB, 0x8C, 0x5E, 0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
 ];
+
+/// The end of a TLS 1.3 server's random when it negotiates 1.2 (a downgrade).
+const DOWNGRADE_12: [u8; 8] = *b"DOWNGRD\x01";
+
+/// TLS 1.2 suites: ECDHE-ECDSA, then ECDHE-RSA, with AEADs.
+const SUITES_12: [u16; 6] = [0xC02B, 0xC02C, 0xCCA9, 0xC02F, 0xC030, 0xCCA8];
 
 /// The "middlebox compatibility" ChangeCipherSpec record.
 const CCS: [u8; 6] = [CHANGE_CIPHER_SPEC, 3, 3, 0, 1, 1];
@@ -227,7 +239,8 @@ fn client_hello(host: &str, random: &[u8; 32], session: &[u8; 32], share: &KeySh
     let mut b = vec![3, 3];
     b.extend_from_slice(random);
     put_vec(&mut b, 1, session);
-    let suites: Vec<u8> = [0x1301u16, 0x1303, 0x1302].iter().flat_map(|s| s.to_be_bytes()).collect();
+    let suites: Vec<u8> =
+        [0x1301u16, 0x1303, 0x1302].iter().chain(&SUITES_12).flat_map(|s| s.to_be_bytes()).collect();
     put_vec(&mut b, 2, &suites);
     b.extend_from_slice(&[1, 0]); // compression: null
     let mut ext = Vec::new();
@@ -242,6 +255,9 @@ fn client_hello(host: &str, random: &[u8; 32], session: &[u8; 32], share: &KeySh
     let mut groups = Vec::new();
     put_vec(&mut groups, 2, &[0x00, 0x1D, 0x00, 0x17]);
     extension(&mut ext, 10, &groups);
+    extension(&mut ext, 11, &[1, 0]); // ec_point_formats: uncompressed (1.2)
+    extension(&mut ext, 23, &[]); // extended_master_secret (1.2)
+    extension(&mut ext, 0xFF01, &[0]); // renegotiation_info: none (1.2)
     let schemes: Vec<u8> = SIGNATURE_SCHEMES.iter().flat_map(|s| s.to_be_bytes()).collect();
     let mut sigs = Vec::new();
     put_vec(&mut sigs, 2, &schemes);
@@ -251,7 +267,7 @@ fn client_hello(host: &str, random: &[u8; 32], session: &[u8; 32], share: &KeySh
     let mut alpn_list = Vec::new();
     put_vec(&mut alpn_list, 2, &alpn);
     extension(&mut ext, 16, &alpn_list);
-    extension(&mut ext, 43, &[2, 3, 4]); // supported_versions: TLS 1.3
+    extension(&mut ext, 43, &[4, 3, 4, 3, 3]); // supported_versions: TLS 1.3, 1.2
     if let Some(cookie) = cookie {
         let mut c = Vec::new();
         put_vec(&mut c, 2, cookie);
@@ -268,24 +284,43 @@ fn client_hello(host: &str, random: &[u8; 32], session: &[u8; 32], share: &KeySh
 
 struct ServerHello<'a> {
     retry: bool,
+    random: &'a [u8],
     session: &'a [u8],
     suite: u16,
     version: Option<u16>,
     /// The server's key share, or (in a retry) the group it wants.
     share: Option<(u16, &'a [u8])>,
     cookie: Option<&'a [u8]>,
+    /// TLS 1.2: the extended master secret was agreed.
+    ems: bool,
+    /// TLS 1.2: the server supports secure renegotiation (as it must).
+    renegotiation_info: bool,
 }
 
 fn parse_server_hello(body: &[u8]) -> Result<ServerHello<'_>, Error> {
     let mut c = Cursor::new(body);
     c.u16()?;
-    let retry = c.bytes(32)? == RETRY_RANDOM;
+    let random = c.bytes(32)?;
+    let retry = random == RETRY_RANDOM;
     let session = c.vec(1)?;
     let suite = c.u16()?;
     if c.u8()? != 0 {
         return Err(Error::Protocol("compression"));
     }
-    let mut hello = ServerHello { retry, session, suite, version: None, share: None, cookie: None };
+    let mut hello = ServerHello {
+        retry,
+        random,
+        session,
+        suite,
+        version: None,
+        share: None,
+        cookie: None,
+        ems: false,
+        renegotiation_info: false,
+    };
+    if c.is_empty() {
+        return Ok(hello);
+    }
     let mut exts = Cursor::new(c.vec(2)?);
     while !exts.is_empty() {
         let kind = exts.u16()?;
@@ -295,6 +330,8 @@ fn parse_server_hello(body: &[u8]) -> Result<ServerHello<'_>, Error> {
             51 if retry => hello.share = Some((e.u16()?, &[])),
             51 => hello.share = Some((e.u16()?, e.vec(2)?)),
             44 => hello.cookie = Some(e.vec(2)?),
+            23 => hello.ems = true,
+            0xFF01 => hello.renegotiation_info = e.vec(1)?.is_empty(),
             _ => {}
         }
     }
@@ -310,6 +347,10 @@ pub struct TlsStream<T: Io> {
     write_keys: Option<Protection>,
     /// Received handshake bytes not yet made into messages.
     hs: Vec<u8>,
+    /// TLS 1.2: the server's keys, used from its ChangeCipherSpec on.
+    pending_read: Option<Protection>,
+    /// Negotiated TLS 1.2 rather than 1.3.
+    tls12: bool,
     plain: Vec<u8>,
     plain_pos: usize,
     eof: bool,
@@ -327,6 +368,8 @@ impl<T: Io> TlsStream<T> {
             read_keys: None,
             write_keys: None,
             hs: Vec::new(),
+            pending_read: None,
+            tls12: false,
             plain: Vec::new(),
             plain_pos: 0,
             eof: false,
@@ -347,11 +390,19 @@ impl<T: Io> TlsStream<T> {
 
     /// The negotiated cipher suite's name.
     pub fn cipher(&self) -> &'static str {
-        match self.suite {
-            Suite::Aes128Gcm => "TLS_AES_128_GCM_SHA256",
-            Suite::Aes256Gcm => "TLS_AES_256_GCM_SHA384",
-            Suite::ChaCha20Poly1305 => "TLS_CHACHA20_POLY1305_SHA256",
+        match (self.suite, self.tls12) {
+            (Suite::Aes128Gcm, false) => "TLS_AES_128_GCM_SHA256",
+            (Suite::Aes256Gcm, false) => "TLS_AES_256_GCM_SHA384",
+            (Suite::ChaCha20Poly1305, false) => "TLS_CHACHA20_POLY1305_SHA256",
+            (Suite::Aes128Gcm, true) => "TLS_ECDHE_AES_128_GCM_SHA256",
+            (Suite::Aes256Gcm, true) => "TLS_ECDHE_AES_256_GCM_SHA384",
+            (Suite::ChaCha20Poly1305, true) => "TLS_ECDHE_CHACHA20_POLY1305_SHA256",
         }
+    }
+
+    /// "TLS 1.3" or "TLS 1.2".
+    pub fn version(&self) -> &'static str {
+        if self.tls12 { "TLS 1.2" } else { "TLS 1.3" }
     }
 
     /// The application protocol the server chose, if any.
@@ -395,6 +446,23 @@ impl<T: Io> TlsStream<T> {
                 return Err(Error::Protocol("expected ServerHello"));
             }
             let sh = parse_server_hello(&msg[4..])?;
+            if sh.version.is_none() && msg.get(4..6) == Some(&[3, 3]) && !sh.retry && retry_suite.is_none() {
+                if sh.random[24..] == DOWNGRADE_12 {
+                    return Err(Error::Protocol("downgrade"));
+                }
+                let suite = SUITES_12
+                    .iter()
+                    .find(|c| **c == sh.suite)
+                    .and_then(|c| Suite::from_tls12(*c))
+                    .ok_or(Error::Protocol("cipher suite"))?;
+                if !sh.renegotiation_info {
+                    return Err(Error::Protocol("no secure renegotiation"));
+                }
+                let server_random: [u8; 32] = sh.random.try_into().unwrap();
+                let ems = sh.ems;
+                transcript.extend_from_slice(&msg);
+                return self.handshake12(host, config, suite, &random, &server_random, ems, share, transcript);
+            }
             if sh.version != Some(0x0304) {
                 return Err(Error::Alert(70));
             }
@@ -470,19 +538,7 @@ impl<T: Io> TlsStream<T> {
         if msg[0] != CERTIFICATE {
             return Err(Error::Protocol("expected Certificate"));
         }
-        let mut c = Cursor::new(&msg[4..]);
-        c.vec(1)?;
-        let mut list = Cursor::new(c.vec(3)?);
-        let mut chain = Vec::new();
-        while !list.is_empty() {
-            chain.push(list.vec(3)?);
-            list.vec(2)?;
-        }
-        let leaf = chain.first().and_then(|c| Certificate::parse(c)).ok_or(Error::Certificate(CertError::BadEncoding))?;
-        if config.verify {
-            verify::verify_chain(&chain, host, config.now, config.roots).map_err(Error::Certificate)?;
-        }
-        let key = leaf.public_key().ok_or(Error::Certificate(CertError::BadEncoding))?;
+        let key = self.certificate(&msg, host, config, true)?;
         transcript.extend_from_slice(&msg);
 
         // CertificateVerify: the server holds the certificate's key.
@@ -542,6 +598,137 @@ impl<T: Io> TlsStream<T> {
         Ok(())
     }
 
+    /// The server's certificates (leaf first) from a Certificate message,
+    /// validated for `host`; returns the leaf's public key.
+    fn certificate(&mut self, msg: &[u8], host: &str, config: &Config, tls13: bool) -> Result<PublicKey, Error> {
+        let mut c = Cursor::new(&msg[4..]);
+        if tls13 {
+            c.vec(1)?;
+        }
+        let mut list = Cursor::new(c.vec(3)?);
+        let mut chain = Vec::new();
+        while !list.is_empty() {
+            chain.push(list.vec(3)?);
+            if tls13 {
+                list.vec(2)?;
+            }
+        }
+        let leaf = chain.first().and_then(|c| Certificate::parse(c)).ok_or(Error::Certificate(CertError::BadEncoding))?;
+        if config.verify {
+            verify::verify_chain(&chain, host, config.now, config.roots).map_err(Error::Certificate)?;
+        }
+        leaf.public_key().ok_or(Error::Certificate(CertError::BadEncoding))
+    }
+
+    /// The rest of a TLS 1.2 handshake (RFC 5246, with RFC 7627 and 8422).
+    #[allow(clippy::too_many_arguments)]
+    fn handshake12(
+        &mut self,
+        host: &str,
+        config: &Config,
+        suite: Suite,
+        client_random: &[u8; 32],
+        server_random: &[u8; 32],
+        ems: bool,
+        share: KeyShare,
+        mut transcript: Vec<u8>,
+    ) -> Result<(), Error> {
+        self.suite = suite;
+        self.tls12 = true;
+        let msg = self.next_message()?;
+        if msg[0] != CERTIFICATE {
+            return Err(Error::Protocol("expected Certificate"));
+        }
+        let key = self.certificate(&msg, host, config, false)?;
+        transcript.extend_from_slice(&msg);
+
+        // ServerKeyExchange: the server's ECDHE share, signed with its key.
+        let msg = self.next_message()?;
+        if msg[0] != SERVER_KEY_EXCHANGE {
+            return Err(Error::Protocol("expected ServerKeyExchange"));
+        }
+        let body = &msg[4..];
+        let mut c = Cursor::new(body);
+        if c.u8()? != 3 {
+            return Err(Error::Protocol("curve type"));
+        }
+        let group = c.u16()?;
+        let point = c.vec(1)?;
+        let params = &body[..4 + point.len()];
+        let scheme = Scheme::from_tls(c.u16()?).ok_or(Error::Protocol("signature scheme"))?;
+        let signature = c.vec(2)?;
+        let mut signed = client_random.to_vec();
+        signed.extend_from_slice(server_random);
+        signed.extend_from_slice(params);
+        if !key.verify(scheme, &signed, signature) {
+            return Err(Error::Certificate(CertError::BadSignature));
+        }
+        transcript.extend_from_slice(&msg);
+
+        // [CertificateRequest], ServerHelloDone.
+        let mut msg = self.next_message()?;
+        let cert_requested = msg[0] == CERTIFICATE_REQUEST;
+        if cert_requested {
+            transcript.extend_from_slice(&msg);
+            msg = self.next_message()?;
+        }
+        if msg[0] != SERVER_HELLO_DONE {
+            return Err(Error::Protocol("expected ServerHelloDone"));
+        }
+        transcript.extend_from_slice(&msg);
+
+        // Our flight: [empty Certificate], ClientKeyExchange, CCS, Finished.
+        let ours = if group == share.group() {
+            share
+        } else {
+            KeyShare::new(group, config.random).ok_or(Error::Protocol("unoffered curve"))?
+        };
+        let premaster = ours.agree(point).ok_or(Error::Protocol("bad key share"))?;
+        if cert_requested {
+            let m = handshake_message(CERTIFICATE, &[0, 0, 0]);
+            self.send(HANDSHAKE, &m)?;
+            transcript.extend_from_slice(&m);
+        }
+        let mut cke = Vec::new();
+        put_vec(&mut cke, 1, &ours.public());
+        let m = handshake_message(CLIENT_KEY_EXCHANGE, &cke);
+        self.send(HANDSHAKE, &m)?;
+        transcript.extend_from_slice(&m);
+
+        let master = if ems {
+            suite.prf(&premaster, b"extended master secret", &suite.hash(&transcript), 48)
+        } else {
+            let mut seed = client_random.to_vec();
+            seed.extend_from_slice(server_random);
+            suite.prf(&premaster, b"master secret", &seed, 48)
+        };
+        let mut seed = server_random.to_vec();
+        seed.extend_from_slice(client_random);
+        let (kl, il) = (suite.key_len(), suite.tls12_iv_len());
+        let block = suite.prf(&master, b"key expansion", &seed, 2 * kl + 2 * il);
+        let (client_key, rest) = block.split_at(kl);
+        let (server_key, rest) = rest.split_at(kl);
+        let (client_iv, server_iv) = rest.split_at(il);
+
+        self.io.write_all(&CCS).map_err(Error::Io)?;
+        self.write_keys = Some(Protection::tls12(suite, client_key, client_iv));
+        let verify = suite.prf(&master, b"client finished", &suite.hash(&transcript), 12);
+        let m = handshake_message(FINISHED, &verify);
+        self.send(HANDSHAKE, &m)?;
+        transcript.extend_from_slice(&m);
+
+        // The server's CCS (switching on its keys) and Finished.
+        self.pending_read = Some(Protection::tls12(suite, server_key, server_iv));
+        let msg = self.next_message()?;
+        if self.pending_read.is_some() || msg[0] != FINISHED {
+            return Err(Error::Protocol("expected Finished"));
+        }
+        if !same(&msg[4..], &suite.prf(&master, b"server finished", &suite.hash(&transcript), 12)) {
+            return Err(Error::Decrypt);
+        }
+        Ok(())
+    }
+
     fn send_plain(&mut self, kind: u8, data: &[u8], minor: u8) -> Result<(), Error> {
         for chunk in data.chunks(MAX_RECORD) {
             let mut r = vec![kind, 3, minor];
@@ -592,7 +779,20 @@ impl<T: Io> TlsStream<T> {
             let record: Vec<u8> = self.inbuf.drain(..5 + len).collect();
             let (header, body) = record.split_at(5);
             match (header[0], self.read_keys.as_mut()) {
-                (CHANGE_CIPHER_SPEC, _) => continue,
+                (CHANGE_CIPHER_SPEC, _) => {
+                    // Meaningful in TLS 1.2 only: the server's keys start here.
+                    if let Some(keys) = self.pending_read.take() {
+                        self.read_keys = Some(keys);
+                    }
+                    continue;
+                }
+                (_, Some(keys)) if keys.legacy() => {
+                    let (kind, content) = keys.open(header, body).ok_or(Error::Decrypt)?;
+                    if content.len() > MAX_RECORD {
+                        return Err(Error::Protocol("record too large"));
+                    }
+                    return Ok((kind, content));
+                }
                 (APPLICATION_DATA, Some(keys)) => {
                     let (kind, content) = keys.open(header, body).ok_or(Error::Decrypt)?;
                     if content.len() > MAX_RECORD {
@@ -656,7 +856,9 @@ impl<T: Io> TlsStream<T> {
     fn post_handshake(&mut self, msg: &[u8]) -> Result<(), Error> {
         match msg[0] {
             NEW_SESSION_TICKET => Ok(()),
-            KEY_UPDATE => {
+            // TLS 1.2 renegotiation: politely declined (no_renegotiation).
+            HELLO_REQUEST if self.tls12 => self.send(ALERT, &[1, 100]),
+            KEY_UPDATE if !self.tls12 => {
                 let requested = *msg.get(4).ok_or(Error::Protocol("KeyUpdate"))?;
                 let keys = self.read_keys.as_ref().ok_or(Error::Protocol("KeyUpdate"))?;
                 self.read_keys = Some(keys.updated());

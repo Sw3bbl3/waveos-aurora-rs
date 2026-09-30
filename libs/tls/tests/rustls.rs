@@ -55,10 +55,22 @@ struct Server {
 
 impl Server {
     fn new(pki: &Pki, tweak: impl FnOnce(&mut rustls::crypto::CryptoProvider)) -> Server {
+        Server::with_versions(pki, &[&rustls::version::TLS13], tweak)
+    }
+
+    fn tls12(pki: &Pki, tweak: impl FnOnce(&mut rustls::crypto::CryptoProvider)) -> Server {
+        Server::with_versions(pki, &[&rustls::version::TLS12], tweak)
+    }
+
+    fn with_versions(
+        pki: &Pki,
+        versions: &[&'static rustls::SupportedProtocolVersion],
+        tweak: impl FnOnce(&mut rustls::crypto::CryptoProvider),
+    ) -> Server {
         let mut p = provider::default_provider();
         tweak(&mut p);
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(p))
-            .with_protocol_versions(&[&rustls::version::TLS13])
+            .with_protocol_versions(versions)
             .unwrap()
             .with_no_client_auth()
             .with_single_cert(
@@ -214,4 +226,51 @@ fn key_update() {
         tls.get_mut().conn.refresh_traffic_keys().unwrap();
         echo(&mut tls, 3000);
     }
+}
+
+#[test]
+fn tls12_suites() {
+    use provider::cipher_suite::*;
+    let ecdsa = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let rsa = pki_with(rsa_key(), rsa_key());
+    let cases = [
+        (&ecdsa, TLS13_AES_128_GCM_SHA256, "TLS_ECDHE_AES_128_GCM_SHA256"),
+        (&ecdsa, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, "TLS_ECDHE_AES_128_GCM_SHA256"),
+        (&ecdsa, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, "TLS_ECDHE_AES_256_GCM_SHA384"),
+        (&ecdsa, TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, "TLS_ECDHE_CHACHA20_POLY1305_SHA256"),
+        (&rsa, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, "TLS_ECDHE_AES_128_GCM_SHA256"),
+        (&rsa, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, "TLS_ECDHE_AES_256_GCM_SHA384"),
+        (&rsa, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, "TLS_ECDHE_CHACHA20_POLY1305_SHA256"),
+    ];
+    for (i, (pki, suite, name)) in cases.into_iter().enumerate() {
+        // The first case keeps rustls's default 1.2 suites.
+        let server = Server::tls12(pki, |p| {
+            if i > 0 {
+                p.cipher_suites = vec![suite];
+            }
+        });
+        let mut tls = connect(server, "example.test", pki).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_eq!((tls.version(), tls.cipher()), ("TLS 1.2", name));
+        echo(&mut tls, 50_000);
+    }
+}
+
+#[test]
+fn tls12_p256_and_errors() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P384_SHA384);
+    let server = Server::tls12(&pki, |p| p.kx_groups = vec![provider::kx_group::SECP256R1]);
+    let mut tls = connect(server, "example.test", &pki).unwrap();
+    echo(&mut tls, 1000);
+    tls.get_mut().conn.send_close_notify();
+    assert_eq!(tls.read(&mut [0u8; 4]), Ok(0));
+    let err = connect(Server::tls12(&pki, |_| {}), "evil.test", &pki).err().unwrap();
+    assert_eq!(err, Error::Certificate(CertError::WrongHost));
+}
+
+#[test]
+fn prefers_tls13() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let server = Server::with_versions(&pki, &[&rustls::version::TLS12, &rustls::version::TLS13], |_| {});
+    let tls = connect(server, "example.test", &pki).unwrap();
+    assert_eq!(tls.version(), "TLS 1.3");
 }
