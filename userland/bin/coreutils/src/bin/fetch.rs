@@ -2,21 +2,10 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use alloc::boxed::Box;
-use aurora::net::{self, TcpStream};
-use aurora_web::http::{self, Error, Io};
+use aurora::net;
+use aurora_web::http::{self, Error};
 use aurora_web::Url;
 aurora::entry!(main);
-
-fn connect(url: &Url) -> Result<Box<dyn Io>, Error> {
-    if url.scheme != "http" {
-        return Err(Error::UnsupportedScheme(url.scheme.clone()));
-    }
-    let ip = net::resolve(&url.host).map_err(|e| Error::Io(e.0))?;
-    let s = TcpStream::connect(aurora::abi::SockAddr::new(ip, url.port_or_default())).map_err(|e| Error::Io(e.0))?;
-    s.socket().set_timeout(30_000);
-    Ok(Box::new(s))
-}
 
 fn main(args: aurora::Args) -> i32 {
     let headers = args.iter().any(|a| a == "-i");
@@ -25,13 +14,13 @@ fn main(args: aurora::Args) -> i32 {
         aurora::eprintln!("usage: fetch [-i] [-o FILE] URL");
         return 2;
     };
-    let raw = if raw.contains("://") { raw.clone() } else { alloc::format!("http://{raw}") };
+    let raw = if raw.contains("://") { raw.clone() } else { alloc::format!("https://{raw}") };
     let Some(url) = Url::parse(&raw) else {
         aurora::eprintln!("fetch: {raw}: not a valid address");
         return 2;
     };
     let t0 = aurora::time::uptime_ms();
-    let resp = match http::fetch(&url, &mut connect) {
+    let resp = match http::fetch(&url, &mut aurora::web::connect) {
         Ok(r) => r,
         Err(Error::Io(e)) => {
             aurora::eprintln!("fetch: {}: {}", url.host, net::describe(aurora::Error(e)));

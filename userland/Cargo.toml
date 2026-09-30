@@ -17,6 +17,7 @@ aurora-gfx = { path = "../libs/gfx" }
 aurora-image = { path = "../libs/image" }
 aurora-wav = { path = "../libs/wav" }
 aurora-web = { path = "../libs/web" }
+aurora-tls = { path = "../libs/tls" }
 
 [profile.dev]
 panic = "abort"

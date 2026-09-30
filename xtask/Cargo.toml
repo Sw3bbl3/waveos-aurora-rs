@@ -9,3 +9,4 @@ publish = false
 fatfs = "0.3"
 wavefs = { path = "../libs/wavefs" }
 aurora-wav = { path = "../libs/wav" }
+webpki-roots = "1"

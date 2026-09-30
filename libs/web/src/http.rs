@@ -25,6 +25,8 @@ pub enum Error {
     TooManyRedirects,
     UnsupportedScheme(String),
     TooLarge,
+    /// A secure connection couldn't be set up (TLS), with the reason.
+    Secure(String),
 }
 
 impl core::fmt::Display for Error {
@@ -36,6 +38,7 @@ impl core::fmt::Display for Error {
             Error::TooManyRedirects => f.write_str("too many redirects"),
             Error::UnsupportedScheme(s) => write!(f, "{}: addresses aren't supported", s),
             Error::TooLarge => f.write_str("the response is too large"),
+            Error::Secure(why) => write!(f, "can't connect securely: {}", why),
         }
     }
 }

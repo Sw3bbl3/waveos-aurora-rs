@@ -255,10 +255,25 @@ fn system_image(programs: &[Program], out: &Path) {
     for (name, wav) in sounds::all() {
         t.file(&format!("Sounds/{name}"), &wav);
     }
+    t.dir("Certificates");
+    t.file("Certificates/roots.bin", &trust_anchors());
     for (dest, src) in programs {
         t.file(dest, &fs::read(src).unwrap());
     }
     t.finish(out).expect("write system.tar");
+}
+
+/// Mozilla's root CAs (via webpki-roots) for HTTPS, in aurora-tls's
+/// `Roots` format: (u16 length, subject, u16 length, SPKI) per anchor.
+fn trust_anchors() -> Vec<u8> {
+    let mut out = Vec::new();
+    for a in webpki_roots::TLS_SERVER_ROOTS {
+        for part in [&a.subject[..], &a.subject_public_key_info[..]] {
+            out.extend_from_slice(&(part.len() as u16).to_be_bytes());
+            out.extend_from_slice(part);
+        }
+    }
+    out
 }
 
 fn find_ovmf() -> PathBuf {
