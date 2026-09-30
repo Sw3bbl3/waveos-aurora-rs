@@ -54,6 +54,15 @@ pub fn create(esp: &Path, home: &Path, out: &Path, size: u64) -> io::Result<()> 
     Ok(())
 }
 
+/// Creates a FAT32 EFI boot image for an optical disc's El Torito entry.
+/// UEFI firmware mounts this image as the boot volume.
+pub fn create_efi_boot_image(esp: &Path, out: &Path) -> io::Result<()> {
+    let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(out)?;
+    file.set_len(ESP_SECTORS * SECTOR)?;
+    format_esp(&mut file, 0, ESP_SECTORS, esp)?;
+    file.sync_all()
+}
+
 /// Replaces the ESP contents of an existing image, keeping the home volume.
 /// Returns false if `img` doesn't have the expected layout.
 pub fn refresh_esp(esp: &Path, img: &Path) -> io::Result<bool> {
