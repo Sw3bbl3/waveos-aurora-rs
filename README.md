@@ -2,12 +2,16 @@
 
 **A 64-bit operating system built from scratch in Rust, aiming to feel as intuitive as macOS and Windows.**
 
-Every layer is original: the UEFI bootloader, the **Tide** kernel, the storage, USB and sound drivers, the **WaveFS** filesystem, the **Crest** window server, the desktop shell and the apps. There is no Linux, no BSD and no borrowed userland underneath.
+Every layer is original: the UEFI bootloader, the **Tide** kernel, the storage, USB, sound and network drivers, the TCP/IP stack, the **WaveFS** filesystem, the **Crest** window server, the desktop shell, the apps, and a web browser, **Surf**, with its own HTML, CSS, layout and TLS. There is no Linux, no BSD and no borrowed userland underneath.
 
 ![WaveOS Aurora in dark mode, with Preview and a notification](docs/screenshots/preview-dark.png)
 
-| Spotlight | Notification Center |
+| Surf on Wikipedia | Surf on Hacker News |
 |---|---|
+| ![Surf showing Wikipedia's main page, with photos](docs/screenshots/surf-wikipedia.png) | ![Surf showing Hacker News](docs/screenshots/surf-hacker-news.png) |
+| **Network tools in Terminal** | **Settings → Network** |
+| ![Terminal running ping, nslookup and fetch over HTTPS](docs/screenshots/network-tools.png) | ![Settings, Network pane](docs/screenshots/settings-network.png) |
+| **Spotlight** | **Notification Center** |
 | ![Spotlight finding an app, a settings pane and a picture](docs/screenshots/spotlight.png) | ![The Notification Center with its calendar](docs/screenshots/notification-center.png) |
 | **Settings** | **Activity Monitor** |
 | ![Settings, Appearance pane](docs/screenshots/settings.png) | ![Activity Monitor, CPU tab](docs/screenshots/activity-monitor.png) |
@@ -31,7 +35,7 @@ While WaveOS runs, the explorer streams what the kernel is doing:
 
 Every part of the architecture map glows with its real activity. Click a part to see what it does, its live numbers and the source files behind it. Opened on its own, the page replays a recorded session instead.
 
-## What works today (Milestones 1–5)
+## What works today (Milestones 1–6)
 
 - **Boots on UEFI x86_64** with its own bootloader (`aurora-boot`). It loads the kernel and a read-only system image.
 - **Tide kernel** (hybrid design):
@@ -54,8 +58,19 @@ Every part of the architecture map glows with its real activity. Click a part to
   - windows you can drag, resize, minimize and zoom
   - light and dark mode, broadcast live to every app
   - three procedurally generated wallpapers
-- **Apps:** Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome.
-- **aurora-sh**, the Terminal shell. It runs about 30 programs from `/System/Bin` as separate processes (`ls`, `cat`, `grep`, `wc`, `ps`, `kill`, `cp`, `mv`, `neofetch`, `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play`, `volume`…). It supports pipelines (`ls -l | grep txt`), redirection (`>`, `>>`), Ctrl+C and Tab completion.
+- **Apps:** Surf, Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome.
+- **Networking**, all our own:
+  - **drivers** for virtio-net and Intel e1000/e1000e, interrupt-driven where MSI allows
+  - an **IPv4 stack** in the kernel: ARP, ICMP, UDP and **TCP** (retransmission timers, fast retransmit, congestion control, window scaling), a **DHCP** client, and BSD-like sockets for programs
+  - **DNS**, and an **HTTP/1.1** client with keep-alive, chunked and gzip responses
+  - **TLS 1.3** (and 1.2 for older servers) with our own handshake, record layer and X.509 certificate checks against Mozilla's root CAs. Cryptographic primitives come from RustCrypto.
+  - a menu-bar status item, **Settings → Network**, and network graphs in Activity Monitor
+- **Surf**, the web browser, on our own engine:
+  - an HTML parser, and CSS with selectors, the cascade, custom properties, `calc()`, media queries and generated content
+  - layout: blocks, inline text with line breaking, lists, tables, flexbox and grid rows, floats, form controls
+  - PNG, **JPEG** (baseline and progressive) and GIF images, from our own decoders
+  - history, find in page (Ctrl+F), zoom, search forms and downloads (one window at a time; no tabs or JavaScript yet)
+- **aurora-sh**, the Terminal shell. It runs about 35 programs from `/System/Bin` as separate processes (`ls`, `cat`, `grep`, `wc`, `ps`, `kill`, `cp`, `mv`, `neofetch`, `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play`, `ping`, `ifconfig`, `nslookup`, `fetch`…). It supports pipelines (`ls -l | grep txt`), redirection (`>`, `>>`), lists (`a && b || c; d`), Ctrl+C and Tab completion.
 - **Storage:**
   - PCI enumeration, plus interrupt-driven **AHCI** (SATA), **virtio-blk** and **NVMe** drivers
   - **USB sticks** appear in Files under Locations and can be ejected; booted from a USB stick, WaveOS keeps your files on it
@@ -67,7 +82,7 @@ Every part of the architecture map glows with its real activity. Click a part to
 - **Spotlight** (Super+Space or Ctrl+Space) finds apps, files, settings and system commands, and does quick calculations.
 - **Notifications:** banners, and a Notification Center with a calendar and Do Not Disturb (click the clock).
 - **Smooth windows:** open, close, minimize-to-dock and zoom animations.
-- **Notes** is a proper editor: selection, the system clipboard, undo, find, fonts, Save As. **Preview** opens PNG and BMP pictures (our own codecs), **Paint** draws and saves PNGs, **Clock** has world clocks, alarms, a stopwatch and timers, and **Activity Monitor** shows every process, CPU, memory and disk.
+- **Notes** is a proper editor: selection, the system clipboard, undo, find, fonts, Save As. **Preview** opens PNG, JPEG, GIF and BMP pictures (our own codecs), **Paint** draws and saves PNGs, **Clock** has world clocks, alarms, a stopwatch and timers, and **Activity Monitor** shows every process, CPU, memory and disk.
 - **Settings:** appearance with accent colours and any picture as wallpaper, display resolution (live on QEMU), six keyboard layouts with dead keys, date and time, and more. Everything is remembered.
 - **Threads** in user space, with futex-based locks, and SSE for apps.
 - **USB:** an xHCI (USB 3) driver with hubs, keyboards, mice, tablets and storage, plugged in at any time.
@@ -95,10 +110,10 @@ The first build takes a minute or two. After that you boot straight to the deskt
 |---|---|
 | `cargo xtask build` | Builds the bootloader, kernel and user space into `target/esp/` |
 | `cargo xtask run --monitor` | Same as `run`, plus the live System Explorer in your browser |
-| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--smp N` the CPUs, `--battery` adds a laptop battery, `--usb-stick` plugs in a USB stick, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
-| `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller, `--smp 1` for one CPU |
+| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB, network). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--net virtio\|e1000\|e1000e\|none` the network card, `--smp N` the CPUs, `--battery` adds a laptop battery, `--usb-stick` plugs in a USB stick, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
+| `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller, `--net` the network card, `--smp 1` for one CPU |
 | `cargo xtask image` | Creates `target/waveos-aurora-usb.img` (ESP plus WaveFS), ready to `dd` onto a USB stick |
-| `cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p xtask` | Host-side tests: filesystems (with crash recovery), the TrueType engine, the image and sound codecs, and the test ACPI table |
+| `cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p aurora-web -p aurora-tls -p aurora-surf -p xtask` | Host-side tests: filesystems (with crash recovery), the TrueType engine, the image and sound codecs, URLs and HTTP, TLS against rustls, the browser engine, and the test ACPI table |
 
 The kernel log streams to your terminal over the serial port. See [docs/BUILDING.md](docs/BUILDING.md) for debugging and troubleshooting, and [docs/HARDWARE.md](docs/HARDWARE.md) to try WaveOS on a real PC.
 
@@ -118,9 +133,10 @@ The kernel log streams to your terminal over the serial port. See [docs/BUILDING
   - `Print Screen` or `Super+Shift+3` saves a screenshot to Pictures
   - in text: `Ctrl+A/C/X/V`, `Ctrl+Z` / `Ctrl+Shift+Z`, `Ctrl+F` to find, `Ctrl+S` to save
 - **Aurora menu** (the wave at top-left): About, Settings, Sleep, Restart, Shut Down.
-- **Menu bar**: click the speaker for the volume, the battery (on laptops) for its details, and the clock for the Notification Center. The volume keys work anywhere.
+- **Menu bar**: click the network item for the connection, the speaker for the volume, the battery (on laptops) for its details, and the clock for the Notification Center. The volume keys work anywhere.
+- **Surf**: type an address or a search in the address bar (Ctrl+L). Alt+←/→ go back and forward, Ctrl+R reloads, Ctrl+F finds on the page, Ctrl +/−/0 zoom, Space and Page Up/Down scroll. `.html` files open in Surf too.
 - **Files**: drag items onto folders, the sidebar, another Files window, a dock app or the Trash (hold Ctrl to copy). Right-click for more; Space opens Quick Look, F2 renames, Delete moves to the Trash, Ctrl+1/2 switch views, Ctrl+F searches.
-- **Terminal**: try `help`, `ps`, `df`, `neofetch`, `cpuinfo`, `lsusb`, `play --tone 440 500`, `ls -l | grep txt`, `echo hi > hi.txt`, `cat hi.txt | wc`, `ls /Boot`, `open notes`, `theme dark`.
+- **Terminal**: try `help`, `ps`, `df`, `neofetch`, `cpuinfo`, `lsusb`, `play --tone 440 500`, `ls -l | grep txt`, `echo hi > hi.txt`, `cat hi.txt | wc`, `ls /Boot`, `open notes`, `theme dark`, `ping example.com`, `ifconfig`, `fetch -i https://example.com`.
 
 ## How it fits together
 
@@ -134,13 +150,16 @@ The kernel log streams to your terminal over the serial port. See [docs/BUILDING
              ├─ acpi/     tables, AML runtime (power button, battery, lid), SCI
              ├─ power/    shutdown, restart, S3 sleep and resume
              ├─ drivers/  serial, PS/2 + keyboard layouts, vmmouse, RTC, HPET, PCI, display modes,
-             │            block (AHCI, virtio-blk, NVMe, GPT, MBR), USB (xHCI, hubs, HID, storage), audio (HDA, mixer)
+             │            block (AHCI, virtio-blk, NVMe, GPT, MBR), USB (xHCI, hubs, HID, storage), audio (HDA, mixer),
+             │            network (virtio-net, e1000)
+             ├─ net/      IPv4, ARP, ICMP, UDP, TCP, DHCP, sockets
              ├─ proc/     processes, pipes, reaper
              ├─ syscall/  system call dispatch
              ├─ fs/       VFS, block cache, WaveFS (/), FAT32 (/Boot), TarFS (/System), RamFS
              └─ gui/      Crest window server, desktop shell, clipboard, drag and drop, notifications, Spotlight
                   ↕ syscalls, shared-memory surfaces
  User space (userland/)     libaurora runtime · Ripple toolkit · apps · /System/Bin tools
+   libs/web · libs/tls · libs/surf   HTTP, TLS 1.3/1.2 and the Surf engine (no_std, tested on the host)
 ```
 
 The full tour, covering the boot handoff, memory layout, processes and syscalls, storage and WaveFS's on-disk format, and rendering, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -154,7 +173,8 @@ The full tour, covering the boot handoff, memory layout, processes and syscalls,
 | **M3** ✅ | Storage: AHCI, virtio-blk, NVMe, a VFS, FAT32, and our own journaled **WaveFS** |
 | **M4** ✅ | Apps and polish: TrueType text, Preview, Paint, Clock, Activity Monitor, drag and drop, Spotlight, notifications, animations, Settings |
 | **M5** ✅ | Real hardware: SMP, HPET and TSC, MSI, USB (xHCI, HID, storage), HD Audio, ACPI (AML), sleep and resume |
-| M6 | Networking: virtio-net and e1000, TCP/IP, DHCP, DNS, HTTP |
+| **M6** ✅ | Networking: virtio-net and e1000, TCP/IP, DHCP, DNS, HTTP, TLS, and the Surf web browser |
+| M7 | Next: tickless idle, per-CPU NVMe queues, a GPU driver, I²C touchpads, IPv6, more of the web platform |
 
 Details are in [docs/ROADMAP.md](docs/ROADMAP.md).
 

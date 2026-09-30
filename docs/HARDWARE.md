@@ -45,6 +45,7 @@ Work through the list and note what happens. The boot log (below) records the de
 - [ ] **Pointer.** Check the touchpad, a USB mouse (with the scroll wheel), and clicking and dragging windows.
 - [ ] **USB stick.** Plug in a FAT32 stick: it should appear in Files under Locations. Open a file, copy one onto it, then eject it and unplug.
 - [ ] **Internal disk.** `lspci` should list the controller, and `df` should show whether a WaveOS volume was found.
+- [ ] **Network.** With a supported wired adapter (see below) plugged in, the menu-bar network item should show Connected and an address. In Terminal try `ifconfig`, `ping example.com` and `fetch https://example.com`, then open Surf.
 - [ ] **Sound.** Play `play /System/Sounds/startup.wav`, then `play --tone 440 1000`. Try the volume keys, the menu-bar slider, and headphones in and out.
 - [ ] **Battery (laptops).** Check the menu-bar percentage and `battery` in Terminal. Unplug and replug the charger.
 - [ ] **Power button.** A short press should open the Shut Down dialog.
@@ -71,15 +72,15 @@ Work through the list and note what happens. The boot log (below) records the de
   - xHCI (USB 3) controllers only. Older EHCI/OHCI-only machines rely on the firmware's legacy PS/2 emulation for the keyboard and mouse.
   - No isochronous devices, such as USB audio or webcams.
 - **Sound.** Intel HD Audio output only, with no microphone and no HDMI audio.
-- **Networking** arrives in Milestone 6.
+- **Networking.** Wired Ethernet only, on Intel e1000/e1000e adapters (82540EM, 82545/82546, 82574L and similar) or virtio-net in virtual machines. Realtek and newer Intel (I219, I225) chips, and Wi-Fi, aren't supported yet. IPv4 only, with the address from DHCP.
 - **Sleep** is S3 (suspend to RAM). Many machines since about 2019 support only "Modern Standby" (S0ix), which WaveOS doesn't implement. On those, Sleep isn't offered.
 
 ## Compatibility
 
 Please add a row for each machine you try.
 
-| Machine | CPU | Boots | Display | Keyboard / pointer | USB storage | Disk | Sound | Battery | Sleep | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|
-| QEMU 11 (q35, Homebrew OVMF), macOS host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB | ✅ | ✅ AHCI, NVMe, virtio | ✅ HDA | ✅ test SSDT | ✅ | Development setup (`cargo xtask run` / `test`) |
-| QEMU and OVMF from Ubuntu 24.04 | TCG, 4 cores | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | CI. This firmware build faults while resuming from S3, before WaveOS runs, so the tests skip sleep there |
-| | | | | | | | | | | |
+| Machine | CPU | Boots | Display | Keyboard / pointer | USB storage | Disk | Network | Sound | Battery | Sleep | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| QEMU 11 (q35, Homebrew OVMF), macOS host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB | ✅ | ✅ AHCI, NVMe, virtio | ✅ virtio-net, e1000, e1000e | ✅ HDA | ✅ test SSDT | ✅ | Development setup (`cargo xtask run` / `test`) |
+| QEMU and OVMF from Ubuntu 24.04 | TCG, 4 cores | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | CI. This firmware build faults while resuming from S3, before WaveOS runs, so the tests skip sleep there |
+| | | | | | | | | | | | |

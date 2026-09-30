@@ -445,7 +445,10 @@ impl<'a> Cascade<'a> {
                 let pe = sel.parts[0].0.pseudo_element;
                 for d in &rule.decls {
                     // Order: sheet, then rule, then declaration position.
-                    out.push((pe, (rank(ent.origin, d.important), sel.specificity, (ent.sheet << 40) | (ent.rule << 12), d)));
+                    out.push((
+                        pe,
+                        (rank(ent.origin, d.important), sel.specificity, (ent.sheet << 40) | (ent.rule << 12), d),
+                    ));
                 }
             }
         }
@@ -677,7 +680,8 @@ fn fixups(s: &mut Style, tag: &str, parent: &Style) {
 fn hints(doc: &Document, node: NodeId) -> Vec<Declaration> {
     let e = doc.element(node).unwrap();
     let mut out = Vec::new();
-    let mut add = |name: &str, value: String| out.push(Declaration { name: String::from(name), value, important: false });
+    let mut add =
+        |name: &str, value: String| out.push(Declaration { name: String::from(name), value, important: false });
     let dim = |v: &str| {
         let v = v.trim();
         if v.ends_with('%') {
@@ -707,7 +711,13 @@ fn hints(doc: &Document, node: NodeId) -> Vec<Declaration> {
         if let Some(sz) = e.attr("size") {
             let sz = sz.trim();
             let n: i32 = sz.trim_start_matches(['+', '-']).parse().unwrap_or(3);
-            let n = if sz.starts_with('+') { 3 + n } else if sz.starts_with('-') { 3 - n } else { n };
+            let n = if sz.starts_with('+') {
+                3 + n
+            } else if sz.starts_with('-') {
+                3 - n
+            } else {
+                n
+            };
             let px = [10, 10, 13, 16, 18, 24, 32, 48][n.clamp(0, 7) as usize];
             add("font-size", format!("{px}px"));
         }
@@ -918,7 +928,9 @@ fn apply(s: &mut Style, name: &str, value: &str, parent: &Style, u: Units) {
                 ("list-item", _) => Display::ListItem,
                 ("table", _) => Display::Table,
                 ("inline-table", _) => Display::InlineBlock,
-                ("table-row-group", _) | ("table-header-group", _) | ("table-footer-group", _) => Display::TableRowGroup,
+                ("table-row-group", _) | ("table-header-group", _) | ("table-footer-group", _) => {
+                    Display::TableRowGroup
+                }
                 ("table-row", _) => Display::TableRow,
                 ("table-cell", _) => Display::TableCell,
                 ("table-caption", _) => Display::TableCaption,
@@ -1317,13 +1329,18 @@ mod tests {
         let author = css::parse(css_src);
         let cascade = Cascade::new(&ua, &[&author], 1000, 800);
         let styles = compute(&doc, &cascade, (1000, 800)).styles;
-        let n = doc.descendants(Document::ROOT).into_iter().find(|n| doc.element(*n).is_some_and(|e| e.id() == Some(id))).unwrap();
+        let n = doc
+            .descendants(Document::ROOT)
+            .into_iter()
+            .find(|n| doc.element(*n).is_some_and(|e| e.id() == Some(id)))
+            .unwrap();
         (*styles[n].clone().unwrap()).clone()
     }
 
     #[test]
     fn cascade_order() {
-        let css_src = "p { color: red } #x { color: blue } .c { color: green !important } p { font-size: 20px; margin: 1em 2px }";
+        let css_src =
+            "p { color: red } #x { color: blue } .c { color: green !important } p { font-size: 20px; margin: 1em 2px }";
         let s = styled("<p id=x class=c style='color: black'>t</p>", css_src, "x");
         assert_eq!(s.color, 0xFF00_8000); // !important wins
         assert_eq!(s.font_size, 20.0);
@@ -1335,7 +1352,8 @@ mod tests {
 
     #[test]
     fn inheritance_vars_and_hints() {
-        let css_src = ":root { --fg: #123456; --pad: 3px } div { color: var(--fg); padding: var(--pad) var(--missing, 7px) }";
+        let css_src =
+            ":root { --fg: #123456; --pad: 3px } div { color: var(--fg); padding: var(--pad) var(--missing, 7px) }";
         let s = styled("<html><body><div><span id=s>x</span></div></body></html>", css_src, "s");
         assert_eq!(s.color, 0xFF12_3456);
         assert_eq!(s.padding[0], Len::ZERO); // padding doesn't inherit

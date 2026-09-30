@@ -118,7 +118,8 @@ fn load(url: Url, job: &LoadJob) -> Result<Loaded, String> {
     let is_html = ct.contains("html") || (ct.is_empty() && resp.body.iter().take(512).any(|b| *b == b'<'));
     let mut images = Vec::new();
     let mut page = if ct.starts_with("image/") || (ct.is_empty() && aurora_image::is_image_name(&final_url.path)) {
-        let img = aurora_image::decode(&resp.body).map_err(|_| String::from("this kind of picture can't be shown yet"))?;
+        let img =
+            aurora_image::decode(&resp.body).map_err(|_| String::from("this kind of picture can't be shown yet"))?;
         let src = final_url.to_string();
         let html = format!(
             "<html><head><title>{} ({}×{})</title></head><body style='margin:0;background:#1c1c20;text-align:center'><img src=\"{}\" style='margin:16px auto'></body></html>",
@@ -462,7 +463,11 @@ impl Surf {
                 return;
             }
         }
-        let job = Arc::new(LoadJob { cancel: AtomicBool::new(false), progress: Mutex::new(String::new()), result: Mutex::new(None) });
+        let job = Arc::new(LoadJob {
+            cancel: AtomicBool::new(false),
+            progress: Mutex::new(String::new()),
+            result: Mutex::new(None),
+        });
         let j = job.clone();
         let u = url.clone();
         match aurora::thread::spawn(move || {
@@ -494,7 +499,11 @@ impl Surf {
             escape(&capitalize(msg)),
             escape(url)
         );
-        self.install(Loaded { page: Page::parse(&html), url: Url::parse(url).unwrap_or_else(|| Url::parse(HOME).unwrap()), images: Vec::new() });
+        self.install(Loaded {
+            page: Page::parse(&html),
+            url: Url::parse(url).unwrap_or_else(|| Url::parse(HOME).unwrap()),
+            images: Vec::new(),
+        });
     }
 
     fn install(&mut self, loaded: Loaded) {
@@ -519,7 +528,8 @@ impl Surf {
             *h = url_string;
         }
         let base = document_base(&page, &url);
-        let sources: Vec<String> = page.images().iter().filter_map(|s| resolve(Some(&base), s)).take(MAX_IMAGES).collect();
+        let sources: Vec<String> =
+            page.images().iter().filter_map(|s| resolve(Some(&base), s)).take(MAX_IMAGES).collect();
         let refresh = page.refresh();
         self.page = Some(page);
         self.url = Some(url);
@@ -818,7 +828,8 @@ impl Surf {
 
     /// Page coordinates of a window point in the content area.
     fn page_point(&self, x: i32, y: i32) -> Option<(i32, i32)> {
-        (self.view.contains(x, y)).then(|| ((x - self.view.x) * 100 / self.zoom, (y - self.view.y + self.scroll) * 100 / self.zoom))
+        (self.view.contains(x, y))
+            .then(|| ((x - self.view.x) * 100 / self.zoom, (y - self.view.y + self.scroll) * 100 / self.zoom))
     }
 
     // ------------------------------------------------------------ painting
@@ -870,7 +881,11 @@ impl Surf {
                         }
                         let f = font_for(*font);
                         let bx = ox + z(*x);
-                        let w = if font.italic { cv.text_slanted(bx, by, text, f, *color) } else { cv.text(bx, by, text, f, *color) };
+                        let w = if font.italic {
+                            cv.text_slanted(bx, by, text, f, *color)
+                        } else {
+                            cv.text(bx, by, text, f, *color)
+                        };
                         let t = (size / 14).max(1);
                         if *underline {
                             cv.fill_rect(Rect::new(bx, by + (size / 8).max(1) + 1, w, t), *color);
@@ -922,7 +937,10 @@ impl Surf {
                     let tx = r.x + 3 - shift;
                     if let Some((a, b)) = edit.selection() {
                         let (xa, xb) = (font.width(&edit.text()[..a]), font.width(&edit.text()[..b]));
-                        cv.fill_rect(Rect::new(tx + xa, r.y + 2, xb - xa, r.h - 4), theme::accent() & 0x00FF_FFFF | 0x5000_0000);
+                        cv.fill_rect(
+                            Rect::new(tx + xa, r.y + 2, xb - xa, r.h - 4),
+                            theme::accent() & 0x00FF_FFFF | 0x5000_0000,
+                        );
                     }
                     cv.text(tx, base_y, edit.text(), font, 0xFF1D_1D24);
                     if self.focus == Some(*node) {
@@ -944,7 +962,11 @@ impl Surf {
                     let hx = ox + z(*x) + ft.width(&text[..a]);
                     let hw = ft.width(&text[a..b]);
                     let color = if k == f.current { 0xB0FF_9500 } else { 0x80FF_E14D };
-                    cv.fill_round_rect(Rect::new(hx - 1, by - ft.ascent as i32 - 1, hw + 2, ft.ascent as i32 - ft.descent as i32 + 2), 3, color);
+                    cv.fill_round_rect(
+                        Rect::new(hx - 1, by - ft.ascent as i32 - 1, hw + 2, ft.ascent as i32 - ft.descent as i32 + 2),
+                        3,
+                        color,
+                    );
                 }
             });
         }
@@ -976,10 +998,12 @@ impl Surf {
             cv.line(rx - 6, ry - 6, rx + 6, ry + 6, 2, t.text);
             cv.line(rx - 6, ry + 6, rx + 6, ry - 6, 2, t.text);
         } else {
-            let pts: Vec<(i32, i32)> = (0..=20).map(|i| {
-                let a = 128 + i * 800 / 20;
-                (rx + 7 * sin(a + 256) / 16384, ry + 7 * sin(a) / 16384)
-            }).collect();
+            let pts: Vec<(i32, i32)> = (0..=20)
+                .map(|i| {
+                    let a = 128 + i * 800 / 20;
+                    (rx + 7 * sin(a + 256) / 16384, ry + 7 * sin(a) / 16384)
+                })
+                .collect();
             cv.polyline(&pts, 2, t.text);
             let (ex, ey) = *pts.last().unwrap();
             cv.polyline(&[(ex - 5, ey - 3), (ex, ey), (ex + 1, ey - 6)], 2, t.text);
@@ -1009,7 +1033,10 @@ impl Surf {
                 let tx = text_x - shift;
                 if let Some((a, b)) = self.address.selection() {
                     let (xa, xb) = (font.width(&text[..a]), font.width(&text[..b]));
-                    cv.fill_rect(Rect::new(tx + xa, r.y + 6, xb - xa, r.h - 12), theme::accent() & 0x00FF_FFFF | 0x5000_0000);
+                    cv.fill_rect(
+                        Rect::new(tx + xa, r.y + 6, xb - xa, r.h - 12),
+                        theme::accent() & 0x00FF_FFFF | 0x5000_0000,
+                    );
                 }
                 cv.text(tx, base_y, text, font, t.text);
                 if env.focused {
@@ -1068,7 +1095,13 @@ impl Surf {
                 cv.fill_rect(Rect::new(cx, field.y + 4, 2, field.h - 8), theme::accent());
             }
         });
-        cv.text(r.right() - 34 - cw, base_y, &count, font, if f.matches.is_empty() && !count.is_empty() { 0xFFFF_453A } else { t.text_secondary });
+        cv.text(
+            r.right() - 34 - cw,
+            base_y,
+            &count,
+            font,
+            if f.matches.is_empty() && !count.is_empty() { 0xFFFF_453A } else { t.text_secondary },
+        );
         // Close (×).
         let (xx, xy) = (r.right() - 18, r.y + r.h / 2);
         cv.line(xx - 5, xy - 5, xx + 5, xy + 5, 2, t.text_secondary);
@@ -1148,7 +1181,11 @@ impl App for Surf {
         if ctrl && ev.code == KeyCode::Char {
             match ev.ch.map(|c| c.to_ascii_lowercase()) {
                 Some('f') => {
-                    let f = self.find.get_or_insert_with(|| Find { edit: TextEdit::new("", false), matches: Vec::new(), current: 0 });
+                    let f = self.find.get_or_insert_with(|| Find {
+                        edit: TextEdit::new("", false),
+                        matches: Vec::new(),
+                        current: 0,
+                    });
                     f.edit.select_all();
                     self.editing = false;
                     self.focus = None;
@@ -1331,7 +1368,9 @@ impl App for Surf {
                         // Uncheck the group.
                         for n in page.doc.find_all("input") {
                             if let aurora_surf::dom::NodeData::Element(el) = &mut page.doc.nodes[n].data {
-                                if el.attr("name") == Some(name.as_str()) && el.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("radio")) {
+                                if el.attr("name") == Some(name.as_str())
+                                    && el.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("radio"))
+                                {
                                     el.attrs.retain(|(k, _)| k != "checked");
                                 }
                             }

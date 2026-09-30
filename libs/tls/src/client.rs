@@ -239,8 +239,7 @@ fn client_hello(host: &str, random: &[u8; 32], session: &[u8; 32], share: &KeySh
     let mut b = vec![3, 3];
     b.extend_from_slice(random);
     put_vec(&mut b, 1, session);
-    let suites: Vec<u8> =
-        [0x1301u16, 0x1303, 0x1302].iter().chain(&SUITES_12).flat_map(|s| s.to_be_bytes()).collect();
+    let suites: Vec<u8> = [0x1301u16, 0x1303, 0x1302].iter().chain(&SUITES_12).flat_map(|s| s.to_be_bytes()).collect();
     put_vec(&mut b, 2, &suites);
     b.extend_from_slice(&[1, 0]); // compression: null
     let mut ext = Vec::new();
@@ -402,7 +401,11 @@ impl<T: Io> TlsStream<T> {
 
     /// "TLS 1.3" or "TLS 1.2".
     pub fn version(&self) -> &'static str {
-        if self.tls12 { "TLS 1.2" } else { "TLS 1.3" }
+        if self.tls12 {
+            "TLS 1.2"
+        } else {
+            "TLS 1.3"
+        }
     }
 
     /// The application protocol the server chose, if any.
@@ -613,7 +616,8 @@ impl<T: Io> TlsStream<T> {
                 list.vec(2)?;
             }
         }
-        let leaf = chain.first().and_then(|c| Certificate::parse(c)).ok_or(Error::Certificate(CertError::BadEncoding))?;
+        let leaf =
+            chain.first().and_then(|c| Certificate::parse(c)).ok_or(Error::Certificate(CertError::BadEncoding))?;
         if config.verify {
             verify::verify_chain(&chain, host, config.now, config.roots).map_err(Error::Certificate)?;
         }

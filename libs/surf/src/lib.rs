@@ -44,7 +44,9 @@ impl Page {
         let mut sheets = Vec::new();
         for n in doc.descendants(Document::ROOT) {
             let Some(e) = doc.element(n) else { continue };
-            let media_ok = e.attr("media").is_none_or(|m| css::media_matches(&m.to_ascii_lowercase(), 1024, 768) || m.contains("width"));
+            let media_ok = e
+                .attr("media")
+                .is_none_or(|m| css::media_matches(&m.to_ascii_lowercase(), 1024, 768) || m.contains("width"));
             match e.tag.as_str() {
                 "style" if media_ok => sheets.push(Sheet::Inline(css::parse(&doc.text_content(n)))),
                 "link" if media_ok => {
@@ -135,7 +137,10 @@ impl Page {
             if e.attr("http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("refresh")) {
                 let content = e.attr("content")?;
                 let (secs, rest) = content.split_once([';', ',']).unwrap_or((content, ""));
-                let url = rest.trim().trim_start_matches(|c: char| c.is_ascii_alphabetic() && c != '=').trim_start_matches('=');
+                let url = rest
+                    .trim()
+                    .trim_start_matches(|c: char| c.is_ascii_alphabetic() && c != '=')
+                    .trim_start_matches('=');
                 let url = url.trim().trim_matches(|c| c == '\'' || c == '"');
                 return Some((secs.trim().parse().unwrap_or(0), String::from(url)));
             }
@@ -174,7 +179,8 @@ pub fn decode(bytes: &[u8], content_type: &str) -> String {
         if let Some(p) = head.find("charset=") {
             let rest = &head[p + 8..];
             let rest = rest.trim_start_matches(['"', '\'']);
-            let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+            let name: String =
+                rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
             charset = Some(name);
         }
     }

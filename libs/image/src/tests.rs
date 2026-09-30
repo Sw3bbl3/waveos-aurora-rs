@@ -261,7 +261,15 @@ fn photo(w: u32, h: u32) -> Vec<u8> {
     rgb
 }
 
-fn jpeg_with(w: u16, h: u16, rgb: &[u8], progressive: bool, sampling: jpeg_encoder::SamplingFactor, restart: Option<u16>, gray: bool) -> Vec<u8> {
+fn jpeg_with(
+    w: u16,
+    h: u16,
+    rgb: &[u8],
+    progressive: bool,
+    sampling: jpeg_encoder::SamplingFactor,
+    restart: Option<u16>,
+    gray: bool,
+) -> Vec<u8> {
     let mut out = Vec::new();
     let mut enc = jpeg_encoder::Encoder::new(&mut out, 90);
     enc.set_progressive(progressive);
@@ -270,7 +278,8 @@ fn jpeg_with(w: u16, h: u16, rgb: &[u8], progressive: bool, sampling: jpeg_encod
         enc.set_restart_interval(r);
     }
     if gray {
-        let luma: Vec<u8> = rgb.chunks(3).map(|p| ((p[0] as u32 * 3 + p[1] as u32 * 6 + p[2] as u32) / 10) as u8).collect();
+        let luma: Vec<u8> =
+            rgb.chunks(3).map(|p| ((p[0] as u32 * 3 + p[1] as u32 * 6 + p[2] as u32) / 10) as u8).collect();
         enc.encode(&luma, w, h, jpeg_encoder::ColorType::Luma).unwrap();
     } else {
         enc.encode(rgb, w, h, jpeg_encoder::ColorType::Rgb).unwrap();
@@ -324,7 +333,11 @@ fn gif_frames_with_transparency_and_interlace() {
             let mut enc = gif::Encoder::new(&mut out, w, h, &palette).unwrap();
             // The encoder writes rows as given: put them in interlaced order ourselves.
             let data = if interlaced {
-                let order = (0..h as usize).step_by(8).chain((4..h as usize).step_by(8)).chain((2..h as usize).step_by(4)).chain((1..h as usize).step_by(2));
+                let order = (0..h as usize)
+                    .step_by(8)
+                    .chain((4..h as usize).step_by(8))
+                    .chain((2..h as usize).step_by(4))
+                    .chain((1..h as usize).step_by(2));
                 order.flat_map(|r| indices[r * w as usize..(r + 1) * w as usize].to_vec()).collect()
             } else {
                 indices.clone()

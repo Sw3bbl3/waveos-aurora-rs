@@ -131,7 +131,8 @@ pub fn fetch(url: &Url) -> Result<Response, Error> {
 pub fn roots() -> Result<Arc<Roots>, Error> {
     let mut cached = ROOTS.lock();
     if cached.is_none() {
-        let file = crate::fs::read(ROOTS_PATH).map_err(|_| Error::Secure(String::from("no trusted certificates are installed")))?;
+        let file = crate::fs::read(ROOTS_PATH)
+            .map_err(|_| Error::Secure(String::from("no trusted certificates are installed")))?;
         *cached = Some(Arc::new(Roots::parse(&file)));
     }
     Ok(cached.as_ref().unwrap().clone())

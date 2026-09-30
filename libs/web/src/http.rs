@@ -310,7 +310,8 @@ fn decode_body(body: Vec<u8>, encoding: &str) -> Result<Vec<u8>, Error> {
             if flags & 2 != 0 {
                 i += 2;
             }
-            decompress_to_vec_with_limit(b.get(i..).ok_or(Error::BadResponse)?, MAX_BODY).map_err(|_| Error::BadResponse)
+            decompress_to_vec_with_limit(b.get(i..).ok_or(Error::BadResponse)?, MAX_BODY)
+                .map_err(|_| Error::BadResponse)
         }
         "deflate" => decompress_to_vec_zlib_with_limit(&body, MAX_BODY)
             .or_else(|_| decompress_to_vec_with_limit(&body, MAX_BODY))
@@ -500,7 +501,8 @@ mod tests {
         gz.extend_from_slice(b"name.txt\0");
         gz.extend_from_slice(&raw);
         gz.extend_from_slice(&[0; 8]); // CRC and size (not checked)
-        let mut resp = format!("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n", gz.len()).into_bytes();
+        let mut resp =
+            format!("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n", gz.len()).into_bytes();
         resp.extend_from_slice(&gz);
         let url = Url::parse("http://example.com/x").unwrap();
         let mut io = Canned { data: resp, pos: 0, sent: Vec::new() };
@@ -508,7 +510,8 @@ mod tests {
         assert_eq!(r.body, text);
         assert_eq!(r.header("content-encoding"), None);
         let z = miniz_oxide::deflate::compress_to_vec_zlib(text, 6);
-        let mut resp = format!("HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nContent-Length: {}\r\n\r\n", z.len()).into_bytes();
+        let mut resp =
+            format!("HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nContent-Length: {}\r\n\r\n", z.len()).into_bytes();
         resp.extend_from_slice(&z);
         let mut io = Canned { data: resp, pos: 0, sent: Vec::new() };
         assert_eq!(send(&mut io, &Request::get(&url)).unwrap().body, text);

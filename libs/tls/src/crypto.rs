@@ -28,15 +28,27 @@ impl Suite {
     }
 
     pub fn hash_len(self) -> usize {
-        if self.sha384() { 48 } else { 32 }
+        if self.sha384() {
+            48
+        } else {
+            32
+        }
     }
 
     pub fn key_len(self) -> usize {
-        if self == Suite::Aes128Gcm { 16 } else { 32 }
+        if self == Suite::Aes128Gcm {
+            16
+        } else {
+            32
+        }
     }
 
     pub fn hash(self, data: &[u8]) -> Vec<u8> {
-        if self.sha384() { Sha384::digest(data).to_vec() } else { Sha256::digest(data).to_vec() }
+        if self.sha384() {
+            Sha384::digest(data).to_vec()
+        } else {
+            Sha256::digest(data).to_vec()
+        }
     }
 
     pub fn extract(self, salt: &[u8], ikm: &[u8]) -> Vec<u8> {
@@ -110,14 +122,22 @@ impl Suite {
 
     /// TLS 1.2's fixed IV length: a 4-byte salt for GCM, a 12-byte IV for ChaCha20.
     pub fn tls12_iv_len(self) -> usize {
-        if self == Suite::ChaCha20Poly1305 { 12 } else { 4 }
+        if self == Suite::ChaCha20Poly1305 {
+            12
+        } else {
+            4
+        }
     }
 
     fn aead(self, key: &[u8], nonce: &[u8; 12], payload: Payload, seal: bool) -> Option<Vec<u8>> {
         macro_rules! run {
             ($cipher:ty) => {{
                 let c = <$cipher>::new_from_slice(key).ok()?;
-                if seal { c.encrypt(nonce.into(), payload).ok() } else { c.decrypt(nonce.into(), payload).ok() }
+                if seal {
+                    c.encrypt(nonce.into(), payload).ok()
+                } else {
+                    c.decrypt(nonce.into(), payload).ok()
+                }
             }};
         }
         match self {
@@ -241,7 +261,8 @@ impl Protection {
         let len = inner.len() + 16;
         let header = [23u8, 3, 3, (len >> 8) as u8, len as u8];
         let nonce = self.nonce();
-        let sealed = self.suite.aead(&self.key, &nonce, Payload { msg: &inner, aad: &header }, true).expect("AEAD seal");
+        let sealed =
+            self.suite.aead(&self.key, &nonce, Payload { msg: &inner, aad: &header }, true).expect("AEAD seal");
         let mut record = header.to_vec();
         record.extend_from_slice(&sealed);
         record

@@ -197,9 +197,8 @@ fn parse_into(css: &str, media: &Vec<String>, sheet: &mut Stylesheet) {
         let body = &css[i + 1..end];
         i = end + 1;
         if let Some(at) = prelude.strip_prefix('@') {
-            let (name, cond) = at.split_once(|c: char| c.is_whitespace() || c == '(').map_or((at, ""), |(n, _)| {
-                (n, &at[n.len()..])
-            });
+            let (name, cond) =
+                at.split_once(|c: char| c.is_whitespace() || c == '(').map_or((at, ""), |(n, _)| (n, &at[n.len()..]));
             match name.to_ascii_lowercase().as_str() {
                 "media" => {
                     let mut m = media.clone();
@@ -374,7 +373,8 @@ fn add_specificity(c: &Compound, spec: &mut (u16, u16, u16)) {
 
 fn ident_len(s: &[u8]) -> usize {
     let mut i = 0;
-    while i < s.len() && (s[i].is_ascii_alphanumeric() || s[i] == b'-' || s[i] == b'_' || s[i] >= 0x80 || s[i] == b'\\') {
+    while i < s.len() && (s[i].is_ascii_alphanumeric() || s[i] == b'-' || s[i] == b'_' || s[i] >= 0x80 || s[i] == b'\\')
+    {
         if s[i] == b'\\' {
             i += 1;
         }
@@ -567,7 +567,9 @@ fn match_from(doc: &Document, node: NodeId, parts: &[(Compound, Option<Combinato
     }
     let Some(comb) = comb else { return true };
     match comb {
-        Combinator::Child => doc.parent(node).is_some_and(|p| doc.element(p).is_some() && match_from(doc, p, parts, k + 1)),
+        Combinator::Child => {
+            doc.parent(node).is_some_and(|p| doc.element(p).is_some() && match_from(doc, p, parts, k + 1))
+        }
         Combinator::Descendant => {
             let mut p = doc.parent(node);
             while let Some(n) = p {
@@ -621,7 +623,9 @@ pub fn matches_compound(doc: &Document, node: NodeId, c: &Compound) -> bool {
             Pseudo::Link => matches!(e.tag.as_str(), "a" | "area") && e.attr("href").is_some(),
             Pseudo::FirstChild => doc.previous_elements(node).next().is_none(),
             Pseudo::LastChild => doc.next_elements(node).next().is_none(),
-            Pseudo::OnlyChild => doc.previous_elements(node).next().is_none() && doc.next_elements(node).next().is_none(),
+            Pseudo::OnlyChild => {
+                doc.previous_elements(node).next().is_none() && doc.next_elements(node).next().is_none()
+            }
             Pseudo::Root => e.tag == "html",
             Pseudo::NthChild(a, b) => {
                 let pos = doc.previous_elements(node).count() as i32 + 1;

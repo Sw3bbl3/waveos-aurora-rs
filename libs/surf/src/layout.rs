@@ -73,12 +73,31 @@ impl Rect {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
-    Rect { rect: Rect, color: u32, radius: i32 },
+    Rect {
+        rect: Rect,
+        color: u32,
+        radius: i32,
+    },
     /// A text run with its baseline at `y`.
-    Text { x: i32, y: i32, text: String, font: FontSpec, color: u32, underline: bool, strike: bool },
-    Image { rect: Rect, src: String },
+    Text {
+        x: i32,
+        y: i32,
+        text: String,
+        font: FontSpec,
+        color: u32,
+        underline: bool,
+        strike: bool,
+    },
+    Image {
+        rect: Rect,
+        src: String,
+    },
     /// A list bullet: filled (disc), hollow (circle) or square.
-    Bullet { rect: Rect, color: u32, kind: ListStyle },
+    Bullet {
+        rect: Rect,
+        color: u32,
+        kind: ListStyle,
+    },
 }
 
 impl Item {
@@ -160,11 +179,30 @@ struct BoxOut {
 enum Atom {
     /// A word (or pre-formatted run). `space`: collapsible space before it;
     /// `brk`: a break opportunity before it without a space (pre-wrap).
-    Text { text: String, style: Rc<Style>, link: Option<NodeId>, bg: u32, space: bool, brk: bool },
+    Text {
+        text: String,
+        style: Rc<Style>,
+        link: Option<NodeId>,
+        bg: u32,
+        space: bool,
+        brk: bool,
+    },
     Break,
     /// Inline padding/border/margin; `space` if a collapsible space precedes it.
-    Gap { w: i32, space: bool },
-    Box { w: i32, h: i32, baseline: i32, items: Vec<Item>, links: Vec<Link>, fields: Vec<Field>, link: Option<NodeId>, space: bool },
+    Gap {
+        w: i32,
+        space: bool,
+    },
+    Box {
+        w: i32,
+        h: i32,
+        baseline: i32,
+        items: Vec<Item>,
+        links: Vec<Link>,
+        fields: Vec<Field>,
+        link: Option<NodeId>,
+        space: bool,
+    },
 }
 
 struct Placed {
@@ -195,7 +233,13 @@ pub struct Engine<'a> {
     pending_y: i32,
 }
 
-pub fn layout(doc: &Document, styles: &[Option<Rc<Style>>], generated: &Generated, host: &dyn Host, width: i32) -> Layout {
+pub fn layout(
+    doc: &Document,
+    styles: &[Option<Rc<Style>>],
+    generated: &Generated,
+    host: &dyn Host,
+    width: i32,
+) -> Layout {
     let mut e = Engine {
         doc,
         styles,
@@ -495,7 +539,8 @@ impl<'a> Engine<'a> {
         if st.visible && !replaced {
             let is_canvas = matches!(tag, "html" | "body");
             if st.background >> 24 != 0 && !is_canvas && !st.masked {
-                self.out.items[bg_index] = Item::Rect { rect, color: st.background, radius: st.radius.min(height as f32 / 2.0) as i32 };
+                self.out.items[bg_index] =
+                    Item::Rect { rect, color: st.background, radius: st.radius.min(height as f32 / 2.0) as i32 };
             }
             self.borders(&st, rect, &border);
         }
@@ -516,13 +561,21 @@ impl<'a> Engine<'a> {
             self.out.items.push(Item::Rect { rect: Rect::new(r.x, r.y, r.w, b[0]), color: color(0), radius: 0 });
         }
         if b[2] > 0 {
-            self.out.items.push(Item::Rect { rect: Rect::new(r.x, r.bottom() - b[2], r.w, b[2]), color: color(2), radius: 0 });
+            self.out.items.push(Item::Rect {
+                rect: Rect::new(r.x, r.bottom() - b[2], r.w, b[2]),
+                color: color(2),
+                radius: 0,
+            });
         }
         if b[3] > 0 {
             self.out.items.push(Item::Rect { rect: Rect::new(r.x, r.y, b[3], r.h), color: color(3), radius: 0 });
         }
         if b[1] > 0 {
-            self.out.items.push(Item::Rect { rect: Rect::new(r.right() - b[1], r.y, b[1], r.h), color: color(1), radius: 0 });
+            self.out.items.push(Item::Rect {
+                rect: Rect::new(r.right() - b[1], r.y, b[1], r.h),
+                color: color(1),
+                radius: 0,
+            });
         }
     }
 
@@ -534,14 +587,26 @@ impl<'a> Engine<'a> {
                 let size = round_i(st.font_size * 0.35).max(4);
                 let x = cx - size - (st.font_size * 0.5) as i32;
                 let y = baseline - (m.ascent * 2 / 5) - size / 2;
-                self.out.items.push(Item::Bullet { rect: Rect::new(x, y, size, size), color: st.color, kind: st.list_style });
+                self.out.items.push(Item::Bullet {
+                    rect: Rect::new(x, y, size, size),
+                    color: st.color,
+                    kind: st.list_style,
+                });
             }
             _ => {
                 let n = self.list_number(node);
                 let text = format!("{}.", counter_text(n, st.list_style));
                 let w = self.host.measure(font, &text);
                 let x = cx - w - (st.font_size * 0.4) as i32;
-                self.out.items.push(Item::Text { x, y: baseline, text, font, color: st.color, underline: false, strike: false });
+                self.out.items.push(Item::Text {
+                    x,
+                    y: baseline,
+                    text,
+                    font,
+                    color: st.color,
+                    underline: false,
+                    strike: false,
+                });
             }
         }
     }
@@ -549,14 +614,19 @@ impl<'a> Engine<'a> {
     fn list_number(&self, node: NodeId) -> i32 {
         let doc = self.doc;
         let parent = doc.parent(node);
-        let start = parent.and_then(|p| doc.element(p)).and_then(|e| e.attr("start")).and_then(|s| s.trim().parse().ok()).unwrap_or(1);
+        let start = parent
+            .and_then(|p| doc.element(p))
+            .and_then(|e| e.attr("start"))
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(1);
         let reversed = parent.and_then(|p| doc.element(p)).is_some_and(|e| e.attr("reversed").is_some());
         if let Some(v) = doc.element(node).and_then(|e| e.attr("value")).and_then(|v| v.trim().parse().ok()) {
             return v;
         }
         let before = doc.previous_elements(node).filter(|s| doc.tag(*s) == "li").count() as i32;
         if reversed {
-            let total = parent.map_or(0, |p| doc.nodes[p].children.iter().filter(|c| doc.tag(**c) == "li").count() as i32);
+            let total =
+                parent.map_or(0, |p| doc.nodes[p].children.iter().filter(|c| doc.tag(**c) == "li").count() as i32);
             total - before
         } else {
             start + before
@@ -567,7 +637,17 @@ impl<'a> Engine<'a> {
 
     /// Lays out `items` side by side (wrapping if allowed); returns the height.
     #[allow(clippy::too_many_arguments)]
-    fn row(&mut self, items: &[NodeId], x: i32, y: i32, w: i32, wrap: bool, justify: Justify, gap: i32, center: bool) -> i32 {
+    fn row(
+        &mut self,
+        items: &[NodeId],
+        x: i32,
+        y: i32,
+        w: i32,
+        wrap: bool,
+        justify: Justify,
+        gap: i32,
+        center: bool,
+    ) -> i32 {
         // Each item's outer width: explicit, else shrink-to-fit.
         let mut widths = Vec::with_capacity(items.len());
         let mut mins = Vec::with_capacity(items.len());
@@ -577,7 +657,8 @@ impl<'a> Engine<'a> {
             let (min, max) = self.pref(n);
             let ml = st.margin[3].or_zero(w);
             let mr = st.margin[1].or_zero(w);
-            let hext: i32 = (st.padding[1].or_zero(w) + st.padding[3].or_zero(w)) + st.borders()[1] as i32 + st.borders()[3] as i32;
+            let hext: i32 =
+                (st.padding[1].or_zero(w) + st.padding[3].or_zero(w)) + st.borders()[1] as i32 + st.borders()[3] as i32;
             let explicit = st.width.resolve(w).map(|v| if st.border_box { v } else { v + hext });
             let mut outer = explicit.unwrap_or(max).min(w - ml - mr).max(0);
             if let Some(maxw) = st.max_width.resolve(w) {
@@ -711,7 +792,8 @@ impl<'a> Engine<'a> {
             }
         };
         let free = |used: &Vec<Vec<bool>>, r: usize, c: usize, rs: usize, cs: usize| {
-            (r..r + rs).all(|rr| (c..c + cs).all(|cc| !used.get(rr).and_then(|row| row.get(cc)).copied().unwrap_or(false)))
+            (r..r + rs)
+                .all(|rr| (c..c + cs).all(|cc| !used.get(rr).and_then(|row| row.get(cc)).copied().unwrap_or(false)))
         };
         let (mut cur_r, mut cur_c) = (0usize, 0usize);
         for &it in &items {
@@ -729,7 +811,8 @@ impl<'a> Engine<'a> {
                         let r0 = (r0.max(1) - 1) as usize;
                         let c0 = (c0.max(1) - 1) as usize;
                         let r1 = n(2).map_or(r0 + 1, |v| (v.max(1) - 1) as usize).max(r0 + 1);
-                        let c1 = n(3).map_or(c0 + 1, |v| if v < 0 { ncols } else { (v.max(1) - 1) as usize }).max(c0 + 1);
+                        let c1 =
+                            n(3).map_or(c0 + 1, |v| if v < 0 { ncols } else { (v.max(1) - 1) as usize }).max(c0 + 1);
                         row = (Some(r0), r1 - r0);
                         col = (Some(c0), c1 - c0);
                     }
@@ -808,7 +891,8 @@ impl<'a> Engine<'a> {
         let free_space = avail - fixed;
         if fr_total > 0.0 && free_space > 0 {
             // Fractions share what's left (on top of their minimums).
-            let base: i32 = tracks.iter().enumerate().filter(|(_, t)| matches!(t, Track::Fr(..))).map(|(i, _)| widths[i]).sum();
+            let base: i32 =
+                tracks.iter().enumerate().filter(|(_, t)| matches!(t, Track::Fr(..))).map(|(i, _)| widths[i]).sum();
             let pool = (free_space + base) as f32;
             for (i, t) in tracks.iter().enumerate() {
                 if let Track::Fr(f, min) = *t {
@@ -818,10 +902,12 @@ impl<'a> Engine<'a> {
         } else if free_space < 0 {
             // Too wide: shrink auto columns toward their minimum content.
             let over = -free_space;
-            let shrinkable: i32 = (0..ncols).filter(|i| tracks[*i] == Track::Auto).map(|i| (widths[i] - auto_min[i]).max(0)).sum();
+            let shrinkable: i32 =
+                (0..ncols).filter(|i| tracks[*i] == Track::Auto).map(|i| (widths[i] - auto_min[i]).max(0)).sum();
             if shrinkable > 0 {
                 for i in (0..ncols).filter(|i| tracks[*i] == Track::Auto) {
-                    let share = (widths[i] - auto_min[i]).max(0) as i64 * over.min(shrinkable) as i64 / shrinkable as i64;
+                    let share =
+                        (widths[i] - auto_min[i]).max(0) as i64 * over.min(shrinkable) as i64 / shrinkable as i64;
                     widths[i] -= share as i32;
                 }
             }
@@ -908,7 +994,11 @@ impl<'a> Engine<'a> {
                     .copied()
                     .filter(|c| doc.element(*c).is_some() && !self.hidden(*c))
                     .map(|c| {
-                        let span = doc.element(c).and_then(|e| e.attr("colspan")).and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(1);
+                        let span = doc
+                            .element(c)
+                            .and_then(|e| e.attr("colspan"))
+                            .and_then(|s| s.trim().parse::<usize>().ok())
+                            .unwrap_or(1);
                         (c, span.clamp(1, 100))
                     })
                     .collect()
@@ -1018,7 +1108,9 @@ impl<'a> Engine<'a> {
                 cx += cw + spacing;
                 col += span;
             }
-            if let Some(h) = row_style.height.resolve(0).filter(|_| matches!(row_style.height, Len::Calc(p, _) if p == 0.0)) {
+            if let Some(h) =
+                row_style.height.resolve(0).filter(|_| matches!(row_style.height, Len::Calc(p, _) if p == 0.0))
+            {
                 row_h = row_h.max(h);
             }
             // Stretch cell backgrounds to the row and centre cells that ask for it.
@@ -1059,7 +1151,8 @@ impl<'a> Engine<'a> {
             }
             if row_style.background >> 24 != 0 && row_style.visible {
                 let rw: i32 = widths.iter().sum::<i32>() + spacing * (ncols as i32 - 1);
-                self.out.items[row_bg_index] = Item::Rect { rect: Rect::new(x + spacing, cy, rw, row_h), color: row_style.background, radius: 0 };
+                self.out.items[row_bg_index] =
+                    Item::Rect { rect: Rect::new(x + spacing, cy, rw, row_h), color: row_style.background, radius: 0 };
             }
             cy += row_h + spacing;
         }
@@ -1073,7 +1166,8 @@ impl<'a> Engine<'a> {
         if let Some((st, text)) = self.gen(n) {
             let font = FontSpec::of(st);
             let max = (self.host.measure64(font, text) + 63) >> 6;
-            let min = text.split_ascii_whitespace().map(|w| (self.host.measure64(font, w) + 63) >> 6).max().unwrap_or(0);
+            let min =
+                text.split_ascii_whitespace().map(|w| (self.host.measure64(font, w) + 63) >> 6).max().unwrap_or(0);
             return (min, max);
         }
         if let Some(v) = self.pref_cache[n] {
@@ -1117,8 +1211,12 @@ impl<'a> Engine<'a> {
                 if st.hidden() {
                     return (0, 0);
                 }
-                let ext = st.padding[1].or_zero(0) + st.padding[3].or_zero(0) + st.borders()[1] as i32 + st.borders()[3] as i32
-                    + st.margin[1].or_zero(0).max(0) + st.margin[3].or_zero(0).max(0);
+                let ext = st.padding[1].or_zero(0)
+                    + st.padding[3].or_zero(0)
+                    + st.borders()[1] as i32
+                    + st.borders()[3] as i32
+                    + st.margin[1].or_zero(0).max(0)
+                    + st.margin[3].or_zero(0).max(0);
                 if let Some(Len::Calc(p, px)) = Some(st.width).filter(|w| !w.is_auto()) {
                     if p == 0.0 {
                         let w = px as i32 + if st.border_box { 0 } else { ext };
@@ -1182,7 +1280,8 @@ impl<'a> Engine<'a> {
                         if self.doc.element(r).is_none() || self.hidden(r) {
                             continue;
                         }
-                        let cells: Vec<NodeId> = doc.nodes[r].children.iter().copied().filter(|c| doc.element(*c).is_some()).collect();
+                        let cells: Vec<NodeId> =
+                            doc.nodes[r].children.iter().copied().filter(|c| doc.element(*c).is_some()).collect();
                         let (rmin, rmax) = cells.iter().fold((0, 0), |(a, b), c| {
                             let (m, x) = self.pref(*c);
                             (a + m + 2, b + x + 2)
@@ -1241,8 +1340,10 @@ impl<'a> Engine<'a> {
         let font = FontSpec::of(&st);
         let m = self.host.metrics(font);
         let line = m.ascent + m.descent;
-        let pad_v = st.padding[0].or_zero(0) + st.padding[2].or_zero(0) + st.borders()[0] as i32 + st.borders()[2] as i32;
-        let pad_h = st.padding[1].or_zero(0) + st.padding[3].or_zero(0) + st.borders()[1] as i32 + st.borders()[3] as i32;
+        let pad_v =
+            st.padding[0].or_zero(0) + st.padding[2].or_zero(0) + st.borders()[0] as i32 + st.borders()[2] as i32;
+        let pad_h =
+            st.padding[1].or_zero(0) + st.padding[3].or_zero(0) + st.borders()[1] as i32 + st.borders()[3] as i32;
         let kind = e.attr("type").unwrap_or("text").to_ascii_lowercase();
         let (label, content_w, content_h) = match (e.tag.as_str(), kind.as_str()) {
             ("input", "checkbox" | "radio") => (String::new(), 13, 13),
@@ -1254,9 +1355,11 @@ impl<'a> Engine<'a> {
             ("select", _) => {
                 let doc = self.doc;
                 let options: Vec<NodeId> = doc.descendants(n).into_iter().filter(|o| doc.tag(*o) == "option").collect();
-                let selected = options.iter().find(|o| doc.element(**o).unwrap().attr("selected").is_some()).or(options.first());
+                let selected =
+                    options.iter().find(|o| doc.element(**o).unwrap().attr("selected").is_some()).or(options.first());
                 let label = selected.map(|o| String::from(doc.text_content(*o).trim())).unwrap_or_default();
-                let widest = options.iter().map(|o| self.host.measure(font, doc.text_content(*o).trim())).max().unwrap_or(40);
+                let widest =
+                    options.iter().map(|o| self.host.measure(font, doc.text_content(*o).trim())).max().unwrap_or(40);
                 (label, widest + 20, line)
             }
             ("textarea", _) => {
@@ -1271,7 +1374,13 @@ impl<'a> Engine<'a> {
             }
         };
         let w = match st.width.resolve(0) {
-            Some(w) if matches!(st.width, Len::Calc(p, _) if p == 0.0) => if st.border_box { w } else { w + pad_h },
+            Some(w) if matches!(st.width, Len::Calc(p, _) if p == 0.0) => {
+                if st.border_box {
+                    w
+                } else {
+                    w + pad_h
+                }
+            }
             _ => content_w + pad_h,
         };
         let h = match st.height {
@@ -1308,7 +1417,14 @@ impl<'a> Engine<'a> {
                             self.spaced_words(&line, &st, bg, out, space);
                         } else if ws.keeps_spaces() && !ws.wraps() {
                             if !line.is_empty() {
-                                out.push(Atom::Text { text: line, style: st.clone(), link: self.link, bg, space: false, brk: false });
+                                out.push(Atom::Text {
+                                    text: line,
+                                    style: st.clone(),
+                                    link: self.link,
+                                    bg,
+                                    space: false,
+                                    brk: false,
+                                });
                             }
                         } else {
                             self.words(&line, &st, bg, out, space);
@@ -1348,7 +1464,16 @@ impl<'a> Engine<'a> {
                                     items.push(Item::Image { rect: Rect::new(0, 0, w, h), src });
                                 }
                             }
-                            out.push(Atom::Box { w, h, baseline: h, items, links: Vec::new(), fields: Vec::new(), link: self.link, space: core::mem::take(space) });
+                            out.push(Atom::Box {
+                                w,
+                                h,
+                                baseline: h,
+                                items,
+                                links: Vec::new(),
+                                fields: Vec::new(),
+                                link: self.link,
+                                space: core::mem::take(space),
+                            });
                         }
                     }
                     "input" | "select" | "textarea" => {
@@ -1358,17 +1483,35 @@ impl<'a> Engine<'a> {
                         let m = self.host.metrics(font);
                         let baseline = (h + m.ascent - m.descent) / 2;
                         let fields = alloc::vec![Field { rect: Rect::new(0, 0, w, h), node: n }];
-                        out.push(Atom::Box { w, h, baseline, items, links: Vec::new(), fields, link: self.link, space: core::mem::take(space) });
+                        out.push(Atom::Box {
+                            w,
+                            h,
+                            baseline,
+                            items,
+                            links: Vec::new(),
+                            fields,
+                            link: self.link,
+                            space: core::mem::take(space),
+                        });
                     }
                     _ if matches!(st.display, Display::InlineBlock | Display::InlineFlex) || tag == "button" => {
                         // An atomic inline: lay it out as a block and place it as one piece.
                         let (_, max) = self.pref(n);
                         let explicit = st.width.resolve(avail);
-                        let hext = st.padding[1].or_zero(avail) + st.padding[3].or_zero(avail) + st.borders()[1] as i32 + st.borders()[3] as i32;
+                        let hext = st.padding[1].or_zero(avail)
+                            + st.padding[3].or_zero(avail)
+                            + st.borders()[1] as i32
+                            + st.borders()[3] as i32;
                         let ml = st.margin[3].or_zero(avail);
                         let mr = st.margin[1].or_zero(avail);
                         let w = match explicit {
-                            Some(w) => if st.border_box { w } else { w + hext },
+                            Some(w) => {
+                                if st.border_box {
+                                    w
+                                } else {
+                                    w + hext
+                                }
+                            }
                             None => max - ml.max(0) - mr.max(0),
                         }
                         .min(avail - ml - mr)
@@ -1384,14 +1527,25 @@ impl<'a> Engine<'a> {
                         if ml > 0 {
                             out.push(Atom::Gap { w: ml, space: core::mem::take(space) });
                         }
-                        out.push(Atom::Box { w, h: res.height, baseline, items, links, fields, link: self.link, space: core::mem::take(space) });
+                        out.push(Atom::Box {
+                            w,
+                            h: res.height,
+                            baseline,
+                            items,
+                            links,
+                            fields,
+                            link: self.link,
+                            space: core::mem::take(space),
+                        });
                         if mr > 0 {
                             out.push(Atom::Gap { w: mr, space: false });
                         }
                     }
                     _ => {
-                        let lead = st.margin[3].or_zero(avail).max(0) + st.padding[3].or_zero(avail) + st.borders()[3] as i32;
-                        let trail = st.margin[1].or_zero(avail).max(0) + st.padding[1].or_zero(avail) + st.borders()[1] as i32;
+                        let lead =
+                            st.margin[3].or_zero(avail).max(0) + st.padding[3].or_zero(avail) + st.borders()[3] as i32;
+                        let trail =
+                            st.margin[1].or_zero(avail).max(0) + st.padding[1].or_zero(avail) + st.borders()[1] as i32;
                         let bg = if st.background >> 24 != 0 { st.background } else { bg };
                         if lead > 0 {
                             out.push(Atom::Gap { w: lead, space: core::mem::take(space) });
@@ -1421,7 +1575,14 @@ impl<'a> Engine<'a> {
         }
         for (i, w) in text.split_ascii_whitespace().enumerate() {
             let sp = core::mem::take(space) || i > 0;
-            out.push(Atom::Text { text: String::from(w), style: st.clone(), link: self.link, bg, space: sp, brk: false });
+            out.push(Atom::Text {
+                text: String::from(w),
+                style: st.clone(),
+                link: self.link,
+                bg,
+                space: sp,
+                brk: false,
+            });
         }
         if text.ends_with(|c: char| c.is_ascii_whitespace()) {
             *space = true;
@@ -1436,7 +1597,14 @@ impl<'a> Engine<'a> {
             let ws = rest.starts_with(' ');
             let end = rest.find(|c: char| (c == ' ') != ws).unwrap_or(rest.len());
             let (tok, tail) = rest.split_at(end);
-            out.push(Atom::Text { text: String::from(tok), style: st.clone(), link: self.link, bg, space: false, brk: after_ws });
+            out.push(Atom::Text {
+                text: String::from(tok),
+                style: st.clone(),
+                link: self.link,
+                bg,
+                space: false,
+                brk: after_ws,
+            });
             after_ws = ws;
             rest = tail;
         }
@@ -1478,13 +1646,29 @@ impl<'a> Engine<'a> {
         };
         if e.tag == "select" {
             let aw = self.host.measure(font, "▾");
-            items.push(Item::Text { x: w - aw - 6, y: baseline, text: String::from("▾"), font, color: st.color, underline: false, strike: false });
+            items.push(Item::Text {
+                x: w - aw - 6,
+                y: baseline,
+                text: String::from("▾"),
+                font,
+                color: st.color,
+                underline: false,
+                strike: false,
+            });
         }
         if !text.is_empty() {
             let x = if is_button { (w - self.host.measure(font, &text)) / 2 } else { pl };
             let text = if kind == "password" { "•".repeat(text.chars().count()) } else { text };
             let first_line = text.lines().next().unwrap_or("").chars().take(200).collect::<String>();
-            items.push(Item::Text { x, y: if e.tag == "textarea" { pl + m.ascent } else { baseline }, text: first_line, font, color, underline: false, strike: false });
+            items.push(Item::Text {
+                x,
+                y: if e.tag == "textarea" { pl + m.ascent } else { baseline },
+                text: first_line,
+                font,
+                color,
+                underline: false,
+                strike: false,
+            });
         }
         items
     }
@@ -1531,8 +1715,12 @@ impl<'a> Engine<'a> {
                     let tw = self.host.measure64(font, &t);
                     (tw, if *space { self.host.measure64(font, " ") } else { 0 }, Some(t))
                 }
-                Atom::Box { w, space, .. } => (*w * 64, if *space { self.host.measure64(strut_font, " ") } else { 0 }, None),
-                Atom::Gap { w, space } => (*w * 64, if *space { self.host.measure64(strut_font, " ") } else { 0 }, None),
+                Atom::Box { w, space, .. } => {
+                    (*w * 64, if *space { self.host.measure64(strut_font, " ") } else { 0 }, None)
+                }
+                Atom::Gap { w, space } => {
+                    (*w * 64, if *space { self.host.measure64(strut_font, " ") } else { 0 }, None)
+                }
                 Atom::Break => {
                     cy = self.finish_line(&mut line, &atoms, x, cy, w, lx, align, strut, strut_lh, true);
                     lx = 0;
@@ -1706,7 +1894,12 @@ impl<'a> Engine<'a> {
                     if let Some(l) = link {
                         let lh = round_i(style.line_px());
                         self.out.links.push(Link {
-                            rect: Rect::new(rx, baseline - m.ascent - (lh - m.ascent - m.descent).max(0) / 2, rw, lh.max(m.ascent + m.descent)),
+                            rect: Rect::new(
+                                rx,
+                                baseline - m.ascent - (lh - m.ascent - m.descent).max(0) / 2,
+                                rw,
+                                lh.max(m.ascent + m.descent),
+                            ),
                             node: *l,
                         });
                     }
@@ -1774,7 +1967,13 @@ fn parse_tracks(t: &str, w: i32, gap: i32, u: &crate::values::Units) -> Vec<Trac
             }
             return Some(match crate::values::length(b, u) {
                 Some(Len::Calc(p, px)) => Track::Px(round_i(p * w as f32 / 100.0 + px).max(min)),
-                _ => if min > 0 { Track::Px(min) } else { Track::Auto },
+                _ => {
+                    if min > 0 {
+                        Track::Px(min)
+                    } else {
+                        Track::Auto
+                    }
+                }
             });
         }
         if tok == "auto" || tok == "min-content" || tok == "max-content" || tok.starts_with("fit-content") {
@@ -1804,18 +2003,26 @@ fn parse_tracks(t: &str, w: i32, gap: i32, u: &crate::values::Units) -> Vec<Trac
         }
         if let Some(inner) = tok.strip_prefix("repeat(").and_then(|r| r.strip_suffix(')')) {
             let Some((count, list)) = inner.split_once(',') else { continue };
-            let list: Vec<Track> = crate::css::split_top(list.trim(), b' ').iter().filter(|s| !s.trim().is_empty()).filter_map(|s| one(s)).collect();
+            let list: Vec<Track> = crate::css::split_top(list.trim(), b' ')
+                .iter()
+                .filter(|s| !s.trim().is_empty())
+                .filter_map(|s| one(s))
+                .collect();
             if list.is_empty() {
                 continue;
             }
             let n = match count.trim() {
                 "auto-fill" | "auto-fit" => {
                     // As many as fit, sized by their minimums.
-                    let each: i32 = list.iter().map(|t| match t {
-                        Track::Px(p) => *p,
-                        Track::Fr(_, min) => *min,
-                        Track::Auto => 0,
-                    }).sum::<i32>().max(1);
+                    let each: i32 = list
+                        .iter()
+                        .map(|t| match t {
+                            Track::Px(p) => *p,
+                            Track::Fr(_, min) => *min,
+                            Track::Auto => 0,
+                        })
+                        .sum::<i32>()
+                        .max(1);
                     (((w + gap) / (each + gap * list.len() as i32)).max(1)) as usize
                 }
                 c => c.parse::<usize>().unwrap_or(1).clamp(1, 64),
@@ -1958,7 +2165,21 @@ fn counter_text(n: i32, style: ListStyle) -> String {
             }
         }
         ListStyle::LowerRoman | ListStyle::UpperRoman if n > 0 && n < 4000 => {
-            let table = [(1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")];
+            let table = [
+                (1000, "m"),
+                (900, "cm"),
+                (500, "d"),
+                (400, "cd"),
+                (100, "c"),
+                (90, "xc"),
+                (50, "l"),
+                (40, "xl"),
+                (10, "x"),
+                (9, "ix"),
+                (5, "v"),
+                (4, "iv"),
+                (1, "i"),
+            ];
             let mut s = String::new();
             let mut v = n;
             for (val, sym) in table {

@@ -41,7 +41,17 @@ fn main() {
     println!("cascade {styled:?}");
     if let Some(pos) = args.iter().position(|a| a == "--grep") {
         let word = &args[pos + 1];
-        let texts: Vec<_> = l.items.iter().filter_map(|i| if let aurora_surf::Item::Text { x, y, text, .. } = i { Some((*x, *y, text.clone())) } else { None }).collect();
+        let texts: Vec<_> = l
+            .items
+            .iter()
+            .filter_map(|i| {
+                if let aurora_surf::Item::Text { x, y, text, .. } = i {
+                    Some((*x, *y, text.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         for (k, t) in texts.iter().enumerate() {
             if t.2.contains(word.as_str()) {
                 for u in &texts[k.saturating_sub(3)..(k + 2).min(texts.len())] {

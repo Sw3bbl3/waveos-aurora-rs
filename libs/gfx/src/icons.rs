@@ -135,9 +135,14 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
             let f = theme::ui_bold(if s >= 40 { 20 } else { 14 });
             cv.text_centered(r, "Hi", f, 0xFFFF_FFFF);
         }
-        Icon::Preview | Icon::Paint | Icon::Clock | Icon::Activity | Icon::Surf | Icon::Picture | Icon::Trash | Icon::TrashFull => {
-            draw_more(cv, icon, r)
-        }
+        Icon::Preview
+        | Icon::Paint
+        | Icon::Clock
+        | Icon::Activity
+        | Icon::Surf
+        | Icon::Picture
+        | Icon::Trash
+        | Icon::TrashFull => draw_more(cv, icon, r),
         Icon::Document => {
             let page = Rect::new(r.x + u(8), r.y + u(3), s - u(16), s - u(6));
             cv.fill_round_rect(page, u(3), 0xFFFF_FFFF);
@@ -235,8 +240,15 @@ fn draw_more(cv: &mut Canvas, icon: Icon, r: Rect) {
             cv.fill_circle(cx, cy, rr, 0xFFFF_FFFF);
             let blue = rgb(0x0A, 0x6C, 0xFF);
             // Meridian and equator.
-            cv.stroke_round_rect(Rect::new(cx - u(6), cy - rr + 1, u(12), rr * 2 - 2), u(6), blue & 0x00FF_FFFF | 0x9000_0000);
-            cv.fill_rect(Rect::new(cx - rr + u(2), cy - u(5), rr * 2 - u(4), u(1).max(1)), blue & 0x00FF_FFFF | 0x9000_0000);
+            cv.stroke_round_rect(
+                Rect::new(cx - u(6), cy - rr + 1, u(12), rr * 2 - 2),
+                u(6),
+                blue & 0x00FF_FFFF | 0x9000_0000,
+            );
+            cv.fill_rect(
+                Rect::new(cx - rr + u(2), cy - u(5), rr * 2 - u(4), u(1).max(1)),
+                blue & 0x00FF_FFFF | 0x9000_0000,
+            );
             // The wave across its lower half.
             wave(cv, Rect::new(cx - rr + u(3), cy + u(2), rr * 2 - u(6), u(8)), 1, u(3).max(2), blue);
         }

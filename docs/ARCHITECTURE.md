@@ -11,16 +11,19 @@ This document is for someone about to read or change the code. It follows the ma
 | `libs/bootinfo/` | `bootinfo` | both | `#[repr(C)]` handoff contract |
 | `libs/abi/` | `aurora-abi` | kernel + user | System call numbers, errors, `#[repr(C)]` structs, key types |
 | `libs/gfx/` | `aurora-gfx` | kernel + user | Rasterizer, our TrueType engine, theme, icons, widgets, wallpapers |
-| `libs/image/` | `aurora-image` | kernel + user + host | PNG decoder and encoder, BMP decoder |
+| `libs/image/` | `aurora-image` | kernel + user + host | PNG decoder and encoder; JPEG, GIF and BMP decoders |
 | `libs/elf/` | `aurora-elf` | bootloader + kernel | Overflow-checked ELF64 reader |
 | `libs/wavefs/` | `wavefs` | kernel + host | The WaveFS filesystem engine (also used by `mkfs` in xtask) |
 | `libs/fat32/` | `fat32` | kernel | FAT32 with long file names |
 | `libs/wav/` | `aurora-wav` | kernel + user + host | WAV decoding (any rate → 48 kHz stereo) and encoding |
+| `libs/web/` | `aurora-web` | user + host | URLs, and an HTTP/1.1 client over any byte stream (keep-alive, chunked, gzip) |
+| `libs/tls/` | `aurora-tls` | user + host | TLS 1.3/1.2 client, DER and X.509 path validation |
+| `libs/surf/` | `aurora-surf` | user + host | The browser engine: HTML, CSS, style and layout to a display list |
 | `userland/libaurora/` | `aurora` | user | Runtime: entry point, heap, `print!`, files, processes, threads, clipboard, drag and drop, preferences |
 | `userland/ripple/` | `ripple` | user | UI toolkit: windows, event loop, the `App` trait, the `text` editing engine |
-| `userland/apps/*` | `app-*` | user | Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome |
+| `userland/apps/*` | `app-*` | user | Surf, Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome |
 | `userland/bin/*` | — | user | Command-line tools (`coreutils`), `usertest`, `crashtest` |
-| `xtask/` | `xtask` | host | Build, run, image and test orchestration; system sounds, a test SSDT (battery, lid) and a USB-stick image |
+| `xtask/` | `xtask` | host | Build, run, image and test orchestration; system sounds, Mozilla's root CAs (from `webpki-roots`), a test SSDT (battery, lid) and a USB-stick image |
 | `assets/fonts/` | — | — | Inter and JetBrains Mono, shipped in `/System/Fonts` |
 | `assets/home/` | — | — | Default folders, documents and pictures for a new home volume |
 | `tools/qmp.py` | — | host | Scripted clicks, drags, typing and screenshots for a running VM |
@@ -265,7 +268,36 @@ The driver reads and writes FAT32 with VFAT long file names, generating `NAME~N.
 4. On wake, the firmware starts CPU 0 in real mode at the trampoline, which enters long mode and calls `resume_entry`. That reloads the kernel page tables, the GDT and TSS (clearing its busy bit), the IDT, `syscall` and FPU setup, and returns into `suspend` as if the save had just returned.
 5. `suspend` then restores the clocks, the APICs, PCI configuration and MSI/MSI-X routes, each driver's hardware (`drivers::resume`: AHCI, NVMe, virtio, HDA, xHCI, display mode, PS/2), ACPI events and `\_WAK`, and finally restarts the other CPUs.
 
-## 7. Telemetry and the System Explorer (`telemetry.rs`, `xtask/src/monitor.rs`)
+## 7. Networking (`drivers/net/`, `net/`)
+
+### Adapters
+
+Both drivers implement the `net::Nic` trait (`mac`, `link_up`, `send`, `poll`) and hand received frames to `net::receive`.
+
+- **virtio-net** (`drivers/net/virtio.rs`) uses the shared modern virtio-pci transport (`drivers/virtio.rs`): receive queue 0 with MSI-X, transmit queue 1 whose buffers are reclaimed lazily, a 12-byte header per frame.
+- **e1000/e1000e** (`drivers/net/e1000.rs`) runs 256-entry descriptor rings with 2 KiB buffers. The 82574L uses MSI-X (routed through `IVAR`); cards without MSI are polled by the network task.
+
+### The stack
+
+- **One task.** `net::init` starts a `net` kernel task that drains the receive queue, processes frames, and runs timers (ARP retries, TCP retransmissions, delayed ACKs, TIME_WAIT, DHCP) at least every 10 ms. The stack's state sits behind one mutex. After each round the task bumps a generation counter and wakes waiters, so a socket's wait never holds the stack's lock while sleeping.
+- **Layers.** Ethernet and ARP (unresolved packets wait in a queue for up to 3.5 s), IPv4 without fragmentation, ICMP (echo, and unreachable reported to TCP), UDP, and TCP (`net/tcp.rs`): the full state machine, MSS 1460, window scale 3, 256 KiB buffers, out-of-order segments kept, RFC 6298 timers, slow start and congestion avoidance, fast retransmit on three duplicate ACKs, zero-window probes, a 5-second TIME_WAIT and RFC 1337.
+- **Interfaces.** `lo` (127.0.0.1) plus one `eth<n>` per adapter. The DHCP client (`net/dhcp.rs`) gets the address, router and DNS servers, and renews at half the lease. The desktop hears about changes and redraws the menu bar.
+- **Sockets** (`net/socket.rs`) are file descriptors: TCP (connect, listen, accept, shutdown), UDP datagrams, and ICMP "ping" sockets (the kernel fills in the identifier and checksum). Reads and writes block with a timeout, or return `EAGAIN` in non-blocking mode.
+- **Randomness** (`random.rs`) is a ChaCha20 generator seeded from RDSEED/RDRAND and timing jitter, rekeyed after use; it gives TCP its initial sequence numbers and programs `GETRANDOM`.
+
+## 8. The web (`libs/web`, `libs/tls`, `libs/surf`, `userland/apps/surf`)
+
+All three libraries are `no_std` and make no system calls. Programs supply connections, text measurement and images, so the libraries run and are tested on the host.
+
+- **HTTP** (`libs/web`). `http::fetch` follows redirects over any `Connect`or. `libaurora::web` provides one that resolves names (DNS over UDP), opens TCP or TLS connections, and keeps idle ones in a small per-process pool (15 s, up to 8), retrying on a fresh connection if an idle one was closed by the server.
+- **TLS** (`libs/tls`). The client offers TLS 1.3 and 1.2. In 1.3 it sends an X25519 key share, answers a HelloRetryRequest with P-256, runs the HKDF key schedule, and checks `CertificateVerify` and `Finished`. In 1.2 it does ECDHE with AEAD ciphers, the extended master secret and the downgrade check. Certificates are parsed by our DER reader and validated to one of Mozilla's roots (packed by xtask into `/System/Certificates/roots.bin`): names (wildcards and IP addresses), validity dates, CA flags and signatures (RSA PKCS#1 and PSS, ECDSA P-256 and P-384). The primitives come from RustCrypto.
+- **The engine** (`libs/surf`):
+  - `html.rs` tokenizes and builds a tree the forgiving way: implied `html`/`head`/`body`, implied end tags, raw-text elements and character references.
+  - `css.rs` parses stylesheets (with `@media` and `@supports`) and matches selectors right to left. `style.rs` runs the cascade: the user-agent sheet, presentational attributes, author sheets and `style` attributes, with `!important`, inheritance, custom properties, `calc()`/`min()`/`max()`, and `::before`/`::after` content. Rules are bucketed by id, class and tag, and each element carries a 256-bit filter of its ancestors' ids, classes and tags, so most descendant selectors are rejected without walking the tree.
+  - `layout.rs` produces a display list of rectangles, text runs, images and bullets, plus link and form-field areas and `#fragment` anchors. It covers block flow with margin collapsing; inline formatting measured in 1/64 px, breaking only at break opportunities; lists; tables (automatic column widths, spans); flex rows; grid (tracks, areas, spans, auto-placement); floats as rows; and form controls.
+- **Surf** (`userland/apps/surf`) loads a page and its stylesheets on a worker thread and pictures on three more, runs layout and paints on the main thread, and keeps the computed styles so pictures arriving later only redo layout.
+
+## 9. Telemetry and the System Explorer (`telemetry.rs`, `xtask/src/monitor.rs`)
 
 When QEMU attaches a second UART (COM2), `telemetry::init` detects it with a scratch-register test and the kernel starts streaming newline-delimited JSON:
 
@@ -279,7 +311,7 @@ Lines are written while holding the port lock and without allocating, so events 
 - xtask serves `docs/explorer/index.html` plus a Server-Sent Events stream at `/events`. The stream replays history, so a page opened late still sees the boot.
 - The page is a single self-contained file with no dependencies. With no server it plays `docs/explorer/demo.js`, a recorded session.
 
-## 8. Testing
+## 10. Testing
 
 - **`cargo xtask test`.** It builds the kernel with `--features ktest`. The tests in `kernel/src/tests.rs` cover:
   - the frame allocator and the heap
@@ -299,12 +331,13 @@ Lines are written while holding the port lock and without allocating, so events 
   - sound: a tone through HDA (the host also checks that QEMU's WAV recording isn't silent)
   - ACPI: AML, sleep types, the test battery, adapter and lid; and that a failing AML task leaves the system running
   - USB: a hub with a keyboard behind it, a tablet, and a FAT32 stick mounted, read and written
-  - sleep: S3 (the harness wakes the VM over QMP), then CPUs, work on every CPU, disk I/O, sound and USB after waking
+  - sleep: S3 (the harness wakes the VM over QMP), then CPUs, work on every CPU, disk I/O, sound, USB and the network after waking
+  - networking: DHCP, ping to loopback and our own address, UDP and TCP over loopback (a megabyte each way), a megabyte over HTTP from a server xtask runs on the host, and an inbound connection through a QEMU port forward
 
   `usertest` also covers threads, futexes and SIMD state surviving preemption.
 
   The kernel reports through QEMU's `isa-debug-exit` device. `xtask test` boots the same fresh disk **twice**: the first boot leaves a file, and the second must find it intact.
 - **Headless boots.** `cargo xtask run --headless` exposes QEMU's HMP monitor at `target/qemu-monitor.sock` and QMP at `target/qemu-qmp.sock`. That makes it possible to script screenshots and input (`screendump`, `input-send-event`).
-- **Host tests.** `cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p xtask` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling), the image codecs (against the `png` crate), WAV decoding and the AML assembler for the test SSDT.
+- **Host tests.** `cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p aurora-web -p aurora-tls -p aurora-surf -p xtask` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling), the image codecs (against the `png`, `jpeg-encoder`, `jpeg-decoder` and `gif` crates), WAV decoding, URLs and HTTP (redirects, keep-alive, gzip), TLS (every cipher suite and version against a rustls server, RFC 8448 key schedule, bad certificates), the browser engine (parsing, selectors, the cascade and layout) and the AML assembler for the test SSDT.
 - **Scripted UI.** `tools/qmp.py` clicks, types and takes screenshots in a running VM.
-- **CI.** On every push, CI runs the host tests, the kernel suite on AHCI, virtio-blk and NVMe with 4 CPUs (and AHCI with 1 CPU), and a headless boot to the desktop.
+- **CI.** On every push, CI runs the host tests, the kernel suite on AHCI, virtio-blk and NVMe with 4 CPUs (and AHCI with 1 CPU), with virtio-net (and e1000e on one job), and a headless boot to the desktop.

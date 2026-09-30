@@ -69,7 +69,11 @@ fn lists_tables_and_images() {
         "<ol><li>one<li>two</ol><table><tr><td>a</td><td>bbbb</td></tr><tr><td colspan=2>w</td></tr></table><img src=big.png>",
     );
     let l = page.layout(400, 600, &Fake);
-    let t: Vec<String> = l.items.iter().filter_map(|i| if let Item::Text { text, .. } = i { Some(text.clone()) } else { None }).collect();
+    let t: Vec<String> = l
+        .items
+        .iter()
+        .filter_map(|i| if let Item::Text { text, .. } = i { Some(text.clone()) } else { None })
+        .collect();
     let mut first4 = t[..4].to_vec();
     first4.sort();
     assert_eq!(first4, ["1.", "2.", "one", "two"]);
@@ -94,7 +98,11 @@ fn css_hides_and_flexes() {
          <div class=nav><a href=/a>A</a><a href=/b>B</a></div><span class=sr>skip</span><p class=wide>wide only</p>",
     );
     let narrow = page.layout(300, 600, &Fake);
-    let t: Vec<(i32, String)> = narrow.items.iter().filter_map(|i| if let Item::Text { x, text, .. } = i { Some((*x, text.clone())) } else { None }).collect();
+    let t: Vec<(i32, String)> = narrow
+        .items
+        .iter()
+        .filter_map(|i| if let Item::Text { x, text, .. } = i { Some((*x, text.clone())) } else { None })
+        .collect();
     assert_eq!(t, [(8, String::from("A")), (284, String::from("B"))]);
     let wide = page.layout(600, 600, &Fake);
     assert!(wide.items.iter().any(|i| matches!(i, Item::Text { text, .. } if text == "wide only")));
@@ -106,7 +114,11 @@ fn css_hides_and_flexes() {
 fn preformatted_text_and_anchors() {
     let page = Page::parse("<pre>a  b\n\tc</pre><h2 id=sec>Section</h2>");
     let l = page.layout(400, 600, &Fake);
-    let t: Vec<String> = l.items.iter().filter_map(|i| if let Item::Text { text, .. } = i { Some(text.clone()) } else { None }).collect();
+    let t: Vec<String> = l
+        .items
+        .iter()
+        .filter_map(|i| if let Item::Text { text, .. } = i { Some(text.clone()) } else { None })
+        .collect();
     assert_eq!(&t[..2], ["a  b", "        c"]);
     assert!(l.anchor("sec").unwrap() > 0);
 }
@@ -149,7 +161,7 @@ fn grids() {
     assert_eq!((x("a"), x("b"), x("c"), x("d")), (8, 118, 260, 8));
     assert_eq!(y("a"), y("c"));
     assert_eq!(y("d") - y("a"), 20 + 10); // one row plus the row gap
-    // Named areas: the sidebar spans two rows, the header both columns.
+                                          // Named areas: the sidebar spans two rows, the header both columns.
     let p = positions(
         "<style>.g{display:grid;grid-template-columns:50px 1fr;grid-template-areas:'head head' 'side main' 'side foot'}
          .g>*{margin:0}</style><div class=g><p style=grid-area:main>m<p style=grid-area:head>h<p style=grid-area:side>s<p style=grid-area:foot>f</div>",

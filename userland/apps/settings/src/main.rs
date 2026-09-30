@@ -596,7 +596,10 @@ impl Settings {
                 cv.text(card.right() - 16 - f.width(&out), c.y + 70 + 2 * ROW_H + 27, &out, f, t.text_secondary);
             }
             Pane::Network => {
-                let ifaces: Vec<_> = aurora::net::interfaces().into_iter().filter(|i| i.flags & aurora::abi::net::IF_LOOPBACK == 0).collect();
+                let ifaces: Vec<_> = aurora::net::interfaces()
+                    .into_iter()
+                    .filter(|i| i.flags & aurora::abi::net::IF_LOOPBACK == 0)
+                    .collect();
                 let f = theme::ui(13);
                 if ifaces.is_empty() {
                     cv.text(c.x, c.y + 80, "No network adapter was found.", theme::ui(14), t.text_secondary);
@@ -620,7 +623,8 @@ impl Settings {
                     cv.text(head.right() - 16 - f.width(drv), head.y + 31, drv, f, t.text_secondary);
                     y += 60;
                     let mac = i.mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
-                    let dns: Vec<String> = i.dns.iter().filter(|d| **d != [0; 4]).map(|d| aurora::net::ip_string(*d)).collect();
+                    let dns: Vec<String> =
+                        i.dns.iter().filter(|d| **d != [0; 4]).map(|d| aurora::net::ip_string(*d)).collect();
                     let lease = if i.lease_secs == 0 {
                         String::from("—")
                     } else {

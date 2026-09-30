@@ -32,8 +32,13 @@ enum Tab {
     System,
 }
 
-const TABS: [(Tab, &str); 5] =
-    [(Tab::Cpu, "CPU"), (Tab::Memory, "Memory"), (Tab::Disk, "Disk"), (Tab::Network, "Network"), (Tab::System, "System")];
+const TABS: [(Tab, &str); 5] = [
+    (Tab::Cpu, "CPU"),
+    (Tab::Memory, "Memory"),
+    (Tab::Disk, "Disk"),
+    (Tab::Network, "Network"),
+    (Tab::System, "System"),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Col {

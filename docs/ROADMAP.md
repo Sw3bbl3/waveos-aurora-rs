@@ -57,7 +57,25 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - **Tools:** `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play` and `volume`; a boot log on the EFI partition; [HARDWARE.md](HARDWARE.md) for testing on real machines.
 - **Deferred:** tickless idle with TSC-deadline timers; I²C touchpads; USB keyboard LEDs; Modern Standby (S0ix); a native GPU driver; per-CPU NVMe queues.
 
-## M6: Networking
+## ✅ M6: Networking and the web
 
-- **NIC drivers:** virtio-net and Intel e1000.
-- **Networking stack:** TCP/IP, starting with smoltcp and moving to our own stack; then DHCP, DNS, an HTTP client, and eventually a simple web browser.
+- **Adapters:** virtio-net (modern virtio-pci, MSI-X) and Intel e1000/e1000e (82540EM, 82574L and relatives; MSI or polled). Both come back after sleep.
+- **Our own IPv4 stack** in the kernel (`net/`): ARP with a pending queue, ICMP echo and unreachable, UDP, and TCP with RFC 6298 retransmission timers, slow start and congestion avoidance, fast retransmit, delayed ACKs, window scaling, zero-window probes and TIME_WAIT. A DHCP client renews its lease, and loopback works.
+- **Sockets** for programs (`SOCKET`, `CONNECT`, `BIND`, `LISTEN`, `ACCEPT`, `SENDTO`, `RECVFROM`, …) with timeouts and non-blocking mode; `GETRANDOM` from a ChaCha20 generator seeded by RDSEED/RDRAND.
+- **The web** (host-tested `no_std` libraries):
+  - `libs/web`: URLs (RFC 3986) and HTTP/1.1 with redirects, chunked bodies, keep-alive through a connection pool, and gzip/deflate
+  - `libs/tls`: TLS 1.3 (X25519 or P-256; AES-GCM or ChaCha20-Poly1305), TLS 1.2 fallback (ECDHE with AEAD ciphers, extended master secret), and our own DER/X.509 path validation against Mozilla's roots. Tested against rustls and RFC 8448.
+  - `libs/surf`: the browser engine. An HTML parser, CSS (selectors with an ancestor Bloom filter, the cascade, custom properties, `calc()`, media queries, `::before`/`::after`), and layout: blocks, inline text, lists, tables, flexbox, grid, floats as rows, form controls.
+- **Images:** our own JPEG (baseline and progressive) and GIF decoders, for Surf, Preview and Files.
+- **Surf:** history, links, fragments, search forms, find in page, zoom, downloads, a start page; `.html` files open in it.
+- **Tools and UI:** `ping`, `ifconfig`, `nslookup`, `fetch`; shell lists (`&&`, `||`, `;`); the menu-bar network item, Settings → Network, and a Network tab in Activity Monitor.
+- **Deferred:** IPv6; JavaScript; cookies and POST forms; tabs; WebP and SVG; Wi-Fi and other adapters (Realtek).
+
+## M7: Next
+
+Candidates, in no fixed order:
+
+- Tickless idle with TSC-deadline timers; per-CPU NVMe queues.
+- I²C-HID touchpads; USB keyboard LEDs.
+- A native GPU driver (virtio-gpu first), so the display survives sleep.
+- IPv6; more of the web platform (cookies, POST, tabs, WebP, SVG).

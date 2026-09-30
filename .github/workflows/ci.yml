@@ -21,7 +21,7 @@ jobs:
           cargo fmt --all -- --check
           (cd userland && cargo fmt --all -- --check)
       - name: Filesystem library tests
-        run: cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p aurora-web -p aurora-tls -p xtask
+        run: cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p aurora-web -p aurora-tls -p aurora-surf -p xtask
 
   kernel:
     name: Kernel tests (${{ matrix.disk }}, ${{ matrix.smp }} CPU, ${{ matrix.net }})

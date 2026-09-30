@@ -74,11 +74,11 @@ dependencies = [
 
 [[package]]
 name = "aurora-abi"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "aurora-boot"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aurora-elf",
  "bootinfo",
@@ -88,11 +88,11 @@ dependencies = [
 
 [[package]]
 name = "aurora-elf"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "aurora-gfx"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fontdue",
  "spin",
@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "aurora-image"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "gif",
  "jpeg-decoder",
@@ -111,11 +111,11 @@ dependencies = [
 
 [[package]]
 name = "aurora-surf"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "aurora-tls"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "aurora-web",
@@ -134,11 +134,11 @@ dependencies = [
 
 [[package]]
 name = "aurora-wav"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "aurora-web"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "miniz_oxide 0.8.9",
 ]
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "bootinfo"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "bumpalo"
@@ -482,7 +482,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "fat32"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fatfs",
 ]
@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "tide"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "acpi",
  "aurora-abi",
@@ -1520,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "wavefs"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "webpki-roots"
@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aurora-wav",
  "fatfs",
