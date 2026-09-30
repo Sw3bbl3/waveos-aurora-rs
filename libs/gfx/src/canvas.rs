@@ -373,6 +373,33 @@ impl<'a> Canvas<'a> {
         (adv + 32) >> 6
     }
 
+    /// Draws `s` slanted about 12° (a synthesized italic). Returns the advance in pixels.
+    pub fn text_slanted(&mut self, x: i32, y: i32, s: &str, font: Font, c: u32) -> i32 {
+        let base_a = alpha(c);
+        let clip = self.clip;
+        let adv = font.layout(s, |g| {
+            for row in 0..g.h as i32 {
+                let py = y + g.y + row;
+                if py < clip.y || py >= clip.bottom() {
+                    continue;
+                }
+                // Rows above the baseline lean right.
+                let shift = (y - py) * 13 / 64;
+                for col in 0..g.w as i32 {
+                    let px = x + g.x + col + shift;
+                    if px < clip.x || px >= clip.right() {
+                        continue;
+                    }
+                    let cov = g.coverage[(row * g.w as i32 + col) as usize] as u32;
+                    if cov != 0 {
+                        self.put(px, py, c, cov * base_a / 255);
+                    }
+                }
+            }
+        });
+        (adv + 32) >> 6
+    }
+
     /// Draws text centred horizontally in `r`, vertically centred on its cap height.
     pub fn text_centered(&mut self, r: Rect, s: &str, font: Font, c: u32) {
         let w = font.width(s);

@@ -22,6 +22,8 @@ pub enum Icon {
     Paint,
     Clock,
     Activity,
+    /// The web browser: a globe riding a wave.
+    Surf,
     /// A picture file (PNG/BMP) in Files.
     Picture,
     Trash,
@@ -133,7 +135,7 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
             let f = theme::ui_bold(if s >= 40 { 20 } else { 14 });
             cv.text_centered(r, "Hi", f, 0xFFFF_FFFF);
         }
-        Icon::Preview | Icon::Paint | Icon::Clock | Icon::Activity | Icon::Picture | Icon::Trash | Icon::TrashFull => {
+        Icon::Preview | Icon::Paint | Icon::Clock | Icon::Activity | Icon::Surf | Icon::Picture | Icon::Trash | Icon::TrashFull => {
             draw_more(cv, icon, r)
         }
         Icon::Document => {
@@ -225,6 +227,18 @@ fn draw_more(cv: &mut Canvas, icon: Icon, r: Rect) {
             let pts: Vec<(i32, i32)> =
                 ys.iter().enumerate().map(|(i, &v)| (g.x + g.w * i as i32 / 9, g.y + g.h * v / 80)).collect();
             cv.polyline(&pts, u(3).max(2), rgb(0x30, 0xD1, 0x58));
+        }
+        Icon::Surf => {
+            cv.fill_round_rect_dgradient(r, rad, rgb(0x0A, 0x6C, 0xFF), rgb(0x2D, 0xD4, 0xBF));
+            let (cx, cy) = r.center();
+            let rr = u(15);
+            cv.fill_circle(cx, cy, rr, 0xFFFF_FFFF);
+            let blue = rgb(0x0A, 0x6C, 0xFF);
+            // Meridian and equator.
+            cv.stroke_round_rect(Rect::new(cx - u(6), cy - rr + 1, u(12), rr * 2 - 2), u(6), blue & 0x00FF_FFFF | 0x9000_0000);
+            cv.fill_rect(Rect::new(cx - rr + u(2), cy - u(5), rr * 2 - u(4), u(1).max(1)), blue & 0x00FF_FFFF | 0x9000_0000);
+            // The wave across its lower half.
+            wave(cv, Rect::new(cx - rr + u(3), cy + u(2), rr * 2 - u(6), u(8)), 1, u(3).max(2), blue);
         }
         Icon::Trash | Icon::TrashFull => {
             let body = Rect::new(r.x + u(11), r.y + u(12), s - u(22), s - u(16));

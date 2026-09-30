@@ -35,6 +35,7 @@ pub enum AppKind {
     Paint,
     Clock,
     Activity,
+    Surf,
     Power,
     Crash,
     DisplayConfirm,
@@ -65,6 +66,15 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Files.elf",
         single: true,
+    },
+    AppInfo {
+        kind: AppKind::Surf,
+        name: "Surf",
+        icon: Icon::Surf,
+        pinned: true,
+        listed: true,
+        path: "/System/Apps/Surf.elf",
+        single: false,
     },
     AppInfo {
         kind: AppKind::Terminal,

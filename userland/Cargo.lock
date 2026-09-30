@@ -127,6 +127,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-surf"
+version = "0.5.0"
+dependencies = [
+ "aurora",
+ "aurora-image",
+ "aurora-surf",
+ "aurora-web",
+ "ripple",
+]
+
+[[package]]
 name = "app-terminal"
 version = "0.5.0"
 dependencies = [
@@ -171,6 +182,10 @@ version = "0.5.0"
 dependencies = [
  "miniz_oxide",
 ]
+
+[[package]]
+name = "aurora-surf"
+version = "0.5.0"
 
 [[package]]
 name = "aurora-tls"

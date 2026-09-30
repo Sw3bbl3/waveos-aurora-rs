@@ -107,6 +107,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-surf"
+version = "0.5.0"
+
+[[package]]
 name = "aurora-tls"
 version = "0.5.0"
 dependencies = [

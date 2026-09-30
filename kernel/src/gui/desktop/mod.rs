@@ -302,9 +302,16 @@ impl Desktop {
         }
     }
 
-    /// Opens a document in the app for its type (pictures in Preview, the rest in Notes).
+    /// Opens a document in the app for its type (pictures in Preview, web pages in Surf, the rest in Notes).
     pub fn open_file(&mut self, path: &str) {
-        let kind = if aurora_image::is_image_name(path) { AppKind::Preview } else { AppKind::Notes };
+        let lower = path.to_ascii_lowercase();
+        let kind = if aurora_image::is_image_name(path) {
+            AppKind::Preview
+        } else if lower.ends_with(".html") || lower.ends_with(".htm") {
+            AppKind::Surf
+        } else {
+            AppKind::Notes
+        };
         self.spawn_program(apps::info(kind).path, &[path]);
     }
 
