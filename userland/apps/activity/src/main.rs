@@ -28,11 +28,12 @@ enum Tab {
     Cpu,
     Memory,
     Disk,
+    Network,
     System,
 }
 
-const TABS: [(Tab, &str); 4] =
-    [(Tab::Cpu, "CPU"), (Tab::Memory, "Memory"), (Tab::Disk, "Disk"), (Tab::System, "System")];
+const TABS: [(Tab, &str); 5] =
+    [(Tab::Cpu, "CPU"), (Tab::Memory, "Memory"), (Tab::Disk, "Disk"), (Tab::Network, "Network"), (Tab::System, "System")];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Col {
@@ -61,6 +62,10 @@ pub struct Activity {
     mem_hist: VecDeque<u32>,
     read_hist: VecDeque<u64>,
     write_hist: VecDeque<u64>,
+    /// Bytes received and sent per second, and the totals last sampled.
+    rx_hist: VecDeque<u64>,
+    tx_hist: VecDeque<u64>,
+    net_prev: Option<(u64, u64)>,
     rates: (u64, u64, u64, u64), // interrupts/s, syscalls/s, switches/s, frames/s
     sort: (Col, bool),
     selected: Option<u32>,
@@ -121,6 +126,9 @@ impl Activity {
             mem_hist: VecDeque::new(),
             read_hist: VecDeque::new(),
             write_hist: VecDeque::new(),
+            rx_hist: VecDeque::new(),
+            tx_hist: VecDeque::new(),
+            net_prev: None,
             rates: (0, 0, 0, 0),
             sort: (Col::Cpu, false),
             selected: None,
@@ -162,6 +170,16 @@ impl Activity {
             );
         }
         push(&mut self.mem_hist, (s.mem_used * 1000 / s.mem_total.max(1)) as u32);
+        // Network: all adapters but loopback.
+        let (rx, tx) = aurora::net::interfaces()
+            .iter()
+            .filter(|i| i.flags & aurora::abi::net::IF_LOOPBACK == 0)
+            .fold((0u64, 0u64), |(r, t), i| (r + i.rx_bytes, t + i.tx_bytes));
+        if let Some((pr, pt)) = self.net_prev {
+            push(&mut self.rx_hist, rx.saturating_sub(pr) * 1000 / dt);
+            push(&mut self.tx_hist, tx.saturating_sub(pt) * 1000 / dt);
+        }
+        self.net_prev = Some((rx, tx));
 
         let mut rows = Vec::new();
         let mut seen = BTreeMap::new();
@@ -203,7 +221,7 @@ impl Activity {
     }
 
     fn tabs(area: Rect) -> Rect {
-        Rect::new(area.x + (area.w - 360) / 2, area.y + 11, 360, 30)
+        Rect::new(area.x + (area.w - 450) / 2, area.y + 11, 450, 30)
     }
 
     fn quit_button(area: Rect) -> Rect {
@@ -440,6 +458,38 @@ impl Activity {
                 widgets::progress(cv, bar, (used * 1000 / info.disk_total.max(1)) as i32, theme::accent());
                 let cap = format!("{} used of {}", human_bytes(used), human_bytes(info.disk_total));
                 cv.text(g.x + 8, bar.bottom() + 22, &cap, theme::ui(12), t.text_secondary);
+            }
+            Tab::Network => {
+                let (purple, teal) = (0xFFBF_5AF2, 0xFF30_B0C7);
+                let max = self.rx_hist.iter().chain(self.tx_hist.iter()).copied().max().unwrap_or(0).max(16 * 1024);
+                let gr = Rect::new(g.x, g.y, g.w - 200, g.h + 60);
+                Self::graph(cv, gr, &[&self.rx_hist, &self.tx_hist], max, &[purple, teal]);
+                let x = gr.right() + 24;
+                let rx = self.rx_hist.back().copied().unwrap_or(0);
+                let tx = self.tx_hist.back().copied().unwrap_or(0);
+                Self::stat(cv, x, g.y + 22, "Receiving", &format!("{}/s", human_bytes(rx)), Some(purple));
+                Self::stat(cv, x, g.y + 70, "Sending", &format!("{}/s", human_bytes(tx)), Some(teal));
+                Self::stat(cv, x, g.y + 118, "Scale", &format!("{}/s", human_bytes(max)), None);
+                let y = gr.bottom() + 34;
+                let f = theme::ui(13);
+                let cols = [(8, "Interface"), (130, "Driver"), (250, "Address"), (390, "Received"), (530, "Sent")];
+                for (cx, h) in cols {
+                    cv.text(g.x + cx, y, h, theme::ui_bold(12), t.text_secondary);
+                }
+                for (k, i) in aurora::net::interfaces().iter().enumerate() {
+                    let ry = y + 28 + k as i32 * 26;
+                    let ip = if i.ip == [0; 4] { String::from("—") } else { aurora::net::ip_string(i.ip) };
+                    let vals = [
+                        String::from(aurora::net::name_of(i)),
+                        String::from(aurora::net::driver_of(i)),
+                        ip,
+                        format!("{} ({} pkts)", human_bytes(i.rx_bytes), i.rx_packets),
+                        format!("{} ({} pkts)", human_bytes(i.tx_bytes), i.tx_packets),
+                    ];
+                    for ((cx, _), v) in cols.iter().zip(vals.iter()) {
+                        cv.text_clipped(g.x + cx, ry, v, f, t.text, 136);
+                    }
+                }
             }
             Tab::System => {
                 let up = s.uptime_ms / 1000;

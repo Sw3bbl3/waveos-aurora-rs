@@ -4,13 +4,15 @@
 //! inside the shell. Anything else is a program: `/System/Bin/<name>` (or a
 //! path), started as its own process with stdout/stderr connected to a pipe
 //! that the terminal reads while the program runs. Supports pipelines
-//! (`ls | grep txt`), output redirection (`>`, `>>`) and Ctrl+C.
+//! (`ls | grep txt`), output redirection (`>`, `>>`), command lists
+//! (`a && b`, `a || b`, `a; b`) and Ctrl+C.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -49,6 +51,60 @@ pub struct Terminal {
     caret_on: bool,
     last_blink: u64,
     job: Option<Job>,
+    /// The rest of a command list, each with the condition that runs it.
+    queue: VecDeque<(Then, String)>,
+    /// Exit status of the last command (0 = success).
+    status: i32,
+    /// A job ended: continue the command list on the next tick.
+    list_pending: bool,
+}
+
+/// How a command in a list depends on the one before it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Then {
+    Always,
+    IfOk,
+    IfFailed,
+}
+
+/// Splits a command line on `;`, `&&` and `||` outside quotes.
+fn command_list(line: &str) -> VecDeque<(Then, String)> {
+    let mut out = VecDeque::new();
+    let mut cur = String::new();
+    let mut then = Then::Always;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => {
+                quote = None;
+                cur.push(c);
+            }
+            (Some(_), c) => cur.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            (None, ';') => {
+                out.push_back((then, core::mem::take(&mut cur)));
+                then = Then::Always;
+            }
+            (None, '&') if chars.peek() == Some(&'&') => {
+                chars.next();
+                out.push_back((then, core::mem::take(&mut cur)));
+                then = Then::IfOk;
+            }
+            (None, '|') if chars.peek() == Some(&'|') => {
+                chars.next();
+                out.push_back((then, core::mem::take(&mut cur)));
+                then = Then::IfFailed;
+            }
+            (None, c) => cur.push(c),
+        }
+    }
+    out.push_back((then, cur));
+    out.retain(|(_, c)| !c.trim().is_empty());
+    out
 }
 
 impl Terminal {
@@ -62,6 +118,9 @@ impl Terminal {
             caret_on: true,
             last_blink: 0,
             job: None,
+            queue: VecDeque::new(),
+            status: 0,
+            list_pending: false,
         };
         let info = process::sys_info();
         t.out(&format!("WaveOS Aurora {} — aurora-sh", process::fixed_str(&info.version, info.version_len)), VIOLET);
@@ -87,18 +146,42 @@ impl Terminal {
     }
 
     fn run(&mut self, cmdline: &str, env: &mut Env) {
+        self.queue = command_list(cmdline);
+        self.status = 0;
+        self.run_queue(env);
+    }
+
+    /// Runs queued commands until one starts a program (or the list ends).
+    fn run_queue(&mut self, env: &mut Env) {
+        while self.job.is_none() {
+            let Some((then, cmd)) = self.queue.pop_front() else { return };
+            let go = match then {
+                Then::Always => true,
+                Then::IfOk => self.status == 0,
+                Then::IfFailed => self.status != 0,
+            };
+            if go {
+                self.run_one(&cmd, env);
+            }
+        }
+    }
+
+    fn run_one(&mut self, cmdline: &str, env: &mut Env) {
         let stages: Vec<Vec<String>> = cmdline.split('|').map(tokenize).collect();
         if stages.iter().any(|s| s.is_empty()) {
             if stages.len() > 1 {
                 self.out("aurora-sh: empty command in pipeline", RED);
             }
+            self.status = 2;
             return;
         }
+        self.status = 0;
         if stages.len() == 1 && self.builtin(&stages[0], env) {
             return;
         }
         if let Err(msg) = self.start(stages) {
             self.out(&msg, RED);
+            self.status = 1;
         }
     }
 
@@ -107,9 +190,11 @@ impl Terminal {
         match argv[0].as_str() {
             "help" => self.out(
                 "Built-in:\n  cd DIR · clear · history · theme light|dark · exit\n\nPrograms in /System/Bin (each runs as \
-                 its own process):\n  ls cat echo mkdir rm mv cp touch grep wc\n  ps kill uname uptime date mem neofetch \
-                 hello\n\nAlso: open APP|FILE · shutdown · reboot\nPipelines and redirection: ls | grep txt, echo hi > \
-                 note.txt, cmd >> log\nCtrl+C stops the running program, Ctrl+L clears the screen.",
+                 its own process):\n  files: ls cat echo mkdir rm mv cp touch grep wc df sync\n  system: ps kill uname \
+                 uptime date mem cpuinfo lspci lsusb dmesg battery neofetch\n  sound: play volume\n  network: ping \
+                 ifconfig nslookup fetch (http and https)\n\nAlso: open APP|FILE · shutdown · reboot\nPipelines and \
+                 redirection: ls | grep txt, echo hi > note.txt, cmd >> log\nLists: a && b (b if a worked), a || b (b \
+                 if a failed), a; b\nCtrl+C stops the running program, Ctrl+L clears the screen.",
                 FG,
             ),
             "clear" => self.lines.clear(),
@@ -118,6 +203,7 @@ impl Terminal {
                 let target = fs::resolve(&fs::cwd(), arg(1).unwrap_or("/"));
                 if let Err(e) = fs::chdir(&target) {
                     self.out(&format!("cd: {target}: {e}"), RED);
+                    self.status = 1;
                 }
             }
             "history" => {
@@ -200,9 +286,13 @@ impl Terminal {
             match res {
                 Ok(pid) => pids.push(pid),
                 Err(e) if e.is(aurora::abi::err::ENOENT) => {
-                    self.out(&format!("{}: command not found (try `help`)", argv[0]), RED)
+                    self.out(&format!("{}: command not found (try `help`)", argv[0]), RED);
+                    self.status = 127;
                 }
-                Err(e) => self.out(&format!("{}: {e}", argv[0]), RED),
+                Err(e) => {
+                    self.out(&format!("{}: {e}", argv[0]), RED);
+                    self.status = 126;
+                }
             }
         }
         if let Some(r) = prev_read {
@@ -253,15 +343,25 @@ impl Terminal {
                 self.out(&job.partial, FG);
             }
             process::close(job.output);
-            for pid in &job.pids {
-                match process::wait(*pid, Some(2000)) {
+            // A list continues after the last stage; its status decides && and ||.
+            let last = job.pids.len().saturating_sub(1);
+            for (k, pid) in job.pids.iter().enumerate() {
+                let code = process::wait(*pid, Some(2000));
+                match code {
                     Ok(0) => {}
                     Ok(-11) => self.out("[program crashed]", RED),
-                    Ok(-9) => self.out("^C", DIM),
-                    Ok(code) => self.out(&format!("[exit code {code}]"), DIM),
-                    Err(_) => {}
+                    Ok(-9) => {
+                        self.out("^C", DIM);
+                        self.queue.clear();
+                    }
+                    Ok(code) if self.queue.is_empty() => self.out(&format!("[exit code {code}]"), DIM),
+                    _ => {}
+                }
+                if k == last {
+                    self.status = code.map_or(1, |c| c as i32);
                 }
             }
+            self.list_pending = true;
             return true;
         }
         changed
@@ -426,6 +526,9 @@ impl App for Terminal {
 
     fn tick(&mut self, env: &mut Env) -> bool {
         let mut changed = self.poll_job();
+        if core::mem::take(&mut self.list_pending) {
+            self.run_queue(env);
+        }
         if env.focused && env.now_ms - self.last_blink >= 530 {
             self.caret_on = !self.caret_on;
             self.last_blink = env.now_ms;

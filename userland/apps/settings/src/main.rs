@@ -37,16 +37,18 @@ enum Pane {
     Appearance,
     Display,
     Keyboard,
+    Network,
     DateTime,
     Sound,
     Notifications,
     About,
 }
 
-const PANES: [(Pane, &str, &str, u32); 7] = [
+const PANES: [(Pane, &str, &str, u32); 8] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
+    (Pane::Network, "Network", "network", 0xFF30D158),
     (Pane::DateTime, "Date & Time", "datetime", 0xFFFF9F0A),
     (Pane::Sound, "Sound", "sound", 0xFFFF375F),
     (Pane::Notifications, "Notifications", "notifications", 0xFFFF453A),
@@ -215,6 +217,7 @@ impl Settings {
                 v.push((Hit::Zone(-30), Rect::new(c.right() - 150, zy + 8, 28, 28)));
                 v.push((Hit::Zone(30), Rect::new(c.right() - 38, zy + 8, 28, 28)));
             }
+            Pane::Network => {}
             Pane::Sound => {
                 v.push((Hit::Volume, Rect::new(c.x + 110, c.y + 70 + 12, c.w - 140, 20)));
                 v.push((Hit::Toggle(pref::MUTED), Self::toggle_rect(Rect::new(c.x, c.y + 70 + ROW_H, c.w, ROW_H))));
@@ -592,6 +595,65 @@ impl Settings {
                 let f = theme::ui(13);
                 cv.text(card.right() - 16 - f.width(&out), c.y + 70 + 2 * ROW_H + 27, &out, f, t.text_secondary);
             }
+            Pane::Network => {
+                let ifaces: Vec<_> = aurora::net::interfaces().into_iter().filter(|i| i.flags & aurora::abi::net::IF_LOOPBACK == 0).collect();
+                let f = theme::ui(13);
+                if ifaces.is_empty() {
+                    cv.text(c.x, c.y + 80, "No network adapter was found.", theme::ui(14), t.text_secondary);
+                }
+                let mut y = c.y + 64;
+                for i in &ifaces {
+                    let ip = |a: [u8; 4]| if a == [0; 4] { String::from("—") } else { aurora::net::ip_string(a) };
+                    let (status, color) = match (i.flags & aurora::abi::net::IF_LINK != 0, i.ip != [0; 4]) {
+                        (true, true) => ("Connected", 0xFF30_D158),
+                        (true, false) => ("Getting an address…", 0xFFFF_9F0A),
+                        (false, _) => ("Cable unplugged", 0xFFFF_453A),
+                    };
+                    // Header: adapter name and status.
+                    let head = Rect::new(c.x, y, c.w, 52);
+                    cv.fill_round_rect(head, 12, t.window_bg_alt);
+                    cv.fill_circle(head.x + 22, head.y + 26, 6, color);
+                    let title = format!("Ethernet ({})", aurora::net::name_of(i));
+                    cv.text(head.x + 40, head.y + 22, &title, theme::ui_bold(14), t.text);
+                    cv.text(head.x + 40, head.y + 40, status, f, t.text_secondary);
+                    let drv = aurora::net::driver_of(i);
+                    cv.text(head.right() - 16 - f.width(drv), head.y + 31, drv, f, t.text_secondary);
+                    y += 60;
+                    let mac = i.mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
+                    let dns: Vec<String> = i.dns.iter().filter(|d| **d != [0; 4]).map(|d| aurora::net::ip_string(*d)).collect();
+                    let lease = if i.lease_secs == 0 {
+                        String::from("—")
+                    } else {
+                        format!("{} h {} min left", i.lease_secs / 3600, i.lease_secs / 60 % 60)
+                    };
+                    let rows = [
+                        ("IP address", ip(i.ip)),
+                        ("Subnet mask", ip(i.netmask)),
+                        ("Router", ip(i.gateway)),
+                        ("DNS servers", if dns.is_empty() { String::from("—") } else { dns.join(", ") }),
+                        ("Hardware address", mac),
+                        ("DHCP lease", lease),
+                        ("Received", format!("{} ({} packets)", human(i.rx_bytes), i.rx_packets)),
+                        ("Sent", format!("{} ({} packets)", human(i.tx_bytes), i.tx_packets)),
+                    ];
+                    let card = Rect::new(c.x, y, c.w, rows.len() as i32 * 34);
+                    cv.fill_round_rect(card, 12, t.window_bg_alt);
+                    for (k, (label, value)) in rows.iter().enumerate() {
+                        let ry = card.y + k as i32 * 34 + 22;
+                        cv.text(card.x + 16, ry, label, f, t.text_secondary);
+                        cv.text(card.right() - 16 - f.width(value), ry, value, f, t.text);
+                        if k > 0 {
+                            cv.fill_rect(Rect::new(card.x + 16, card.y + k as i32 * 34, card.w - 32, 1), t.separator);
+                        }
+                    }
+                    y = card.bottom() + 20;
+                }
+                let note = "Addresses come from the network's DHCP server. Test the connection with `ping` or \
+                            `fetch` in Terminal, or browse with Surf.";
+                for (k, (a, b)) in widgets::wrap(note, f, c.w).into_iter().enumerate() {
+                    cv.text(c.x, y + 10 + k as i32 * 20, &note[a..b], f, t.text_secondary);
+                }
+            }
             Pane::Notifications => {
                 let r = Rect::new(c.x, c.y + 70, c.w, ROW_H);
                 Self::card(cv, r, 1);
@@ -674,6 +736,15 @@ fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
             }
             cv.fill_rect(Rect::new(cx - 4, cy + 2, 8, 1), 0xFF8E8E93);
         }
+        Pane::Network => {
+            // Three nodes joined (a small network).
+            cv.line(cx - 5, cy + 4, cx, cy - 4, 2, w);
+            cv.line(cx + 5, cy + 4, cx, cy - 4, 2, w);
+            cv.line(cx - 5, cy + 4, cx + 5, cy + 4, 2, w);
+            for (x, y) in [(cx, cy - 4), (cx - 5, cy + 4), (cx + 5, cy + 4)] {
+                cv.fill_circle(x, y, 2, w);
+            }
+        }
         Pane::DateTime => {
             cv.fill_circle(cx, cy, 7, w);
             cv.line(cx, cy, cx, cy - 5, 1, 0xFFFF9F0A);
@@ -693,6 +764,15 @@ fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
             cv.fill_circle(cx, cy - 4, 1, w);
             cv.fill_rect(Rect::new(cx - 1, cy - 1, 2, 7), w);
         }
+    }
+}
+
+fn human(n: u64) -> String {
+    match n {
+        n if n >= 1 << 30 => format!("{}.{} GB", n >> 30, (n % (1 << 30)) * 10 >> 30),
+        n if n >= 1 << 20 => format!("{}.{} MB", n >> 20, (n % (1 << 20)) * 10 >> 20),
+        n if n >= 1 << 10 => format!("{} KB", n >> 10),
+        n => format!("{n} bytes"),
     }
 }
 
@@ -791,6 +871,9 @@ impl App for Settings {
             }
             changed = true; // the big clock ticks
         }
+        if self.pane == Pane::Network {
+            changed = true; // traffic counters
+        }
         if let Some((_, at)) = self.note {
             if env.now_ms > at + 4000 {
                 self.note = None;
@@ -808,6 +891,8 @@ impl App for Settings {
     fn tick_interval(&self) -> u64 {
         if self.pane == Pane::DateTime {
             500
+        } else if self.pane == Pane::Network {
+            1000
         } else {
             100
         }

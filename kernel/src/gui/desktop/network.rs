@@ -41,13 +41,24 @@ impl Desktop {
     fn network_popover_rect(&self) -> Rect {
         let r = self.network_rect().unwrap_or_default();
         let w = 300;
-        Rect::new((r.x + r.w / 2 - w / 2).min(self.w - w - 8), MENUBAR_H + 6, w, 176)
+        Rect::new((r.x + r.w / 2 - w / 2).min(self.w - w - 8), MENUBAR_H + 6, w, 212)
+    }
+
+    /// The "Network Settings…" row at the bottom of the popover.
+    fn network_settings_rect(&self) -> Rect {
+        let p = self.network_popover_rect();
+        Rect::new(p.x + 6, p.bottom() - 36, p.w - 12, 30)
     }
 
     pub(super) fn network_press(&mut self, x: i32, y: i32) -> bool {
         let on_item = self.network_rect().is_some_and(|r| r.contains(x, y));
         if self.network_popover {
             let inside = self.network_popover_rect().contains(x, y);
+            if self.network_settings_rect().contains(x, y) {
+                self.close_network_popover();
+                self.spawn_program(super::apps::info(super::apps::AppKind::Settings).path, &["network"]);
+                return true;
+            }
             if !inside {
                 self.network_popover = false;
                 let p = self.network_popover_rect();
@@ -136,5 +147,8 @@ impl Desktop {
             cv.text(p.x + 16, y, label, f, t.text_secondary);
             cv.text_clipped(p.x + 110, y, value, f, t.text, p.w - 126);
         }
+        let s = self.network_settings_rect();
+        cv.fill_rect(Rect::new(p.x + 14, s.y - 4, p.w - 28, 1), t.separator);
+        cv.text(s.x + 10, s.y + 20, "Network Settings…", f, t.text);
     }
 }
