@@ -16,6 +16,7 @@ pub enum Icon {
     Calculator,
     Settings,
     Welcome,
+    Learn,
     Folder,
     Document,
     Preview,
@@ -55,6 +56,17 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
             wave(cv, inner, 2, u(4).max(2), 0xFFFF_FFFF);
             let lower = inner.offset(0, u(9));
             wave(cv, Rect::new(lower.x + u(6), lower.y, lower.w - u(12), lower.h), 1, u(3).max(1), 0xAAFF_FFFF);
+        }
+        Icon::Learn => {
+            cv.fill_round_rect_dgradient(r, rad, 0xff4b70ef, 0xff7952df);
+            let left = Rect::new(r.x + u(9), r.y + u(11), u(14), u(27));
+            let right = Rect::new(r.x + u(25), r.y + u(11), u(14), u(27));
+            cv.fill_round_rect(left, u(3), 0xfff6f4ff);
+            cv.fill_round_rect(right, u(3), 0xffdedbff);
+            for y in [18, 23, 28] {
+                cv.fill_rect(Rect::new(r.x + u(12), r.y + u(y), u(8), u(1).max(1)), 0xff8993c5);
+                cv.fill_rect(Rect::new(r.x + u(28), r.y + u(y), u(8), u(1).max(1)), 0xff8993c5);
+            }
         }
         Icon::Launcher => {
             cv.fill_round_rect_dgradient(r, rad, rgb(0x5B, 0x6C, 0xFF), rgb(0xA8, 0x55, 0xF7));

@@ -644,6 +644,33 @@ impl App for Learn {
     }
 }
 corekit::entry!(main);
-fn main(_: corekit::Args) -> i32 {
-    aurorakit::run(Learn::new())
+fn main(args: corekit::Args) -> i32 {
+    if args.get(1).is_some_and(|s| s == "--check-library") {
+        aurorakit::load_fonts();
+        let mut learn = Learn::new();
+        let mut checked = 0;
+        let catalog = learn.catalog.clone();
+        if catalog.is_empty() {
+            corekit::println!("learn-check FAILED: missing catalog");
+            return 1;
+        }
+        for a in catalog {
+            learn.locale = a.locale.clone();
+            learn.open_id(&a.id, false);
+            learn.view = Rect::new(0, 0, 720, 550);
+            learn.ensure_layout();
+            if learn.error.is_some() || learn.layout.as_ref().is_none_or(|l| l.items.is_empty()) {
+                corekit::println!("learn-check FAILED {} {}", a.locale, a.id);
+                return 1;
+            }
+            checked += 1;
+        }
+        corekit::println!("learn-check passed: {} offline articles rendered", checked);
+        return 0;
+    }
+    let mut learn = Learn::new();
+    if let Some(id) = args.get(1) {
+        learn.open_id(id, false);
+    }
+    aurorakit::run(learn)
 }

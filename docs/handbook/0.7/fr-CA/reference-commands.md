@@ -23,3 +23,18 @@ Résultat attendu : deux fichiers lisibles. La redirection > remplace un fichier
 
 ## Dépannage
 Les noms de commandes et les chemins distinguent les majuscules des minuscules. Les programmes peuvent n’implémenter qu’une partie des options Unix habituelles. Ne supposez pas que les scripts shell, les gestionnaires de paquets ou les outils Rust natifs sont disponibles.
+
+## Commandes de l’interpréteur
+Utilisez `cd DIR` pour changer de dossier, `history` pour revoir les commandes, `clear` ou Ctrl+L pour effacer l’affichage et `exit` pour fermer Terminal. `theme light` et `theme dark` choisissent l’apparence. `open Learn` lance une application; `open /Documents/practice/message.txt` ouvre un fichier. `shutdown` et `reboot` agissent sur tout le système.
+
+## Autres exemples
+```sh
+ls /Documents | grep txt
+ps
+uname
+ifconfig
+nslookup example.com
+fetch https://example.com
+sync
+```
+Les exemples réseau nécessitent un adaptateur configuré et un réseau accessible. `a && b` exécute b après une réussite; `a || b` exécute b après un échec; `a; b` exécute les deux. Ctrl+C arrête le programme au premier plan. Mettez les chemins contenant des espaces entre guillemets. Utilisez `kill PID` seulement après avoir identifié le processus voulu avec `ps`.

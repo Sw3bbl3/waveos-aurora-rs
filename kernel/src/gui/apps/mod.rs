@@ -64,7 +64,7 @@ pub static CATALOG: &[AppInfo] = &[
     AppInfo {
         kind: AppKind::Learn,
         name: "Learn",
-        icon: Icon::Welcome,
+        icon: Icon::Learn,
         pinned: false,
         listed: true,
         path: "/System/Apps/Learn.elf",

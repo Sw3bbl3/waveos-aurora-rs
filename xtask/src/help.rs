@@ -81,10 +81,20 @@ pub fn build(root: &Path) -> Result<PathBuf, String> {
             sources.insert(p.canonicalize().unwrap(), (locale.to_string(), id));
         }
         ids.insert(locale, names);
-        sources.insert(
-            root.join(format!("docs/releases/0.7.0/{locale}.md")).canonicalize().map_err(|e| e.to_string())?,
-            (locale.into(), "release-0.7.0".into()),
-        );
+        for entry in fs::read_dir(root.join("docs/releases")).map_err(|e| e.to_string())? {
+            let release = entry.map_err(|e| e.to_string())?.path();
+            if !release.is_dir() {
+                continue;
+            }
+            let version = release.file_name().unwrap().to_str().ok_or("Invalid release path")?;
+            sources.insert(
+                release
+                    .join(format!("{locale}.md"))
+                    .canonicalize()
+                    .map_err(|_| format!("Missing {locale} translation for release {version}"))?,
+                (locale.into(), format!("release-{version}")),
+            );
+        }
     }
     if ids["en"] != ids["fr-CA"] {
         return Err("English and Canadian French article IDs differ".into());
@@ -213,5 +223,33 @@ mod tests {
     #[test]
     fn complete_handbook_validates() {
         build(&crate::root()).unwrap();
+    }
+    #[test]
+    fn missing_translation_link_anchor_and_image_are_rejected() {
+        let root = std::env::temp_dir().join(format!("waveos-help-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for lang in ["en", "fr-CA"] {
+            fs::create_dir_all(root.join(format!("docs/handbook/0.7/{lang}"))).unwrap();
+            fs::create_dir_all(root.join("docs/releases/0.7.0")).unwrap();
+            fs::write(root.join(format!("docs/releases/0.7.0/{lang}.md")), "# Release\n").unwrap();
+        }
+        let en = root.join("docs/handbook/0.7/en/start.md");
+        let fr = root.join("docs/handbook/0.7/fr-CA/start.md");
+        fs::write(&en, "# Start\n").unwrap();
+        assert!(build(&root).unwrap_err().contains("IDs differ"));
+        fs::write(&fr, "# Départ\n").unwrap();
+        assert!(build(&root).is_ok());
+        for source in [
+            "# Start\n[Missing](no.md)",
+            "# Start\n[Missing](#absent)",
+            "# Start\n![Missing](lost.png)",
+            "# Start\n![Remote](https://example.com/a.png)",
+        ] {
+            fs::write(&en, source).unwrap();
+            assert!(build(&root).is_err(), "{source}");
+        }
+        fs::write(&en, "# Start\n[Here](#start)").unwrap();
+        assert!(build(&root).is_ok());
+        fs::remove_dir_all(root).unwrap();
     }
 }

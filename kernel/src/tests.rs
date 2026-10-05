@@ -34,11 +34,13 @@ const TESTS: &[Test] = &[
     ("sound: HDA playback", sound),
     ("ACPI: AML, sleep states, battery", acpi_runtime),
     ("USB: hub, keyboard, tablet, storage", usb),
+    ("TCP: retransmission ACK bounds", crate::net::tcp::retransmission_ack_test),
     ("network: DHCP, ICMP, UDP, TCP", network),
     ("sleep (S3) and wake", sleep_and_wake),
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
+    ("Learn: both offline libraries", learn_library),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
     ("AuroraFS on RAM disk (kernel adapter)", wavefs_ramdisk),
@@ -254,6 +256,17 @@ fn user_processes() {
     }
     let (_, after) = mm::frame::counts();
     assert!(after + 8 >= before, "user processes leaked {} frames", before - after);
+}
+
+fn learn_library() {
+    let pid = crate::proc::spawn("/System/Apps/Learn.elf", &["Learn", "--check-library"], [None, None, None], 0)
+        .expect("spawn Learn library validation");
+    let p = crate::proc::get(pid).unwrap();
+    let deadline = time::uptime_ms() + 60_000;
+    while p.exit_code().is_none() && time::uptime_ms() < deadline {
+        sched::sleep_ms(10);
+    }
+    assert_eq!(p.exit_code(), Some(0), "Learn offline library validation failed");
 }
 
 use crate::drivers::block::{self, BlockDevice, BlockResult};

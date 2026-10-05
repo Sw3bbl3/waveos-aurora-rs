@@ -1084,6 +1084,9 @@ impl Desktop {
 
     /// Right-click: focuses the window under the pointer and forwards the click to its content.
     fn right_press(&mut self, x: i32, y: i32) {
+        if self.switcher.is_some() {
+            return;
+        }
         if self.menu.is_some() || self.launcher.is_some() || y < MENUBAR_H || self.dock_rect().contains(x, y) {
             return;
         }

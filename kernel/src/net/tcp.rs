@@ -69,6 +69,8 @@ pub struct Conn {
     iss: u32,
     snd_una: u32,
     snd_nxt: u32,
+    /// Highest sequence sent; retransmission only rewinds snd_nxt.
+    snd_max: u32,
     snd_wnd: u32,
     snd_wl1: u32,
     snd_wl2: u32,
@@ -76,6 +78,7 @@ pub struct Conn {
     /// The program shut down sending: a FIN follows the data.
     fin_queued: bool,
     fin_sent: bool,
+    fin_ever_sent: bool,
     fin_seq: u32,
     fin_acked: bool,
     rcv_nxt: u32,
@@ -119,12 +122,14 @@ impl Conn {
             iss,
             snd_una: iss,
             snd_nxt: iss.wrapping_add(1),
+            snd_max: iss.wrapping_add(1),
             snd_wnd: 0,
             snd_wl1: 0,
             snd_wl2: 0,
             send_buf: VecDeque::new(),
             fin_queued: false,
             fin_sent: false,
+            fin_ever_sent: false,
             fin_seq: 0,
             fin_acked: false,
             rcv_nxt: 0,
@@ -247,6 +252,9 @@ impl Conn {
             let seq = self.snd_nxt;
             out.push(self.segment(seq, flags, &data));
             self.snd_nxt = self.snd_nxt.wrapping_add(n as u32);
+            if lt(self.snd_max, self.snd_nxt) {
+                self.snd_max = self.snd_nxt;
+            }
             if self.rtt_probe.is_none() {
                 self.rtt_probe = Some((self.snd_nxt, now));
             }
@@ -258,6 +266,10 @@ impl Conn {
             out.push(self.segment(seq, FIN | ACK, &[]));
             self.snd_nxt = self.snd_nxt.wrapping_add(1);
             self.fin_sent = true;
+            self.fin_ever_sent = true;
+            if lt(self.snd_max, self.snd_nxt) {
+                self.snd_max = self.snd_nxt;
+            }
             self.state = match self.state {
                 State::Established => State::FinWait1,
                 State::CloseWait => State::LastAck,
@@ -276,6 +288,7 @@ impl Conn {
     fn established(&mut self, window: u16, now: u64) {
         self.snd_una = self.iss.wrapping_add(1);
         self.snd_nxt = self.snd_una;
+        self.snd_max = self.snd_una;
         self.snd_wnd = window as u32; // never scaled in SYN segments
         self.cwnd = 10 * self.mss.min(MSS) as u32;
         self.rexmit_at = None;
@@ -326,17 +339,25 @@ impl Conn {
         }
     }
 
+    fn new_ack(&self, ack: u32) -> bool {
+        lt(self.snd_una, ack) && le(ack, self.snd_max)
+    }
+
     /// The peer acknowledged up to `ack`.
     fn acked(&mut self, ack: u32, now: u64) {
         let acked = ack.wrapping_sub(self.snd_una);
         let mut data = acked as usize;
-        if self.fin_sent && lt(self.fin_seq, ack) {
+        if self.fin_ever_sent && !self.fin_acked && lt(self.fin_seq, ack) {
+            self.fin_sent = true;
             self.fin_acked = true;
             data -= 1;
         }
         let data = data.min(self.send_buf.len());
         self.send_buf.drain(..data);
         self.snd_una = ack;
+        if lt(self.snd_nxt, ack) {
+            self.snd_nxt = ack;
+        }
         if let Some((seq, sent)) = self.rtt_probe {
             if le(seq, ack) {
                 self.rtt_sample(now - sent);
@@ -345,7 +366,7 @@ impl Conn {
         }
         self.retries = 0;
         self.dup_acks = 0;
-        self.rexmit_at = if self.snd_una == self.snd_nxt { None } else { Some(now + self.rto) };
+        self.rexmit_at = if self.snd_una == self.snd_max { None } else { Some(now + self.rto) };
         let mss = self.mss.min(MSS) as u32;
         if self.cwnd < self.ssthresh {
             self.cwnd += acked.min(mss);
@@ -761,7 +782,7 @@ pub fn input(s: &mut Stack, src: Ip, dst: Ip, p: &[u8]) {
     }
 
     let c = s.tcp.conns.get_mut(&id).unwrap();
-    if lt(c.snd_una, ack) && le(ack, c.snd_nxt) {
+    if c.new_ack(ack) {
         c.acked(ack, now);
     } else if ack == c.snd_una && data.is_empty() && flags & FIN == 0 && c.snd_una != c.snd_nxt {
         c.dup_acks += 1;
@@ -774,7 +795,7 @@ pub fn input(s: &mut Stack, src: Ip, dst: Ip, p: &[u8]) {
             c.fin_sent = c.fin_sent && c.fin_acked;
             c.rtt_probe = None;
         }
-    } else if lt(c.snd_nxt, ack) {
+    } else if lt(c.snd_max, ack) {
         c.ack_now = true;
         flush(s, id, now);
         return;
@@ -872,5 +893,40 @@ pub fn tick(s: &mut Stack, now: u64) {
             continue;
         }
         flush(s, id, now);
+    }
+}
+
+/// Delayed cumulative ACKs remain valid after the retransmission cursor rewinds.
+#[cfg(feature = "ktest")]
+pub fn retransmission_ack_test() {
+    for base in [100u32, u32::MAX - 49] {
+        let mut c = Conn::new(([127, 0, 0, 1], 8000), ([127, 0, 0, 1], 8001), State::Established);
+        c.snd_una = base;
+        c.snd_nxt = base;
+        c.snd_max = base;
+        c.snd_wnd = 65535;
+        c.cwnd = 65535;
+        c.send_buf.extend(0..100);
+        assert!(!c.output(0).is_empty());
+        c.snd_nxt = base.wrapping_add(20); // retransmit only the first 20 bytes
+        let ack = base.wrapping_add(75);
+        assert!(c.new_ack(ack));
+        assert!(!c.new_ack(base.wrapping_add(101)));
+        c.acked(ack, 10);
+        assert_eq!(c.snd_nxt, ack);
+        assert_eq!(c.send_buf.front(), Some(&75));
+        assert_eq!(c.send_buf.len(), 25);
+        assert!(c.rexmit_at.is_some());
+        c.fin_queued = true;
+        c.output(20);
+        c.snd_nxt = c.snd_una;
+        c.fin_sent = false;
+        let fin_ack = base.wrapping_add(101);
+        assert!(c.new_ack(fin_ack));
+        c.acked(fin_ack, 30);
+        assert!(c.fin_acked);
+        assert!(c.send_buf.is_empty());
+        assert!(c.rexmit_at.is_none());
+        assert_eq!(c.unsent(), 0);
     }
 }
