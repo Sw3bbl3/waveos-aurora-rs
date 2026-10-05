@@ -4,12 +4,12 @@
 //! LBA 0        protective MBR
 //! LBA 1..33    GPT header + partition entries
 //! 1 MiB        partition 1: EFI System Partition (FAT32) — bootloader, kernel, system image
-//!  +64 MiB     partition 2: "Aurora HD" (WaveFS) — the user's files
+//!  +64 MiB     partition 2: "Aurora HD" (AuroraFS) — the user's files
 //! last 1 MiB   unpartitioned scratch area (used by the kernel's driver self-tests)
 //! end-33..end  backup GPT
 //! ```
 //!
-//! `refresh_esp` rewrites only the ESP, so files on the WaveFS partition
+//! `refresh_esp` rewrites only the ESP, so files on the AuroraFS partition
 //! survive rebuilds.
 
 use std::fs::{self, File, OpenOptions};
@@ -42,7 +42,7 @@ fn layout(size: u64) -> Layout {
     Layout { total, home_start, home_end }
 }
 
-/// Creates a fresh image: GPT, FAT32 ESP with `esp`'s contents, and a WaveFS
+/// Creates a fresh image: GPT, FAT32 ESP with `esp`'s contents, and a AuroraFS
 /// home volume seeded from `home` (a directory tree).
 pub fn create(esp: &Path, home: &Path, out: &Path, size: u64) -> io::Result<()> {
     let l = layout(size);
@@ -169,28 +169,28 @@ fn copy_to_fat<T: fatfs::ReadWriteSeek>(src: &Path, dst: &fatfs::Dir<T>) -> io::
     Ok(())
 }
 
-// ------------------------------------------------------------ WaveFS
+// ------------------------------------------------------------ AuroraFS
 
-/// A partition of the image file seen as 4 KiB WaveFS blocks.
+/// A partition of the image file seen as 4 KiB AuroraFS blocks.
 struct WaveDisk<'a> {
     region: Region<'a>,
     blocks: u64,
 }
 
-impl wavefs::Disk for WaveDisk<'_> {
+impl aurorafs::Disk for WaveDisk<'_> {
     fn blocks(&self) -> u64 {
         self.blocks
     }
-    fn read(&mut self, block: u64, buf: &mut wavefs::Block) -> wavefs::Result<()> {
-        self.region.seek(SeekFrom::Start(block * 4096)).map_err(|_| wavefs::Error::Io)?;
-        self.region.read_exact(buf).map_err(|_| wavefs::Error::Io)
+    fn read(&mut self, block: u64, buf: &mut aurorafs::Block) -> aurorafs::Result<()> {
+        self.region.seek(SeekFrom::Start(block * 4096)).map_err(|_| aurorafs::Error::Io)?;
+        self.region.read_exact(buf).map_err(|_| aurorafs::Error::Io)
     }
-    fn write(&mut self, block: u64, buf: &wavefs::Block) -> wavefs::Result<()> {
-        self.region.seek(SeekFrom::Start(block * 4096)).map_err(|_| wavefs::Error::Io)?;
-        self.region.write_all(buf).map_err(|_| wavefs::Error::Io)
+    fn write(&mut self, block: u64, buf: &aurorafs::Block) -> aurorafs::Result<()> {
+        self.region.seek(SeekFrom::Start(block * 4096)).map_err(|_| aurorafs::Error::Io)?;
+        self.region.write_all(buf).map_err(|_| aurorafs::Error::Io)
     }
-    fn flush(&mut self) -> wavefs::Result<()> {
-        self.region.flush().map_err(|_| wavefs::Error::Io)
+    fn flush(&mut self) -> aurorafs::Result<()> {
+        self.region.flush().map_err(|_| aurorafs::Error::Io)
     }
 }
 
@@ -219,15 +219,15 @@ fn mkfs_home(file: &mut File, start: u64, sectors: u64, home: &Path) -> io::Resu
     let bytes = sectors * SECTOR;
     let region = Region { file, start: start * SECTOR, len: bytes, pos: 0 };
     let disk = WaveDisk { region, blocks: bytes / 4096 };
-    let err = |e: wavefs::Error| io::Error::other(format!("WaveFS: {e:?}"));
-    let mut vol = wavefs::Volume::format(disk, "Aurora HD", pseudo_guid(3), now).map_err(err)?;
+    let err = |e: aurorafs::Error| io::Error::other(format!("AuroraFS: {e:?}"));
+    let mut vol = aurorafs::Volume::format(disk, "Aurora HD", pseudo_guid(3), now).map_err(err)?;
     seed(&mut vol, home, "").map_err(err)?;
     vol.commit().map_err(err)?;
     vol.fsck().map_err(io::Error::other)?;
     Ok(())
 }
 
-fn seed<D: wavefs::Disk>(vol: &mut wavefs::Volume<D>, src: &Path, prefix: &str) -> wavefs::Result<()> {
+fn seed<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, src: &Path, prefix: &str) -> aurorafs::Result<()> {
     let Ok(entries) = fs::read_dir(src) else { return Ok(()) };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
@@ -241,7 +241,7 @@ fn seed<D: wavefs::Disk>(vol: &mut wavefs::Volume<D>, src: &Path, prefix: &str) 
             vol.mkdir_all(&path)?;
             seed(vol, &entry.path(), &path)?;
         } else {
-            vol.write_file(&path, &fs::read(entry.path()).map_err(|_| wavefs::Error::Io)?)?;
+            vol.write_file(&path, &fs::read(entry.path()).map_err(|_| aurorafs::Error::Io)?)?;
         }
     }
     Ok(())
@@ -263,7 +263,7 @@ fn write_gpt(file: &mut File, l: &Layout) -> io::Result<()> {
     let mut entries = vec![0u8; (ENTRIES * ENTRY_SIZE) as usize];
     let parts: [(&[u8; 16], u64, u64, &str); 2] = [
         (&ESP_TYPE, ESP_START, ESP_START + ESP_SECTORS - 1, "EFI System"),
-        (&wavefs::PARTITION_TYPE, l.home_start, l.home_end, "Aurora HD"),
+        (&aurorafs::PARTITION_TYPE, l.home_start, l.home_end, "Aurora HD"),
     ];
     for (i, (ty, first, last, name)) in parts.iter().enumerate() {
         let e = &mut entries[i * ENTRY_SIZE as usize..(i + 1) * ENTRY_SIZE as usize];
@@ -328,7 +328,7 @@ fn pseudo_guid(salt: u64) -> [u8; 16] {
 }
 
 fn crc32(data: &[u8]) -> u32 {
-    wavefs::crc32(data)
+    aurorafs::crc32(data)
 }
 
 /// A window onto a byte range of the image file.

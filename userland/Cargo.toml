@@ -2,7 +2,7 @@
 # xtask supplies the target, linker script and flags for ring-3 programs.
 [workspace]
 resolver = "2"
-members = ["libaurora", "ripple", "apps/*", "bin/*"]
+members = ["constellation", "corekit", "aurorakit", "apps/*", "bin/*"]
 
 [workspace.package]
 version = "0.6.0"
@@ -10,15 +10,17 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-aurora = { path = "libaurora" }
-ripple = { path = "ripple" }
+constellation-sdk = { path = "constellation" }
+gina = { path = "../libs/gina" }
+corekit = { path = "corekit" }
+aurorakit = { path = "aurorakit" }
 aurora-abi = { path = "../libs/abi" }
-aurora-gfx = { path = "../libs/gfx" }
+lumen = { path = "../libs/gfx" }
 aurora-image = { path = "../libs/image" }
 aurora-wav = { path = "../libs/wav" }
-aurora-web = { path = "../libs/web" }
-aurora-tls = { path = "../libs/tls" }
-aurora-surf = { path = "../libs/surf" }
+nebula-web = { path = "../libs/web" }
+nebula-secure = { path = "../libs/tls" }
+nebula-engine = { path = "../libs/surf" }
 
 [profile.dev]
 panic = "abort"

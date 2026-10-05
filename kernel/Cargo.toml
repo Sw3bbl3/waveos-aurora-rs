@@ -1,11 +1,11 @@
 [package]
-name = "tide"
+name = "aster"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "tide"
+name = "aster"
 test = false
 bench = false
 
@@ -13,11 +13,12 @@ bench = false
 ktest = []
 
 [dependencies]
+gina = { path = "../libs/gina" }
 bootinfo = { path = "../libs/bootinfo" }
-aurora-gfx = { path = "../libs/gfx" }
+lumen = { path = "../libs/gfx" }
 aurora-abi = { path = "../libs/abi" }
 aurora-elf = { path = "../libs/elf" }
-wavefs = { path = "../libs/wavefs" }
+aurorafs = { path = "../libs/aurorafs" }
 fat32 = { path = "../libs/fat32" }
 aurora-image = { path = "../libs/image" }
 aurora-wav = { path = "../libs/wav" }

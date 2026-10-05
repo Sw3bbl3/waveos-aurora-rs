@@ -1,5 +1,5 @@
 [package]
-name = "aurora-boot"
+name = "firstlight"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -12,17 +12,18 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use aurora::abi::{display, pref, DateTime, DisplayMode};
-use aurora::prefs;
 use aurora_image::Image;
-use ripple::canvas::{with_alpha, Canvas};
-use ripple::geom::Rect;
-use ripple::icons::{self, Icon};
-use ripple::text::TextField;
-use ripple::theme;
-use ripple::wallpaper;
-use ripple::widgets::{self, button, ButtonStyle};
-use ripple::{App, Env, KeyEvent, Request};
+use aurorakit::canvas::{with_alpha, Canvas};
+use aurorakit::geom::Rect;
+use aurorakit::icons::{self, Icon};
+use aurorakit::text::TextField;
+use aurorakit::theme;
+use aurorakit::ui::{self, View};
+use aurorakit::wallpaper;
+use aurorakit::widgets::{self, button, ButtonStyle};
+use aurorakit::{App, Env, KeyEvent, Request};
+use corekit::abi::{display, pref, DateTime, DisplayMode};
+use corekit::prefs;
 
 const SIDEBAR_W: i32 = 214;
 const ROW_H: i32 = 44;
@@ -42,9 +43,11 @@ enum Pane {
     Sound,
     Notifications,
     About,
+    Desktop,
+    Accessibility,
 }
 
-const PANES: [(Pane, &str, &str, u32); 8] = [
+const PANES: [(Pane, &str, &str, u32); 10] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
@@ -52,6 +55,8 @@ const PANES: [(Pane, &str, &str, u32); 8] = [
     (Pane::DateTime, "Date & Time", "datetime", 0xFFFF9F0A),
     (Pane::Sound, "Sound", "sound", 0xFFFF375F),
     (Pane::Notifications, "Notifications", "notifications", 0xFFFF453A),
+    (Pane::Desktop, "Desktop & Dock", "desktop", 0xFF5856D6),
+    (Pane::Accessibility, "Accessibility", "accessibility", 0xFF147EFB),
     (Pane::About, "About", "about", 0xFF30B0C7),
 ];
 
@@ -76,11 +81,18 @@ enum Hit {
     SetClock,
     Zone(i32),
     Volume,
+    Glass,
+    DockSize,
     AboutMore,
 }
 
 pub struct Settings {
+    controls: ui::State,
     pane: Pane,
+    search: TextField,
+    search_focused: bool,
+    scroll: i32,
+    focus: Option<Hit>,
     hover: Option<Hit>,
     thumbs: Vec<Vec<u32>>,
     custom_thumb: Option<Image>,
@@ -93,7 +105,7 @@ pub struct Settings {
     clock_edited: bool,
     dragging: Option<Hit>,
     area: Rect,
-    info: aurora::abi::SysInfo,
+    info: corekit::abi::SysInfo,
     screen: (i32, i32),
 }
 
@@ -114,7 +126,12 @@ impl Settings {
             .map(|(p, _, _, _)| *p)
             .unwrap_or(Pane::Appearance);
         let mut s = Self {
+            controls: ui::State::default(),
             pane,
+            search: TextField::new("", "Search settings"),
+            search_focused: false,
+            scroll: 0,
+            focus: None,
             hover: None,
             thumbs,
             custom_thumb: None,
@@ -126,7 +143,7 @@ impl Settings {
             clock_edited: false,
             dragging: None,
             area: Rect::new(0, 0, 820, 560),
-            info: aurora::process::sys_info(),
+            info: corekit::process::sys_info(),
             screen: (0, 0),
         };
         s.load_custom_thumb();
@@ -137,22 +154,67 @@ impl Settings {
     fn load_custom_thumb(&mut self) {
         let path = prefs::get("wallpaper_image");
         self.custom_thumb = path
-            .and_then(|p| aurora::fs::read(&p).ok())
+            .and_then(|p| corekit::fs::read(&p).ok())
             .and_then(|d| aurora_image::decode(&d).ok())
             .map(|img| img.thumbnail(THUMB_W as u32 * 2, THUMB_H as u32 * 2));
     }
 
     fn sync_clock(&mut self) {
-        let d = aurora::time::now();
+        let d = corekit::time::now();
         self.clock = [d.year as i32, d.month as i32, d.day as i32, d.hour as i32, d.minute as i32];
     }
 
     fn flash(&mut self, msg: String) {
-        self.note = Some((msg, aurora::time::uptime_ms()));
+        self.note = Some((msg, corekit::time::uptime_ms()));
     }
 
-    fn content(area: Rect) -> Rect {
-        Rect::new(area.x + SIDEBAR_W + 28, area.y + 24, area.w - SIDEBAR_W - 56, area.h - 48)
+    fn control_action(&mut self, action: Option<ui::Action>) -> bool {
+        let Some(action) = action else { return false };
+        let (id, value) = match action {
+            ui::Action::Toggle(id, on) => (id, format!("{}", on as u8)),
+            ui::Action::Change(5, v) => (5, format!("{}", 32 + v * 32 / 1000)),
+            ui::Action::Change(6, v) => (6, format!("{}", v / 10)),
+            _ => return false,
+        };
+        let key = match id {
+            1 => pref::REDUCE_TRANSPARENCY,
+            2 => pref::REDUCE_MOTION,
+            3 => pref::HIGH_CONTRAST,
+            4 => pref::DOCK_AUTOHIDE,
+            5 => pref::DOCK_SIZE,
+            6 => pref::GLASS,
+            _ => return false,
+        };
+        if let Err(e) = prefs::set(key, &value) {
+            self.flash(format!("Could not save: {e}"));
+        }
+        true
+    }
+
+    fn visible_panes(&self) -> Vec<usize> {
+        let query = self.search.text().to_ascii_lowercase();
+        PANES
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, label, id, _))| {
+                let terms = match *id {
+                    "desktop" => "dock size hide glass intensity transparency lumen",
+                    "accessibility" => "reduce motion transparency contrast",
+                    "appearance" => "light dark accent wallpaper",
+                    "keyboard" => "layout repeat typing",
+                    "display" => "resolution screen",
+                    "sound" => "volume mute",
+                    "notifications" => "do not disturb",
+                    _ => "",
+                };
+                query.is_empty() || label.to_ascii_lowercase().contains(&query) || terms.contains(&query)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn content(&self, area: Rect) -> Rect {
+        Rect::new(area.x + SIDEBAR_W + 28, area.y + 24 - self.scroll, area.w - SIDEBAR_W - 56, area.h - 48)
     }
 
     /// A grouped card of `n` rows starting at `y`.
@@ -167,10 +229,10 @@ impl Settings {
     /// Every clickable thing on screen, for drawing and hit-testing alike.
     fn hits(&self, area: Rect) -> Vec<(Hit, Rect)> {
         let mut v = Vec::new();
-        for (i, _) in PANES.iter().enumerate() {
-            v.push((Hit::Pane(i), Rect::new(area.x + 10, area.y + 52 + i as i32 * 34, SIDEBAR_W - 20, 30)));
+        for (row, i) in self.visible_panes().into_iter().enumerate() {
+            v.push((Hit::Pane(i), Rect::new(area.x + 10, area.y + 98 + row as i32 * 36, SIDEBAR_W - 20, 32)));
         }
-        let c = Self::content(area);
+        let c = self.content(area);
         match self.pane {
             Pane::Appearance => {
                 v.push((Hit::Light, Rect::new(c.x, c.y + 70, THUMB_W, THUMB_H)));
@@ -217,6 +279,17 @@ impl Settings {
                 v.push((Hit::Zone(-30), Rect::new(c.right() - 150, zy + 8, 28, 28)));
                 v.push((Hit::Zone(30), Rect::new(c.right() - 38, zy + 8, 28, 28)));
             }
+            Pane::Desktop => {
+                v.push((Hit::DockSize, Rect::new(c.x + 160, c.y + 86, c.w - 190, 24)));
+                v.push((Hit::Toggle(pref::DOCK_AUTOHIDE), Self::toggle_rect(Rect::new(c.x, c.y + 126, c.w, ROW_H))));
+                v.push((Hit::Glass, Rect::new(c.x + 160, c.y + 244, c.w - 190, 24)));
+            }
+            Pane::Accessibility => {
+                for (i, key) in [pref::REDUCE_TRANSPARENCY, pref::REDUCE_MOTION, pref::HIGH_CONTRAST].iter().enumerate()
+                {
+                    v.push((Hit::Toggle(key), Self::toggle_rect(Rect::new(c.x, c.y + 76 + i as i32 * 84, c.w, ROW_H))));
+                }
+            }
             Pane::Network => {}
             Pane::Sound => {
                 v.push((Hit::Volume, Rect::new(c.x + 110, c.y + 70 + 12, c.w - 140, 20)));
@@ -233,13 +306,22 @@ impl Settings {
     }
 
     fn hit_at(&self, x: i32, y: i32) -> Option<Hit> {
-        self.hits(self.area).into_iter().find(|(_, r)| r.contains(x, y)).map(|(h, _)| h)
+        self.hits(self.area)
+            .into_iter()
+            .find(|(h, r)| {
+                r.contains(x, y)
+                    && (matches!(h, Hit::Pane(_))
+                        || (x >= self.area.x + SIDEBAR_W && y >= self.area.y && y < self.area.bottom()))
+            })
+            .map(|(h, _)| h)
     }
 
     fn run(&mut self, h: Hit, x: i32, env: &mut Env) {
         match h {
             Hit::Pane(i) => {
                 self.pane = PANES[i].0;
+                self.scroll = 0;
+                self.focus = None;
                 self.try_focused = false;
                 if self.pane == Pane::Display {
                     self.modes = prefs::display_modes();
@@ -275,7 +357,11 @@ impl Settings {
             }
             Hit::RepeatDelay | Hit::RepeatRate => self.slide(h, x),
             Hit::TryField => self.try_focused = true,
-            Hit::Toggle(key) => prefs::set_bool(key, !prefs::get_bool(key)),
+            Hit::Toggle(key) => {
+                if let Err(e) = prefs::set(key, if prefs::get_bool(key) { "0" } else { "1" }) {
+                    self.flash(format!("Could not save: {e}"));
+                }
+            }
             Hit::Field(i, d) => {
                 let c = &mut self.clock;
                 c[i] += d;
@@ -312,7 +398,7 @@ impl Settings {
                 let v = (prefs::get_int("utc_offset", 0) + d as i64).clamp(-12 * 60, 14 * 60);
                 let _ = prefs::set("utc_offset", &format!("{v}"));
             }
-            Hit::Volume => self.slide(h, x),
+            Hit::Volume | Hit::Glass | Hit::DockSize => self.slide(h, x),
             Hit::AboutMore => env.requests.push(Request::OpenApp(String::from("About"))),
         }
     }
@@ -329,6 +415,16 @@ impl Settings {
             // Rate: 32 steps, faster to the right.
             Hit::RepeatRate => {
                 let _ = prefs::set(pref::REPEAT_RATE, &format!("{}", 31 - (v * 31 + 500) / 1000));
+            }
+            Hit::Glass => {
+                if let Err(e) = prefs::set(pref::GLASS, &format!("{}", v / 10)) {
+                    self.flash(format!("Could not save: {e}"));
+                }
+            }
+            Hit::DockSize => {
+                if let Err(e) = prefs::set(pref::DOCK_SIZE, &format!("{}", 32 + v * 32 / 1000)) {
+                    self.flash(format!("Could not save: {e}"));
+                }
             }
             Hit::Volume => {
                 let _ = prefs::set(pref::VOLUME, &format!("{}", (v + 5) / 10));
@@ -353,14 +449,20 @@ impl Settings {
         }
     }
 
-    fn draw_sidebar(&self, cv: &mut Canvas, area: Rect) {
+    fn draw_sidebar(&mut self, cv: &mut Canvas, area: Rect) {
         let t = theme::current();
         let side = Rect::new(area.x, area.y, SIDEBAR_W, area.h);
-        cv.fill_rect(side, t.window_bg_alt);
+        cv.fill_rect(side, with_alpha(t.window_bg_alt, 24));
         cv.fill_rect(Rect::new(side.right() - 1, side.y, 1, side.h), t.separator);
         cv.text(area.x + 20, area.y + 34, "Settings", theme::ui_bold(18), t.text);
-        for (i, (pane, label, _, color)) in PANES.iter().enumerate() {
-            let r = Rect::new(area.x + 10, area.y + 52 + i as i32 * 34, SIDEBAR_W - 20, 30);
+        self.search.draw(cv, Rect::new(area.x + 12, area.y + 50, SIDEBAR_W - 24, 34), self.search_focused);
+        let visible = self.visible_panes();
+        if visible.is_empty() {
+            cv.text(area.x + 20, area.y + 120, "No matching settings", theme::ui(12), t.text_secondary);
+        }
+        for (row, i) in visible.into_iter().enumerate() {
+            let (pane, label, _, color) = &PANES[i];
+            let r = Rect::new(area.x + 10, area.y + 98 + row as i32 * 36, SIDEBAR_W - 20, 32);
             if *pane == self.pane {
                 cv.fill_round_rect(r, 8, theme::accent());
             } else if self.hover == Some(Hit::Pane(i)) {
@@ -376,7 +478,7 @@ impl Settings {
 
     fn draw_pane(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
         let t = theme::current();
-        let c = Self::content(area);
+        let c = self.content(area);
         let title = PANES.iter().find(|p| p.0 == self.pane).map(|p| p.1).unwrap_or("");
         cv.text(c.x, c.y + 24, title, theme::ui_bold(22), t.text);
         let hits = self.hits(area);
@@ -515,7 +617,7 @@ impl Settings {
                 self.try_field.draw(cv, fr, env.focused && self.try_focused);
             }
             Pane::DateTime => {
-                let d = aurora::time::now();
+                let d = corekit::time::now();
                 let h24 = prefs::get_bool(pref::CLOCK_24H);
                 let time = if h24 {
                     format!("{:02}:{:02}:{:02}", d.hour, d.minute, d.second)
@@ -527,7 +629,7 @@ impl Settings {
                     format!("{}:{:02}:{:02} {}", h, d.minute, d.second, if d.hour < 12 { "AM" } else { "PM" })
                 };
                 cv.text(c.x, c.y + 80, &time, theme::ui_bold(36), t.text);
-                cv.text(c.x, c.y + 108, &aurora::time::format_date(&d), theme::ui(14), t.text_secondary);
+                cv.text(c.x, c.y + 108, &corekit::time::format_date(&d), theme::ui(14), t.text_secondary);
                 let rows = Self::rows(c, c.y + 132, 3);
                 Self::card(cv, Rect::new(c.x, rows[0].y, c.w, 3 * ROW_H), 3);
                 for (r, (key, label)) in rows.iter().zip([
@@ -596,9 +698,9 @@ impl Settings {
                 cv.text(card.right() - 16 - f.width(&out), c.y + 70 + 2 * ROW_H + 27, &out, f, t.text_secondary);
             }
             Pane::Network => {
-                let ifaces: Vec<_> = aurora::net::interfaces()
+                let ifaces: Vec<_> = corekit::net::interfaces()
                     .into_iter()
-                    .filter(|i| i.flags & aurora::abi::net::IF_LOOPBACK == 0)
+                    .filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0)
                     .collect();
                 let f = theme::ui(13);
                 if ifaces.is_empty() {
@@ -606,8 +708,8 @@ impl Settings {
                 }
                 let mut y = c.y + 64;
                 for i in &ifaces {
-                    let ip = |a: [u8; 4]| if a == [0; 4] { String::from("—") } else { aurora::net::ip_string(a) };
-                    let (status, color) = match (i.flags & aurora::abi::net::IF_LINK != 0, i.ip != [0; 4]) {
+                    let ip = |a: [u8; 4]| if a == [0; 4] { String::from("—") } else { corekit::net::ip_string(a) };
+                    let (status, color) = match (i.flags & corekit::abi::net::IF_LINK != 0, i.ip != [0; 4]) {
                         (true, true) => ("Connected", 0xFF30_D158),
                         (true, false) => ("Getting an address…", 0xFFFF_9F0A),
                         (false, _) => ("Cable unplugged", 0xFFFF_453A),
@@ -616,15 +718,15 @@ impl Settings {
                     let head = Rect::new(c.x, y, c.w, 52);
                     cv.fill_round_rect(head, 12, t.window_bg_alt);
                     cv.fill_circle(head.x + 22, head.y + 26, 6, color);
-                    let title = format!("Ethernet ({})", aurora::net::name_of(i));
+                    let title = format!("Ethernet ({})", corekit::net::name_of(i));
                     cv.text(head.x + 40, head.y + 22, &title, theme::ui_bold(14), t.text);
                     cv.text(head.x + 40, head.y + 40, status, f, t.text_secondary);
-                    let drv = aurora::net::driver_of(i);
+                    let drv = corekit::net::driver_of(i);
                     cv.text(head.right() - 16 - f.width(drv), head.y + 31, drv, f, t.text_secondary);
                     y += 60;
                     let mac = i.mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
                     let dns: Vec<String> =
-                        i.dns.iter().filter(|d| **d != [0; 4]).map(|d| aurora::net::ip_string(*d)).collect();
+                        i.dns.iter().filter(|d| **d != [0; 4]).map(|d| corekit::net::ip_string(*d)).collect();
                     let lease = if i.lease_secs == 0 {
                         String::from("—")
                     } else {
@@ -653,7 +755,7 @@ impl Settings {
                     y = card.bottom() + 20;
                 }
                 let note = "Addresses come from the network's DHCP server. Test the connection with `ping` or \
-                            `fetch` in Terminal, or browse with Surf.";
+                            `fetch` in Terminal, or browse with Nebula.";
                 for (k, (a, b)) in widgets::wrap(note, f, c.w).into_iter().enumerate() {
                     cv.text(c.x, y + 10 + k as i32 * 20, &note[a..b], f, t.text_secondary);
                 }
@@ -670,18 +772,51 @@ impl Settings {
                     cv.text(c.x, c.y + 142 + k as i32 * 20, &text[a..b], f, t.text_secondary);
                 }
             }
+            Pane::Desktop | Pane::Accessibility => {
+                let children = if self.pane == Pane::Desktop {
+                    alloc::vec![
+                        View::label("Make the desktop yours"),
+                        View::card(alloc::vec![
+                            View::slider(5, "Dock size", (theme::dock_icon_size() - 32) * 1000 / 32),
+                            View::toggle(4, "Automatically hide Dock", prefs::get_bool(pref::DOCK_AUTOHIDE))
+                        ]),
+                        View::card(alloc::vec![
+                            View::slider(6, "Liquid glass intensity", theme::glass_intensity() as i32 * 10),
+                            View::label("Changes apply across the desktop immediately.")
+                        ]),
+                        View::glass(alloc::vec![View::heading("Lumen"), View::label("Liquid glass material preview")])
+                    ]
+                } else {
+                    alloc::vec![
+                        View::label("Comfort and clarity"),
+                        View::card(alloc::vec![
+                            View::toggle(1, "Reduce transparency", theme::reduce_transparency()),
+                            View::label("Use solid surfaces for easier reading.")
+                        ]),
+                        View::card(alloc::vec![
+                            View::toggle(2, "Reduce motion", theme::reduce_motion()),
+                            View::label("Arrange windows without animated transitions.")
+                        ]),
+                        View::card(alloc::vec![
+                            View::toggle(3, "Increase contrast", theme::high_contrast()),
+                            View::label("Stronger text, borders and control outlines.")
+                        ])
+                    ]
+                };
+                self.controls.draw(cv, &View::column(children), Rect::new(c.x, c.y + 52, c.w, 600));
+            }
             Pane::About => {
                 let (cx, _) = c.center();
                 icons::draw(cv, Icon::Aurora, Rect::new(cx - 44, c.y + 50, 88, 88));
                 cv.text_centered(Rect::new(c.x, c.y + 150, c.w, 34), "WaveOS Aurora", theme::ui_bold(26), t.text);
                 let i = &self.info;
-                let version = format!("Version {}", aurora::process::fixed_str(&i.version, i.version_len));
+                let version = format!("Version {}", corekit::process::fixed_str(&i.version, i.version_len));
                 cv.text_centered(Rect::new(c.x, c.y + 184, c.w, 20), &version, theme::ui(14), t.text_secondary);
                 let rows = [
-                    ("Processor", aurora::process::fixed_str(&i.cpu, i.cpu_len)),
+                    ("Processor", corekit::process::fixed_str(&i.cpu, i.cpu_len)),
                     ("Memory", format!("{} MiB", i.mem_total >> 20)),
                     ("Display", format!("{} × {}", env.screen.0, env.screen.1)),
-                    ("Startup disk", aurora::process::fixed_str(&i.root, i.root_len)),
+                    ("Startup disk", corekit::process::fixed_str(&i.root, i.root_len)),
                     ("Available", format!("{} MB of {} MB", i.disk_free >> 20, i.disk_total >> 20)),
                 ];
                 let card = Rect::new(c.x, c.y + 216, c.w, rows.len() as i32 * 36);
@@ -764,7 +899,7 @@ fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
             cv.fill_round_rect(Rect::new(cx - 6, cy - 6, 12, 12), 3, w);
             cv.fill_circle(cx + 5, cy - 5, 3, 0xFFFFD60A);
         }
-        Pane::About => {
+        Pane::Desktop | Pane::Accessibility | Pane::About => {
             cv.fill_circle(cx, cy - 4, 1, w);
             cv.fill_rect(Rect::new(cx - 1, cy - 1, 2, 7), w);
         }
@@ -801,6 +936,9 @@ fn mode_preview(cv: &mut Canvas, r: Rect, dark: bool) {
 }
 
 impl App for Settings {
+    fn materials(&self, area: Rect) -> Vec<corekit::abi::MaterialRegion> {
+        alloc::vec![corekit::abi::MaterialRegion { x: 0, y: 0, width: SIDEBAR_W.min(area.w), height: area.h }]
+    }
     fn title(&self) -> String {
         "Settings".into()
     }
@@ -812,10 +950,28 @@ impl App for Settings {
     fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
         self.area = area;
         self.draw_sidebar(cv, area);
-        self.draw_pane(cv, area, env);
+        cv.with_clip(Rect::new(area.x + SIDEBAR_W, area.y, area.w - SIDEBAR_W, area.h), |cv| {
+            self.draw_pane(cv, area, env)
+        });
+        if let Some(h) = self.focus {
+            if let Some((_, r)) = self.hits(area).into_iter().find(|(k, _)| *k == h) {
+                cv.stroke_round_rect(r.inset(-2), 8, theme::accent());
+            }
+        }
     }
 
     fn click(&mut self, x: i32, y: i32, _area: Rect, env: &mut Env) -> bool {
+        if matches!(self.pane, Pane::Desktop | Pane::Accessibility) && x >= self.area.x + SIDEBAR_W {
+            let action = self.controls.click(x, y);
+            if self.control_action(action) {
+                return true;
+            }
+        }
+        self.search_focused = self.search.click(x, y, env.mods.shift, env.now_ms);
+        if self.search_focused {
+            self.try_focused = false;
+            return true;
+        }
         if self.pane == Pane::Keyboard && self.try_field.click(x, y, env.mods.shift, env.now_ms) {
             self.try_focused = true;
             return true;
@@ -831,6 +987,12 @@ impl App for Settings {
     }
 
     fn drag(&mut self, x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
+        if matches!(self.pane, Pane::Desktop | Pane::Accessibility) {
+            let action = self.controls.drag(x);
+            if self.control_action(action) {
+                return true;
+            }
+        }
         if self.try_focused && self.try_field.drag(x) {
             return true;
         }
@@ -842,17 +1004,61 @@ impl App for Settings {
     }
 
     fn release(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
+        self.controls.release();
         self.try_field.release();
         self.dragging = None;
         false
     }
 
     fn hover(&mut self, x: i32, y: i32, _area: Rect) -> bool {
+        if matches!(self.pane, Pane::Desktop | Pane::Accessibility) && self.controls.hover(x, y) {
+            return true;
+        }
         let h = if x < 0 { None } else { self.hit_at(x, y) };
         core::mem::replace(&mut self.hover, h) != h
     }
 
     fn key(&mut self, ev: &KeyEvent, env: &mut Env) -> bool {
+        use aurorakit::KeyCode;
+        if ev.pressed && ev.mods.ctrl && matches!(ev.ch, Some('f') | Some('F')) {
+            self.search_focused = true;
+            return true;
+        }
+        if self.search_focused {
+            return self.search.key(ev, env.now_ms).handled;
+        }
+        if ev.pressed && matches!(self.pane, Pane::Desktop | Pane::Accessibility) {
+            let key = match ev.code {
+                KeyCode::Tab => Some(if ev.mods.shift { ui::Key::Previous } else { ui::Key::Next }),
+                KeyCode::Enter => Some(ui::Key::Activate),
+                KeyCode::Left => Some(ui::Key::Left),
+                KeyCode::Right => Some(ui::Key::Right),
+                _ => None,
+            };
+            if let Some(key) = key {
+                let action = self.controls.key(key);
+                self.control_action(action);
+                return true;
+            }
+        }
+        if ev.pressed && ev.code == KeyCode::Tab {
+            let hits = self.hits(self.area);
+            let old = self.focus.and_then(|h| hits.iter().position(|(k, _)| *k == h));
+            let n = hits.len();
+            if n > 0 {
+                let next = old.map(|i| if ev.mods.shift { (i + n - 1) % n } else { (i + 1) % n }).unwrap_or(0);
+                self.focus = Some(hits[next].0);
+            }
+            return true;
+        }
+        if ev.pressed && matches!(ev.code, KeyCode::Enter) {
+            if let Some(h) = self.focus {
+                if let Some((_, r)) = self.hits(self.area).into_iter().find(|(k, _)| *k == h) {
+                    self.run(h, r.x + r.w / 2, env);
+                    return true;
+                }
+            }
+        }
         if self.try_focused {
             return self.try_field.key(ev, env.now_ms).handled;
         }
@@ -860,7 +1066,7 @@ impl App for Settings {
     }
 
     fn tick(&mut self, env: &mut Env) -> bool {
-        let mut changed = false;
+        let mut changed = self.search.tick(env.now_ms, env.focused && self.search_focused);
         if env.screen != self.screen {
             self.screen = env.screen;
             self.modes = prefs::display_modes();
@@ -889,6 +1095,20 @@ impl App for Settings {
             self.load_custom_thumb();
             changed = true;
         }
+        // Preference broadcasts trigger redraws. Static pages must not force
+        // full desktop compositions ten times per second while idle.
+        changed
+    }
+
+    fn scroll(&mut self, delta: i32, area: Rect) -> bool {
+        let height = match self.pane {
+            Pane::Keyboard => 650,
+            Pane::DateTime => 610,
+            _ => 540,
+        };
+        let next = (self.scroll + delta * 36).clamp(0, (height - area.h).max(0));
+        let changed = next != self.scroll;
+        self.scroll = next;
         changed
     }
 
@@ -903,8 +1123,8 @@ impl App for Settings {
     }
 }
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
-    ripple::run(Settings::new(args.get(1).map(String::as_str)))
+fn main(args: corekit::Args) -> i32 {
+    aurorakit::run(Settings::new(args.get(1).map(String::as_str)))
 }

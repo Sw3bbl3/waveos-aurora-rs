@@ -1,7 +1,7 @@
 //! Our client against a rustls server, in memory: certificates from rcgen.
 
-use aurora_tls::{CertError, Config, Error, Roots, TlsStream};
-use aurora_web::http::Io;
+use nebula_secure::{CertError, Config, Error, Roots, TlsStream};
+use nebula_web::http::Io;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rustls::crypto::ring as provider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};

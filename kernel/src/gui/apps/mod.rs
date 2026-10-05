@@ -35,12 +35,14 @@ pub enum AppKind {
     Paint,
     Clock,
     Activity,
-    Surf,
+    Nebula,
     Power,
     Crash,
     DisplayConfirm,
     /// A program not in the catalog.
     Other,
+    Installer,
+    Studio,
 }
 
 pub struct AppInfo {
@@ -59,6 +61,24 @@ pub struct AppInfo {
 
 pub static CATALOG: &[AppInfo] = &[
     AppInfo {
+        kind: AppKind::Studio,
+        name: "Constellation Studio",
+        icon: Icon::Terminal,
+        pinned: true,
+        listed: true,
+        path: "/System/Apps/Studio.elf",
+        single: false,
+    },
+    AppInfo {
+        kind: AppKind::Installer,
+        name: "GINA Apps",
+        icon: Icon::Files,
+        pinned: false,
+        listed: true,
+        path: "/System/Apps/Installer.elf",
+        single: false,
+    },
+    AppInfo {
         kind: AppKind::Files,
         name: "Files",
         icon: Icon::Files,
@@ -68,12 +88,12 @@ pub static CATALOG: &[AppInfo] = &[
         single: true,
     },
     AppInfo {
-        kind: AppKind::Surf,
-        name: "Surf",
-        icon: Icon::Surf,
+        kind: AppKind::Nebula,
+        name: "Nebula",
+        icon: Icon::Nebula,
         pinned: true,
         listed: true,
-        path: "/System/Apps/Surf.elf",
+        path: "/System/Apps/Nebula.elf",
         single: false,
     },
     AppInfo {
@@ -235,6 +255,9 @@ pub struct Env {
 }
 
 pub trait App {
+    fn materials(&self) -> Vec<Rect> {
+        Vec::new()
+    }
     fn kind(&self) -> AppKind;
     fn title(&self) -> String {
         String::from(info(self.kind()).name)

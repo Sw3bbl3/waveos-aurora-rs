@@ -36,6 +36,9 @@ impl ClientApp {
 }
 
 impl App for ClientApp {
+    fn materials(&self) -> alloc::vec::Vec<Rect> {
+        server::material_regions(self.id)
+    }
     fn kind(&self) -> AppKind {
         self.kind
     }
@@ -54,8 +57,13 @@ impl App for ClientApp {
             server::push_event(self.id, Event { kind: event::RESIZE, x: area.w, y: area.h, ..Default::default() });
         }
         let bg = theme::current().window_bg;
+        let glass = !self.materials().is_empty();
         let drawn = server::with_surface(self.id, |px, w, h| {
-            cv.blit(px, w, h, area, WINDOW_RADIUS);
+            if glass {
+                cv.blit_alpha(px, w, h, area, WINDOW_RADIUS);
+            } else {
+                cv.blit(px, w, h, area, WINDOW_RADIUS);
+            }
             (w as i32, h as i32)
         });
         // Until the client catches up with a resize, fill the uncovered part.

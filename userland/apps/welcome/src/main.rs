@@ -5,12 +5,12 @@
 
 extern crate alloc;
 
-use ripple::canvas::{rgb, Canvas};
-use ripple::geom::Rect;
-use ripple::icons::{self, Icon};
-use ripple::theme;
-use ripple::widgets::{button, ButtonStyle};
-use ripple::{hit, App, Env, Request};
+use aurorakit::canvas::{rgb, Canvas};
+use aurorakit::geom::Rect;
+use aurorakit::icons::{self, Icon};
+use aurorakit::theme;
+use aurorakit::widgets::{button, ButtonStyle};
+use aurorakit::{hit, App, Env, Request};
 
 pub struct Welcome {
     hovered: Option<usize>,
@@ -63,8 +63,8 @@ impl App for Welcome {
         cv.fill_round_rect_with(hero, 14, |x, y| {
             let tx = (x - hero.x) * 256 / hero.w;
             let ty = (y - hero.y) * 256 / hero.h;
-            let a = ripple::canvas::mix(rgb(0x5B, 0x3F, 0xE0), rgb(0x16, 0xB8, 0xA6), tx);
-            ripple::canvas::mix(a, rgb(0x0B, 0x12, 0x33), ty / 2)
+            let a = aurorakit::canvas::mix(rgb(0x5B, 0x3F, 0xE0), rgb(0x16, 0xB8, 0xA6), tx);
+            aurorakit::canvas::mix(a, rgb(0x0B, 0x12, 0x33), ty / 2)
         });
         icons::wave(cv, Rect::new(hero.right() - 190, hero.y + 30, 160, 70), 2, 5, 0x50FF_FFFF);
         icons::wave(cv, Rect::new(hero.right() - 170, hero.y + 52, 130, 50), 2, 3, 0x38FF_FFFF);
@@ -105,8 +105,8 @@ impl App for Welcome {
     }
 }
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(_: aurora::Args) -> i32 {
-    ripple::run(Welcome::new())
+fn main(_: corekit::Args) -> i32 {
+    aurorakit::run(Welcome::new())
 }

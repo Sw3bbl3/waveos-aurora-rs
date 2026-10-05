@@ -7,7 +7,7 @@ use crate::gui::apps::{self, AppKind, CATALOG};
 use crate::gui::canvas::{mix, with_alpha, Canvas};
 use crate::gui::geom::Rect;
 use crate::gui::icons::{self, Icon};
-use crate::gui::theme::{self, DOCK_H, DOCK_ICON, DOCK_MARGIN, DOCK_PAD, MENUBAR_H};
+use crate::gui::theme::{self, DOCK_MARGIN, DOCK_PAD, MENUBAR_H};
 use crate::gui::widgets;
 use alloc::format;
 use alloc::string::String;
@@ -24,6 +24,7 @@ const MENU_ITEM_H: i32 = 26;
 pub(super) enum DockItem {
     Launcher,
     App(AppKind),
+    External(u32),
     Separator,
     Trash,
 }
@@ -99,15 +100,34 @@ enum LauncherHover {
     Power,
 }
 
+#[derive(Clone)]
+struct LaunchApp {
+    kind: Option<AppKind>,
+    name: String,
+    path: String,
+    icon: Icon,
+}
+
 pub struct Launcher {
+    apps: Vec<LaunchApp>,
     query: String,
     hover: Option<LauncherHover>,
+    page: usize,
 }
 
 impl Launcher {
-    fn results(&self) -> Vec<&'static apps::AppInfo> {
+    fn results(&self) -> Vec<&LaunchApp> {
         let q = self.query.to_ascii_lowercase();
-        CATALOG.iter().filter(|a| a.listed && a.name.to_ascii_lowercase().contains(q.as_str())).collect()
+        self.apps
+            .iter()
+            .filter(|a| a.name.to_ascii_lowercase().contains(q.as_str()))
+            .skip(self.page * 18)
+            .take(18)
+            .collect()
+    }
+    fn pages(&self) -> usize {
+        let q = self.query.to_ascii_lowercase();
+        self.apps.iter().filter(|a| a.name.to_ascii_lowercase().contains(q.as_str())).count().div_ceil(18).max(1)
     }
 }
 
@@ -156,25 +176,34 @@ impl Desktop {
             v.extend(extra.into_iter().map(DockItem::App));
         }
         v.push(DockItem::Separator);
+        v.extend(self.windows.iter().filter(|w| w.app.kind() == AppKind::Other).map(|w| DockItem::External(w.id)));
         v.push(DockItem::Trash);
         v
     }
 
     pub(super) fn dock_layout(&self) -> (Rect, Vec<(DockItem, Rect)>) {
         let items = self.dock_items();
-        let width: i32 =
-            items.iter().map(|i| if *i == DockItem::Separator { SEPARATOR_W } else { DOCK_ICON }).sum::<i32>()
-                + DOCK_GAP * (items.len() as i32 - 1)
-                + 2 * DOCK_PAD
-                + 4;
-        let dock = Rect::new((self.w - width) / 2, self.h - DOCK_MARGIN - DOCK_H, width, DOCK_H);
+        let width: i32 = items
+            .iter()
+            .map(|i| if *i == DockItem::Separator { SEPARATOR_W } else { theme::dock_icon_size() })
+            .sum::<i32>()
+            + DOCK_GAP * (items.len() as i32 - 1)
+            + 2 * DOCK_PAD
+            + 4;
+        let hidden = theme::dock_autohide() && !self.dock_revealed;
+        let dock = Rect::new(
+            (self.w - width) / 2,
+            if hidden { self.h + 48 } else { self.h - DOCK_MARGIN - theme::dock_height() },
+            width,
+            theme::dock_height(),
+        );
         let mut x = dock.x + DOCK_PAD + 2;
         let y = dock.y + DOCK_PAD;
         let rects = items
             .into_iter()
             .map(|i| {
-                let w = if i == DockItem::Separator { SEPARATOR_W } else { DOCK_ICON };
-                let r = Rect::new(x, y, w, DOCK_ICON);
+                let w = if i == DockItem::Separator { SEPARATOR_W } else { theme::dock_icon_size() };
+                let r = Rect::new(x, y, w, theme::dock_icon_size());
                 x += w + DOCK_GAP;
                 (i, r)
             })
@@ -192,6 +221,13 @@ impl Desktop {
 
     fn dock_click(&mut self, item: DockItem) {
         match item {
+            DockItem::External(id) => {
+                if self.focused_id() == Some(id) {
+                    self.minimize(id);
+                } else {
+                    self.raise(id);
+                }
+            }
             DockItem::Launcher => self.toggle_launcher(),
             DockItem::App(kind) => {
                 let focused_kind = self.focused().map(|w| w.app.kind());
@@ -235,7 +271,23 @@ impl Desktop {
     pub fn toggle_launcher(&mut self) {
         let r = self.launcher_rect();
         if self.launcher.take().is_none() {
-            self.launcher = Some(Launcher { query: String::new(), hover: None });
+            let mut entries: Vec<LaunchApp> = CATALOG
+                .iter()
+                .filter(|a| a.listed)
+                .map(|a| LaunchApp {
+                    kind: Some(a.kind),
+                    name: String::from(a.name),
+                    path: String::from(a.path),
+                    icon: a.icon,
+                })
+                .collect();
+            entries.extend(crate::gui::installed::list().into_iter().map(|a| LaunchApp {
+                kind: None,
+                name: a.manifest.name,
+                path: a.path,
+                icon: Icon::Aurora,
+            }));
+            self.launcher = Some(Launcher { apps: entries, query: String::new(), hover: None, page: 0 });
             self.close_menu();
         }
         self.damage(r.inset(-50));
@@ -260,16 +312,27 @@ impl Desktop {
             }
             KeyCode::Enter => {
                 if let Some(first) = l.results().first() {
-                    let kind = first.kind;
-                    self.launch(kind);
+                    let app = (*first).clone();
+                    self.toggle_launcher();
+                    if let Some(kind) = app.kind {
+                        self.open(kind);
+                    } else {
+                        self.spawn_program(&app.path, &[]);
+                    }
                 }
                 return;
             }
             KeyCode::Backspace => {
                 l.query.pop();
+                l.page = 0;
             }
+            KeyCode::Left => l.page = l.page.saturating_sub(1),
+            KeyCode::Right => l.page = (l.page + 1).min(l.pages() - 1),
             _ => match k.ch {
-                Some(c) if !c.is_control() && !k.mods.ctrl && l.query.len() < 32 => l.query.push(c),
+                Some(c) if !c.is_control() && !k.mods.ctrl && l.query.len() < 32 => {
+                    l.query.push(c);
+                    l.page = 0;
+                }
                 _ => return,
             },
         }
@@ -278,11 +341,29 @@ impl Desktop {
     }
 
     fn launcher_click(&mut self, x: i32, y: i32) {
+        let p = self.launcher_rect();
+        if let Some(l) = self.launcher.as_mut() {
+            if Rect::new(p.right() - 210, p.bottom() - 50, 40, 36).contains(x, y) {
+                l.page = l.page.saturating_sub(1);
+                self.damage(p);
+                return;
+            }
+            if Rect::new(p.right() - 108, p.bottom() - 50, 40, 36).contains(x, y) {
+                l.page = (l.page + 1).min(l.pages() - 1);
+                self.damage(p);
+                return;
+            }
+        }
         let Some(l) = self.launcher.as_ref() else { return };
         let results = l.results();
         if let Some(i) = self.launcher_tiles(results.len()).iter().position(|r| r.contains(x, y)) {
-            let kind = results[i].kind;
-            self.launch(kind);
+            let app = results[i].clone();
+            self.toggle_launcher();
+            if let Some(kind) = app.kind {
+                self.open(kind);
+            } else {
+                self.spawn_program(&app.path, &[]);
+            }
         } else if self.launcher_power().contains(x, y) {
             self.launch(AppKind::Power);
         }
@@ -301,6 +382,7 @@ impl Desktop {
 
     fn app_name(&self) -> String {
         match self.focused() {
+            Some(w) if w.app.kind() == AppKind::Other => w.app.title(),
             Some(w) => String::from(apps::info(w.app.kind()).name),
             None => String::from("Desktop"),
         }
@@ -422,6 +504,13 @@ impl Desktop {
 
     pub(super) fn update_shell_hover(&mut self, x: i32, y: i32) {
         // Dock.
+        let reveal = y >= self.h - theme::dock_height() - DOCK_MARGIN - 16;
+        if self.dock_revealed != reveal {
+            self.dock_revealed = reveal;
+            if theme::dock_autohide() {
+                self.damage_all();
+            }
+        }
         let (dock, items) = self.dock_layout();
         let dh = items.iter().position(|(i, r)| *i != DockItem::Separator && r.inset(-DOCK_GAP / 2).contains(x, y));
         if dh != self.dock_hover {
@@ -490,12 +579,22 @@ impl Desktop {
                             cv.fill_circle(r.x + r.w / 2, dock.bottom() - 5, 2, t.text_on_glass);
                         }
                     }
+                    DockItem::External(_) => {
+                        icons::draw(cv, Icon::Aurora, r);
+                        cv.fill_circle(r.x + r.w / 2, dock.bottom() - 5, 2, t.text_on_glass);
+                    }
                     DockItem::Trash => icons::draw(cv, if self.trash_full { Icon::TrashFull } else { Icon::Trash }, r),
                 }
             }
             // Tooltip.
             if let Some((item, r)) = self.dock_hover.and_then(|i| items.get(i)) {
+                let external_title = if let DockItem::External(id) = item {
+                    self.windows.iter().find(|w| w.id == *id).map(|w| w.app.title()).unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 let label = match item {
+                    DockItem::External(_) => external_title.as_str(),
                     DockItem::Launcher => "Launcher",
                     DockItem::App(k) => apps::info(*k).name,
                     DockItem::Trash => "Trash",
@@ -531,6 +630,7 @@ impl Desktop {
             self.paint_volume_icon(cv);
             self.paint_battery_item(cv);
             self.paint_network_item(cv);
+            self.paint_controls_icon(cv);
         }
 
         // Launcher.
@@ -556,8 +656,8 @@ impl Desktop {
                     }
                     icons::draw(cv, app.icon, Rect::new(r.x + (r.w - 48) / 2, r.y + 10, 48, 48));
                     let f = theme::ui(12);
-                    let w = f.width(app.name).min(r.w - 8);
-                    cv.text_clipped(r.x + (r.w - w) / 2, r.y + 76, app.name, f, t.text, r.w - 8);
+                    let w = f.width(&app.name).min(r.w - 8);
+                    cv.text_clipped(r.x + (r.w - w) / 2, r.y + 76, &app.name, f, t.text, r.w - 8);
                 }
                 // Footer: user and power.
                 let foot_y = p.bottom() - 64;
@@ -566,6 +666,29 @@ impl Desktop {
                 cv.fill_round_rect_dgradient(av, 16, theme::accent(), theme::ACCENT_2);
                 cv.text_centered(av, "A", theme::ui_bold(14), 0xFFFF_FFFF);
                 cv.text(p.x + 66, foot_y + 37, "Aurora User", theme::ui_bold(13), t.text);
+                if l.pages() > 1 {
+                    widgets::button(
+                        cv,
+                        Rect::new(p.right() - 210, p.bottom() - 50, 40, 36),
+                        "‹",
+                        widgets::ButtonStyle::Secondary,
+                        false,
+                    );
+                    cv.text(
+                        p.right() - 164,
+                        p.bottom() - 27,
+                        &alloc::format!("{}/{}", l.page + 1, l.pages()),
+                        theme::ui(12),
+                        t.text_secondary,
+                    );
+                    widgets::button(
+                        cv,
+                        Rect::new(p.right() - 108, p.bottom() - 50, 40, 36),
+                        "›",
+                        widgets::ButtonStyle::Secondary,
+                        false,
+                    );
+                }
                 let pw = self.launcher_power();
                 if l.hover == Some(LauncherHover::Power) {
                     cv.fill_round_rect(pw, 10, t.hover);

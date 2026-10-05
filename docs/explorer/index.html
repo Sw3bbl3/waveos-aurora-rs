@@ -408,7 +408,7 @@ const LANE_COLORS = ["#0A84FF","#30D158","#FF9F0A","#BF5AF2","#FF375F","#40C8E0"
 
 const STAGES = [
   { id: "firmware",   label: "Firmware",       nodes: ["firmware"] },
-  { id: "boot",       label: "aurora-boot",    nodes: ["boot"] },
+  { id: "boot",       label: "firstlight",    nodes: ["boot"] },
   { id: "kernel",     label: "Kernel entry",   nodes: ["cpu"] },
   { id: "cpu",        label: "CPU tables",     nodes: ["cpu"] },
   { id: "memory",     label: "Memory",         nodes: ["mm"] },
@@ -416,9 +416,9 @@ const STAGES = [
   { id: "input",      label: "Input",          nodes: ["input"] },
   { id: "vfs",        label: "File systems",   nodes: ["vfs", "tarfs"] },
   { id: "scheduler",  label: "Scheduler",      nodes: ["sched", "proc"] },
-  { id: "storage",    label: "Storage",        nodes: ["pci", "blockdrv", "cache", "wavefs", "fat32"] },
-  { id: "gui",        label: "Window server",  nodes: ["crest"] },
-  { id: "desktop",    label: "Desktop ready",  nodes: ["syscall", "libaurora", "ripple", "apps", "tools"] },
+  { id: "storage",    label: "Storage",        nodes: ["pci", "blockdrv", "cache", "aurorafs", "fat32"] },
+  { id: "gui",        label: "Window server",  nodes: ["lumen-server"] },
+  { id: "desktop",    label: "Desktop ready",  nodes: ["syscall", "corekit", "aurorakit", "apps", "tools"] },
 ];
 
 // Node geometry is in the map's 1180×760 coordinate space.
@@ -432,14 +432,14 @@ const NODES = [
     summary: "ls, cat, grep, wc, ps, kill, cp, mv, df, neofetch…",
     detail: "Terminal runs these from /System/Bin as separate processes, connected with pipes. Pipelines and redirection work the same way as on Unix.",
     files: ["userland/bin/coreutils/src/bin/", "userland/apps/terminal/src/main.rs"] },
-  { id: "ripple", x: 40, y: 142, w: 250, h: 58, kind: "user", title: "Ripple toolkit",
+  { id: "aurorakit", x: 40, y: 142, w: 250, h: 58, kind: "user", title: "AuroraKit toolkit",
     summary: "Windows, events and drawing for apps.",
-    detail: "Ripple creates an app's window, runs its event loop and draws it with aurora-gfx, the same rasterizer the window server uses. That's why apps look identical to the rest of the desktop.",
-    files: ["userland/ripple/src/lib.rs", "libs/gfx/src/canvas.rs"] },
-  { id: "libaurora", x: 310, y: 142, w: 550, h: 58, kind: "user", title: "libaurora runtime",
+    detail: "AuroraKit creates an app's window, runs its event loop and draws it with lumen, the same rasterizer the window server uses. That's why apps look identical to the rest of the desktop.",
+    files: ["userland/aurorakit/src/lib.rs", "libs/gfx/src/canvas.rs"] },
+  { id: "corekit", x: 310, y: 142, w: 550, h: 58, kind: "user", title: "corekit runtime",
     summary: "Program entry, heap, print!, files, processes.",
     detail: "The user-space runtime every program links. It turns Rust calls like fs::read or process::spawn into system calls, and grows the heap by mapping new memory from the kernel.",
-    files: ["userland/libaurora/src/"] },
+    files: ["userland/corekit/src/"] },
   // Syscall gate
   { id: "syscall", x: 40, y: 248, w: 820, h: 40, kind: "kernel", title: "System call gate",
     summary: "syscall / sysret — 37 calls, every pointer checked.",
@@ -454,13 +454,13 @@ const NODES = [
     summary: "Preemptive round-robin, 10 ms slices.",
     detail: "Decides which task runs. The 1 kHz timer interrupt preempts a task after 10 ms; tasks also give up the CPU when they sleep or wait. Each switch saves registers, loads the next task's page tables and kernel stack.",
     files: ["kernel/src/sched/mod.rs", "kernel/src/arch/switch.rs"] },
-  { id: "crest", x: 460, y: 310, w: 190, h: 70, kind: "kernel", title: "Crest window server",
+  { id: "lumen-server", x: 460, y: 310, w: 190, h: 70, kind: "kernel", title: "Lumen Server window server",
     summary: "Compositing, dock, menu bar, launcher.",
     detail: "Runs in the kernel, like Windows NT's win32k. It repaints only the damaged parts of the screen, composites each app's shared surface with rounded corners and shadows, and routes mouse and keyboard input to the focused window.",
     files: ["kernel/src/gui/mod.rs", "kernel/src/gui/server.rs", "kernel/src/gui/desktop/mod.rs", "kernel/src/gui/desktop/shell.rs"] },
   { id: "vfs", x: 670, y: 310, w: 190, h: 70, kind: "kernel", title: "Virtual file system",
     summary: "One tree over every volume.",
-    detail: "Joins the mounted filesystems into one path tree: WaveFS at /, the system image at /System and the EFI partition at /Boot. File calls from apps land here and are routed by longest mount prefix.",
+    detail: "Joins the mounted filesystems into one path tree: AuroraFS at /, the system image at /System and the EFI partition at /Boot. File calls from apps land here and are routed by longest mount prefix.",
     files: ["kernel/src/fs/mod.rs"] },
   // Kernel core
   { id: "mm", x: 40, y: 410, w: 190, h: 70, kind: "kernel", title: "Memory manager",
@@ -475,10 +475,10 @@ const NODES = [
     summary: "/System — read-only tar.",
     detail: "The apps and tools ship in system.tar, loaded into memory by the bootloader and mounted read-only at /System. Starting a program reads its ELF from here.",
     files: ["kernel/src/fs/tarfs.rs"] },
-  { id: "wavefs", x: 670, y: 410, w: 90, h: 70, kind: "kernel", title: "WaveFS",
+  { id: "aurorafs", x: 670, y: 410, w: 90, h: 70, kind: "kernel", title: "AuroraFS",
     summary: "Journaled home volume.",
     detail: "Our own extent-based filesystem for your files. Metadata changes go through a write-ahead journal and are committed every 5 seconds, so the volume stays consistent after a crash or power cut.",
-    files: ["libs/wavefs/src/lib.rs", "kernel/src/fs/wavefs.rs"] },
+    files: ["libs/aurorafs/src/lib.rs", "kernel/src/fs/aurorafs.rs"] },
   { id: "fat32", x: 770, y: 410, w: 90, h: 70, kind: "kernel", title: "FAT32",
     summary: "/Boot",
     detail: "Reads and writes the EFI System Partition with long file names, so /Boot shows the bootloader, kernel and system image the firmware booted from.",
@@ -513,30 +513,30 @@ const NODES = [
     summary: "Powers on, finds the ESP.",
     detail: "OVMF (or your PC's firmware) initializes the machine and runs EFI/BOOT/BOOTX64.EFI from the EFI System Partition.",
     files: [] },
-  { id: "boot", x: 206, y: 684, w: 150, h: 50, kind: "hw", title: "aurora-boot",
+  { id: "boot", x: 206, y: 684, w: 150, h: 50, kind: "hw", title: "firstlight",
     summary: "Our UEFI bootloader.",
-    detail: "Picks a screen mode, loads the kernel and system image, builds the first page tables, exits boot services and jumps into the Tide kernel.",
+    detail: "Picks a screen mode, loads the kernel and system image, builds the first page tables, exits boot services and jumps into the Aster kernel.",
     files: ["bootloader/src/main.rs", "bootloader/src/paging.rs"] },
   { id: "hw-cpu", x: 400, y: 684, w: 110, h: 50, kind: "hw", title: "CPU", summary: "x86_64", detail: "The processor. WaveOS Aurora currently uses one core.", files: [] },
   { id: "hw-ram", x: 520, y: 684, w: 110, h: 50, kind: "hw", title: "RAM", summary: "", detail: "Physical memory, handed to the memory manager as a map of usable regions by the bootloader.", files: [] },
   { id: "hw-display", x: 900, y: 310, w: 240, h: 70, kind: "hw", title: "Display", summary: "GOP framebuffer",
-    detail: "A linear framebuffer set up by the firmware. Crest copies only damaged rectangles from its back buffer to it.", files: [] },
+    detail: "A linear framebuffer set up by the firmware. Lumen Server copies only damaged rectangles from its back buffer to it.", files: [] },
   { id: "hw-input", x: 900, y: 410, w: 240, h: 70, kind: "hw", title: "Keyboard & mouse", summary: "PS/2 · vmmouse",
     detail: "Keyboard and pointing device, delivering interrupts 1 and 12.", files: [] },
   { id: "hw-disk", x: 900, y: 572, w: 240, h: 70, kind: "hw", title: "Disk", summary: "",
-    detail: "The boot disk: a GPT with an EFI System Partition and the Aurora HD WaveFS volume.", files: [] },
+    detail: "The boot disk: a GPT with an EFI System Partition and the Aurora HD AuroraFS volume.", files: [] },
 ];
 const NODE = Object.fromEntries(NODES.map(n => [n.id, n]));
 
 const EDGES = [
-  ["apps", "ripple", "win"], ["apps", "libaurora", "sys"], ["tools", "libaurora", "sys"], ["ripple", "libaurora", "win"],
-  ["libaurora", "syscall", "sys"],
-  ["syscall", "proc", "proc"], ["syscall", "crest", "win"], ["syscall", "vfs", "file"], ["syscall", "mm", "mmap"],
+  ["apps", "aurorakit", "win"], ["apps", "corekit", "sys"], ["tools", "corekit", "sys"], ["aurorakit", "corekit", "win"],
+  ["corekit", "syscall", "sys"],
+  ["syscall", "proc", "proc"], ["syscall", "lumen-server", "win"], ["syscall", "vfs", "file"], ["syscall", "mm", "mmap"],
   ["proc", "sched", "sched"], ["proc", "mm", "proc"], ["proc", "tarfs", "proc"],
-  ["vfs", "wavefs", "disk"], ["vfs", "fat32", "boot"], ["vfs", "tarfs", "file"],
-  ["wavefs", "cache", "disk"], ["fat32", "cache", "boot"], ["cache", "blockdrv", "disk"], ["blockdrv", "hw-disk", "disk"],
+  ["vfs", "aurorafs", "disk"], ["vfs", "fat32", "boot"], ["vfs", "tarfs", "file"],
+  ["aurorafs", "cache", "disk"], ["fat32", "cache", "boot"], ["cache", "blockdrv", "disk"], ["blockdrv", "hw-disk", "disk"],
   ["pci", "blockdrv", "none"], ["irq", "sched", "timer"], ["irq", "input", "input"], ["hw-input", "input", "input"],
-  ["input", "crest", "input"], ["crest", "hw-display", "frames"], ["cpu", "irq", "none"], ["acpi", "irq", "none"],
+  ["input", "lumen-server", "input"], ["lumen-server", "hw-display", "frames"], ["cpu", "irq", "none"], ["acpi", "irq", "none"],
   ["mm", "hw-ram", "mem"], ["firmware", "boot", "none"], ["boot", "cpu", "none"], ["sched", "hw-cpu", "cpu"],
 ];
 
@@ -611,7 +611,7 @@ function ingest(ev) {
     case "console": {
       const line = ev.line || "";
       if (!S.stagesAt.firmware && /BdsDxe|UEFI|Boot0/.test(line)) { S.stagesAt.firmware = 0; S.stage = S.stage || "firmware"; dirty.boot = true; }
-      if (/aurora-boot/.test(line) && S.stagesAt.boot == null) { S.stagesAt.firmware = S.stagesAt.firmware ?? 0; S.stagesAt.boot = 0; S.stage = "boot"; dirty.boot = true; }
+      if (/firstlight/.test(line) && S.stagesAt.boot == null) { S.stagesAt.firmware = S.stagesAt.firmware ?? 0; S.stagesAt.boot = 0; S.stage = "boot"; dirty.boot = true; }
       pushEvent("console", line, S.t, /PANIC|panicked|crashed/.test(line) ? "k-crash" : "");
       break;
     }
@@ -633,7 +633,7 @@ function ingest(ev) {
     case "win":
       S.t = Math.max(S.t, ev.t);
       pushEvent("win", ev.what === "open" ? `Window “${ev.title}” opened by pid ${ev.pid}` : `Window ${ev.id} closed${ev.title ? " (“" + ev.title + "”)" : ""}`, ev.t, "k-win");
-      flash(["crest"]);
+      flash(["lumen-server"]);
       break;
     case "mount":
       pushEvent("storage", `Mounted ${ev.fs} at ${ev.path}`, ev.t, "k-storage");
@@ -785,7 +785,7 @@ const GLYPHS = {
 function buildMap() {
   const bands = [
     { y: 30, h: 182, label: "User space · ring 3" },
-    { y: 222, h: 436, label: "Tide kernel · ring 0" },
+    { y: 222, h: 436, label: "Aster kernel · ring 0" },
     { y: 666, h: 80, label: "Firmware & hardware" },
   ];
   for (const b of bands) {
@@ -830,9 +830,9 @@ function activity(id) {
   const sat = (v, full) => Math.min(1, v / full);
   const a = {
     apps: sat(r.userBusy, 25), tools: sat(S.procs.filter(p => p.alive && p.path.startsWith("/System/Bin")).length, 2),
-    ripple: sat(r.winCalls, 400), libaurora: sat(r.sys, 900), syscall: sat(r.sys, 900), proc: sat(r.procCalls, 5),
-    sched: sat(r.switches, 500), crest: sat(r.frames, 20), vfs: sat(r.file, 40), mm: sat(r.mmap, 5),
-    input: sat(r.input, 30), tarfs: sat(r.procCalls, 3), wavefs: sat(r.homeIo, 20), fat32: sat(r.bootIo, 20),
+    aurorakit: sat(r.winCalls, 400), corekit: sat(r.sys, 900), syscall: sat(r.sys, 900), proc: sat(r.procCalls, 5),
+    sched: sat(r.switches, 500), lumen-server: sat(r.frames, 20), vfs: sat(r.file, 40), mm: sat(r.mmap, 5),
+    input: sat(r.input, 30), tarfs: sat(r.procCalls, 3), aurorafs: sat(r.homeIo, 20), fat32: sat(r.bootIo, 20),
     cache: sat(r.diskOps, 30), blockdrv: sat(r.diskOps, 30), irq: sat(r.timer, 1000) * 0.35, cpu: sat(r.busy, 100) * 0.5,
     "hw-cpu": sat(r.busy, 100), "hw-ram": 0.15, "hw-display": sat(r.frames, 20), "hw-input": sat(r.input, 30), "hw-disk": sat(r.diskOps, 30),
     acpi: 0, pci: 0, firmware: 0, boot: 0,
@@ -846,17 +846,17 @@ function metricText(id) {
   switch (id) {
     case "apps": { const n = alive.filter(p => p.path.startsWith("/System/Apps")).length; return `${n} running · ${r.userBusy.toFixed(0)}% CPU`; }
     case "tools": { const n = alive.filter(p => p.path.startsWith("/System/Bin")).length; return n ? `${n} running now` : "idle"; }
-    case "ripple": return `${fmtRate(r.winCalls, "window calls/s")}`;
-    case "libaurora": return `${fmtRate(r.sys, "syscalls/s")}`;
+    case "aurorakit": return `${fmtRate(r.winCalls, "window calls/s")}`;
+    case "corekit": return `${fmtRate(r.sys, "syscalls/s")}`;
     case "syscall": return `${fmtRate(r.sys, "calls/s")} · ${S.sys.reduce((a, b) => a + b, 0).toLocaleString()} total`;
     case "proc": return `${alive.length} process${alive.length === 1 ? "" : "es"}`;
     case "sched": return `${fmtRate(r.switches, "switches/s")}`;
-    case "crest": return `${fmtRate(r.frames, "frames/s")} · ${S.win.length} windows`;
+    case "lumen-server": return `${fmtRate(r.frames, "frames/s")} · ${S.win.length} windows`;
     case "vfs": return `${fmtRate(r.file, "file calls/s")}`;
     case "mm": return m ? `${fmtBytes(m.used)} of ${fmtBytes(m.total)}` : "";
     case "input": return `${fmtRate(r.input, "events/s")}`;
     case "tarfs": return "read-only";
-    case "wavefs": { const f = S.fs.find(x => x.p === "/"); return f && f.total ? `${fmtBytes(f.free)} free` : "not mounted"; }
+    case "aurorafs": { const f = S.fs.find(x => x.p === "/"); return f && f.total ? `${fmtBytes(f.free)} free` : "not mounted"; }
     case "fat32": { const f = S.fs.find(x => x.p === "/Boot"); return f && f.total ? `${fmtBytes(f.free)} free` : "—"; }
     case "cache": return `${fmtRate(r.diskOps, "disk ops/s")}`;
     case "irq": return `${fmtRate(r.timer, "Hz timer")}`;
@@ -1264,7 +1264,7 @@ function inspectorHtml() {
     const extra = nodeExtra(n.id);
     return `<div class="insp">
       <div class="insp-head"><div class="insp-icon"><svg width="18" height="18" viewBox="0 0 16 16"><path d="${GLYPHS[n.kind === "user" ? "user" : n.kind === "hw" ? "hw" : "kernel"]}" fill="none" stroke="var(--accent)" stroke-width="1.5"/></svg></div>
-        <div><h3>${esc(n.title)}</h3><div class="kind">${n.kind === "user" ? "User space" : n.kind === "hw" ? "Firmware & hardware" : "Tide kernel"}${at != null ? ` · started at +${at} ms` : ""}</div></div></div>
+        <div><h3>${esc(n.title)}</h3><div class="kind">${n.kind === "user" ? "User space" : n.kind === "hw" ? "Firmware & hardware" : "Aster kernel"}${at != null ? ` · started at +${at} ms` : ""}</div></div></div>
       <p>${esc(n.detail)}</p>
       <div class="stats">${extra.stats.map(([l, v]) => `<div class="stat"><div class="label">${l}</div><div class="value">${v}</div></div>`).join("")}</div>
       ${extra.spark ? `<div class="section"><h2>${extra.sparkLabel}</h2>${sparkSvg(extra.spark, cssVar("--live"))}</div>` : ""}
@@ -1318,7 +1318,7 @@ function taskBlurb(name) {
     reaper: "Frees the memory, files and windows of processes that have exited or crashed.",
     flusher: "Commits file-system changes to disk every five seconds.",
     telemetry: "Sends the snapshots this page is drawing, four times a second.",
-    crest: "The window server: handles input, applies window requests from apps and repaints damaged parts of the screen.",
+    lumen-server: "The window server: handles input, applies window requests from apps and repaints damaged parts of the screen.",
   }[name] || "A kernel thread.";
 }
 
@@ -1327,8 +1327,8 @@ function nodeExtra(id) {
   const hist = k => S.history.map(h => h[k]);
   switch (id) {
     case "sched": return { stats: [["Switches", fmtRate(r.switches, "/s")], ["Tasks", S.tasks.size], ["Busy", r.busy.toFixed(0) + "%"], ["Slice", "10 ms"]], spark: hist("switches"), sparkLabel: "Context switches per second" };
-    case "syscall": case "libaurora": return { stats: [["Calls", fmtRate(r.sys, "/s")], ["Since boot", S.sys.reduce((a, b) => a + b, 0).toLocaleString()], ["File calls", fmtRate(r.file, "/s")], ["Window calls", fmtRate(r.winCalls, "/s")]], spark: hist("sys"), sparkLabel: "System calls per second" };
-    case "crest": case "hw-display": return { stats: [["Frames", fmtRate(r.frames, "/s")], ["Pixels", fmtRate(r.px / 1e6, "M/s")], ["Windows", S.win.length], ["Input", fmtRate(r.input, "/s")]], spark: hist("frames"), sparkLabel: "Frames per second",
+    case "syscall": case "corekit": return { stats: [["Calls", fmtRate(r.sys, "/s")], ["Since boot", S.sys.reduce((a, b) => a + b, 0).toLocaleString()], ["File calls", fmtRate(r.file, "/s")], ["Window calls", fmtRate(r.winCalls, "/s")]], spark: hist("sys"), sparkLabel: "System calls per second" };
+    case "lumen-server": case "hw-display": return { stats: [["Frames", fmtRate(r.frames, "/s")], ["Pixels", fmtRate(r.px / 1e6, "M/s")], ["Windows", S.win.length], ["Input", fmtRate(r.input, "/s")]], spark: hist("frames"), sparkLabel: "Frames per second",
       html: S.win.length ? `<div class="section"><h2>Open windows</h2><dl class="kv">${S.win.map(w => `<dt>pid ${w.pid}</dt><dd>${esc(w.title)}</dd>`).join("")}</dl></div>` : "" };
     case "mm": case "hw-ram": return { stats: m ? [["Used", fmtBytes(m.used)], ["Total", fmtBytes(m.total)], ["Heap", fmtBytes(m.heapUsed)], ["mmap", fmtRate(r.mmap, "/s")]] : [], spark: hist("mem"), sparkLabel: "Used memory" };
     case "apps": case "proc": case "tools": {
@@ -1336,7 +1336,7 @@ function nodeExtra(id) {
       return { stats: [["Processes", alive.length], ["User CPU", r.userBusy.toFixed(0) + "%"], ["Spawns", S.sys[5] || 0], ["Crashes", S.events.filter(e => e.cls === "k-crash" && e.kind === "proc").length]],
         html: `<div class="section"><h2>Running</h2><dl class="kv">${alive.map(p => `<dt class="num">${p.pid}</dt><dd>${esc(p.n)} · ${fmtBytes(p.kib * 1024)}</dd>`).join("") || "<dd>none</dd>"}</dl></div>` };
     }
-    case "wavefs": case "fat32": case "vfs": case "tarfs": case "cache": return { stats: S.fs.filter(f => f.total).map(f => [f.p, `${fmtBytes(f.free)} free`]).concat([["Disk I/O", fmtBytes(r.diskBytes) + "/s"]]), spark: hist("disk"), sparkLabel: "Disk throughput" };
+    case "aurorafs": case "fat32": case "vfs": case "tarfs": case "cache": return { stats: S.fs.filter(f => f.total).map(f => [f.p, `${fmtBytes(f.free)} free`]).concat([["Disk I/O", fmtBytes(r.diskBytes) + "/s"]]), spark: hist("disk"), sparkLabel: "Disk throughput" };
     case "blockdrv": case "hw-disk": return { stats: S.blk.filter(b => !/p\d+$/.test(b.n)).flatMap(b => [[b.n, b.d.split(" — ")[0]], ["Read", fmtBytes(b.rb)], ["Written", fmtBytes(b.wb)]]).concat([["Now", fmtBytes(r.diskBytes) + "/s"]]), spark: hist("disk"), sparkLabel: "Disk throughput" };
     case "irq": case "input": case "hw-input": return { stats: [["Timer", fmtRate(r.timer, "Hz")], ["Input", fmtRate(r.input, "/s")], ["Keyboard", (S.irq.kbd || 0).toLocaleString()], ["Mouse", (S.irq.mouse || 0).toLocaleString()]] };
     case "cpu": case "hw-cpu": return { stats: [["Busy", r.busy.toFixed(0) + "%"], ["Apps", r.userBusy.toFixed(0) + "%"], ["Cores", 1], ["Switches", fmtRate(r.switches, "/s")]], spark: hist("busy"), sparkLabel: "CPU busy" };

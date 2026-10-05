@@ -6,7 +6,7 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 
 - The UEFI bootloader, and a higher-half kernel with physical memory management and a heap.
 - ACPI, APIC timer and IRQ routing, a preemptive scheduler, PS/2 input, the RTC, and ACPI power off and restart.
-- The Crest compositor and the Aurora desktop: menu bar, dock, launcher, windows, light and dark themes, and wallpapers.
+- The Lumen Server compositor and the Aurora desktop: menu bar, dock, launcher, windows, light and dark themes, and wallpapers.
 - The apps: Files, Terminal, Notes, Calculator, Settings, About and Welcome, all on an in-memory RamFS.
 - A kernel self-test suite, headless CI boots, and a USB-bootable GPT image.
 
@@ -15,21 +15,21 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - **Ring 3:** per-process address spaces with NX, `syscall`/`sysret`, and a validated user-pointer ABI (`libs/abi`).
 - **Processes:** an ELF loader and spawn/wait/kill. Kills are cooperative, and a reaper task frees exited processes.
 - **IPC and isolation:** fd tables and pipes. A CPU fault in ring 3 kills only the faulting process, and the desktop shows a crash report.
-- **Crest:** stays in the kernel, like NT's win32k. Apps draw into shared-memory surfaces and receive events through `next_event`.
-- **Userland:** the libaurora runtime and the Ripple UI toolkit. All seven apps now run in user space.
+- **Lumen Server:** stays in the kernel, like NT's win32k. Apps draw into shared-memory surfaces and receive events through `next_event`.
+- **Userland:** the corekit runtime and the AuroraKit UI toolkit. All seven apps now run in user space.
 - **Terminal:** a real shell. Programs in `/System/Bin` run as separate processes, with pipelines and redirection.
 - **Tests:** the `usertest` syscall conformance suite runs as part of `cargo xtask test`.
 - **Deferred:** message-port IPC and a user-space window server are planned together with multi-threaded processes.
 
-## ✅ M3: Storage and WaveFS
+## ✅ M3: Storage and AuroraFS
 
 - **Hardware:** PCI/PCIe enumeration (ECAM via ACPI MCFG). Polled drivers for **AHCI**, **virtio-blk** (modern virtio-pci) and **NVMe**, plus GPT partitions.
 - **VFS:** a mount table and a write-back block cache, with a background flusher every 5 s and a sync on shutdown and restart.
-- **WaveFS:** our journaled, extent-based filesystem.
+- **AuroraFS:** our journaled, extent-based filesystem.
   - Metadata goes through a physical write-ahead journal in ordered mode, with revoke-on-free and checksummed commits.
   - It's a `no_std` library shared by the kernel and the host `mkfs`, with crash-recovery tests.
 - **FAT32:** read/write with long file names, mounted at `/Boot`, and cross-checked against the `fatfs` crate.
-- **Disk images:** `xtask` builds GPT images with an ESP plus a WaveFS home volume, and keeps the home volume across rebuilds.
+- **Disk images:** `xtask` builds GPT images with an ESP plus a AuroraFS home volume, and keeps the home volume across rebuilds.
 - **Files:** volumes in the sidebar, New Folder, inline Rename, Delete, Copy/Cut/Paste and context menus. The theme and wallpaper persist.
 - **Tests:** the kernel suite runs on all three controllers in CI, and boots twice to verify persistence.
 - **Deferred:** interrupt-driven I/O (MSI/MSI-X) moves to M5, and drag and drop moves to M4.
@@ -39,7 +39,7 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - **Text:** our own TrueType engine (outlines, kerning, exact-area anti-aliasing in fixed point) renders any size, in the kernel and in apps.
 - **User space:** SSE2 for programs, threads, futexes, `Mutex`/`Condvar`.
 - **New apps:** Preview (our own PNG and BMP codecs), Paint, Clock (world clock, alarms, stopwatch, timers) and Activity Monitor.
-- **Notes:** selection, the clipboard, undo/redo, find, fonts and sizes, Save As, and an unsaved-changes prompt, on a shared `ripple::text` engine.
+- **Notes:** selection, the clipboard, undo/redo, find, fonts and sizes, Save As, and an unsaved-changes prompt, on a shared `aurorakit::text` engine.
 - **Files:** drag and drop, icon and sortable list views, multi-select, search, Quick Look, picture thumbnails and a Trash with Put Back.
 - **Desktop:** window animations, notifications and a Notification Center with a calendar, Spotlight (apps, indexed files, settings, calculations, commands), a system clipboard, screenshots, pictures as wallpaper, and a dynamic accent colour.
 - **Settings:** Appearance, Display (live resolution changes on Bochs/QEMU VGA, boot-time modes elsewhere), Keyboard (six layouts, key repeat), Date & Time, Sound, Notifications and About.
@@ -66,8 +66,8 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
   - `libs/web`: URLs (RFC 3986) and HTTP/1.1 with redirects, chunked bodies, keep-alive through a connection pool, and gzip/deflate
   - `libs/tls`: TLS 1.3 (X25519 or P-256; AES-GCM or ChaCha20-Poly1305), TLS 1.2 fallback (ECDHE with AEAD ciphers, extended master secret), and our own DER/X.509 path validation against Mozilla's roots. Tested against rustls and RFC 8448.
   - `libs/surf`: the browser engine. An HTML parser, CSS (selectors with an ancestor Bloom filter, the cascade, custom properties, `calc()`, media queries, `::before`/`::after`), and layout: blocks, inline text, lists, tables, flexbox, grid, floats as rows, form controls.
-- **Images:** our own JPEG (baseline and progressive) and GIF decoders, for Surf, Preview and Files.
-- **Surf:** history, links, fragments, search forms, find in page, zoom, downloads, a start page; `.html` files open in it.
+- **Images:** our own JPEG (baseline and progressive) and GIF decoders, for Nebula, Preview and Files.
+- **Nebula:** history, links, fragments, search forms, find in page, zoom, downloads, a start page; `.html` files open in it.
 - **Tools and UI:** `ping`, `ifconfig`, `nslookup`, `fetch`; shell lists (`&&`, `||`, `;`); the menu-bar network item, Settings → Network, and a Network tab in Activity Monitor.
 - **Deferred:** IPv6; JavaScript; cookies and POST forms; tabs; WebP and SVG; Wi-Fi and other adapters (Realtek).
 

@@ -9,7 +9,7 @@ env:
 
 jobs:
   host:
-    name: Format and host tests (WaveFS, FAT32, gfx, image, WAV)
+    name: Format and host tests (AuroraFS, FAT32, gfx, image, WAV)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +21,7 @@ jobs:
           cargo fmt --all -- --check
           (cd userland && cargo fmt --all -- --check)
       - name: Filesystem library tests
-        run: cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p aurora-web -p aurora-tls -p aurora-surf -p xtask
+        run: cargo test -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask
 
   kernel:
     name: Kernel tests (${{ matrix.disk }}, ${{ matrix.smp }} CPU, ${{ matrix.net }})
@@ -70,7 +70,7 @@ jobs:
           timeout 180 cargo xtask run --no-build --headless > serial.log 2>&1 || true
           sed 's/\x1b\[[0-9;]*[A-Za-z]//g' serial.log | grep -v '^\s*$' | tail -40
           grep -q "Aurora desktop ready" serial.log
-          grep -q "mounted WaveFS" serial.log
+          grep -q "mounted AuroraFS" serial.log
       - name: Build USB disk image
         run: cargo xtask image
       - name: Upload disk image

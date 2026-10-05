@@ -1,0 +1,16 @@
+[package]
+name = "app-nebula"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "app-nebula"
+path = "src/main.rs"
+
+[dependencies]
+corekit.workspace = true
+aurorakit.workspace = true
+aurora-image.workspace = true
+nebula-web.workspace = true
+nebula-engine.workspace = true

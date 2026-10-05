@@ -45,7 +45,7 @@ Work through the list and note what happens. The boot log (below) records the de
 - [ ] **Pointer.** Check the touchpad, a USB mouse (with the scroll wheel), and clicking and dragging windows.
 - [ ] **USB stick.** Plug in a FAT32 stick: it should appear in Files under Locations. Open a file, copy one onto it, then eject it and unplug.
 - [ ] **Internal disk.** `lspci` should list the controller, and `df` should show whether a WaveOS volume was found.
-- [ ] **Network.** With a supported wired adapter (see below) plugged in, the menu-bar network item should show Connected and an address. In Terminal try `ifconfig`, `ping example.com` and `fetch https://example.com`, then open Surf.
+- [ ] **Network.** With a supported wired adapter (see below) plugged in, the menu-bar network item should show Connected and an address. In Terminal try `ifconfig`, `ping example.com` and `fetch https://example.com`, then open Nebula.
 - [ ] **Sound.** Play `play /System/Sounds/startup.wav`, then `play --tone 440 1000`. Try the volume keys, the menu-bar slider, and headphones in and out.
 - [ ] **Battery (laptops).** Check the menu-bar percentage and `battery` in Terminal. Unplug and replug the charger.
 - [ ] **Power button.** A short press should open the Shut Down dialog.

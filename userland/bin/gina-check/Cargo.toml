@@ -1,0 +1,8 @@
+[package]
+name = "gina-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+corekit.workspace = true
+gina.workspace = true

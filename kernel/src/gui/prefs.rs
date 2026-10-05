@@ -14,7 +14,17 @@ fn valid_key(k: &str) -> bool {
 /// Defaults for preferences that have one.
 fn default(key: &str) -> Option<&'static str> {
     Some(match key {
-        pref::DARK | pref::CLOCK_24H | pref::CLOCK_SECONDS | pref::DND | pref::MUTED => "0",
+        pref::DARK
+        | pref::CLOCK_24H
+        | pref::CLOCK_SECONDS
+        | pref::DND
+        | pref::MUTED
+        | pref::REDUCE_TRANSPARENCY
+        | pref::REDUCE_MOTION
+        | pref::HIGH_CONTRAST
+        | pref::DOCK_AUTOHIDE => "0",
+        pref::GLASS => "70",
+        pref::DOCK_SIZE => "48",
         pref::CLOCK_DATE => "1",
         pref::ACCENT => "0",
         pref::KEYBOARD => "us",
@@ -43,13 +53,29 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         return Err(EINVAL);
     }
     match key {
+        pref::GLASS if !value.parse::<u8>().is_ok_and(|v| v <= 100) => return Err(EINVAL),
+        pref::DOCK_SIZE if !value.parse::<u8>().is_ok_and(|v| (32..=64).contains(&v)) => return Err(EINVAL),
+        pref::REDUCE_TRANSPARENCY | pref::REDUCE_MOTION | pref::HIGH_CONTRAST | pref::DOCK_AUTOHIDE
+            if value != "0" && value != "1" =>
+        {
+            return Err(EINVAL)
+        }
         pref::KEYBOARD if !keymap::LAYOUTS.iter().any(|l| l.id == value) => return Err(EINVAL),
         pref::ACCENT if value.parse::<u8>().is_err() => return Err(EINVAL),
         _ => {}
     }
-    settings::set(key, value);
+    settings::try_set(key, value)?;
     server::command(Command::Pref(String::from(key)));
     Ok(())
+}
+
+pub fn apply_appearance() {
+    let flags = [pref::REDUCE_TRANSPARENCY, pref::REDUCE_MOTION, pref::HIGH_CONTRAST, pref::DOCK_AUTOHIDE]
+        .iter()
+        .enumerate()
+        .fold(0, |flags, (i, key)| flags | ((get_bool(key) as u8) << i));
+    super::theme::set_effects(get(pref::GLASS).and_then(|v| v.parse().ok()).unwrap_or(70), flags);
+    super::theme::set_dock_size(get(pref::DOCK_SIZE).and_then(|v| v.parse().ok()).unwrap_or(48));
 }
 
 /// Applies preferences that live in drivers (at boot and when changed).

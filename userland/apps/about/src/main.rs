@@ -7,14 +7,14 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
-use ripple::canvas::Canvas;
-use ripple::geom::Rect;
-use ripple::icons::{self, Icon};
-use ripple::theme;
-use ripple::{App, Env};
+use aurorakit::canvas::Canvas;
+use aurorakit::geom::Rect;
+use aurorakit::icons::{self, Icon};
+use aurorakit::theme;
+use aurorakit::{App, Env};
 
-use aurora::abi::SysInfo;
-use aurora::process::fixed_str;
+use corekit::abi::SysInfo;
+use corekit::process::fixed_str;
 
 pub struct About {
     info: SysInfo,
@@ -23,7 +23,7 @@ pub struct About {
 
 impl About {
     pub fn new() -> Self {
-        Self { info: aurora::process::sys_info(), last_second: 0 }
+        Self { info: corekit::process::sys_info(), last_second: 0 }
     }
 }
 
@@ -56,13 +56,13 @@ impl App for About {
         cv.text(cx - f2.width(&ver) / 2, area.y + 160, &ver, f2, t.text_secondary);
 
         let rows = [
-            ("Kernel", format!("Tide {} (x86_64, hybrid)", version)),
+            ("Kernel", format!("Aster {} (x86_64, hybrid)", version)),
             ("Processor", fixed_str(&i.cpu, i.cpu_len)),
             ("Memory", format!("{} total · {} in use", mib(i.mem_total), mib(i.mem_used))),
             ("Processes", format!("{} running", i.processes)),
             ("Home volume", fixed_str(&i.root, i.root_len)),
             ("Display", format!("{} × {}", env.screen.0, env.screen.1)),
-            ("Uptime", aurora::time::format_uptime(env.now_ms)),
+            ("Uptime", corekit::time::format_uptime(env.now_ms)),
         ];
         let mut y = area.y + 196;
         let label_x = cx - 16;
@@ -80,15 +80,15 @@ impl App for About {
     fn tick(&mut self, env: &mut Env) -> bool {
         let s = env.now_ms / 1000;
         if core::mem::replace(&mut self.last_second, s) != s {
-            self.info = aurora::process::sys_info();
+            self.info = corekit::process::sys_info();
             return true;
         }
         false
     }
 }
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(_: aurora::Args) -> i32 {
-    ripple::run(About::new())
+fn main(_: corekit::Args) -> i32 {
+    aurorakit::run(About::new())
 }

@@ -11,8 +11,10 @@
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 
 mod aml;
+mod display;
 mod image;
 mod monitor;
+mod package;
 mod sounds;
 mod tar;
 
@@ -29,6 +31,18 @@ const USER_TARGET: &str = "x86_64-aurora-user";
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let flag = |f: &str| args.iter().any(|a| a == f);
+    let number = |name: &str, default: u64, min: u64, max: u64| -> u64 {
+        match args.iter().position(|a| a == name) {
+            None => default,
+            Some(i) => match args.get(i + 1).and_then(|s| s.parse::<u64>().ok()).filter(|v| *v >= min && *v <= max) {
+                Some(n) => n,
+                None => {
+                    eprintln!("{name} must be between {min} and {max}");
+                    exit(2);
+                }
+            },
+        }
+    };
     let profile = if flag("--debug") { Profile::Debug } else { Profile::Release };
     let disk =
         args.iter().position(|a| a == "--disk").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("ahci");
@@ -46,15 +60,29 @@ fn main() {
     }
 
     match args.first().map(String::as_str) {
+        Some("package") => {
+            if args.len() != 4 {
+                eprintln!("usage: cargo xtask package MANIFEST.toml APP.elf OUTPUT.gina");
+                exit(2);
+            }
+            if let Err(e) = package::package(Path::new(&args[1]), Path::new(&args[2]), Path::new(&args[3])) {
+                eprintln!("{e}");
+                exit(1);
+            }
+        }
         Some("build") => {
             build(profile, false);
         }
         Some("run") => {
             let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
-            let img = root().join("target/waveos-aurora.img");
-            prepare_disk(&esp, &img, flag("--fresh-disk"));
+            let developer = flag("--developer");
+            let img = root().join(if developer { "target/waveos-developer.img" } else { "target/waveos-aurora.img" });
+            let size = number("--disk-size-mib", if developer { 8192 } else { 256 }, 128, 65536) * 1024 * 1024;
+            prepare_disk(&esp, &img, flag("--fresh-disk"), size);
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
             let opts = RunOpts {
+                memory_mib: number("--memory-mib", if developer { 4096 } else { 512 }, 256, 32768),
+                keyboard_capture: !flag("--no-keyboard-capture"),
                 headless: flag("--headless"),
                 gdb: flag("--gdb"),
                 log_int: flag("--int"),
@@ -125,17 +153,20 @@ fn root() -> PathBuf {
 const DISK_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Creates the persistent disk if needed; otherwise refreshes only its ESP so
-/// files saved on the WaveFS volume survive rebuilds.
-fn prepare_disk(esp: &Path, img: &Path, fresh: bool) {
+/// files saved on the AuroraFS volume survive rebuilds.
+fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64) {
     let home = root().join("assets/home");
     if !fresh && img.exists() {
         match image::refresh_esp(esp, img) {
             Ok(true) => return,
-            Ok(false) => eprintln!("{} has an old layout; recreating it", img.display()),
-            Err(e) => eprintln!("could not update {}: {e}; recreating it", img.display()),
+            Ok(false) => panic!(
+                "{} has an unsupported layout; disk preserved. Back it up before using --fresh-disk",
+                img.display()
+            ),
+            Err(e) => panic!("could not update {}: {e}; disk preserved", img.display()),
         }
     }
-    image::create(esp, &home, img, DISK_SIZE).expect("disk image creation failed");
+    image::create(esp, &home, img, size).expect("image creation failed");
 }
 
 fn esp_dir(test: bool) -> PathBuf {
@@ -159,20 +190,44 @@ fn cargo_build(package: &str, target: &str, profile: Profile, features: &[&str])
 
 /// Builds both halves and lays out an EFI System Partition directory.
 fn build(profile: Profile, test: bool) -> PathBuf {
-    cargo_build("aurora-boot", UEFI_TARGET, profile, &[]);
-    cargo_build("tide", KERNEL_TARGET, profile, if test { &["ktest"] } else { &[] });
+    verify_toolchain();
+    cargo_build("firstlight", UEFI_TARGET, profile, &[]);
+    cargo_build("aster", KERNEL_TARGET, profile, if test { &["ktest"] } else { &[] });
 
     let target = root().join("target");
     let esp = esp_dir(test);
     fs::create_dir_all(esp.join("EFI/BOOT")).unwrap();
     fs::create_dir_all(esp.join("aurora")).unwrap();
-    fs::copy(target.join(UEFI_TARGET).join(profile.dir()).join("aurora-boot.efi"), esp.join("EFI/BOOT/BOOTX64.EFI"))
+    fs::copy(target.join(UEFI_TARGET).join(profile.dir()).join("firstlight.efi"), esp.join("EFI/BOOT/BOOTX64.EFI"))
         .expect("copy bootloader");
-    fs::copy(target.join(KERNEL_TARGET).join(profile.dir()).join("tide"), esp.join("aurora/kernel.elf"))
+    fs::copy(target.join(KERNEL_TARGET).join(profile.dir()).join("aster"), esp.join("aurora/kernel.elf"))
         .expect("copy kernel");
     let programs = build_userland(profile);
     system_image(&programs, &esp.join("aurora/system.tar"));
     esp
+}
+
+/// The kernel, user ABI and future native host port share one compiler baseline.
+fn verify_toolchain() {
+    let baseline = include_str!("../../tools/toolchain-baseline.toml");
+    let value = |key: &str| -> &str {
+        baseline
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once('=')?;
+                (name.trim() == key).then(|| value.trim().trim_matches('"'))
+            })
+            .expect("compiler baseline key")
+    };
+    let output = Command::new("rustc").arg("-vV").output().expect("run rustc");
+    let version = String::from_utf8_lossy(&output.stdout);
+    for (label, expected) in [("commit-hash", value("rust_commit")), ("LLVM version", value("llvm_version"))] {
+        let actual = version.lines().find_map(|line| line.strip_prefix(&format!("{label}: "))).unwrap_or("unknown");
+        if actual != expected {
+            eprintln!("Compiler baseline mismatch: {label} is {actual}, expected {expected}. Use the compiler recorded in tools/toolchain-baseline.toml; update that file only as an intentional toolchain migration.");
+            exit(1);
+        }
+    }
 }
 
 /// A user program to place in the system image: (path inside /System, ELF file).
@@ -185,7 +240,7 @@ fn build_userland(profile: Profile) -> Vec<Program> {
     if !manifest.exists() {
         return Vec::new();
     }
-    let user_ld = root().join("userland/libaurora/user.ld");
+    let user_ld = root().join("userland/corekit/user.ld");
     let target_dir = root().join("target/user");
     let spec = root().join("userland").join(format!("{USER_TARGET}.json"));
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
@@ -239,7 +294,7 @@ fn system_image(programs: &[Program], out: &Path) {
     let mut t = tar::Tar::new();
     t.file(
         "version.txt",
-        format!("WaveOS Aurora {}\nKernel: Tide\nWindow server: Crest\n", env!("CARGO_PKG_VERSION")).as_bytes(),
+        format!("WaveOS Aurora {}\nKernel: Aster\nWindow server: Lumen Server\n", env!("CARGO_PKG_VERSION")).as_bytes(),
     );
     t.dir("Apps");
     t.dir("Bin");
@@ -260,10 +315,71 @@ fn system_image(programs: &[Program], out: &Path) {
     for (dest, src) in programs {
         t.file(dest, &fs::read(src).unwrap());
     }
+    bundle_sdk(&mut t);
+    if let Some((_, elf)) = programs.iter().find(|(p, _)| p == "Bin/gina-demo") {
+        let manifest = gina::Manifest {
+            id: "dev.example.gallery".into(),
+            name: "AuroraKit Gallery".into(),
+            developer: "Constellation SDK Example".into(),
+            version: "1.0.0".into(),
+            entry: "bin/app".into(),
+            icon: String::new(),
+            resources: Vec::new(),
+            extensions: Vec::new(),
+        };
+        let executable = fs::read(elf).unwrap();
+        let package = gina::pack(&manifest, &[("bin/app", &executable)]).expect("package gallery");
+        t.file("Developer/Examples/AuroraKitGallery.gina", &package);
+    }
     t.finish(out).expect("write system.tar");
 }
 
-/// Mozilla's root CAs (via webpki-roots) for HTTPS, in aurora-tls's
+fn bundle_sdk(t: &mut tar::Tar) {
+    fn walk(t: &mut tar::Tar, base: &Path, path: &Path) {
+        let mut entries: Vec<_> = fs::read_dir(path).unwrap().flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for entry in entries {
+            if entry.is_dir() {
+                walk(t, base, &entry);
+            } else if matches!(entry.extension().and_then(|s| s.to_str()), Some("rs" | "toml" | "ld" | "json")) {
+                t.file(
+                    &format!("Developer/SDK/{}", entry.strip_prefix(base).unwrap().display()),
+                    &fs::read(entry).unwrap(),
+                );
+            }
+        }
+    }
+    let base = root();
+    for relative in [
+        "userland/corekit",
+        "userland/aurorakit",
+        "libs/abi",
+        "libs/elf",
+        "libs/gfx",
+        "libs/image",
+        "libs/wav",
+        "libs/web",
+        "libs/tls",
+        "libs/gina",
+    ] {
+        walk(t, &base, &base.join(relative));
+    }
+    t.file(
+        "Developer/SDK/userland/x86_64-aurora-user.json",
+        &fs::read(base.join("userland/x86_64-aurora-user.json")).unwrap(),
+    );
+    let user = fs::read_to_string(base.join("userland/Cargo.toml")).unwrap();
+    let user = user
+        .lines()
+        .map(|l| if l.starts_with("members =") { "members = [\"corekit\", \"aurorakit\"]" } else { l })
+        .collect::<Vec<_>>()
+        .join("\n");
+    t.file("Developer/SDK/userland/Cargo.toml", user.as_bytes());
+    t.file("Developer/SDK/Cargo.toml",b"[workspace]\nmembers = [\"libs/*\"]\nresolver = \"2\"\n[workspace.package]\nversion = \"0.7.0\"\nedition = \"2021\"\nlicense = \"MIT\"\n");
+    t.file("Developer/STATUS.txt",b"Constellation SDK\nNative project editing, UI design and GINA packaging/installation are available.\nThe native Rust/LLVM toolchain and source debugger have not been ported.\nBuild operations fail explicitly until the native toolchain is installed.\nThe gallery package is precompiled on the build host, not compiled inside WaveOS.\n");
+}
+
+/// Mozilla's root CAs (via webpki-roots) for HTTPS, in nebula-secure's
 /// `Roots` format: (u16 length, subject, u16 length, SPKI) per anchor.
 fn trust_anchors() -> Vec<u8> {
     let mut out = Vec::new();
@@ -322,6 +438,8 @@ fn ovmf_vars(code: &Path) -> PathBuf {
 }
 
 struct RunOpts<'a> {
+    memory_mib: u64,
+    keyboard_capture: bool,
     headless: bool,
     gdb: bool,
     log_int: bool,
@@ -358,7 +476,8 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let _ = fs::remove_file(&qmp);
 
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-m", "512M", "-cpu", "max", "-vga", "std"]);
+    cmd.args(["-machine", "q35", "-cpu", "max", "-vga", "std"]);
+    cmd.arg("-m").arg(opts.memory_mib.to_string());
     cmd.arg("-smp").arg(opts.smp.to_string());
     if !opts.allow_reboot {
         cmd.arg("-no-reboot");
@@ -411,8 +530,11 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     cmd.arg("-monitor").arg(format!("unix:{},server,nowait", monitor.display()));
     cmd.arg("-qmp").arg(format!("unix:{},server,nowait", qmp.display()));
     cmd.args(["-name", "WaveOS Aurora"]);
-    if opts.headless {
-        cmd.args(["-display", "none"]);
+    if let Some(backend) = display::backend(cfg!(target_os = "macos"), opts.headless, opts.keyboard_capture) {
+        cmd.args(["-display", backend]);
+        if cfg!(target_os = "macos") && !opts.headless && opts.keyboard_capture {
+            eprintln!("\nWaveOS keyboard capture: enable QEMU in macOS System Settings > Privacy & Security > Accessibility.\nClick inside the VM to capture Command and system shortcuts. Control+Option+G releases input.\nIf QEMU reports 'Could not create event tap', capture is NOT active: grant permission and relaunch.\nUse --no-keyboard-capture to disable this feature.\n");
+        }
     }
     if opts.gdb {
         cmd.args(["-s", "-S"]);
@@ -580,6 +702,8 @@ fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, fwd_port: u16) ->
     let audio = root().join("target/test-audio.wav");
     let _ = fs::remove_file(&audio);
     let opts = RunOpts {
+        memory_mib: 512,
+        keyboard_capture: false,
         headless: true,
         gdb: false,
         log_int: false,

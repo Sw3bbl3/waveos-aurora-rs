@@ -6,7 +6,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use aurora::fs;
+use corekit::fs;
 
 /// Resolves a path argument against the working directory.
 pub fn path(arg: &str) -> String {
@@ -17,7 +17,7 @@ pub fn path(arg: &str) -> String {
 pub fn read_stdin() -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
-    while let Ok(n) = aurora::io::read_fd(0, &mut buf) {
+    while let Ok(n) = corekit::io::read_fd(0, &mut buf) {
         if n == 0 {
             break;
         }
@@ -37,7 +37,7 @@ pub fn inputs(files: &[String], tool: &str) -> (Vec<(String, Vec<u8>)>, i32) {
         match fs::read(&path(f)) {
             Ok(d) => out.push((f.clone(), d)),
             Err(e) => {
-                aurora::eprintln!("{tool}: {f}: {e}");
+                corekit::eprintln!("{tool}: {f}: {e}");
                 status = 1;
             }
         }

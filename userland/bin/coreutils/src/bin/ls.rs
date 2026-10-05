@@ -2,10 +2,10 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use aurora::{fs, println};
-aurora::entry!(main);
+use corekit::{fs, println};
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let long = args.iter().any(|a| a == "-l");
     let mut dirs: alloc::vec::Vec<&str> =
         args[1..].iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
@@ -22,14 +22,14 @@ fn main(args: aurora::Args) -> i32 {
             Ok(entries) => {
                 for e in entries {
                     if long {
-                        let t = aurora::time::from_seconds(e.mtime);
+                        let t = corekit::time::from_seconds(e.mtime);
                         let size =
                             if e.is_dir { alloc::string::String::from("-") } else { coreutils::human_size(e.size) };
                         println!(
                             "{} {:>9}  {} {:>2} {:02}:{:02}  {}{}",
                             if e.is_dir { "d" } else { "-" },
                             size,
-                            aurora::time::MONTHS[(t.month.clamp(1, 12) - 1) as usize],
+                            corekit::time::MONTHS[(t.month.clamp(1, 12) - 1) as usize],
                             t.day,
                             t.hour,
                             t.minute,
@@ -42,7 +42,7 @@ fn main(args: aurora::Args) -> i32 {
                 }
             }
             Err(e) => {
-                aurora::eprintln!("ls: {d}: {e}");
+                corekit::eprintln!("ls: {d}: {e}");
                 status = 1;
             }
         }

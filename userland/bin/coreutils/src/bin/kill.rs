@@ -2,20 +2,20 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let mut status = 0;
     for a in &args[1..] {
         match a.parse::<u32>() {
             Ok(pid) => {
-                if let Err(e) = aurora::process::kill(pid) {
-                    aurora::eprintln!("kill: {pid}: {e}");
+                if let Err(e) = corekit::process::kill(pid) {
+                    corekit::eprintln!("kill: {pid}: {e}");
                     status = 1;
                 }
             }
             Err(_) => {
-                aurora::eprintln!("kill: {a}: not a pid");
+                corekit::eprintln!("kill: {a}: not a pid");
                 status = 2;
             }
         }

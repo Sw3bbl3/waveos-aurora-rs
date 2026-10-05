@@ -1,4 +1,4 @@
-//! Crest — the WaveOS Aurora compositor and desktop.
+//! Lumen Server — the WaveOS Aurora compositor and desktop.
 //!
 //! Runs as a kernel task. Each frame it drains the input queue, lets the
 //! desktop update, repaints only damaged regions into a RAM back buffer and
@@ -9,12 +9,13 @@ pub mod clipboard;
 pub mod cursor;
 pub mod desktop;
 pub mod dnd;
+pub mod installed;
 pub mod notify;
 pub mod prefs;
 pub mod server;
 pub mod settings;
 
-pub use aurora_gfx::{canvas, geom, icons, theme, wallpaper, widgets};
+pub use lumen::{canvas, geom, icons, theme, wallpaper, widgets};
 
 use crate::drivers::input;
 use crate::mm::phys_to_virt;
@@ -41,7 +42,7 @@ fn current_fb() -> Option<Framebuffer> {
 /// Installs the TrueType UI faces from the system image (text falls back to
 /// a few built-in sizes without them).
 fn load_fonts() {
-    use aurora_gfx::font::{self, Face};
+    use lumen::font::{self, Face};
     for face in [Face::Regular, Face::SemiBold, Face::Mono] {
         let ok = crate::fs::read_all(face.file())
             .is_ok_and(|data| font::install(face, alloc::boxed::Box::leak(data.into_boxed_slice())));
@@ -56,7 +57,7 @@ pub fn screen_size() -> (i32, i32) {
 }
 
 pub fn start() {
-    sched::spawn("crest", run);
+    sched::spawn("lumen-server", run);
 }
 
 /// A network interface got (or lost) its address.
@@ -126,16 +127,19 @@ fn run() {
     input::set_consumer(sched::current_id());
     server::set_compositor(sched::current_id());
 
-    crate::telemetry::stage("gui", "Crest window server");
+    crate::telemetry::stage("gui", "Lumen Server window server");
     load_settings();
+    prefs::apply_appearance();
     let t0 = time::uptime_ms();
     let mut desktop = Desktop::new(w, h);
     log!("gui", "desktop composed in {} ms ({}x{})", time::uptime_ms() - t0, w, h);
 
     let mut back = vec![0u32; (w * h) as usize];
+    let mut materials = lumen::material::MaterialCache::default();
     let mut front = front_buffer(&fb);
     let mut ready = false;
     let mut next_tick = 0;
+    let mut frame_stats = (0u64, 0u64, 0u64, time::uptime_ms());
     loop {
         let now = time::uptime_ms();
         desktop.set_now(now);
@@ -151,6 +155,7 @@ fn run() {
                     *FB.lock() = Some(fb);
                     (w, h) = (fb.width as i32, fb.height as i32);
                     back = vec![0u32; (w * h) as usize];
+                    materials.clear();
                     front = front_buffer(&fb);
                     input::set_screen_size(w, h);
                     desktop.resize(w, h);
@@ -176,11 +181,32 @@ fn run() {
             crate::telemetry::FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
         for r in damage {
+            let started = time::uptime_ms();
             crate::telemetry::PIXELS.fetch_add(r.area() as u64, core::sync::atomic::Ordering::Relaxed);
             let mut cv = Canvas::new(&mut back, w, h);
+            materials.begin_frame();
+            cv.materials = Some(&mut materials);
             cv.clip = r;
             desktop.paint(&mut cv);
             flush(front, &back, &fb, r);
+            if r.area() == i64::from(w) * i64::from(h) {
+                let elapsed = time::uptime_ms() - started;
+                frame_stats.0 += 1;
+                frame_stats.1 += elapsed;
+                frame_stats.2 = frame_stats.2.max(elapsed);
+            }
+        }
+        if frame_stats.0 > 0 && time::uptime_ms() - frame_stats.3 >= 10000 {
+            log!(
+                "lumen",
+                "{} scene frames, mean {} ms, max {} ms at {}x{}",
+                frame_stats.0,
+                frame_stats.1 / frame_stats.0,
+                frame_stats.2,
+                w,
+                h
+            );
+            frame_stats = (0, 0, 0, time::uptime_ms());
         }
         if core::mem::take(&mut desktop.screenshot) {
             take_screenshot(&back, w as u32, h as u32);

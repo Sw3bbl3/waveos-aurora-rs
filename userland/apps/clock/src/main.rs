@@ -13,15 +13,15 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use aurora::abi::pref;
-use aurora::{fs, prefs, time};
-use ripple::canvas::{with_alpha, Canvas};
-use ripple::geom::Rect;
-use ripple::math::sin;
-use ripple::text::TextField;
-use ripple::theme;
-use ripple::widgets::{self, button, ButtonStyle};
-use ripple::{App, Env, KeyCode, KeyEvent};
+use aurorakit::canvas::{with_alpha, Canvas};
+use aurorakit::geom::Rect;
+use aurorakit::math::sin;
+use aurorakit::text::TextField;
+use aurorakit::theme;
+use aurorakit::widgets::{self, button, ButtonStyle};
+use aurorakit::{App, Env, KeyCode, KeyEvent};
+use corekit::abi::pref;
+use corekit::{fs, prefs, time};
 
 const TOOLBAR_H: i32 = 52;
 const ALARMS: &str = "/Settings/clock.conf";
@@ -595,8 +595,8 @@ impl Clock {
                 if now - s >= tm.left_ms {
                     tm.left_ms = 0;
                     tm.running_since = None;
-                    aurora::notify::post("Timer done", &format!("Your {} timer has ended.", tm.label));
-                    aurora::audio::play_system("timer");
+                    corekit::notify::post("Timer done", &format!("Your {} timer has ended.", tm.label));
+                    corekit::audio::play_system("timer");
                     changed = true;
                 }
             }
@@ -608,8 +608,8 @@ impl Clock {
             if a.enabled && a.hour == d.hour && a.minute == d.minute && a.rang != Some((d.hour, d.minute, day)) {
                 a.rang = Some((d.hour, d.minute, day));
                 let label = if a.label.is_empty() { String::from("Alarm") } else { a.label.clone() };
-                aurora::notify::post(&label, &format!("It's {:02}:{:02}.", d.hour, d.minute));
-                aurora::audio::play_system("timer");
+                corekit::notify::post(&label, &format!("It's {:02}:{:02}.", d.hour, d.minute));
+                corekit::audio::play_system("timer");
                 fired = true;
             }
         }
@@ -719,8 +719,8 @@ impl App for Clock {
     }
 }
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(_: aurora::Args) -> i32 {
-    ripple::run(Clock::new())
+fn main(_: corekit::Args) -> i32 {
+    aurorakit::run(Clock::new())
 }

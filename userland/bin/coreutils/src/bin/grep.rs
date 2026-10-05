@@ -3,14 +3,14 @@
 #![no_main]
 extern crate alloc;
 use alloc::string::String;
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let ignore_case = args.iter().any(|a| a == "-i");
     let invert = args.iter().any(|a| a == "-v");
     let rest: alloc::vec::Vec<String> = args[1..].iter().filter(|a| *a != "-i" && *a != "-v").cloned().collect();
     let Some(pattern) = rest.first() else {
-        aurora::eprintln!("usage: grep [-i] [-v] PATTERN [FILE...]");
+        corekit::eprintln!("usage: grep [-i] [-v] PATTERN [FILE...]");
         return 2;
     };
     let pat = if ignore_case { pattern.to_lowercase() } else { pattern.clone() };
@@ -23,9 +23,9 @@ fn main(args: aurora::Args) -> i32 {
             if hay.contains(pat.as_str()) != invert {
                 found = true;
                 if multi {
-                    aurora::println!("{name}: {line}");
+                    corekit::println!("{name}: {line}");
                 } else {
-                    aurora::println!("{line}");
+                    corekit::println!("{line}");
                 }
             }
         }

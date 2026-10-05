@@ -1,4 +1,4 @@
-//! The handoff contract between `aurora-boot` (the UEFI loader) and the Tide kernel.
+//! The handoff contract between `firstlight` (the UEFI loader) and the Aster kernel.
 //!
 //! Everything here is `#[repr(C)]` so both sides agree on layout regardless of
 //! the compiler target (the bootloader is built for `x86_64-unknown-uefi`, the

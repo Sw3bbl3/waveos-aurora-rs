@@ -1,10 +1,10 @@
 Welcome to WaveOS Aurora!
 
-Everything you see was built from scratch: the bootloader, the Tide kernel,
-the Crest window server, the storage drivers, the WaveFS filesystem and every
+Everything you see was built from scratch: the bootloader, the Aster kernel,
+the Lumen Server window server, the storage drivers, the AuroraFS filesystem and every
 app. Each app runs as its own protected user-space process.
 
-Your files are stored on disk in WaveFS, a journaled filesystem, so they
+Your files are stored on disk in AuroraFS, a journaled filesystem, so they
 survive restarts and even power cuts.
 
 Try:

@@ -2,10 +2,10 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(_args: aurora::Args) -> i32 {
-    let text = aurora::sys::report(aurora::abi::report::CPU);
-    let _ = aurora::io::write_fd(1, text.as_bytes());
+fn main(_args: corekit::Args) -> i32 {
+    let text = corekit::sys::report(corekit::abi::report::CPU);
+    let _ = corekit::io::write_fd(1, text.as_bytes());
     0
 }

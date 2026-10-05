@@ -1,4 +1,4 @@
-//! The WaveOS Aurora system-call ABI, shared by the Tide kernel and user space.
+//! The WaveOS Aurora system-call ABI, shared by the Aster kernel and user space.
 //!
 //! Calling convention (`syscall` instruction): number in `rax`, arguments in
 //! `rdi, rsi, rdx, r10, r8, r9`, result in `rax`. Results `>= 0` are success;
@@ -144,7 +144,18 @@ pub mod nr {
     pub const GETRANDOM: usize = 67;
     /// `sock_info(fd, *mut SockAddr local, *mut SockAddr remote) -> state`
     pub const SOCK_INFO: usize = 68;
-    pub const COUNT: usize = 69;
+    /// `win_materials(window, *const MaterialRegion, count)`; at most 8 regions.
+    pub const WIN_MATERIALS: usize = 69;
+    pub const COUNT: usize = 70;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MaterialRegion {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 /// Networking (IPv4).
@@ -481,7 +492,7 @@ pub struct SysInfo {
     pub cpu: [u8; 48],
     pub version_len: u32,
     pub version: [u8; 16],
-    /// Human-readable description of the root volume, e.g. "WaveFS on AHCI".
+    /// Human-readable description of the root volume, e.g. "AuroraFS on AHCI".
     pub root_len: u32,
     pub root: [u8; 48],
     pub disk_total: u64,
@@ -546,6 +557,12 @@ pub mod clip {
 
 /// System preference keys (values are text; booleans are "0"/"1").
 pub mod pref {
+    pub const GLASS: &str = "glass_intensity";
+    pub const REDUCE_TRANSPARENCY: &str = "reduce_transparency";
+    pub const REDUCE_MOTION: &str = "reduce_motion";
+    pub const HIGH_CONTRAST: &str = "high_contrast";
+    pub const DOCK_SIZE: &str = "dock_size";
+    pub const DOCK_AUTOHIDE: &str = "dock_autohide";
     pub const DARK: &str = "dark";
     /// Index into the accent palette.
     pub const ACCENT: &str = "accent";
@@ -642,6 +659,7 @@ pub struct Event {
 
 /// `desktop` requests.
 pub mod desktop {
+    pub const REFRESH_APPS: usize = 14;
     /// Open an app by program path (arg = path).
     pub const OPEN_APP: usize = 1;
     /// Open a document in the default app (arg = path).

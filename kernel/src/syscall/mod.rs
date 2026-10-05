@@ -125,10 +125,7 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             };
             user::put(a[0], &dt).map(|_| 0)
         }
-        nr::SYNC => {
-            fs::sync_all();
-            Ok(0)
-        }
+        nr::SYNC => fs::try_sync_all().map(|_| 0),
         nr::CHDIR => {
             let path = user::path(a[0], a[1])?;
             if !fs::is_dir(&path) {
@@ -343,6 +340,7 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         }
         nr::DESKTOP => crate::gui::server::desktop_request(a[0] as usize, a[1], a[2]),
         nr::WIN_CREATE
+        | nr::WIN_MATERIALS
         | nr::WIN_SURFACE
         | nr::WIN_PRESENT
         | nr::WIN_SET_TITLE

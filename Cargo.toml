@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/wavefs", "libs/fat32", "libs/image", "libs/wav", "libs/web", "libs/tls", "libs/surf"]
-default-members = ["xtask"]
+members = ["libs/gina", "xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/aurorafs", "libs/fat32", "libs/image", "libs/wav", "libs/web", "libs/tls", "libs/surf"]
+default-members = ["libs/gina", "xtask"]
 
 [workspace.package]
 version = "0.6.0"

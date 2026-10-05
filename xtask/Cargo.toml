@@ -6,7 +6,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+gina = { path = "../libs/gina" }
 fatfs = "0.3"
-wavefs = { path = "../libs/wavefs" }
+aurorafs = { path = "../libs/aurorafs" }
 aurora-wav = { path = "../libs/wav" }
 webpki-roots = "1"

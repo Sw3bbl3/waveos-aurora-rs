@@ -39,8 +39,11 @@ const COMMANDS: [(Command, &str, &str); 7] = [
 ];
 
 /// Settings panes Spotlight can open (the argument Settings understands).
-const PANES: [(&str, &str); 8] = [
+const PANES: [(&str, &str); 11] = [
     ("Appearance", "appearance"),
+    ("Desktop & Dock", "desktop"),
+    ("Liquid Glass", "desktop"),
+    ("Accessibility", "accessibility"),
     ("Wallpaper", "appearance"),
     ("Display", "display"),
     ("Keyboard", "keyboard"),
@@ -53,6 +56,7 @@ const PANES: [(&str, &str); 8] = [
 #[derive(Clone, PartialEq, Debug)]
 enum Result {
     App(AppKind),
+    Installed(String, String),
     File { path: String, dir: bool },
     Pane(&'static str, &'static str),
     Calc(String),
@@ -224,6 +228,11 @@ impl Spotlight {
             .collect();
         apps.sort_by_key(|(p, _)| *p);
         out.extend(apps.into_iter().map(|(_, k)| Result::App(k)));
+        for a in crate::gui::installed::list() {
+            if a.manifest.name.to_lowercase().contains(&q) {
+                out.push(Result::Installed(a.manifest.name, a.path));
+            }
+        }
         for (label, arg) in PANES {
             if label.to_lowercase().contains(&q) {
                 out.push(Result::Pane(label, arg));
@@ -281,6 +290,7 @@ impl Desktop {
         self.toggle_spotlight();
         match r {
             Result::App(k) => self.open(k),
+            Result::Installed(_, path) => self.spawn_program(&path, &[]),
             Result::File { path, dir } => {
                 let files = apps::info(AppKind::Files).path;
                 if dir {
@@ -421,6 +431,10 @@ impl Desktop {
             let fg2 = if sel { 0xDDFF_FFFF } else { t.text_secondary };
             let ir = Rect::new(row.x + 10, row.y + 7, 32, 32);
             let (title, subtitle, kind): (String, String, &str) = match res {
+                Result::Installed(name, _) => {
+                    icons::draw(cv, Icon::Aurora, ir);
+                    (name.clone(), String::from("GINA application"), "Application")
+                }
                 Result::App(k) => {
                     let a = apps::info(*k);
                     icons::draw(cv, a.icon, ir);

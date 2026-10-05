@@ -8,15 +8,15 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use aurora::abi::{err::*, nr};
-use aurora::process::Stdio;
-use aurora::sync::{futex_wait, Mutex};
-use aurora::sys::call;
-use aurora::{fs, println, process, thread, time};
 use core::hint::black_box;
 use core::sync::atomic::AtomicU32;
+use corekit::abi::{err::*, nr};
+use corekit::process::Stdio;
+use corekit::sync::{futex_wait, Mutex};
+use corekit::sys::call;
+use corekit::{fs, println, process, thread, time};
 
-aurora::entry!(main);
+corekit::entry!(main);
 
 static mut FAILED: i32 = 0;
 
@@ -29,14 +29,14 @@ fn check(name: &str, ok: bool) {
     }
 }
 
-fn errno<T>(r: aurora::Result<T>) -> isize {
+fn errno<T>(r: corekit::Result<T>) -> isize {
     match r {
         Ok(_) => 0,
         Err(e) => e.0.abs(),
     }
 }
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     if args.get(1).map(String::as_str) == Some("child") {
         // Child mode: echo arguments to stdout and exit with a known code.
         println!("child says {}", args[2..].join(" "));
@@ -102,7 +102,7 @@ fn main(args: aurora::Args) -> i32 {
             check("spawn child", pid.is_ok());
             let mut out = Vec::new();
             let mut buf = [0u8; 256];
-            while let Ok(n) = aurora::io::read_fd(r, &mut buf) {
+            while let Ok(n) = corekit::io::read_fd(r, &mut buf) {
                 if n == 0 {
                     break;
                 }

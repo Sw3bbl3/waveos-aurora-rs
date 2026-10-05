@@ -2,13 +2,13 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use aurora::fs;
-aurora::entry!(main);
+use corekit::fs;
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let a: alloc::vec::Vec<&alloc::string::String> = args[1..].iter().filter(|a| !a.starts_with('-')).collect();
     if a.len() != 2 {
-        aurora::eprintln!("usage: cp FROM TO");
+        corekit::eprintln!("usage: cp FROM TO");
         return 2;
     }
     let from = coreutils::path(a[0]);
@@ -19,7 +19,7 @@ fn main(args: aurora::Args) -> i32 {
     match fs::copy(&from, &to) {
         Ok(()) => 0,
         Err(e) => {
-            aurora::eprintln!("cp: {e}");
+            corekit::eprintln!("cp: {e}");
             1
         }
     }

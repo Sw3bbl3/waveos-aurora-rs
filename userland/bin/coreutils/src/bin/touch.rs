@@ -2,14 +2,14 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use aurora::abi::open;
-aurora::entry!(main);
+use corekit::abi::open;
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let mut status = 0;
     for f in &args[1..] {
-        if let Err(e) = aurora::fs::File::open(&coreutils::path(f), open::WRITE | open::CREATE) {
-            aurora::eprintln!("touch: {f}: {e}");
+        if let Err(e) = corekit::fs::File::open(&coreutils::path(f), open::WRITE | open::CREATE) {
+            corekit::eprintln!("touch: {f}: {e}");
             status = 1;
         }
     }

@@ -1,20 +1,20 @@
 //! Virtual filesystem: a mount table over pluggable filesystems.
 //!
 //! Mounts (longest prefix wins):
-//!   `/`        user files — WaveFS on disk (M3), or RamFS when no disk is found
+//!   `/`        user files — AuroraFS on disk (M3), or RamFS when no disk is found
 //!   `/System`  the read-only system image (TarFS over the boot initrd)
 //!   `/Boot`    the EFI System Partition (FAT32, M3)
 //!
 //! Filesystems implement [`Filesystem`] with interior locking (`sync::Mutex`,
 //! which may be held across disk I/O). Errors are `aurora_abi::err` numbers.
 
+pub mod aurorafs;
 pub mod cache;
 pub mod fat;
 pub mod index;
 pub mod ramfs;
 pub mod tarfs;
 pub mod trash;
-pub mod wavefs;
 
 use crate::sync::IrqMutex;
 use alloc::string::{String, ToString};
@@ -47,7 +47,7 @@ pub struct DirEntry {
 }
 
 pub trait Filesystem: Send + Sync {
-    /// Short description, e.g. "RamFS" or "WaveFS on AHCI".
+    /// Short description, e.g. "RamFS" or "AuroraFS on AHCI".
     fn describe(&self) -> String;
     fn root(&self) -> Ino;
     fn lookup(&self, dir: Ino, name: &str) -> FsResult<Ino>;
@@ -83,7 +83,7 @@ struct Mount {
 }
 
 static MOUNTS: IrqMutex<Vec<Mount>> = IrqMutex::new(Vec::new());
-/// `/` is a WaveFS volume (files persist), not the in-memory fallback.
+/// `/` is a AuroraFS volume (files persist), not the in-memory fallback.
 static PERSISTENT_ROOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn root_persistent() -> bool {
@@ -105,13 +105,13 @@ pub fn adopt_boot(dev: Arc<dyn crate::drivers::block::BlockDevice>) -> bool {
     }
 }
 
-/// Makes a WaveFS volume found later (on a USB disk) the home volume, when
+/// Makes a AuroraFS volume found later (on a USB disk) the home volume, when
 /// boot found none. Returns whether it did.
 pub fn adopt_home(dev: Arc<dyn crate::drivers::block::BlockDevice>) -> bool {
     if root_persistent() {
         return false;
     }
-    match wavefs::WaveFs::mount(dev.clone()) {
+    match aurorafs::AuroraFs::mount(dev.clone()) {
         Ok(fs) => {
             mount("/", Arc::new(fs));
             PERSISTENT_ROOT.store(true, core::sync::atomic::Ordering::Release);
@@ -119,7 +119,7 @@ pub fn adopt_home(dev: Arc<dyn crate::drivers::block::BlockDevice>) -> bool {
             true
         }
         Err(e) => {
-            log!("vfs", "{}: WaveFS mount failed: {}", dev.name(), aurora_abi::err::name(e));
+            log!("vfs", "{}: AuroraFS mount failed: {}", dev.name(), aurora_abi::err::name(e));
             false
         }
     }
@@ -364,12 +364,19 @@ pub fn rename(from: &str, to: &str) -> FsResult<()> {
 }
 
 pub fn sync_all() {
+    let _ = try_sync_all();
+}
+
+pub fn try_sync_all() -> FsResult<()> {
     let all: Vec<Arc<dyn Filesystem>> = MOUNTS.lock().iter().map(|m| m.fs.clone()).collect();
+    let mut error = None;
     for fs in all {
         if let Err(e) = fs.sync() {
             log!("vfs", "sync of {} failed: {}", fs.describe(), aurora_abi::err::name(e));
+            error = Some(e);
         }
     }
+    error.map_or(Ok(()), Err)
 }
 
 /// An open file (or directory) handle.
@@ -513,7 +520,7 @@ pub fn init(initrd: &'static [u8]) {
     }
 }
 
-/// Mounts volumes found on disks: the first WaveFS partition becomes `/`
+/// Mounts volumes found on disks: the first AuroraFS partition becomes `/`
 /// (otherwise the RamFS root stays, seeded with default folders). Starts the
 /// background flusher.
 pub fn mount_disks() {
@@ -531,19 +538,19 @@ pub fn mount_disks() {
             }
             continue;
         }
-        if part.type_guid == ::wavefs::PARTITION_TYPE && !root_found {
-            match wavefs::WaveFs::mount(dev.clone()) {
+        if part.type_guid == ::aurorafs::PARTITION_TYPE && !root_found {
+            match aurorafs::AuroraFs::mount(dev.clone()) {
                 Ok(fs) => {
                     mount("/", Arc::new(fs));
                     root_found = true;
                     PERSISTENT_ROOT.store(true, core::sync::atomic::Ordering::Release);
                 }
-                Err(e) => log!("vfs", "{}: WaveFS mount failed: {}", dev.name(), aurora_abi::err::name(e)),
+                Err(e) => log!("vfs", "{}: AuroraFS mount failed: {}", dev.name(), aurora_abi::err::name(e)),
             }
         }
     }
     if !root_found {
-        log!("vfs", "no WaveFS volume found — files are kept in memory only");
+        log!("vfs", "no AuroraFS volume found — files are kept in memory only");
     }
     ramfs::seed();
     crate::sched::spawn("flusher", flusher);

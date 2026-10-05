@@ -1,4 +1,4 @@
-//! Web client building blocks shared by `fetch` and the Surf browser: URLs
+//! Web client building blocks shared by `fetch` and the Nebula browser: URLs
 //! and HTTP/1.1. No system calls: callers supply the connections, so this
 //! also runs (and is tested) on the host.
 

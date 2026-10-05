@@ -1,11 +1,11 @@
 [package]
-name = "aurora-tls"
+name = "nebula-secure"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-aurora-web = { path = "../web" }
+nebula-web = { path = "../web" }
 sha2 = { version = "0.10", default-features = false, features = ["oid"] }
 hmac = { version = "0.12", default-features = false }
 hkdf = { version = "0.12", default-features = false }

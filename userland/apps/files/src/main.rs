@@ -16,19 +16,19 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use aurora::abi::drag;
-use aurora::fs;
-use aurora::process::desktop;
-use aurora::sync::Mutex;
 use aurora_image::Image;
+use aurorakit::canvas::{with_alpha, Canvas};
+use aurorakit::geom::Rect;
+use aurorakit::icons::{self, Icon};
+use aurorakit::text::TextField;
+use aurorakit::theme;
+use aurorakit::widgets::{button, ButtonStyle};
+use aurorakit::{App, Env, KeyCode, KeyEvent, Request};
 use core::sync::atomic::{AtomicBool, Ordering};
-use ripple::canvas::{with_alpha, Canvas};
-use ripple::geom::Rect;
-use ripple::icons::{self, Icon};
-use ripple::text::TextField;
-use ripple::theme;
-use ripple::widgets::{button, ButtonStyle};
-use ripple::{App, Env, KeyCode, KeyEvent, Request};
+use corekit::abi::drag;
+use corekit::fs;
+use corekit::process::desktop;
+use corekit::sync::Mutex;
 
 const SIDEBAR_W: i32 = 190;
 const TOOLBAR_H: i32 = 50;
@@ -313,7 +313,7 @@ fn human_date(secs: u64) -> String {
         12 => (12, "PM"),
         _ => (h - 12, "PM"),
     };
-    format!("{} {}, {}, {}:{:02} {}", aurora::time::MONTHS[(m - 1) as usize], d, y, h12, min, ampm)
+    format!("{} {}, {}, {}:{:02} {}", corekit::time::MONTHS[(m - 1) as usize], d, y, h12, min, ampm)
 }
 
 impl Files {
@@ -435,7 +435,7 @@ impl Files {
         if self.cursor.is_some_and(|c| c >= self.items.len()) {
             self.cursor = None;
         }
-        self.last_refresh = aurora::time::uptime_ms();
+        self.last_refresh = corekit::time::uptime_ms();
     }
 
     fn sort_items(&mut self) {
@@ -461,7 +461,7 @@ impl Files {
     }
 
     fn flash(&mut self, msg: String) {
-        self.status = Some((msg, aurora::time::uptime_ms()));
+        self.status = Some((msg, corekit::time::uptime_ms()));
     }
 
     fn selected_paths(&self) -> Vec<String> {
@@ -512,7 +512,7 @@ impl Files {
         self.search_state = Some(state.clone());
         let root = self.cwd.clone();
         let needle = q.to_lowercase();
-        let job = aurora::thread::spawn(move || {
+        let job = corekit::thread::spawn(move || {
             let mut stack = alloc::vec![root];
             let mut found = 0usize;
             while let Some(dir) = stack.pop() {
@@ -767,7 +767,7 @@ impl Files {
             Action::OpenWith(app) => {
                 for p in paths.into_iter().take(8) {
                     let _ =
-                        aurora::process::spawn(&format!("/System/Apps/{app}.elf"), &[p.as_str()], Default::default());
+                        corekit::process::spawn(&format!("/System/Apps/{app}.elf"), &[p.as_str()], Default::default());
                 }
             }
             Action::QuickLook => self.toggle_quicklook(),
@@ -792,7 +792,7 @@ impl Files {
                 if paths.is_empty() {
                     return;
                 }
-                aurora::clipboard::set_files(&paths);
+                corekit::clipboard::set_files(&paths);
                 self.cut = if action == Action::Cut { paths.clone() } else { Vec::new() };
                 let what = if paths.len() == 1 {
                     format!("“{}”", fs::file_name(&paths[0]))
@@ -953,7 +953,7 @@ impl Files {
             self.flash(String::from("This location is read-only"));
             return;
         }
-        let Some(paths) = aurora::clipboard::files() else {
+        let Some(paths) = corekit::clipboard::files() else {
             self.flash(String::from("Nothing to paste"));
             return;
         };
@@ -1056,7 +1056,7 @@ impl Files {
             } else if writable {
                 items.push(Some((Action::NewFolder, "New Folder")));
                 items.push(Some((Action::NewFile, "New Text File")));
-                if aurora::clipboard::files().is_some() {
+                if corekit::clipboard::files().is_some() {
                     items.push(Some((Action::Paste, "Paste")));
                 }
             }
@@ -1672,7 +1672,7 @@ impl App for Files {
             let row = self.place_rects(area).1[i];
             if volume && Self::eject_rect(row).contains(x, y) {
                 let name = String::from(p.label);
-                match aurora::process::desktop::eject(&path) {
+                match corekit::process::desktop::eject(&path) {
                     Ok(()) => self.flash(format!("“{name}” can now be removed.")),
                     Err(e) => self.flash(format!("Couldn't eject “{name}”: {e}")),
                 }
@@ -1790,7 +1790,7 @@ impl App for Files {
                 } else {
                     drag::DOCUMENT
                 };
-                aurora::dnd::start_files(&paths, icon);
+                corekit::dnd::start_files(&paths, icon);
                 false
             }
             None => {
@@ -1913,8 +1913,8 @@ impl App for Files {
         self.drag_over(-1, -1, area, env);
         let _ = (x, y);
         let Some(dir) = target else { return true };
-        match aurora::dnd::dropped(kind) {
-            Some(aurora::dnd::Dropped::Files(paths)) => {
+        match corekit::dnd::dropped(kind) {
+            Some(corekit::dnd::Dropped::Files(paths)) => {
                 if dir == TRASH {
                     self.trash(paths);
                     return true;
@@ -1940,7 +1940,7 @@ impl App for Files {
                 }
                 self.refresh();
             }
-            Some(aurora::dnd::Dropped::Text(text)) => {
+            Some(corekit::dnd::Dropped::Text(text)) => {
                 // Dropped text becomes a new text file.
                 let path = fs::unique_name(&dir, "Dropped Text", ".txt");
                 if fs::write(&path, text.as_bytes()).is_ok() {
@@ -2131,9 +2131,9 @@ impl App for Files {
     }
 }
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let start = args.get(1).map(|p| fs::resolve(&fs::cwd(), p)).unwrap_or_else(|| String::from("/Documents"));
-    ripple::run(Files::new(&start))
+    aurorakit::run(Files::new(&start))
 }

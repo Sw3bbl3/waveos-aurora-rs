@@ -205,7 +205,7 @@ fn mount_volumes(disk: &Arc<dyn BlockDevice>, fallback: &str) -> Vec<String> {
             parts = block::mbr::partitions(disk);
         }
         for p in parts {
-            let home = p.type_guid == ::wavefs::PARTITION_TYPE;
+            let home = p.type_guid == ::aurorafs::PARTITION_TYPE;
             let esp = p.type_guid == block::gpt::ESP_TYPE;
             let dev = block::register_counted(Arc::new(p));
             // Booted from this stick with no WaveOS disk inside the computer:

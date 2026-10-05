@@ -10,13 +10,13 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use aurora::abi::{ProcInfo, SysStats, PROC_EXITED, PROC_RUNNING, PROC_SLEEPING};
-use aurora::process;
-use ripple::canvas::{with_alpha, Canvas};
-use ripple::geom::Rect;
-use ripple::theme;
-use ripple::widgets::{self, button, ButtonStyle};
-use ripple::{App, Env, KeyCode, KeyEvent};
+use aurorakit::canvas::{with_alpha, Canvas};
+use aurorakit::geom::Rect;
+use aurorakit::theme;
+use aurorakit::widgets::{self, button, ButtonStyle};
+use aurorakit::{App, Env, KeyCode, KeyEvent};
+use corekit::abi::{ProcInfo, SysStats, PROC_EXITED, PROC_RUNNING, PROC_SLEEPING};
+use corekit::process;
 
 const TOOLBAR_H: i32 = 52;
 const GRAPH_H: i32 = 150;
@@ -149,7 +149,7 @@ impl Activity {
 
     /// Reads the counters and turns them into rates since the last sample.
     fn sample(&mut self) {
-        let now = aurora::time::uptime_ms();
+        let now = corekit::time::uptime_ms();
         let s = process::sys_stats();
         let dt = now.saturating_sub(self.last_sample).max(1);
         if let Some(p) = &self.prev {
@@ -176,9 +176,9 @@ impl Activity {
         }
         push(&mut self.mem_hist, (s.mem_used * 1000 / s.mem_total.max(1)) as u32);
         // Network: all adapters but loopback.
-        let (rx, tx) = aurora::net::interfaces()
+        let (rx, tx) = corekit::net::interfaces()
             .iter()
-            .filter(|i| i.flags & aurora::abi::net::IF_LOOPBACK == 0)
+            .filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0)
             .fold((0u64, 0u64), |(r, t), i| (r + i.rx_bytes, t + i.tx_bytes));
         if let Some((pr, pt)) = self.net_prev {
             push(&mut self.rx_hist, rx.saturating_sub(pr) * 1000 / dt);
@@ -481,12 +481,12 @@ impl Activity {
                 for (cx, h) in cols {
                     cv.text(g.x + cx, y, h, theme::ui_bold(12), t.text_secondary);
                 }
-                for (k, i) in aurora::net::interfaces().iter().enumerate() {
+                for (k, i) in corekit::net::interfaces().iter().enumerate() {
                     let ry = y + 28 + k as i32 * 26;
-                    let ip = if i.ip == [0; 4] { String::from("—") } else { aurora::net::ip_string(i.ip) };
+                    let ip = if i.ip == [0; 4] { String::from("—") } else { corekit::net::ip_string(i.ip) };
                     let vals = [
-                        String::from(aurora::net::name_of(i)),
-                        String::from(aurora::net::driver_of(i)),
+                        String::from(corekit::net::name_of(i)),
+                        String::from(corekit::net::driver_of(i)),
                         ip,
                         format!("{} ({} pkts)", human_bytes(i.rx_bytes), i.rx_packets),
                         format!("{} ({} pkts)", human_bytes(i.tx_bytes), i.tx_packets),
@@ -678,8 +678,8 @@ impl App for Activity {
     }
 }
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(_: aurora::Args) -> i32 {
-    ripple::run(Activity::new())
+fn main(_: corekit::Args) -> i32 {
+    aurorakit::run(Activity::new())
 }

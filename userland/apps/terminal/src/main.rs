@@ -16,13 +16,13 @@ use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use aurora::abi::open;
-use aurora::fs;
-use aurora::process::{self, Stdio};
-use ripple::canvas::{rgb, Canvas};
-use ripple::geom::Rect;
-use ripple::theme;
-use ripple::{App, Env, KeyCode, KeyEvent, Request};
+use aurorakit::canvas::{rgb, Canvas};
+use aurorakit::geom::Rect;
+use aurorakit::theme;
+use aurorakit::{App, Env, KeyCode, KeyEvent, Request};
+use corekit::abi::open;
+use corekit::fs;
+use corekit::process::{self, Stdio};
 
 const BG: u32 = rgb(0x14, 0x16, 0x1D);
 const FG: u32 = rgb(0xD8, 0xDE, 0xE9);
@@ -220,7 +220,7 @@ impl Terminal {
                 None => self.out("usage: open APP|FILE", RED),
                 Some(target) => {
                     let path = fs::resolve(&fs::cwd(), target);
-                    let is_file = fs::stat(&path).is_ok_and(|s| s.kind == aurora::abi::KIND_FILE);
+                    let is_file = fs::stat(&path).is_ok_and(|s| s.kind == corekit::abi::KIND_FILE);
                     if is_file && (path.ends_with(".elf") || path.starts_with("/System/Bin/")) {
                         env.requests.push(Request::OpenApp(path));
                     } else if is_file {
@@ -285,7 +285,7 @@ impl Terminal {
             prev_read = next_read;
             match res {
                 Ok(pid) => pids.push(pid),
-                Err(e) if e.is(aurora::abi::err::ENOENT) => {
+                Err(e) if e.is(corekit::abi::err::ENOENT) => {
                     self.out(&format!("{}: command not found (try `help`)", argv[0]), RED);
                     self.status = 127;
                 }
@@ -315,7 +315,7 @@ impl Terminal {
         let mut changed = false;
         let mut eof = false;
         for _ in 0..16 {
-            match aurora::io::read_fd(job.output, &mut buf) {
+            match corekit::io::read_fd(job.output, &mut buf) {
                 Ok(0) => {
                     eof = true;
                     break;
@@ -574,9 +574,9 @@ impl Terminal {
     }
 }
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(_: aurora::Args) -> i32 {
+fn main(_: corekit::Args) -> i32 {
     let _ = fs::chdir("/Documents");
-    ripple::run(Terminal::new())
+    aurorakit::run(Terminal::new())
 }

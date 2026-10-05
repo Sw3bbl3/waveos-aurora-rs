@@ -1,4 +1,4 @@
-/* Tide kernel link layout: higher half, top 2 GiB (-mcmodel=kernel). */
+/* Aster kernel link layout: higher half, top 2 GiB (-mcmodel=kernel). */
 ENTRY(_start)
 
 KERNEL_BASE = 0xFFFFFFFF80000000;

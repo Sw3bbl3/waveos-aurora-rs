@@ -14,6 +14,7 @@ import json, os, socket, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 W, H = 1280, 800
+KEY_DELAY = float(os.environ.get("AURORA_QMP_KEY_DELAY", "0.03"))
 SPECIAL = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash", "=": "equal", ",": "comma",
            ";": "semicolon", "'": "apostrophe", "`": "grave_accent", "[": "bracket_left", "]": "bracket_right",
            "\\": "backslash", ">": "shift+dot", "<": "shift+comma", "*": "shift+8", "+": "shift+equal",
@@ -48,8 +49,8 @@ def pos(x, y):
 def btn(down, b="left"):
     ev([{"type": "btn", "data": {"down": down, "button": b}}]); time.sleep(0.05)
 def key(codes):
-    ev([{"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": c}}} for c in codes]); time.sleep(0.03)
-    ev([{"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": c}}} for c in reversed(codes)]); time.sleep(0.03)
+    ev([{"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": c}}} for c in codes]); time.sleep(KEY_DELAY)
+    ev([{"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": c}}} for c in reversed(codes)]); time.sleep(KEY_DELAY)
 
 for step in sys.argv[1:]:
     k, _, v = step.partition(":")

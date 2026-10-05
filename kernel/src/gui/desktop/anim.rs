@@ -89,6 +89,11 @@ impl Desktop {
     }
 
     fn add_ghost(&mut self, kind: Kind, id: u32, from: Rect, to: Rect, alpha: (i32, i32), duration: u64, hide: bool) {
+        if theme::reduce_motion() {
+            self.damage(halo(from));
+            self.damage(halo(to));
+            return;
+        }
         let Some((pixels, w, h)) = self.snapshot(id) else { return };
         if hide {
             if let Some(i) = self.index_of(id) {
@@ -146,6 +151,10 @@ impl Desktop {
 
     /// Call after the window got its new rectangle; `old` is where it was.
     pub(super) fn animate_zoom(&mut self, id: u32, old: Rect) {
+        if theme::reduce_motion() {
+            self.damage_all();
+            return;
+        }
         let Some(i) = self.index_of(id) else { return };
         let new = self.windows[i].rect;
         // Snapshot at the old size (content hasn't been resized yet).

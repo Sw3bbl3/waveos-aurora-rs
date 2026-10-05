@@ -2,13 +2,13 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use aurora::audio;
-aurora::entry!(main);
+use corekit::audio;
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let v = audio::volume();
     if !v.present {
-        aurora::eprintln!("volume: no sound device");
+        corekit::eprintln!("volume: no sound device");
         return 1;
     }
     let v = match args.get(1).map(|a| a.as_str()) {
@@ -18,12 +18,12 @@ fn main(args: aurora::Args) -> i32 {
         Some(n) => match n.parse::<u32>() {
             Ok(level) if level <= 100 => audio::set_volume(level, false),
             _ => {
-                aurora::eprintln!("volume: expected 0–100, mute or unmute");
+                corekit::eprintln!("volume: expected 0–100, mute or unmute");
                 return 2;
             }
         },
     };
-    aurora::println!(
+    corekit::println!(
         "volume {}%{}{}",
         v.level,
         if v.muted { " (muted)" } else { "" },

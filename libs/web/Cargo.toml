@@ -1,5 +1,5 @@
 [package]
-name = "aurora-web"
+name = "nebula-web"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

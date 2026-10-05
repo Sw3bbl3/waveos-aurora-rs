@@ -2,12 +2,12 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use aurora::audio::{self, Stream, RATE};
-aurora::entry!(main);
+use corekit::audio::{self, Stream, RATE};
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     if args.len() < 2 {
-        aurora::eprintln!("usage: play FILE.wav... | play --tone HZ [MS]");
+        corekit::eprintln!("usage: play FILE.wav... | play --tone HZ [MS]");
         return 2;
     }
     if args[1] == "--tone" {
@@ -18,11 +18,11 @@ fn main(args: aurora::Args) -> i32 {
     let mut status = 0;
     for a in &args[1..] {
         let path = coreutils::path(a);
-        let result = match aurora::fs::read(&path) {
+        let result = match corekit::fs::read(&path) {
             Ok(data) => match audio::decode_wav(&data) {
                 Some(samples) => Stream::open().and_then(|mut s| s.write(&samples)),
                 None => {
-                    aurora::eprintln!("play: {a}: not a PCM WAV file");
+                    corekit::eprintln!("play: {a}: not a PCM WAV file");
                     status = 1;
                     continue;
                 }
@@ -30,7 +30,7 @@ fn main(args: aurora::Args) -> i32 {
             Err(e) => Err(e),
         };
         if let Err(e) = result {
-            aurora::eprintln!("play: {a}: {e}");
+            corekit::eprintln!("play: {a}: {e}");
             status = 1;
         }
     }
@@ -52,7 +52,7 @@ fn tone(hz: u32, ms: u32) -> i32 {
     match Stream::open().and_then(|mut s| s.write(&samples)) {
         Ok(()) => 0,
         Err(e) => {
-            aurora::eprintln!("play: {e}");
+            corekit::eprintln!("play: {e}");
             1
         }
     }

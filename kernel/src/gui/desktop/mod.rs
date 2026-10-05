@@ -6,6 +6,7 @@
 
 mod anim;
 mod battery;
+mod controls;
 mod dragdrop;
 mod network;
 mod notifications;
@@ -103,7 +104,7 @@ impl Window {
 #[derive(Clone, Copy)]
 enum DragKind {
     Move,
-    Resize,
+    Resize(u8),
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +127,8 @@ pub struct Desktop {
     pub h: i32,
     wallpaper: Vec<u32>,
     blurred: Vec<u32>,
+    scene: Vec<u32>,
+    scene_dirty: bool,
     windows: Vec<Window>,
     next_id: u32,
     cursor: (i32, i32),
@@ -135,6 +138,8 @@ pub struct Desktop {
     launcher: Option<Launcher>,
     menu: Option<Menu>,
     dock_hover: Option<usize>,
+    dock_revealed: bool,
+    snap_preview: Option<Rect>,
     traffic_hover: Option<u32>,
     last_click: (u64, i32, i32),
     clock: String,
@@ -167,6 +172,8 @@ pub struct Desktop {
     volume: volume::VolumeUi,
     battery_popover: bool,
     network_popover: bool,
+    quick_open: bool,
+    quick_ui: lumen::ui::State,
 }
 
 impl Desktop {
@@ -177,6 +184,8 @@ impl Desktop {
             h,
             wallpaper,
             blurred,
+            scene: alloc::vec![0; (w*h) as usize],
+            scene_dirty: true,
             windows: Vec::new(),
             next_id: 1,
             cursor: (w / 2, h / 2),
@@ -186,6 +195,8 @@ impl Desktop {
             launcher: None,
             menu: None,
             dock_hover: None,
+            dock_revealed: false,
+            snap_preview: None,
             traffic_hover: None,
             last_click: (0, 0, 0),
             clock: String::new(),
@@ -210,6 +221,8 @@ impl Desktop {
             volume: volume::VolumeUi::default(),
             battery_popover: false,
             network_popover: false,
+            quick_open: false,
+            quick_ui: lumen::ui::State::default(),
         };
         d.open(AppKind::Welcome);
         d.damage_all();
@@ -237,11 +250,13 @@ impl Desktop {
     pub fn damage(&mut self, r: Rect) {
         let r = r.intersect(&self.screen());
         if !r.is_empty() {
+            self.scene_dirty = true;
             self.damage.push(r);
         }
     }
 
     pub fn damage_all(&mut self) {
+        self.scene_dirty = true;
         self.damage.clear();
         self.damage.push(self.screen());
     }
@@ -266,7 +281,7 @@ impl Desktop {
 
     /// Area available to windows (between the menu bar and the dock).
     fn work_area(&self) -> Rect {
-        let bottom = self.h - theme::DOCK_H - theme::DOCK_MARGIN - 8;
+        let bottom = self.h - if theme::dock_autohide() { 8 } else { theme::dock_height() + theme::DOCK_MARGIN + 8 };
         Rect::new(8, MENUBAR_H + 8, self.w - 16, bottom - MENUBAR_H - 8)
     }
 
@@ -302,13 +317,25 @@ impl Desktop {
         }
     }
 
-    /// Opens a document in the app for its type (pictures in Preview, web pages in Surf, the rest in Notes).
+    /// Opens a document in the app for its type (pictures in Preview, web pages in Nebula, the rest in Notes).
     pub fn open_file(&mut self, path: &str) {
         let lower = path.to_ascii_lowercase();
+        if lower.ends_with(".gina") {
+            self.spawn_program("/System/Apps/Installer.elf", &[path]);
+            return;
+        }
+        if let Some((_, extension)) = lower.rsplit_once('.') {
+            if let Some(app) =
+                super::installed::list().into_iter().find(|a| a.manifest.extensions.iter().any(|e| e == extension))
+            {
+                self.spawn_program(&app.path, &[path]);
+                return;
+            }
+        }
         let kind = if aurora_image::is_image_name(path) {
             AppKind::Preview
         } else if lower.ends_with(".html") || lower.ends_with(".htm") {
-            AppKind::Surf
+            AppKind::Nebula
         } else {
             AppKind::Notes
         };
@@ -505,6 +532,16 @@ impl Desktop {
     fn pref_changed(&mut self, key: &str) {
         use aurora_abi::pref;
         match key {
+            pref::GLASS
+            | pref::REDUCE_TRANSPARENCY
+            | pref::REDUCE_MOTION
+            | pref::HIGH_CONTRAST
+            | pref::DOCK_SIZE
+            | pref::DOCK_AUTOHIDE => {
+                super::prefs::apply_appearance();
+                self.broadcast_theme();
+                self.damage_all();
+            }
             pref::DARK => self.set_dark(super::prefs::get_bool(pref::DARK)),
             pref::ACCENT => {
                 theme::set_accent(super::prefs::get(pref::ACCENT).and_then(|v| v.parse().ok()).unwrap_or(0));
@@ -587,6 +624,13 @@ impl Desktop {
     pub fn process_commands(&mut self) {
         for cmd in server::take_commands() {
             match cmd {
+                Command::AppsChanged => {
+                    if self.launcher.is_some() {
+                        self.toggle_launcher();
+                        self.toggle_launcher();
+                    }
+                    self.damage_all();
+                }
                 Command::Created(id) => {
                     let kind = server::info(id)
                         .and_then(|(pid, ..)| crate::proc::get(pid))
@@ -706,12 +750,15 @@ impl Desktop {
         let moved = (x, y) != self.cursor;
         if moved {
             let (ox, oy) = self.cursor;
-            self.damage(cursor::bounds(ox, oy));
+            self.damage.push(cursor::bounds(ox, oy).intersect(&self.screen()));
             self.cursor = (x, y);
-            self.damage(cursor::bounds(x, y));
+            self.damage.push(cursor::bounds(x, y).intersect(&self.screen()));
         }
         let pressed = buttons & !self.buttons;
         let released = self.buttons & !buttons;
+        if released & 1 != 0 {
+            self.quick_ui.release();
+        }
         self.buttons = buttons;
 
         if moved {
@@ -730,7 +777,17 @@ impl Desktop {
             self.drop_drag(x, y);
         } else if released & BUTTON_LEFT != 0 {
             self.grab = None;
-            if self.drag.take().is_none() {
+            let drag = self.drag.take();
+            if let Some(d) = drag {
+                self.damage_all(); // Restore stationary material sampling.
+                if let Some(target) = self.snap_preview.take() {
+                    if let Some(i) = self.index_of(d.window) {
+                        self.windows[i].saved = Some(d.start_rect);
+                        self.windows[i].rect = target;
+                    }
+                    self.damage_all();
+                }
+            } else {
                 if let Some(f) = self.focused_id() {
                     self.with_app(f, |app, area, _| {
                         app.release(x, y, area);
@@ -752,6 +809,9 @@ impl Desktop {
     }
 
     fn pointer_moved(&mut self, x: i32, y: i32) {
+        if self.controls_move(x, y) {
+            return;
+        }
         if self.buttons & BUTTON_LEFT != 0 && self.volume_drag(x) {
             return;
         }
@@ -772,14 +832,41 @@ impl Desktop {
                     let ny = (d.start_rect.y + dy).clamp(MENUBAR_H, self.h - TITLEBAR_H);
                     w.rect = Rect::new(d.start_rect.x + dx, ny, d.start_rect.w, d.start_rect.h);
                 }
-                DragKind::Resize => {
+                DragKind::Resize(edges) => {
                     let (mw, mh) = w.app.min_size();
-                    w.rect.w = (d.start_rect.w + dx).max(mw);
-                    w.rect.h = (d.start_rect.h + dy).max(mh + TITLEBAR_H);
+                    let min_h = mh + TITLEBAR_H;
+                    if edges & 1 != 0 {
+                        w.rect.x = (d.start_rect.x + dx).min(d.start_rect.right() - mw);
+                        w.rect.w = d.start_rect.right() - w.rect.x;
+                    }
+                    if edges & 2 != 0 {
+                        w.rect.w = (d.start_rect.w + dx).max(mw);
+                    }
+                    if edges & 4 != 0 {
+                        w.rect.y = (d.start_rect.y + dy).clamp(MENUBAR_H, d.start_rect.bottom() - min_h);
+                        w.rect.h = d.start_rect.bottom() - w.rect.y;
+                    }
+                    if edges & 8 != 0 {
+                        w.rect.h = (d.start_rect.h + dy).max(min_h);
+                    }
                 }
             }
             w.saved = None;
             let new = w.bounds();
+            if matches!(d.kind, DragKind::Move) {
+                let area = self.work_area();
+                let preview = if x < 18 {
+                    Some(Rect::new(area.x, area.y, area.w / 2 - 4, area.h))
+                } else if x > self.w - 18 {
+                    Some(Rect::new(area.x + area.w / 2 + 4, area.y, area.w - area.w / 2 - 4, area.h))
+                } else {
+                    None
+                };
+                if preview != self.snap_preview {
+                    self.snap_preview = preview;
+                    self.damage_all();
+                }
+            }
             self.damage(old.union(&new));
             return;
         }
@@ -828,7 +915,8 @@ impl Desktop {
             && (y - self.last_click.2).abs() < 5;
         self.last_click = if double { (0, x, y) } else { (self.now_ms, x, y) };
 
-        if self.network_press(x, y)
+        if self.controls_press(x, y)
+            || self.network_press(x, y)
             || self.battery_press(x, y)
             || self.volume_press(x, y)
             || self.spotlight_press(x, y)
@@ -856,6 +944,29 @@ impl Desktop {
         }
         let i = self.index_of(id).unwrap();
         let w = &self.windows[i];
+        let mut edges = 0u8;
+        if w.app.resizable() {
+            if x < w.rect.x + 5 {
+                edges |= 1;
+            }
+            if x >= w.rect.right() - 5 {
+                edges |= 2;
+            }
+            if y < w.rect.y + 5 {
+                edges |= 4;
+            }
+            if y >= w.rect.bottom() - 5 {
+                edges |= 8;
+            }
+            if w.grip().contains(x, y) {
+                edges |= 10;
+            }
+        }
+        if edges != 0 {
+            self.drag =
+                Some(Drag { window: id, kind: DragKind::Resize(edges), start_x: x, start_y: y, start_rect: w.rect });
+            return;
+        }
         if w.titlebar().contains(x, y) {
             match w.traffic_hit(x, y) {
                 Some(0) => self.request_close(id),
@@ -863,12 +974,29 @@ impl Desktop {
                 Some(2) => self.toggle_zoom(id),
                 _ if double => self.toggle_zoom(id),
                 _ => {
+                    if let Some(saved) = w.saved {
+                        let mut restored = saved;
+                        restored.x = x - saved.w / 2;
+                        restored.y = y - TITLEBAR_H / 2;
+                        self.windows[i].rect = restored;
+                        self.windows[i].saved = None;
+                        self.drag = Some(Drag {
+                            window: id,
+                            kind: DragKind::Move,
+                            start_x: x,
+                            start_y: y,
+                            start_rect: restored,
+                        });
+                        self.damage_all();
+                        return;
+                    }
                     self.drag =
                         Some(Drag { window: id, kind: DragKind::Move, start_x: x, start_y: y, start_rect: w.rect })
                 }
             }
         } else if w.app.resizable() && w.grip().contains(x, y) {
-            self.drag = Some(Drag { window: id, kind: DragKind::Resize, start_x: x, start_y: y, start_rect: w.rect });
+            self.drag =
+                Some(Drag { window: id, kind: DragKind::Resize(10), start_x: x, start_y: y, start_rect: w.rect });
         } else if double {
             self.grab = Some(id);
             self.with_app(id, |app, area, env| app.double_click(x, y, area, env));
@@ -895,6 +1023,9 @@ impl Desktop {
     }
 
     fn key(&mut self, k: KeyEvent) {
+        if self.controls_key(&k) {
+            return;
+        }
         if self.dnd.is_some() {
             if k.pressed && k.code == KeyCode::Escape {
                 self.cancel_drag();
@@ -1036,6 +1167,12 @@ impl Desktop {
 
     /// Merges pending damage into a small set of rectangles and clears it.
     pub fn take_damage(&mut self) -> Vec<Rect> {
+        // Reconstruct the scene bottom-up before sampling any backdrop. Cursor-only
+        // updates reuse the composited scene and never re-blur it.
+        if self.scene_dirty {
+            self.damage.clear();
+            return alloc::vec![self.screen()];
+        }
         let mut rects: Vec<Rect> = core::mem::take(&mut self.damage);
         // Merge overlapping or nearly-touching rectangles until stable.
         let mut merged = true;
@@ -1063,6 +1200,14 @@ impl Desktop {
     }
 
     pub fn paint(&mut self, cv: &mut Canvas) {
+        if let Some(cache) = cv.materials.as_deref_mut() {
+            cache.set_moving(self.drag.is_some() || self.animating());
+        }
+        if !self.scene_dirty && self.scene.len() == cv.buf.len() {
+            cv.blit_same(&self.scene, cv.clip);
+            cursor::draw(cv, self.cursor.0, self.cursor.1);
+            return;
+        }
         cv.blit_same(&self.wallpaper, cv.clip);
         let focused = self.focused_id();
         let clip = cv.clip;
@@ -1077,17 +1222,25 @@ impl Desktop {
             paint_window(cv, &mut self.windows[i], is_focused, hover, &env, true);
         }
         self.paint_ghosts(cv);
+        if let Some(r) = self.snap_preview {
+            cv.fill_round_rect(r, 16, crate::gui::canvas::with_alpha(theme::accent(), 65));
+            cv.stroke_round_rect(r, 16, theme::accent());
+        }
         self.paint_shell(cv);
         self.paint_banners(cv);
         self.paint_center(cv);
         self.paint_volume(cv);
         self.paint_battery_popover(cv);
         self.paint_network_popover(cv);
+        self.paint_controls(cv);
         self.paint_spotlight(cv);
         self.paint_drag(cv);
         if let Some(p) = self.power {
             self.paint_power_overlay(cv, p);
         }
+        self.scene.resize(cv.buf.len(), 0);
+        self.scene.copy_from_slice(cv.buf);
+        self.scene_dirty = false;
         cursor::draw(cv, self.cursor.0, self.cursor.1);
     }
 
@@ -1108,11 +1261,22 @@ fn paint_window(cv: &mut Canvas, w: &mut Window, focused: bool, hover: bool, env
         let strength = if focused { t.shadow } else { t.shadow * 6 / 10 };
         cv.shadow(r, WINDOW_RADIUS, SHADOW_BLUR, if focused { SHADOW_OFFSET } else { 6 }, strength);
     }
-    cv.fill_round_rect(r, WINDOW_RADIUS, t.window_bg);
-
     // Title bar.
     let tb = w.titlebar();
-    cv.with_clip(tb, |cv| cv.fill_round_rect(r, WINDOW_RADIUS, t.titlebar));
+    if shadow {
+        cv.with_clip(tb, |cv| cv.frosted(r, WINDOW_RADIUS, t.glass_tint));
+    } else {
+        cv.with_clip(tb, |cv| cv.fill_round_rect(r, WINDOW_RADIUS, t.titlebar));
+    }
+    let regions = w.app.materials();
+    if regions.is_empty() || !shadow {
+        cv.fill_rect_round_bottom(w.content(), WINDOW_RADIUS, t.window_bg);
+    } else {
+        for region in regions {
+            let region = region.offset(w.content().x, w.content().y).intersect(&w.content());
+            cv.frosted(region, 12, t.glass_tint);
+        }
+    }
     cv.fill_rect(Rect::new(r.x, tb.bottom() - 1, r.w, 1), t.separator);
     let title = w.app.title();
     let f = theme::ui_bold(13);

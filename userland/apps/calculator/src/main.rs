@@ -7,11 +7,11 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::{String, ToString};
-use ripple::canvas::{mix, rgb, Canvas};
-use ripple::geom::Rect;
-use ripple::theme;
-use ripple::{App, Env};
-use ripple::{KeyCode, KeyEvent};
+use aurorakit::canvas::{mix, rgb, Canvas};
+use aurorakit::geom::Rect;
+use aurorakit::theme;
+use aurorakit::{App, Env};
+use aurorakit::{KeyCode, KeyEvent};
 
 const KEYS: [[&str; 4]; 5] =
     [["C", "±", "%", "÷"], ["7", "8", "9", "×"], ["4", "5", "6", "−"], ["1", "2", "3", "+"], ["0", "", ".", "="]];
@@ -258,8 +258,8 @@ impl App for Calculator {
     }
 }
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(_: aurora::Args) -> i32 {
-    ripple::run(Calculator::new())
+fn main(_: corekit::Args) -> i32 {
+    aurorakit::run(Calculator::new())
 }

@@ -6,22 +6,22 @@ This document is for someone about to read or change the code. It follows the ma
 
 | Path | Crate | Target | Role |
 |---|---|---|---|
-| `bootloader/` | `aurora-boot` | `x86_64-unknown-uefi` | UEFI application: loads the kernel and the system image |
-| `kernel/` | `tide` | `x86_64-unknown-none` | The kernel and the Crest window server |
+| `bootloader/` | `firstlight` | `x86_64-unknown-uefi` | UEFI application: loads the kernel and the system image |
+| `kernel/` | `aster` | `x86_64-unknown-none` | The kernel and the Lumen Server window server |
 | `libs/bootinfo/` | `bootinfo` | both | `#[repr(C)]` handoff contract |
 | `libs/abi/` | `aurora-abi` | kernel + user | System call numbers, errors, `#[repr(C)]` structs, key types |
-| `libs/gfx/` | `aurora-gfx` | kernel + user | Rasterizer, our TrueType engine, theme, icons, widgets, wallpapers |
+| `libs/gfx/` | `lumen` | kernel + user | Rasterizer, our TrueType engine, theme, icons, widgets, wallpapers |
 | `libs/image/` | `aurora-image` | kernel + user + host | PNG decoder and encoder; JPEG, GIF and BMP decoders |
 | `libs/elf/` | `aurora-elf` | bootloader + kernel | Overflow-checked ELF64 reader |
-| `libs/wavefs/` | `wavefs` | kernel + host | The WaveFS filesystem engine (also used by `mkfs` in xtask) |
+| `libs/aurorafs/` | `aurorafs` | kernel + host | The AuroraFS filesystem engine (also used by `mkfs` in xtask) |
 | `libs/fat32/` | `fat32` | kernel | FAT32 with long file names |
 | `libs/wav/` | `aurora-wav` | kernel + user + host | WAV decoding (any rate → 48 kHz stereo) and encoding |
-| `libs/web/` | `aurora-web` | user + host | URLs, and an HTTP/1.1 client over any byte stream (keep-alive, chunked, gzip) |
-| `libs/tls/` | `aurora-tls` | user + host | TLS 1.3/1.2 client, DER and X.509 path validation |
-| `libs/surf/` | `aurora-surf` | user + host | The browser engine: HTML, CSS, style and layout to a display list |
-| `userland/libaurora/` | `aurora` | user | Runtime: entry point, heap, `print!`, files, processes, threads, clipboard, drag and drop, preferences |
-| `userland/ripple/` | `ripple` | user | UI toolkit: windows, event loop, the `App` trait, the `text` editing engine |
-| `userland/apps/*` | `app-*` | user | Surf, Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome |
+| `libs/web/` | `nebula-web` | user + host | URLs, and an HTTP/1.1 client over any byte stream (keep-alive, chunked, gzip) |
+| `libs/tls/` | `nebula-secure` | user + host | TLS 1.3/1.2 client, DER and X.509 path validation |
+| `libs/surf/` | `nebula-engine` | user + host | The browser engine: HTML, CSS, style and layout to a display list |
+| `userland/corekit/` | `aurora` | user | Runtime: entry point, heap, `print!`, files, processes, threads, clipboard, drag and drop, preferences |
+| `userland/aurorakit/` | `aurorakit` | user | UI toolkit: windows, event loop, the `App` trait, the `text` editing engine |
+| `userland/apps/*` | `app-*` | user | Nebula, Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome |
 | `userland/bin/*` | — | user | Command-line tools (`coreutils`), `usertest`, `crashtest` |
 | `xtask/` | `xtask` | host | Build, run, image and test orchestration; system sounds, Mozilla's root CAs (from `webpki-roots`), a test SSDT (battery, lid) and a USB-stick image |
 | `assets/fonts/` | — | — | Inter and JetBrains Mono, shipped in `/System/Fonts` |
@@ -29,11 +29,11 @@ This document is for someone about to read or change the code. It follows the ma
 | `tools/qmp.py` | — | host | Scripted clicks, drags, typing and screenshots for a running VM |
 | `tools/make_sample_pictures.py` | — | host | Generates the sample pictures (procedural) |
 
-The root workspace's `default-members` is only `xtask`, so a plain `cargo build` never tries to build the kernel for your host. `userland/` is a separate workspace. `xtask` builds it for our own target, `userland/x86_64-aurora-user.json` (ring 3 with SSE2; the kernel stays soft-float), rebuilding `core` and `alloc` with `-Zbuild-std`, links it with `userland/libaurora/user.ld` (base `0x40_0000`), and packs the binaries and fonts into `system.tar`:
+The root workspace's `default-members` is only `xtask`, so a plain `cargo build` never tries to build the kernel for your host. `userland/` is a separate workspace. `xtask` builds it for our own target, `userland/x86_64-aurora-user.json` (ring 3 with SSE2; the kernel stays soft-float), rebuilding `core` and `alloc` with `-Zbuild-std`, links it with `userland/corekit/user.ld` (base `0x40_0000`), and packs the binaries and fonts into `system.tar`:
 - `app-*` binaries become `/System/Apps/<Name>.elf`
 - everything else becomes `/System/Bin/<name>`
 
-## 1. Boot: `aurora-boot`
+## 1. Boot: `firstlight`
 
 `bootloader/src/main.rs` runs as a UEFI application (`EFI/BOOT/BOOTX64.EFI`):
 
@@ -56,9 +56,9 @@ serial → GDT/TSS → IDT → syscall MSRs → FPU → mm (frames, heap, drop i
       → ACPI tables → HPET → TSC calibration → APIC → per-CPU data → PS/2 + IRQ routing
       → VFS (RamFS at /, TarFS at /System) → scheduler → reaper → sti
       → start the other CPUs (trampoline, INIT-SIPI-SIPI)
-      → PCI → display → block drivers + GPT (MSI/MSI-X) → mount WaveFS at /, FAT32 at /Boot
+      → PCI → display → block drivers + GPT (MSI/MSI-X) → mount AuroraFS at /, FAT32 at /Boot
       → USB (xHCI) → sound (HDA + mixer) → ACPI runtime (AML task)
-      → flusher → spawn "crest" (restores settings, launches Welcome) → idle
+      → flusher → spawn "lumen-server" (restores settings, launches Welcome) → idle
 ```
 
 ### Memory layout
@@ -133,7 +133,7 @@ Every process has its own PML4:
 
 There is no `fork`. The model is spawn-style, like Windows' CreateProcess.
 
-**Threads.** A process can run several threads (`thread_spawn`/`thread_exit`): tasks that share its address space and handles. `futex_wait`/`futex_wake` put contended threads to sleep, keyed by (address space, address); libaurora builds `sync::Mutex`, `Condvar` and `thread::spawn`/`join` on them. `thread_exit` can store 1 into a word and wake it, which is how `join` knows the thread has left its stack.
+**Threads.** A process can run several threads (`thread_spawn`/`thread_exit`): tasks that share its address space and handles. `futex_wait`/`futex_wake` put contended threads to sleep, keyed by (address space, address); corekit builds `sync::Mutex`, `Condvar` and `thread::spawn`/`join` on them. `thread_exit` can store 1 into a word and wake it, which is how `join` knows the thread has left its stack.
 
 **SIMD state.** User code uses SSE2; the kernel is soft-float and never touches those registers. So only user tasks carry an FXSAVE area, saved and restored eagerly on every switch between them (`arch/fpu.rs`).
 
@@ -157,14 +157,14 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
 - **CPU faults in ring 3** end only the faulting process (`proc::crash_current`), and the desktop shows a Problem Report.
 - **The `reaper` kernel task** frees a process once the scheduler has retired its last thread: it closes handles (so pipe peers see EOF), closes windows, and drops the address space.
 
-### libaurora and Ripple
-- **libaurora:** the runtime. It provides `_start`, a heap that grows by `mmap`-ing new arenas, and `print!`, which formats into one buffer and writes it once. It also has file, process and time APIs.
-- **Ripple:** the UI toolkit. An app implements `ripple::App` (draw/key/click/drag/hover/scroll/tick, drop targets, close requests) and calls `ripple::run`. Ripple creates the window, draws the app with `aurora-gfx` into the shared surface, calls `win_present`, and turns window-server events into method calls.
-- **`ripple::text`:** one editing engine for every text box: `TextEdit` (caret, selection, word and line motion, undo grouped by typing bursts, the clipboard), a word-wrapping `TextView` with mouse selection (double-click a word, triple-click a line, drag with auto-scroll), and a single-line `TextField`.
+### corekit and AuroraKit
+- **corekit:** the runtime. It provides `_start`, a heap that grows by `mmap`-ing new arenas, and `print!`, which formats into one buffer and writes it once. It also has file, process and time APIs.
+- **AuroraKit:** the UI toolkit. An app implements `aurorakit::App` (draw/key/click/drag/hover/scroll/tick, drop targets, close requests) and calls `aurorakit::run`. AuroraKit creates the window, draws the app with `lumen` into the shared surface, calls `win_present`, and turns window-server events into method calls.
+- **`aurorakit::text`:** one editing engine for every text box: `TextEdit` (caret, selection, word and line motion, undo grouped by typing bursts, the clipboard), a word-wrapping `TextView` with mouse selection (double-click a word, triple-click a line, drag with auto-scroll), and a single-line `TextField`.
 
-## 4. Crest window server (`kernel/src/gui/`)
+## 4. Lumen Server window server (`kernel/src/gui/`)
 
-- **Main loop.** Crest is the `crest` kernel task (`gui/mod.rs`). Each frame it:
+- **Main loop.** Lumen Server is the `lumen-server` kernel task (`gui/mod.rs`). Each frame it:
   1. drains input
   2. applies client commands (`server::take_commands`: window created, closed, presented, retitled; open app/file; theme; power) and crash reports
   3. repaints only the **damaged rectangles** into a RAM back buffer
@@ -174,17 +174,17 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
   - **Compositing:** `ClientApp` adapts it to the window manager. It blits the surface with rounded bottom corners, and turns clicks, keys, scrolls, focus and resizes into `aurora_abi::Event`s on the window's queue.
   - **Events:** the process receives events through the blocking `next_event` syscall.
 - **Built-in dialogs.** A few system dialogs (Power, Problem Report, "Keep this resolution?") are built into the server and implement the kernel-side `App` trait directly.
-- **Rendering primitives.** Rendering is `aurora-gfx`:
+- **Rendering primitives.** Rendering is `lumen`:
   - integer anti-aliased shapes, SDF shadows and frosted glass
   - glass samples a wallpaper blurred once at startup
   - bilinear image scaling with correct transparent edges (`draw_image`)
   - wallpapers are procedural, or any picture
-- **Text** (`libs/gfx/src/ttf`, `font.rs`) is our own TrueType engine. It reads `cmap`, `glyf` outlines (simple and composite), `hmtx`, OS/2 metrics and pair kerning (`kern` and GPOS), and rasterizes by exact signed-area accumulation in 16.16 fixed point, so the soft-float kernel can use it too. Glyphs are cached per face, size and quarter-pixel offset. Crest and every app install the faces from `/System/Fonts`; a few build-time sizes cover the time before that (and the panic screen).
+- **Text** (`libs/gfx/src/ttf`, `font.rs`) is our own TrueType engine. It reads `cmap`, `glyf` outlines (simple and composite), `hmtx`, OS/2 metrics and pair kerning (`kern` and GPOS), and rasterizes by exact signed-area accumulation in 16.16 fixed point, so the soft-float kernel can use it too. Glyphs are cached per face, size and quarter-pixel offset. Lumen Server and every app install the faces from `/System/Fonts`; a few build-time sizes cover the time before that (and the panic screen).
 - **Desktop** (`desktop/mod.rs`): the window stack, focus, drag and resize, zoom and minimize. A press in a window's content captures the pointer until release, so apps get drags even outside their window.
-- **Animations** (`desktop/anim.rs`): opening, closing, minimizing into the dock, restoring and zooming draw a snapshot of the window scaled and faded between two rectangles while the real window stays hidden. Client windows appear once they've drawn their first frame. Crest runs at 60 Hz only while something moves.
+- **Animations** (`desktop/anim.rs`): opening, closing, minimizing into the dock, restoring and zooming draw a snapshot of the window scaled and faded between two rectangles while the real window stays hidden. Client windows appear once they've drawn their first frame. Lumen Server runs at 60 Hz only while something moves.
 - **Shell** (`desktop/shell.rs`): the menu bar, dock (with the Trash), launcher and menus. The catalog in `apps/mod.rs` maps app names and icons to program paths.
 - **Clipboard** (`clipboard.rs`): one item, text or a list of files; files paste as their paths where text is wanted.
-- **Drag and drop** (`dnd.rs`, `desktop/dragdrop.rs`): an app calls `drag_start` during a press; Crest takes the pointer, draws the drag image, sends `DRAG_OVER`/`DRAG_LEAVE` to windows underneath, and on release delivers `DROP` (the target fetches the payload with `drag_data`) and `DRAG_END` to the source. Dock apps open dropped files, and the dock Trash takes them.
+- **Drag and drop** (`dnd.rs`, `desktop/dragdrop.rs`): an app calls `drag_start` during a press; Lumen Server takes the pointer, draws the drag image, sends `DRAG_OVER`/`DRAG_LEAVE` to windows underneath, and on release delivers `DROP` (the target fetches the payload with `drag_data`) and `DRAG_END` to the source. Dock apps open dropped files, and the dock Trash takes them.
 - **Notifications** (`notify.rs`, `desktop/notifications.rs`): `notify` from apps, or the system; banners slide in at the top right, and the Notification Center (click the clock) keeps the history next to a calendar and Do Not Disturb.
 - **Spotlight** (`desktop/spotlight.rs`, `fs/index.rs`): apps, files, settings panes, calculations and commands. The file index is built by a background task at boot and kept current by hooks in the VFS (create, mkdir, rename, unlink).
 - **Preferences** (`settings.rs`, `prefs.rs`): `key=value` lines in `/Settings/aurora.conf`, read and written with `pref_get`/`pref_set` and applied at once: dark mode, the accent colour, keyboard layout and key repeat, clock format, Do Not Disturb, volume.
@@ -210,13 +210,13 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
 
 | Path | Filesystem | Notes |
 |---|---|---|
-| `/` | WaveFS on the partition typed `57415645-4653-4175-726F-72612D465331` | Falls back to RamFS when no disk is found |
+| `/` | AuroraFS on the partition typed `57415645-4653-4175-726F-72612D465331` | Falls back to RamFS when no disk is found |
 | `/System` | TarFS over the boot-time `system.tar` | Read-only |
 | `/Boot` | FAT32 on the EFI System Partition | Read/write, long file names, case-insensitive |
 
 Disk-backed filesystems sit on `fs/cache.rs`, a write-back cache of 4 KiB blocks with LRU eviction. Its `flush` writes dirty blocks in order, merging adjacent runs, and then flushes the device. A `flusher` kernel task calls `sync_all` every 5 s, and shutdown and restart sync first.
 
-### WaveFS on-disk format (`libs/wavefs`)
+### AuroraFS on-disk format (`libs/aurorafs`)
 
 ```
 block 0            superblock (magic WAVEFS01, geometry, counts, UUID, label, CRC32); backup in the last block
@@ -234,7 +234,7 @@ data               file contents; directories are files of (inode, kind, name) r
 
 On mount, a complete, checksummed transaction left in the journal is replayed, and a torn one is ignored. Freed blocks are not reused until the transaction that freed them commits. Freeing a block also revokes any journaled image of it, so a replay can never overwrite file data that later reused the block.
 
-The same crate formats volumes on the host (`xtask/src/image.rs`). Its tests (`cargo test -p wavefs`) simulate power cuts by keeping only flushed writes, and check the result with `fsck`.
+The same crate formats volumes on the host (`xtask/src/image.rs`). Its tests (`cargo test -p aurorafs`) simulate power cuts by keeping only flushed writes, and check the result with `fsck`.
 
 ### FAT32 (`libs/fat32`)
 
@@ -289,13 +289,13 @@ Both drivers implement the `net::Nic` trait (`mac`, `link_up`, `send`, `poll`) a
 
 All three libraries are `no_std` and make no system calls. Programs supply connections, text measurement and images, so the libraries run and are tested on the host.
 
-- **HTTP** (`libs/web`). `http::fetch` follows redirects over any `Connect`or. `libaurora::web` provides one that resolves names (DNS over UDP), opens TCP or TLS connections, and keeps idle ones in a small per-process pool (15 s, up to 8), retrying on a fresh connection if an idle one was closed by the server.
+- **HTTP** (`libs/web`). `http::fetch` follows redirects over any `Connect`or. `corekit::web` provides one that resolves names (DNS over UDP), opens TCP or TLS connections, and keeps idle ones in a small per-process pool (15 s, up to 8), retrying on a fresh connection if an idle one was closed by the server.
 - **TLS** (`libs/tls`). The client offers TLS 1.3 and 1.2. In 1.3 it sends an X25519 key share, answers a HelloRetryRequest with P-256, runs the HKDF key schedule, and checks `CertificateVerify` and `Finished`. In 1.2 it does ECDHE with AEAD ciphers, the extended master secret and the downgrade check. Certificates are parsed by our DER reader and validated to one of Mozilla's roots (packed by xtask into `/System/Certificates/roots.bin`): names (wildcards and IP addresses), validity dates, CA flags and signatures (RSA PKCS#1 and PSS, ECDSA P-256 and P-384). The primitives come from RustCrypto.
 - **The engine** (`libs/surf`):
   - `html.rs` tokenizes and builds a tree the forgiving way: implied `html`/`head`/`body`, implied end tags, raw-text elements and character references.
   - `css.rs` parses stylesheets (with `@media` and `@supports`) and matches selectors right to left. `style.rs` runs the cascade: the user-agent sheet, presentational attributes, author sheets and `style` attributes, with `!important`, inheritance, custom properties, `calc()`/`min()`/`max()`, and `::before`/`::after` content. Rules are bucketed by id, class and tag, and each element carries a 256-bit filter of its ancestors' ids, classes and tags, so most descendant selectors are rejected without walking the tree.
   - `layout.rs` produces a display list of rectangles, text runs, images and bullets, plus link and form-field areas and `#fragment` anchors. It covers block flow with margin collapsing; inline formatting measured in 1/64 px, breaking only at break opportunities; lists; tables (automatic column widths, spans); flex rows; grid (tracks, areas, spans, auto-placement); floats as rows; and form controls.
-- **Surf** (`userland/apps/surf`) loads a page and its stylesheets on a worker thread and pictures on three more, runs layout and paints on the main thread, and keeps the computed styles so pictures arriving later only redo layout.
+- **Nebula** (`userland/apps/surf`) loads a page and its stylesheets on a worker thread and pictures on three more, runs layout and paints on the main thread, and keeps the computed styles so pictures arriving later only redo layout.
 
 ## 9. Telemetry and the System Explorer (`telemetry.rs`, `xtask/src/monitor.rs`)
 
@@ -325,7 +325,7 @@ Lines are written while holding the port lock and without allocating, so events 
   - keyboard layouts, AltGr and dead keys
   - the TrueType engine with the installed faces
   - Spotlight's calculator and file index, the clipboard, and the Trash with Put Back
-  - storage: a GPT read, a write-and-verify round trip on the real controller (checking that completions arrive by interrupt), WaveFS through the kernel adapter on a RAM disk, WaveFS on the home volume checked with `fsck`, and FAT32 on `/Boot`
+  - storage: a GPT read, a write-and-verify round trip on the real controller (checking that completions arrive by interrupt), AuroraFS through the kernel adapter on a RAM disk, AuroraFS on the home volume checked with `fsck`, and FAT32 on `/Boot`
   - SMP: work on every CPU with lock stress, TLB shootdowns, the TSC against the HPET
   - user copies that fault, recovering with `EFAULT`
   - sound: a tone through HDA (the host also checks that QEMU's WAV recording isn't silent)
@@ -338,6 +338,6 @@ Lines are written while holding the port lock and without allocating, so events 
 
   The kernel reports through QEMU's `isa-debug-exit` device. `xtask test` boots the same fresh disk **twice**: the first boot leaves a file, and the second must find it intact.
 - **Headless boots.** `cargo xtask run --headless` exposes QEMU's HMP monitor at `target/qemu-monitor.sock` and QMP at `target/qemu-qmp.sock`. That makes it possible to script screenshots and input (`screendump`, `input-send-event`).
-- **Host tests.** `cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p aurora-web -p aurora-tls -p aurora-surf -p xtask` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling), the image codecs (against the `png`, `jpeg-encoder`, `jpeg-decoder` and `gif` crates), WAV decoding, URLs and HTTP (redirects, keep-alive, gzip), TLS (every cipher suite and version against a rustls server, RFC 8448 key schedule, bad certificates), the browser engine (parsing, selectors, the cascade and layout) and the AML assembler for the test SSDT.
+- **Host tests.** `cargo test -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling), the image codecs (against the `png`, `jpeg-encoder`, `jpeg-decoder` and `gif` crates), WAV decoding, URLs and HTTP (redirects, keep-alive, gzip), TLS (every cipher suite and version against a rustls server, RFC 8448 key schedule, bad certificates), the browser engine (parsing, selectors, the cascade and layout) and the AML assembler for the test SSDT.
 - **Scripted UI.** `tools/qmp.py` clicks, types and takes screenshots in a running VM.
 - **CI.** On every push, CI runs the host tests, the kernel suite on AHCI, virtio-blk and NVMe with 4 CPUs (and AHCI with 1 CPU), with virtio-net (and e1000e on one job), and a headless boot to the desktop.

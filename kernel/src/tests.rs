@@ -8,8 +8,8 @@ use crate::gui::geom::Rect;
 use crate::{fs, mm, power, sched, time};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use aurora_gfx::math::isqrt;
 use core::sync::atomic::{AtomicU32, Ordering};
+use lumen::math::isqrt;
 
 type Test = (&'static str, fn());
 
@@ -41,8 +41,8 @@ const TESTS: &[Test] = &[
     ("user processes (usertest)", user_processes),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
-    ("WaveFS on RAM disk (kernel adapter)", wavefs_ramdisk),
-    ("WaveFS home volume", wavefs_home),
+    ("AuroraFS on RAM disk (kernel adapter)", wavefs_ramdisk),
+    ("AuroraFS home volume", wavefs_home),
     ("FAT32 /Boot", fat_boot),
     ("persistence across reboot", persistence),
 ];
@@ -330,10 +330,10 @@ impl BlockDevice for RamDisk {
 }
 
 fn wavefs_ramdisk() {
-    use crate::fs::{wavefs::WaveFs, Filesystem, Kind};
+    use crate::fs::{aurorafs::AuroraFs, Filesystem, Kind};
     let dev: Arc<dyn BlockDevice> = Arc::new(RamDisk(crate::sync::Mutex::new(alloc::vec![0u8; 8 << 20])));
     {
-        let fs = WaveFs::format(dev.clone(), "Test").unwrap();
+        let fs = AuroraFs::format(dev.clone(), "Test").unwrap();
         let docs = fs.create(fs.root(), "Documents", Kind::Dir).unwrap();
         let f = fs.create(docs, "note.txt", Kind::File).unwrap();
         fs.write(f, 0, b"kept across remount").unwrap();
@@ -343,7 +343,7 @@ fn wavefs_ramdisk() {
         fs.sync().unwrap();
         fs.check().unwrap();
     }
-    let fs = WaveFs::mount(dev).unwrap();
+    let fs = AuroraFs::mount(dev).unwrap();
     let docs = fs.lookup(fs.root(), "Documents").unwrap();
     let f = fs.lookup(docs, "note.txt").unwrap();
     let mut buf = [0u8; 19];
@@ -356,7 +356,7 @@ fn wavefs_ramdisk() {
 
 fn wavefs_home() {
     let (root, _) = fs::lookup("/").unwrap();
-    assert!(root.describe().contains("WaveFS"), "root is {}", root.describe());
+    assert!(root.describe().contains("AuroraFS"), "root is {}", root.describe());
     assert!(fs::read_all("/Desktop/Read Me.txt").unwrap().starts_with(b"Welcome to WaveOS Aurora"));
     fs::mkdir("/Documents/ktest").unwrap();
     for i in 0..20 {
@@ -380,8 +380,8 @@ fn fat_boot() {
     let kernel = fs::read_all("/Boot/aurora/kernel.elf").expect("kernel on the ESP");
     assert_eq!(&kernel[0..4], b"\x7fELF");
     assert!(fs::read_all("/Boot/EFI/BOOT/BOOTX64.EFI").unwrap().starts_with(b"MZ"));
-    fs::write_all("/Boot/Aurora test file.txt", b"written by Tide").unwrap();
-    assert_eq!(fs::read_all("/Boot/aurora test FILE.txt").unwrap(), b"written by Tide"); // FAT is case-insensitive
+    fs::write_all("/Boot/Aurora test file.txt", b"written by Aster").unwrap();
+    assert_eq!(fs::read_all("/Boot/aurora test FILE.txt").unwrap(), b"written by Aster"); // FAT is case-insensitive
     fs::unlink("/Boot/Aurora test file.txt").unwrap();
     fs::sync_all();
 }
@@ -407,7 +407,7 @@ fn persistence() {
 }
 
 fn truetype() {
-    use aurora_gfx::font::{self, Face};
+    use lumen::font::{self, Face};
     for face in [Face::Regular, Face::SemiBold, Face::Mono] {
         assert!(font::installed(face), "{} not installed from the system image", face.file());
     }
@@ -764,6 +764,7 @@ fn network() {
         "no address from DHCP"
     );
     let me = crate::net::interfaces().into_iter().find(|i| i.flags & aurora_abi::net::IF_LOOPBACK == 0).unwrap().ip;
+    log!("net-test", "address {}", crate::net::wire::ip_str(me));
 
     // ICMP echo, to ourselves over loopback and on our own address.
     for dst in [[127, 0, 0, 1], me] {
@@ -776,6 +777,7 @@ fn network() {
         assert_eq!((n, from.ip, buf[0], buf[7], &buf[8..10]), (10, dst, 0, 7, &b"hi"[..]));
     }
 
+    log!("net-test", "pings answered");
     // UDP over loopback.
     let a = Socket::new(Kind::Udp);
     a.bind(&SockAddr::new([0; 4], 5353)).unwrap();
@@ -818,9 +820,11 @@ fn network() {
     crate::sched::sleep_ms(50);
     let c = Socket::new(Kind::Tcp);
     c.connect(&SockAddr::new([127, 0, 0, 1], 7070)).expect("connect over loopback");
+    log!("net-test", "loopback TCP connected");
     let data: Vec<u8> = (0..SIZE).map(pattern).collect();
     let want_sum = data.iter().enumerate().fold(0u64, |s, (k, &b)| s.wrapping_add(b as u64 * (k as u64 % 7 + 1)));
     assert_eq!(c.write(&data).unwrap(), SIZE);
+    log!("net-test", "1 MiB written");
     c.shutdown().unwrap();
     let mut back = Vec::new();
     let mut buf = alloc::vec![0u8; 16384];

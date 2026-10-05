@@ -1,7 +1,7 @@
 //! Layout with a fake monospaced font: every character is half the font size wide.
 
-use aurora_surf::layout::Item;
-use aurora_surf::{FontSpec, Host, Metrics, Page, Rect};
+use nebula_engine::layout::Item;
+use nebula_engine::{FontSpec, Host, Metrics, Page, Rect};
 
 struct Fake;
 

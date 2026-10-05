@@ -12,16 +12,16 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use aurora::fs;
 use aurora_image::Image;
-use ripple::canvas::{with_alpha, Canvas};
-use ripple::geom::Rect;
-use ripple::icons::{self, Icon};
-use ripple::theme;
-use ripple::widgets::{button, ButtonStyle};
-use ripple::{App, Env, KeyCode, KeyEvent, Request};
+use aurorakit::canvas::{with_alpha, Canvas};
+use aurorakit::geom::Rect;
+use aurorakit::icons::{self, Icon};
+use aurorakit::theme;
+use aurorakit::widgets::{button, ButtonStyle};
+use aurorakit::{App, Env, KeyCode, KeyEvent, Request};
+use corekit::fs;
 
-aurora::entry!(main);
+corekit::entry!(main);
 
 const TOOLBAR_H: i32 = 46;
 const MIN_ZOOM: i32 = 5; // percent
@@ -310,7 +310,7 @@ impl App for Preview {
                     let pts: Vec<(i32, i32)> = (0..=18)
                         .map(|i| {
                             let a = 180 + i * 38; // most of a circle, 1024 units per turn
-                            (cx + 7 * ripple::math::sin(a + 256) / 16384, cy + 7 * ripple::math::sin(a) / 16384)
+                            (cx + 7 * aurorakit::math::sin(a + 256) / 16384, cy + 7 * aurorakit::math::sin(a) / 16384)
                         })
                         .collect();
                     cv.polyline(&pts, 2, c);
@@ -434,7 +434,7 @@ impl App for Preview {
     }
 }
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let path = args.get(1).map(|p| fs::resolve(&fs::cwd(), p));
-    ripple::run(Preview::new(path))
+    aurorakit::run(Preview::new(path))
 }

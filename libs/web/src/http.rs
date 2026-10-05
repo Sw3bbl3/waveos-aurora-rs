@@ -76,7 +76,7 @@ impl core::fmt::Display for Error {
 }
 
 pub const MAX_BODY: usize = 64 << 20;
-pub const USER_AGENT: &str = "Mozilla/5.0 (WaveOS Aurora) Surf/0.6";
+pub const USER_AGENT: &str = "Mozilla/5.0 (WaveOS Aurora) Nebula/0.6";
 
 #[derive(Clone, Debug)]
 pub struct Response {

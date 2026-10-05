@@ -2,12 +2,12 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use aurora::fs;
-aurora::entry!(main);
+use corekit::fs;
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     if args.len() != 3 {
-        aurora::eprintln!("usage: mv FROM TO");
+        corekit::eprintln!("usage: mv FROM TO");
         return 2;
     }
     let from = coreutils::path(&args[1]);
@@ -18,7 +18,7 @@ fn main(args: aurora::Args) -> i32 {
     match fs::move_path(&from, &to) {
         Ok(()) => 0,
         Err(e) => {
-            aurora::eprintln!("mv: {e}");
+            corekit::eprintln!("mv: {e}");
             1
         }
     }

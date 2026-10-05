@@ -1,0 +1,9 @@
+# Exact compiler used to build and validate this development baseline.
+# The native WaveOS host-tool port is not included in this baseline.
+rust_release = "1.101.0-nightly"
+rust_commit = "d080e7dff1b0fc54541545252818f8cccf995d05"
+rust_commit_date = "2026-09-27"
+llvm_version = "23.1.1"
+application_target = "x86_64-aurora-user"
+application_abi = 1
+native_host_tools_available = false

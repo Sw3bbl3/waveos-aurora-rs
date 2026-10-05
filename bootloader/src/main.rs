@@ -1,4 +1,4 @@
-//! aurora-boot — the WaveOS Aurora UEFI bootloader.
+//! firstlight — the WaveOS Aurora UEFI bootloader.
 //!
 //! Boot flow:
 //! 1. Pick a graphics mode through GOP.
@@ -38,7 +38,7 @@ const MEMMAP_SLACK: usize = 64;
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().expect("uefi helpers");
-    info!("aurora-boot {} starting", env!("CARGO_PKG_VERSION"));
+    info!("firstlight {} starting", env!("CARGO_PKG_VERSION"));
 
     let conf = BootConf::read();
     let (framebuffer, modes, mode_count) = init_graphics(conf.resolution);
@@ -143,7 +143,7 @@ fn main() -> Status {
     let pml4_phys = pt.pml4();
     info!("page tables ready, physical window covers {} GiB", phys_end >> 30);
 
-    info!("exiting boot services, jumping to Tide kernel...");
+    info!("exiting boot services, jumping to Aster kernel...");
 
     // --- Point of no return -----------------------------------------------------
     let uefi_map = unsafe { boot::exit_boot_services(None) };

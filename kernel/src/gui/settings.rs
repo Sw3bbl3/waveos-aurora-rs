@@ -9,6 +9,8 @@ use alloc::string::{String, ToString};
 
 const PATH: &str = "/Settings/aurora.conf";
 
+static WRITER: spin::Mutex<()> = spin::Mutex::new(());
+
 static VALUES: IrqMutex<BTreeMap<String, String>> = IrqMutex::new(BTreeMap::new());
 
 pub fn load() {
@@ -24,7 +26,7 @@ pub fn load() {
     }
 }
 
-fn save(values: &BTreeMap<String, String>) {
+fn save(values: &BTreeMap<String, String>) -> Result<(), isize> {
     let mut text = String::from("# WaveOS Aurora preferences — written by the system\n");
     for (k, v) in values {
         text.push_str(k);
@@ -33,9 +35,12 @@ fn save(values: &BTreeMap<String, String>) {
         text.push('\n');
     }
     let _ = crate::fs::mkdir("/Settings");
-    if let Err(e) = crate::fs::write_all(PATH, text.as_bytes()) {
-        log!("gui", "could not save settings: {}", aurora_abi::err::name(e));
-    }
+    let temp = "/Settings/aurora.conf.pending";
+    crate::fs::write_all(temp, text.as_bytes())?;
+    crate::fs::lookup(temp)?.0.sync()?;
+    crate::fs::rename(temp, PATH)?;
+    crate::fs::lookup(PATH)?.0.sync()?;
+    Ok(())
 }
 
 pub fn get(key: &str) -> Option<String> {
@@ -52,15 +57,22 @@ pub fn get_bool(key: &str, default: bool) -> bool {
 
 /// Sets `key` and saves (no write if unchanged).
 pub fn set(key: &str, value: &str) {
-    let snapshot = {
-        let mut v = VALUES.lock();
-        if v.get(key).map(String::as_str) == Some(value) {
-            return;
-        }
-        v.insert(key.to_string(), value.to_string());
-        v.clone()
-    };
-    save(&snapshot);
+    if let Err(e) = try_set(key, value) {
+        log!("gui", "could not save settings: {}", aurora_abi::err::name(e));
+    }
+}
+
+/// Persist before publishing a new preference to callers.
+pub fn try_set(key: &str, value: &str) -> Result<(), isize> {
+    let _writer = WRITER.lock();
+    let mut snapshot = VALUES.lock().clone();
+    if snapshot.get(key).map(String::as_str) == Some(value) {
+        return Ok(());
+    }
+    snapshot.insert(String::from(key), String::from(value));
+    save(&snapshot)?;
+    VALUES.lock().insert(String::from(key), String::from(value));
+    Ok(())
 }
 
 pub fn set_int(key: &str, value: i64) {

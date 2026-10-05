@@ -1,6 +1,6 @@
 //! Parses and lays out HTML files with a fake font, reporting timings:
-//! `cargo run --release -p aurora-surf --example check -- page.html [css…]`
-use aurora_surf::{FontSpec, Host, Metrics, Page};
+//! `cargo run --release -p nebula-engine --example check -- page.html [css…]`
+use nebula_engine::{FontSpec, Host, Metrics, Page};
 use std::time::Instant;
 
 struct Fake;
@@ -20,7 +20,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let html = std::fs::read(&args[0]).unwrap();
     let t = Instant::now();
-    let text = aurora_surf::decode(&html, "");
+    let text = nebula_engine::decode(&html, "");
     let mut page = Page::parse(&text);
     let parsed = t.elapsed();
     for (i, (slot, _)) in page.pending_stylesheets().into_iter().enumerate() {
@@ -45,7 +45,7 @@ fn main() {
             .items
             .iter()
             .filter_map(|i| {
-                if let aurora_surf::Item::Text { x, y, text, .. } = i {
+                if let nebula_engine::Item::Text { x, y, text, .. } = i {
                     Some((*x, *y, text.clone()))
                 } else {
                     None

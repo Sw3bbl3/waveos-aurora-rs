@@ -1,0 +1,14 @@
+[package]
+name = "corekit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aurora-abi.workspace = true
+aurora-wav.workspace = true
+nebula-web.workspace = true
+nebula-secure.workspace = true
+linked_list_allocator = "0.10"
+
+gina.workspace = true

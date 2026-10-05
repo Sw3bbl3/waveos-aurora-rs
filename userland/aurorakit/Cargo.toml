@@ -1,0 +1,9 @@
+[package]
+name = "aurorakit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+corekit.workspace = true
+lumen.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "app-installer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+corekit.workspace = true
+aurorakit.workspace = true
+gina.workspace = true

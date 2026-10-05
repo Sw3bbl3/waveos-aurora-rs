@@ -9,5 +9,5 @@ name = "app-terminal"
 path = "src/main.rs"
 
 [dependencies]
-aurora.workspace = true
-ripple.workspace = true
+corekit.workspace = true
+aurorakit.workspace = true

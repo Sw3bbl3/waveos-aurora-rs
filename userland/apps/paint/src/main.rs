@@ -14,14 +14,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use aurora::fs;
 use aurora_image::Image;
-use ripple::canvas::{blend, rgb, with_alpha, Canvas};
-use ripple::geom::Rect;
-use ripple::text::TextField;
-use ripple::theme;
-use ripple::widgets::{self, button, ButtonStyle};
-use ripple::{App, Env, KeyCode, KeyEvent};
+use aurorakit::canvas::{blend, rgb, with_alpha, Canvas};
+use aurorakit::geom::Rect;
+use aurorakit::text::TextField;
+use aurorakit::theme;
+use aurorakit::widgets::{self, button, ButtonStyle};
+use aurorakit::{App, Env, KeyCode, KeyEvent};
+use corekit::fs;
 
 use libm::{ceilf, fabsf, sqrtf};
 
@@ -199,7 +199,7 @@ impl Paint {
     }
 
     fn flash(&mut self, msg: String) {
-        self.status = Some((msg, aurora::time::uptime_ms()));
+        self.status = Some((msg, corekit::time::uptime_ms()));
     }
 
     fn name(&self) -> String {
@@ -859,7 +859,7 @@ impl App for Paint {
     }
 
     fn drop(&mut self, _x: i32, _y: i32, kind: u32, _area: Rect, _env: &mut Env) -> bool {
-        if let Some(aurora::dnd::Dropped::Files(paths)) = aurora::dnd::dropped(kind) {
+        if let Some(corekit::dnd::Dropped::Files(paths)) = corekit::dnd::dropped(kind) {
             if let Some(p) = paths.iter().find(|p| aurora_image::is_image_name(p)) {
                 let p = p.clone();
                 self.open(&p);
@@ -919,9 +919,9 @@ impl App for Paint {
     }
 }
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let path = args.get(1).map(|p| fs::resolve(&fs::cwd(), p));
-    ripple::run(Paint::new(path))
+    aurorakit::run(Paint::new(path))
 }

@@ -4,7 +4,7 @@
 
 | Tool | macOS | Debian / Ubuntu |
 |---|---|---|
-| Rust | [rustup](https://rustup.rs), which installs the pinned nightly automatically | same |
+| Rust | [rustup](https://rustup.rs), with the exact Rust/LLVM baseline in `tools/toolchain-baseline.toml` | same |
 | QEMU + OVMF | `brew install qemu` (bundles `edk2-x86_64-code.fd`) | `sudo apt install qemu-system-x86 ovmf` |
 
 `xtask` finds OVMF in the usual Homebrew and distro locations. To point it at a specific build, set `OVMF_CODE=/path/to/OVMF_CODE.fd`. It expects a matching `*VARS*` file in the same directory.
@@ -22,16 +22,21 @@ cargo xtask run --smp 1             # number of CPUs (default 4)
 cargo xtask run --battery           # add a test laptop battery, power adapter and lid (ACPI)
 cargo xtask run --usb-stick         # plug in a 64 MiB FAT32 USB stick (target/usb-stick.img)
 cargo xtask run --no-sound          # no host audio (sound goes nowhere)
+cargo xtask run --no-keyboard-capture # macOS: opt out of full keyboard capture
+cargo xtask run --developer         # separate 8 GiB developer disk, 4 GiB RAM
+cargo xtask run --net none          # disable networking for offline validation
 cargo xtask test [--disk virtio] [--smp 1]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
-cargo test -p wavefs -p fat32 -p aurora-gfx -p aurora-image -p aurora-wav -p xtask   # host-side tests
+cargo test -p aurorafs -p fat32 -p lumen -p gina -p aurora-image -p aurora-wav -p xtask   # host-side tests
 cargo xtask image                   # target/waveos-aurora-usb.img for USB boot
 ```
 
 `cargo xtask run` boots `target/waveos-aurora.img`, a 256 MiB GPT disk:
 - **Partition 1** is a FAT32 EFI System Partition with the bootloader, the kernel and `system.tar`. Each build rewrites it.
-- **Partition 2** is **"Aurora HD"**, a WaveFS volume that holds your files. It is created once from `assets/home/` and then kept, so notes, folders and settings survive rebuilds.
+- **Partition 2** is **"Aurora HD"**, a AuroraFS volume that holds your files. It is created once from `assets/home/` and then kept, so notes, folders and settings survive rebuilds.
 
-The virtual machine has 4 CPUs, Intel HD Audio (played through your Mac's speakers with Core Audio), a USB 3 controller with a tablet and, behind a hub, a keyboard, and S3 sleep enabled. In a QEMU window the absolute pointer lets your mouse move freely in and out of the guest; the keyboard follows focus. To wake WaveOS from sleep, press a key, or run `tools/qmp.py qmp:system_wakeup`.
+The virtual machine has 4 CPUs, Intel HD Audio (played through your Mac's speakers with Core Audio), a USB 3 controller with a tablet and, behind a hub, a keyboard, and S3 sleep enabled. On macOS, interactive launches request Cocoa full keyboard capture, forward Command, and disable Option/Command swapping. QEMU needs Accessibility permission; event-tap failures are reported on stderr. Click in the VM to capture and press **Control+Option+G** to release. Use `--no-keyboard-capture` to opt out. To wake WaveOS from sleep, press a key, or run `tools/qmp.py qmp:system_wakeup`.
+
+See [Constellation development](CONSTELLATION.md) for GINA packaging, native CLI commands, Studio, the compiler-port gap, developer disk sizing, and compatibility details.
 
 `cargo xtask test` also attaches a USB stick, the test battery, and records the sound output to `target/test-audio.wav`. Its sleep test puts the VM to sleep and wakes it over QMP. Some OVMF builds (Ubuntu's, for one) fault while resuming, before WaveOS gets control: the harness notices and runs the suite again with `sleep=off`. Set `AURORA_TEST_SLEEP=off` to skip it from the start.
 
@@ -47,7 +52,7 @@ The virtual machine has 4 CPUs, Intel HD Audio (played through your Mac's speake
 - **Interrupt trace.** `cargo xtask run --int` writes QEMU's interrupt and CPU-reset trace to `target/qemu-int.log`. It's useful for triple faults.
 - **GDB.** Run `cargo xtask run --gdb` to start QEMU paused with a GDB stub on `:1234`. Then:
   ```sh
-  gdb target/x86_64-unknown-none/release/tide -ex 'target remote :1234'
+  gdb target/x86_64-unknown-none/release/aster -ex 'target remote :1234'
   ```
 - **Scripted control.** Scripts can drive the guest while it runs. `tools/qmp.py` wraps the common cases, for example `tools/qmp.py "click:553,752" "type:ls\n" "shot:out.png"`. The raw sockets are:
   - `target/qemu-monitor.sock` is the HMP monitor (for example `screendump shot.png -f png`).

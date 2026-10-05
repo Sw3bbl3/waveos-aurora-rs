@@ -3,12 +3,12 @@
 #![no_std]
 #![no_main]
 
-use aurora::println;
+use corekit::println;
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
-    println!("Hello from user space! I am pid {}.", aurora::process::pid());
+fn main(args: corekit::Args) -> i32 {
+    println!("Hello from user space! I am pid {}.", corekit::process::pid());
     if args.len() > 1 {
         println!("You passed: {}", args[1..].join(" "));
     }

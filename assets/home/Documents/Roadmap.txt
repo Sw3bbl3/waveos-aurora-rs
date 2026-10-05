@@ -1,8 +1,8 @@
 WaveOS Aurora roadmap
 
 M1  Boot to a graphical desktop                     (done)
-M2  User space: processes, syscalls, pipes, Ripple  (done)
-M3  Storage: AHCI/virtio/NVMe, VFS, WaveFS, FAT32   (done)
+M2  User space: processes, syscalls, pipes, AuroraKit  (done)
+M3  Storage: AHCI/virtio/NVMe, VFS, AuroraFS, FAT32   (done)
 M4  Apps: editor, image viewer, more settings
 M5  Real hardware: SMP, USB, power management
 M6  Networking: TCP/IP, DHCP, DNS, HTTP

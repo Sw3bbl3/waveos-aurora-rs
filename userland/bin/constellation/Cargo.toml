@@ -1,0 +1,9 @@
+[package]
+name = "constellation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+corekit.workspace = true
+constellation-sdk.workspace = true
+gina.workspace = true

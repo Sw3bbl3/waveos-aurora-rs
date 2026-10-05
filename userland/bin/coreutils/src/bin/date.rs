@@ -2,9 +2,9 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(_: aurora::Args) -> i32 {
-    aurora::println!("{}", aurora::time::format_date(&aurora::time::now()));
+fn main(_: corekit::Args) -> i32 {
+    corekit::println!("{}", corekit::time::format_date(&corekit::time::now()));
     0
 }

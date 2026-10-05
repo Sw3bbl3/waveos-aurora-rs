@@ -73,30 +73,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "aster"
+version = "0.6.0"
+dependencies = [
+ "acpi",
+ "aurora-abi",
+ "aurora-elf",
+ "aurora-image",
+ "aurora-wav",
+ "aurorafs",
+ "bootinfo",
+ "fat32",
+ "gina",
+ "linked_list_allocator",
+ "log",
+ "lumen",
+ "spin",
+ "x86_64",
+]
+
+[[package]]
 name = "aurora-abi"
 version = "0.6.0"
 
 [[package]]
-name = "aurora-boot"
-version = "0.6.0"
-dependencies = [
- "aurora-elf",
- "bootinfo",
- "log",
- "uefi",
-]
-
-[[package]]
 name = "aurora-elf"
 version = "0.6.0"
-
-[[package]]
-name = "aurora-gfx"
-version = "0.6.0"
-dependencies = [
- "fontdue",
- "spin",
-]
 
 [[package]]
 name = "aurora-image"
@@ -110,38 +112,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "aurora-surf"
-version = "0.6.0"
-
-[[package]]
-name = "aurora-tls"
-version = "0.6.0"
-dependencies = [
- "aes-gcm",
- "aurora-web",
- "chacha20poly1305",
- "hkdf",
- "hmac",
- "p256",
- "p384",
- "rand_core",
- "rcgen",
- "rsa",
- "rustls",
- "sha2",
- "x25519-dalek",
-]
-
-[[package]]
 name = "aurora-wav"
 version = "0.6.0"
 
 [[package]]
-name = "aurora-web"
+name = "aurorafs"
 version = "0.6.0"
-dependencies = [
- "miniz_oxide 0.8.9",
-]
 
 [[package]]
 name = "autocfg"
@@ -531,6 +507,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
+name = "firstlight"
+version = "0.6.0"
+dependencies = [
+ "aurora-elf",
+ "bootinfo",
+ "log",
+ "uefi",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -621,6 +607,14 @@ checksum = "4ae047235e33e2829703574b54fdec96bfbad892062d97fed2f76022287de61b"
 dependencies = [
  "color_quant",
  "weezl",
+]
+
+[[package]]
+name = "gina"
+version = "0.6.0"
+dependencies = [
+ "aurora-elf",
+ "sha2",
 ]
 
 [[package]]
@@ -768,6 +762,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "lumen"
+version = "0.6.0"
+dependencies = [
+ "fontdue",
+ "spin",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -785,6 +787,36 @@ checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "nebula-engine"
+version = "0.6.0"
+
+[[package]]
+name = "nebula-secure"
+version = "0.6.0"
+dependencies = [
+ "aes-gcm",
+ "chacha20poly1305",
+ "hkdf",
+ "hmac",
+ "nebula-web",
+ "p256",
+ "p384",
+ "rand_core",
+ "rcgen",
+ "rsa",
+ "rustls",
+ "sha2",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "nebula-web"
+version = "0.6.0"
+dependencies = [
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -1329,25 +1361,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tide"
-version = "0.6.0"
-dependencies = [
- "acpi",
- "aurora-abi",
- "aurora-elf",
- "aurora-gfx",
- "aurora-image",
- "aurora-wav",
- "bootinfo",
- "fat32",
- "linked_list_allocator",
- "log",
- "spin",
- "wavefs",
- "x86_64",
-]
-
-[[package]]
 name = "time"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1517,10 +1530,6 @@ checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "wavefs"
-version = "0.6.0"
 
 [[package]]
 name = "webpki-roots"
@@ -1697,8 +1706,9 @@ name = "xtask"
 version = "0.6.0"
 dependencies = [
  "aurora-wav",
+ "aurorafs",
  "fatfs",
- "wavefs",
+ "gina",
  "webpki-roots",
 ]
 

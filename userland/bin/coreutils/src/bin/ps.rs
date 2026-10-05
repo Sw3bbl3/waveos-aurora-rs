@@ -2,13 +2,13 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use aurora::abi;
-use aurora::println;
-aurora::entry!(main);
+use corekit::abi;
+use corekit::println;
+corekit::entry!(main);
 
-fn main(_: aurora::Args) -> i32 {
+fn main(_: corekit::Args) -> i32 {
     println!("  PID  PPID  STATE     CPU(ms)    MEM  NAME");
-    let mut rows = aurora::process::list();
+    let mut rows = corekit::process::list();
     rows.sort_by_key(|p| (p.user, p.pid));
     for p in rows.iter().filter(|p| p.state != abi::PROC_EXITED) {
         let state = match p.state {

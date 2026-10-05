@@ -1,4 +1,4 @@
-//! Tide — the WaveOS Aurora kernel.
+//! Aster — the WaveOS Aurora kernel.
 
 #![no_std]
 #![no_main]
@@ -39,8 +39,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::serial::init();
     telemetry::init();
-    telemetry::stage("kernel", "Tide kernel entry");
-    kprintln!("\nWaveOS Aurora — Tide kernel {}", VERSION);
+    telemetry::stage("kernel", "Aster kernel entry");
+    kprintln!("\nWaveOS Aurora — Aster kernel {}", VERSION);
     assert_eq!(boot_info.magic, BOOTINFO_MAGIC, "bad BootInfo magic");
     assert_eq!(boot_info.version, bootinfo::BOOTINFO_VERSION, "bootloader/kernel version mismatch");
 

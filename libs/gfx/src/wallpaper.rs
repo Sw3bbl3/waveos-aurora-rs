@@ -206,7 +206,7 @@ pub fn blur(src: &[u32], w: i32, h: i32, radius: i32) -> Vec<u32> {
     a
 }
 
-fn box_pass(src: &[u32], dst: &mut [u32], w: i32, h: i32, r: i32, horizontal: bool) {
+pub(crate) fn box_pass(src: &[u32], dst: &mut [u32], w: i32, h: i32, r: i32, horizontal: bool) {
     let (lines, len) = if horizontal { (h, w) } else { (w, h) };
     let idx = |line: i32, i: i32| -> usize {
         let i = i.clamp(0, len - 1);

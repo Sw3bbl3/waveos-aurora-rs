@@ -2,9 +2,9 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let (inputs, status) = coreutils::inputs(&args[1..], "wc");
     let (mut tl, mut tw, mut tb) = (0, 0, 0);
     let many = inputs.len() > 1;
@@ -14,10 +14,10 @@ fn main(args: aurora::Args) -> i32 {
         tl += l;
         tw += w;
         tb += b;
-        aurora::println!("{l:>7} {w:>7} {b:>7} {}", if name == "-" { "" } else { name });
+        corekit::println!("{l:>7} {w:>7} {b:>7} {}", if name == "-" { "" } else { name });
     }
     if many {
-        aurora::println!("{tl:>7} {tw:>7} {tb:>7} total");
+        corekit::println!("{tl:>7} {tw:>7} {tb:>7} total");
     }
     status
 }

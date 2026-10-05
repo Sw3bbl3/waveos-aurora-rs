@@ -12,14 +12,14 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use aurora::fs;
-use ripple::canvas::{with_alpha, Canvas};
-use ripple::font::Font;
-use ripple::geom::Rect;
-use ripple::text::{TextField, TextView};
-use ripple::theme;
-use ripple::widgets::{button, ButtonStyle};
-use ripple::{App, Env, KeyCode, KeyEvent, Request};
+use aurorakit::canvas::{with_alpha, Canvas};
+use aurorakit::font::Font;
+use aurorakit::geom::Rect;
+use aurorakit::text::{TextField, TextView};
+use aurorakit::theme;
+use aurorakit::widgets::{button, ButtonStyle};
+use aurorakit::{App, Env, KeyCode, KeyEvent, Request};
+use corekit::fs;
 
 const TOOLBAR_H: i32 = 46;
 const FIND_H: i32 = 44;
@@ -730,9 +730,9 @@ impl App for Notes {
     }
 }
 
-aurora::entry!(main);
+corekit::entry!(main);
 
-fn main(args: aurora::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
     let path = args.get(1).map(|p| fs::resolve(&fs::cwd(), p));
-    ripple::run(Notes::new(path))
+    aurorakit::run(Notes::new(path))
 }

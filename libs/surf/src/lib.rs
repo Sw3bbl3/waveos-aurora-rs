@@ -1,4 +1,4 @@
-//! The Surf web engine: HTML parsing, CSS, style and layout to a display
+//! The Nebula web engine: HTML parsing, CSS, style and layout to a display
 //! list. No system calls and no drawing: the app measures text, loads
 //! resources and paints. Runs (and is tested) on the host.
 

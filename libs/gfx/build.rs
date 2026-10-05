@@ -1,4 +1,4 @@
-//! aurora-gfx build script.
+//! lumen build script.
 //!
 //! Pre-rasterizes a few sizes of the UI fonts (Inter, JetBrains Mono) with
 //! fontdue on the host — the fallback used before the TrueType engine has its

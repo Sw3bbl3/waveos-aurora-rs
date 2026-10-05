@@ -1,4 +1,4 @@
-//! RamFS — an in-memory filesystem. Used as the root when no WaveFS disk is
+//! RamFS — an in-memory filesystem. Used as the root when no AuroraFS disk is
 //! present, and by tests.
 
 use super::*;

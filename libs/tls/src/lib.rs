@@ -1,6 +1,6 @@
 //! A TLS 1.3 client for HTTPS, with our own handshake, record layer, DER and
 //! X.509 path validation. Cryptographic primitives come from RustCrypto.
-//! Like `aurora-web`, it makes no system calls, so it runs (and is tested
+//! Like `nebula-web`, it makes no system calls, so it runs (and is tested
 //! against rustls) on the host.
 
 #![no_std]

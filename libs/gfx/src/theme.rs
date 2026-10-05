@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 pub const MENUBAR_H: i32 = 30;
 pub const TITLEBAR_H: i32 = 40;
-pub const WINDOW_RADIUS: i32 = 12;
+pub const WINDOW_RADIUS: i32 = 16;
 pub const DOCK_ICON: i32 = 48;
 pub const DOCK_PAD: i32 = 9;
 pub const DOCK_H: i32 = DOCK_ICON + 2 * DOCK_PAD + 4;
@@ -45,6 +45,7 @@ pub const CLOSE: u32 = rgb(0xFF, 0x5F, 0x57);
 pub const MINIMIZE: u32 = rgb(0xFE, 0xBC, 0x2E);
 pub const ZOOM: u32 = rgb(0x28, 0xC8, 0x40);
 
+#[derive(Clone, Copy)]
 pub struct Theme {
     pub dark: bool,
     pub window_bg: u32,
@@ -104,8 +105,58 @@ pub static DARK: Theme = Theme {
 
 static DARK_MODE: AtomicBool = AtomicBool::new(false);
 static WALLPAPER: AtomicU8 = AtomicU8::new(0);
+static GLASS: AtomicU8 = AtomicU8::new(70);
+static EFFECTS: AtomicU8 = AtomicU8::new(0);
+static DOCK_SIZE: AtomicU8 = AtomicU8::new(48);
+
+pub fn set_effects(glass: u8, flags: u8) {
+    GLASS.store(glass.min(100), Ordering::Relaxed);
+    EFFECTS.store(flags, Ordering::Relaxed);
+}
+pub fn glass_intensity() -> u8 {
+    GLASS.load(Ordering::Relaxed)
+}
+pub fn reduce_transparency() -> bool {
+    EFFECTS.load(Ordering::Relaxed) & 1 != 0
+}
+pub fn reduce_motion() -> bool {
+    EFFECTS.load(Ordering::Relaxed) & 2 != 0
+}
+pub fn high_contrast() -> bool {
+    EFFECTS.load(Ordering::Relaxed) & 4 != 0
+}
+pub fn dock_autohide() -> bool {
+    EFFECTS.load(Ordering::Relaxed) & 8 != 0
+}
+pub fn set_dock_size(size: u8) {
+    DOCK_SIZE.store(size.clamp(32, 64), Ordering::Relaxed);
+}
+pub fn dock_icon_size() -> i32 {
+    DOCK_SIZE.load(Ordering::Relaxed) as i32
+}
+pub fn dock_height() -> i32 {
+    dock_icon_size() + 2 * DOCK_PAD + 4
+}
+
+static LIGHT_CONTRAST: Theme = Theme {
+    text: 0xff080810,
+    text_secondary: 0xff303040,
+    window_border: 0xff454555,
+    control_border: 0xff454555,
+    ..LIGHT
+};
+static DARK_CONTRAST: Theme = Theme {
+    text: 0xffffffff,
+    text_secondary: 0xffe0e0ef,
+    window_border: 0xffaaaaaf,
+    control_border: 0xffaaaaaf,
+    ..DARK
+};
 
 pub fn current() -> &'static Theme {
+    if high_contrast() {
+        return if DARK_MODE.load(Ordering::Relaxed) { &DARK_CONTRAST } else { &LIGHT_CONTRAST };
+    }
     if DARK_MODE.load(Ordering::Relaxed) {
         &DARK
     } else {

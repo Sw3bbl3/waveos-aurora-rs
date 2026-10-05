@@ -1,4 +1,4 @@
-//! Crest's client interface: windows owned by user processes.
+//! Lumen Server's client interface: windows owned by user processes.
 //!
 //! A client window has a *surface* — pixel memory mapped both into the kernel
 //! (so the compositor can read it) and into the owning process (so the app can
@@ -34,6 +34,7 @@ impl Surface {
 }
 
 pub struct Client {
+    materials: Vec<Rect>,
     pub pid: u32,
     pub title: String,
     pub resizable: bool,
@@ -59,6 +60,7 @@ pub enum Command {
     DragStart,
     /// Items went into or out of the Trash (the dock icon may change).
     TrashChanged,
+    AppsChanged,
     /// A preference changed (see `prefs`).
     Pref(String),
     /// Switch the screen resolution (live-capable displays only).
@@ -297,6 +299,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             CLIENTS.lock().insert(
                 id,
                 Client {
+                    materials: Vec::new(),
                     pid,
                     title,
                     resizable: a[4] as usize & aurora_abi::win::RESIZABLE != 0,
@@ -308,6 +311,39 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             send(Command::Created(id));
             crate::telemetry::window("open", id, pid, &title_of(id));
             Ok(id as u64)
+        }
+        nr::WIN_MATERIALS => {
+            let id = a[0] as u32;
+            owned(id, pid)?;
+            if a[2] > 8 {
+                return Err(EINVAL);
+            }
+            let bytes = crate::syscall::user::slice(a[1], a[2] * 16)?;
+            let mut regions = Vec::new();
+            let mut clients = CLIENTS.lock();
+            let c = clients.get_mut(&id).ok_or(EBADF)?;
+            for data in bytes.chunks_exact(16) {
+                let n = |at: usize| i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+                let r = Rect::new(n(0), n(4), n(8), n(12));
+                if r.x < 0
+                    || r.y < 0
+                    || r.w <= 0
+                    || r.h <= 0
+                    || r.x as i64 + r.w as i64 > c.surface.width as i64
+                    || r.y as i64 + r.h as i64 > c.surface.height as i64
+                {
+                    return Err(EINVAL);
+                }
+                if regions.iter().any(|p: &Rect| p.intersects(&r)) {
+                    return Err(EINVAL);
+                }
+                regions.push(r);
+            }
+            if regions != c.materials {
+                c.materials = regions;
+                send(Command::Present(id, Rect::new(0, 0, c.surface.width as i32, c.surface.height as i32)));
+            }
+            Ok(0)
         }
         nr::WIN_SURFACE => {
             let id = a[0] as u32;
@@ -452,9 +488,17 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
             send(Command::Reboot);
             Ok(0)
         }
+        REFRESH_APPS => {
+            send(Command::AppsChanged);
+            Ok(0)
+        }
         GET_THEME => Ok((super::theme::accent_index() as u64) << 16
             | ((super::theme::current().dark as u64) << 8)
             | super::theme::wallpaper() as u64),
         _ => Err(EINVAL),
     }
+}
+
+pub fn material_regions(id: u32) -> Vec<Rect> {
+    CLIENTS.lock().get(&id).map(|c| c.materials.clone()).unwrap_or_default()
 }

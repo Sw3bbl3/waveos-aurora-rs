@@ -53,115 +53,123 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 name = "app-about"
 version = "0.6.0"
 dependencies = [
- "aurora",
- "ripple",
+ "aurorakit",
+ "corekit",
 ]
 
 [[package]]
 name = "app-activity"
 version = "0.6.0"
 dependencies = [
- "aurora",
- "ripple",
+ "aurorakit",
+ "corekit",
 ]
 
 [[package]]
 name = "app-calculator"
 version = "0.6.0"
 dependencies = [
- "aurora",
- "ripple",
+ "aurorakit",
+ "corekit",
 ]
 
 [[package]]
 name = "app-clock"
 version = "0.6.0"
 dependencies = [
- "aurora",
- "ripple",
+ "aurorakit",
+ "corekit",
 ]
 
 [[package]]
 name = "app-files"
 version = "0.6.0"
 dependencies = [
- "aurora",
  "aurora-image",
- "ripple",
+ "aurorakit",
+ "corekit",
+]
+
+[[package]]
+name = "app-installer"
+version = "0.6.0"
+dependencies = [
+ "aurorakit",
+ "corekit",
+ "gina",
+]
+
+[[package]]
+name = "app-nebula"
+version = "0.6.0"
+dependencies = [
+ "aurora-image",
+ "aurorakit",
+ "corekit",
+ "nebula-engine",
+ "nebula-web",
 ]
 
 [[package]]
 name = "app-notes"
 version = "0.6.0"
 dependencies = [
- "aurora",
- "ripple",
+ "aurorakit",
+ "corekit",
 ]
 
 [[package]]
 name = "app-paint"
 version = "0.6.0"
 dependencies = [
- "aurora",
  "aurora-image",
+ "aurorakit",
+ "corekit",
  "libm",
- "ripple",
 ]
 
 [[package]]
 name = "app-preview"
 version = "0.6.0"
 dependencies = [
- "aurora",
  "aurora-image",
- "ripple",
+ "aurorakit",
+ "corekit",
 ]
 
 [[package]]
 name = "app-settings"
 version = "0.6.0"
 dependencies = [
- "aurora",
  "aurora-image",
- "ripple",
+ "aurorakit",
+ "corekit",
 ]
 
 [[package]]
-name = "app-surf"
+name = "app-studio"
 version = "0.6.0"
 dependencies = [
- "aurora",
- "aurora-image",
- "aurora-surf",
- "aurora-web",
- "ripple",
+ "aurorakit",
+ "constellation-sdk",
+ "corekit",
+ "gina",
 ]
 
 [[package]]
 name = "app-terminal"
 version = "0.6.0"
 dependencies = [
- "aurora",
- "ripple",
+ "aurorakit",
+ "corekit",
 ]
 
 [[package]]
 name = "app-welcome"
 version = "0.6.0"
 dependencies = [
- "aurora",
- "ripple",
-]
-
-[[package]]
-name = "aurora"
-version = "0.6.0"
-dependencies = [
- "aurora-abi",
- "aurora-tls",
- "aurora-wav",
- "aurora-web",
- "linked_list_allocator",
+ "aurorakit",
+ "corekit",
 ]
 
 [[package]]
@@ -169,12 +177,8 @@ name = "aurora-abi"
 version = "0.6.0"
 
 [[package]]
-name = "aurora-gfx"
+name = "aurora-elf"
 version = "0.6.0"
-dependencies = [
- "fontdue",
- "spin",
-]
 
 [[package]]
 name = "aurora-image"
@@ -184,35 +188,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "aurora-surf"
-version = "0.6.0"
-
-[[package]]
-name = "aurora-tls"
-version = "0.6.0"
-dependencies = [
- "aes-gcm",
- "aurora-web",
- "chacha20poly1305",
- "hkdf",
- "hmac",
- "p256",
- "p384",
- "rand_core",
- "rsa",
- "sha2",
- "x25519-dalek",
-]
-
-[[package]]
 name = "aurora-wav"
 version = "0.6.0"
 
 [[package]]
-name = "aurora-web"
+name = "aurorakit"
 version = "0.6.0"
 dependencies = [
- "miniz_oxide",
+ "corekit",
+ "lumen",
 ]
 
 [[package]]
@@ -290,6 +274,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "constellation"
+version = "0.6.0"
+dependencies = [
+ "constellation-sdk",
+ "corekit",
+ "gina",
+]
+
+[[package]]
+name = "constellation-sdk"
+version = "0.6.0"
+dependencies = [
+ "corekit",
+ "gina",
+]
+
+[[package]]
 name = "core_maths"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -299,12 +300,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "corekit"
+version = "0.6.0"
+dependencies = [
+ "aurora-abi",
+ "aurora-wav",
+ "gina",
+ "linked_list_allocator",
+ "nebula-secure",
+ "nebula-web",
+]
+
+[[package]]
 name = "coreutils"
 version = "0.6.0"
 dependencies = [
- "aurora",
- "aurora-web",
+ "corekit",
  "libm",
+ "nebula-web",
 ]
 
 [[package]]
@@ -320,7 +333,7 @@ dependencies = [
 name = "crashtest"
 version = "0.6.0"
 dependencies = [
- "aurora",
+ "corekit",
 ]
 
 [[package]]
@@ -495,6 +508,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "gina"
+version = "0.6.0"
+dependencies = [
+ "aurora-elf",
+ "sha2",
+]
+
+[[package]]
+name = "gina-check"
+version = "0.6.0"
+dependencies = [
+ "corekit",
+ "gina",
+]
+
+[[package]]
+name = "gina-demo"
+version = "0.6.0"
+dependencies = [
+ "aurorakit",
+ "corekit",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -520,7 +557,7 @@ dependencies = [
 name = "hello"
 version = "0.6.0"
 dependencies = [
- "aurora",
+ "corekit",
 ]
 
 [[package]]
@@ -590,12 +627,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen"
+version = "0.6.0"
+dependencies = [
+ "fontdue",
+ "spin",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
+]
+
+[[package]]
+name = "nebula-engine"
+version = "0.6.0"
+
+[[package]]
+name = "nebula-secure"
+version = "0.6.0"
+dependencies = [
+ "aes-gcm",
+ "chacha20poly1305",
+ "hkdf",
+ "hmac",
+ "nebula-web",
+ "p256",
+ "p384",
+ "rand_core",
+ "rsa",
+ "sha2",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "nebula-web"
+version = "0.6.0"
+dependencies = [
+ "miniz_oxide",
 ]
 
 [[package]]
@@ -790,14 +863,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ripple"
-version = "0.6.0"
-dependencies = [
- "aurora",
- "aurora-gfx",
-]
-
-[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -960,7 +1025,7 @@ dependencies = [
 name = "usertest"
 version = "0.6.0"
 dependencies = [
- "aurora",
+ "corekit",
 ]
 
 [[package]]

@@ -31,6 +31,17 @@ pub fn blend(dst: u32, src: u32, a: u32) -> u32 {
         return src | 0xFF00_0000;
     }
     let inv = 255 - a;
+    let da = alpha(dst);
+    if da < 255 {
+        let oa = a + da * inv / 255;
+        if oa == 0 {
+            return 0;
+        }
+        let channel = |shift: u32| {
+            ((((src >> shift) & 255) * a * 255 + ((dst >> shift) & 255) * da * inv) / (oa * 255)).min(255) << shift
+        };
+        return oa << 24 | channel(16) | channel(8) | channel(0);
+    }
     let rb = ((src & 0x00FF_00FF) * a + (dst & 0x00FF_00FF) * inv + 0x0080_0080) >> 8 & 0x00FF_00FF;
     let g = ((src & 0x0000_FF00) * a + (dst & 0x0000_FF00) * inv + 0x0000_8000) >> 8 & 0x0000_FF00;
     0xFF00_0000 | rb | g
@@ -48,6 +59,7 @@ pub fn mix(a: u32, b: u32, t: i32) -> u32 {
 }
 
 pub struct Canvas<'a> {
+    pub materials: Option<&'a mut crate::material::MaterialCache>,
     pub buf: &'a mut [u32],
     pub width: i32,
     #[allow(dead_code)]
@@ -84,7 +96,7 @@ fn round_rect_coverage(r: &Rect, radius: i32, x: i32, y: i32) -> u32 {
 
 impl<'a> Canvas<'a> {
     pub fn new(buf: &'a mut [u32], width: i32, height: i32) -> Self {
-        Self { buf, width, height, clip: Rect::new(0, 0, width, height) }
+        Self { buf, width, height, clip: Rect::new(0, 0, width, height), materials: None }
     }
 
     /// Runs `f` with the clip narrowed to `r`, restoring it afterwards.
@@ -286,6 +298,23 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    pub fn blit_alpha(&mut self, src: &[u32], sw: u32, sh: u32, dst: Rect, radius: i32) {
+        let img = Rect::new(dst.x, dst.y, (sw as i32).min(dst.w), (sh as i32).min(dst.h));
+        let top = Rect::new(dst.x, dst.y, dst.w, (dst.h - radius).max(0));
+        self.with_clip(img.intersect(&top), |cv| {
+            cv.fill_round_rect_with(img, 0, |x, y| src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize])
+        });
+        if radius > 0 {
+            let band = Rect::new(dst.x, dst.bottom() - radius, dst.w, radius);
+            let shape = Rect::new(dst.x, dst.bottom() - 2 * radius, dst.w, 2 * radius);
+            self.with_clip(img.intersect(&band), |cv| {
+                cv.fill_round_rect_with(shape, radius, |x, y| {
+                    src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize]
+                })
+            });
+        }
+    }
+
     /// Draws a `src_w`×`src_h` image with straight alpha scaled into `dst`
     /// (bilinear filtering, premultiplied so transparent edges don't fringe),
     /// at `opacity` 0..=255. For large reductions, draw a thumbnail instead.
@@ -347,10 +376,17 @@ impl<'a> Canvas<'a> {
     }
 
     /// Frosted glass: the pre-blurred wallpaper under a rounded rect, tinted.
-    pub fn glass(&mut self, blurred: &[u32], r: Rect, radius: i32, tint: u32) {
-        let w = self.width;
-        let ta = alpha(tint);
-        self.fill_round_rect_with(r, radius, |x, y| blend(blurred[(y * w + x) as usize], tint, ta));
+    pub fn glass(&mut self, _blurred: &[u32], r: Rect, radius: i32, tint: u32) {
+        self.frosted(r, radius, tint);
+    }
+
+    pub fn frosted(&mut self, r: Rect, radius: i32, tint: u32) {
+        if let Some(cache) = self.materials.take() {
+            cache.paint(self, r, radius, tint);
+            self.materials = Some(cache);
+        } else {
+            crate::material::MaterialCache::default().paint(self, r, radius, tint);
+        }
     }
 
     /// Draws `s` with its baseline at `y`. Returns the advance in pixels.

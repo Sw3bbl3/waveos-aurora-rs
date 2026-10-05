@@ -23,7 +23,7 @@ pub enum Icon {
     Clock,
     Activity,
     /// The web browser: a globe riding a wave.
-    Surf,
+    Nebula,
     /// A picture file (PNG/BMP) in Files.
     Picture,
     Trash,
@@ -139,7 +139,7 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
         | Icon::Paint
         | Icon::Clock
         | Icon::Activity
-        | Icon::Surf
+        | Icon::Nebula
         | Icon::Picture
         | Icon::Trash
         | Icon::TrashFull => draw_more(cv, icon, r),
@@ -233,7 +233,7 @@ fn draw_more(cv: &mut Canvas, icon: Icon, r: Rect) {
                 ys.iter().enumerate().map(|(i, &v)| (g.x + g.w * i as i32 / 9, g.y + g.h * v / 80)).collect();
             cv.polyline(&pts, u(3).max(2), rgb(0x30, 0xD1, 0x58));
         }
-        Icon::Surf => {
+        Icon::Nebula => {
             cv.fill_round_rect_dgradient(r, rad, rgb(0x0A, 0x6C, 0xFF), rgb(0x2D, 0xD4, 0xBF));
             let (cx, cy) = r.center();
             let rr = u(15);

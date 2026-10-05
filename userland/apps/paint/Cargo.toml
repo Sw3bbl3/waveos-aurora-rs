@@ -9,7 +9,7 @@ name = "app-paint"
 path = "src/main.rs"
 
 [dependencies]
-aurora.workspace = true
-ripple.workspace = true
+corekit.workspace = true
+aurorakit.workspace = true
 aurora-image.workspace = true
 libm = "0.2"
