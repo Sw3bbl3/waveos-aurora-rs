@@ -1,0 +1,336 @@
+{
+  "warmup_repetitions": 1,
+  "measured_repetitions": 5,
+  "records": [
+    {
+      "repetition": 1,
+      "stage": "startup",
+      "samples": [
+        {
+          "metric": "search",
+          "ms": 5
+        },
+        {
+          "metric": "startup",
+          "ms": 81
+        }
+      ]
+    },
+    {
+      "repetition": 1,
+      "stage": "search",
+      "samples": [
+        {
+          "metric": "search",
+          "ms": 4
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        },
+        {
+          "metric": "search",
+          "ms": 4
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        }
+      ]
+    },
+    {
+      "repetition": 1,
+      "stage": "scroll",
+      "samples": [
+        {
+          "metric": "scroll-render",
+          "ms": 19
+        },
+        {
+          "metric": "scroll-render",
+          "ms": 14
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "stage": "startup",
+      "samples": [
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "startup",
+          "ms": 74
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "stage": "search",
+      "samples": [
+        {
+          "metric": "search",
+          "ms": 4
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "stage": "scroll",
+      "samples": [
+        {
+          "metric": "scroll-render",
+          "ms": 17
+        },
+        {
+          "metric": "scroll-render",
+          "ms": 13
+        }
+      ]
+    },
+    {
+      "repetition": 3,
+      "stage": "startup",
+      "samples": [
+        {
+          "metric": "search",
+          "ms": 5
+        },
+        {
+          "metric": "startup",
+          "ms": 87
+        }
+      ]
+    },
+    {
+      "repetition": 3,
+      "stage": "search",
+      "samples": [
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        },
+        {
+          "metric": "search",
+          "ms": 1
+        },
+        {
+          "metric": "search",
+          "ms": 4
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 1
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        }
+      ]
+    },
+    {
+      "repetition": 3,
+      "stage": "scroll",
+      "samples": [
+        {
+          "metric": "scroll-render",
+          "ms": 22
+        },
+        {
+          "metric": "scroll-render",
+          "ms": 16
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "stage": "startup",
+      "samples": [
+        {
+          "metric": "search",
+          "ms": 4
+        },
+        {
+          "metric": "startup",
+          "ms": 80
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "stage": "search",
+      "samples": [
+        {
+          "metric": "search",
+          "ms": 4
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 1
+        },
+        {
+          "metric": "search",
+          "ms": 4
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        },
+        {
+          "metric": "search",
+          "ms": 4
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "stage": "scroll",
+      "samples": [
+        {
+          "metric": "scroll-render",
+          "ms": 20
+        },
+        {
+          "metric": "scroll-render",
+          "ms": 15
+        }
+      ]
+    },
+    {
+      "repetition": 5,
+      "stage": "startup",
+      "samples": [
+        {
+          "metric": "search",
+          "ms": 5
+        },
+        {
+          "metric": "startup",
+          "ms": 85
+        }
+      ]
+    },
+    {
+      "repetition": 5,
+      "stage": "search",
+      "samples": [
+        {
+          "metric": "search",
+          "ms": 4
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 1
+        },
+        {
+          "metric": "search",
+          "ms": 3
+        },
+        {
+          "metric": "search",
+          "ms": 4
+        },
+        {
+          "metric": "search",
+          "ms": 2
+        },
+        {
+          "metric": "search",
+          "ms": 4
+        }
+      ]
+    },
+    {
+      "repetition": 5,
+      "stage": "scroll",
+      "samples": [
+        {
+          "metric": "scroll-render",
+          "ms": 9
+        },
+        {
+          "metric": "scroll-render",
+          "ms": 15
+        }
+      ]
+    }
+  ]
+}

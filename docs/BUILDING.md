@@ -1,5 +1,7 @@
 # Building, running and debugging
 
+For the versioned 0.7 user and developer guides, see the [bilingual handbook](handbook/README.md). This reference URL remains available.
+
 ## Requirements
 
 | Tool | macOS | Debian / Ubuntu |

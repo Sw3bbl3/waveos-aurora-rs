@@ -1,5 +1,7 @@
 # WaveOS Aurora architecture
 
+For the versioned 0.7 user and developer guides, see the [bilingual handbook](handbook/README.md). This reference URL remains available.
+
 This document is for someone about to read or change the code. It follows the machine from power-on to the desktop, then covers each subsystem.
 
 ## Repository layout

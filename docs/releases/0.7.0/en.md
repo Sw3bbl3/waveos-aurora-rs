@@ -1,4 +1,7 @@
 # WaveOS Aurora 0.7.0
+
+October 5, 2026
+
 This update introduces Learn, new ways to arrange and switch windows, and improvements to desktop rendering and keyboard navigation.
 
 ## Learn
@@ -17,7 +20,11 @@ This update introduces Learn, new ways to arrange and switch windows, and improv
 - Apply existing contrast, transparency, and motion preferences to new desktop controls.
 
 ## Performance
-Desktop updates can repaint eligible changed regions while retaining full reconstruction for glass-dependent scenes. Measured results and their limits are provided in the release validation assets; no system-wide speedup is implied.
+- Eligible localized updates redraw less of the desktop. In a controlled Notes typing workload, median composition and framebuffer-flush time fell from 47 to 10 ms, with 93.0% fewer painted pixels per frame batch against development baseline `1011e1a`.
+- Dragging and switching showed higher p95 timings. Read the [measurements and limitations](../../handbook/0.7/en/reference-validation.md#measured-desktop-results-october-5-2026) before applying these results to other workloads.
+
+## Fixes
+- Resolves a TCP retransmission issue that could stall transfers on a single-CPU system.
 
 ## Known limitations
 Native compiler/debugger tools remain unavailable. Browser and hardware limits continue to apply. Read the [complete handbook](../../handbook/0.7/en/start-welcome.md) and [validation guide](../../handbook/0.7/en/reference-validation.md).

@@ -20,13 +20,28 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 fn parsed(source: &str) -> Result<(Vec<Event<'_>>, Vec<(String, String)>, String), String> {
-    let mut events: Vec<_> = Parser::new_ext(source, Options::ENABLE_TABLES).collect();
+    let mut events: Vec<_> = Parser::new_ext(
+        source,
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES | Options::ENABLE_TASKLISTS,
+    )
+    .collect();
     let mut headings = Vec::new();
     let mut plain = String::new();
     let mut used = BTreeSet::new();
     for i in 0..events.len() {
         if matches!(events[i], Event::Html(_) | Event::InlineHtml(_)) {
             return Err("Raw HTML is not supported in handbook sources".into());
+        }
+        if matches!(
+            events[i],
+            Event::Start(Tag::Strikethrough | Tag::FootnoteDefinition(_))
+                | Event::FootnoteReference(_)
+                | Event::TaskListMarker(_)
+        ) {
+            return Err(
+                "Strikethrough, footnotes, and task lists are unsupported; use plain text and numbered instructions"
+                    .into(),
+            );
         }
         if matches!(events[i], Event::Start(Tag::Heading { .. })) {
             let title = events[i + 1..]
@@ -216,6 +231,9 @@ mod tests {
     #[test]
     fn reject_html_and_make_unique_anchors() {
         assert!(parsed("# Good\n<script>bad</script>").is_err());
+        for source in ["# Good\n~~removed~~", "# Good\n- [ ] Task", "# Good\nText[^1]\n\n[^1]: note"] {
+            assert!(parsed(source).is_err());
+        }
         let (_, h, _) = parsed("# Réseau\n## Réseau\n").unwrap();
         assert_eq!(h[0].0, "reseau");
         assert_eq!(h[1].0, "reseau-2");

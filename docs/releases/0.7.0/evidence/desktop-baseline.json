@@ -1,0 +1,3388 @@
+{
+  "warmup_repetitions": 1,
+  "measured_repetitions": 5,
+  "records": [
+    {
+      "repetition": 1,
+      "workload": "typing",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 35,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 28,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 28,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 40,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 39,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 37,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 33,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 1,
+      "workload": "dragging",
+      "frames": [
+        {
+          "kind": "partial-or-cursor",
+          "pixels": 736,
+          "ms": 0,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 58,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 64,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 38,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 58,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 32,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 38,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 36,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 1,
+      "workload": "switching",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 29,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 26,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 60,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 27,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 23,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 25,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 40,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "partial-or-cursor",
+          "pixels": 736,
+          "ms": 1,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 1,
+      "workload": "settings",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 39,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 70,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 32,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 34,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 38,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 34,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 32,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 70,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 73,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 76,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 58,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 58,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 40,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 72,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 71,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 65,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 32,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "workload": "typing",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 33,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 25,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 28,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 41,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 35,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 44,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 40,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 41,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 44,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 29,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "workload": "dragging",
+      "frames": [
+        {
+          "kind": "partial-or-cursor",
+          "pixels": 736,
+          "ms": 0,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 37,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 41,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 33,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 53,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 33,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 62,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 36,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 38,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "workload": "switching",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 61,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 27,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 24,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 57,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 26,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 24,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 24,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 33,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "partial-or-cursor",
+          "pixels": 736,
+          "ms": 1,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "workload": "settings",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 37,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 80,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 32,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 34,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 29,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 65,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 69,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 71,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 53,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 56,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 38,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 74,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 72,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 65,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 3,
+      "workload": "typing",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 36,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 26,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 28,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 36,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 34,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 32,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 41,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 3,
+      "workload": "dragging",
+      "frames": [
+        {
+          "kind": "partial-or-cursor",
+          "pixels": 736,
+          "ms": 0,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 35,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 62,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 64,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 61,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 30,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 39,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 3,
+      "workload": "switching",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 61,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 27,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 23,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 38,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 61,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 27,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 23,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 24,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "partial-or-cursor",
+          "pixels": 736,
+          "ms": 1,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 3,
+      "workload": "settings",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 37,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 80,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 32,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 33,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 54,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 29,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 65,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 71,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 76,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 58,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 57,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 39,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 53,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 68,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 83,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 87,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 37,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 32,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "workload": "typing",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 34,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 26,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 28,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 25,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 29,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "workload": "dragging",
+      "frames": [
+        {
+          "kind": "partial-or-cursor",
+          "pixels": 736,
+          "ms": 0,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 34,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 61,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 63,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 62,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 30,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 39,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "workload": "switching",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 61,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 27,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 24,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 59,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 26,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 24,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 23,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "partial-or-cursor",
+          "pixels": 736,
+          "ms": 0,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "workload": "settings",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 36,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 81,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 33,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 59,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 35,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 44,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 30,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 33,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 73,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 77,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 57,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 56,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 39,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 74,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 70,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 64,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 32,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 5,
+      "workload": "typing",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 35,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 26,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 28,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 24,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 24,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 41,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 38,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 47,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 46,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 45,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 5,
+      "workload": "dragging",
+      "frames": [
+        {
+          "kind": "partial-or-cursor",
+          "pixels": 736,
+          "ms": 0,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 34,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 61,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 61,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 40,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 61,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 30,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 39,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 5,
+      "workload": "switching",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 26,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 23,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 60,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 28,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 23,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 23,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "partial-or-cursor",
+          "pixels": 736,
+          "ms": 0,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    },
+    {
+      "repetition": 5,
+      "workload": "settings",
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 38,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 80,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 41,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 48,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 35,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 53,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 44,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 37,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 52,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 42,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 68,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 70,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 69,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 53,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 59,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 39,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 43,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 53,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 61,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 40,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 51,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 49,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 70,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 67,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 31,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 26,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        },
+        {
+          "kind": "full",
+          "pixels": 1024000,
+          "ms": 50,
+          "width": 1280,
+          "height": 800
+        }
+      ]
+    }
+  ]
+}

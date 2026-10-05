@@ -31,6 +31,8 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
+      # Avoid exhausting hosted-runner acquisition while retaining every configuration.
+      max-parallel: 1
       matrix:
         disk: [ahci, virtio, nvme]
         smp: [4]

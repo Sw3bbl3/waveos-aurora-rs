@@ -1,5 +1,7 @@
 # Aurora development milestone
 
+For the versioned 0.7 user and developer guides, see the [bilingual handbook](handbook/README.md). This reference URL remains available.
+
 This branch adds Lumen backdrop materials, AuroraKit declarative controls, GINA installation, and the first native Constellation Studio application. **It does not yet meet the complete native compiler and debugger acceptance milestone.** Studio runs inside WaveOS, but Rust, Cargo, LLVM, rustfmt and rust-analyzer have not been ported to run there. Build reports that prerequisite explicitly; no host helper or simulated build is used.
 
 ## Component names and compatibility

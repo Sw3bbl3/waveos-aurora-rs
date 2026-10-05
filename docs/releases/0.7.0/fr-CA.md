@@ -1,4 +1,7 @@
 # WaveOS Aurora 0.7.0
+
+5 octobre 2026
+
 Cette mise à jour présente Learn, de nouvelles façons d’organiser les fenêtres et de passer de l’une à l’autre, ainsi que des améliorations du rendu et de la navigation au clavier.
 
 ## Learn
@@ -17,7 +20,11 @@ Cette mise à jour présente Learn, de nouvelles façons d’organiser les fenê
 - Appliquez les préférences existantes de contraste, de transparence et de mouvement aux nouvelles commandes.
 
 ## Performance
-Le bureau peut redessiner les régions modifiées admissibles tout en conservant une reconstruction complète lorsque le verre en dépend. Les mesures et leurs limites figurent dans les fichiers de validation; aucun gain global n’est sous-entendu.
+- Les mises à jour localisées admissibles redessinent moins de zones du bureau. Dans une saisie contrôlée avec Notes, le temps médian de composition et de copie à l’écran est passé de 47 à 10 ms, avec 93.0% moins de pixels peints par lot d’images par rapport à la base de développement `1011e1a`.
+- Le déplacement et le changement de fenêtre ont montré un p95 plus élevé. Consultez les [mesures et limites](../../handbook/0.7/fr-CA/reference-validation.md#resultats-du-bureau-5-octobre-2026) avant d’appliquer ces résultats à d’autres charges.
+
+## Correctifs
+- Corrige un problème de retransmission TCP pouvant bloquer les transferts sur un système à un seul processeur.
 
 ## Limites connues
 Le compilateur et le débogueur natifs demeurent indisponibles. Les limites du navigateur et du matériel s’appliquent toujours. Consultez le [guide complet](../../handbook/0.7/fr-CA/start-welcome.md) et le [guide de validation](../../handbook/0.7/fr-CA/reference-validation.md).

@@ -23,3 +23,6 @@ Hold Alt and press Tab to open the window chooser. Press Tab again to advance, o
 
 ## Troubleshooting
 Fixed-size apps cannot snap. A split smaller than an app’s minimum size is unavailable. On macOS, enable QEMU Accessibility permission for Command capture and use Control+Option+G to release capture. QMP-generated input does not verify host keyboard interception.
+
+## Window chooser
+![The Alt+Tab chooser with Notes, Learn, and Welcome](../../../screenshots/0.7/window-switcher.png)

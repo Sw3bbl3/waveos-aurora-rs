@@ -23,3 +23,6 @@ Maintenez Alt et appuyez sur Tab pour ouvrir le sélecteur. Appuyez de nouveau s
 
 ## Dépannage
 Les applications à dimensions fixes ne peuvent pas être ancrées. Un partage inférieur aux dimensions minimales n’est pas disponible. Sous macOS, accordez à QEMU l’autorisation Accessibilité pour capter Commande; Control+Option+G libère la capture. Les touches injectées par QMP ne vérifient pas l’interception du clavier de l’hôte.
+
+## Sélecteur de fenêtres
+![Le sélecteur Alt+Tab avec Notes, Learn et Welcome](../../../screenshots/0.7/window-switcher.png)

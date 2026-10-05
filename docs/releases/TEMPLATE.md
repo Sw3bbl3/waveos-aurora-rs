@@ -2,7 +2,7 @@
 
 Publication date / Date de publication: YYYY-MM-DD
 
-One concise paragraph explaining the update’s main benefit. Write separate English and Canadian French files. Use original WaveOS wording and the concise structure of Apple's public update notes.
+One concise paragraph explaining the update’s main benefit. Write separate English and Canadian French files. Use original WaveOS wording and the concise structure of [Apple’s public update notes](https://support.apple.com/en-us/122868).
 
 ## Feature or app name
 

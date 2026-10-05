@@ -1,4 +1,4 @@
-# About and Welcome
+# About et Welcome
 Vérifiez la version en cours et retrouvez l’introduction.
 
 ## Utiliser l’application

@@ -1518,7 +1518,7 @@ button { font-size: 15px; padding: 9px 20px; border-radius: 22px; border: 0; bac
 <a class="card" href="https://www.rust-lang.org/"><b>Rust</b><span>The language Aurora is written in</span></a>
 <a class="card" href="https://github.com/Sw3bbl3/waveos-aurora-rs"><b>WaveOS Aurora</b><span>This system's source code</span></a>
 </div>
-<p class="foot">Nebula 0.6 — HTML, CSS, layout, TLS and TCP/IP written for WaveOS Aurora</p>
+<p class="foot">Nebula 0.7.0 — HTML, CSS, layout, TLS and TCP/IP written for WaveOS Aurora</p>
 </body></html>"#;
 
 fn main(args: corekit::Args) -> i32 {

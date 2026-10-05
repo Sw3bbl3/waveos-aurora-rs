@@ -1,14 +1,21 @@
-Welcome to WaveOS Aurora!
+Welcome to WaveOS Aurora 0.7.0
 
-Everything you see was built from scratch: the bootloader, the Aster kernel,
-the Lumen Server window server, the storage drivers, the AuroraFS filesystem and every
-app. Each app runs as its own protected user-space process.
+Open Learn for the complete offline handbook in English or French (Canada).
+Use Ctrl+Space to find an app, or open Launcher from the dock.
+Hold Alt and press Tab to choose a window. Super+arrow keys arrange windows.
 
-Your files are stored on disk in AuroraFS, a journaled filesystem, so they
-survive restarts and even power cuts.
+Files and preferences survive restarts when a writable AuroraFS home volume
+is mounted. Use the system menu to shut down cleanly. An ISO session without
+a writable home volume stores its files temporarily in memory.
 
-Try:
-  • Opening apps from the launcher (or press the Windows/Super key)
-  • Creating a folder in Files, or editing this note and saving it
-  • Typing `ps`, `mem` or `ls -l | grep txt` in Terminal
-  • Switching to dark mode in Settings (it is remembered)
+Try creating a folder in Files, saving a note in Notes, or changing the
+appearance in Settings. Constellation Studio can edit projects; its native
+compiler and debugger remain unavailable in this release.
+
+Bienvenue dans WaveOS Aurora 0.7.0
+
+Ouvrez Learn pour consulter le guide complet hors ligne en français canadien
+ou en anglais. Ctrl+Espace recherche les applications; Alt+Tab change de fenêtre.
+Les fichiers sont conservés après un redémarrage lorsqu’un volume personnel
+AuroraFS accessible en écriture est monté. Sans ce volume, une session ISO
+conserve temporairement les fichiers en mémoire. Éteignez par le menu système.

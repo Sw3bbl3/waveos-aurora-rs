@@ -11,3 +11,6 @@ Consultez tous les guides sans connexion réseau.
 La langue et la taille du texte sont conservées. Les liens externes indiquent qu’une connexion est requise et s’ouvrent dans Nebula. Cette version ne comprend pas de leçons guidées ni de listes de progression.
 
 Voir [Bureau et fenêtres](desktop-windows.md) pour les raccourcis communs et [Récupération](reference-recovery.md) si l’application ne s’ouvre pas.
+
+## Capture de la version
+![Learn affichant le guide français canadien](../../../screenshots/0.7/learn-fr.png)

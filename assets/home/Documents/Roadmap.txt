@@ -1,8 +1,12 @@
-WaveOS Aurora roadmap
+WaveOS Aurora 0.7.0
 
-M1  Boot to a graphical desktop                     (done)
-M2  User space: processes, syscalls, pipes, AuroraKit  (done)
-M3  Storage: AHCI/virtio/NVMe, VFS, AuroraFS, FAT32   (done)
-M4  Apps: editor, image viewer, more settings
-M5  Real hardware: SMP, USB, power management
-M6  Networking: TCP/IP, DHCP, DNS, HTTP
+Included: native desktop and bundled apps, persistent AuroraFS storage,
+wired/emulated networking, the Nebula browser, GINA application packages,
+Constellation project editing, visual window switching, snapping, and Learn.
+Learn includes offline user and developer guides in English and Canadian French.
+
+Future work: native compiler/debugger, virtual desktops, native GPU support,
+I2C touchpads, Wi-Fi, IPv6, and more of the web platform.
+
+Hardware and browser support have limits. Open Learn > Known limitations
+and the release validation report for configurations actually tested.

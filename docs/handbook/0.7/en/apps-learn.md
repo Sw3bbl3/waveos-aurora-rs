@@ -11,3 +11,6 @@ Browse every guide without a network connection.
 Language and reading size persist. External links are marked as requiring the network and open in Nebula. There are no guided lessons or progress checklists in this version.
 
 See [Desktop and windows](desktop-windows.md) for shared shortcuts and [Recovery](reference-recovery.md) if the app cannot open.
+
+## Release screenshot
+![Learn displaying the English handbook](../../../screenshots/0.7/learn-en.png)

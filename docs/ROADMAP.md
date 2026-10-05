@@ -71,7 +71,14 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - **Tools and UI:** `ping`, `ifconfig`, `nslookup`, `fetch`; shell lists (`&&`, `||`, `;`); the menu-bar network item, Settings → Network, and a Network tab in Activity Monitor.
 - **Deferred:** IPv6; JavaScript; cookies and POST forms; tabs; WebP and SVG; Wi-Fi and other adapters (Realtek).
 
-## M7: Next
+## 0.7: Desktop and offline documentation
+
+- Learn: a native, searchable English and Canadian French handbook.
+- Visual MRU window switching, explicit snap states, and keyboard focus improvements.
+- Conservative localized composition with reproducible release measurements.
+- See [0.7.0 update notes](releases/0.7.0/en.md) and the [handbook](handbook/README.md).
+
+## Future work
 
 Candidates, in no fixed order:
 

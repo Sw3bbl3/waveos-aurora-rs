@@ -87,6 +87,7 @@ struct Learn {
     show_contents: bool,
     started: u64,
     first_draw: bool,
+    pending_scroll: bool,
 }
 const CATEGORIES: [&str; 8] = ["all", "start", "desktop", "apps", "system", "developer", "reference", "release"];
 impl Learn {
@@ -134,6 +135,7 @@ impl Learn {
             show_contents: false,
             started,
             first_draw: true,
+            pending_scroll: false,
         };
         s.refresh_results();
         s.open_id("start-welcome", true);
@@ -186,18 +188,26 @@ impl Learn {
                     .replace("#edf0f6", if t.dark { "#252c3b" } else { "#edf0f6" })
                     .replace("#5550c8", if t.dark { "#b7a8ff" } else { "#5550c8" });
                 let page = Page::parse(&html);
+                let mut missing_image = false;
                 for src in page.images().into_iter().take(12) {
                     if let Some(name) = src.strip_prefix("../images/").filter(|s| !s.contains('/') && !s.contains(".."))
                     {
                         if let Ok(data) = corekit::fs::read(&format!("/System/Help/images/{name}")) {
                             if let Ok(image) = aurora_image::decode(&data) {
-                                self.images.insert(src, image);
+                                self.images.insert(src.clone(), image);
                             }
                         }
                     }
+                    missing_image |= !self.images.contains_key(&src);
                 }
                 self.page = Some(page);
-                self.error = None;
+                self.error = missing_image.then(|| {
+                    self.tr(
+                        "An image is missing or invalid. Reinstall the help library.",
+                        "Une image est absente ou invalide. Réinstallez la bibliothèque d’aide.",
+                    )
+                    .into()
+                });
             }
             Err(_) => {
                 self.error = Some(
@@ -214,7 +224,9 @@ impl Learn {
         let t = theme::current();
         let key = (self.view.w, self.size, t.dark, theme::high_contrast());
         if key != self.layout_key {
-            if self.layout_key.0 != 0 && (self.layout_key.2 != t.dark || self.layout_key.3 != theme::high_contrast()) {
+            // The first page is parsed before AuroraKit receives the system theme.
+            // Reload on the first draw too when booting directly into dark mode.
+            if self.layout_key.2 != t.dark || self.layout_key.3 != theme::high_contrast() {
                 self.load();
             }
             self.layout = self.page.as_ref().map(|p| p.layout(self.view.w, self.view.h, &Fonts(&self.images)));
@@ -380,6 +392,7 @@ impl App for Learn {
         (1020, 620)
     }
     fn draw(&mut self, cv: &mut Canvas, area: Rect, _: &Env) {
+        let draw_started = corekit::time::uptime_ms();
         self.area = area;
         self.targets.clear();
         let t = theme::current();
@@ -521,6 +534,10 @@ impl App for Learn {
                 }
             }
         }
+        if self.pending_scroll {
+            corekit::println!("learn-perf scroll-render {} ms", corekit::time::uptime_ms() - draw_started);
+            self.pending_scroll = false;
+        }
         if self.first_draw {
             corekit::println!("learn-perf startup {} ms", corekit::time::uptime_ms() - self.started);
             self.first_draw = false;
@@ -610,18 +627,22 @@ impl App for Learn {
         }
         match k.code {
             KeyCode::PageDown => {
+                self.pending_scroll = true;
                 self.scroll = (self.scroll + self.view.h - 40).min(self.max_scroll());
                 true
             }
             KeyCode::PageUp => {
+                self.pending_scroll = true;
                 self.scroll = (self.scroll - self.view.h + 40).max(0);
                 true
             }
             KeyCode::Home => {
+                self.pending_scroll = true;
                 self.scroll = 0;
                 true
             }
             KeyCode::End => {
+                self.pending_scroll = true;
                 self.scroll = self.max_scroll();
                 true
             }
@@ -629,14 +650,13 @@ impl App for Learn {
         }
     }
     fn scroll(&mut self, delta: i32, _: Rect) -> bool {
-        let started = corekit::time::uptime_ms();
+        self.pending_scroll = true;
         if matches!(self.hover, Some(Action::Article(_) | Action::Category(_) | Action::Search)) {
             self.side_scroll = (self.side_scroll + delta * 36)
                 .clamp(0, (self.results.len() as i32 * 36 - (self.area.h - 390).max(36)).max(0));
         } else {
             self.scroll = (self.scroll + delta * 48).clamp(0, self.max_scroll());
         }
-        corekit::println!("learn-perf scroll-state {} ms", corekit::time::uptime_ms() - started);
         true
     }
     fn tick(&mut self, env: &mut Env) -> bool {
@@ -665,7 +685,15 @@ fn main(args: corekit::Args) -> i32 {
             }
             checked += 1;
         }
-        corekit::println!("learn-check passed: {} offline articles rendered", checked);
+        // Exercise the same error path used for an incomplete system image.
+        learn.current = Some(0);
+        learn.catalog[0].path = "missing-guide.html".into();
+        learn.load();
+        if learn.error.is_none() || learn.page.is_some() {
+            corekit::println!("learn-check FAILED: missing article did not produce an error");
+            return 1;
+        }
+        corekit::println!("learn-check passed: {} offline articles rendered; missing content handled", checked);
         return 0;
     }
     let mut learn = Learn::new();
