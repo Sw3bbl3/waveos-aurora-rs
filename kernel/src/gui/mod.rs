@@ -176,6 +176,7 @@ fn run() {
         if now >= next_tick {
             next_tick = now + desktop.tick(now);
         }
+        let scene_changed = desktop.scene_changed();
         let damage = desktop.take_damage();
         if !damage.is_empty() {
             crate::telemetry::FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -199,8 +200,23 @@ fn run() {
                 frame_stats.2 = frame_stats.2.max(elapsed);
             }
         }
+        desktop.finish_frame();
         if batch_pixels > 0 {
-            log!("frame", "{}, {}, {}, {}x{}", if batch_full { "full" } else { "partial-or-cursor" }, batch_pixels, time::uptime_ms() - batch_start, w, h);
+            log!(
+                "frame",
+                "{}, {}, {}, {}x{}",
+                if batch_full {
+                    "full"
+                } else if scene_changed {
+                    "partial"
+                } else {
+                    "cursor"
+                },
+                batch_pixels,
+                time::uptime_ms() - batch_start,
+                w,
+                h
+            );
         }
         if frame_stats.0 > 0 && time::uptime_ms() - frame_stats.3 >= 10000 {
             log!(

@@ -878,6 +878,11 @@ impl TextField {
         self.edit.text()
     }
 
+    pub fn set_text(&mut self, text: &str) {
+        self.edit.set_text(text);
+        self.scroll_x = 0;
+    }
+
     fn font() -> Font {
         theme::ui(14)
     }

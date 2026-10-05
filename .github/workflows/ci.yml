@@ -20,8 +20,10 @@ jobs:
         run: |
           cargo fmt --all -- --check
           (cd userland && cargo fmt --all -- --check)
+      - name: Validate bilingual handbook
+        run: cargo xtask docs
       - name: Filesystem library tests
-        run: cargo test -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask
+        run: cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask
 
   kernel:
     name: Kernel tests (${{ matrix.disk }}, ${{ matrix.smp }} CPU, ${{ matrix.net }})
@@ -45,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU and OVMF
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso
       - name: Install toolchain (from rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -59,7 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU and OVMF
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso
       - name: Install toolchain (from rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -73,9 +75,14 @@ jobs:
           grep -q "mounted AuroraFS" serial.log
       - name: Build USB disk image
         run: cargo xtask image
+      - name: Build UEFI ISO
+        run: cargo xtask iso --no-build
       - name: Upload disk image
         uses: actions/upload-artifact@v4
         with:
           name: waveos-aurora-usb-img
-          path: target/waveos-aurora-usb.img
+          path: |
+            target/waveos-aurora-usb.img
+            target/waveos-aurora.iso
+            target/help/
           compression-level: 9

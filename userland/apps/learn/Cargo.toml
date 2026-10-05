@@ -1,0 +1,14 @@
+[package]
+name = "app-learn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[[bin]]
+name = "app-learn"
+path = "src/main.rs"
+[dependencies]
+corekit.workspace = true
+aurorakit.workspace = true
+aurora-image.workspace = true
+nebula-engine.workspace = true
+aurora-help = { path = "../../../libs/help" }

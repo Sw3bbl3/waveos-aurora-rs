@@ -11,3 +11,6 @@ fatfs = "0.3"
 aurorafs = { path = "../libs/aurorafs" }
 aurora-wav = { path = "../libs/wav" }
 webpki-roots = "1"
+pulldown-cmark = "0.13"
+serde_json = "1"
+aurora-help = { path = "../libs/help" }

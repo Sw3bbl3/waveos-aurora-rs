@@ -5,6 +5,8 @@
 //! wallpaper → windows → dock → menu bar → launcher → menus → cursor.
 
 mod anim;
+mod switcher;
+use lumen::windowing::{self, Placement, Switcher};
 mod battery;
 mod controls;
 mod dragdrop;
@@ -65,6 +67,7 @@ pub struct Window {
     pub rect: Rect,
     pub minimized: bool,
     pub saved: Option<Rect>,
+    pub placement: Placement,
     /// Hidden while an animation stands in for it.
     pub animating: bool,
     /// A client window waits (up to a moment) for its first frame before it appears.
@@ -130,6 +133,8 @@ pub struct Desktop {
     scene: Vec<u32>,
     scene_dirty: bool,
     windows: Vec<Window>,
+    mru: Vec<u32>,
+    switcher: Option<Switcher>,
     next_id: u32,
     cursor: (i32, i32),
     buttons: u8,
@@ -187,6 +192,8 @@ impl Desktop {
             scene: alloc::vec![0; (w*h) as usize],
             scene_dirty: true,
             windows: Vec::new(),
+            mru: Vec::new(),
+            switcher: None,
             next_id: 1,
             cursor: (w / 2, h / 2),
             buttons: 0,
@@ -355,11 +362,21 @@ impl Desktop {
         let rect = Rect::new(x, y, w, h);
         let id = self.next_id;
         self.next_id += 1;
+        self.touch_mru(id);
         let prev = self.focused_id();
         // Client windows appear (animated) once they have drawn their first frame.
         let client = app.client_id().is_some();
         let awaiting_frame = client.then_some(self.now_ms);
-        self.windows.push(Window { id, app, rect, minimized: false, saved: None, animating: client, awaiting_frame });
+        self.windows.push(Window {
+            id,
+            app,
+            rect,
+            minimized: false,
+            saved: None,
+            placement: Placement::Floating,
+            animating: client,
+            awaiting_frame,
+        });
         if let Some(p) = prev {
             self.damage_window(p);
         }
@@ -406,6 +423,8 @@ impl Desktop {
 
     pub fn raise(&mut self, id: u32) {
         let Some(i) = self.index_of(id) else { return };
+        self.touch_mru(id);
+        self.damage_all();
         let prev = self.focused_id();
         let mut w = self.windows.remove(i);
         let was_minimized = core::mem::replace(&mut w.minimized, false);
@@ -435,6 +454,11 @@ impl Desktop {
     }
 
     pub fn close(&mut self, id: u32) {
+        self.mru.retain(|v| *v != id);
+        if let Some(s) = &mut self.switcher {
+            s.remove(id);
+        }
+        self.damage_all();
         self.animate_close(id);
         if let Some(i) = self.index_of(id) {
             let b = self.windows[i].bounds();
@@ -468,24 +492,37 @@ impl Desktop {
     }
 
     pub fn toggle_zoom(&mut self, id: u32) {
-        let wa = self.work_area();
-        if let Some(i) = self.index_of(id) {
-            if !self.windows[i].app.resizable() {
-                return;
-            }
-            self.damage_window(id);
-            let w = &mut self.windows[i];
-            let old = w.rect;
-            match w.saved.take() {
-                Some(r) => w.rect = r,
-                None => {
-                    w.saved = Some(w.rect);
-                    w.rect = wa;
-                }
-            }
-            self.animate_zoom(id, old);
-            self.damage_window(id);
+        let Some(i) = self.index_of(id) else { return };
+        let placement =
+            if self.windows[i].placement == Placement::Maximized { Placement::Floating } else { Placement::Maximized };
+        self.place_window(id, placement);
+    }
+
+    fn place_window(&mut self, id: u32, placement: Placement) {
+        let area = self.work_area();
+        let Some(i) = self.index_of(id) else { return };
+        if !self.windows[i].app.resizable() {
+            return;
         }
+        let w = &mut self.windows[i];
+        let old = w.rect;
+        let (mw, mh) = w.app.min_size();
+        let next = if placement == Placement::Floating {
+            windowing::clamp(w.saved.unwrap_or(old), area)
+        } else {
+            let Some(r) = windowing::target(placement, area, (mw, mh + TITLEBAR_H)) else { return };
+            if w.placement == Placement::Floating {
+                w.saved = Some(old);
+            }
+            r
+        };
+        w.rect = next;
+        w.placement = placement;
+        if placement == Placement::Floating {
+            w.saved = None;
+        }
+        self.animate_zoom(id, old);
+        self.damage_all();
     }
 
     // ------------------------------------------------------------- requests
@@ -539,6 +576,15 @@ impl Desktop {
             | pref::DOCK_SIZE
             | pref::DOCK_AUTOHIDE => {
                 super::prefs::apply_appearance();
+                if matches!(key, pref::DOCK_SIZE | pref::DOCK_AUTOHIDE) {
+                    let wa = self.work_area();
+                    for win in &mut self.windows {
+                        let (mw, mh) = win.app.min_size();
+                        if let Some(r) = windowing::target(win.placement, wa, (mw, mh + TITLEBAR_H)) {
+                            win.rect = r;
+                        }
+                    }
+                }
                 self.broadcast_theme();
                 self.damage_all();
             }
@@ -571,8 +617,17 @@ impl Desktop {
             r.h = r.h.min(wa.h);
             r.x = r.x.clamp(wa.x, (wa.right() - r.w).max(wa.x));
             r.y = r.y.clamp(wa.y, (wa.bottom() - r.h).max(wa.y));
-            if win.saved.is_some() {
-                *r = wa; // zoomed windows stay zoomed
+            if let Some(saved) = win.saved.as_mut() {
+                *saved = windowing::clamp(*saved, wa);
+            }
+            if win.placement != Placement::Floating {
+                let (mw, mh) = win.app.min_size();
+                if let Some(target) = windowing::target(win.placement, wa, (mw, mh + TITLEBAR_H)) {
+                    *r = target;
+                } else {
+                    *r = windowing::clamp(win.saved.take().unwrap_or(*r), wa);
+                    win.placement = Placement::Floating;
+                }
             }
         }
         self.ghosts.clear();
@@ -784,6 +839,13 @@ impl Desktop {
                     if let Some(i) = self.index_of(d.window) {
                         self.windows[i].saved = Some(d.start_rect);
                         self.windows[i].rect = target;
+                        self.windows[i].placement = if target.w == self.work_area().w {
+                            Placement::Maximized
+                        } else if target.x == self.work_area().x {
+                            Placement::Left
+                        } else {
+                            Placement::Right
+                        };
                     }
                     self.damage_all();
                 }
@@ -796,7 +858,7 @@ impl Desktop {
                 }
             }
         }
-        if wheel != 0 {
+        if wheel != 0 && self.switcher.is_none() {
             if let Some(w) = self.window_at(x, y) {
                 let id = self.windows[w].id;
                 self.with_app(id, |app, area, _| app.scroll(wheel as i32, area));
@@ -809,6 +871,9 @@ impl Desktop {
     }
 
     fn pointer_moved(&mut self, x: i32, y: i32) {
+        if self.switcher.is_some() {
+            return;
+        }
         if self.controls_move(x, y) {
             return;
         }
@@ -852,16 +917,23 @@ impl Desktop {
                 }
             }
             w.saved = None;
+            w.placement = Placement::Floating;
             let new = w.bounds();
             if matches!(d.kind, DragKind::Move) {
                 let area = self.work_area();
-                let preview = if x < 18 {
+                let preview = if !self.windows[i].app.resizable() {
+                    None
+                } else if y < MENUBAR_H + 12 {
+                    Some(area)
+                } else if x < 18 {
                     Some(Rect::new(area.x, area.y, area.w / 2 - 4, area.h))
                 } else if x > self.w - 18 {
                     Some(Rect::new(area.x + area.w / 2 + 4, area.y, area.w - area.w / 2 - 4, area.h))
                 } else {
                     None
                 };
+                let (mw, mh) = self.windows[i].app.min_size();
+                let preview = preview.filter(|r| r.w >= mw && r.h >= mh + TITLEBAR_H);
                 if preview != self.snap_preview {
                     self.snap_preview = preview;
                     self.damage_all();
@@ -910,6 +982,9 @@ impl Desktop {
     }
 
     fn press(&mut self, x: i32, y: i32) {
+        if self.switcher_press(x, y) {
+            return;
+        }
         let double = self.now_ms - self.last_click.0 < DOUBLE_CLICK_MS
             && (x - self.last_click.1).abs() < 5
             && (y - self.last_click.2).abs() < 5;
@@ -980,6 +1055,7 @@ impl Desktop {
                         restored.y = y - TITLEBAR_H / 2;
                         self.windows[i].rect = restored;
                         self.windows[i].saved = None;
+                        self.windows[i].placement = Placement::Floating;
                         self.drag = Some(Drag {
                             window: id,
                             kind: DragKind::Move,
@@ -1023,6 +1099,9 @@ impl Desktop {
     }
 
     fn key(&mut self, k: KeyEvent) {
+        if self.switcher_key(&k) {
+            return;
+        }
         if self.controls_key(&k) {
             return;
         }
@@ -1073,6 +1152,27 @@ impl Desktop {
         }
         if k.pressed {
             // Global shortcuts.
+            if k.mods.super_key {
+                if let Some(id) = self.focused_id() {
+                    let placement = match k.code {
+                        KeyCode::Left => Some(Placement::Left),
+                        KeyCode::Right => Some(Placement::Right),
+                        KeyCode::Up => Some(Placement::Maximized),
+                        KeyCode::Down => Some(Placement::Floating),
+                        _ => None,
+                    };
+                    if let Some(p) = placement {
+                        if p == Placement::Floating
+                            && self.windows[self.index_of(id).unwrap()].placement == Placement::Floating
+                        {
+                            self.minimize(id);
+                        } else {
+                            self.place_window(id, p);
+                        }
+                        return;
+                    }
+                }
+            }
             if k.mods.ctrl && k.code == KeyCode::Escape {
                 self.toggle_launcher();
                 return;
@@ -1083,7 +1183,7 @@ impl Desktop {
                 return;
             }
             if k.mods.alt && k.code == KeyCode::Tab {
-                self.cycle_windows();
+                self.begin_switcher(k.mods.shift);
                 return;
             }
             if (k.mods.alt && k.code == KeyCode::F4) || (k.mods.ctrl && matches!(k.ch, Some('w') | Some('W'))) {
@@ -1106,13 +1206,6 @@ impl Desktop {
         }
     }
 
-    fn cycle_windows(&mut self) {
-        let visible: Vec<u32> = self.windows.iter().filter(|w| !w.minimized).map(|w| w.id).collect();
-        if visible.len() > 1 {
-            self.raise(visible[0]);
-        }
-    }
-
     // ------------------------------------------------------------------ time
 
     /// Periodic work: clock, caret blink, live app data. Returns ms until the next tick.
@@ -1130,6 +1223,9 @@ impl Desktop {
         // Tell apps when they gain or lose focus (caret blinking, etc.).
         let focus = self.focused_id();
         if focus != self.last_focus {
+            if let Some(id) = focus {
+                self.touch_mru(id);
+            }
             for (id, on) in [(self.last_focus, false), (focus, true)] {
                 if let Some(id) = id {
                     self.with_app(id, |app, _, _| {
@@ -1169,11 +1265,17 @@ impl Desktop {
     pub fn take_damage(&mut self) -> Vec<Rect> {
         // Reconstruct the scene bottom-up before sampling any backdrop. Cursor-only
         // updates reuse the composited scene and never re-blur it.
-        if self.scene_dirty {
+        if self.scene_dirty && !self.partial_safe() {
             self.damage.clear();
             return alloc::vec![self.screen()];
         }
         let mut rects: Vec<Rect> = core::mem::take(&mut self.damage);
+        if self.scene_dirty {
+            if rects.len() > 12 {
+                return alloc::vec![self.screen()];
+            }
+            return rects;
+        }
         // Merge overlapping or nearly-touching rectangles until stable.
         let mut merged = true;
         while merged {
@@ -1197,6 +1299,42 @@ impl Desktop {
             return alloc::vec![all];
         }
         rects
+    }
+
+    pub fn scene_changed(&self) -> bool {
+        self.scene_dirty
+    }
+    pub fn finish_frame(&mut self) {
+        self.scene_dirty = false;
+    }
+    fn partial_safe(&self) -> bool {
+        if self.scene.len() != (self.w * self.h) as usize
+            || self.drag.is_some()
+            || self.animating()
+            || self.launcher.is_some()
+            || self.menu.is_some()
+            || self.center.is_some()
+            || self.spotlight.is_some()
+            || self.quick_open
+            || self.battery_popover
+            || self.network_popover
+            || self.volume_popover_open()
+            || !self.banners.is_empty()
+            || self.dnd.is_some()
+            || self.power.is_some()
+            || self.switcher.is_some()
+        {
+            return false;
+        }
+        let mut materials = alloc::vec![Rect::new(0, 0, self.w, MENUBAR_H), self.dock_rect()];
+        for w in &self.windows {
+            if w.minimized {
+                continue;
+            }
+            materials.push(w.titlebar());
+            materials.extend(w.app.materials().into_iter().map(|r| r.offset(w.content().x, w.content().y)));
+        }
+        windowing::safe_damage(&self.damage, &materials, 40)
     }
 
     pub fn paint(&mut self, cv: &mut Canvas) {
@@ -1235,12 +1373,16 @@ impl Desktop {
         self.paint_controls(cv);
         self.paint_spotlight(cv);
         self.paint_drag(cv);
+        self.paint_switcher(cv);
         if let Some(p) = self.power {
             self.paint_power_overlay(cv, p);
         }
         self.scene.resize(cv.buf.len(), 0);
-        self.scene.copy_from_slice(cv.buf);
-        self.scene_dirty = false;
+        for y in cv.clip.y..cv.clip.bottom() {
+            let start = (y * cv.width + cv.clip.x) as usize;
+            let end = start + cv.clip.w as usize;
+            self.scene[start..end].copy_from_slice(&cv.buf[start..end]);
+        }
         cursor::draw(cv, self.cursor.0, self.cursor.1);
     }
 

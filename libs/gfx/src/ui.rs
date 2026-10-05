@@ -263,6 +263,33 @@ impl State {
     pub fn release(&mut self) {
         self.dragging = None;
     }
+    /// Returns false at a boundary so the containing app can move focus out.
+    pub fn traverse(&mut self, reverse: bool) -> bool {
+        let i = self.focused.and_then(|id| self.targets.iter().position(|t| t.id == id));
+        let next = match i {
+            None => {
+                if reverse {
+                    self.targets.len().checked_sub(1)
+                } else {
+                    Some(0)
+                }
+            }
+            Some(i) => {
+                if reverse {
+                    i.checked_sub(1)
+                } else {
+                    Some(i + 1)
+                }
+            }
+        };
+        if let Some(t) = next.and_then(|i| self.targets.get(i)) {
+            self.focused = Some(t.id);
+            true
+        } else {
+            self.focused = None;
+            false
+        }
+    }
     pub fn key(&mut self, key: Key) -> Option<Action> {
         if self.targets.is_empty() {
             return None;
@@ -279,7 +306,7 @@ impl State {
             _ => {
                 let t = &self.targets[i?];
                 match t.kind {
-                    Kind::Slider(value) => Some(Action::Change(
+                    Kind::Slider(value) if matches!(key, Key::Left | Key::Right) => Some(Action::Change(
                         t.id,
                         (value + if matches!(key, Key::Left) { -50 } else { 50 }).clamp(0, 1000),
                     )),
@@ -308,6 +335,21 @@ mod tests {
         state.draw(&mut cv, &view, Rect::new(0, 0, 150, 120));
         assert_eq!(state.focused, Some(2));
         assert_eq!(state.rect(2).unwrap().y, 52);
+    }
+    #[test]
+    fn slider_activation_is_not_a_value_change_and_focus_can_leave() {
+        let view = View::column(alloc::vec![View::slider(1, "Level", 500), View::button(2, "Done")]);
+        let mut pixels = alloc::vec![0;200*160];
+        let mut state = State::default();
+        state.draw(&mut Canvas::new(&mut pixels, 200, 160), &view, Rect::new(0, 0, 200, 160));
+        assert!(state.traverse(false));
+        assert_eq!(state.key(Key::Activate), None);
+        assert_eq!(state.key(Key::Left), Some(Action::Change(1, 450)));
+        assert!(state.traverse(false));
+        assert!(!state.traverse(false));
+        assert_eq!(state.focused, None);
+        assert!(state.traverse(true));
+        assert_eq!(state.focused, Some(2));
     }
     #[test]
     fn clipped_children_cannot_receive_clicks() {

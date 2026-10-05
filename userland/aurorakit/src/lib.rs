@@ -130,6 +130,8 @@ pub trait App {
 struct Window {
     id: u64,
     surface: SurfaceInfo,
+    previous: Vec<u32>,
+    previous_size: (u32, u32),
 }
 
 impl Window {
@@ -144,9 +146,23 @@ impl Window {
         unsafe { core::slice::from_raw_parts_mut(s.addr as *mut u32, (s.stride * s.height) as usize) }
     }
 
-    fn present(&self) {
-        let s = &self.surface;
-        let _ = call(nr::WIN_PRESENT, &[self.id, 0, 0, s.width as u64, s.height as u64]);
+    fn present(&mut self) {
+        let s = self.surface;
+        let pixels = unsafe { core::slice::from_raw_parts(s.addr as *const u32, (s.stride * s.height) as usize) };
+        let rect = lumen::canvas::changed_bounds(
+            &self.previous,
+            pixels,
+            s.width as i32,
+            s.height as i32,
+            s.stride as i32,
+            self.previous_size != (s.width, s.height),
+        );
+        self.previous.clear();
+        self.previous.extend_from_slice(pixels);
+        self.previous_size = (s.width, s.height);
+        if let Some(r) = rect {
+            let _ = call(nr::WIN_PRESENT, &[self.id, r.x as u64, r.y as u64, r.w as u64, r.h as u64]);
+        }
     }
 
     fn set_title(&self, title: &str) {
@@ -211,7 +227,7 @@ pub fn run<A: App>(mut app: A) -> i32 {
             return 1;
         }
     };
-    let mut win = Window { id, surface: Window::surface(id) };
+    let mut win = Window { id, surface: Window::surface(id), previous: Vec::new(), previous_size: (0, 0) };
     let mut env = Env {
         now_ms: corekit::time::uptime_ms(),
         focused: true,

@@ -539,3 +539,44 @@ impl<'a> Canvas<'a> {
         }
     }
 }
+
+/// Tight damage for an app surface. First frames and resizes are always complete.
+pub fn changed_bounds(old: &[u32], new: &[u32], w: i32, h: i32, stride: i32, force: bool) -> Option<Rect> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    if force || old.len() != new.len() {
+        return Some(Rect::new(0, 0, w, h));
+    }
+    let (mut left, mut top, mut right, mut bottom) = (w, h, 0, 0);
+    for y in 0..h {
+        let start = (y * stride) as usize;
+        let a = &old[start..start + w as usize];
+        let b = &new[start..start + w as usize];
+        if a == b {
+            continue;
+        }
+        top = top.min(y);
+        bottom = y + 1;
+        let l = a.iter().zip(b).position(|(a, b)| a != b).unwrap() as i32;
+        let r = a.iter().zip(b).rposition(|(a, b)| a != b).unwrap() as i32 + 1;
+        left = left.min(l);
+        right = right.max(r);
+    }
+    (bottom > top).then_some(Rect::new(left, top, right - left, bottom - top))
+}
+#[cfg(test)]
+mod damage_tests {
+    use super::*;
+    #[test]
+    fn tight_damage_includes_all_changes_and_ignores_stride_padding() {
+        let a = alloc::vec![0;120];
+        let mut b = a.clone();
+        assert_eq!(changed_bounds(&a, &b, 8, 10, 12, false), None);
+        b[12 * 3 + 2] = 1;
+        b[12 * 6 + 5] = 1;
+        b[11] = 9;
+        assert_eq!(changed_bounds(&a, &b, 8, 10, 12, false), Some(Rect::new(2, 3, 4, 4)));
+        assert_eq!(changed_bounds(&[], &b, 8, 10, 12, true), Some(Rect::new(0, 0, 8, 10)));
+    }
+}

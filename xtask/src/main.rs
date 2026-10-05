@@ -13,6 +13,7 @@
 
 mod aml;
 mod display;
+mod help;
 mod image;
 mod monitor;
 mod package;
@@ -61,6 +62,9 @@ fn main() {
     }
 
     match args.first().map(String::as_str) {
+        Some("docs") => {
+            println!("{}", help::build(&root()).unwrap_or_else(|e| panic!("{e}")).display());
+        }
         Some("package") => {
             if args.len() != 4 {
                 eprintln!("usage: cargo xtask package MANIFEST.toml APP.elf OUTPUT.gina");
@@ -77,9 +81,18 @@ fn main() {
         Some("run") => {
             let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let developer = flag("--developer");
-            let img = args.iter().position(|a| a == "--disk-image").and_then(|i| args.get(i + 1)).map(PathBuf::from).unwrap_or_else(|| root().join(if developer { "target/waveos-developer.img" } else { "target/waveos-aurora.img" }));
+            let img = args
+                .iter()
+                .position(|a| a == "--disk-image")
+                .and_then(|i| args.get(i + 1))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    root().join(if developer { "target/waveos-developer.img" } else { "target/waveos-aurora.img" })
+                });
             let size = number("--disk-size-mib", if developer { 8192 } else { 256 }, 128, 65536) * 1024 * 1024;
-            prepare_disk(&esp, &img, flag("--fresh-disk"), size);
+            if !flag("--no-refresh") {
+                prepare_disk(&esp, &img, flag("--fresh-disk"), size);
+            }
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
             let opts = RunOpts {
                 memory_mib: number("--memory-mib", if developer { 4096 } else { 512 }, 256, 32768),
@@ -137,7 +150,8 @@ fn main() {
             let out = target.join("waveos-aurora.iso");
             let status = Command::new("xorriso")
                 .args(["-as", "mkisofs", "-iso-level", "3", "-R", "-J", "-V", "WAVEOS_AURORA"])
-                .arg("-o").arg(&out)
+                .arg("-o")
+                .arg(&out)
                 .args(["-e", "EFI/BOOT/efiboot.img", "-no-emul-boot"])
                 .arg(&staging)
                 .status()
@@ -149,7 +163,9 @@ fn main() {
         }
         Some("test") => test(profile, disk, smp, net),
         _ => {
-            eprintln!("usage: cargo xtask <build|run|image|iso|test> [--debug] [--headless] [--no-build] [--gdb] [--int]");
+            eprintln!(
+                "usage: cargo xtask <build|run|image|iso|test> [--debug] [--headless] [--no-build] [--gdb] [--int]"
+            );
             exit(2);
         }
     }
@@ -340,6 +356,7 @@ fn system_image(programs: &[Program], out: &Path) {
         t.file(dest, &fs::read(src).unwrap());
     }
     bundle_sdk(&mut t);
+    help::bundle(&mut t, &root());
     if let Some((_, elf)) = programs.iter().find(|(p, _)| p == "Bin/gina-demo") {
         let manifest = gina::Manifest {
             id: "dev.example.gallery".into(),

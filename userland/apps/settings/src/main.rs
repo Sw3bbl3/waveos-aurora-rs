@@ -962,6 +962,8 @@ impl App for Settings {
 
     fn click(&mut self, x: i32, y: i32, _area: Rect, env: &mut Env) -> bool {
         if matches!(self.pane, Pane::Desktop | Pane::Accessibility) && x >= self.area.x + SIDEBAR_W {
+            self.search_focused = false;
+            self.focus = None;
             let action = self.controls.click(x, y);
             if self.control_action(action) {
                 return true;
@@ -1022,17 +1024,86 @@ impl App for Settings {
         use aurorakit::KeyCode;
         if ev.pressed && ev.mods.ctrl && matches!(ev.ch, Some('f') | Some('F')) {
             self.search_focused = true;
+            self.focus = None;
+            self.controls.focused = None;
+            return true;
+        }
+        if ev.pressed && ev.code == KeyCode::Tab {
+            let hits = self.hits(self.area);
+            let reverse = ev.mods.shift;
+            let declarative = matches!(self.pane, Pane::Desktop | Pane::Accessibility);
+            if self.search_focused {
+                self.search_focused = false;
+                self.try_focused = false;
+                if reverse && declarative && self.controls.traverse(true) {
+                    self.focus = None;
+                } else {
+                    self.focus = if reverse { hits.last() } else { hits.first() }.map(|(h, _)| *h);
+                }
+            } else if declarative && self.controls.focused.is_some() {
+                if !self.controls.traverse(reverse) {
+                    if reverse {
+                        self.focus = hits.last().map(|(h, _)| *h);
+                    } else {
+                        self.search_focused = true;
+                        self.focus = None;
+                    }
+                }
+            } else {
+                let old = self.focus.and_then(|h| hits.iter().position(|(k, _)| *k == h));
+                let next = match old {
+                    Some(i) => {
+                        if reverse {
+                            i.checked_sub(1)
+                        } else {
+                            Some(i + 1)
+                        }
+                    }
+                    None => Some(0),
+                };
+                if let Some((h, r)) = next.and_then(|i| hits.get(i)) {
+                    self.focus = Some(*h);
+                    if !matches!(h, Hit::Pane(_)) {
+                        if r.bottom() > self.area.bottom() - 12 {
+                            self.scroll += r.bottom() - (self.area.bottom() - 12);
+                        }
+                        if r.y < self.area.y + 12 {
+                            self.scroll = (self.scroll - (self.area.y + 12 - r.y)).max(0);
+                        }
+                    }
+                } else if !reverse && declarative && self.controls.traverse(false) {
+                    self.focus = None;
+                } else {
+                    self.search_focused = true;
+                    self.focus = None;
+                }
+            }
             return true;
         }
         if self.search_focused {
+            if ev.pressed && matches!(ev.code, KeyCode::Down | KeyCode::Enter) {
+                if let Some(i) = self.visible_panes().first().copied() {
+                    self.search_focused = false;
+                    self.focus = Some(Hit::Pane(i));
+                    if ev.code == KeyCode::Enter {
+                        self.run(Hit::Pane(i), 0, env);
+                        self.focus = Some(Hit::Pane(i));
+                    }
+                }
+                return true;
+            }
             return self.search.key(ev, env.now_ms).handled;
         }
-        if ev.pressed && matches!(self.pane, Pane::Desktop | Pane::Accessibility) {
+        if ev.pressed
+            && self.controls.focused.is_some()
+            && self.focus.is_none()
+            && matches!(self.pane, Pane::Desktop | Pane::Accessibility)
+        {
             let key = match ev.code {
-                KeyCode::Tab => Some(if ev.mods.shift { ui::Key::Previous } else { ui::Key::Next }),
                 KeyCode::Enter => Some(ui::Key::Activate),
                 KeyCode::Left => Some(ui::Key::Left),
                 KeyCode::Right => Some(ui::Key::Right),
+                _ if ev.ch == Some(' ') => Some(ui::Key::Activate),
                 _ => None,
             };
             if let Some(key) = key {
@@ -1041,20 +1112,29 @@ impl App for Settings {
                 return true;
             }
         }
-        if ev.pressed && ev.code == KeyCode::Tab {
-            let hits = self.hits(self.area);
-            let old = self.focus.and_then(|h| hits.iter().position(|(k, _)| *k == h));
-            let n = hits.len();
-            if n > 0 {
-                let next = old.map(|i| if ev.mods.shift { (i + n - 1) % n } else { (i + 1) % n }).unwrap_or(0);
-                self.focus = Some(hits[next].0);
-            }
-            return true;
-        }
-        if ev.pressed && matches!(ev.code, KeyCode::Enter) {
+        if ev.pressed && (ev.code == KeyCode::Enter || ev.ch == Some(' ')) {
             if let Some(h) = self.focus {
                 if let Some((_, r)) = self.hits(self.area).into_iter().find(|(k, _)| *k == h) {
-                    self.run(h, r.x + r.w / 2, env);
+                    if !matches!(h, Hit::Volume | Hit::RepeatDelay | Hit::RepeatRate | Hit::Glass | Hit::DockSize) {
+                        self.run(h, r.x + r.w / 2, env);
+                        self.focus = Some(h);
+                    }
+                    return true;
+                }
+            }
+        }
+        if ev.pressed && matches!(ev.code, KeyCode::Left | KeyCode::Right) {
+            if let Some(h) = self.focus {
+                if matches!(h, Hit::Volume | Hit::RepeatDelay | Hit::RepeatRate | Hit::Glass | Hit::DockSize) {
+                    let step = if ev.code == KeyCode::Left { -1 } else { 1 };
+                    let (key, current, min, max, delta) = match h {
+                        Hit::Volume => (pref::VOLUME, prefs::get_int(pref::VOLUME, 70), 0, 100, 5),
+                        Hit::RepeatDelay => (pref::REPEAT_DELAY, prefs::get_int(pref::REPEAT_DELAY, 1), 0, 3, -1),
+                        Hit::RepeatRate => (pref::REPEAT_RATE, prefs::get_int(pref::REPEAT_RATE, 20), 0, 31, -1),
+                        Hit::Glass => (pref::GLASS, prefs::get_int(pref::GLASS, 70), 0, 100, 5),
+                        _ => (pref::DOCK_SIZE, prefs::get_int(pref::DOCK_SIZE, 48), 32, 64, 2),
+                    };
+                    let _ = prefs::set(key, &format!("{}", (current + step * delta).clamp(min, max)));
                     return true;
                 }
             }

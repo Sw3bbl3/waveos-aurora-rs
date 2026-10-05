@@ -245,8 +245,13 @@ fn user_processes() {
     }
     assert_eq!(p.exit_code(), Some(0), "usertest reported failures (see log above)");
     drop(p);
-    // Give the reaper a moment, then make sure the processes' memory came back.
-    sched::sleep_ms(100);
+    // Exit status is published before the last thread is switched away and
+    // the asynchronous reaper releases its address space. Wait for the actual
+    // resource invariant, not a fixed delay that races slow/emulated CPUs.
+    let cleanup_deadline = time::uptime_ms() + 5000;
+    while mm::frame::counts().1 + 8 < before && time::uptime_ms() < cleanup_deadline {
+        sched::sleep_ms(10);
+    }
     let (_, after) = mm::frame::counts();
     assert!(after + 8 >= before, "user processes leaked {} frames", before - after);
 }

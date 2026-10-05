@@ -51,7 +51,7 @@ impl App for About {
         cv.text(cx - f.width(title) / 2, area.y + 138, title, f, t.text);
         let i = &self.info;
         let version = fixed_str(&i.version, i.version_len);
-        let ver = format!("Version {} · Milestone 3", version);
+        let ver = format!("Version {}", version);
         let f2 = theme::ui(13);
         cv.text(cx - f2.width(&ver) / 2, area.y + 160, &ver, f2, t.text_secondary);
 

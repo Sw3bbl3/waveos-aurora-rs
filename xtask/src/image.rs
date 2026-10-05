@@ -156,7 +156,13 @@ fn format_esp(file: &mut File, start: u64, sectors: u64, esp: &Path) -> io::Resu
     format_esp_with_type(file, start, sectors, esp, fatfs::FatType::Fat32)
 }
 
-fn format_esp_with_type(file: &mut File, start: u64, sectors: u64, esp: &Path, fat_type: fatfs::FatType) -> io::Result<()> {
+fn format_esp_with_type(
+    file: &mut File,
+    start: u64,
+    sectors: u64,
+    esp: &Path,
+    fat_type: fatfs::FatType,
+) -> io::Result<()> {
     let mut part = Region { file, start: start * SECTOR, len: sectors * SECTOR, pos: 0 };
     fatfs::format_volume(
         &mut part,

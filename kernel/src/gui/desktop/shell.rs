@@ -393,6 +393,7 @@ impl Desktop {
             MenuKind::Aurora => alloc::vec![
                 item("About WaveOS Aurora", "", MenuAction::About),
                 item("Settings…", "", MenuAction::Settings),
+                item("Learn — WaveOS Guide", "", MenuAction::Open(AppKind::Learn)),
                 SEPARATOR,
                 item("Launcher", "Super", MenuAction::Launcher),
                 SEPARATOR,

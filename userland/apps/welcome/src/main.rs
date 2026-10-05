@@ -92,7 +92,10 @@ impl App for Welcome {
 
     fn click(&mut self, x: i32, y: i32, area: Rect, env: &mut Env) -> bool {
         match hit(&Self::buttons(area), x, y) {
-            Some(0) => env.requests.push(Request::Close),
+            Some(0) => {
+                env.requests.push(Request::OpenApp("Learn".into()));
+                env.requests.push(Request::Close);
+            }
             Some(1) => env.requests.push(Request::OpenApp("About".into())),
             _ => {}
         }

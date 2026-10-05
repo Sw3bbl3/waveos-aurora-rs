@@ -5,7 +5,7 @@ resolver = "2"
 members = ["constellation", "corekit", "aurorakit", "apps/*", "bin/*"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 

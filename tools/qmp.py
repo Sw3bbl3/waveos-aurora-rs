@@ -82,6 +82,8 @@ for step in sys.argv[1:]:
             else: key([c])
     elif k == "key":
         key(v.split("+"))
+    elif k in ("keydown", "keyup"):
+        ev([{"type": "key", "data": {"down": k == "keydown", "key": {"type": "qcode", "data": c}}} for c in v.split("+")])
     elif k == "wheel":
         n = int(v); b = "wheel-down" if n > 0 else "wheel-up"
         for _ in range(abs(n)): btn(True, b); btn(False, b)

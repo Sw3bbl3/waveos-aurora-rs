@@ -19,3 +19,5 @@ pub use ttf as lyra;
 pub mod ui;
 pub mod wallpaper;
 pub mod widgets;
+
+pub mod windowing;

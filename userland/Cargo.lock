@@ -51,7 +51,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "app-about"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "app-activity"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "app-calculator"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "app-clock"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "app-files"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurora-image",
  "aurorakit",
@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "app-installer"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -100,8 +100,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-learn"
+version = "0.7.0"
+dependencies = [
+ "aurora-help",
+ "aurora-image",
+ "aurorakit",
+ "corekit",
+ "nebula-engine",
+]
+
+[[package]]
 name = "app-nebula"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurora-image",
  "aurorakit",
@@ -112,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "app-notes"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -120,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "app-paint"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurora-image",
  "aurorakit",
@@ -130,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "app-preview"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurora-image",
  "aurorakit",
@@ -139,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "app-settings"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurora-image",
  "aurorakit",
@@ -148,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "app-studio"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurorakit",
  "constellation-sdk",
@@ -158,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "app-terminal"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -166,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "app-welcome"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -174,26 +185,34 @@ dependencies = [
 
 [[package]]
 name = "aurora-abi"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "aurora-elf"
-version = "0.6.0"
+version = "0.7.0"
+
+[[package]]
+name = "aurora-help"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "aurora-image"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "miniz_oxide",
 ]
 
 [[package]]
 name = "aurora-wav"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "aurorakit"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "corekit",
  "lumen",
@@ -275,7 +294,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "constellation"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "constellation-sdk",
  "corekit",
@@ -284,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "constellation-sdk"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "corekit",
  "gina",
@@ -301,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "corekit"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurora-abi",
  "aurora-wav",
@@ -313,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "coreutils"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "corekit",
  "libm",
@@ -331,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "crashtest"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "corekit",
 ]
@@ -389,7 +408,7 @@ checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -509,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "gina"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurora-elf",
  "sha2",
@@ -517,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "gina-check"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "corekit",
  "gina",
@@ -525,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "gina-demo"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -555,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "hello"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "corekit",
 ]
@@ -586,6 +605,12 @@ checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
 ]
+
+[[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "lazy_static"
@@ -628,11 +653,17 @@ dependencies = [
 
 [[package]]
 name = "lumen"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "fontdue",
  "spin",
 ]
+
+[[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "miniz_oxide"
@@ -645,11 +676,11 @@ dependencies = [
 
 [[package]]
 name = "nebula-engine"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "nebula-secure"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
@@ -666,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-web"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "miniz_oxide",
 ]
@@ -919,6 +950,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
+name = "serde"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+dependencies = [
+ "serde_core",
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_core"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
+dependencies = [
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_derive"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.151"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -991,6 +1065,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
 name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1023,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "usertest"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "corekit",
 ]
@@ -1061,7 +1146,7 @@ checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1069,3 +1154,9 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"

@@ -102,6 +102,7 @@ impl Desktop {
                 }
             }
             KeyCode::Enter => Key::Activate,
+            _ if k.ch == Some(' ') => Key::Activate,
             KeyCode::Left => Key::Left,
             KeyCode::Right => Key::Right,
             _ => return true,

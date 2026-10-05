@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AppKind {
     Welcome,
+    Learn,
     About,
     Files,
     Terminal,
@@ -60,6 +61,15 @@ pub struct AppInfo {
 }
 
 pub static CATALOG: &[AppInfo] = &[
+    AppInfo {
+        kind: AppKind::Learn,
+        name: "Learn",
+        icon: Icon::Welcome,
+        pinned: false,
+        listed: true,
+        path: "/System/Apps/Learn.elf",
+        single: true,
+    },
     AppInfo {
         kind: AppKind::Studio,
         name: "Constellation Studio",

@@ -91,6 +91,10 @@ Every part of the architecture map glows with its real activity. Click a part to
 - **Sound:** an Intel HD Audio driver and a mixer. System sounds, a menu-bar volume control, volume keys, headphone detection, and programs can play audio.
 - **Laptop-ready:** a battery indicator with time remaining, low-battery warnings, the power button, and sleep from the menu, Spotlight or the lid.
 
+## Learn and documentation
+
+The complete 0.7 handbook is available in [English](docs/handbook/0.7/en/start-welcome.md) and [Canadian French](docs/handbook/0.7/fr-CA/start-welcome.md), and offline in the native Learn app. See [update reports](docs/releases/README.md), [contributor guidance](CONTRIBUTING.md), and the release validation for measured results.
+
 ## Quick start
 
 You need an x86_64 or Apple Silicon Mac, or a Linux machine, with:
