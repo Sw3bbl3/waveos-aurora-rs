@@ -180,6 +180,9 @@ fn run() {
         if !damage.is_empty() {
             crate::telemetry::FRAMES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
+        let batch_start = time::uptime_ms();
+        let batch_pixels: i64 = damage.iter().map(|r| r.area()).sum();
+        let batch_full = damage.iter().any(|r| r.area() == i64::from(w) * i64::from(h));
         for r in damage {
             let started = time::uptime_ms();
             crate::telemetry::PIXELS.fetch_add(r.area() as u64, core::sync::atomic::Ordering::Relaxed);
@@ -195,6 +198,9 @@ fn run() {
                 frame_stats.1 += elapsed;
                 frame_stats.2 = frame_stats.2.max(elapsed);
             }
+        }
+        if batch_pixels > 0 {
+            log!("frame", "{}, {}, {}, {}x{}", if batch_full { "full" } else { "partial-or-cursor" }, batch_pixels, time::uptime_ms() - batch_start, w, h);
         }
         if frame_stats.0 > 0 && time::uptime_ms() - frame_stats.3 >= 10000 {
             log!(

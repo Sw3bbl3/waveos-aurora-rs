@@ -1,3 +1,11 @@
 /target
+/userland/target/
 *.img
+*.iso
+*.vdi
+*.vmdk
+*.qcow2
+*.log
+.idea/
+.vscode/
 .DS_Store

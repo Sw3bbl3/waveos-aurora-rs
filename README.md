@@ -116,6 +116,8 @@ The first build takes a minute or two. After that you boot straight to the deskt
 | `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller, `--net` the network card, `--smp 1` for one CPU |
 | `cargo xtask image` | Creates `target/waveos-aurora-usb.img` (ESP plus AuroraFS), ready to `dd` onto a USB stick |
 | `cargo test -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask` | Host-side tests: filesystems (with crash recovery), the TrueType engine, the image and sound codecs, URLs and HTTP, TLS against rustls, the browser engine, and the test ACPI table |
+| `cargo xtask iso` | Creates `target/waveos-aurora.iso` for a UEFI VM (requires xorriso; enable EFI) |
+
 
 The kernel log streams to your terminal over the serial port. See [docs/BUILDING.md](docs/BUILDING.md) for debugging and troubleshooting, and [docs/HARDWARE.md](docs/HARDWARE.md) to try WaveOS on a real PC.
 

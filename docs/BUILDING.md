@@ -6,6 +6,7 @@
 |---|---|---|
 | Rust | [rustup](https://rustup.rs), with the exact Rust/LLVM baseline in `tools/toolchain-baseline.toml` | same |
 | QEMU + OVMF | `brew install qemu` (bundles `edk2-x86_64-code.fd`) | `sudo apt install qemu-system-x86 ovmf` |
+| xorriso (ISO only) | `brew install xorriso` | `sudo apt install xorriso` |
 
 `xtask` finds OVMF in the usual Homebrew and distro locations. To point it at a specific build, set `OVMF_CODE=/path/to/OVMF_CODE.fd`. It expects a matching `*VARS*` file in the same directory.
 
@@ -28,6 +29,8 @@ cargo xtask run --net none          # disable networking for offline validation
 cargo xtask test [--disk virtio] [--smp 1]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
 cargo test -p aurorafs -p fat32 -p lumen -p gina -p aurora-image -p aurora-wav -p xtask   # host-side tests
 cargo xtask image                   # target/waveos-aurora-usb.img for USB boot
+cargo xtask iso                     # target/waveos-aurora.iso for UEFI virtual machines
+cargo xtask iso --no-build          # package an existing target/esp without rebuilding
 ```
 
 `cargo xtask run` boots `target/waveos-aurora.img`, a 256 MiB GPT disk:
@@ -43,6 +46,12 @@ See [Constellation development](CONSTELLATION.md) for GINA packaging, native CLI
 ## Booting on real hardware (experimental)
 
 `cargo xtask image` writes `target/waveos-aurora-usb.img`, a complete system to put on a USB stick. [HARDWARE.md](HARDWARE.md) explains how to write it, the boot options, what to check, and the known limits.
+
+## VirtualBox ISO
+
+`cargo xtask iso` builds `target/waveos-aurora.iso` with a UEFI El Torito boot image. In VirtualBox, create a 64-bit VM, enable **EFI** under System > Motherboard, attach the ISO to the optical drive, and boot it. Give the VM at least 2 GiB of RAM. The ISO is read-only, so files created in a session are kept in memory unless you also attach a WaveOS disk image with a WaveFS partition. This image boots via UEFI; legacy BIOS mode is unsupported.
+
+If VirtualBox says **No bootable medium found**, check that the VM firmware is set to EFI and that its optical drive points to the newly generated ISO. Changing an existing VM from BIOS to EFI may also require enabling 64-bit mode. Run `cargo xtask iso` again after code changes; an older copied ISO will not update automatically.
 
 ## Debugging
 

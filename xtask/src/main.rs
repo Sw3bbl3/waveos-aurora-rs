@@ -8,6 +8,7 @@
 //!       --smp N                           number of CPUs (default 4)
 //!       --headless --no-build --debug --gdb --int
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
+//!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 
 mod aml;
@@ -76,7 +77,7 @@ fn main() {
         Some("run") => {
             let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let developer = flag("--developer");
-            let img = root().join(if developer { "target/waveos-developer.img" } else { "target/waveos-aurora.img" });
+            let img = args.iter().position(|a| a == "--disk-image").and_then(|i| args.get(i + 1)).map(PathBuf::from).unwrap_or_else(|| root().join(if developer { "target/waveos-developer.img" } else { "target/waveos-aurora.img" }));
             let size = number("--disk-size-mib", if developer { 8192 } else { 256 }, 128, 65536) * 1024 * 1024;
             prepare_disk(&esp, &img, flag("--fresh-disk"), size);
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
@@ -123,9 +124,32 @@ fn main() {
             println!("wrote {}", out.display());
             println!("flash to a USB stick with: sudo dd if={} of=/dev/rdiskN bs=4m", out.display());
         }
+        Some("iso") => {
+            let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
+            let target = root().join("target");
+            let staging = target.join("iso-staging");
+            if staging.exists() {
+                fs::remove_dir_all(&staging).expect("remove old ISO staging directory");
+            }
+            fs::create_dir_all(staging.join("EFI/BOOT")).expect("create ISO staging directory");
+            let boot_image = staging.join("EFI/BOOT/efiboot.img");
+            image::create_efi_boot_image(&esp, &boot_image).expect("create EFI boot image");
+            let out = target.join("waveos-aurora.iso");
+            let status = Command::new("xorriso")
+                .args(["-as", "mkisofs", "-iso-level", "3", "-R", "-J", "-V", "WAVEOS_AURORA"])
+                .arg("-o").arg(&out)
+                .args(["-e", "EFI/BOOT/efiboot.img", "-no-emul-boot"])
+                .arg(&staging)
+                .status()
+                .expect("failed to run xorriso; install xorriso to create an ISO");
+            if !status.success() {
+                exit(status.code().unwrap_or(1));
+            }
+            println!("wrote {}", out.display());
+        }
         Some("test") => test(profile, disk, smp, net),
         _ => {
-            eprintln!("usage: cargo xtask <build|run|image|test> [--debug] [--headless] [--no-build] [--gdb] [--int]");
+            eprintln!("usage: cargo xtask <build|run|image|iso|test> [--debug] [--headless] [--no-build] [--gdb] [--int]");
             exit(2);
         }
     }
