@@ -171,6 +171,33 @@ pub struct ArrayStore {
     pub len_writable: bool,
 }
 
+/// The state of an iterator helper (`iter.map(f)`, `iter.take(3)`…).
+pub struct IterHelper {
+    /// map, filter, take, drop, flatMap, or a wrapper from Iterator.from.
+    pub kind: HelperKind,
+    /// The underlying iterator (an IterRecord).
+    pub underlying: ObjRef,
+    pub f: Value,
+    pub counter: f64,
+    /// take: how many remain; drop: how many to skip first.
+    pub limit: f64,
+    /// flatMap: the inner iterator being drained (an IterRecord).
+    pub inner: Option<ObjRef>,
+    pub done: bool,
+    pub running: bool,
+    pub started: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum HelperKind {
+    Map,
+    Filter,
+    Take,
+    Drop,
+    FlatMap,
+    Wrap,
+}
+
 pub struct IterRecord {
     pub iter: Value,
     pub next: Value,
@@ -351,8 +378,9 @@ pub enum Kind {
     Fields(Vec<(Value, Value, u8)>),
     /// An object belonging to the embedder (a DOM node, etc.).
     Host(u32, u64),
-    /// An async-from-sync iterator wrapper, or an iterator helper.
+    /// An async-from-sync iterator wrapper.
     Wrapper(Value),
+    IterHelper(Box<IterHelper>),
 }
 
 pub struct Obj {
@@ -453,6 +481,11 @@ impl Obj {
             Kind::RegExpStringIterator(b) => out.push(b.0),
             Kind::ForIn(f) => out.push(f.2),
             Kind::ReturnSignal(x) | Kind::Wrapper(x) => v(x, out),
+            Kind::IterHelper(h) => {
+                out.push(h.underlying);
+                out.extend(h.inner);
+                v(&h.f, out);
+            }
             Kind::Fields(f) => {
                 for (a, b, _) in f {
                     v(a, out);

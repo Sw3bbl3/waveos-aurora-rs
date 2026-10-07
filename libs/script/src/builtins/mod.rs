@@ -7,6 +7,7 @@ pub mod date;
 pub mod error;
 pub mod function;
 pub mod global;
+pub mod iterator_helpers;
 pub mod iterators;
 pub mod json;
 pub mod math;
@@ -56,6 +57,7 @@ pub fn setup(rt: &mut Realm) {
     object::init(rt);
     symbol::init(rt);
     iterators::init(rt);
+    iterator_helpers::init(rt);
     array::init(rt);
     string::init(rt);
     number::init(rt);

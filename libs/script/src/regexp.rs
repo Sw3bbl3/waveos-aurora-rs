@@ -162,6 +162,74 @@ pub fn compile(pattern: &[u16], flags: &str) -> Result<Program, String> {
     Ok(Program { insts, classes, n_groups, names, flags, n_marks })
 }
 
+/// A group name starting at `i` (just after `<`): the name and the index
+/// just past its `>`. Names are identifiers; `\u` escapes are allowed.
+fn group_name(s: &[u32], mut i: usize) -> Result<(String, usize), String> {
+    let bad = || String::from("Invalid capture group name");
+    let mut name = String::new();
+    loop {
+        let c = *s.get(i).ok_or_else(bad)?;
+        if c == '>' as u32 {
+            i += 1;
+            break;
+        }
+        let cp = if c == '\\' as u32 {
+            if s.get(i + 1) != Some(&('u' as u32)) {
+                return Err(bad());
+            }
+            i += 2;
+            let hex = |s: &[u32], at: usize, n: usize| -> Option<u32> {
+                let mut v = 0;
+                for k in 0..n {
+                    v = v * 16 + char::from_u32(*s.get(at + k)?)?.to_digit(16)?;
+                }
+                Some(v)
+            };
+            if s.get(i) == Some(&('{' as u32)) {
+                let end = (i..s.len()).find(|&k| s[k] == '}' as u32).ok_or_else(bad)?;
+                let v = hex(s, i + 1, end - i - 1).filter(|_| end > i + 1).ok_or_else(bad)?;
+                i = end + 1;
+                v
+            } else {
+                let hi = hex(s, i, 4).ok_or_else(bad)?;
+                i += 4;
+                // A surrogate pair written as two escapes.
+                if (0xD800..0xDC00).contains(&hi)
+                    && s.get(i) == Some(&('\\' as u32))
+                    && s.get(i + 1) == Some(&('u' as u32))
+                {
+                    match hex(s, i + 2, 4) {
+                        Some(lo) if (0xDC00..0xE000).contains(&lo) => {
+                            i += 6;
+                            0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+                        }
+                        _ => hi,
+                    }
+                } else {
+                    hi
+                }
+            }
+        } else if (0xD800..0xDC00).contains(&c) && s.get(i + 1).is_some_and(|lo| (0xDC00..0xE000).contains(lo)) {
+            let lo = s[i + 1];
+            i += 2;
+            0x10000 + ((c - 0xD800) << 10) + (lo - 0xDC00)
+        } else {
+            i += 1;
+            c
+        };
+        let ch = char::from_u32(cp).ok_or_else(bad)?;
+        let ok = if name.is_empty() { crate::lexer::is_id_start(ch) } else { crate::lexer::is_id_part(ch) };
+        if !ok {
+            return Err(bad());
+        }
+        name.push(ch);
+    }
+    if name.is_empty() {
+        return Err(bad());
+    }
+    Ok((name, i))
+}
+
 fn count_groups(s: &[u32], names: &mut Vec<(String, usize)>) -> usize {
     let mut n = 0;
     let mut i = 0;
@@ -187,13 +255,9 @@ fn count_groups(s: &[u32], names: &mut Vec<(String, usize)>) -> usize {
                     && s[i + 3] != '!' as u32
                 {
                     n += 1;
-                    let mut j = i + 3;
-                    let mut name = String::new();
-                    while j < s.len() && s[j] != '>' as u32 {
-                        name.push(char::from_u32(s[j]).unwrap_or('?'));
-                        j += 1;
+                    if let Ok((name, _)) = group_name(s, i + 3) {
+                        names.push((name, n));
                     }
-                    names.push((name, n));
                 }
             } else {
                 n += 1;
@@ -390,12 +454,11 @@ impl<'a> PatParser<'a> {
                     if self.eat(':') {
                         capture = false;
                     } else if self.eat('<') {
-                        while !self.eat('>') {
-                            if self.peek().is_none() {
-                                return Err(String::from("Invalid capture group name"));
-                            }
-                            self.pos += 1;
+                        let (name, end) = group_name(self.s, self.pos)?;
+                        if self.names.iter().filter(|(n, _)| *n == name).count() > 1 {
+                            return Err(String::from("Duplicate capture group name"));
                         }
+                        self.pos = end;
                     } else {
                         return Err(String::from("Invalid group"));
                     }
@@ -465,13 +528,9 @@ impl<'a> PatParser<'a> {
         }
         if ch == 'k' {
             if self.s.get(self.pos + 1) == Some(&('<' as u32)) && (!self.names.is_empty() || self.flags.unicode) {
-                self.pos += 2;
-                let mut name = String::new();
-                while !self.eat('>') {
-                    let Some(c) = self.peek() else { return Err(String::from("Invalid named reference")) };
-                    name.push(char::from_u32(c).unwrap_or('?'));
-                    self.pos += 1;
-                }
+                let (name, end) =
+                    group_name(self.s, self.pos + 2).map_err(|_| String::from("Invalid named reference"))?;
+                self.pos = end;
                 if !self.names.iter().any(|(n, _)| *n == name) {
                     return Err(String::from("Invalid named capture referenced"));
                 }

@@ -264,6 +264,38 @@ fn lexical_names(stmts: &[Stmt], functions_too: bool) -> Vec<(Name, BKind)> {
     out
 }
 
+/// Early errors for a block's declarations: a lexical name declared twice
+/// (two plain functions are allowed in sloppy mode), or also declared with
+/// `var` anywhere inside the block.
+fn check_redeclarations(stmts: &[Stmt], strict: bool) -> R<()> {
+    let lexical = lexical_names(stmts, true);
+    for (i, (n, k)) in lexical.iter().enumerate() {
+        for (m, k2) in &lexical[..i] {
+            if m == n {
+                let plain_functions = *k == BKind::Function
+                    && *k2 == BKind::Function
+                    && !strict
+                    && stmts.iter().all(|s| match s {
+                        Stmt::Function(f) if f.name.as_ref() == Some(n) => !f.is_async && !f.is_generator,
+                        _ => true,
+                    });
+                if !plain_functions {
+                    return Err(err(&format!("Identifier '{n}' has already been declared")));
+                }
+            }
+        }
+    }
+    let mut vars = Vec::new();
+    let mut annex_b = Vec::new();
+    var_names(stmts, &mut vars, &mut annex_b, true, strict);
+    for v in &vars {
+        if lexical.iter().any(|(n, _)| n == v) {
+            return Err(err(&format!("Identifier '{v}' has already been declared")));
+        }
+    }
+    Ok(())
+}
+
 fn hoisted_functions(stmts: &[Stmt]) -> Vec<&Rc<Function>> {
     let mut out = Vec::new();
     for s in stmts {
@@ -641,6 +673,11 @@ impl<'a> Compiler<'a> {
         let mut annex_b = Vec::new();
         var_names(&s.body, &mut vars, &mut annex_b, false, s.strict);
         let lexical = lexical_names(&s.body, false);
+        for (i, (n, _)) in lexical.iter().enumerate() {
+            if lexical[..i].iter().any(|(m, _)| m == n) {
+                return Err(err(&format!("Identifier '{n}' has already been declared")));
+            }
+        }
         for (n, _) in &lexical {
             if vars.contains(n) {
                 return Err(err(&format!("Identifier '{n}' has already been declared")));
@@ -719,6 +756,11 @@ impl<'a> Compiler<'a> {
         var_names(&f.body, &mut vars, &mut annex_b, false, f.strict);
         let lexical = lexical_names(&f.body, false);
         let functions = hoisted_functions(&f.body);
+        for (i, (n, _)) in lexical.iter().enumerate() {
+            if lexical[..i].iter().any(|(m, _)| m == n) {
+                return Err(err(&format!("Identifier '{n}' has already been declared")));
+            }
+        }
         for (n, _) in &lexical {
             if vars.contains(n) || param_names.contains(n) || functions.iter().any(|g| g.name.as_ref() == Some(n)) {
                 return Err(err(&format!("Identifier '{n}' has already been declared")));
@@ -863,6 +905,7 @@ impl<'a> Compiler<'a> {
 
     /// A statement list with its own block scope.
     fn block(&mut self, stmts: &'a [Stmt]) -> R<()> {
+        check_redeclarations(stmts, self.fr().strict)?;
         let lexical = lexical_names(stmts, true);
         if lexical.is_empty() {
             return self.statements(stmts);
@@ -1334,6 +1377,8 @@ impl<'a> Compiler<'a> {
         let tmp = self.new_local();
         self.emit(Op::SetLocal(tmp));
         self.emit(Op::Pop);
+        let all: Vec<Stmt> = cases.iter().flat_map(|c| c.body.iter().cloned()).collect();
+        check_redeclarations(&all, self.fr().strict)?;
         let mut lexical = Vec::new();
         for c in cases {
             lexical.extend(lexical_names(&c.body, true));
@@ -1654,6 +1699,10 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::Call(1 + exprs.len() as u32));
             }
             Expr::Regex { pattern, flags } => {
+                // An invalid literal is an early error, even if never evaluated.
+                if let Err(e) = crate::regexp::compile(pattern.units(), flags) {
+                    return Err(err(&format!("Invalid regular expression: /{pattern}/{flags}: {e}")));
+                }
                 let p = self.str_const(pattern.clone());
                 let f = self.str_const(JsStr::from(flags.as_str()));
                 self.emit(Op::RegExp(p, f));

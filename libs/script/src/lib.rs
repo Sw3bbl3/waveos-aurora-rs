@@ -26,6 +26,7 @@ pub mod object;
 pub mod parser;
 pub mod realm;
 pub mod regexp;
+mod unicode_id;
 pub mod value;
 pub mod vm;
 

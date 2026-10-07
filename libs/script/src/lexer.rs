@@ -83,20 +83,11 @@ const EXPR_KEYWORDS: &[&str] = &[
 ];
 
 pub fn is_id_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '$' || c == '_' || (!c.is_ascii() && c.is_alphabetic())
+    c.is_ascii_alphabetic() || c == '$' || c == '_' || (!c.is_ascii() && crate::unicode_id::is_id_start(c))
 }
 
 pub fn is_id_part(c: char) -> bool {
-    c.is_ascii_alphanumeric()
-        || c == '$'
-        || c == '_'
-        || c == '\u{200C}'
-        || c == '\u{200D}'
-        || (!c.is_ascii() && (c.is_alphanumeric() || is_combining(c)))
-}
-
-fn is_combining(c: char) -> bool {
-    matches!(c as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)
+    c.is_ascii_alphanumeric() || c == '$' || c == '_' || (!c.is_ascii() && crate::unicode_id::is_id_continue(c))
 }
 
 fn is_line_term(c: char) -> bool {
