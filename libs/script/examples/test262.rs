@@ -18,9 +18,6 @@ const UNSUPPORTED: &[&str] = &[
     "BigInt",
     "SharedArrayBuffer",
     "Atomics",
-    "ArrayBuffer",
-    "DataView",
-    "TypedArray",
     "Float16Array",
     "Uint8Array",
     "resizable-arraybuffer",
@@ -44,6 +41,7 @@ const UNSUPPORTED: &[&str] = &[
     "iterator-includes",
     "iterator-chunking",
     "Iterator.prototype.join",
+    "immutable-arraybuffer",
     "set-methods",
     "Array.fromAsync",
     "regexp-modifiers",
@@ -156,6 +154,13 @@ fn eval_script(rt: &mut Realm, c: &Call) -> JsResult {
     rt.eval(&s, "evalScript")
 }
 
+fn detach(rt: &mut Realm, c: &Call) -> JsResult {
+    if let Value::Object(b) = c.arg(0) {
+        nebula_script::builtins::typed::detach(rt, b);
+    }
+    Ok(Value::Null)
+}
+
 fn gc(rt: &mut Realm, _c: &Call) -> JsResult {
     rt.collect();
     Ok(Value::Undefined)
@@ -167,6 +172,8 @@ fn install_262(rt: &mut Realm) {
     let o = rt.new_object();
     let es = rt.native("evalScript", 1, eval_script, false);
     rt.define(o, "evalScript", Value::Object(es), nebula_script::HIDDEN);
+    let d = rt.native("detachArrayBuffer", 1, detach, false);
+    rt.define(o, "detachArrayBuffer", Value::Object(d), nebula_script::HIDDEN);
     let g = rt.native("gc", 0, gc, false);
     rt.define(o, "gc", Value::Object(g), nebula_script::HIDDEN);
     let global = Value::Object(rt.global);

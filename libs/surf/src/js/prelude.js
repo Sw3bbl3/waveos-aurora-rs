@@ -395,4 +395,79 @@
   for (const [name, value] of Object.entries({ Headers, Response, Request, AbortController, AbortSignal, FormData, XMLHttpRequest, fetch })) {
     define(name, value);
   }
+
+  // ---------------------------------------------------------------- text and crypto
+  class TextEncoder {
+    get encoding() { return "utf-8"; }
+    encode(input = "") {
+      const s = String(input);
+      const out = [];
+      for (let i = 0; i < s.length; i++) {
+        let c = s.charCodeAt(i);
+        if (c >= 0xd800 && c < 0xdc00 && i + 1 < s.length) {
+          const d = s.charCodeAt(i + 1);
+          if (d >= 0xdc00 && d < 0xe000) { c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00); i++; }
+        }
+        if (c >= 0xd800 && c < 0xe000) c = 0xfffd;
+        if (c < 0x80) out.push(c);
+        else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+        else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+        else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+      }
+      return new Uint8Array(out);
+    }
+    encodeInto(s, dest) {
+      const bytes = this.encode(s);
+      const n = Math.min(bytes.length, dest.length);
+      dest.set(bytes.subarray(0, n));
+      return { read: s.length, written: n };
+    }
+  }
+  class TextDecoder {
+    constructor(label = "utf-8", options = {}) {
+      const l = String(label).toLowerCase();
+      if (!["utf-8", "utf8", "unicode-1-1-utf-8"].includes(l)) throw new RangeError(`The encoding '${label}' is not supported`);
+      this.fatal = !!options.fatal;
+      this.ignoreBOM = !!options.ignoreBOM;
+    }
+    get encoding() { return "utf-8"; }
+    decode(input) {
+      if (input === undefined) return "";
+      const b = input instanceof ArrayBuffer ? new Uint8Array(input)
+        : ArrayBuffer.isView(input) ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength) : null;
+      if (!b) throw new TypeError("TextDecoder.decode: the input is not a buffer");
+      let s = "", i = 0;
+      if (!this.ignoreBOM && b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) i = 3;
+      const bad = () => { if (this.fatal) throw new TypeError("The encoded data was not valid."); return "�"; };
+      while (i < b.length) {
+        const c = b[i];
+        let n = c < 0x80 ? 0 : c >= 0xf0 && c < 0xf5 ? 3 : c >= 0xe0 ? 2 : c >= 0xc2 && c < 0xe0 ? 1 : -1;
+        if (n < 0 || c >= 0xf5) { s += bad(); i++; continue; }
+        let cp = n === 0 ? c : c & (0x3f >> n);
+        let ok = true;
+        for (let k = 1; k <= n; k++) {
+          const d = b[i + k];
+          if (d === undefined || (d & 0xc0) !== 0x80) { ok = false; break; }
+          cp = (cp << 6) | (d & 63);
+        }
+        if (!ok || (n === 2 && (cp < 0x800 || (cp >= 0xd800 && cp < 0xe000))) || (n === 3 && (cp < 0x10000 || cp > 0x10ffff))) {
+          s += bad(); i++; continue;
+        }
+        s += String.fromCodePoint(cp);
+        i += n + 1;
+      }
+      return s;
+    }
+  }
+  const crypto = {
+    getRandomValues(array) { return __nebula_random(array); },
+    randomUUID() {
+      const b = __nebula_random(new Uint8Array(16));
+      b[6] = (b[6] & 0x0f) | 0x40;
+      b[8] = (b[8] & 0x3f) | 0x80;
+      const h = [...b].map(x => x.toString(16).padStart(2, "0")).join("");
+      return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+    },
+  };
+  for (const [name, value] of Object.entries({ TextEncoder, TextDecoder, crypto })) define(name, value);
 })(globalThis);

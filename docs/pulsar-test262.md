@@ -2,7 +2,7 @@
 
 Measured on 2026-10-07 against test262 commit `c8c79889`, every test in sloppy and strict mode as its flags require. Tests for features Pulsar doesn't have yet are skipped (see `UNSUPPORTED` in `libs/script/examples/test262.rs`).
 
-31017 passed, 4179 failed, 12682 skipped: 88.1% of the tests run
+34415 passed, 2069 failed, 11394 skipped: 94.3% of the tests run
 
 | Area | Passed | Failed | Skipped | Pass rate |
 |---|---:|---:|---:|---:|
@@ -10,9 +10,9 @@ Measured on 2026-10-07 against test262 commit `c8c79889`, every test in sloppy a
 | annexB/language | 440 | 379 | 26 | 53.7% |
 | built-ins/AbstractModuleSource | 0 | 0 | 8 | – |
 | built-ins/AggregateError | 22 | 2 | 1 | 91.7% |
-| built-ins/Array | 2684 | 21 | 377 | 99.2% |
-| built-ins/ArrayBuffer | 0 | 63 | 158 | 0.0% |
-| built-ins/ArrayIteratorPrototype | 17 | 0 | 10 | 100.0% |
+| built-ins/Array | 2689 | 16 | 377 | 99.4% |
+| built-ins/ArrayBuffer | 67 | 0 | 154 | 100.0% |
+| built-ins/ArrayIteratorPrototype | 26 | 1 | 0 | 96.3% |
 | built-ins/AsyncDisposableStack | 0 | 0 | 104 | – |
 | built-ins/AsyncFromSyncIteratorPrototype | 5 | 33 | 0 | 13.2% |
 | built-ins/AsyncFunction | 17 | 0 | 1 | 100.0% |
@@ -22,7 +22,7 @@ Measured on 2026-10-07 against test262 commit `c8c79889`, every test in sloppy a
 | built-ins/Atomics | 0 | 0 | 389 | – |
 | built-ins/BigInt | 0 | 1 | 76 | 0.0% |
 | built-ins/Boolean | 50 | 0 | 1 | 100.0% |
-| built-ins/DataView | 0 | 352 | 209 | 0.0% |
+| built-ins/DataView | 370 | 2 | 189 | 99.5% |
 | built-ins/Date | 571 | 12 | 11 | 97.9% |
 | built-ins/DisposableStack | 0 | 0 | 93 | – |
 | built-ins/Error | 44 | 29 | 20 | 60.3% |
@@ -31,7 +31,7 @@ Measured on 2026-10-07 against test262 commit `c8c79889`, every test in sloppy a
 | built-ins/GeneratorFunction | 20 | 1 | 2 | 95.2% |
 | built-ins/GeneratorPrototype | 61 | 0 | 0 | 100.0% |
 | built-ins/Infinity | 6 | 0 | 0 | 100.0% |
-| built-ins/Iterator | 9 | 218 | 427 | 4.0% |
+| built-ins/Iterator | 387 | 6 | 261 | 98.5% |
 | built-ins/JSON | 119 | 0 | 46 | 100.0% |
 | built-ins/Map | 164 | 0 | 40 | 100.0% |
 | built-ins/MapIteratorPrototype | 11 | 0 | 0 | 100.0% |
@@ -39,24 +39,24 @@ Measured on 2026-10-07 against test262 commit `c8c79889`, every test in sloppy a
 | built-ins/NaN | 6 | 0 | 0 | 100.0% |
 | built-ins/NativeErrors | 88 | 0 | 6 | 100.0% |
 | built-ins/Number | 337 | 0 | 3 | 100.0% |
-| built-ins/Object | 3301 | 38 | 72 | 98.9% |
+| built-ins/Object | 3316 | 27 | 68 | 99.2% |
 | built-ins/Promise | 595 | 21 | 116 | 96.6% |
 | built-ins/Proxy | 0 | 2 | 309 | 0.0% |
 | built-ins/Reflect | 142 | 1 | 10 | 99.3% |
-| built-ins/RegExp | 863 | 28 | 988 | 96.9% |
+| built-ins/RegExp | 869 | 22 | 988 | 97.5% |
 | built-ins/RegExpStringIteratorPrototype | 17 | 0 | 0 | 100.0% |
 | built-ins/Set | 190 | 0 | 193 | 100.0% |
 | built-ins/SetIteratorPrototype | 11 | 0 | 0 | 100.0% |
 | built-ins/ShadowRealm | 0 | 0 | 64 | – |
 | built-ins/SharedArrayBuffer | 0 | 0 | 104 | – |
-| built-ins/String | 1172 | 38 | 13 | 96.9% |
+| built-ins/String | 1173 | 37 | 13 | 96.9% |
 | built-ins/StringIteratorPrototype | 7 | 0 | 0 | 100.0% |
 | built-ins/SuppressedError | 0 | 0 | 22 | – |
 | built-ins/Symbol | 73 | 1 | 24 | 98.6% |
 | built-ins/Temporal | 0 | 0 | 4605 | – |
 | built-ins/ThrowTypeError | 9 | 4 | 1 | 69.2% |
-| built-ins/TypedArray | 0 | 7 | 1446 | 0.0% |
-| built-ins/TypedArrayConstructors | 0 | 1 | 737 | 0.0% |
+| built-ins/TypedArray | 664 | 26 | 763 | 96.2% |
+| built-ins/TypedArrayConstructors | 355 | 5 | 378 | 98.6% |
 | built-ins/Uint8Array | 0 | 0 | 70 | – |
 | built-ins/WeakMap | 92 | 0 | 49 | 100.0% |
 | built-ins/WeakRef | 0 | 0 | 29 | – |
@@ -74,26 +74,26 @@ Measured on 2026-10-07 against test262 commit `c8c79889`, every test in sloppy a
 | built-ins/undefined | 8 | 0 | 0 | 100.0% |
 | language/arguments-object | 236 | 27 | 0 | 89.7% |
 | language/asi | 102 | 0 | 0 | 100.0% |
-| language/block-scope | 50 | 95 | 0 | 34.5% |
-| language/comments | 50 | 1 | 1 | 98.0% |
+| language/block-scope | 145 | 0 | 0 | 100.0% |
+| language/comments | 51 | 0 | 1 | 100.0% |
 | language/computed-property-names | 48 | 0 | 0 | 100.0% |
 | language/destructuring | 17 | 0 | 2 | 100.0% |
 | language/directive-prologue | 58 | 4 | 0 | 93.5% |
-| language/eval-code | 138 | 204 | 5 | 40.4% |
-| language/expressions | 8809 | 1040 | 1253 | 89.4% |
+| language/eval-code | 140 | 202 | 5 | 40.9% |
+| language/expressions | 9319 | 540 | 1243 | 94.5% |
 | language/function-code | 216 | 1 | 0 | 99.5% |
 | language/future-reserved-words | 55 | 0 | 0 | 100.0% |
 | language/global-code | 32 | 10 | 0 | 76.2% |
-| language/identifier-resolution | 7 | 7 | 0 | 50.0% |
-| language/identifiers | 204 | 64 | 0 | 76.1% |
+| language/identifier-resolution | 12 | 2 | 0 | 85.7% |
+| language/identifiers | 260 | 8 | 0 | 97.0% |
 | language/keywords | 25 | 0 | 0 | 100.0% |
 | language/line-terminators | 41 | 0 | 0 | 100.0% |
-| language/literals | 284 | 110 | 142 | 72.1% |
+| language/literals | 371 | 23 | 142 | 94.2% |
 | language/punctuators | 11 | 0 | 0 | 100.0% |
 | language/reserved-words | 26 | 0 | 1 | 100.0% |
 | language/rest-parameters | 11 | 0 | 0 | 100.0% |
 | language/source-text | 1 | 0 | 0 | 100.0% |
 | language/statementList | 64 | 16 | 0 | 80.0% |
-| language/statements | 7825 | 1229 | 293 | 86.4% |
+| language/statements | 8597 | 489 | 261 | 94.6% |
 | language/types | 109 | 1 | 3 | 99.1% |
 | language/white-space | 67 | 0 | 0 | 100.0% |

@@ -2889,6 +2889,8 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     rt.define(history, "state", Value::Null, DEFAULT);
     rt.set_global("history", Value::Object(history));
 
+    let rnd = rt.native("__nebula_random", 1, native_random, false);
+    rt.define(g, "__nebula_random", Value::Object(rnd), 0);
     let req = rt.native("__nebula_request", 4, native_request, false);
     rt.define(g, "__nebula_request", Value::Object(req), 0);
 
@@ -3146,4 +3148,30 @@ pub fn complete_request(rt: &mut Realm, id: u32, result: Result<HttpResponse, St
     };
     report(rt, r);
     rt.run_jobs();
+}
+
+/// `__nebula_random(typedArray)`: fills an integer typed array with random
+/// bytes from the host (crypto.getRandomValues).
+fn native_random(rt: &mut Realm, c: &Call) -> JsResult {
+    let Value::Object(o) = c.arg(0) else { return Err(rt.type_error("getRandomValues: not a typed array")) };
+    let Some((kind, buffer, offset, len)) = rt.typed_array(o) else {
+        return Err(rt.type_error("getRandomValues: not a typed array"));
+    };
+    if matches!(kind, nebula_script::object::TAKind::F32 | nebula_script::object::TAKind::F64) {
+        return Err(
+            rt.error(nebula_script::ErrorKind::Error, "TypeMismatchError: The data provided is not an integer array")
+        );
+    }
+    let n = len * kind.size();
+    if n > 65536 {
+        return Err(
+            rt.error(nebula_script::ErrorKind::Error, "QuotaExceededError: getRandomValues takes at most 65536 bytes")
+        );
+    }
+    let mut bytes = vec![0u8; n];
+    rt.random_bytes(&mut bytes);
+    if let Kind::ArrayBuffer(b) = &mut rt.heap.get_mut(buffer).kind {
+        b.bytes[offset..offset + n].copy_from_slice(&bytes);
+    }
+    Ok(c.arg(0))
 }

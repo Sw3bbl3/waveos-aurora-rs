@@ -133,10 +133,13 @@ pub struct Compiler<'a> {
     src: Rc<str>,
     file: Rc<str>,
     fns: Vec<FnState<'a>>,
+    /// Enclosing `with` statements: (function index, its scope's index,
+    /// the hidden binding holding the object).
+    withs: Vec<(usize, usize, Name)>,
 }
 
 pub fn compile_script(script: &Script, src: Rc<str>, file: Rc<str>) -> R<Rc<Code>> {
-    let mut c = Compiler { src, file, fns: Vec::new() };
+    let mut c = Compiler { src, file, fns: Vec::new(), withs: Vec::new() };
     c.script(script)
 }
 
@@ -207,7 +210,7 @@ fn var_names_stmt(s: &Stmt, out: &mut Vec<Name>, annex_b: &mut Vec<Name>, nested
             }
             var_names_stmt(body, out, annex_b, true, strict);
         }
-        Stmt::While(_, b) | Stmt::DoWhile(b, _) => var_names_stmt(b, out, annex_b, true, strict),
+        Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::With(_, b) => var_names_stmt(b, out, annex_b, true, strict),
         Stmt::Labeled(_, b) => var_names_stmt(b, out, annex_b, nested, strict),
         Stmt::Block(b) => var_names(b, out, annex_b, true, strict),
         Stmt::Try { block, handler, finalizer, .. } => {
@@ -366,6 +369,10 @@ impl<'a> Compiler<'a> {
             Op::IterResult(_) => Op::IterResult(target),
             Op::ForInNext(_) => Op::ForInNext(target),
             Op::YieldDelegate(_) => Op::YieldDelegate(target),
+            Op::WithGet(n, _) => Op::WithGet(n, target),
+            Op::WithSet(n, _) => Op::WithSet(n, target),
+            Op::WithGetMethod(n, _) => Op::WithGetMethod(n, target),
+            Op::WithDelete(n, _) => Op::WithDelete(n, target),
             other => panic!("not a jump: {other:?}"),
         };
     }
@@ -515,7 +522,59 @@ impl<'a> Compiler<'a> {
         Ok(Res::Global)
     }
 
+    /// Where a name's binding is: (function index, scope index), or None
+    /// for a global.
+    fn binding_position(&self, name: &str) -> Option<(usize, usize)> {
+        for (fi, f) in self.fns.iter().enumerate().rev() {
+            for (si, s) in f.scopes.iter().enumerate().rev() {
+                if s.find(name).is_some() {
+                    return Some((fi, si));
+                }
+                if s.global && si == 0 {
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// The `with` objects (innermost first) that a name must be looked up
+    /// in before its binding: those between the binding and here.
+    fn withs_for(&self, name: &str) -> Vec<Name> {
+        if self.withs.is_empty() || name.starts_with('%') {
+            return Vec::new();
+        }
+        let pos = self.binding_position(name);
+        self.withs
+            .iter()
+            .rev()
+            .filter(|(wf, wl, _)| match pos {
+                None => true,
+                Some((fi, si)) => !(fi > *wf || (fi == *wf && si > *wl)),
+            })
+            .map(|(_, _, n)| n.clone())
+            .collect()
+    }
+
     fn load(&mut self, name: &Name) -> R<()> {
+        let withs = self.withs_for(name);
+        if withs.is_empty() {
+            return self.load_plain(name);
+        }
+        let n = self.name_const(name);
+        let mut ends = Vec::new();
+        for w in &withs {
+            self.load_plain(w)?;
+            ends.push(self.emit(Op::WithGet(n, 0)));
+        }
+        self.load_plain(name)?;
+        for j in ends {
+            self.patch_here(j);
+        }
+        Ok(())
+    }
+
+    fn load_plain(&mut self, name: &Name) -> R<()> {
         match self.resolve(name)? {
             Res::Local(slot, k) => {
                 if k.lexical() {
@@ -547,6 +606,24 @@ impl<'a> Compiler<'a> {
 
     /// Stores the top of the stack in `name`, leaving it there.
     fn store(&mut self, name: &Name, mode: Mode) -> R<()> {
+        let withs = if mode == Mode::Init { Vec::new() } else { self.withs_for(name) };
+        if withs.is_empty() {
+            return self.store_plain(name, mode);
+        }
+        let n = self.name_const(name);
+        let mut ends = Vec::new();
+        for w in &withs {
+            self.load_plain(w)?;
+            ends.push(self.emit(Op::WithSet(n, 0)));
+        }
+        self.store_plain(name, mode)?;
+        for j in ends {
+            self.patch_here(j);
+        }
+        Ok(())
+    }
+
+    fn store_plain(&mut self, name: &Name, mode: Mode) -> R<()> {
         let strict = self.fr().strict;
         match self.resolve(name)? {
             Res::Local(slot, k) => {
@@ -1023,6 +1100,25 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Block(b) => self.block(b)?,
             Stmt::Empty | Stmt::Debugger => {}
+            Stmt::With(obj, body) => {
+                self.expr(obj)?;
+                self.emit(Op::ToObject);
+                let name = Name::from(format!("%with{}", self.withs.len()));
+                self.enter_scope(&[(name.clone(), BKind::Hidden)]);
+                self.store_plain(&name, Mode::Init)?;
+                self.emit(Op::Pop);
+                if let Some(c) = self.fr().completion {
+                    self.emit(Op::Undef);
+                    self.emit(Op::SetLocal(c));
+                    self.emit(Op::Pop);
+                }
+                let at = (self.fns.len() - 1, self.fr().scopes.len() - 1, name);
+                self.withs.push(at);
+                let r = self.statement_scoped(body);
+                self.withs.pop();
+                r?;
+                self.exit_scope();
+            }
             Stmt::Throw(e) => {
                 self.expr(e)?;
                 self.emit(Op::Throw);
@@ -1981,6 +2077,20 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::Undef);
                 self.patch_here(skip);
             }
+            Expr::Ident(name) if !self.withs_for(name).is_empty() => {
+                // A function found on a with object is called with it as `this`.
+                let n = self.name_const(name);
+                let mut ends = Vec::new();
+                for w in self.withs_for(name) {
+                    self.load_plain(&w)?;
+                    ends.push(self.emit(Op::WithGetMethod(n, 0)));
+                }
+                self.load_plain(name)?;
+                self.emit(Op::Undef);
+                for j in ends {
+                    self.patch_here(j);
+                }
+            }
             other => {
                 self.expr(other)?;
                 self.emit(Op::Undef);
@@ -2025,6 +2135,31 @@ impl<'a> Compiler<'a> {
         match op {
             UnaryOp::Typeof => {
                 if let Expr::Ident(n) = strip(arg) {
+                    let withs = self.withs_for(n);
+                    if !withs.is_empty() {
+                        let c = self.name_const(n);
+                        let mut found = Vec::new();
+                        for w in withs {
+                            self.load_plain(&w)?;
+                            found.push(self.emit(Op::WithGet(c, 0)));
+                        }
+                        match self.resolve(n)? {
+                            Res::Global => {
+                                self.emit(Op::TypeofGlobal(c));
+                            }
+                            _ => {
+                                self.load_plain(n)?;
+                                self.emit(Op::Typeof);
+                            }
+                        }
+                        let end = self.emit(Op::Jump(0));
+                        for j in found {
+                            self.patch_here(j);
+                        }
+                        self.emit(Op::Typeof);
+                        self.patch_here(end);
+                        return Ok(());
+                    }
                     if let Res::Global = self.resolve(n)? {
                         let c = self.name_const(n);
                         self.emit(Op::TypeofGlobal(c));
@@ -2066,6 +2201,24 @@ impl<'a> Compiler<'a> {
                     self.emit(Op::Pop);
                     self.emit(Op::True);
                     self.patch_here(skip);
+                }
+                Expr::Ident(n) if !self.withs_for(n).is_empty() => {
+                    let c = self.name_const(n);
+                    let mut ends = Vec::new();
+                    for w in self.withs_for(n) {
+                        self.load_plain(&w)?;
+                        ends.push(self.emit(Op::WithDelete(c, 0)));
+                    }
+                    if let Res::Global = self.resolve(n)? {
+                        let g = self.name_const("globalThis");
+                        self.emit(Op::GetGlobal(g));
+                        self.emit(Op::DeleteProp(c));
+                    } else {
+                        self.emit(Op::False);
+                    }
+                    for j in ends {
+                        self.patch_here(j);
+                    }
                 }
                 Expr::Ident(n) => match self.resolve(n)? {
                     Res::Global => {

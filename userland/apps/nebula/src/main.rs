@@ -68,6 +68,11 @@ impl nebula_script::Host for PageHost {
     fn timezone_offset(&mut self, _utc_ms: f64) -> f64 {
         -(corekit::time::utc_offset_minutes() as f64)
     }
+
+    fn fill_random(&mut self, buf: &mut [u8]) -> bool {
+        corekit::net::random(buf);
+        true
+    }
 }
 
 /// localStorage is kept per site, in a file under /Settings/Nebula.

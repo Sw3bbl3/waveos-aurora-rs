@@ -18,6 +18,7 @@ pub mod reflect;
 pub mod regexp;
 pub mod string;
 pub mod symbol;
+pub mod typed;
 
 use crate::heap::ObjRef;
 use crate::object::*;
@@ -65,6 +66,7 @@ pub fn setup(rt: &mut Realm) {
     json::init(rt);
     promise::init(rt);
     collections::init(rt);
+    typed::init(rt);
     regexp::init(rt);
     date::init(rt);
     reflect::init(rt);

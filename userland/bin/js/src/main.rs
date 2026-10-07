@@ -40,6 +40,11 @@ impl Host for OsHost {
     fn timezone_offset(&mut self, _utc_ms: f64) -> f64 {
         -(corekit::time::utc_offset_minutes() as f64)
     }
+
+    fn fill_random(&mut self, buf: &mut [u8]) -> bool {
+        corekit::net::random(buf);
+        true
+    }
 }
 
 /// Runs code; prints uncaught errors. Returns the completion value.

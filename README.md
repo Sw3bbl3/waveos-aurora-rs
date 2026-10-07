@@ -33,7 +33,7 @@ A menu bar, a dock and windows that glide. Frosted glass that really blurs what'
 
 ## JavaScript, written from scratch too.
 
-**Pulsar** is our own JavaScript engine: a compiler, a virtual machine, a garbage collector, and the whole standard library, from classes and generators to `async`/`await` and regular expressions. It passes more than 31,000 of the official conformance tests. In Nebula it brings pages to life: the DOM, events, timers, `fetch`, storage, and libraries like jQuery. In Terminal, type `js` and start writing.
+**Pulsar** is our own JavaScript engine: a compiler, a virtual machine, a garbage collector, and the whole standard library, from classes and generators to `async`/`await` and regular expressions. It passes more than 34,000 of the official conformance tests. In Nebula it brings pages to life: the DOM, events, timers, `fetch`, storage, and libraries like jQuery. In Terminal, type `js` and start writing.
 
 | | |
 |---|---|

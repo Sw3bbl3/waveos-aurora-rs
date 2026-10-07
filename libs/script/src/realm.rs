@@ -33,6 +33,13 @@ pub trait Host {
     fn timezone_offset(&mut self, _utc_ms: f64) -> f64 {
         0.0
     }
+    /// Fills `buf` with random bytes for crypto.getRandomValues. Hosts with
+    /// an operating-system generator should provide it; the default is not
+    /// cryptographically strong.
+    fn fill_random(&mut self, buf: &mut [u8]) -> bool {
+        let _ = buf;
+        false
+    }
 }
 
 /// State the embedder keeps inside the realm (the browser's DOM bindings),
@@ -127,6 +134,11 @@ pub struct Intrinsics {
     pub iterator_helper_proto: ObjRef,
     pub wrap_for_valid_iterator_proto: ObjRef,
     pub promise_proto: ObjRef,
+    pub array_buffer_proto: ObjRef,
+    pub array_buffer_ctor: ObjRef,
+    pub data_view_proto: ObjRef,
+    pub typed_protos: [ObjRef; 9],
+    pub typed_ctors: [ObjRef; 9],
     pub promise_ctor: ObjRef,
     pub map_proto: ObjRef,
     pub set_proto: ObjRef,
@@ -171,6 +183,9 @@ impl Intrinsics {
             self.iterator_helper_proto,
             self.wrap_for_valid_iterator_proto,
             self.promise_proto,
+            self.array_buffer_proto,
+            self.array_buffer_ctor,
+            self.data_view_proto,
             self.promise_ctor,
             self.map_proto,
             self.set_proto,
@@ -188,6 +203,8 @@ impl Intrinsics {
             self.throw_type_error,
             self.eval,
         ];
+        v.extend_from_slice(&self.typed_protos);
+        v.extend_from_slice(&self.typed_ctors);
         v.extend_from_slice(&self.errors);
         v.extend_from_slice(&self.error_ctors);
         v
@@ -321,6 +338,11 @@ impl Realm {
                 iterator_helper_proto: placeholder,
                 wrap_for_valid_iterator_proto: placeholder,
                 promise_proto: placeholder,
+                array_buffer_proto: placeholder,
+                array_buffer_ctor: placeholder,
+                data_view_proto: placeholder,
+                typed_protos: [placeholder; 9],
+                typed_ctors: [placeholder; 9],
                 promise_ctor: placeholder,
                 map_proto: placeholder,
                 set_proto: placeholder,
@@ -547,6 +569,15 @@ impl Realm {
         Ok(())
     }
 
+    /// Random bytes: the host's generator, else the engine's.
+    pub fn random_bytes(&mut self, buf: &mut [u8]) {
+        if !self.host.fill_random(buf) {
+            for b in buf.iter_mut() {
+                *b = (self.random() * 256.0) as u8;
+            }
+        }
+    }
+
     pub fn random(&mut self) -> f64 {
         // xorshift64*
         let mut x = self.rng;
@@ -701,8 +732,72 @@ impl Realm {
         self.heap.get(o).proto
     }
 
+    // ------------------------------------------------------------ typed arrays
+
+    /// CanonicalNumericIndexString: the number a key names, if it names one.
+    pub fn numeric_key(key: &PropKey) -> Option<f64> {
+        let PropKey::Str(s) = key else { return None };
+        if let Some(i) = s.as_index() {
+            return Some(i as f64);
+        }
+        if s.eq_str("-0") {
+            return Some(-0.0);
+        }
+        let n = numconv::parse(s.units());
+        if s.is_empty() || !s.eq_str(&numconv::to_string(n)) {
+            return None;
+        }
+        Some(n)
+    }
+
+    /// For a typed array: (kind, buffer, byte offset, length), with length 0
+    /// once its buffer is detached.
+    pub fn typed_array(&self, o: ObjRef) -> Option<(TAKind, ObjRef, usize, usize)> {
+        match &self.heap.get(o).kind {
+            Kind::TypedArray(t) => {
+                let detached = matches!(&self.heap.get(t.buffer).kind, Kind::ArrayBuffer(b) if b.detached);
+                Some((t.kind, t.buffer, t.offset, if detached { 0 } else { t.length }))
+            }
+            _ => None,
+        }
+    }
+
+    /// IsValidIntegerIndex, as an element index.
+    pub fn ta_index(&self, o: ObjRef, n: f64) -> Option<usize> {
+        let (_, _, _, len) = self.typed_array(o)?;
+        if n != libm::trunc(n) || (n == 0.0 && n.is_sign_negative()) || n < 0.0 || n >= len as f64 {
+            return None;
+        }
+        Some(n as usize)
+    }
+
+    pub fn ta_get(&self, o: ObjRef, i: usize) -> f64 {
+        let (kind, buf, off, _) = self.typed_array(o).unwrap();
+        let at = off + i * kind.size();
+        match &self.heap.get(buf).kind {
+            Kind::ArrayBuffer(b) => kind.read(&b.bytes[at..at + kind.size()]),
+            _ => f64::NAN,
+        }
+    }
+
+    pub fn ta_put(&mut self, o: ObjRef, i: usize, v: f64) {
+        let (kind, buf, off, _) = self.typed_array(o).unwrap();
+        let at = off + i * kind.size();
+        if let Kind::ArrayBuffer(b) = &mut self.heap.get_mut(buf).kind {
+            if at + kind.size() <= b.bytes.len() {
+                kind.write(&mut b.bytes[at..at + kind.size()], v);
+            }
+        }
+    }
+
     pub fn get_own_property(&self, o: ObjRef, key: &PropKey) -> Option<Prop> {
         let obj = self.heap.get(o);
+        if let Kind::TypedArray(_) = obj.kind {
+            if let Some(n) = Self::numeric_key(key) {
+                let i = self.ta_index(o, n)?;
+                return Some(Prop::data(Value::Number(self.ta_get(o, i)), DEFAULT));
+            }
+        }
         match &obj.kind {
             Kind::Array(a) => {
                 if let Some(i) = key.as_index() {
@@ -733,6 +828,14 @@ impl Realm {
     pub fn get(&mut self, o: ObjRef, key: &PropKey, receiver: Value) -> JsResult {
         let mut cur = o;
         loop {
+            if let Kind::TypedArray(_) = self.heap.get(cur).kind {
+                if let Some(n) = Self::numeric_key(key) {
+                    return Ok(match self.ta_index(cur, n) {
+                        Some(i) => Value::Number(self.ta_get(cur, i)),
+                        None => Value::Undefined,
+                    });
+                }
+            }
             if let Some(p) = self.get_own_property(cur, key) {
                 return match p.slot {
                     Slot::Data(v) => Ok(v),
@@ -815,6 +918,26 @@ impl Realm {
     }
 
     pub fn define_own(&mut self, o: ObjRef, key: PropKey, desc: PropDesc) -> Result<bool, Value> {
+        if let Kind::TypedArray(_) = self.heap.get(o).kind {
+            if let Some(n) = Self::numeric_key(&key) {
+                let Some(i) = self.ta_index(o, n) else { return Ok(false) };
+                if desc.configurable == Some(false)
+                    || desc.enumerable == Some(false)
+                    || desc.is_accessor()
+                    || desc.writable == Some(false)
+                {
+                    return Ok(false);
+                }
+                if let Some(v) = desc.value {
+                    let x = self.to_number(&v)?;
+                    // The conversion may have detached the buffer.
+                    if let Some(i) = self.ta_index(o, i as f64) {
+                        self.ta_put(o, i, x);
+                    }
+                }
+                return Ok(true);
+            }
+        }
         // Arrays: `length` and indices.
         if let Kind::Array(_) = self.heap.get(o).kind {
             if key.is_str("length") {
@@ -1091,6 +1214,21 @@ impl Realm {
 
     /// OrdinarySet, through the prototype chain.
     pub fn set(&mut self, o: ObjRef, key: PropKey, v: Value, receiver: Value) -> Result<bool, Value> {
+        if let Kind::TypedArray(_) = self.heap.get(o).kind {
+            if let Some(n) = Self::numeric_key(&key) {
+                if receiver == Value::Object(o) {
+                    // TypedArraySetElement: convert, then write if still in bounds.
+                    let x = self.to_number(&v)?;
+                    if let Some(i) = self.ta_index(o, n) {
+                        self.ta_put(o, i, x);
+                    }
+                    return Ok(true);
+                }
+                if self.ta_index(o, n).is_none() {
+                    return Ok(true);
+                }
+            }
+        }
         // Fast path: an existing writable own data property on the receiver.
         if receiver == Value::Object(o) {
             let obj = self.heap.get_mut(o);
@@ -1203,6 +1341,11 @@ impl Realm {
     pub fn has_property(&mut self, o: ObjRef, key: &PropKey) -> Result<bool, Value> {
         let mut cur = o;
         loop {
+            if let Kind::TypedArray(_) = self.heap.get(cur).kind {
+                if let Some(n) = Self::numeric_key(key) {
+                    return Ok(self.ta_index(cur, n).is_some());
+                }
+            }
             if self.get_own_property(cur, key).is_some() {
                 return Ok(true);
             }
@@ -1218,6 +1361,11 @@ impl Realm {
     }
 
     pub fn delete(&mut self, o: ObjRef, key: &PropKey) -> Result<bool, Value> {
+        if let Kind::TypedArray(_) = self.heap.get(o).kind {
+            if let Some(n) = Self::numeric_key(key) {
+                return Ok(self.ta_index(o, n).is_none());
+            }
+        }
         let obj = self.heap.get_mut(o);
         match &mut obj.kind {
             Kind::Array(a) => {
@@ -1267,6 +1415,10 @@ impl Realm {
                 }
             }
             Kind::Primitive(Value::String(s)) => indices.extend(0..s.len() as u32),
+            Kind::TypedArray(_) => {
+                let len = self.typed_array(o).map_or(0, |t| t.3);
+                indices.extend(0..len as u32);
+            }
             _ => {}
         }
         let dense_count = indices.len();

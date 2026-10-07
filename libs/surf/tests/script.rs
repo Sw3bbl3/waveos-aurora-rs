@@ -340,3 +340,17 @@ fn fetch_and_xhr_go_through_the_browser() {
         vec!["fetch true 200 application/json", "json a+b", "xhr 200 hi there nebula", "failed TypeError"]
     );
 }
+
+#[test]
+fn text_codecs_and_crypto() {
+    let (_p, _js, log, _) = page(
+        r##"<body><script>
+          const bytes = new TextEncoder().encode("héllo 😀");
+          console.log(bytes.length, [...bytes.slice(0, 3)].join(), new TextDecoder().decode(bytes));
+          console.log(new TextDecoder().decode(new Uint8Array([0xff, 0x41])));
+          const r = crypto.getRandomValues(new Uint32Array(4));
+          console.log(r.length, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID()));
+        </script></body>"##,
+    );
+    assert_eq!(*log.borrow(), vec!["11 104,195,169 héllo 😀", "\u{FFFD}A", "4 true"]);
+}

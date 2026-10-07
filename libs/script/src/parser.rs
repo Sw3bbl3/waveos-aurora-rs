@@ -416,8 +416,8 @@ impl<'a> Parser<'a> {
                     self.expect("(")?;
                     let test = self.expression(false)?;
                     self.expect(")")?;
-                    let cons = self.substatement()?;
-                    let alt = if self.eat_kw("else") { Some(Box::new(self.substatement()?)) } else { None };
+                    let cons = self.if_body()?;
+                    let alt = if self.eat_kw("else") { Some(Box::new(self.if_body()?)) } else { None };
                     Ok(Stmt::If(test, Box::new(cons), alt))
                 }
                 "for" => self.for_statement(),
@@ -478,7 +478,22 @@ impl<'a> Parser<'a> {
                     self.semicolon()?;
                     Ok(Stmt::Debugger)
                 }
-                "with" => Err(self.err("'with' statements are not supported")),
+                "with" => {
+                    if self.strict {
+                        return Err(self.err("Strict mode code may not include a with statement"));
+                    }
+                    self.advance();
+                    self.expect("(")?;
+                    let obj = self.expression(false)?;
+                    self.expect(")")?;
+                    // Names inside may refer to the object's properties, so
+                    // (as with eval) every binding stays reachable at run time.
+                    for f in self.fns.iter_mut() {
+                        f.has_eval = true;
+                    }
+                    let body = self.substatement()?;
+                    Ok(Stmt::With(obj, Box::new(body)))
+                }
                 "function" => {
                     // Annex B: a function declaration as an if body, etc.
                     if self.strict {
@@ -511,7 +526,27 @@ impl<'a> Parser<'a> {
     }
 
     /// The body of if/while/for: a statement, but not a declaration.
+    /// An `if` branch: Annex B also allows a plain function declaration.
+    fn if_body(&mut self) -> R<Stmt> {
+        if self.is_kw("function") {
+            return self.statement();
+        }
+        self.substatement()
+    }
+
+    /// The body of a loop or `with`, where no declaration may appear
+    /// (labelled functions included).
     fn substatement(&mut self) -> R<Stmt> {
+        let mut i = 0;
+        while matches!(self.peek_tok(i), Tok::Ident(..)) && self.is_at(i + 1, ":") {
+            i += 2;
+        }
+        let async_fn = self.is_kw_at(i, "async")
+            && self.is_kw_at(i + 1, "function")
+            && self.toks.get(self.pos + i + 1).is_some_and(|t| !t.nl_before);
+        if self.is_kw_at(i, "function") || async_fn {
+            return Err(self.err("a function declaration is not allowed here"));
+        }
         if self.is_let_declaration() && self.is_at(1, "[") {
             return Err(self.err("a lexical declaration is not allowed here"));
         }

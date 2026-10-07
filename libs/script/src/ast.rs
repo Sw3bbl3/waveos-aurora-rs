@@ -260,20 +260,41 @@ pub enum Stmt {
     Class(Rc<Class>),
     Return(Option<Expr>),
     If(Expr, P<Stmt>, Option<P<Stmt>>),
-    For { init: Option<ForInit>, test: Option<Expr>, update: Option<Expr>, body: P<Stmt> },
-    ForIn { head: ForHead, obj: Expr, body: P<Stmt> },
-    ForOf { head: ForHead, iter: Expr, body: P<Stmt>, is_await: bool },
+    For {
+        init: Option<ForInit>,
+        test: Option<Expr>,
+        update: Option<Expr>,
+        body: P<Stmt>,
+    },
+    ForIn {
+        head: ForHead,
+        obj: Expr,
+        body: P<Stmt>,
+    },
+    ForOf {
+        head: ForHead,
+        iter: Expr,
+        body: P<Stmt>,
+        is_await: bool,
+    },
     While(Expr, P<Stmt>),
     DoWhile(P<Stmt>, Expr),
     Break(Option<Name>),
     Continue(Option<Name>),
     Throw(Expr),
-    Try { block: Vec<Stmt>, param: Option<Pat>, handler: Option<Vec<Stmt>>, finalizer: Option<Vec<Stmt>> },
+    Try {
+        block: Vec<Stmt>,
+        param: Option<Pat>,
+        handler: Option<Vec<Stmt>>,
+        finalizer: Option<Vec<Stmt>>,
+    },
     Switch(Expr, Vec<Case>),
     Labeled(Name, P<Stmt>),
     Block(Vec<Stmt>),
     Empty,
     Debugger,
+    /// `with (object) body` (sloppy mode only).
+    With(Expr, P<Stmt>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

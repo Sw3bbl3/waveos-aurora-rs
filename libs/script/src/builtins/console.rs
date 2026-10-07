@@ -242,6 +242,21 @@ fn inspect_object(rt: &mut Realm, o: ObjRef, depth: usize, seen: &mut Vec<ObjRef
             let items: Vec<String> = entries.iter().map(|k| inspect_inner(rt, k, depth + 1, seen, false)).collect();
             format!("Set({size}) {}", join(items, "{", "}", indent))
         }
+        Kind::TypedArray(_) => {
+            let (kind, _, _, len) = rt.typed_array(o).unwrap();
+            let items: Vec<String> = (0..len.min(100))
+                .map(|i| inspect_inner(rt, &Value::Number(rt.ta_get(o, i)), depth + 1, seen, false))
+                .collect();
+            let mut items = items;
+            if len > 100 {
+                items.push(format!("... {} more items", len - 100));
+            }
+            format!("{}({len}) {}", kind.name(), join(items, "[", "]", indent))
+        }
+        Kind::ArrayBuffer(b) => {
+            let bytes: Vec<String> = b.bytes.iter().take(50).map(|x| format!("{x:02x}")).collect();
+            format!("ArrayBuffer {{ [Uint8Contents]: <{}>, byteLength: {} }}", bytes.join(" "), b.bytes.len())
+        }
         Kind::WeakMap(_) => String::from("WeakMap { <items unknown> }"),
         Kind::WeakSet(_) => String::from("WeakSet { <items unknown> }"),
         _ => {

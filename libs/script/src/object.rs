@@ -171,6 +171,110 @@ pub struct ArrayStore {
     pub len_writable: bool,
 }
 
+/// The element type of a typed array.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TAKind {
+    I8,
+    U8,
+    U8C,
+    I16,
+    U16,
+    I32,
+    U32,
+    F32,
+    F64,
+}
+
+impl TAKind {
+    pub const ALL: [TAKind; 9] = [
+        TAKind::I8,
+        TAKind::U8,
+        TAKind::U8C,
+        TAKind::I16,
+        TAKind::U16,
+        TAKind::I32,
+        TAKind::U32,
+        TAKind::F32,
+        TAKind::F64,
+    ];
+
+    pub fn size(self) -> usize {
+        match self {
+            TAKind::I8 | TAKind::U8 | TAKind::U8C => 1,
+            TAKind::I16 | TAKind::U16 => 2,
+            TAKind::I32 | TAKind::U32 | TAKind::F32 => 4,
+            TAKind::F64 => 8,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            TAKind::I8 => "Int8Array",
+            TAKind::U8 => "Uint8Array",
+            TAKind::U8C => "Uint8ClampedArray",
+            TAKind::I16 => "Int16Array",
+            TAKind::U16 => "Uint16Array",
+            TAKind::I32 => "Int32Array",
+            TAKind::U32 => "Uint32Array",
+            TAKind::F32 => "Float32Array",
+            TAKind::F64 => "Float64Array",
+        }
+    }
+
+    /// Reads an element (little-endian, as on every machine WaveOS runs on).
+    pub fn read(self, b: &[u8]) -> f64 {
+        match self {
+            TAKind::I8 => b[0] as i8 as f64,
+            TAKind::U8 | TAKind::U8C => b[0] as f64,
+            TAKind::I16 => i16::from_le_bytes([b[0], b[1]]) as f64,
+            TAKind::U16 => u16::from_le_bytes([b[0], b[1]]) as f64,
+            TAKind::I32 => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+            TAKind::U32 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+            TAKind::F32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+            TAKind::F64 => f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+        }
+    }
+
+    /// Writes a (already numeric) value, converting as the element type does.
+    pub fn write(self, b: &mut [u8], v: f64) {
+        use crate::numconv::{to_int32, to_uint32};
+        match self {
+            TAKind::I8 => b[0] = to_int32(v) as i8 as u8,
+            TAKind::U8 => b[0] = to_uint32(v) as u8,
+            TAKind::U8C => {
+                b[0] = if v.is_nan() || v <= 0.0 {
+                    0
+                } else if v >= 255.0 {
+                    255
+                } else {
+                    // Round half to even.
+                    let f = libm::floor(v);
+                    let r = if v - f > 0.5 || (v - f == 0.5 && f % 2.0 != 0.0) { f + 1.0 } else { f };
+                    r as u8
+                }
+            }
+            TAKind::I16 => b[..2].copy_from_slice(&(to_int32(v) as i16).to_le_bytes()),
+            TAKind::U16 => b[..2].copy_from_slice(&(to_uint32(v) as u16).to_le_bytes()),
+            TAKind::I32 => b[..4].copy_from_slice(&to_int32(v).to_le_bytes()),
+            TAKind::U32 => b[..4].copy_from_slice(&to_uint32(v).to_le_bytes()),
+            TAKind::F32 => b[..4].copy_from_slice(&(v as f32).to_le_bytes()),
+            TAKind::F64 => b[..8].copy_from_slice(&v.to_le_bytes()),
+        }
+    }
+}
+
+pub struct TypedArray {
+    pub kind: TAKind,
+    pub buffer: ObjRef,
+    pub offset: usize,
+    pub length: usize,
+}
+
+pub struct ArrayBuffer {
+    pub bytes: Vec<u8>,
+    pub detached: bool,
+}
+
 /// The state of an iterator helper (`iter.map(f)`, `iter.take(3)`…).
 pub struct IterHelper {
     /// map, filter, take, drop, flatMap, or a wrapper from Iterator.from.
@@ -381,6 +485,10 @@ pub enum Kind {
     /// An async-from-sync iterator wrapper.
     Wrapper(Value),
     IterHelper(Box<IterHelper>),
+    ArrayBuffer(Box<ArrayBuffer>),
+    TypedArray(Box<TypedArray>),
+    /// A DataView: (buffer, offset, length).
+    DataView(Box<(ObjRef, usize, usize)>),
 }
 
 pub struct Obj {
@@ -481,6 +589,9 @@ impl Obj {
             Kind::RegExpStringIterator(b) => out.push(b.0),
             Kind::ForIn(f) => out.push(f.2),
             Kind::ReturnSignal(x) | Kind::Wrapper(x) => v(x, out),
+            Kind::TypedArray(t) => out.push(t.buffer),
+            Kind::DataView(d) => out.push(d.0),
+            Kind::ArrayBuffer(_) => {}
             Kind::IterHelper(h) => {
                 out.push(h.underlying);
                 out.extend(h.inner);

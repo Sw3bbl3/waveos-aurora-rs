@@ -1277,6 +1277,49 @@ impl Realm {
                     self.suspend(g, GenState::Suspended);
                     return Ok(Value::Undefined);
                 }
+                Op::ToObject => {
+                    let v = self.pop();
+                    let o = self.to_object(&v)?;
+                    self.stack.push(Value::Object(o));
+                }
+                Op::WithGet(name, t) => {
+                    let Value::Object(o) = self.pop() else { unreachable!() };
+                    let key = self.ckey(name);
+                    if self.with_has(o, &key)? {
+                        let v = self.get(o, &key, Value::Object(o))?;
+                        self.stack.push(v);
+                        self.frame_mut().pc = t as usize;
+                    }
+                }
+                Op::WithSet(name, t) => {
+                    let Value::Object(o) = self.pop() else { unreachable!() };
+                    let key = self.ckey(name);
+                    if self.with_has(o, &key)? {
+                        let v = self.peek(0).clone();
+                        let strict = self.strict();
+                        self.put(&Value::Object(o), key, v, strict)?;
+                        self.frame_mut().pc = t as usize;
+                    }
+                }
+                Op::WithDelete(name, t) => {
+                    let Value::Object(o) = self.pop() else { unreachable!() };
+                    let key = self.ckey(name);
+                    if self.with_has(o, &key)? {
+                        let ok = self.delete(o, &key)?;
+                        self.stack.push(Value::Bool(ok));
+                        self.frame_mut().pc = t as usize;
+                    }
+                }
+                Op::WithGetMethod(name, t) => {
+                    let Value::Object(o) = self.pop() else { unreachable!() };
+                    let key = self.ckey(name);
+                    if self.with_has(o, &key)? {
+                        let f = self.get(o, &key, Value::Object(o))?;
+                        self.stack.push(f);
+                        self.stack.push(Value::Object(o));
+                        self.frame_mut().pc = t as usize;
+                    }
+                }
                 Op::Debugger | Op::Nop => {}
             }
         }
@@ -1351,6 +1394,20 @@ impl Realm {
             Some(t) => t.to_rust(),
             None => self.short_describe(f),
         }
+    }
+
+    /// Whether a `with` object provides `key` (honouring @@unscopables).
+    fn with_has(&mut self, o: ObjRef, key: &PropKey) -> Result<bool, Value> {
+        if !self.has_property(o, key)? {
+            return Ok(false);
+        }
+        let u = self.get(o, &PropKey::Sym(Sym::UNSCOPABLES), Value::Object(o))?;
+        if let Value::Object(uo) = u {
+            if self.get(uo, key, u.clone())?.truthy() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn delete_value(&mut self, obj: &Value, key: &PropKey) -> Result<bool, Value> {

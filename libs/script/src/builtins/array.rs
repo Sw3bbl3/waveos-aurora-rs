@@ -15,7 +15,7 @@ pub fn idx_key(i: f64) -> PropKey {
     }
 }
 
-fn get_i(rt: &mut Realm, o: ObjRef, i: f64) -> JsResult {
+pub(crate) fn get_i(rt: &mut Realm, o: ObjRef, i: f64) -> JsResult {
     rt.tick()?;
     if let Kind::Array(a) = &rt.heap.get(o).kind {
         if let Some(v) = a.dense.get(i as usize) {
@@ -27,7 +27,7 @@ fn get_i(rt: &mut Realm, o: ObjRef, i: f64) -> JsResult {
     rt.get(o, &idx_key(i), Value::Object(o))
 }
 
-fn set_i(rt: &mut Realm, o: ObjRef, i: f64, v: Value) -> Result<(), Value> {
+pub(crate) fn set_i(rt: &mut Realm, o: ObjRef, i: f64, v: Value) -> Result<(), Value> {
     let k = idx_key(i);
     if !rt.set(o, k.clone(), v, Value::Object(o))? {
         let d = rt.key_display(&k);
@@ -458,7 +458,7 @@ pub fn join_values(rt: &mut Realm, o: ObjRef, sep: &JsStr) -> Result<JsStr, Valu
     Ok(JsStr::from_units(out))
 }
 
-fn join(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn join(rt: &mut Realm, c: &Call) -> JsResult {
     let o = rt.to_object(&c.this)?;
     let sep = if c.arg(0).is_undefined() { JsStr::from(",") } else { rt.to_string(&c.arg(0))? };
     // Cycles (an array containing itself) join as empty.
@@ -480,7 +480,7 @@ fn to_string(rt: &mut Realm, c: &Call) -> JsResult {
     object::proto_to_string(rt, c)
 }
 
-fn to_locale_string(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn to_locale_string(rt: &mut Realm, c: &Call) -> JsResult {
     let (o, len) = this_len(rt, c)?;
     let mut parts = Vec::new();
     let mut k = 0.0;
@@ -498,7 +498,7 @@ fn to_locale_string(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::str(&parts.join(",")))
 }
 
-fn reverse(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn reverse(rt: &mut Realm, c: &Call) -> JsResult {
     let (o, len) = this_len(rt, c)?;
     if let Kind::Array(a) = &mut rt.heap.get_mut(o).kind {
         if a.dense.len() == a.len as usize && !a.dense.contains(&Value::Empty) {
@@ -533,7 +533,7 @@ fn reverse(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(c.this.clone())
 }
 
-fn index_of(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn index_of(rt: &mut Realm, c: &Call) -> JsResult {
     let (o, len) = this_len(rt, c)?;
     if len == 0.0 {
         return Ok(Value::Number(-1.0));
@@ -552,7 +552,7 @@ fn index_of(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Number(-1.0))
 }
 
-fn last_index_of(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn last_index_of(rt: &mut Realm, c: &Call) -> JsResult {
     let (o, len) = this_len(rt, c)?;
     if len == 0.0 {
         return Ok(Value::Number(-1.0));
@@ -580,7 +580,7 @@ fn last_index_of(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Number(-1.0))
 }
 
-fn includes(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn includes(rt: &mut Realm, c: &Call) -> JsResult {
     let (o, len) = this_len(rt, c)?;
     let mut k = rt.relative_index(&c.arg(1), len, 0.0)?;
     let target = c.arg(0);
@@ -646,7 +646,7 @@ fn iterate(rt: &mut Realm, c: &Call, kind: u8) -> JsResult {
 
 macro_rules! iter_fn {
     ($name:ident, $k:expr) => {
-        fn $name(rt: &mut Realm, c: &Call) -> JsResult {
+        pub(crate) fn $name(rt: &mut Realm, c: &Call) -> JsResult {
             iterate(rt, c, $k)
         }
     };
@@ -693,15 +693,15 @@ fn reduce_impl(rt: &mut Realm, c: &Call, right: bool) -> JsResult {
     Ok(acc)
 }
 
-fn reduce(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn reduce(rt: &mut Realm, c: &Call) -> JsResult {
     reduce_impl(rt, c, false)
 }
 
-fn reduce_right(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn reduce_right(rt: &mut Realm, c: &Call) -> JsResult {
     reduce_impl(rt, c, true)
 }
 
-fn fill(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn fill(rt: &mut Realm, c: &Call) -> JsResult {
     let (o, len) = this_len(rt, c)?;
     let start = rt.relative_index(&c.arg(1), len, 0.0)?;
     let end = rt.relative_index(&c.arg(2), len, len)?;
@@ -713,7 +713,7 @@ fn fill(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Object(o))
 }
 
-fn copy_within(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn copy_within(rt: &mut Realm, c: &Call) -> JsResult {
     let (o, len) = this_len(rt, c)?;
     let to = rt.relative_index(&c.arg(0), len, 0.0)?;
     let from = rt.relative_index(&c.arg(1), len, 0.0)?;
@@ -788,7 +788,7 @@ fn flat_map(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Object(a))
 }
 
-fn at(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn at(rt: &mut Realm, c: &Call) -> JsResult {
     let (o, len) = this_len(rt, c)?;
     let i = rt.to_integer(&c.arg(0))?;
     let k = if i >= 0.0 { i } else { len + i };
@@ -976,19 +976,19 @@ fn make_iter(rt: &mut Realm, c: &Call, kind: IterKind) -> JsResult {
     Ok(Value::Object(rt.alloc(Obj::new(Some(p), Kind::ArrayIterator(Value::Object(o), 0, kind)))))
 }
 
-fn values(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn values(rt: &mut Realm, c: &Call) -> JsResult {
     make_iter(rt, c, IterKind::Values)
 }
 
-fn keys(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn keys(rt: &mut Realm, c: &Call) -> JsResult {
     make_iter(rt, c, IterKind::Keys)
 }
 
-fn entries(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn entries(rt: &mut Realm, c: &Call) -> JsResult {
     make_iter(rt, c, IterKind::Entries)
 }
 
-fn iter_next(rt: &mut Realm, c: &Call) -> JsResult {
+pub(crate) fn iter_next(rt: &mut Realm, c: &Call) -> JsResult {
     let Value::Object(it) = c.this else {
         return Err(rt.type_error("not an Array Iterator"));
     };

@@ -245,6 +245,20 @@ pub enum Op {
     /// Async generators: awaits the yielded value.
     AsyncYield,
 
+    /// with: obj → (jumps with the property's value when obj has `name`,
+    /// else pops obj).
+    WithGet(u32, u32),
+    /// with: value obj → value (sets obj[name] and jumps when obj has it,
+    /// else pops obj).
+    WithSet(u32, u32),
+    /// with: obj → func obj (jumps when obj has `name`, else pops obj).
+    WithGetMethod(u32, u32),
+    /// with: obj → (deletes obj[name], pushing the result, and jumps when
+    /// obj has it, else pops obj).
+    WithDelete(u32, u32),
+    /// ToObject on the top value.
+    ToObject,
+
     Debugger,
     Nop,
 }
