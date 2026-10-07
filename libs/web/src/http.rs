@@ -325,6 +325,24 @@ pub fn fetch<C: Connect + ?Sized>(url: &Url, connect: &mut C) -> Result<Response
     request("GET", url, &[], &[], connect)
 }
 
+/// Somewhere to keep cookies between requests.
+pub trait Cookies {
+    /// The `Cookie` header for a request to `url` (empty for none).
+    fn header(&mut self, url: &Url) -> String;
+    /// Takes a `Set-Cookie` header from `url`'s response.
+    fn store(&mut self, url: &Url, set_cookie: &str);
+}
+
+/// No cookies: none sent, none kept.
+pub struct NoCookies;
+
+impl Cookies for NoCookies {
+    fn header(&mut self, _: &Url) -> String {
+        String::new()
+    }
+    fn store(&mut self, _: &Url, _: &str) {}
+}
+
 /// Sends a request, following up to five redirects as browsers do: 301,
 /// 302 and 303 turn a POST into a GET; 307 and 308 repeat it.
 pub fn request<C: Connect + ?Sized>(
@@ -333,6 +351,19 @@ pub fn request<C: Connect + ?Sized>(
     headers: &[(String, String)],
     body: &[u8],
     connect: &mut C,
+) -> Result<Response, Error> {
+    request_with_cookies(method, url, headers, body, connect, &mut NoCookies)
+}
+
+/// [`request`], sending and keeping cookies at every step (redirects
+/// often set them).
+pub fn request_with_cookies<C: Connect + ?Sized, K: Cookies + ?Sized>(
+    method: &str,
+    url: &Url,
+    headers: &[(String, String)],
+    body: &[u8],
+    connect: &mut C,
+    cookies: &mut K,
 ) -> Result<Response, Error> {
     let mut url = url.clone();
     let mut method = String::from(method);
@@ -343,8 +374,14 @@ pub fn request<C: Connect + ?Sized>(
         }
         let mut target = url.clone();
         target.fragment = None;
-        let req =
-            Request { method: &method, url: &target, headers: headers.to_vec(), body, keep_alive: connect.pooled() };
+        let mut all = headers.to_vec();
+        if !all.iter().any(|(k, _)| k.eq_ignore_ascii_case("cookie")) {
+            let c = cookies.header(&url);
+            if !c.is_empty() {
+                all.push((String::from("Cookie"), c));
+            }
+        }
+        let req = Request { method: &method, url: &target, headers: all, body, keep_alive: connect.pooled() };
         let (mut conn, reused) = connect.connect(&url, false)?;
         let (resp, reusable) = match exchange(&mut conn, &req) {
             Ok(r) => r,
@@ -358,6 +395,11 @@ pub fn request<C: Connect + ?Sized>(
         };
         if reusable {
             connect.release(&url, conn);
+        }
+        for (k, v) in &resp.headers {
+            if k.eq_ignore_ascii_case("set-cookie") {
+                cookies.store(&url, v);
+            }
         }
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
             if let Some(next) = resp.header("location").and_then(|l| url.join(l)) {

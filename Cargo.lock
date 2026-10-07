@@ -823,6 +823,7 @@ name = "nebula-engine"
 version = "0.7.0"
 dependencies = [
  "nebula-script",
+ "nebula-web",
 ]
 
 [[package]]

@@ -10,7 +10,8 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use nebula_secure::{Config, Roots, TlsStream};
-use nebula_web::http::{self, Connect, Error, Io, Response};
+use nebula_web::cookie::{Jar, Source};
+use nebula_web::http::{self, Connect, Cookies, Error, Io, Response};
 use nebula_web::Url;
 
 pub use nebula_secure;
@@ -24,6 +25,7 @@ const MAX_IDLE: usize = 8;
 
 static ROOTS: Mutex<Option<Arc<Roots>>> = Mutex::new(None);
 static POOL: Mutex<Vec<Idle>> = Mutex::new(Vec::new());
+static JAR: Mutex<Jar> = Mutex::new(Jar::new());
 
 struct Idle {
     key: String,
@@ -122,14 +124,34 @@ impl Connect for Pooled {
     }
 }
 
-/// GETs `url` (following redirects) over pooled connections.
-pub fn fetch(url: &Url) -> Result<Response, Error> {
-    http::fetch(url, &mut Pooled)
+/// The process's cookies: sent with, and kept from, [`fetch`] and
+/// [`request`]. Starts empty; an app that wants them kept loads and saves
+/// them itself.
+pub fn cookies() -> crate::sync::MutexGuard<'static, Jar> {
+    JAR.lock()
 }
 
-/// Sends any request (following redirects) over pooled connections.
+/// The process's cookie jar, as the HTTP client sees it.
+pub struct SharedCookies;
+
+impl Cookies for SharedCookies {
+    fn header(&mut self, url: &Url) -> String {
+        cookies().header(url, unix_time(), Source::Http)
+    }
+    fn store(&mut self, url: &Url, set_cookie: &str) {
+        cookies().set(url, set_cookie, unix_time(), Source::Http);
+    }
+}
+
+/// GETs `url` (following redirects) over pooled connections.
+pub fn fetch(url: &Url) -> Result<Response, Error> {
+    request("GET", url, &[], &[])
+}
+
+/// Sends any request (following redirects) over pooled connections, with
+/// the process's cookies.
 pub fn request(method: &str, url: &Url, headers: &[(String, String)], body: &[u8]) -> Result<Response, Error> {
-    http::request(method, url, headers, body, &mut Pooled)
+    http::request_with_cookies(method, url, headers, body, &mut Pooled, &mut SharedCookies)
 }
 
 /// The system's trusted root CAs (loaded once).

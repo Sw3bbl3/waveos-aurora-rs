@@ -15,6 +15,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use nebula_script::object::{Kind, NativeFn, Obj, CONFIGURABLE};
 use nebula_script::{Call, Embedder, JsResult, ObjRef, PropKey, Realm, Sym, Value, DEFAULT, HIDDEN};
+use nebula_web::cookie::{Jar, Source};
+use nebula_web::Url;
 
 /// Host objects are tagged with what they wrap.
 const NODE: u32 = 1;
@@ -96,7 +98,7 @@ pub struct Dom {
     pub storage: BTreeMap<String, String>,
     pub storage_dirty: bool,
     session: BTreeMap<String, String>,
-    pub cookie: BTreeMap<String, String>,
+    pub cookies: Box<dyn CookieHost>,
     pub focus: Option<NodeId>,
     pub alerts: Vec<String>,
     started: f64,
@@ -2001,26 +2003,40 @@ fn ready_state(rt: &mut Realm, _c: &Call) -> JsResult {
     Ok(Value::str(with_dom(rt, |_, dom| dom.ready_state)))
 }
 
+/// The browser's cookies, as `document.cookie` sees them.
+pub trait CookieHost {
+    fn with_jar(&mut self, f: &mut dyn FnMut(&mut Jar));
+}
+
+/// A page with no browser behind it keeps its own cookies.
+impl CookieHost for Jar {
+    fn with_jar(&mut self, f: &mut dyn FnMut(&mut Jar)) {
+        f(self)
+    }
+}
+
 fn cookie_get(rt: &mut Realm, _c: &Call) -> JsResult {
-    let s = with_dom(rt, |_, dom| dom.cookie.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; "));
+    let now = (rt.host.now_ms() / 1000.0) as i64;
+    let s = with_dom(rt, |_, dom| {
+        let mut s = String::new();
+        if let Some(url) = Url::parse(&dom.url) {
+            dom.cookies.with_jar(&mut |jar| s = jar.header(&url, now, Source::Script));
+        }
+        s
+    });
     Ok(Value::str(&s))
 }
 
 fn cookie_set(rt: &mut Realm, c: &Call) -> JsResult {
     let s = arg_str(rt, c, 0)?;
-    let first = s.split(';').next().unwrap_or("");
-    let expired =
-        s.to_ascii_lowercase().contains("max-age=0") || s.to_ascii_lowercase().contains("expires=thu, 01 jan 1970");
-    if let Some((k, v)) = first.split_once('=') {
-        let (k, v) = (String::from(k.trim()), String::from(v.trim()));
-        with_dom(rt, |_, dom| {
-            if expired {
-                dom.cookie.remove(&k);
-            } else {
-                dom.cookie.insert(k, v);
-            }
-        });
-    }
+    let now = (rt.host.now_ms() / 1000.0) as i64;
+    with_dom(rt, |_, dom| {
+        if let Some(url) = Url::parse(&dom.url) {
+            dom.cookies.with_jar(&mut |jar| {
+                jar.set(&url, &s, now, Source::Script);
+            });
+        }
+    });
     Ok(Value::Undefined)
 }
 
@@ -2427,7 +2443,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
         storage,
         storage_dirty: false,
         session: BTreeMap::new(),
-        cookie: BTreeMap::new(),
+        cookies: Box::new(nebula_web::cookie::Jar::new()),
         focus: None,
         alerts: Vec::new(),
         started,

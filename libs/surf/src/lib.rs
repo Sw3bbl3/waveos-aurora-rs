@@ -135,6 +135,13 @@ impl Scripts {
         script::dom_mut(&mut self.realm).focus
     }
 
+    /// Where `document.cookie` reads and writes go: the browser's jar, so
+    /// pages and their requests share cookies. (By default, a jar of the
+    /// page's own.)
+    pub fn set_cookies(&mut self, cookies: Box<dyn script::CookieHost>) {
+        script::dom_mut(&mut self.realm).cookies = cookies;
+    }
+
     pub fn set_viewport(&mut self, w: i32, h: i32) {
         script::dom_mut(&mut self.realm).viewport = (w, h);
     }

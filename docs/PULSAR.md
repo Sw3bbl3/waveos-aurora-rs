@@ -28,13 +28,13 @@ Our own regression suite (`libs/script/tests/js`) compares output byte for byte 
 | 1 | Language core: lexer, parser, compiler, VM, collector, core built-ins, `js` command, test262 runner | Done |
 | 2 | Symbols, iterators, generators, Map/Set, Promise, async/await, async generators, RegExp, Date | Done |
 | 3 | The DOM in Nebula: document and element bindings, events, timers, storage | Done; checked in WaveOS (QEMU) with the bundled demo, Wikipedia and Hacker News |
-| 4 | `fetch`, layout geometry, cookies, performance | `fetch`, `XMLHttpRequest` and geometry done; cookies and performance work remain |
+| 4 | `fetch`, layout geometry, cookies, performance | `fetch`, `XMLHttpRequest`, geometry and cookies done; performance work remains |
 
 ## In the browser
 
 `libs/surf/src/script.rs` binds the DOM; `libs/surf/src/js/prelude.js` adds web APIs written in JavaScript (URL, URLSearchParams, the observers, fetch, XMLHttpRequest, AbortController, FormData, TextEncoder and TextDecoder); `crypto.getRandomValues` and `crypto.randomUUID` draw on the system's random source. Nebula fetches scripts, including ones that scripts insert, and network requests on worker threads, and runs everything on its UI thread.
 
-Each page gets a fresh realm. Scripts see clicks, keys, typing and form submission before Nebula acts on them, and preventDefault() stops Nebula's default action. localStorage is kept per site in `/Settings/Nebula/Storage`. The `nebula_javascript` preference (0 or 1) turns scripts off.
+Each page gets a fresh realm. Scripts see clicks, keys, typing and form submission before Nebula acts on them, and preventDefault() stops Nebula's default action. localStorage is kept per site in `/Settings/Nebula/Storage`. Cookies follow RFC 6265 (domains, paths, expiry, Secure, HttpOnly, the `__Secure-` and `__Host-` prefixes): pages, their requests and `document.cookie` share one jar (`libs/web/src/cookie.rs`), and cookies with an expiry date are kept in `/Settings/Nebula/Cookies`. The `nebula_javascript` preference (0 or 1) turns scripts off.
 
 A test runs jQuery 3.7.1 against the DOM (`libs/surf/tests/script.rs`). `cargo run -p nebula-engine --example page -- page.html URL` runs a saved page's scripts on the host and reports what they did.
 
@@ -42,7 +42,7 @@ A test runs jQuery 3.7.1 against the DOM (`libs/surf/tests/script.rs`). `cargo r
 
 Proxy, BigInt (and so BigInt64Array), resizable and shared ArrayBuffers, direct `eval` (eval always runs in the global scope), modules, Intl, Unicode normalisation (`normalize` returns its input), and locale-aware collation beyond an approximation.
 
-In the browser: cookies are kept only while a page is open and aren't sent with requests; `fetch` doesn't apply same-origin rules (no cookies or credentials are sent, which limits the risk); `MutationObserver` never reports; `IntersectionObserver` reports every element as visible once; `getComputedStyle` returns inline styles; dataset is read-only.
+In the browser: there's no CORS, so `fetch` and `XMLHttpRequest` send cookies only to the page's own origin (as `credentials: "same-origin"` does) and other sites' responses never carry the user's cookies; there's no SameSite enforcement, so cookies also go with requests for other sites' images and scripts; `MutationObserver` never reports; `IntersectionObserver` reports every element as visible once; `getComputedStyle` returns inline styles; dataset is read-only.
 
 ## Try it
 

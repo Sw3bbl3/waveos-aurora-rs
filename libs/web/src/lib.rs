@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+pub mod cookie;
 pub mod http;
 pub mod url;
 

@@ -354,3 +354,27 @@ fn text_codecs_and_crypto() {
     );
     assert_eq!(*log.borrow(), vec!["11 104,195,169 héllo 😀", "\u{FFFD}A", "4 true"]);
 }
+
+#[test]
+fn document_cookie_follows_the_rules() {
+    let (mut p, mut js, log, clock) = page(
+        r##"<script>
+        document.cookie = "a=1";
+        document.cookie = "b=2; path=/";
+        document.cookie = "c=3; path=/elsewhere";
+        document.cookie = "d=4; domain=other.com";
+        document.cookie = "e=5; max-age=10";
+        document.cookie = "h=6; HttpOnly";
+        console.log(document.cookie);
+        document.cookie = "a=; max-age=0";
+        console.log(document.cookie);
+        </script>"##,
+    );
+    // Longer paths first: a and e belong to /dir.
+    assert_eq!(log.borrow()[0], "a=1; e=5; b=2");
+    assert_eq!(log.borrow()[1], "e=5; b=2");
+    // Ten seconds on, e has expired.
+    *clock.borrow_mut() = 20_000.0;
+    p.run_script(&mut js, "console.log(document.cookie)", "later");
+    assert_eq!(log.borrow()[2], "b=2");
+}

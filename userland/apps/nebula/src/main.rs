@@ -104,6 +104,65 @@ fn save_storage(url: &Url, m: &BTreeMap<String, String>) {
     }
 }
 
+/// Cookies are shared by every page and kept, when they ask to be, here.
+const COOKIES_PATH: &str = "/Settings/Nebula/Cookies";
+
+fn load_cookies() {
+    if let Ok(text) = corekit::fs::read_to_string(COOKIES_PATH) {
+        *corekit::web::cookies() = nebula_web::cookie::Jar::load(&text, corekit::web::unix_time());
+    }
+}
+
+/// Saves the persistent cookies, if any changed.
+fn save_cookies() {
+    let text = {
+        let mut jar = corekit::web::cookies();
+        if !core::mem::take(&mut jar.dirty) {
+            return;
+        }
+        jar.remove_expired(corekit::web::unix_time());
+        jar.dirty = false;
+        jar.save()
+    };
+    let _ = corekit::fs::mkdir("/Settings/Nebula");
+    if let Err(e) = corekit::fs::write(COOKIES_PATH, text.as_bytes()) {
+        corekit::io::log(&format!("[nebula] couldn't save cookies: {e}\n"));
+    }
+}
+
+/// `document.cookie` reads and writes the browser's jar.
+struct BrowserCookies;
+
+impl nebula_engine::script::CookieHost for BrowserCookies {
+    fn with_jar(&mut self, f: &mut dyn FnMut(&mut nebula_web::cookie::Jar)) {
+        f(&mut corekit::web::cookies())
+    }
+}
+
+/// Cookies for a script's request: only to the page's own origin, as with
+/// `credentials: "same-origin"` (there's no CORS yet, so a page must never
+/// read another site's responses as the user).
+struct SameOrigin(String);
+
+fn origin(u: &Url) -> String {
+    format!("{}://{}:{}", u.scheme, u.host, u.port_or_default())
+}
+
+impl http::Cookies for SameOrigin {
+    fn header(&mut self, url: &Url) -> String {
+        if origin(url) == self.0 {
+            corekit::web::SharedCookies.header(url)
+        } else {
+            String::new()
+        }
+    }
+    fn store(&mut self, url: &Url, set_cookie: &str) {
+        if origin(url) == self.0 {
+            corekit::web::SharedCookies.store(url, set_cookie);
+        }
+    }
+}
+
 // ------------------------------------------------------------------ loading
 
 struct Loaded {
@@ -648,6 +707,7 @@ impl Nebula {
             let (w, h) = ((self.view.w * 100 / self.zoom).max(200), (self.view.h * 100 / self.zoom).max(200));
             let url_s = url.to_string();
             let mut js = Scripts::new(alloc::boxed::Box::new(PageHost), &url_s, (w, h), load_storage(&url));
+            js.set_cookies(alloc::boxed::Box::new(BrowserCookies));
             for (name, code) in &scripts {
                 page.run_script(&mut js, code, name);
             }
@@ -715,8 +775,10 @@ impl Nebula {
             }
         }
         // fetch() and XMLHttpRequest, also in the background.
+        let page_origin = self.url.as_ref().map(origin).unwrap_or_default();
         for req in js.take_requests() {
             let (results, g) = (self.request_results.clone(), self.generation.load(Ordering::Relaxed));
+            let mut cookies = SameOrigin(page_origin.clone());
             let Some(u) = base.as_ref().and_then(|b| b.join(&req.url)) else {
                 results.lock().push((g, req.id, Err(String::from("bad URL"))));
                 continue;
@@ -726,7 +788,10 @@ impl Nebula {
                 let r = if u.scheme == "file" {
                     get(&u)
                 } else {
-                    corekit::web::request(&req.method, &u, &req.headers, req.body.as_bytes()).map_err(describe)
+                    let body = req.body.as_bytes();
+                    let pool = &mut corekit::web::Pooled;
+                    http::request_with_cookies(&req.method, &u, &req.headers, body, pool, &mut cookies)
+                        .map_err(describe)
                 };
                 let r = r.map(|resp| nebula_engine::script::HttpResponse {
                     status: resp.status,
@@ -1672,6 +1737,7 @@ impl App for Nebula {
 
     fn tick(&mut self, env: &mut Env) -> bool {
         let mut dirty = false;
+        save_cookies();
         // Scripts that scripts inserted, now loaded.
         let loaded: Vec<(u64, NodeId, String, Option<String>)> = core::mem::take(&mut *self.script_loads.lock());
         if !loaded.is_empty() {
@@ -1855,5 +1921,6 @@ fn main(args: corekit::Args) -> i32 {
         Some(a) => a.clone(),
         None => String::from(HOME),
     };
+    load_cookies();
     aurorakit::run(Nebula::new(&start))
 }
