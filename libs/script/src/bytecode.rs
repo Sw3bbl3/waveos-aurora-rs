@@ -314,9 +314,33 @@ pub struct Code {
     pub callees: Vec<(u32, u32)>,
     pub source: Option<(Rc<str>, u32, u32)>,
     pub file: Rc<str>,
+    /// For each name constant used by GetGlobal/SetGlobal: where the name
+    /// was last found ([`GLOBAL_LEXICAL`] | slot, or global property
+    /// index + 1) and the realm's lexical epoch then.
+    pub global_cache: Vec<core::cell::Cell<(u32, u32)>>,
 }
 
+/// Marks a global cache entry as a top-level let/const/class slot.
+pub const GLOBAL_LEXICAL: u32 = 1 << 31;
+
 impl Code {
+    /// A listing of the bytecode, nested functions included (for
+    /// `js --dump`).
+    pub fn dump(&self) -> alloc::string::String {
+        use core::fmt::Write;
+        let mut s = alloc::string::String::new();
+        let _ = writeln!(s, "== {} ({} locals)", self.name, self.n_locals);
+        for (i, op) in self.ops.iter().enumerate() {
+            let _ = writeln!(s, "{i:5}  {op:?}");
+        }
+        for c in &self.consts {
+            if let Const::Code(c) = c {
+                s.push_str(&c.dump());
+            }
+        }
+        s
+    }
+
     pub fn line_at(&self, pc: usize) -> u32 {
         let i = self.lines.partition_point(|(p, _)| *p as usize <= pc);
         if i == 0 {

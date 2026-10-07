@@ -31,12 +31,13 @@ pub fn function_ctor(rt: &mut Realm, c: &Call) -> JsResult {
         (true, true) => "async function*",
     };
     let src = format!("({kw} anonymous({params}\n) {{\n{body}\n}})");
-    let code =
+    let mut code =
         crate::compiler::compile_script(&script, alloc::rc::Rc::from(src.as_str()), alloc::rc::Rc::from("Function"))
             .map_err(|e| {
                 let msg = e.message.clone();
                 rt.error(crate::realm::ErrorKind::SyntaxError, &msg)
             })?;
+    rt.intern_code(&mut code);
     // Run in the global scope; the completion value is the function.
     let g = Value::Object(rt.global);
     let f = rt.call_code(code, g)?;

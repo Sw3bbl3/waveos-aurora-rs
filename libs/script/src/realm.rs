@@ -9,7 +9,7 @@ use crate::object::*;
 use crate::value::{JsStr, PropKey, Sym, Value};
 use crate::vm::Frame;
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -262,14 +262,37 @@ impl PropDesc {
     }
 }
 
+/// Interned keys for the engine's own lookups (a fresh `PropKey::from`
+/// would allocate and compare by content every time).
+#[derive(Default)]
+pub struct Names {
+    pub prototype: PropKey,
+    pub constructor: PropKey,
+    pub length: PropKey,
+    pub next: PropKey,
+    pub done: PropKey,
+    pub value: PropKey,
+}
+
 pub struct Realm {
     pub heap: Heap,
     pub stack: Vec<Value>,
     pub frames: Vec<Frame>,
     pub intr: Intrinsics,
+    /// Property keys the engine itself looks up often (interned).
+    pub names: Names,
     pub global: ObjRef,
     /// Global `let`, `const` and `class` bindings: value and constness.
-    pub lexicals: BTreeMap<JsStr, (Value, bool)>,
+    /// Top-level let, const and class bindings: name → slot in `lex`.
+    pub lexicals: BTreeMap<JsStr, u32>,
+    /// Their values, and whether each is const.
+    pub lex: Vec<(Value, bool)>,
+    /// Bumped whenever a top-level lexical binding is declared (which can
+    /// hide a global property that lookups had cached).
+    pub lex_epoch: u32,
+    /// Short strings shared by compiled code and built-in property names,
+    /// so a lookup usually finds its key by pointer.
+    atoms: BTreeSet<JsStr>,
     pub symbols: Vec<SymbolInfo>,
     pub registry: BTreeMap<JsStr, Sym>,
     pub jobs: VecDeque<Job>,
@@ -312,6 +335,7 @@ impl Realm {
             heap: Heap::default(),
             stack: Vec::with_capacity(1024),
             frames: Vec::new(),
+            names: Names::default(),
             intr: Intrinsics {
                 object_proto: placeholder,
                 function_proto: placeholder,
@@ -362,6 +386,9 @@ impl Realm {
             },
             global: placeholder,
             lexicals: BTreeMap::new(),
+            lex: Vec::new(),
+            lex_epoch: 0,
+            atoms: BTreeSet::new(),
             symbols: Vec::new(),
             registry: BTreeMap::new(),
             jobs: VecDeque::new(),
@@ -386,8 +413,21 @@ impl Realm {
         for name in Sym::WELL_KNOWN {
             rt.symbols.push(SymbolInfo { description: Some(JsStr::from(format!("Symbol.{name}"))), private: false });
         }
+        rt.names = Names {
+            prototype: rt.atom("prototype"),
+            constructor: rt.atom("constructor"),
+            length: rt.atom("length"),
+            next: rt.atom("next"),
+            done: rt.atom("done"),
+            value: rt.atom("value"),
+        };
         crate::builtins::setup(&mut rt);
         rt
+    }
+
+    /// An interned property key.
+    pub fn atom(&mut self, s: &str) -> PropKey {
+        PropKey::Str(self.intern(JsStr::from(s)))
     }
 
     // ------------------------------------------------------------ running
@@ -400,7 +440,34 @@ impl Realm {
 
     pub fn compile(&mut self, src: &str, file: &str) -> Result<Rc<Code>, Value> {
         let script = crate::parser::parse_script(src).map_err(|e| self.syntax_error(&e, file))?;
-        crate::compiler::compile_script(&script, Rc::from(src), Rc::from(file)).map_err(|e| self.syntax_error(&e, file))
+        let mut code = crate::compiler::compile_script(&script, Rc::from(src), Rc::from(file))
+            .map_err(|e| self.syntax_error(&e, file))?;
+        self.intern_code(&mut code);
+        Ok(code)
+    }
+
+    /// The shared copy of a short string.
+    pub fn intern(&mut self, s: JsStr) -> JsStr {
+        if s.len() > 32 {
+            return s;
+        }
+        if let Some(a) = self.atoms.get(&s) {
+            return a.clone();
+        }
+        self.atoms.insert(s.clone());
+        s
+    }
+
+    /// Interns a freshly compiled script's string constants.
+    pub(crate) fn intern_code(&mut self, code: &mut Rc<Code>) {
+        let Some(code) = Rc::get_mut(code) else { return };
+        for c in code.consts.iter_mut() {
+            match c {
+                crate::bytecode::Const::Str(s) => *s = self.intern(s.clone()),
+                crate::bytecode::Const::Code(inner) => self.intern_code(inner),
+                _ => {}
+            }
+        }
     }
 
     fn syntax_error(&mut self, e: &crate::lexer::SyntaxError, file: &str) -> Value {
@@ -495,7 +562,7 @@ impl Realm {
         }
         roots.push(self.global);
         roots.extend(self.intr.all());
-        for (v, _) in self.lexicals.values() {
+        for (v, _) in &self.lex {
             push(v, &mut roots);
         }
         for j in &self.jobs {
@@ -672,7 +739,10 @@ impl Realm {
 
     /// Defines a data property directly (no checks).
     pub fn define(&mut self, o: ObjRef, key: impl Into<PropKey>, v: Value, flags: u8) {
-        let key = key.into();
+        let key = match key.into() {
+            PropKey::Str(s) => PropKey::Str(self.intern(s)),
+            k => k,
+        };
         if let Kind::Array(_) = self.heap.get(o).kind {
             let _ = self.define_own(o, key, PropDesc::data(v, flags));
             return;
@@ -681,7 +751,11 @@ impl Realm {
     }
 
     pub fn define_accessor(&mut self, o: ObjRef, key: impl Into<PropKey>, get: Value, set: Value, flags: u8) {
-        self.heap.get_mut(o).props.insert(key.into(), Prop { slot: Slot::Accessor(get, set), flags });
+        let key = match key.into() {
+            PropKey::Str(s) => PropKey::Str(self.intern(s)),
+            k => k,
+        };
+        self.heap.get_mut(o).props.insert(key, Prop { slot: Slot::Accessor(get, set), flags });
     }
 
     /// Creates a native function object.
@@ -828,6 +902,27 @@ impl Realm {
     pub fn get(&mut self, o: ObjRef, key: &PropKey, receiver: Value) -> JsResult {
         let mut cur = o;
         loop {
+            // Ordinary objects: straight to the property map.
+            let obj = self.heap.get(cur);
+            if !matches!(obj.kind, Kind::TypedArray(_) | Kind::Array(_) | Kind::Primitive(Value::String(_))) {
+                match obj.props.get(key) {
+                    Some(Prop { slot: Slot::Data(v), .. }) => return Ok(v.clone()),
+                    Some(Prop { slot: Slot::Accessor(g, _), .. }) => {
+                        if g.is_undefined() {
+                            return Ok(Value::Undefined);
+                        }
+                        let g = g.clone();
+                        return self.call(&g, receiver, &[]);
+                    }
+                    None => match obj.proto {
+                        Some(p) => {
+                            cur = p;
+                            continue;
+                        }
+                        None => return Ok(Value::Undefined),
+                    },
+                }
+            }
             if let Kind::TypedArray(_) = self.heap.get(cur).kind {
                 if let Some(n) = Self::numeric_key(key) {
                     return Ok(match self.ta_index(cur, n) {
@@ -1534,6 +1629,22 @@ impl Realm {
         }
     }
 
+    /// [`Realm::call`] with arguments the caller no longer needs (a native
+    /// function takes them without a copy).
+    pub fn call_owned(&mut self, f: &Value, this: Value, args: Vec<Value>) -> JsResult {
+        if let Value::Object(fo) = f {
+            if let Kind::Native(n) = &self.heap.get(*fo).kind {
+                let nf = n.f;
+                let call = Call { this, args, new_target: Value::Undefined, callee: *fo };
+                self.enter_run()?;
+                let r = nf(self, &call);
+                self.run_depth -= 1;
+                return r;
+            }
+        }
+        self.call(f, this, &args)
+    }
+
     pub fn call(&mut self, f: &Value, this: Value, args: &[Value]) -> JsResult {
         let Value::Object(fo) = f else {
             return Err(self.type_error("value is not a function"));
@@ -1548,6 +1659,7 @@ impl Realm {
                 self.run_depth -= 1;
                 r
             }
+            Kind::Function(c) if !c.code.is_generator && !c.code.is_async => self.call_closure_slice(fo, this, args),
             Kind::Function(_) => self.call_closure(fo, this, args.to_vec(), Value::Undefined),
             Kind::Bound(b) => {
                 let (target, bthis) = (b.target, b.this.clone());
@@ -1589,7 +1701,7 @@ impl Realm {
     /// The prototype for an object created by `new_target` (subclassing).
     pub fn proto_from_ctor(&mut self, new_target: &Value, default: ObjRef) -> Result<ObjRef, Value> {
         if let Value::Object(nt) = new_target {
-            let p = self.get(*nt, &PropKey::from("prototype"), new_target.clone())?;
+            let p = self.get(*nt, &self.names.prototype.clone(), new_target.clone())?;
             if let Value::Object(p) = p {
                 return Ok(p);
             }
@@ -1717,7 +1829,7 @@ impl Realm {
         if let Kind::Array(a) = &self.heap.get(o).kind {
             return Ok(a.len as f64);
         }
-        let l = self.get(o, &PropKey::from("length"), Value::Object(o))?;
+        let l = self.get(o, &self.names.length.clone(), Value::Object(o))?;
         self.to_length(&l)
     }
 
@@ -1827,7 +1939,7 @@ impl Realm {
             return self.instance_of(v, &t);
         }
         let Value::Object(mut o) = v else { return Ok(false) };
-        let proto = self.get(*co, &PropKey::from("prototype"), c.clone())?;
+        let proto = self.get(*co, &self.names.prototype.clone(), c.clone())?;
         let Value::Object(p) = proto else {
             return Err(self.type_error("Function has non-object prototype in instanceof check"));
         };
@@ -1863,7 +1975,7 @@ impl Realm {
         if let (Value::Object(a), Value::Object(m)) = (v, &method) {
             if *m == self.intr.array_values && matches!(self.heap.get(*a).kind, Kind::Array(_)) {
                 let p = self.intr.array_iterator_proto;
-                let next = self.get(p, &PropKey::from("next"), Value::Object(p))?;
+                let next = self.get(p, &self.names.next.clone(), Value::Object(p))?;
                 if next == Value::Object(self.intr.array_iterator_next) {
                     return Ok(self.alloc(Obj::new(
                         None,
@@ -1891,7 +2003,7 @@ impl Realm {
         let Some((arr, i)) = fast else { return Ok(()) };
         let p = self.intr.array_iterator_proto;
         let iter = self.alloc(Obj::new(Some(p), Kind::ArrayIterator(Value::Object(arr), i, IterKind::Values)));
-        let next = self.get(iter, &PropKey::from("next"), Value::Object(iter))?;
+        let next = self.get(iter, &self.names.next.clone(), Value::Object(iter))?;
         if let Kind::IterRecord(r) = &mut self.heap.get_mut(rec).kind {
             r.iter = Value::Object(iter);
             r.next = next;
@@ -1904,7 +2016,7 @@ impl Realm {
         if !matches!(iter, Value::Object(_)) {
             return Err(self.type_error("Result of the Symbol.iterator method is not an object"));
         }
-        let next = self.get_v(&iter, &PropKey::from("next"))?;
+        let next = self.get_v(&iter, &self.names.next.clone())?;
         Ok(self.alloc(Obj::new(None, Kind::IterRecord(Box::new(IterRecord { iter, next, done: false, fast: None })))))
     }
 
@@ -1926,6 +2038,13 @@ impl Realm {
             if let Kind::IterRecord(r) = &mut self.heap.get_mut(rec).kind {
                 r.fast = Some((arr, i + 1));
             }
+            if let Kind::Array(a) = &self.heap.get(arr).kind {
+                if let Some(v) = a.dense.get(i as usize) {
+                    if *v != Value::Empty {
+                        return Ok(Some(v.clone()));
+                    }
+                }
+            }
             let v = self.get(arr, &PropKey::index(i), Value::Object(arr))?;
             return Ok(Some(v));
         }
@@ -1940,12 +2059,12 @@ impl Realm {
             self.set_iter_done(rec);
             return Err(self.type_error("Iterator result is not an object"));
         };
-        let d = self.get(ro, &PropKey::from("done"), r.clone())?;
+        let d = self.get(ro, &self.names.done.clone(), r.clone())?;
         if d.truthy() {
             self.set_iter_done(rec);
             return Ok(None);
         }
-        Ok(Some(self.get(ro, &PropKey::from("value"), r.clone())?))
+        Ok(Some(self.get(ro, &self.names.value.clone(), r.clone())?))
     }
 
     pub fn set_iter_done(&mut self, rec: ObjRef) {
@@ -1985,7 +2104,7 @@ impl Realm {
                 if a.dense.len() == a.len as usize && !a.dense.contains(&Value::Empty) {
                     let method = self.get_v(v, &PropKey::Sym(Sym::ITERATOR))?;
                     let p = self.intr.array_iterator_proto;
-                    let next = self.get(p, &PropKey::from("next"), Value::Object(p))?;
+                    let next = self.get(p, &self.names.next.clone(), Value::Object(p))?;
                     if method == Value::Object(self.intr.array_values)
                         && next == Value::Object(self.intr.array_iterator_next)
                     {
@@ -2062,8 +2181,8 @@ impl Realm {
     }
 
     pub fn global_value(&mut self, name: &str) -> JsResult {
-        if let Some((v, _)) = self.lexicals.get(&JsStr::from(name)) {
-            return Ok(v.clone());
+        if let Some(&i) = self.lexicals.get(&JsStr::from(name)) {
+            return Ok(self.lex[i as usize].0.clone());
         }
         let g = self.global;
         self.get_str(g, name)

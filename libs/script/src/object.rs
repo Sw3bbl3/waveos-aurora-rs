@@ -78,6 +78,20 @@ impl Props {
         self.position(key).map(|i| &self.entries[i].1)
     }
 
+    /// Where a key is, for callers that cache positions (check the key
+    /// again with [`Props::entry_at`]: removals shift entries).
+    pub fn index_of(&self, key: &PropKey) -> Option<usize> {
+        self.position(key)
+    }
+
+    pub fn entry_at(&self, i: usize) -> Option<(&PropKey, &Prop)> {
+        self.entries.get(i).map(|(k, p)| (k, p))
+    }
+
+    pub fn entry_at_mut(&mut self, i: usize) -> Option<&mut Prop> {
+        self.entries.get_mut(i).map(|(_, p)| p)
+    }
+
     pub fn get_mut(&mut self, key: &PropKey) -> Option<&mut Prop> {
         self.position(key).map(move |i| &mut self.entries[i].1)
     }

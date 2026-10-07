@@ -287,6 +287,12 @@ impl PropKey {
     }
 }
 
+impl Default for PropKey {
+    fn default() -> PropKey {
+        PropKey::Str(JsStr::empty())
+    }
+}
+
 impl From<&str> for PropKey {
     fn from(s: &str) -> PropKey {
         PropKey::Str(JsStr::from(s))

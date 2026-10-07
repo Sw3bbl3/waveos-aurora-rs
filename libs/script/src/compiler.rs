@@ -721,7 +721,9 @@ impl<'a> Compiler<'a> {
         span: Option<(u32, u32)>,
     ) -> Rc<Code> {
         let f = self.fns.pop().unwrap();
+        let global_cache = (0..f.consts.len()).map(|_| core::cell::Cell::new((0, 0))).collect();
         Rc::new(Code {
+            global_cache,
             name,
             ops: f.ops,
             consts: f.consts,
@@ -1029,18 +1031,14 @@ impl<'a> Compiler<'a> {
 
     fn statement(&mut self, s: &'a Stmt) -> R<()> {
         match s {
-            Stmt::Expr(e) => {
-                self.expr(e)?;
-                match self.fr().completion {
-                    Some(c) => {
-                        self.emit(Op::SetLocal(c));
-                        self.emit(Op::Pop);
-                    }
-                    None => {
-                        self.emit(Op::Pop);
-                    }
+            Stmt::Expr(e) => match self.fr().completion {
+                Some(c) => {
+                    self.expr(e)?;
+                    self.emit(Op::SetLocal(c));
+                    self.emit(Op::Pop);
                 }
-            }
+                None => self.expr_discarded(e)?,
+            },
             Stmt::Var(kind, decls) => {
                 for d in decls {
                     match &d.init {
@@ -1333,8 +1331,7 @@ impl<'a> Compiler<'a> {
                     self.emit(Op::CopyScope);
                 }
                 if let Some(u) = update {
-                    self.expr(u)?;
-                    self.emit(Op::Pop);
+                    self.expr_discarded(u)?;
                 }
                 self.emit(Op::Jump(top));
                 if let Some(e) = exit {
@@ -2258,6 +2255,16 @@ impl<'a> Compiler<'a> {
                 });
             }
         }
+        Ok(())
+    }
+
+    /// An expression whose value is thrown away: `i++` can then be `++i`.
+    fn expr_discarded(&mut self, e: &'a Expr) -> R<()> {
+        match e {
+            Expr::Update { inc, target, .. } => self.update(*inc, true, target)?,
+            _ => self.expr(e)?,
+        }
+        self.emit(Op::Pop);
         Ok(())
     }
 

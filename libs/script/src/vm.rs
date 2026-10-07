@@ -6,7 +6,7 @@
 //! Generators and async functions suspend by moving their frame and its
 //! slice of the stack into the generator object.
 
-use crate::bytecode::{Code, CodeKind, Const, Op};
+use crate::bytecode::{Code, CodeKind, Const, Op, GLOBAL_LEXICAL};
 use crate::heap::ObjRef;
 use crate::numconv;
 use crate::object::*;
@@ -28,11 +28,28 @@ pub struct Handler {
     pub finally: bool,
 }
 
+/// Where a new frame's arguments are.
+enum Args {
+    Owned(Vec<Value>),
+    /// On the stack from this index, with the callee and `this` just below.
+    OnStack(usize),
+}
+
+/// Where a global name lives (see [`Code::global_cache`]).
+#[derive(Clone, Copy)]
+enum GlobalAt {
+    Lexical(usize),
+    Property(usize),
+}
+
 pub struct Frame {
     pub code: Rc<Code>,
     pub func: Value,
     pub pc: usize,
     pub base: usize,
+    /// The stack height to go back to when the frame ends (below `base`
+    /// when the callee and `this` were left under the arguments).
+    pub floor: usize,
     pub this: Value,
     pub new_target: Value,
     pub scope: Option<ObjRef>,
@@ -88,6 +105,7 @@ impl Realm {
             func: Value::Undefined,
             pc: 0,
             base,
+            floor: base,
             this,
             new_target: Value::Undefined,
             scope: None,
@@ -108,6 +126,23 @@ impl Realm {
         }
     }
 
+    /// Calls closure `f` (not a generator or async function) from native
+    /// code, its arguments copied straight onto the stack.
+    pub(crate) fn call_closure_slice(&mut self, f: ObjRef, this: Value, args: &[Value]) -> JsResult {
+        self.stack.push(Value::Object(f));
+        self.stack.push(this.clone());
+        let start = self.stack.len();
+        self.stack.extend_from_slice(args);
+        match self.push_frame_from(f, this, Args::OnStack(start), Value::Undefined, false, true) {
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => self.run(None),
+            Err(e) => {
+                self.stack.truncate(start - 2);
+                Err(e)
+            }
+        }
+    }
+
     pub(crate) fn construct_closure(&mut self, f: ObjRef, args: Vec<Value>, new_target: Value) -> JsResult {
         match self.push_frame(f, Value::Undefined, args, new_target, true, true)? {
             Some(v) => Ok(v),
@@ -122,6 +157,18 @@ impl Realm {
         f: ObjRef,
         this: Value,
         args: Vec<Value>,
+        new_target: Value,
+        construct: bool,
+        boundary: bool,
+    ) -> Result<Option<Value>, Value> {
+        self.push_frame_from(f, this, Args::Owned(args), new_target, construct, boundary)
+    }
+
+    fn push_frame_from(
+        &mut self,
+        f: ObjRef,
+        this: Value,
+        args: Args,
         new_target: Value,
         construct: bool,
         boundary: bool,
@@ -156,15 +203,30 @@ impl Realm {
             };
             (t, Value::Undefined)
         };
-        let base = self.stack.len();
         let n_params = code.n_params as usize;
-        for i in 0..code.n_locals as usize {
-            self.stack.push(if i < n_params {
-                args.get(i).cloned().unwrap_or(Value::Undefined)
-            } else {
-                Value::Undefined
-            });
-        }
+        let n_locals = code.n_locals as usize;
+        let (base, floor, args) = match args {
+            Args::Owned(args) => {
+                let base = self.stack.len();
+                for i in 0..n_locals {
+                    self.stack.push(if i < n_params {
+                        args.get(i).cloned().unwrap_or(Value::Undefined)
+                    } else {
+                        Value::Undefined
+                    });
+                }
+                (base, base, args)
+            }
+            // The arguments become the parameters where they are; the
+            // callee and `this` below them go when the frame ends.
+            Args::OnStack(start) => {
+                let kept = if code.keep_args { self.stack[start..].to_vec() } else { Vec::new() };
+                let argc = self.stack.len() - start;
+                self.stack.truncate(start + argc.min(n_params));
+                self.stack.resize(start + n_locals, Value::Undefined);
+                (start, start - 2, kept)
+            }
+        };
         let is_gen = code.is_generator;
         let is_async = code.is_async;
         let mut frame = Frame {
@@ -172,6 +234,7 @@ impl Realm {
             func: Value::Object(f),
             pc: 0,
             base,
+            floor,
             this,
             new_target,
             scope,
@@ -187,7 +250,7 @@ impl Realm {
             frame.boundary = true;
             let proto = if is_gen {
                 let default = if is_async { self.intr.async_generator_proto } else { self.intr.generator_proto };
-                let p = self.get(f, &PropKey::from("prototype"), Value::Object(f))?;
+                let p = self.get(f, &self.names.prototype.clone(), Value::Object(f))?;
                 Some(match p {
                     Value::Object(p) => p,
                     _ => default,
@@ -239,6 +302,7 @@ impl Realm {
         };
         self.check_frames()?;
         frame.base = self.stack.len();
+        frame.floor = frame.base;
         frame.boundary = true;
         self.stack.extend(saved);
         let at_delegate = matches!(frame.code.ops.get(frame.pc), Some(Op::YieldDelegate(_)));
@@ -306,7 +370,7 @@ impl Realm {
                 }
             }
             let frame = self.frames.pop().unwrap();
-            self.stack.truncate(frame.base);
+            self.stack.truncate(frame.floor);
             if let Some(g) = frame.generator {
                 if let Kind::Generator(gs) = &mut self.heap.get_mut(g).kind {
                     gs.state = GenState::Done;
@@ -547,9 +611,9 @@ impl Realm {
                 }
                 Op::TypeofGlobal(name) => {
                     let key = self.cstr(name);
-                    let v = match self.lexicals.get(&key) {
-                        Some((Value::Empty, _)) => return Err(self.tdz_error(name)),
-                        Some((v, _)) => v.clone(),
+                    let v = match self.lexicals.get(&key).map(|&i| &self.lex[i as usize].0) {
+                        Some(Value::Empty) => return Err(self.tdz_error(name)),
+                        Some(v) => v.clone(),
                         None => {
                             let g = self.global;
                             let k = PropKey::Str(key);
@@ -600,13 +664,15 @@ impl Realm {
                             self.error(ErrorKind::SyntaxError, &format!("Identifier '{n}' has already been declared"))
                         );
                     }
-                    self.lexicals.insert(key, (Value::Empty, is_const));
+                    self.lexicals.insert(key, self.lex.len() as u32);
+                    self.lex.push((Value::Empty, is_const));
+                    self.lex_epoch += 1;
                 }
                 Op::InitLexical(name) => {
                     let v = self.peek(0).clone();
                     let key = self.cstr(name);
-                    if let Some(slot) = self.lexicals.get_mut(&key) {
-                        slot.0 = v;
+                    if let Some(&i) = self.lexicals.get(&key) {
+                        self.lex[i as usize].0 = v;
                     }
                 }
                 Op::ThrowConst(_) => {
@@ -900,13 +966,13 @@ impl Realm {
                     let b = self.pop();
                     let a = self.pop();
                     let r = self.loose_eq(&a, &b)?;
-                    self.stack.push(Value::Bool(r == (op == Op::Eq)));
+                    self.stack.push(Value::Bool(r == matches!(op, Op::Eq)));
                 }
                 Op::StrictEq | Op::StrictNe => {
                     let b = self.pop();
                     let a = self.pop();
                     let r = self.strict_eq(&a, &b);
-                    self.stack.push(Value::Bool(r == (op == Op::StrictEq)));
+                    self.stack.push(Value::Bool(r == matches!(op, Op::StrictEq)));
                 }
                 Op::Lt | Op::Le | Op::Gt | Op::Ge => {
                     let b = self.pop();
@@ -951,7 +1017,7 @@ impl Realm {
                 }
                 Op::Inc | Op::Dec => {
                     let Value::Number(x) = self.pop() else { unreachable!() };
-                    self.stack.push(Value::Number(if op == Op::Inc { x + 1.0 } else { x - 1.0 }));
+                    self.stack.push(Value::Number(if matches!(op, Op::Inc) { x + 1.0 } else { x - 1.0 }));
                 }
                 Op::ToString => {
                     let a = self.pop();
@@ -1224,13 +1290,13 @@ impl Realm {
                     let Value::Object(ro) = r else {
                         return Err(self.type_error("Iterator result is not an object"));
                     };
-                    let done = self.get(ro, &PropKey::from("done"), r.clone())?;
+                    let done = self.get(ro, &self.names.done.clone(), r.clone())?;
                     if done.truthy() {
                         let Value::Object(rec) = *self.peek(0) else { unreachable!() };
                         self.set_iter_done(rec);
                         self.frame_mut().pc = t as usize;
                     } else {
-                        let v = self.get(ro, &PropKey::from("value"), r.clone())?;
+                        let v = self.get(ro, &self.names.value.clone(), r.clone())?;
                         self.stack.push(v);
                     }
                 }
@@ -1420,22 +1486,61 @@ impl Realm {
         Ok(r)
     }
 
-    fn get_global(&mut self, name: u32) -> JsResult {
-        let key = self.cstr(name);
-        if let Some((v, _)) = self.lexicals.get(&key) {
-            if *v == Value::Empty {
-                return Err(self.tdz_error(name));
-            }
-            return Ok(v.clone());
+    /// Where a global name was found last time, if that still holds: a
+    /// lexical slot, or the global object's own data property at an index.
+    fn global_cached(&self, name: u32) -> Option<GlobalAt> {
+        let code = &self.frame().code;
+        let (at, epoch) = code.global_cache[name as usize].get();
+        if at & GLOBAL_LEXICAL != 0 {
+            return Some(GlobalAt::Lexical((at & !GLOBAL_LEXICAL) as usize));
         }
-        let g = self.global;
-        let k = PropKey::Str(key);
-        // Fast path: an own data property of the global object.
-        if let Some(p) = self.heap.get(g).props.get(&k) {
-            if let Slot::Data(v) = &p.slot {
+        if at == 0 || epoch != self.lex_epoch {
+            return None;
+        }
+        let i = at as usize - 1;
+        let (k, p) = self.heap.get(self.global).props.entry_at(i)?;
+        match (k, &p.slot) {
+            (PropKey::Str(s), Slot::Data(_)) if s == code.str_const(name) => Some(GlobalAt::Property(i)),
+            _ => None,
+        }
+    }
+
+    /// Finds a global name the slow way, remembering where.
+    fn global_lookup(&mut self, name: u32) -> Option<GlobalAt> {
+        let key = self.cstr(name);
+        let cell = |rt: &Self, v| rt.frame().code.global_cache[name as usize].set(v);
+        if let Some(&i) = self.lexicals.get(&key) {
+            cell(self, (GLOBAL_LEXICAL | i, 0));
+            return Some(GlobalAt::Lexical(i as usize));
+        }
+        let i = self.heap.get(self.global).props.index_of(&PropKey::Str(key))?;
+        if let Slot::Data(_) = self.heap.get(self.global).props.entry_at(i)?.1.slot {
+            cell(self, (i as u32 + 1, self.lex_epoch));
+            return Some(GlobalAt::Property(i));
+        }
+        None
+    }
+
+    fn get_global(&mut self, name: u32) -> JsResult {
+        match self.global_cached(name).or_else(|| self.global_lookup(name)) {
+            Some(GlobalAt::Lexical(i)) => {
+                let v = &self.lex[i].0;
+                if *v == Value::Empty {
+                    return Err(self.tdz_error(name));
+                }
                 return Ok(v.clone());
             }
+            Some(GlobalAt::Property(i)) => {
+                if let Some((_, p)) = self.heap.get(self.global).props.entry_at(i) {
+                    if let Slot::Data(v) = &p.slot {
+                        return Ok(v.clone());
+                    }
+                }
+            }
+            None => {}
         }
+        let g = self.global;
+        let k = self.ckey(name);
         if self.has_property(g, &k)? {
             return self.get(g, &k, Value::Object(g));
         }
@@ -1444,17 +1549,32 @@ impl Realm {
     }
 
     fn set_global_binding(&mut self, name: u32, v: Value) -> Result<(), Value> {
-        let key = self.cstr(name);
-        if let Some((cur, is_const)) = self.lexicals.get(&key) {
-            if *cur == Value::Empty {
-                return Err(self.tdz_error(name));
+        match self.global_cached(name).or_else(|| self.global_lookup(name)) {
+            Some(GlobalAt::Lexical(i)) => {
+                let (cur, is_const) = &self.lex[i];
+                if *cur == Value::Empty {
+                    return Err(self.tdz_error(name));
+                }
+                if *is_const {
+                    return Err(self.type_error("Assignment to constant variable."));
+                }
+                self.lex[i].0 = v;
+                return Ok(());
             }
-            if *is_const {
-                return Err(self.type_error("Assignment to constant variable."));
+            Some(GlobalAt::Property(i)) => {
+                let g = self.global;
+                if let Some(p) = self.heap.get_mut(g).props.entry_at_mut(i) {
+                    if p.writable() {
+                        if let Slot::Data(slot) = &mut p.slot {
+                            *slot = v;
+                            return Ok(());
+                        }
+                    }
+                }
             }
-            self.lexicals.get_mut(&key).unwrap().0 = v;
-            return Ok(());
+            None => {}
         }
+        let key = self.cstr(name);
         let g = self.global;
         let k = PropKey::Str(key);
         let strict = self.strict();
@@ -1506,10 +1626,8 @@ impl Realm {
         if let Value::Object(fo) = f {
             if let Kind::Function(c) = &self.heap.get(fo).kind {
                 if !c.code.is_generator && !c.code.is_async {
-                    let args: Vec<Value> = self.stack.split_off(start);
-                    let this = self.stack.pop().unwrap();
-                    self.stack.pop();
-                    return self.push_frame(fo, this, args, Value::Undefined, false, false);
+                    let this = self.stack[start - 1].clone();
+                    return self.push_frame_from(fo, this, Args::OnStack(start), Value::Undefined, false, false);
                 }
             }
         }
@@ -1520,7 +1638,7 @@ impl Realm {
         let args: Vec<Value> = self.stack.split_off(start);
         let this = self.stack.pop().unwrap();
         self.stack.pop();
-        self.call(&f, this, &args).map(Some)
+        self.call_owned(&f, this, args).map(Some)
     }
 
     fn new_from_stack(&mut self, f: Value, start: usize) -> Result<Option<Value>, Value> {
@@ -1556,7 +1674,7 @@ impl Realm {
             v = this;
         }
         let frame = self.frames.pop().unwrap();
-        self.stack.truncate(frame.base);
+        self.stack.truncate(frame.floor);
         if let Some(g) = frame.generator {
             let promise = match &mut self.heap.get_mut(g).kind {
                 Kind::Generator(gs) => {
@@ -1618,9 +1736,9 @@ impl Realm {
         let Value::Object(ro) = result else {
             return Err(self.type_error("Iterator result is not an object"));
         };
-        let done = self.get(ro, &PropKey::from("done"), result.clone())?;
+        let done = self.get(ro, &self.names.done.clone(), result.clone())?;
         if done.truthy() {
-            let v = self.get(ro, &PropKey::from("value"), result.clone())?;
+            let v = self.get(ro, &self.names.value.clone(), result.clone())?;
             if mode == 2 {
                 let sig = self.alloc(Obj::new(None, Kind::ReturnSignal(v)));
                 return Err(Value::Object(sig));
@@ -1678,7 +1796,7 @@ impl Realm {
         // Inside an arrow, `super()` refers to the enclosing constructor.
         let ctor = match &self.heap.get(ctor).kind {
             Kind::Function(c) if c.code.kind == CodeKind::Arrow => match c.home {
-                Some(h) => match self.get_own_property(h, &PropKey::from("constructor")) {
+                Some(h) => match self.get_own_property(h, &self.names.constructor.clone()) {
                     Some(Prop { slot: Slot::Data(Value::Object(c)), .. }) => c,
                     _ => ctor,
                 },
@@ -1750,7 +1868,7 @@ impl Realm {
                     return Err(self.type_error(&format!("Class extends value {d} is not a constructor or null")));
                 }
                 let ho = h.as_object().unwrap();
-                let pp = self.get(ho, &PropKey::from("prototype"), h.clone())?;
+                let pp = self.get(ho, &self.names.prototype.clone(), h.clone())?;
                 let pp = match pp {
                     Value::Object(p) => Some(p),
                     Value::Null => None,
@@ -2087,6 +2205,13 @@ impl Realm {
 }
 
 fn js_mod(x: f64, y: f64) -> f64 {
+    // Small integers (the usual case) without a call to fmod. The result
+    // takes x's sign, so 0 from a negative x is -0.
+    const SAFE: f64 = 9007199254740992.0;
+    if x.abs() < SAFE && y.abs() < SAFE && y != 0.0 && x == (x as i64) as f64 && y == (y as i64) as f64 {
+        let r = (x as i64 % y as i64) as f64;
+        return if r == 0.0 && x.is_sign_negative() { -0.0 } else { r };
+    }
     if y.is_infinite() && x.is_finite() {
         return x;
     }

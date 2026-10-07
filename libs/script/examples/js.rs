@@ -22,6 +22,14 @@ impl Host for StdHost {
 fn main() {
     let mut rt = Realm::new(Box::new(StdHost));
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "--dump") {
+        let src = std::fs::read_to_string(&args[2]).expect("read file");
+        match rt.compile(&src, &args[2]) {
+            Ok(code) => print!("{}", code.dump()),
+            Err(e) => eprintln!("{}", rt.describe_error(&e)),
+        }
+        return;
+    }
     if let Some(path) = args.get(1) {
         let src = std::fs::read_to_string(path).expect("read file");
         let r = rt.eval(&src, path);

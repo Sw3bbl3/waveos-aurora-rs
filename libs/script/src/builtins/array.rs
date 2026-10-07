@@ -832,46 +832,65 @@ pub fn sort_values(rt: &mut Realm, v: &mut [Value], cmp: &Value) -> Result<(), V
     if n < 2 {
         return Ok(());
     }
-    // Insertion sort for small runs, then merge.
-    const RUN: usize = 16;
+    // A natural merge sort (stable): find the runs already in order (a
+    // strictly descending run is reversed), extend short ones by insertion,
+    // then merge neighbours. Sorted or reversed input takes n - 1 compares.
+    const MIN_RUN: usize = 16;
+    let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;
     while i < n {
-        let end = (i + RUN).min(n);
-        for j in i + 1..end {
-            let mut k = j;
-            while k > i && compare(rt, cmp, &v[k - 1], &v[k])? == Ordering::Greater {
-                v.swap(k - 1, k);
-                k -= 1;
+        let mut j = i + 1;
+        if j < n && compare(rt, cmp, &v[j], &v[j - 1])? == Ordering::Less {
+            while j < n && compare(rt, cmp, &v[j], &v[j - 1])? == Ordering::Less {
+                j += 1;
+            }
+            v[i..j].reverse();
+        } else {
+            while j < n && compare(rt, cmp, &v[j], &v[j - 1])? != Ordering::Less {
+                j += 1;
             }
         }
+        let end = if j - i < MIN_RUN { (i + MIN_RUN).min(n) } else { j };
+        for k in j..end {
+            let mut m = k;
+            while m > i && compare(rt, cmp, &v[m - 1], &v[m])? == Ordering::Greater {
+                v.swap(m - 1, m);
+                m -= 1;
+            }
+        }
+        runs.push((i, end));
         i = end;
     }
-    let mut width = RUN;
     let mut buf: Vec<Value> = Vec::with_capacity(n);
-    while width < n {
-        let mut lo = 0;
-        while lo < n {
-            let mid = (lo + width).min(n);
-            let hi = (lo + 2 * width).min(n);
-            if mid < hi {
-                buf.clear();
-                let (mut a, mut b) = (lo, mid);
-                while a < mid && b < hi {
-                    if compare(rt, cmp, &v[b], &v[a])? == Ordering::Less {
-                        buf.push(v[b].clone());
-                        b += 1;
-                    } else {
-                        buf.push(v[a].clone());
-                        a += 1;
-                    }
-                }
-                buf.extend_from_slice(&v[a..mid]);
-                buf.extend_from_slice(&v[b..hi]);
-                v[lo..hi].clone_from_slice(&buf);
+    while runs.len() > 1 {
+        let mut merged = Vec::with_capacity(runs.len().div_ceil(2));
+        for pair in runs.chunks(2) {
+            let &[(lo, mid), (_, hi)] = pair else {
+                merged.push(pair[0]);
+                continue;
+            };
+            // Already in order across the join: nothing to do.
+            if compare(rt, cmp, &v[mid], &v[mid - 1])? != Ordering::Less {
+                merged.push((lo, hi));
+                continue;
             }
-            lo += 2 * width;
+            buf.clear();
+            let (mut a, mut b) = (lo, mid);
+            while a < mid && b < hi {
+                if compare(rt, cmp, &v[b], &v[a])? == Ordering::Less {
+                    buf.push(v[b].clone());
+                    b += 1;
+                } else {
+                    buf.push(v[a].clone());
+                    a += 1;
+                }
+            }
+            buf.extend_from_slice(&v[a..mid]);
+            buf.extend_from_slice(&v[b..hi]);
+            v[lo..hi].clone_from_slice(&buf);
+            merged.push((lo, hi));
         }
-        width *= 2;
+        runs = merged;
     }
     Ok(())
 }

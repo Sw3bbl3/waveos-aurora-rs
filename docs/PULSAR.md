@@ -28,7 +28,27 @@ Our own regression suite (`libs/script/tests/js`) compares output byte for byte 
 | 1 | Language core: lexer, parser, compiler, VM, collector, core built-ins, `js` command, test262 runner | Done |
 | 2 | Symbols, iterators, generators, Map/Set, Promise, async/await, async generators, RegExp, Date | Done |
 | 3 | The DOM in Nebula: document and element bindings, events, timers, storage | Done; checked in WaveOS (QEMU) with the bundled demo, Wikipedia and Hacker News |
-| 4 | `fetch`, layout geometry, cookies, performance | `fetch`, `XMLHttpRequest`, geometry and cookies done; performance work remains |
+| 4 | `fetch`, layout geometry, cookies, performance | Done: see Performance below; inline caches for property access are next |
+
+## Performance
+
+Pulsar is an interpreter: no JIT, and so no machine code made at run time. `libs/script/bench` has small benchmarks. `cargo run --release -p nebula-script --example js -- --dump file.js` lists the bytecode a script compiles to.
+
+| Benchmark | What it does | Before | Now |
+|---|---|---:|---:|
+| `loop.js` | 3 million iterations of arithmetic on a top-level `let` | 0.50 s | 0.18 s |
+| `props.js` | 500,000 class instances, each calling a method | 0.41 s | 0.27 s |
+| `arrays.js` | `map`, `filter`, `reduce` and `sort` over 200,000 numbers | 0.33 s | 0.14 s |
+| `strings.js` | building, joining and splitting 100,000 strings | 0.10 s | 0.09 s |
+
+Measured on an Apple silicon Mac, best of three runs. What changed:
+- Top-level variables and global functions are found through a per-instruction cache instead of by name.
+- Short strings in compiled code and built-in property names are interned, so most property lookups match by pointer.
+- Ordinary objects skip the exotic-object checks when reading properties.
+- Calls between JavaScript functions take their arguments where they already are on the stack.
+- `sort` is a natural merge sort, so data that is already in order, or reversed, needs one comparison per element.
+- `x % y` on integers no longer calls `fmod`.
+- `i++` whose value is unused compiles like `++i`.
 
 ## In the browser
 
