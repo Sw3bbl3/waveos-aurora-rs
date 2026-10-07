@@ -78,6 +78,40 @@ pub fn parse(html: &str) -> Document {
             Token::End(name) => b.end(&name),
         }
     }
+    // Every document has <html>, <head> and <body>, as in browsers.
+    let html = match b.doc.find("html") {
+        Some(h) => h,
+        None => {
+            let h = b.doc.create(NodeData::Element(Element { tag: String::from("html"), attrs: Vec::new() }));
+            for c in core::mem::take(&mut b.doc.nodes[Document::ROOT].children) {
+                b.doc.nodes[c].parent = None;
+                b.doc.insert(h, c, None);
+            }
+            b.doc.insert(Document::ROOT, h, None);
+            h
+        }
+    };
+    if b.doc.find("head").is_none() {
+        let head = b.doc.create(NodeData::Element(Element { tag: String::from("head"), attrs: Vec::new() }));
+        // Head content before the body moves into the head.
+        let leading: Vec<NodeId> = b.doc.nodes[html]
+            .children
+            .iter()
+            .copied()
+            .take_while(|c| b.doc.tag(*c) != "body")
+            .filter(|c| HEAD_CONTENT.contains(&b.doc.tag(*c)))
+            .collect();
+        let first = b.doc.nodes[html].children.first().copied();
+        b.doc.insert(html, head, first);
+        for c in leading {
+            b.doc.insert(head, c, None);
+        }
+    }
+    if b.doc.find("body").is_none() {
+        let body = b.doc.create(NodeData::Element(Element { tag: String::from("body"), attrs: Vec::new() }));
+        b.doc.insert(html, body, None);
+    }
+    b.doc.version = 0;
     b.doc
 }
 
@@ -941,6 +975,8 @@ mod tests {
         let doc = parse("<title>t</title><p>x");
         let html = doc.find("html").unwrap();
         let kids: Vec<&str> = doc.nodes[html].children.iter().map(|c| doc.tag(*c)).collect();
-        assert_eq!(kids, ["title", "body"]);
+        assert_eq!(kids, ["head", "body"]);
+        let head = doc.find("head").unwrap();
+        assert_eq!(doc.tag(doc.nodes[head].children[0]), "title");
     }
 }

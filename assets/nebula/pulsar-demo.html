@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+<title>Pulsar Demo</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #f3f4f8; color: #1d1d24 }
+.wrap { max-width: 720px; margin: 0 auto; padding: 40px 20px }
+h1 { font-size: 34px; margin: 0 0 4px; color: #0a6cff }
+.sub { color: #6e6e7a; margin: 0 0 28px }
+.card { background: #fff; border: 1px solid #e2e2ea; border-radius: 14px; padding: 18px 20px; margin-bottom: 16px }
+.card h2 { font-size: 17px; margin: 0 0 10px }
+.row { display: flex; gap: 10px; align-items: center }
+button { font-size: 15px; padding: 8px 16px; border-radius: 18px; border: 0; background: #0a6cff; color: #fff }
+button.quiet { background: #e8e8ef; color: #1d1d24 }
+input { font-size: 15px; padding: 7px 12px; border: 1px solid #c8c8d2; border-radius: 16px; width: 300px }
+.count { font-size: 30px; font-weight: 600; min-width: 60px; text-align: center }
+ul { margin: 10px 0 0; padding-left: 22px }
+li.done { color: #9a9aa6; text-decoration: line-through }
+.clock { font-size: 26px; font-weight: 600 }
+.small { color: #6e6e7a; font-size: 13px }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Hello from Pulsar</h1>
+  <p class="sub">Everything on this page is made by JavaScript running in Nebula on WaveOS.</p>
+
+  <div class="card">
+    <h2>A counter</h2>
+    <div class="row">
+      <button class="quiet" id="minus">−</button>
+      <span class="count" id="count">0</span>
+      <button id="plus">+</button>
+      <span class="small" id="saved"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Things to do</h2>
+    <form id="todo-form" class="row">
+      <input id="todo" placeholder="Something to do, then Enter">
+      <button type="submit">Add</button>
+    </form>
+    <ul id="todos"></ul>
+    <p class="small" id="todo-status"></p>
+  </div>
+
+  <div class="card">
+    <h2>Fetching</h2>
+    <p id="fetched" class="small">Reading this page with fetch()…</p>
+  </div>
+
+  <div class="card">
+    <h2>The time</h2>
+    <p class="clock" id="clock">…</p>
+    <p class="small" id="engine"></p>
+  </div>
+</div>
+
+<script>
+// The counter remembers its value in localStorage.
+let count = Number(localStorage.getItem("demo.count") || 0);
+const countEl = document.getElementById("count");
+function showCount() {
+  countEl.textContent = count;
+  localStorage.setItem("demo.count", String(count));
+  document.getElementById("saved").textContent = count ? "remembered" : "";
+}
+document.getElementById("plus").addEventListener("click", () => { count++; showCount(); });
+document.getElementById("minus").addEventListener("click", () => { count--; showCount(); });
+showCount();
+
+// A to-do list: add with the form, click an item to finish it.
+const todos = [];
+const list = document.getElementById("todos");
+function render() {
+  list.innerHTML = "";
+  for (const [i, t] of todos.entries()) {
+    const li = document.createElement("li");
+    li.textContent = t.text;
+    if (t.done) li.classList.add("done");
+    li.addEventListener("click", () => { todos[i].done = !todos[i].done; render(); });
+    list.append(li);
+  }
+  const left = todos.filter(t => !t.done).length;
+  document.getElementById("todo-status").textContent =
+    todos.length ? `${left} of ${todos.length} left — click one to finish it` : "Nothing yet.";
+}
+document.getElementById("todo-form").addEventListener("submit", e => {
+  e.preventDefault();
+  const input = document.getElementById("todo");
+  const text = input.value.trim();
+  if (text) todos.push({ text, done: false });
+  input.value = "";
+  render();
+});
+render();
+
+// A clock, updated every second.
+const pad = n => String(n).padStart(2, "0");
+function tick() {
+  const d = new Date();
+  document.getElementById("clock").textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+setInterval(tick, 1000);
+tick();
+
+document.getElementById("engine").textContent =
+  `${navigator.userAgent.split(" ").slice(-2).join(" · ")} — ${[..."JavaScript"].length} letters, ` +
+  `${[1, 2, 3].map(x => x * x).join("+")} = ${[1, 4, 9].reduce((a, b) => a + b)}`;
+// fetch(): this page reads its own source.
+fetch(location.href)
+  .then(r => r.text())
+  .then(src => {
+    const lines = src.split("\n").length;
+    const scripts = (src.match(/addEventListener/g) || []).length;
+    document.getElementById("fetched").textContent =
+      `This page is ${lines} lines long and adds ${scripts} event listeners — read with fetch() just now.`;
+  })
+  .catch(e => { document.getElementById("fetched").textContent = "fetch failed: " + e.message; });
+
+console.log("Pulsar demo ready");
+</script>
+</body>
+</html>

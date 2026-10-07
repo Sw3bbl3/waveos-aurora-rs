@@ -134,6 +134,8 @@ pub struct Layout {
     pub items: Vec<Item>,
     pub links: Vec<Link>,
     pub fields: Vec<Field>,
+    /// Every element's border box (for routing clicks to scripts).
+    pub boxes: Vec<Field>,
     /// Element ids (and <a name>s) with their y, for #fragments.
     pub anchors: Vec<(String, i32)>,
     pub width: i32,
@@ -148,6 +150,19 @@ impl Layout {
     }
     pub fn field_at(&self, x: i32, y: i32) -> Option<NodeId> {
         self.fields.iter().rev().find(|f| f.rect.contains(x, y)).map(|f| f.node)
+    }
+
+    /// The innermost element under a point: the smallest box containing it
+    /// (links and fields count, being the finest-grained boxes).
+    pub fn node_at(&self, x: i32, y: i32) -> Option<NodeId> {
+        self.boxes
+            .iter()
+            .chain(self.fields.iter())
+            .map(|f| (f.rect, f.node))
+            .chain(self.links.iter().map(|l| (l.rect, l.node)))
+            .filter(|(r, _)| r.contains(x, y))
+            .min_by_key(|(r, _)| r.w as i64 * r.h as i64)
+            .map(|(_, n)| n)
     }
     pub fn anchor(&self, name: &str) -> Option<i32> {
         self.anchors.iter().find(|(n, _)| n == name).map(|(_, y)| *y)
@@ -200,6 +215,7 @@ enum Atom {
         items: Vec<Item>,
         links: Vec<Link>,
         fields: Vec<Field>,
+        boxes: Vec<Field>,
         link: Option<NodeId>,
         space: bool,
     },
@@ -546,6 +562,9 @@ impl<'a> Engine<'a> {
         }
         if tag == "button" {
             self.out.fields.push(Field { rect, node });
+        }
+        if height > 0 && used > 0 {
+            self.out.boxes.push(Field { rect, node });
         }
         // A block-level link is clickable across its box.
         if let Some(l) = self.link_of(node) {
@@ -1471,6 +1490,7 @@ impl<'a> Engine<'a> {
                                 items,
                                 links: Vec::new(),
                                 fields: Vec::new(),
+                                boxes: Vec::new(),
                                 link: self.link,
                                 space: core::mem::take(space),
                             });
@@ -1490,6 +1510,7 @@ impl<'a> Engine<'a> {
                             items,
                             links: Vec::new(),
                             fields,
+                            boxes: Vec::new(),
                             link: self.link,
                             space: core::mem::take(space),
                         });
@@ -1517,6 +1538,7 @@ impl<'a> Engine<'a> {
                         .min(avail - ml - mr)
                         .max(0);
                         let (i0, l0, f0) = (self.out.items.len(), self.out.links.len(), self.out.fields.len());
+                        let b0 = self.out.boxes.len();
                         let saved_baseline = self.first_baseline.take();
                         let res = self.block(n, 0, 0, w, Some(w));
                         let baseline = self.first_baseline.unwrap_or(res.height);
@@ -1524,6 +1546,8 @@ impl<'a> Engine<'a> {
                         let items: Vec<Item> = self.out.items.drain(i0..).collect();
                         let links: Vec<Link> = self.out.links.drain(l0..).collect();
                         let fields: Vec<Field> = self.out.fields.drain(f0..).collect();
+                        // The inline block's own boxes travel with it.
+                        let boxes: Vec<Field> = self.out.boxes.drain(b0..).collect();
                         if ml > 0 {
                             out.push(Atom::Gap { w: ml, space: core::mem::take(space) });
                         }
@@ -1534,6 +1558,7 @@ impl<'a> Engine<'a> {
                             items,
                             links,
                             fields,
+                            boxes,
                             link: self.link,
                             space: core::mem::take(space),
                         });
@@ -1906,7 +1931,7 @@ impl<'a> Engine<'a> {
                     k = j;
                     continue;
                 }
-                Atom::Box { baseline: b, h, items, links, fields, link, w: bw, .. } => {
+                Atom::Box { baseline: b, h, items, links, fields, boxes, link, w: bw, .. } => {
                     let bx = x + dx + px(p.x);
                     let by = baseline - b;
                     for it in items {
@@ -1925,6 +1950,12 @@ impl<'a> Engine<'a> {
                         f.rect.x += bx;
                         f.rect.y += by;
                         self.out.fields.push(f);
+                    }
+                    for f in boxes {
+                        let mut f = f.clone();
+                        f.rect.x += bx;
+                        f.rect.y += by;
+                        self.out.boxes.push(f);
                     }
                     if let Some(l) = link {
                         self.out.links.push(Link { rect: Rect::new(bx, by, *bw, *h), node: *l });

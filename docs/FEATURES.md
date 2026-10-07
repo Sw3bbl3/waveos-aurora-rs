@@ -36,7 +36,12 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - an HTML parser, and CSS with selectors, the cascade, custom properties, `calc()`, media queries and generated content
   - layout: blocks, inline text with line breaking, lists, tables, flexbox and grid rows, floats, form controls
   - PNG, **JPEG** (baseline and progressive) and GIF images, from our own decoders
-  - history, find in page (Ctrl+F), zoom, search forms and downloads (one window at a time; no tabs or JavaScript yet)
+  - history, find in page (Ctrl+F), zoom, search forms and downloads (one window at a time; no tabs yet)
+- **Pulsar**, our JavaScript engine ([details](PULSAR.md)):
+  - the language through ES2023: classes with private fields, generators, `async`/`await`, destructuring, modules aside
+  - the standard library, our own regular-expression engine, and `Date` in the local time zone
+  - in Nebula: the DOM, events with capture and bubbling, timers, animation frames, `fetch` and `XMLHttpRequest`, `localStorage` per site, and scripts that load more scripts; jQuery runs
+  - `js` in Terminal: a prompt with multi-line input, files, or `-e`
 - **aurora-sh**, the Terminal shell. It runs about 35 programs from `/System/Bin` as separate processes (`ls`, `cat`, `grep`, `wc`, `ps`, `kill`, `cp`, `mv`, `neofetch`, `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play`, `ping`, `ifconfig`, `nslookup`, `fetch`…). It supports pipelines (`ls -l | grep txt`), redirection (`>`, `>>`), lists (`a && b || c; d`), Ctrl+C and Tab completion.
 - **Storage:**
   - PCI enumeration, plus interrupt-driven **AHCI** (SATA), **virtio-blk** and **NVMe** drivers

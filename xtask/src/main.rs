@@ -388,6 +388,16 @@ fn system_image(programs: &[Program], out: &Path) {
     }
     t.dir("Certificates");
     t.file("Certificates/roots.bin", &trust_anchors());
+    // Pages Nebula ships with (its start page links the JavaScript demo).
+    t.dir("Library");
+    t.dir("Library/Nebula");
+    let pages = root().join("assets/nebula");
+    let mut page_files: Vec<_> = fs::read_dir(&pages).unwrap().map(|e| e.unwrap().path()).collect();
+    page_files.sort();
+    for f in page_files {
+        let name = f.file_name().unwrap().to_string_lossy().into_owned();
+        t.file(&format!("Library/Nebula/{name}"), &fs::read(&f).unwrap());
+    }
     for (dest, src) in programs {
         t.file(dest, &fs::read(src).unwrap());
     }

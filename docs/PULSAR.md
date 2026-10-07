@@ -27,12 +27,22 @@ Our own regression suite (`libs/script/tests/js`) compares output byte for byte 
 |---|---|---|
 | 1 | Language core: lexer, parser, compiler, VM, collector, core built-ins, `js` command, test262 runner | Done |
 | 2 | Symbols, iterators, generators, Map/Set, Promise, async/await, async generators, RegExp, Date | Done |
-| 3 | The DOM in Nebula: document and element bindings, events, timers, storage | Bindings done and tested on the host; browser integration in progress |
-| 4 | `fetch`, layout geometry, cookies, performance | Planned |
+| 3 | The DOM in Nebula: document and element bindings, events, timers, storage | Done; checked in WaveOS (QEMU) with the bundled demo, Wikipedia and Hacker News |
+| 4 | `fetch`, layout geometry, cookies, performance | `fetch`, `XMLHttpRequest` and geometry done; cookies and performance work remain |
+
+## In the browser
+
+`libs/surf/src/script.rs` binds the DOM; `libs/surf/src/js/prelude.js` adds web APIs written in JavaScript (URL, URLSearchParams, the observers, fetch, XMLHttpRequest, AbortController, FormData). Nebula fetches scripts, including ones that scripts insert, and network requests on worker threads, and runs everything on its UI thread.
+
+Each page gets a fresh realm. Scripts see clicks, keys, typing and form submission before Nebula acts on them, and preventDefault() stops Nebula's default action. localStorage is kept per site in `/Settings/Nebula/Storage`. The `nebula_javascript` preference (0 or 1) turns scripts off.
+
+A test runs jQuery 3.7.1 against the DOM (`libs/surf/tests/script.rs`). `cargo run -p nebula-engine --example page -- page.html URL` runs a saved page's scripts on the host and reports what they did.
 
 ## Not yet supported
 
 Proxy, BigInt, typed arrays and ArrayBuffer, `with`, direct `eval` (eval always runs in the global scope), modules, Intl, Unicode normalisation (`normalize` returns its input), and locale-aware collation beyond an approximation.
+
+In the browser: cookies are kept only while a page is open and aren't sent with requests; `fetch` doesn't apply same-origin rules (no cookies or credentials are sent, which limits the risk); `MutationObserver` never reports; `IntersectionObserver` reports every element as visible once; `getComputedStyle` returns inline styles; dataset is read-only.
 
 ## Try it
 

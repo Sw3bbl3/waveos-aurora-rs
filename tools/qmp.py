@@ -19,7 +19,8 @@ SPECIAL = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash", "=":
            ";": "semicolon", "'": "apostrophe", "`": "grave_accent", "[": "bracket_left", "]": "bracket_right",
            "\\": "backslash", ">": "shift+dot", "<": "shift+comma", "*": "shift+8", "+": "shift+equal",
            "_": "shift+minus", ":": "shift+semicolon", "|": "shift+backslash", "!": "shift+1", "~": "shift+grave_accent",
-           "&": "shift+7", '"': "shift+apostrophe", "?": "shift+slash", "(": "shift+9", ")": "shift+0"}
+           "&": "shift+7", "{": "shift+bracket_left", "}": "shift+bracket_right", "#": "shift+3", "$": "shift+4",
+           "%": "shift+5", "^": "shift+6", "@": "shift+2", '"': "shift+apostrophe", "?": "shift+slash", "(": "shift+9", ")": "shift+0"}
 
 sock = socket.socket(socket.AF_UNIX)
 sock.connect(os.path.join(ROOT, "target/qemu-qmp.sock"))

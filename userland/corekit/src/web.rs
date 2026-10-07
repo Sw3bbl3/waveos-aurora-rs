@@ -127,6 +127,11 @@ pub fn fetch(url: &Url) -> Result<Response, Error> {
     http::fetch(url, &mut Pooled)
 }
 
+/// Sends any request (following redirects) over pooled connections.
+pub fn request(method: &str, url: &Url, headers: &[(String, String)], body: &[u8]) -> Result<Response, Error> {
+    http::request(method, url, headers, body, &mut Pooled)
+}
+
 /// The system's trusted root CAs (loaded once).
 pub fn roots() -> Result<Arc<Roots>, Error> {
     let mut cached = ROOTS.lock();

@@ -47,8 +47,97 @@ pub struct Page {
     /// No doctype: quirks mode.
     pub quirks: bool,
     ua: Stylesheet,
-    /// The JavaScript realm, once scripts are enabled.
-    pub js: Option<Realm>,
+}
+
+/// A page's JavaScript: its realm and DOM state. Kept by the browser beside
+/// the [`Page`] (on the thread that runs scripts; a Page itself can move
+/// between threads).
+pub struct Scripts {
+    pub realm: Realm,
+}
+
+impl Scripts {
+    pub fn new(
+        host: Box<dyn nebula_script::Host>,
+        url: &str,
+        viewport: (i32, i32),
+        storage: BTreeMap<String, String>,
+    ) -> Scripts {
+        let mut realm = Realm::new(host);
+        realm.step_limit = 200_000_000;
+        script::install(&mut realm, url, viewport, storage);
+        Scripts { realm }
+    }
+
+    /// When scripts next want to run: the earliest timer, or soon when
+    /// animation frames are waiting.
+    pub fn next_wakeup(&mut self, now: f64) -> Option<f64> {
+        let (timer, frames) = script::pending(&mut self.realm);
+        if frames {
+            return Some(now + 16.0);
+        }
+        timer
+    }
+
+    /// A navigation a script asked for (`location.href = …`).
+    pub fn take_navigation(&mut self) -> Option<String> {
+        script::dom_mut(&mut self.realm).navigate.take()
+    }
+
+    /// localStorage, if a script changed it.
+    pub fn take_storage(&mut self) -> Option<BTreeMap<String, String>> {
+        let dom = script::dom_mut(&mut self.realm);
+        if core::mem::take(&mut dom.storage_dirty) {
+            Some(dom.storage.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Tells scripts where everything is: element boxes from a layout (in
+    /// CSS pixels), the page size and the scroll position.
+    pub fn set_layout(&mut self, layout: &Layout, scroll: (i32, i32)) {
+        let dom = script::dom_mut(&mut self.realm);
+        dom.geometry.clear();
+        for f in layout.boxes.iter().chain(layout.fields.iter()) {
+            let r = f.rect;
+            dom.geometry
+                .entry(f.node)
+                .and_modify(|g| {
+                    // The union of an element's boxes.
+                    let (x0, y0) = (g.0.min(r.x), g.1.min(r.y));
+                    let (x1, y1) = ((g.0 + g.2).max(r.x + r.w), (g.1 + g.3).max(r.y + r.h));
+                    *g = (x0, y0, x1 - x0, y1 - y0);
+                })
+                .or_insert((r.x, r.y, r.w, r.h));
+        }
+        dom.page_size = (layout.width, layout.height);
+        dom.scroll = scroll;
+    }
+
+    /// Network requests scripts made (`fetch`, `XMLHttpRequest`).
+    pub fn take_requests(&mut self) -> Vec<script::HttpRequest> {
+        core::mem::take(&mut script::dom_mut(&mut self.realm).requests)
+    }
+
+    /// A scroll position a script asked for.
+    pub fn take_scroll_request(&mut self) -> Option<(i32, i32)> {
+        script::dom_mut(&mut self.realm).scroll_request.take()
+    }
+
+    /// External scripts that scripts inserted, to fetch: (element, src).
+    pub fn take_fetches(&mut self) -> Vec<(NodeId, String)> {
+        core::mem::take(&mut script::dom_mut(&mut self.realm).fetches)
+    }
+
+    /// The element scripts last focused, if any.
+    pub fn focus(&mut self) -> Option<NodeId> {
+        script::dom_mut(&mut self.realm).focus
+    }
+
+    pub fn set_viewport(&mut self, w: i32, h: i32) {
+        script::dom_mut(&mut self.realm).viewport = (w, h);
+    }
 }
 
 impl Page {
@@ -81,7 +170,7 @@ impl Page {
         if quirks {
             ua.rules.extend(css::parse(style::QUIRKS_CSS).rules);
         }
-        Page { doc, title, sheets, base, quirks, ua, js: None }
+        Page { doc, title, sheets, base, quirks, ua }
     }
 
     // ------------------------------------------------------------ scripts
@@ -115,23 +204,9 @@ impl Page {
         out
     }
 
-    /// Creates the page's JavaScript realm with its DOM.
-    pub fn enable_scripts(
-        &mut self,
-        host: Box<dyn nebula_script::Host>,
-        url: &str,
-        viewport: (i32, i32),
-        storage: BTreeMap<String, String>,
-    ) {
-        let mut rt = Realm::new(host);
-        rt.step_limit = 200_000_000;
-        script::install(&mut rt, url, viewport, storage);
-        self.js = Some(rt);
-    }
-
-    /// Runs `f` with the document inside the realm. None without scripts.
-    pub fn with_js<R>(&mut self, f: impl FnOnce(&mut Realm) -> R) -> Option<R> {
-        let rt = self.js.as_mut()?;
+    /// Runs `f` with the document inside the realm.
+    pub fn with_js<R>(&mut self, js: &mut Scripts, f: impl FnOnce(&mut Realm) -> R) -> R {
+        let rt = &mut js.realm;
         script::dom_mut(rt).doc = core::mem::take(&mut self.doc);
         // Each turn of the event loop gets a fresh budget.
         rt.steps = 0;
@@ -141,12 +216,26 @@ impl Page {
         if let Some(t) = self.doc.find("title") {
             self.title = collapse_ws(&self.doc.text_content(t));
         }
-        Some(r)
+        r
+    }
+
+    /// Runs a script that a script inserted, once the browser fetched it
+    /// (None: it couldn't be loaded).
+    pub fn run_fetched(&mut self, js: &mut Scripts, node: NodeId, name: &str, source: Option<&str>) {
+        self.with_js(js, |rt| script::run_fetched(rt, node, name, source));
+    }
+
+    /// Answers a script's network request (Err: it failed, with why).
+    pub fn complete_request(&mut self, js: &mut Scripts, id: u32, result: Result<script::HttpResponse, String>) {
+        self.with_js(js, |rt| script::complete_request(rt, id, result));
     }
 
     /// Runs one script; errors go to the console.
-    pub fn run_script(&mut self, source: &str, name: &str) {
-        self.with_js(|rt| {
+    pub fn run_script(&mut self, js: &mut Scripts, source: &str, name: &str) {
+        // Scripts the parser put in the page never run again if moved.
+        let parsed = self.doc.find_all("script");
+        script::dom_mut(&mut js.realm).started_scripts.extend(parsed);
+        self.with_js(js, |rt| {
             let r = rt.eval(source, name);
             script::report(rt, r);
             rt.run_jobs();
@@ -154,8 +243,8 @@ impl Page {
     }
 
     /// After the scripts: DOMContentLoaded, then load.
-    pub fn finish_loading(&mut self) {
-        self.with_js(|rt| {
+    pub fn finish_loading(&mut self, js: &mut Scripts) {
+        self.with_js(js, |rt| {
             script::dom_mut(rt).ready_state = "interactive";
             script::fire(rt, Document::ROOT, "readystatechange", false, false);
             script::fire(rt, Document::ROOT, "DOMContentLoaded", true, false);
@@ -168,25 +257,25 @@ impl Page {
 
     /// A click on `node` (mousedown, mouseup, click). Returns whether the
     /// browser should carry out the default action (follow, submit, …).
-    pub fn dispatch_click(&mut self, node: NodeId, x: i32, y: i32) -> bool {
-        self.with_js(|rt| {
+    pub fn dispatch_click(&mut self, js: &mut Scripts, node: NodeId, x: i32, y: i32) -> bool {
+        self.with_js(js, |rt| {
             script::fire_mouse(rt, node, "mousedown", x, y);
             script::fire_mouse(rt, node, "mouseup", x, y);
             script::fire_mouse(rt, node, "click", x, y)
         })
-        .unwrap_or(true)
     }
 
     /// A plain event (input, change, submit, focus…). Returns whether the
     /// default action should happen.
-    pub fn dispatch(&mut self, node: NodeId, kind: &str, bubbles: bool, cancelable: bool) -> bool {
-        self.with_js(|rt| script::fire(rt, node, kind, bubbles, cancelable)).unwrap_or(true)
+    pub fn dispatch(&mut self, js: &mut Scripts, node: NodeId, kind: &str, bubbles: bool, cancelable: bool) -> bool {
+        self.with_js(js, |rt| script::fire(rt, node, kind, bubbles, cancelable))
     }
 
     /// keydown/keyup at `node`.
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_key(
         &mut self,
+        js: &mut Scripts,
         node: NodeId,
         kind: &str,
         key: &str,
@@ -195,56 +284,17 @@ impl Page {
         shift: bool,
         alt: bool,
     ) -> bool {
-        self.with_js(|rt| script::fire_key(rt, node, kind, key, code, ctrl, shift, alt)).unwrap_or(true)
+        self.with_js(js, |rt| script::fire_key(rt, node, kind, key, code, ctrl, shift, alt))
     }
 
     /// Runs due timers and animation frames. Returns whether any ran.
-    pub fn run_timers(&mut self, now: f64) -> bool {
-        self.with_js(|rt| {
+    pub fn run_timers(&mut self, js: &mut Scripts, now: f64) -> bool {
+        self.with_js(js, |rt| {
             let a = script::fire_timers(rt, now);
             let b = script::fire_frames(rt, now);
             rt.report_unhandled();
             a || b
         })
-        .unwrap_or(false)
-    }
-
-    /// When scripts next want to run: the earliest timer, or now when
-    /// animation frames are waiting.
-    pub fn next_wakeup(&mut self, now: f64) -> Option<f64> {
-        let rt = self.js.as_mut()?;
-        let (timer, frames) = script::pending(rt);
-        if frames {
-            return Some(now + 16.0);
-        }
-        timer
-    }
-
-    /// A navigation a script asked for (`location.href = …`).
-    pub fn take_navigation(&mut self) -> Option<String> {
-        self.js.as_mut().and_then(|rt| script::dom_mut(rt).navigate.take())
-    }
-
-    /// localStorage, if a script changed it.
-    pub fn take_storage(&mut self) -> Option<BTreeMap<String, String>> {
-        let rt = self.js.as_mut()?;
-        let dom = script::dom_mut(rt);
-        if core::mem::take(&mut dom.storage_dirty) {
-            Some(dom.storage.clone())
-        } else {
-            None
-        }
-    }
-
-    /// The element scripts last focused, if any.
-    pub fn script_focus(&mut self) -> Option<NodeId> {
-        self.js.as_mut().and_then(|rt| script::dom_mut(rt).focus)
-    }
-
-    pub fn set_viewport(&mut self, w: i32, h: i32) {
-        if let Some(rt) = self.js.as_mut() {
-            script::dom_mut(rt).viewport = (w, h);
-        }
     }
 
     /// Linked stylesheets still to load: (slot, href).

@@ -685,6 +685,9 @@ dependencies = [
 [[package]]
 name = "nebula-engine"
 version = "0.7.0"
+dependencies = [
+ "nebula-script",
+]
 
 [[package]]
 name = "nebula-script"

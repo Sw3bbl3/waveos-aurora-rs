@@ -31,6 +31,27 @@ struct Listener {
     property: bool,
 }
 
+/// A network request a script made (`fetch`, `XMLHttpRequest`).
+#[derive(Clone, Debug)]
+pub struct HttpRequest {
+    pub id: u32,
+    pub method: String,
+    /// As the script wrote it (the browser resolves it against the page).
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+/// What came back for an [`HttpRequest`].
+#[derive(Clone, Debug)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub status_text: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
 struct Timer {
     id: u32,
     due: f64,
@@ -79,6 +100,22 @@ pub struct Dom {
     pub focus: Option<NodeId>,
     pub alerts: Vec<String>,
     started: f64,
+    /// Script elements inserted by scripts, to start once the change is done.
+    inserted_scripts: Vec<NodeId>,
+    /// Script elements that have run (or are loading): they never run twice.
+    pub started_scripts: alloc::collections::BTreeSet<NodeId>,
+    /// External scripts to fetch: (element, src as written).
+    pub fetches: Vec<(NodeId, String)>,
+    /// Element boxes from the last layout, in page coordinates: x, y, w, h.
+    pub geometry: BTreeMap<NodeId, (i32, i32, i32, i32)>,
+    /// The page's size and how far it is scrolled (set by the browser).
+    pub page_size: (i32, i32),
+    pub scroll: (i32, i32),
+    /// A scroll position scripts asked for (window.scrollTo).
+    pub scroll_request: Option<(i32, i32)>,
+    /// Network requests to make, and the promise functions awaiting each.
+    pub requests: Vec<HttpRequest>,
+    pending_requests: BTreeMap<u32, (Value, Value)>,
 }
 
 impl Embedder for Dom {
@@ -101,6 +138,10 @@ impl Embedder for Dom {
         }
         for (_, f) in &self.frames {
             v(f);
+        }
+        for (a, b) in self.pending_requests.values() {
+            v(a);
+            v(b);
         }
         let p = &self.protos;
         for o in [
@@ -217,9 +258,17 @@ fn to_node(rt: &mut Realm, dom: &mut Dom, v: &Value) -> Result<NodeId, Value> {
 
 // ---------------------------------------------------------------- selectors
 
+/// Parses a selector list as `querySelector` does: None for a syntax error
+/// (including pseudo-classes CSS doesn't define, like jQuery's `:first`).
+fn parse_selectors(selector: &str) -> Option<Vec<css::Selector>> {
+    if !css::standard_pseudos(selector) {
+        return None;
+    }
+    css::split_top(selector, b',').iter().map(|s| css::parse_selector(s.trim())).collect()
+}
+
 fn select(doc: &Document, root: NodeId, selector: &str, first: bool) -> Option<Vec<NodeId>> {
-    let sels: Vec<css::Selector> =
-        css::split_top(selector, b',').iter().map(|s| css::parse_selector(s.trim())).collect::<Option<Vec<_>>>()?;
+    let sels = parse_selectors(selector)?;
     let mut out = Vec::new();
     for n in doc.descendants(root) {
         if doc.element(n).is_some() && sels.iter().any(|s| css::matches(doc, n, s)) {
@@ -261,8 +310,7 @@ fn matches_fn(rt: &mut Realm, c: &Call) -> JsResult {
     let n = this_node(rt, c)?;
     let sel = arg_str(rt, c, 0)?;
     with_dom(rt, |rt, dom| {
-        let sels: Option<Vec<css::Selector>> =
-            css::split_top(&sel, b',').iter().map(|s| css::parse_selector(s.trim())).collect();
+        let sels: Option<Vec<css::Selector>> = parse_selectors(&sel);
         match sels {
             Some(s) => Ok(Value::Bool(s.iter().any(|x| css::matches(&dom.doc, n, x)))),
             None => Err(syntax_error(rt, &sel)),
@@ -274,9 +322,7 @@ fn closest(rt: &mut Realm, c: &Call) -> JsResult {
     let n = this_node(rt, c)?;
     let sel = arg_str(rt, c, 0)?;
     with_dom(rt, |rt, dom| {
-        let Some(sels) =
-            css::split_top(&sel, b',').iter().map(|s| css::parse_selector(s.trim())).collect::<Option<Vec<_>>>()
-        else {
+        let Some(sels) = parse_selectors(&sel) else {
             return Err(syntax_error(rt, &sel));
         };
         let mut cur = Some(n);
@@ -471,16 +517,65 @@ fn insert_checked(
     child: NodeId,
     before: Option<NodeId>,
 ) -> Result<(), Value> {
+    // A fragment's children are what gets inserted.
+    let roots: Vec<NodeId> =
+        if dom.doc.tag(child) == FRAGMENT { dom.doc.nodes[child].children.clone() } else { vec![child] };
     if !dom.doc.insert(parent, child, before) {
         return Err(hierarchy_error(rt));
     }
+    if dom.doc.is_connected(parent) {
+        for r in roots {
+            let mut all = vec![r];
+            all.extend(dom.doc.descendants(r));
+            dom.inserted_scripts.extend(all.into_iter().filter(|n| dom.doc.tag(*n) == "script"));
+        }
+    }
     Ok(())
+}
+
+/// Whether a script element holds classic JavaScript.
+pub fn is_classic_script(doc: &Document, n: NodeId) -> bool {
+    let ty = doc.element(n).and_then(|e| e.attr("type")).unwrap_or("").trim().to_ascii_lowercase();
+    ty.is_empty()
+        || matches!(
+            ty.as_str(),
+            "text/javascript"
+                | "application/javascript"
+                | "text/ecmascript"
+                | "application/ecmascript"
+                | "application/x-javascript"
+        )
+}
+
+/// Starts scripts that were just inserted: inline ones run now, external
+/// ones are queued for the browser to fetch.
+fn run_inserted_scripts(rt: &mut Realm) {
+    let list = with_dom(rt, |_, dom| core::mem::take(&mut dom.inserted_scripts));
+    for n in list {
+        let job = with_dom(rt, |_, dom| {
+            if !dom.doc.is_connected(n) || !is_classic_script(&dom.doc, n) || !dom.started_scripts.insert(n) {
+                return None;
+            }
+            match dom.doc.element(n).and_then(|e| e.attr("src")).map(str::trim).filter(|s| !s.is_empty()) {
+                Some(src) => {
+                    dom.fetches.push((n, String::from(src)));
+                    None
+                }
+                None => Some(dom.doc.text_content(n)),
+            }
+        });
+        if let Some(code) = job {
+            let r = rt.eval(&code, "inserted script");
+            report(rt, r);
+        }
+    }
 }
 
 fn append_child(rt: &mut Realm, c: &Call) -> JsResult {
     let p = this_node(rt, c)?;
     let child = arg_node(rt, c, 0)?;
     with_dom(rt, |rt, dom| insert_checked(rt, dom, p, child, None))?;
+    run_inserted_scripts(rt);
     Ok(c.arg(0))
 }
 
@@ -489,6 +584,7 @@ fn insert_before(rt: &mut Realm, c: &Call) -> JsResult {
     let child = arg_node(rt, c, 0)?;
     let before = if c.arg(1).is_nullish() { None } else { Some(arg_node(rt, c, 1)?) };
     with_dom(rt, |rt, dom| insert_checked(rt, dom, p, child, before))?;
+    run_inserted_scripts(rt);
     Ok(c.arg(0))
 }
 
@@ -523,6 +619,7 @@ fn replace_child(rt: &mut Realm, c: &Call) -> JsResult {
         dom.doc.detach(old);
         Ok(())
     })?;
+    run_inserted_scripts(rt);
     Ok(c.arg(1))
 }
 
@@ -561,19 +658,27 @@ fn insert_many(rt: &mut Realm, c: &Call, mode: u8) -> JsResult {
 }
 
 fn append(rt: &mut Realm, c: &Call) -> JsResult {
-    insert_many(rt, c, 0)
+    let r = insert_many(rt, c, 0);
+    run_inserted_scripts(rt);
+    r
 }
 
 fn prepend(rt: &mut Realm, c: &Call) -> JsResult {
-    insert_many(rt, c, 1)
+    let r = insert_many(rt, c, 1);
+    run_inserted_scripts(rt);
+    r
 }
 
 fn before(rt: &mut Realm, c: &Call) -> JsResult {
-    insert_many(rt, c, 2)
+    let r = insert_many(rt, c, 2);
+    run_inserted_scripts(rt);
+    r
 }
 
 fn after(rt: &mut Realm, c: &Call) -> JsResult {
-    insert_many(rt, c, 3)
+    let r = insert_many(rt, c, 3);
+    run_inserted_scripts(rt);
+    r
 }
 
 fn replace_with(rt: &mut Realm, c: &Call) -> JsResult {
@@ -784,6 +889,7 @@ fn insert_adjacent_html(rt: &mut Realm, c: &Call) -> JsResult {
 
 fn insert_adjacent_element(rt: &mut Realm, c: &Call) -> JsResult {
     insert_adjacent(rt, c, 1)?;
+    run_inserted_scripts(rt);
     Ok(c.arg(1))
 }
 
@@ -959,13 +1065,113 @@ fn dataset(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Object(o))
 }
 
-fn rect(rt: &mut Realm, c: &Call) -> JsResult {
-    this_node(rt, c)?;
-    let o = rt.new_object();
-    for k in ["x", "y", "top", "left", "right", "bottom", "width", "height"] {
-        rt.define(o, k, Value::Number(0.0), DEFAULT);
+/// An element's box: from the last layout; the viewport for <html>.
+fn box_of(dom: &Dom, n: NodeId) -> Option<(i32, i32, i32, i32)> {
+    match dom.doc.tag(n) {
+        "html" => Some((0, 0, dom.viewport.0, dom.page_size.1.max(dom.viewport.1))),
+        _ => dom.geometry.get(&n).copied(),
     }
-    Ok(Value::Object(o))
+}
+
+fn dom_rect(rt: &mut Realm, x: i32, y: i32, w: i32, h: i32) -> Value {
+    let o = rt.new_object();
+    for (k, v) in
+        [("x", x), ("y", y), ("left", x), ("top", y), ("width", w), ("height", h), ("right", x + w), ("bottom", y + h)]
+    {
+        rt.define(o, k, Value::Number(v as f64), DEFAULT);
+    }
+    Value::Object(o)
+}
+
+fn rect(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    let (b, scroll) = with_dom(rt, |_, dom| (box_of(dom, n), dom.scroll));
+    let (x, y, w, h) = b.unwrap_or((0, 0, 0, 0));
+    Ok(dom_rect(rt, x - scroll.0, y - scroll.1, w, h))
+}
+
+fn client_rects(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    let (b, scroll) = with_dom(rt, |_, dom| (box_of(dom, n), dom.scroll));
+    let items = match b {
+        Some((x, y, w, h)) => vec![dom_rect(rt, x - scroll.0, y - scroll.1, w, h)],
+        None => Vec::new(),
+    };
+    Ok(rt.array_from(items))
+}
+
+/// offsetWidth, clientHeight, …: which measure is in slot 0.
+fn measure(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    let what = rt.native_slots(c.callee)[0].clone();
+    let what = rt.to_rust_string(&what)?;
+    let v = with_dom(rt, |_, dom| {
+        let is_root = matches!(dom.doc.tag(n), "html" | "body");
+        let (x, y, w, h) = box_of(dom, n).unwrap_or((0, 0, 0, 0));
+        match what.as_str() {
+            "offsetWidth" | "scrollWidth" => w,
+            "offsetHeight" => h,
+            "clientWidth" if is_root => dom.viewport.0,
+            "clientHeight" if is_root => dom.viewport.1,
+            "clientWidth" => w,
+            "clientHeight" => h,
+            "scrollHeight" if is_root => dom.page_size.1,
+            "scrollHeight" => h,
+            "offsetTop" => y,
+            "offsetLeft" => x,
+            "scrollTop" if is_root => dom.scroll.1,
+            "scrollLeft" if is_root => dom.scroll.0,
+            _ => 0,
+        }
+    });
+    Ok(Value::Number(v as f64))
+}
+
+/// window.scrollX (slot 0 false) and scrollY (true).
+fn scroll_xy(rt: &mut Realm, c: &Call) -> JsResult {
+    let y = rt.native_slots(c.callee)[0].truthy();
+    let s = with_dom(rt, |_, dom| dom.scroll);
+    Ok(Value::Number(if y { s.1 } else { s.0 } as f64))
+}
+
+/// window.scrollTo(x, y) / scrollTo({ top, left }); scrollBy adds (slot 0 true).
+fn scroll_to(rt: &mut Realm, c: &Call) -> JsResult {
+    let by = rt.native_slots(c.callee).first().is_some_and(|v| v.truthy());
+    let (mut x, mut y) = (None, None);
+    match c.arg(0) {
+        Value::Object(o) => {
+            let l = rt.get_str(o, "left")?;
+            let t = rt.get_str(o, "top")?;
+            if !l.is_undefined() {
+                x = Some(rt.to_number(&l)?);
+            }
+            if !t.is_undefined() {
+                y = Some(rt.to_number(&t)?);
+            }
+        }
+        v => {
+            x = Some(rt.to_number(&v)?);
+            y = Some(rt.to_number(&c.arg(1))?);
+        }
+    }
+    with_dom(rt, |_, dom| {
+        let base = dom.scroll_request.unwrap_or(dom.scroll);
+        let fx = |v: f64, b: i32| if v.is_finite() { v as i32 } else { b };
+        let nx = x.map(|v| if by { base.0 + fx(v, 0) } else { fx(v, base.0) }).unwrap_or(base.0);
+        let ny = y.map(|v| if by { base.1 + fx(v, 0) } else { fx(v, base.1) }).unwrap_or(base.1);
+        dom.scroll_request = Some((nx.max(0), ny.max(0)));
+    });
+    Ok(Value::Undefined)
+}
+
+fn scroll_into_view(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    with_dom(rt, |_, dom| {
+        if let Some((_, y, _, _)) = box_of(dom, n) {
+            dom.scroll_request = Some((0, y.max(0)));
+        }
+    });
+    Ok(Value::Undefined)
 }
 
 fn zero(_rt: &mut Realm, _c: &Call) -> JsResult {
@@ -1707,15 +1913,49 @@ fn init_event(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Undefined)
 }
 
+/// The tag of a document made by `document.implementation.createHTMLDocument`
+/// (a detached subtree acting as its own document).
+const DOCUMENT: &str = "#document";
+
 macro_rules! doc_find {
     ($name:ident, $tag:expr) => {
-        fn $name(rt: &mut Realm, _c: &Call) -> JsResult {
+        fn $name(rt: &mut Realm, c: &Call) -> JsResult {
+            let this = node_of(rt, &c.this).unwrap_or(Document::ROOT);
             with_dom(rt, |rt, dom| {
-                let n = dom.doc.find($tag);
+                let n = dom.doc.descendants(this).into_iter().find(|x| dom.doc.tag(*x) == $tag);
                 Ok(wrap_opt(rt, dom, n))
             })
         }
     };
+}
+
+fn create_html_document(rt: &mut Realm, c: &Call) -> JsResult {
+    let title = if c.arg(0).is_undefined() { None } else { Some(arg_str(rt, c, 0)?) };
+    with_dom(rt, |rt, dom| {
+        let el = |dom: &mut Dom, tag: &str| {
+            dom.doc.create(NodeData::Element(Element { tag: String::from(tag), attrs: Vec::new() }))
+        };
+        let d = el(dom, DOCUMENT);
+        let html = el(dom, "html");
+        let head = el(dom, "head");
+        let body = el(dom, "body");
+        dom.doc.insert(d, html, None);
+        dom.doc.insert(html, head, None);
+        dom.doc.insert(html, body, None);
+        if let Some(t) = title {
+            let te = el(dom, "title");
+            dom.doc.insert(head, te, None);
+            dom.doc.set_text_content(te, &t);
+        }
+        // It behaves as a document: wrap it with the Document prototype.
+        let o = rt.alloc(Obj::new(dom.protos.document, Kind::Host(NODE, d as u64)));
+        dom.wrappers.insert(d, o);
+        Ok(Value::Object(o))
+    })
+}
+
+fn has_feature(_rt: &mut Realm, _c: &Call) -> JsResult {
+    Ok(Value::Bool(true))
 }
 doc_find!(doc_body, "body");
 doc_find!(doc_head, "head");
@@ -1796,12 +2036,13 @@ fn document_write(rt: &mut Realm, c: &Call) -> JsResult {
     for i in 0..c.args.len() {
         s.push_str(&arg_str(rt, c, i)?);
     }
-    with_dom(rt, |_, dom| {
+    with_dom(rt, |rt, dom| {
         let body = dom.doc.find("body").unwrap_or(Document::ROOT);
         for x in parse_into(&mut dom.doc, &s) {
-            dom.doc.insert(body, x, None);
+            let _ = insert_checked(rt, dom, body, x, None);
         }
     });
+    run_inserted_scripts(rt);
     Ok(Value::Undefined)
 }
 
@@ -2190,6 +2431,15 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
         focus: None,
         alerts: Vec::new(),
         started,
+        inserted_scripts: Vec::new(),
+        started_scripts: alloc::collections::BTreeSet::new(),
+        fetches: Vec::new(),
+        geometry: BTreeMap::new(),
+        page_size: viewport,
+        scroll: (0, 0),
+        scroll_request: None,
+        requests: Vec::new(),
+        pending_requests: BTreeMap::new(),
     }));
 
     let op = rt.intr.object_proto;
@@ -2295,7 +2545,8 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
             ("insertAdjacentElement", 2, insert_adjacent_element),
             ("insertAdjacentText", 2, insert_adjacent_text),
             ("getBoundingClientRect", 0, rect),
-            ("scrollIntoView", 0, noop),
+            ("getClientRects", 0, client_rects),
+            ("scrollIntoView", 0, scroll_into_view),
             ("scrollTo", 0, noop),
             ("setPointerCapture", 1, noop),
             ("releasePointerCapture", 1, noop),
@@ -2351,7 +2602,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
         "scrollWidth",
         "scrollHeight",
     ] {
-        accessor(rt, html_element, name, zero, None);
+        accessor_with(rt, html_element, name, Value::str(name), measure, None);
     }
     methods(rt, html_element, &[("click", 0, click), ("focus", 0, focus), ("blur", 0, blur)]);
     for h in HANDLERS {
@@ -2408,6 +2659,10 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     for (name, tag) in [("forms", "form"), ("images", "img"), ("links", "a"), ("scripts", "script")] {
         accessor_with(rt, document, name, Value::str(tag), doc_all, None);
     }
+    let implementation = rt.new_object();
+    rt.method(implementation, "createHTMLDocument", 1, create_html_document);
+    rt.method(implementation, "hasFeature", 0, has_feature);
+    rt.define(document, "implementation", Value::Object(implementation), HIDDEN);
     rt.define(document, "visibilityState", Value::str("visible"), HIDDEN);
     rt.define(document, "hidden", Value::Bool(false), HIDDEN);
     for h in HANDLERS {
@@ -2537,9 +2792,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
             ("prompt", 1, prompt),
             ("matchMedia", 1, match_media),
             ("getComputedStyle", 1, get_computed_style),
-            ("scrollTo", 2, noop),
-            ("scrollBy", 2, noop),
-            ("scroll", 2, noop),
+            ("scroll", 2, scroll_to),
             ("focus", 0, noop),
             ("blur", 0, noop),
             ("btoa", 1, btoa),
@@ -2550,9 +2803,16 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     accessor(rt, g, "innerHeight", inner_height, None);
     accessor(rt, g, "outerWidth", inner_width, None);
     accessor(rt, g, "outerHeight", inner_height, None);
-    for name in ["scrollX", "scrollY", "pageXOffset", "pageYOffset", "screenX", "screenY"] {
+    for (name, y) in [("scrollX", false), ("scrollY", true), ("pageXOffset", false), ("pageYOffset", true)] {
+        accessor_with(rt, g, name, Value::Bool(y), scroll_xy, None);
+    }
+    for name in ["screenX", "screenY"] {
         accessor(rt, g, name, zero, None);
     }
+    let to = rt.native_with("scrollTo", 2, scroll_to, false, vec![Value::Bool(false)]);
+    rt.define(g, "scrollTo", Value::Object(to), HIDDEN);
+    let by = rt.native_with("scrollBy", 2, scroll_to, false, vec![Value::Bool(true)]);
+    rt.define(g, "scrollBy", Value::Object(by), HIDDEN);
     rt.define(g, "devicePixelRatio", Value::Number(1.0), DEFAULT);
     for h in HANDLERS {
         accessor_with(rt, g, &format!("on{}", h.to_ascii_lowercase()), Value::str(h), handler_get, Some(handler_set));
@@ -2628,7 +2888,18 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     rt.define(history, "length", Value::Number(1.0), DEFAULT);
     rt.define(history, "state", Value::Null, DEFAULT);
     rt.set_global("history", Value::Object(history));
+
+    let req = rt.native("__nebula_request", 4, native_request, false);
+    rt.define(g, "__nebula_request", Value::Object(req), 0);
+
+    // Web APIs written in JavaScript.
+    if let Err(e) = rt.eval(PRELUDE, "prelude.js") {
+        let msg = rt.describe_error(&e);
+        rt.host.console("error", &format!("prelude: {msg}"));
+    }
 }
+
+const PRELUDE: &str = include_str!("js/prelude.js");
 
 // ---------------------------------------------------------------- the event loop
 
@@ -2791,4 +3062,88 @@ pub fn fire_mouse(rt: &mut Realm, target: NodeId, kind: &str, x: i32, y: i32) ->
             true
         }
     }
+}
+
+/// Runs an external script the browser fetched for an inserted element,
+/// then fires `load` (or `error` when `source` is None) at it.
+pub fn run_fetched(rt: &mut Realm, node: NodeId, name: &str, source: Option<&str>) {
+    match source {
+        Some(code) => {
+            let r = rt.eval(code, name);
+            report(rt, r);
+            rt.run_jobs();
+            fire(rt, node, "load", false, false);
+        }
+        None => {
+            fire(rt, node, "error", false, false);
+        }
+    }
+}
+
+/// `__nebula_request(method, url, [[name, value]…], body)`: a promise of
+/// `{ status, statusText, url, headers, body }` (the prelude's `fetch` and
+/// `XMLHttpRequest` build on it).
+fn native_request(rt: &mut Realm, c: &Call) -> JsResult {
+    let method = arg_str(rt, c, 0)?.to_ascii_uppercase();
+    let url = arg_str(rt, c, 1)?;
+    let mut headers = Vec::new();
+    if let Value::Object(_) = c.arg(2) {
+        for pair in rt.list_from_array_like(&c.arg(2))? {
+            let kv = rt.list_from_array_like(&pair)?;
+            if kv.len() == 2 {
+                headers.push((rt.to_rust_string(&kv[0])?, rt.to_rust_string(&kv[1])?));
+            }
+        }
+    }
+    let body = if c.arg(3).is_nullish() { String::new() } else { arg_str(rt, c, 3)? };
+    // A promise, settled by `complete_request`.
+    let ctor = Value::Object(rt.intr.promise_ctor);
+    let wr = rt.native("", 0, noop, false);
+    let executor = rt.native_with("", 2, capture_resolvers, false, vec![Value::Object(wr)]);
+    let p = rt.construct(&ctor, &[Value::Object(executor)], None)?;
+    let res = rt.get_str(wr, "resolve")?;
+    let rej = rt.get_str(wr, "reject")?;
+    with_dom(rt, |_, dom| {
+        dom.next_id += 1;
+        let id = dom.next_id;
+        dom.pending_requests.insert(id, (res, rej));
+        dom.requests.push(HttpRequest { id, method, url, headers, body });
+    });
+    Ok(p)
+}
+
+/// A promise executor that stores resolve/reject on the object in slot 0.
+fn capture_resolvers(rt: &mut Realm, c: &Call) -> JsResult {
+    let Value::Object(o) = rt.native_slots(c.callee)[0] else { unreachable!() };
+    rt.define(o, "resolve", c.arg(0), DEFAULT);
+    rt.define(o, "reject", c.arg(1), DEFAULT);
+    Ok(Value::Undefined)
+}
+
+/// Settles a script's request with the browser's answer (Err: it failed).
+pub fn complete_request(rt: &mut Realm, id: u32, result: Result<HttpResponse, String>) {
+    let Some((res, rej)) = with_dom(rt, |_, dom| dom.pending_requests.remove(&id)) else { return };
+    let r = match result {
+        Ok(resp) => {
+            let o = rt.new_object();
+            rt.define(o, "status", Value::Number(resp.status as f64), DEFAULT);
+            rt.define(o, "statusText", Value::str(&resp.status_text), DEFAULT);
+            rt.define(o, "url", Value::str(&resp.url), DEFAULT);
+            let pairs: Vec<Value> = resp
+                .headers
+                .iter()
+                .map(|(k, v)| rt.array_from(vec![Value::str(&k.to_ascii_lowercase()), Value::str(v)]))
+                .collect();
+            let h = rt.array_from(pairs);
+            rt.define(o, "headers", h, DEFAULT);
+            rt.define(o, "body", Value::str(&resp.body), DEFAULT);
+            rt.call(&res, Value::Undefined, &[Value::Object(o)])
+        }
+        Err(msg) => {
+            let e = rt.type_error(&format!("Failed to fetch: {msg}"));
+            rt.call(&rej, Value::Undefined, &[e])
+        }
+    };
+    report(rt, r);
+    rt.run_jobs();
 }

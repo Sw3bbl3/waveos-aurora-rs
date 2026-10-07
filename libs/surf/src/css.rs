@@ -5,7 +5,7 @@
 //! (width, orientation, colour scheme), @supports (assumed true) and !important.
 //! Anything else makes a selector never match, so unknown rules stay inert.
 
-use crate::dom::{Document, NodeId};
+use crate::dom::{Document, NodeData, NodeId};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -72,6 +72,14 @@ pub enum Pseudo {
     Not(Vec<Compound>),
     /// :is() / :where(): any of these.
     Is(Vec<Compound>),
+    /// :nth-last-child(a n + b)
+    NthLastChild(i32, i32),
+    /// :nth-of-type / :nth-last-of-type (a, b, from the end).
+    NthOfType(i32, i32, bool),
+    Checked,
+    Disabled,
+    Enabled,
+    Empty,
 }
 
 /// A complex selector, stored right to left: `parts[0]` is the subject.
@@ -483,6 +491,24 @@ fn parse_compound(s: &str) -> Option<(Compound, usize)> {
                     ("last-child", _) => c.pseudos.push(Pseudo::LastChild),
                     ("only-child", _) => c.pseudos.push(Pseudo::OnlyChild),
                     ("root", _) => c.pseudos.push(Pseudo::Root),
+                    ("checked", _) => c.pseudos.push(Pseudo::Checked),
+                    ("disabled", _) => c.pseudos.push(Pseudo::Disabled),
+                    ("enabled", _) => c.pseudos.push(Pseudo::Enabled),
+                    ("empty", _) => c.pseudos.push(Pseudo::Empty),
+                    ("first-of-type", _) => c.pseudos.push(Pseudo::NthOfType(0, 1, false)),
+                    ("last-of-type", _) => c.pseudos.push(Pseudo::NthOfType(0, 1, true)),
+                    ("only-of-type", _) => {
+                        c.pseudos.push(Pseudo::NthOfType(0, 1, false));
+                        c.pseudos.push(Pseudo::NthOfType(0, 1, true));
+                    }
+                    ("nth-last-child", Some(a)) => match nth(a) {
+                        Some((a, b)) => c.pseudos.push(Pseudo::NthLastChild(a, b)),
+                        None => c.never = true,
+                    },
+                    (n @ ("nth-of-type" | "nth-last-of-type"), Some(a)) => match nth(a) {
+                        Some((a, b)) => c.pseudos.push(Pseudo::NthOfType(a, b, n == "nth-last-of-type")),
+                        None => c.never = true,
+                    },
                     ("nth-child", Some(a)) => match nth(a) {
                         Some((a, b)) => c.pseudos.push(Pseudo::NthChild(a, b)),
                         None => c.never = true,
@@ -627,20 +653,150 @@ pub fn matches_compound(doc: &Document, node: NodeId, c: &Compound) -> bool {
                 doc.previous_elements(node).next().is_none() && doc.next_elements(node).next().is_none()
             }
             Pseudo::Root => e.tag == "html",
-            Pseudo::NthChild(a, b) => {
-                let pos = doc.previous_elements(node).count() as i32 + 1;
-                if *a == 0 {
-                    pos == *b
+            Pseudo::NthChild(a, b) => nth_matches(doc.previous_elements(node).count() as i32 + 1, *a, *b),
+            Pseudo::NthLastChild(a, b) => nth_matches(doc.next_elements(node).count() as i32 + 1, *a, *b),
+            Pseudo::NthOfType(a, b, from_end) => {
+                let same = |n: &NodeId| doc.tag(*n) == e.tag;
+                let pos = if *from_end {
+                    doc.next_elements(node).filter(same).count()
                 } else {
-                    (pos - b) % a == 0 && (pos - b) / a >= 0
-                }
+                    doc.previous_elements(node).filter(same).count()
+                } as i32
+                    + 1;
+                nth_matches(pos, *a, *b)
             }
+            Pseudo::Checked => {
+                (e.tag == "input" && e.attr("checked").is_some()) || (e.tag == "option" && e.attr("selected").is_some())
+            }
+            Pseudo::Disabled => is_control(&e.tag) && e.attr("disabled").is_some(),
+            Pseudo::Enabled => is_control(&e.tag) && e.attr("disabled").is_none(),
+            Pseudo::Empty => doc.nodes[node].children.iter().all(|c| match &doc.nodes[*c].data {
+                NodeData::Text(t) => t.is_empty(),
+                _ => false,
+            }),
             Pseudo::Not(list) => !list.iter().any(|c| matches_compound(doc, node, c)),
             Pseudo::Is(list) => list.iter().any(|c| matches_compound(doc, node, c)),
         };
         if !ok {
             return false;
         }
+    }
+    true
+}
+
+fn nth_matches(pos: i32, a: i32, b: i32) -> bool {
+    if a == 0 {
+        pos == b
+    } else {
+        (pos - b) % a == 0 && (pos - b) / a >= 0
+    }
+}
+
+fn is_control(tag: &str) -> bool {
+    matches!(tag, "input" | "button" | "select" | "textarea" | "option" | "optgroup" | "fieldset")
+}
+
+/// Whether a selector only uses pseudo-classes CSS defines (scripts get a
+/// SyntaxError otherwise, which libraries rely on to use their own engines).
+pub fn standard_pseudos(selector: &str) -> bool {
+    const KNOWN: &[&str] = &[
+        "link",
+        "any-link",
+        "visited",
+        "hover",
+        "active",
+        "focus",
+        "focus-within",
+        "focus-visible",
+        "target",
+        "first-child",
+        "last-child",
+        "only-child",
+        "nth-child",
+        "nth-last-child",
+        "nth-of-type",
+        "nth-last-of-type",
+        "first-of-type",
+        "last-of-type",
+        "only-of-type",
+        "root",
+        "empty",
+        "not",
+        "is",
+        "where",
+        "has",
+        "matches",
+        "checked",
+        "disabled",
+        "enabled",
+        "required",
+        "optional",
+        "read-only",
+        "read-write",
+        "placeholder-shown",
+        "default",
+        "indeterminate",
+        "valid",
+        "invalid",
+        "in-range",
+        "out-of-range",
+        "lang",
+        "dir",
+        "scope",
+        "defined",
+        "fullscreen",
+        "modal",
+        "popover-open",
+        "autofill",
+        "user-valid",
+        "user-invalid",
+        "before",
+        "after",
+        "first-line",
+        "first-letter",
+        "marker",
+        "placeholder",
+        "selection",
+        "backdrop",
+        "file-selector-button",
+        "-webkit-autofill",
+        "-moz-focusring",
+    ];
+    let b = selector.as_bytes();
+    let (mut i, mut quote, mut bracket) = (0, 0u8, 0);
+    while i < b.len() {
+        let c = b[i];
+        if quote != 0 {
+            if c == b'\\' {
+                i += 1;
+            } else if c == quote {
+                quote = 0;
+            }
+        } else if c == b'"' || c == b'\'' {
+            quote = c;
+        } else if c == b'[' {
+            bracket += 1;
+        } else if c == b']' {
+            bracket -= 1;
+        } else if c == b'\\' {
+            i += 1;
+        } else if c == b':' && bracket == 0 {
+            let mut j = i + 1;
+            if j < b.len() && b[j] == b':' {
+                j += 1;
+            }
+            let start = j;
+            while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'-' || b[j] == b'_') {
+                j += 1;
+            }
+            let name = selector[start..j].to_ascii_lowercase();
+            if !KNOWN.contains(&name.as_str()) {
+                return false;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
     }
     true
 }

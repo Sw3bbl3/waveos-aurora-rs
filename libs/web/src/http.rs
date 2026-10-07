@@ -322,15 +322,29 @@ fn decode_body(body: Vec<u8>, encoding: &str) -> Result<Vec<u8>, Error> {
 
 /// GETs `url`, following up to five redirects.
 pub fn fetch<C: Connect + ?Sized>(url: &Url, connect: &mut C) -> Result<Response, Error> {
+    request("GET", url, &[], &[], connect)
+}
+
+/// Sends a request, following up to five redirects as browsers do: 301,
+/// 302 and 303 turn a POST into a GET; 307 and 308 repeat it.
+pub fn request<C: Connect + ?Sized>(
+    method: &str,
+    url: &Url,
+    headers: &[(String, String)],
+    body: &[u8],
+    connect: &mut C,
+) -> Result<Response, Error> {
     let mut url = url.clone();
+    let mut method = String::from(method);
+    let mut body = body;
     for _ in 0..6 {
         if url.scheme != "http" && url.scheme != "https" {
             return Err(Error::UnsupportedScheme(url.scheme.clone()));
         }
         let mut target = url.clone();
         target.fragment = None;
-        let mut req = Request::get(&target);
-        req.keep_alive = connect.pooled();
+        let req =
+            Request { method: &method, url: &target, headers: headers.to_vec(), body, keep_alive: connect.pooled() };
         let (mut conn, reused) = connect.connect(&url, false)?;
         let (resp, reusable) = match exchange(&mut conn, &req) {
             Ok(r) => r,
@@ -347,6 +361,10 @@ pub fn fetch<C: Connect + ?Sized>(url: &Url, connect: &mut C) -> Result<Response
         }
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
             if let Some(next) = resp.header("location").and_then(|l| url.join(l)) {
+                if matches!(resp.status, 301..=303) && method != "GET" && method != "HEAD" {
+                    method = String::from("GET");
+                    body = &[];
+                }
                 url = next;
                 continue;
             }

@@ -25,11 +25,20 @@ A menu bar, a dock and windows that glide. Frosted glass that really blurs what'
 
 ## The web, on an engine of our own.
 
-**Nebula** loads real websites through a stack we wrote ourselves: the network drivers, TCP/IP, TLS 1.3, HTTP, and an HTML and CSS engine with flexbox, grid and tables. And now **Pulsar**, our new JavaScript engine, is on its way in.
+**Nebula** loads real websites through a stack we wrote ourselves: the network drivers, TCP/IP, TLS 1.3, HTTP, and an HTML and CSS engine with flexbox, grid and tables.
 
 | | |
 |---|---|
 | ![Nebula showing Wikipedia's main page, with photos](docs/screenshots/surf-wikipedia.png) | ![Nebula showing Hacker News](docs/screenshots/surf-hacker-news.png) |
+
+## JavaScript, written from scratch too.
+
+**Pulsar** is our own JavaScript engine: a compiler, a virtual machine, a garbage collector, and the whole standard library, from classes and generators to `async`/`await` and regular expressions. It passes more than 31,000 of the official conformance tests. In Nebula it brings pages to life: the DOM, events, timers, `fetch`, storage, and libraries like jQuery. In Terminal, type `js` and start writing.
+
+| | |
+|---|---|
+| ![The Pulsar demo page in Nebula: a counter, a to-do list and a live clock](docs/screenshots/pulsar-demo.png) | ![The js prompt in Terminal, with a class, JSON and a loop](docs/screenshots/pulsar-repl.png) |
+| **In Nebula.** Open *Pulsar demo* from the start page. | **In Terminal.** `js` for a prompt, `js file.js` to run a file. |
 
 ## Every app in its own world.
 
@@ -80,7 +89,7 @@ A minute later, you're at the desktop. Add `--monitor` to open the System Explor
 | **AuroraKit** | The UI toolkit every app is built with |
 | **Lyra** | TrueType font engine |
 | **Nebula** | Web browser: HTTP, TLS, HTML, CSS and layout |
-| **Pulsar** | JavaScript engine — [in development](docs/PULSAR.md) |
+| **Pulsar** | JavaScript engine: compiler, VM, collector, DOM — [status](docs/PULSAR.md) |
 
 Nearly everything is our own. Where we stand on others' shoulders, we say so: cryptographic primitives come from [RustCrypto](https://github.com/RustCrypto), ACPI's AML interpreter from the [`acpi`](https://crates.io/crates/acpi) crate, and maths functions from [`libm`](https://crates.io/crates/libm).
 

@@ -1,7 +1,8 @@
 //! Nebula — the WaveOS Aurora web browser.
 //!
-//! Pages load on a background thread (the document and its stylesheets),
-//! images on a few more; layout (`nebula-engine`) and painting happen here.
+//! Pages load on a background thread (the document, its stylesheets and
+//! scripts), images on a few more; layout (`nebula-engine`), scripts
+//! (Pulsar) and painting happen here.
 #![no_std]
 #![no_main]
 
@@ -25,8 +26,9 @@ use corekit::sync::Mutex;
 use corekit::thread::JoinHandle;
 use nebula_engine::dom::{Document, NodeId};
 use nebula_engine::layout::Item;
+use nebula_engine::nebula_script;
 use nebula_engine::style::ListStyle;
-use nebula_engine::{FontSpec, Host, Layout, Metrics, Page};
+use nebula_engine::{FontSpec, Host, Layout, Metrics, Page, ScriptSource, Scripts};
 use nebula_web::http::{self, Response};
 use nebula_web::Url;
 
@@ -38,6 +40,64 @@ const SEARCH: &str = "https://html.duckduckgo.com/html/?q=";
 const IMAGE_WORKERS: usize = 3;
 const MAX_IMAGES: usize = 80;
 const MAX_STYLESHEETS: usize = 16;
+const MAX_SCRIPTS: usize = 48;
+
+/// Whether pages may run JavaScript (preference `nebula_javascript`).
+fn javascript_enabled() -> bool {
+    corekit::prefs::get_int("nebula_javascript", 1) != 0
+}
+
+/// Where scripts' console output and the clock come from.
+struct PageHost;
+
+impl nebula_script::Host for PageHost {
+    fn now_ms(&mut self) -> f64 {
+        corekit::time::unix_ms()
+    }
+
+    fn console(&mut self, level: &str, line: &str) {
+        corekit::io::log(&format!("[nebula] console.{level}: {line}\n"));
+    }
+
+    fn seed(&mut self) -> u64 {
+        let mut b = [0u8; 8];
+        corekit::net::random(&mut b);
+        u64::from_le_bytes(b)
+    }
+
+    fn timezone_offset(&mut self, _utc_ms: f64) -> f64 {
+        -(corekit::time::utc_offset_minutes() as f64)
+    }
+}
+
+/// localStorage is kept per site, in a file under /Settings/Nebula.
+fn storage_path(url: &Url) -> String {
+    let site: String =
+        url.host.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
+    let site = if site.is_empty() { String::from("local-files") } else { site };
+    format!("/Settings/Nebula/Storage/{site}")
+}
+
+fn load_storage(url: &Url) -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
+    let raw = corekit::fs::read_to_string(&storage_path(url)).unwrap_or_default();
+    for entry in raw.split('\u{1E}') {
+        if let Some((k, v)) = entry.split_once('\u{1F}') {
+            m.insert(String::from(k), String::from(v));
+        }
+    }
+    m
+}
+
+fn save_storage(url: &Url, m: &BTreeMap<String, String>) {
+    let _ = corekit::fs::mkdir("/Settings/Nebula");
+    let _ = corekit::fs::mkdir("/Settings/Nebula/Storage");
+    let raw: Vec<String> = m.iter().map(|(k, v)| format!("{k}\u{1F}{v}")).collect();
+    let path = storage_path(url);
+    if let Err(e) = corekit::fs::write(&path, raw.join("\u{1E}").as_bytes()) {
+        corekit::io::log(&format!("[nebula] couldn't save {path}: {e}\n"));
+    }
+}
 
 // ------------------------------------------------------------------ loading
 
@@ -46,6 +106,8 @@ struct Loaded {
     url: Url,
     /// Images that came with the document (an image opened directly).
     images: Vec<(String, Image)>,
+    /// The page's scripts, fetched, in order: (name, source).
+    scripts: Vec<(String, String)>,
 }
 
 struct LoadJob {
@@ -109,7 +171,7 @@ fn escape(s: &str) -> String {
 fn load(url: Url, job: &LoadJob) -> Result<Loaded, String> {
     if url.scheme == "about" {
         let html = if url.path == "home" { HOME_PAGE } else { "<html><body></body></html>" };
-        return Ok(Loaded { page: Page::parse(html), url, images: Vec::new() });
+        return Ok(Loaded { page: Page::parse(html), url, images: Vec::new(), scripts: Vec::new() });
     }
     *job.progress.lock() = format!("Connecting to {}…", url.host);
     let resp = get(&url)?;
@@ -176,7 +238,28 @@ fn load(url: Url, job: &LoadJob) -> Result<Loaded, String> {
             }
         }
     }
-    Ok(Loaded { page, url: final_url, images })
+    // Scripts, in document order (external ones fetched now).
+    let mut scripts = Vec::new();
+    if javascript_enabled() {
+        for (i, src) in page.scripts().into_iter().enumerate().take(MAX_SCRIPTS) {
+            if job.cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            match src {
+                ScriptSource::Inline(code) => scripts.push((format!("{} (inline script {})", final_url, i + 1), code)),
+                ScriptSource::External(href) => {
+                    let Some(u) = base.join(&href) else { continue };
+                    *job.progress.lock() = format!("Loading scripts from {}…", u.host);
+                    if let Ok(r) = get(&u) {
+                        if r.ok() {
+                            scripts.push((u.to_string(), nebula_engine::decode(&r.body, "")));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(Loaded { page, url: final_url, images, scripts })
 }
 
 /// The URL relative links resolve against (<base href>, else the document's).
@@ -363,6 +446,18 @@ struct Nebula {
     /// The cascade for the current viewport (reused when only images change).
     styles: Option<((i32, i32), nebula_engine::style::Computed)>,
     find: Option<Find>,
+    /// The document version the current layout reflects (scripts bump it).
+    laid_version: u64,
+    /// When page scripts next want to run (Unix ms): timers, animation frames.
+    js_wakeup: Option<f64>,
+    /// The current page's JavaScript, if it has any.
+    js: Option<Scripts>,
+    /// Scripts that scripts inserted, as they finish loading:
+    /// (page generation, element, URL, source if it loaded).
+    script_loads: Arc<Mutex<Vec<(u64, NodeId, String, Option<String>)>>>,
+    scripts_loading: usize,
+    /// Answers to scripts' network requests: (page generation, id, result).
+    request_results: Arc<Mutex<Vec<(u64, u32, Result<nebula_engine::script::HttpResponse, String>)>>>,
 }
 
 /// Find in page: the query and its matches as (text item, byte range).
@@ -400,9 +495,15 @@ impl Nebula {
             focus: None,
             fragment: None,
             press: None,
-            zoom: corekit::prefs::get_int("surf.zoom", 100).clamp(50, 300) as i32,
+            zoom: corekit::prefs::get_int("nebula_zoom", 100).clamp(50, 300) as i32,
             styles: None,
             find: None,
+            laid_version: 0,
+            js_wakeup: None,
+            js: None,
+            script_loads: Arc::new(Mutex::new(Vec::new())),
+            scripts_loading: 0,
+            request_results: Arc::new(Mutex::new(Vec::new())),
         };
         s.go(start, true);
         s
@@ -503,13 +604,14 @@ impl Nebula {
             page: Page::parse(&html),
             url: Url::parse(url).unwrap_or_else(|| Url::parse(HOME).unwrap()),
             images: Vec::new(),
+            scripts: Vec::new(),
         });
     }
 
     fn install(&mut self, loaded: Loaded) {
         self.find = None;
         self.styles = None;
-        let Loaded { page, url, images } = loaded;
+        let Loaded { mut page, url, images, scripts } = loaded;
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.queue.lock().queue.clear();
         self.images.clear();
@@ -521,6 +623,7 @@ impl Nebula {
         self.scroll = 0;
         self.hover = None;
         let url_string = url.to_string();
+        self.js = None;
         if !self.editing {
             self.address.set_text(&url_string);
         }
@@ -531,8 +634,24 @@ impl Nebula {
         let sources: Vec<String> =
             page.images().iter().filter_map(|s| resolve(Some(&base), s)).take(MAX_IMAGES).collect();
         let refresh = page.refresh();
+        // Scripts run before the first layout, as the page finishes loading.
+        let has_handlers = page.doc.nodes.iter().any(|n| match &n.data {
+            nebula_engine::dom::NodeData::Element(e) => e.attrs.iter().any(|(k, _)| k.starts_with("on")),
+            _ => false,
+        });
+        if javascript_enabled() && (!scripts.is_empty() || has_handlers) {
+            let (w, h) = ((self.view.w * 100 / self.zoom).max(200), (self.view.h * 100 / self.zoom).max(200));
+            let url_s = url.to_string();
+            let mut js = Scripts::new(alloc::boxed::Box::new(PageHost), &url_s, (w, h), load_storage(&url));
+            for (name, code) in &scripts {
+                page.run_script(&mut js, code, name);
+            }
+            page.finish_loading(&mut js);
+            self.js = Some(js);
+        }
         self.page = Some(page);
         self.url = Some(url);
+        self.after_scripts();
         self.relayout();
         // Images.
         let g = self.generation.load(Ordering::Relaxed);
@@ -568,8 +687,93 @@ impl Nebula {
         }
     }
 
+    /// Follows up on what scripts did: navigation, storage, inserted
+    /// scripts, scrolling, DOM changes.
+    fn after_scripts(&mut self) {
+        let Some(page) = self.page.as_mut() else { return };
+        let Some(js) = self.js.as_mut() else { return };
+        // Scripts that scripts inserted load in the background.
+        let base = self.url.as_ref().map(|u| document_base(page, u));
+        for (node, src) in js.take_fetches() {
+            let Some(u) = base.as_ref().and_then(|b| b.join(&src)) else { continue };
+            let (loads, g) = (self.script_loads.clone(), self.generation.load(Ordering::Relaxed));
+            self.scripts_loading += 1;
+            let spawned = corekit::thread::spawn(move || {
+                let source = match get(&u) {
+                    Ok(r) if r.ok() => Some(nebula_engine::decode(&r.body, "")),
+                    _ => None,
+                };
+                loads.lock().push((g, node, u.to_string(), source));
+            });
+            if spawned.is_err() {
+                self.scripts_loading -= 1;
+            }
+        }
+        // fetch() and XMLHttpRequest, also in the background.
+        for req in js.take_requests() {
+            let (results, g) = (self.request_results.clone(), self.generation.load(Ordering::Relaxed));
+            let Some(u) = base.as_ref().and_then(|b| b.join(&req.url)) else {
+                results.lock().push((g, req.id, Err(String::from("bad URL"))));
+                continue;
+            };
+            self.scripts_loading += 1;
+            let spawned = corekit::thread::spawn(move || {
+                let r = if u.scheme == "file" {
+                    get(&u)
+                } else {
+                    corekit::web::request(&req.method, &u, &req.headers, req.body.as_bytes()).map_err(describe)
+                };
+                let r = r.map(|resp| nebula_engine::script::HttpResponse {
+                    status: resp.status,
+                    status_text: resp.reason.clone(),
+                    url: resp.url.to_string(),
+                    body: nebula_engine::decode(&resp.body, resp.header("content-type").unwrap_or("")),
+                    headers: resp.headers,
+                });
+                results.lock().push((g, req.id, r));
+            });
+            if spawned.is_err() {
+                self.scripts_loading -= 1;
+            }
+        }
+        let scroll_to = js.take_scroll_request().map(|(_, y)| y * self.zoom / 100);
+        if let Some(m) = js.take_storage() {
+            if let Some(u) = &self.url {
+                save_storage(u, &m);
+            }
+        }
+        if let Some(target) = js.take_navigation() {
+            if target == "about:back" {
+                self.back();
+            } else if let Some(u) = self.url.as_ref().and_then(|u| u.join(&target)) {
+                self.go(&u.to_string(), true);
+            }
+            return;
+        }
+        // Values scripts set show in the fields being edited.
+        for (node, edit) in self.fields.iter_mut() {
+            if let Some(v) = page.doc.values.get(node) {
+                if edit.text() != v {
+                    edit.set_text(v);
+                }
+            }
+        }
+        if page.doc.version != self.laid_version {
+            self.relayout();
+        }
+        if let Some(y) = scroll_to {
+            self.scroll = y;
+            self.clamp_scroll();
+        }
+    }
+
     fn relayout(&mut self) {
         let Some(page) = &self.page else { return };
+        if page.doc.version != self.laid_version {
+            // The tree changed: the cascade must run again.
+            self.styles = None;
+            self.laid_version = page.doc.version;
+        }
         let base = self.url.as_ref().map(|u| document_base(page, u));
         let host = Fonts { images: &self.images, base };
         let w = (self.view.w * 100 / self.zoom).max(200);
@@ -579,6 +783,10 @@ impl Nebula {
         }
         let l = page.layout_with(&self.styles.as_ref().unwrap().1, w, &host);
         self.laid_out_width = self.view.w;
+        if let Some(js) = self.js.as_mut() {
+            js.set_viewport(w, h);
+            js.set_layout(&l, (0, self.scroll * 100 / self.zoom));
+        }
         self.layout = Some(l);
         self.clamp_scroll();
         if self.find.is_some() {
@@ -599,7 +807,7 @@ impl Nebula {
         // Keep the same part of the page in view.
         let frac = if self.max_scroll() > 0 { self.scroll as i64 * 1000 / self.max_scroll() as i64 } else { 0 };
         self.zoom = zoom;
-        let _ = corekit::prefs::set("surf.zoom", &format!("{zoom}"));
+        let _ = corekit::prefs::set("nebula_zoom", &format!("{zoom}"));
         self.relayout();
         self.scroll = (frac * self.max_scroll() as i64 / 1000) as i32;
         self.clamp_scroll();
@@ -752,26 +960,19 @@ impl Nebula {
         if let Some(e) = self.fields.get(&node) {
             return String::from(e.text());
         }
-        let doc = self.doc().unwrap();
-        let el = doc.element(node).unwrap();
-        match el.tag.as_str() {
-            "textarea" => doc.text_content(node),
-            "select" => {
-                let opts: Vec<NodeId> = doc.descendants(node).into_iter().filter(|o| doc.tag(*o) == "option").collect();
-                let sel = opts.iter().find(|o| doc.element(**o).unwrap().attr("selected").is_some()).or(opts.first());
-                sel.map(|o| {
-                    let e = doc.element(*o).unwrap();
-                    e.attr("value").map(String::from).unwrap_or_else(|| String::from(doc.text_content(*o).trim()))
-                })
-                .unwrap_or_default()
-            }
-            _ => String::from(el.attr("value").unwrap_or("")),
-        }
+        nebula_engine::script::control_value(self.doc().unwrap(), node)
     }
 
     /// Submits the form containing `from` (GET; POST forms are sent as GET too).
     fn submit(&mut self, from: NodeId) {
         let Some(form) = self.form_of(from) else { return };
+        if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+            let go_on = page.dispatch(js, form, "submit", true, true);
+            self.after_scripts();
+            if !go_on {
+                return;
+            }
+        }
         let Some(doc) = self.doc() else { return };
         let fe = doc.element(form).unwrap();
         let action = fe.attr("action").unwrap_or("").trim();
@@ -1279,6 +1480,15 @@ impl App for Nebula {
                 _ => return self.address.handle_key(ev, env.now_ms).handled,
             }
         }
+        if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+            let target = self.focus.or_else(|| page.doc.find("body")).unwrap_or(Document::ROOT);
+            let (key, code) = key_names(ev);
+            let go_on = page.dispatch_key(js, target, "keydown", &key, &code, ev.mods.ctrl, ev.mods.shift, ev.mods.alt);
+            self.after_scripts();
+            if !go_on {
+                return true;
+            }
+        }
         if let Some(node) = self.focus {
             match ev.code {
                 KeyCode::Enter => {
@@ -1296,7 +1506,19 @@ impl App for Nebula {
                         self.fields.insert(node, TextEdit::new(&v, false));
                     }
                     let e = self.fields.get_mut(&node).unwrap();
-                    return e.handle_key(ev, env.now_ms).handled;
+                    let before = String::from(e.text());
+                    let handled = e.handle_key(ev, env.now_ms).handled;
+                    let after = String::from(e.text());
+                    if after != before {
+                        if let Some(page) = self.page.as_mut() {
+                            page.doc.values.insert(node, after);
+                            if let Some(js) = self.js.as_mut() {
+                                page.dispatch(js, node, "input", true, false);
+                                self.after_scripts();
+                            }
+                        }
+                    }
+                    return handled;
                 }
             }
         }
@@ -1348,7 +1570,18 @@ impl App for Nebula {
         }
         let Some((px, py)) = self.page_point(x, y) else { return was_editing };
         let Some(l) = &self.layout else { return was_editing };
-        if let Some(node) = l.field_at(px, py) {
+        let (field, link, target) = (l.field_at(px, py), l.link_at(px, py), l.node_at(px, py));
+        // Scripts see the click first; preventDefault() stops the browser's action.
+        if let Some(t) = target.or(field).or(link) {
+            if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+                let go_on = page.dispatch_click(js, t, px, py);
+                self.after_scripts();
+                if !go_on {
+                    return true;
+                }
+            }
+        }
+        if let Some(node) = field {
             let doc = self.doc().unwrap();
             let e = doc.element(node).unwrap();
             let kind = e.attr("type").unwrap_or("text").to_ascii_lowercase();
@@ -1384,6 +1617,12 @@ impl App for Nebula {
                         }
                     }
                     self.styles = None;
+                    if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+                        page.doc.version += 1;
+                        page.dispatch(js, node, "input", true, false);
+                        page.dispatch(js, node, "change", true, false);
+                        self.after_scripts();
+                    }
                     self.relayout();
                 }
                 ("input", "hidden") => {}
@@ -1402,7 +1641,7 @@ impl App for Nebula {
             return true;
         }
         self.focus = None;
-        if let Some(link) = l.link_at(px, py) {
+        if let Some(link) = link {
             self.follow(link);
             return true;
         }
@@ -1428,6 +1667,50 @@ impl App for Nebula {
 
     fn tick(&mut self, env: &mut Env) -> bool {
         let mut dirty = false;
+        // Scripts that scripts inserted, now loaded.
+        let loaded: Vec<(u64, NodeId, String, Option<String>)> = core::mem::take(&mut *self.script_loads.lock());
+        if !loaded.is_empty() {
+            let g = self.generation.load(Ordering::Relaxed);
+            for (gen, node, url, source) in loaded {
+                self.scripts_loading = self.scripts_loading.saturating_sub(1);
+                if gen != g {
+                    continue;
+                }
+                if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+                    page.run_fetched(js, node, &url, source.as_deref());
+                }
+                self.after_scripts();
+                dirty = true;
+            }
+        }
+        // Answers to fetch() and XMLHttpRequest.
+        let answers: Vec<_> = core::mem::take(&mut *self.request_results.lock());
+        if !answers.is_empty() {
+            let g = self.generation.load(Ordering::Relaxed);
+            for (gen, id, result) in answers {
+                self.scripts_loading = self.scripts_loading.saturating_sub(1);
+                if gen != g {
+                    continue;
+                }
+                if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+                    page.complete_request(js, id, result);
+                }
+                self.after_scripts();
+                dirty = true;
+            }
+        }
+        // Page timers and animation frames.
+        if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+            let now = corekit::time::unix_ms();
+            if js.next_wakeup(now).is_some_and(|w| w <= now) {
+                page.run_timers(js, now);
+                self.after_scripts();
+                dirty = true;
+            }
+            self.js_wakeup = self.js.as_mut().and_then(|j| j.next_wakeup(now));
+        } else {
+            self.js_wakeup = None;
+        }
         // A finished page load.
         let done = self.job.as_ref().and_then(|(job, _)| job.result.lock().take());
         if let Some(result) = done {
@@ -1465,11 +1748,50 @@ impl App for Nebula {
     }
 
     fn tick_interval(&self) -> u64 {
-        if self.loading() || self.relayout_at.is_some() || !self.workers.iter().all(|w| w.is_finished()) {
-            50
-        } else {
-            500
+        let busy = self.loading() || self.relayout_at.is_some() || self.scripts_loading > 0;
+        let base = if busy || !self.workers.iter().all(|w| w.is_finished()) { 50 } else { 500 };
+        match self.js_wakeup {
+            // Wake for the next timer (16 ms at the most often, for animations).
+            Some(w) => ((w - corekit::time::unix_ms()).max(16.0) as u64).min(base),
+            None => base,
         }
+    }
+}
+
+/// KeyboardEvent `key` and `code` for a key press.
+fn key_names(ev: &KeyEvent) -> (String, String) {
+    let named = match ev.code {
+        KeyCode::Enter => Some(("Enter", "Enter")),
+        KeyCode::Escape => Some(("Escape", "Escape")),
+        KeyCode::Backspace => Some(("Backspace", "Backspace")),
+        KeyCode::Tab => Some(("Tab", "Tab")),
+        KeyCode::Up => Some(("ArrowUp", "ArrowUp")),
+        KeyCode::Down => Some(("ArrowDown", "ArrowDown")),
+        KeyCode::Left => Some(("ArrowLeft", "ArrowLeft")),
+        KeyCode::Right => Some(("ArrowRight", "ArrowRight")),
+        KeyCode::Home => Some(("Home", "Home")),
+        KeyCode::End => Some(("End", "End")),
+        KeyCode::PageUp => Some(("PageUp", "PageUp")),
+        KeyCode::PageDown => Some(("PageDown", "PageDown")),
+        KeyCode::Delete => Some(("Delete", "Delete")),
+        _ => None,
+    };
+    if let Some((k, c)) = named {
+        return (String::from(k), String::from(c));
+    }
+    match ev.ch {
+        Some(' ') => (String::from(" "), String::from("Space")),
+        Some(ch) => {
+            let code = if ch.is_ascii_alphabetic() {
+                format!("Key{}", ch.to_ascii_uppercase())
+            } else if ch.is_ascii_digit() {
+                format!("Digit{ch}")
+            } else {
+                String::new()
+            };
+            (ch.to_string(), code)
+        }
+        None => (String::from("Unidentified"), String::new()),
     }
 }
 
@@ -1517,8 +1839,9 @@ button { font-size: 15px; padding: 9px 20px; border-radius: 22px; border: 0; bac
 <a class="card" href="https://lite.cnn.com/"><b>CNN Lite</b><span>Headlines, lightly</span></a>
 <a class="card" href="https://www.rust-lang.org/"><b>Rust</b><span>The language Aurora is written in</span></a>
 <a class="card" href="https://github.com/Sw3bbl3/waveos-aurora-rs"><b>WaveOS Aurora</b><span>This system's source code</span></a>
+<a class="card" href="file:///System/Library/Nebula/pulsar-demo.html"><b>Pulsar demo</b><span>JavaScript, made here</span></a>
 </div>
-<p class="foot">Nebula 0.7.0 — HTML, CSS, layout, TLS and TCP/IP written for WaveOS Aurora</p>
+<p class="foot">Nebula 0.8 — HTML, CSS, layout, JavaScript, TLS and TCP/IP written for WaveOS Aurora</p>
 </body></html>"#;
 
 fn main(args: corekit::Args) -> i32 {

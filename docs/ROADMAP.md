@@ -69,7 +69,7 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - **Images:** our own JPEG (baseline and progressive) and GIF decoders, for Nebula, Preview and Files.
 - **Nebula:** history, links, fragments, search forms, find in page, zoom, downloads, a start page; `.html` files open in it.
 - **Tools and UI:** `ping`, `ifconfig`, `nslookup`, `fetch`; shell lists (`&&`, `||`, `;`); the menu-bar network item, Settings → Network, and a Network tab in Activity Monitor.
-- **Deferred:** IPv6; JavaScript; cookies and POST forms; tabs; WebP and SVG; Wi-Fi and other adapters (Realtek).
+- **Deferred:** IPv6; cookies and POST forms; tabs; WebP and SVG; Wi-Fi and other adapters (Realtek).
 
 ## 0.7: Desktop and offline documentation
 
@@ -86,3 +86,10 @@ Candidates, in no fixed order:
 - I²C-HID touchpads; USB keyboard LEDs.
 - A native GPU driver (virtio-gpu first), so the display survives sleep.
 - IPv6; more of the web platform (cookies, POST, tabs, WebP, SVG).
+
+## 0.8: Pulsar, JavaScript
+
+- **The engine** (`libs/script`): lexer, parser, a compiler with static scopes, a bytecode VM whose generators and async functions suspend by saving their frames, mark-and-sweep collection, and the standard library with our own regular expressions. 31,017 test262 tests pass (88.1% of those run).
+- **In Nebula:** page scripts and scripts they insert, the DOM and events, timers and animation frames, element geometry from layout, `fetch` and `XMLHttpRequest`, per-site `localStorage`, and web APIs written in JavaScript (URL, observers, AbortController). Clicks, typing and form submission go to scripts first. jQuery runs.
+- **In Terminal:** `js`, with typed lines forwarded to a running program's stdin.
+- **Deferred:** Proxy, BigInt, typed arrays, modules, cookies, and same-origin checks on `fetch`.
