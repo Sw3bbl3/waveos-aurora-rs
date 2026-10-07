@@ -1,8 +1,9 @@
 [package]
-name = "nebula-engine"
+name = "js"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-nebula-script = { path = "../script" }
+corekit.workspace = true
+nebula-script.workspace = true

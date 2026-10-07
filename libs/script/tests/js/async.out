@@ -1,0 +1,18 @@
+start
+async body
+end
+micro 1
+micro 2
+after await
+micro 3
+all [ 1, 2, 3 ]
+settled [ 'rejected', 'fulfilled' ]
+caught TypeError bad
+race fast
+any 2
+AggregateError [ 1 ]
+for await [ 1, 2 ]
+sync iterable a
+sync iterable b
+finally
+recovered x

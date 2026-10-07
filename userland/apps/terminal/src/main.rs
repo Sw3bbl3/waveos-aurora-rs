@@ -3,9 +3,10 @@
 //! Built-in commands (`cd`, `clear`, `help`, `exit`, `theme`, `history`) run
 //! inside the shell. Anything else is a program: `/System/Bin/<name>` (or a
 //! path), started as its own process with stdout/stderr connected to a pipe
-//! that the terminal reads while the program runs. Supports pipelines
-//! (`ls | grep txt`), output redirection (`>`, `>>`), command lists
-//! (`a && b`, `a || b`, `a; b`) and Ctrl+C.
+//! that the terminal reads while the program runs. What you type while a
+//! program runs goes to its stdin a line at a time (Ctrl+D ends the input).
+//! Supports pipelines (`ls | grep txt`), output redirection (`>`, `>>`),
+//! command lists (`a && b`, `a || b`, `a; b`) and Ctrl+C.
 
 #![no_std]
 #![no_main]
@@ -40,6 +41,8 @@ struct Job {
     /// Read end of the pipe carrying the last stage's output.
     output: u64,
     partial: String,
+    /// Write end of the first stage's stdin (closed by Ctrl+D).
+    stdin: Option<u64>,
 }
 
 pub struct Terminal {
@@ -139,8 +142,9 @@ impl Terminal {
     }
 
     fn prompt(&self) -> String {
-        if self.job.is_some() {
-            return String::new();
+        if let Some(job) = &self.job {
+            // A program's unfinished line (like a `> ` prompt) leads the input.
+            return job.partial.clone();
         }
         format!("aurora:{}$ ", fs::cwd())
     }
@@ -261,7 +265,9 @@ impl Terminal {
 
         let [out_r, out_w] = process::pipe(true).map_err(|e| format!("aurora-sh: pipe: {e}"))?;
         let mut pids = Vec::new();
-        let mut prev_read: Option<u64> = None;
+        // The first stage reads what is typed while it runs.
+        let [in_r, in_w] = process::pipe(false).map_err(|e| format!("aurora-sh: pipe: {e}"))?;
+        let mut prev_read: Option<u64> = Some(in_r);
         let n = stages.len();
         for (i, argv) in stages.iter().enumerate() {
             let program =
@@ -302,8 +308,9 @@ impl Terminal {
         drop(redirect);
         if pids.is_empty() {
             process::close(out_r);
+            process::close(in_w);
         } else {
-            self.job = Some(Job { pids, output: out_r, partial: String::new() });
+            self.job = Some(Job { pids, output: out_r, partial: String::new(), stdin: Some(in_w) });
         }
         Ok(())
     }
@@ -343,6 +350,9 @@ impl Terminal {
                 self.out(&job.partial, FG);
             }
             process::close(job.output);
+            if let Some(w) = job.stdin {
+                process::close(w);
+            }
             // A list continues after the last stage; its status decides && and ||.
             let last = job.pids.len().saturating_sub(1);
             for (k, pid) in job.pids.iter().enumerate() {
@@ -486,7 +496,7 @@ impl App for Terminal {
             return true;
         }
         if self.job.is_some() {
-            return false; // no stdin forwarding yet
+            return self.job_key(ev);
         }
         match ev.code {
             KeyCode::Enter => {
@@ -547,6 +557,35 @@ impl App for Terminal {
 }
 
 impl Terminal {
+    /// A key while a program runs: line editing, then the line goes to its stdin.
+    fn job_key(&mut self, ev: &KeyEvent) -> bool {
+        let Some(job) = self.job.as_mut() else { return false };
+        if ev.mods.ctrl && matches!(ev.ch, Some('d') | Some('D')) {
+            if let Some(w) = job.stdin.take() {
+                process::close(w);
+            }
+            return true;
+        }
+        match ev.code {
+            KeyCode::Enter => {
+                let line = core::mem::take(&mut self.input);
+                let echo = format!("{}{}", core::mem::take(&mut job.partial), line);
+                if let Some(w) = job.stdin {
+                    let _ = corekit::io::write_fd(w, format!("{line}\n").as_bytes());
+                }
+                self.out(&echo, FG);
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            _ => match ev.ch {
+                Some(c) if !c.is_control() && !ev.mods.ctrl => self.input.push(c),
+                _ => return false,
+            },
+        }
+        true
+    }
+
     /// Tab completion for program names and paths.
     fn complete(&mut self) {
         let start = self.input.rfind(' ').map(|i| i + 1).unwrap_or(0);

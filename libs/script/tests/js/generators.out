@@ -1,0 +1,16 @@
+got hi
+{ value: 0, done: false } { value: 1, done: false } { value: 2, done: false } { value: 'done', done: true } { value: undefined, done: true }
+inner returned done
+[ 0, 1, 'after' ]
+{ value: 1, done: false }
+generator cleanup
+{ value: 42, done: true }
+{ value: undefined, done: true }
+caught in gen boom
+{ value: 2, done: false } { value: undefined, done: true }
+0,1,1,2,3,5,8,13,21,34
+0 1 [ 2, 3, 4 ]
+{ value: 1, done: false } [ 2, 3 ]
+[object Generator] function
+[ 0, 1, 2, 3, 4 ]
+[ [ 'k', 'v' ] ] helo

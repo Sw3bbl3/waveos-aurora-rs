@@ -1,0 +1,42 @@
+[ 1, 9 ] [ 1, 2, 3, [ 4 ] ] [ 1, 2, 3 ]
+[ 1, 4, 5 ] [ 3, 2, 1 ] [ 1, 9, 3 ] 3
+[ 0, 2, 4 ] [ 7, 8 ] [ 'h', 'é', 'l', 'l', 'o' ] true
+[ 2, 3 ] [ 1, 'a', 'b', 'c', 4, 5 ]
+1 true -1 2 2
+[ 1, 10, 2, 3 ] [ 10, 3, 2, 1 ] [ 'C', 'a', 'b' ]
+1-2-3 ,,1 1,2,3
+[ [ 'a', 1 ], [ 'b', 2 ] ] { x: 1 } { a: 1, b: 2 }
+1 true
+[ '0', '1', 'length' ] [ '0', '1' ] true
+***Hello xxx trim| c 98
+[ 'a', 'b', '', 'c' ] a2b4c6 bbb true
+[ 'T', 'Q' ] [ '2024', '01', '05' ] 2
+[ '11', '23' ] xy1 abc STRASSE
+2024 [ 'a', 'b' ] [ 'camel', 'Case', 'String' ]
+16 0 NaN 3.5 11111111 3.142 1,234.5
+5 Infinity 3 -2 -1 -4 5 3
+true false true 0.0000012 1.2e+2
+{
+  "a": 1,
+  "b": [
+    1,
+    2
+  ],
+  "c": {
+    "d": "e"
+  }
+}
+[null,null,null] {"d":"1970-01-01T00:00:00.000Z"} " \n"
+[ 10, '2', { three: 30 } ]
+2 1 2
+[ 1, 3 ] true
+v false
+Symbol(desc) desc true
+123 null 1,2 [object Object] 1,2 12 12 2 [object Object] true
+3.14 8 true a%20b%26c%3Dd%2F%C3%A9 ✓
+2 true true
+2020-02-29T12:00:00.000Z 1582977600000 0
+number 0 NaN "1970-01-02T00:00:00.000Z"
+[object Array] [object Null] [object Map]
+{ value: [ 0, 1 ], done: false } [object Array Iterator] [ 'a', 'b' ]
+undefined { value: 1, writable: true, enumerable: false, configurable: false }

@@ -1,0 +1,24 @@
+function hoisted
+undefined
+ReferenceError Cannot access 'tdz' before initialization
+2
+1
+0,10,20
+3,3,3
+2
+3
+3628800
+annex b
+switch TDZ ReferenceError
+object 3
+finally runs
+try
+cleanup 1
+cleanup 2
+2
+4
+6 5
+object
+o object
+undefined object function symbol
+{"k":1,"other":2,"x1":3}

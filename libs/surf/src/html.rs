@@ -783,6 +783,94 @@ const ENTITIES: &[(&str, &str)] = &[
     ("Tab", "\t"),
 ];
 
+/// Parses an HTML fragment (as `innerHTML` does): a document whose root
+/// holds the parsed `<body>` contents.
+pub fn parse_fragment(html: &str) -> Document {
+    let full = parse(&alloc::format!("<!doctype html><html><head></head><body>{html}</body></html>"));
+    let mut out = Document::default();
+    if let Some(body) = full.find("body") {
+        for &c in &full.nodes[body].children {
+            let copy = out.import(&full, c);
+            out.insert(Document::ROOT, copy, None);
+        }
+    }
+    out
+}
+
+fn escape_into(out: &mut String, s: &str, attr: bool) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' if !attr => out.push_str("&lt;"),
+            '>' if !attr => out.push_str("&gt;"),
+            '"' if attr => out.push_str("&quot;"),
+            '\u{A0}' => out.push_str("&nbsp;"),
+            c => out.push(c),
+        }
+    }
+}
+
+/// The HTML of a node's children (`innerHTML`).
+pub fn serialize_children(doc: &Document, n: NodeId) -> String {
+    let mut out = String::new();
+    for &c in &doc.nodes[n].children {
+        serialize_into(doc, c, &mut out);
+    }
+    out
+}
+
+/// The HTML of a node itself (`outerHTML`).
+pub fn serialize(doc: &Document, n: NodeId) -> String {
+    let mut out = String::new();
+    serialize_into(doc, n, &mut out);
+    out
+}
+
+fn serialize_into(doc: &Document, n: NodeId, out: &mut String) {
+    match &doc.nodes[n].data {
+        NodeData::Document => {
+            for &c in &doc.nodes[n].children {
+                serialize_into(doc, c, out);
+            }
+        }
+        NodeData::Text(t) => {
+            let raw = doc.parent(n).is_some_and(|p| matches!(doc.tag(p), "script" | "style" | "xmp" | "plaintext"));
+            if raw {
+                out.push_str(t);
+            } else {
+                escape_into(out, t, false);
+            }
+        }
+        NodeData::Element(e) => {
+            if e.tag == crate::dom::FRAGMENT {
+                for &c in &doc.nodes[n].children {
+                    serialize_into(doc, c, out);
+                }
+                return;
+            }
+            out.push('<');
+            out.push_str(&e.tag);
+            for (k, v) in &e.attrs {
+                out.push(' ');
+                out.push_str(k);
+                out.push_str("=\"");
+                escape_into(out, v, true);
+                out.push('"');
+            }
+            out.push('>');
+            if VOID.contains(&e.tag.as_str()) {
+                return;
+            }
+            for &c in &doc.nodes[n].children {
+                serialize_into(doc, c, out);
+            }
+            out.push_str("</");
+            out.push_str(&e.tag);
+            out.push('>');
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

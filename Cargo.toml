@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["libs/help", "libs/gina", "xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/aurorafs", "libs/fat32", "libs/image", "libs/wav", "libs/web", "libs/tls", "libs/surf"]
+members = ["libs/help", "libs/gina", "xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/aurorafs", "libs/fat32", "libs/image", "libs/wav", "libs/web", "libs/tls", "libs/surf", "libs/script"]
 default-members = ["libs/gina", "xtask"]
 
 [workspace.package]
@@ -17,3 +17,8 @@ panic = "abort"
 opt-level = 3
 debug = 1
 codegen-units = 1
+
+# The conformance runner catches engine panics per test.
+[profile.test262]
+inherits = "release"
+panic = "unwind"

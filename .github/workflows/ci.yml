@@ -23,7 +23,7 @@ jobs:
       - name: Validate bilingual handbook
         run: cargo xtask docs
       - name: Filesystem library tests
-        run: cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask
+        run: cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p xtask
 
   kernel:
     name: Kernel tests (${{ matrix.disk }}, ${{ matrix.smp }} CPU, ${{ matrix.net }})

@@ -20,6 +20,43 @@ pub fn now() -> DateTime {
     d
 }
 
+/// Days from 1970-01-01 to a calendar date (Howard Hinnant's days_from_civil).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// The time zone set in Settings: minutes east of UTC.
+pub fn utc_offset_minutes() -> i64 {
+    crate::prefs::get_int("utc_offset", 0)
+}
+
+/// Milliseconds since the Unix epoch (UTC). The real-time clock keeps local
+/// time; sub-second precision comes from the uptime counter.
+pub fn unix_ms() -> f64 {
+    static mut BASE: Option<(f64, u64)> = None;
+    // SAFETY: programs read the clock from one thread at a time in practice;
+    // a race only re-reads the clock.
+    let base = unsafe { *core::ptr::addr_of!(BASE) };
+    let (epoch, up) = match base {
+        Some(b) => b,
+        None => {
+            let d = now();
+            let days = days_from_civil(d.year as i64, d.month as i64, d.day as i64);
+            let local = days * 86400 + d.hour as i64 * 3600 + d.minute as i64 * 60 + d.second as i64;
+            let utc = local - utc_offset_minutes() * 60;
+            let b = (utc as f64 * 1000.0, uptime_ms());
+            unsafe { *core::ptr::addr_of_mut!(BASE) = Some(b) };
+            b
+        }
+    };
+    epoch + (uptime_ms() - up) as f64
+}
+
 pub const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 pub const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 

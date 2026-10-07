@@ -821,6 +821,16 @@ dependencies = [
 [[package]]
 name = "nebula-engine"
 version = "0.7.0"
+dependencies = [
+ "nebula-script",
+]
+
+[[package]]
+name = "nebula-script"
+version = "0.7.0"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "nebula-secure"

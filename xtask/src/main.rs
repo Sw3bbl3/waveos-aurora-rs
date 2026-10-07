@@ -162,9 +162,10 @@ fn main() {
             println!("wrote {}", out.display());
         }
         Some("test") => test(profile, disk, smp, net),
+        Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo xtask <build|run|image|iso|test> [--debug] [--headless] [--no-build] [--gdb] [--int]"
+                "usage: cargo xtask <build|run|image|iso|test|test262> [--debug] [--headless] [--no-build] [--gdb] [--int]"
             );
             exit(2);
         }
@@ -184,6 +185,41 @@ impl Profile {
             Profile::Release => "release",
         }
     }
+}
+
+/// The test262 commit Pulsar's results are measured against.
+const TEST262_COMMIT: &str = "c8c798898646638cd0c24879f8e0374e847e7d74";
+
+/// Runs the ECMAScript conformance suite against Pulsar (fetching it once).
+/// Extra arguments (a path filter) go to the runner.
+fn test262(extra: &[String]) {
+    let dir = root().join("target/test262");
+    if !dir.join("harness").exists() {
+        fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git").current_dir(&dir).args(args).status().map(|s| s.success()).unwrap_or(false);
+            if !ok {
+                eprintln!("git {} failed", args.join(" "));
+                exit(1);
+            }
+        };
+        println!("fetching test262 at {TEST262_COMMIT}…");
+        git(&["init", "-q"]);
+        git(&["fetch", "-q", "--depth", "1", "https://github.com/tc39/test262.git", TEST262_COMMIT]);
+        git(&["checkout", "-q", "FETCH_HEAD"]);
+    }
+    let status = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .current_dir(root())
+        .args(["run", "--profile", "test262", "-p", "nebula-script", "--example", "test262", "--"])
+        .arg(&dir)
+        .args(["--summary", "target/test262-summary.md", "--failures", "target/test262-failures.txt"])
+        .args(extra.iter().filter(|a| !a.starts_with("--")))
+        .status()
+        .expect("failed to run cargo");
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+    println!("summary: target/test262-summary.md, failures: target/test262-failures.txt");
 }
 
 fn root() -> PathBuf {

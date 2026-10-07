@@ -1,0 +1,25 @@
+ReferenceError: undefinedThing is not defined
+TypeError: Cannot read properties of null (reading 'x')
+TypeError: Cannot read properties of undefined (reading 'y')
+TypeError: fn is not a function
+TypeError: obj.nope is not a function
+TypeError: obj.a.b is not a constructor
+TypeError: Assignment to constant variable.
+RangeError: range!
+SyntaxError
+TypeError: Reduce of empty array with no initial value
+RangeError: Invalid array length
+TypeError: Cannot convert a Symbol value to a string
+ReferenceError: undeclared is not defined
+RangeError: toFixed() digits argument must be between 0 and 100
+URIError: URI malformed
+{"custom":true}
+SyntaxError
+TypeError: Cannot define property x, object is not extensible
+TypeError: Cannot read private member #p from an object whose class did not declare it
+root true []
+TypeError: t no new [ 1 ]
+finally first
+then outer inner
+1000
+true
