@@ -7,7 +7,8 @@ use corekit::net;
 corekit::entry!(main);
 
 fn main(_: corekit::Args) -> i32 {
-    for i in net::interfaces() {
+    let v6 = net::interfaces6();
+    for (k, i) in net::interfaces().into_iter().enumerate() {
         let mut flags = alloc::vec::Vec::new();
         if i.flags & IF_UP != 0 {
             flags.push("UP");
@@ -41,6 +42,18 @@ fn main(_: corekit::Args) -> i32 {
         }
         if i.gateway != [0; 4] {
             corekit::println!("    gateway {}", net::ip_string(i.gateway));
+        }
+        if let Some(c) = v6.get(k) {
+            for (a, len) in c.addrs.iter().zip(c.prefix_len).take(c.addr_count as usize) {
+                let scope = if a[0] == 0xfe && a[1] & 0xc0 == 0x80 { "  scope link" } else { "" };
+                corekit::println!("    inet6 {}/{}{}", net::ip6_string(a), len, scope);
+            }
+            if c.router != [0; 16] {
+                corekit::println!("    router6 {}", net::ip6_string(&c.router));
+            }
+            for d in &c.dns[..c.dns_count as usize] {
+                corekit::println!("    dns6 {}", net::ip6_string(d));
+            }
         }
         let dns: alloc::vec::Vec<_> = i.dns.iter().filter(|d| **d != [0; 4]).map(|d| net::ip_string(*d)).collect();
         if !dns.is_empty() {

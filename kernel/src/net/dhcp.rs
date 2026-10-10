@@ -79,7 +79,7 @@ fn send(s: &mut Stack, i: usize, kind: u8) {
     let c = s.ifaces[i].dhcp.as_ref().unwrap();
     let (requested, server) = if kind == REQUEST { (c.offered, c.server) } else { (ANY, ANY) };
     let msg = message(s.ifaces[i].mac, c.xid, kind, requested, server);
-    let d = super::udp::datagram(ANY, super::BROADCAST, 68, 67, &msg);
+    let d = super::udp::datagram(super::v4(ANY), super::v4(super::BROADCAST), 68, 67, &msg);
     s.send_broadcast(i, ANY, PROTO_UDP, &d);
 }
 

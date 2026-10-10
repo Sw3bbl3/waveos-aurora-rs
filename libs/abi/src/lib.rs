@@ -146,7 +146,9 @@ pub mod nr {
     pub const SOCK_INFO: usize = 68;
     /// `win_materials(window, *const MaterialRegion, count)`; at most 8 regions.
     pub const WIN_MATERIALS: usize = 69;
-    pub const COUNT: usize = 70;
+    /// `net_info6(*mut NetInterface6, max) -> count` — same order as `net_info`
+    pub const NET_INFO6: usize = 70;
+    pub const COUNT: usize = 71;
 }
 
 #[repr(C)]
@@ -166,6 +168,11 @@ pub mod net {
     /// ICMP echo ("ping"): send an echo request (type 8) with any identifier;
     /// the kernel sets the identifier and checksum and delivers the replies.
     pub const ICMP: u64 = 3;
+    /// The same over IPv6: addresses are [`super::SockAddr6`]. ICMP6 sends
+    /// echo requests of type 128.
+    pub const TCP6: u64 = 4;
+    pub const UDP6: u64 = 5;
+    pub const ICMP6: u64 = 6;
 
     /// `sockopt` options.
     /// Receive/accept/connect timeout in ms (0 = wait forever).
@@ -204,6 +211,36 @@ impl SockAddr {
     pub const fn new(ip: [u8; 4], port: u16) -> SockAddr {
         SockAddr { ip, port, _pad: 0 }
     }
+}
+
+/// An IPv6 address and port (for TCP6, UDP6 and ICMP6 sockets).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SockAddr6 {
+    pub ip: [u8; 16],
+    pub port: u16,
+    pub _pad: [u8; 6],
+}
+
+impl SockAddr6 {
+    pub const fn new(ip: [u8; 16], port: u16) -> SockAddr6 {
+        SockAddr6 { ip, port, _pad: [0; 6] }
+    }
+}
+
+/// An interface's IPv6 configuration, as `net_info6` reports it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NetInterface6 {
+    /// Addresses (link-local first) and their prefix lengths.
+    pub addrs: [[u8; 16]; 4],
+    pub prefix_len: [u8; 4],
+    pub addr_count: u32,
+    /// The default router (all zero: none).
+    pub router: [u8; 16],
+    pub dns: [[u8; 16]; 2],
+    pub dns_count: u32,
+    pub _pad: u32,
 }
 
 /// A network interface as `net_info` reports it.

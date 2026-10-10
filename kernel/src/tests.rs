@@ -759,9 +759,9 @@ fn sleep_and_wake() {
     if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
         use crate::net::socket::{Kind, Socket};
         assert!(wait_for(crate::net::online, 10_000), "no network address after sleep");
-        let c = Socket::new(Kind::Tcp);
+        let c = Socket::new(Kind::Tcp, false);
         c.option(aurora_abi::net::OPT_TIMEOUT, 10_000).unwrap();
-        c.connect(&aurora_abi::SockAddr::new([10, 0, 2, 2], port)).expect("no network after sleep");
+        c.connect((crate::net::v4([10, 0, 2, 2]), port)).expect("no network after sleep");
         c.write(b"GET /none HTTP/1.1\r\nHost: h\r\n\r\n").unwrap();
         let mut buf = [0u8; 64];
         let n = c.read(&mut buf).expect("no reply after sleep");
@@ -772,7 +772,6 @@ fn sleep_and_wake() {
 
 fn network() {
     use crate::net::socket::{Kind, Socket};
-    use aurora_abi::SockAddr;
     // DHCP (QEMU's user networking hands out 10.0.2.15).
     assert!(
         wait_for(
@@ -786,33 +785,33 @@ fn network() {
 
     // ICMP echo, to ourselves over loopback and on our own address.
     for dst in [[127, 0, 0, 1], me] {
-        let ping = Socket::new(Kind::Icmp);
+        let ping = Socket::new(Kind::Icmp, false);
         ping.option(aurora_abi::net::OPT_TIMEOUT, 2000).unwrap();
         let msg = [8u8, 0, 0, 0, 0, 0, 0, 7, b'h', b'i'];
-        ping.send_to(&msg, &SockAddr::new(dst, 0)).unwrap();
+        ping.send_to(&msg, (crate::net::v4(dst), 0)).unwrap();
         let mut buf = [0u8; 64];
         let (n, from) = ping.recv_from(&mut buf).expect("no echo reply");
-        assert_eq!((n, from.ip, buf[0], buf[7], &buf[8..10]), (10, dst, 0, 7, &b"hi"[..]));
+        assert_eq!((n, crate::net::as_v4(&from.0).unwrap(), buf[0], buf[7], &buf[8..10]), (10, dst, 0, 7, &b"hi"[..]));
     }
 
     log!("net-test", "pings answered");
     // UDP over loopback.
-    let a = Socket::new(Kind::Udp);
-    a.bind(&SockAddr::new([0; 4], 5353)).unwrap();
+    let a = Socket::new(Kind::Udp, false);
+    a.bind((crate::net::v4([0; 4]), 5353)).unwrap();
     a.option(aurora_abi::net::OPT_TIMEOUT, 2000).unwrap();
-    let b = Socket::new(Kind::Udp);
-    b.send_to(b"datagram", &SockAddr::new([127, 0, 0, 1], 5353)).unwrap();
+    let b = Socket::new(Kind::Udp, false);
+    b.send_to(b"datagram", (crate::net::v4([127, 0, 0, 1]), 5353)).unwrap();
     let mut buf = [0u8; 64];
     let (n, from) = a.recv_from(&mut buf).unwrap();
     assert_eq!(&buf[..n], b"datagram");
-    assert_eq!(from.ip, [127, 0, 0, 1]);
+    assert_eq!(crate::net::as_v4(&from.0), Some([127, 0, 0, 1]));
 
     // TCP over loopback: 1 MiB up, a summary and 1 MiB back.
     let pattern = |i: usize| (i.wrapping_mul(131) % 253) as u8;
     const SIZE: usize = 1 << 20;
     crate::sched::spawn("t-tcp-server", || {
-        let l = Socket::new(Kind::Tcp);
-        l.bind(&SockAddr::new([0; 4], 7070)).unwrap();
+        let l = Socket::new(Kind::Tcp, false);
+        l.bind((crate::net::v4([0; 4]), 7070)).unwrap();
         l.listen(4).unwrap();
         let (c, _) = l.accept().unwrap();
         let mut got = 0usize;
@@ -836,8 +835,8 @@ fn network() {
         c.write(&reply).unwrap();
     });
     crate::sched::sleep_ms(50);
-    let c = Socket::new(Kind::Tcp);
-    c.connect(&SockAddr::new([127, 0, 0, 1], 7070)).expect("connect over loopback");
+    let c = Socket::new(Kind::Tcp, false);
+    c.connect((crate::net::v4([127, 0, 0, 1]), 7070)).expect("connect over loopback");
     log!("net-test", "loopback TCP connected");
     let data: Vec<u8> = (0..SIZE).map(pattern).collect();
     let want_sum = data.iter().enumerate().fold(0u64, |s, (k, &b)| s.wrapping_add(b as u64 * (k as u64 % 7 + 1)));
@@ -864,8 +863,8 @@ fn network() {
 
     // To the host (10.0.2.2) through QEMU's NAT: 1 MiB over HTTP.
     if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
-        let c = Socket::new(Kind::Tcp);
-        c.connect(&SockAddr::new([10, 0, 2, 2], port)).expect("connect to the host");
+        let c = Socket::new(Kind::Tcp, false);
+        c.connect((crate::net::v4([10, 0, 2, 2]), port)).expect("connect to the host");
         c.write(b"GET /big HTTP/1.1\r\nHost: host\r\n\r\n").unwrap();
         c.option(aurora_abi::net::OPT_TIMEOUT, 20_000).unwrap();
         let mut resp = Vec::new();
@@ -883,8 +882,8 @@ fn network() {
         crate::kprint!("[1 MiB from the host] ");
 
         // From the host: QEMU forwards a host port to our 8080.
-        let l = Socket::new(Kind::Tcp);
-        l.bind(&SockAddr::new([0; 4], 8080)).unwrap();
+        let l = Socket::new(Kind::Tcp, false);
+        l.bind((crate::net::v4([0; 4]), 8080)).unwrap();
         l.listen(1).unwrap();
         l.option(aurora_abi::net::OPT_TIMEOUT, 15_000).unwrap();
         log!("net-test", "listening on 8080");
@@ -900,7 +899,104 @@ fn network() {
         }
         assert_eq!(got, b"ping\n");
         conn.write(b"pong\n").unwrap();
-        crate::kprint!("[inbound from {}] ", crate::net::wire::ip_str(peer.ip));
+        crate::kprint!("[inbound from {}] ", crate::net::wire::addr_str(&peer.0));
         crate::sched::sleep_ms(100);
+    }
+    network6();
+}
+
+/// IPv6: a link-local address at once, a global one from QEMU's router
+/// advertisement, echo, UDP and TCP over ::1, and the host over IPv6.
+fn network6() {
+    use crate::net::socket::{Kind, Socket};
+    let lo6: [u8; 16] = crate::net::ip6::LOOPBACK6;
+    let card = || crate::net::interfaces6().into_iter().nth(1).expect("an IPv6 interface");
+    let ll = card().addrs[0];
+    assert_eq!(&ll[..2], &[0xfe, 0x80], "no link-local address");
+    assert!(
+        wait_for(|| card().addr_count >= 2 && card().router != [0; 16], 15_000),
+        "no address or router from router advertisements"
+    );
+    let global = card().addrs[1];
+    log!("net-test", "IPv6 {} via {}", crate::net::wire::ip6_str(&global), crate::net::wire::ip6_str(&card().router));
+
+    // Echo to ::1, our link-local and global addresses, and the router.
+    let gateway = {
+        let mut g = global;
+        g[8..].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 2]);
+        g
+    };
+    for dst in [lo6, ll, global, gateway] {
+        let ping = Socket::new(Kind::Icmp, true);
+        ping.option(aurora_abi::net::OPT_TIMEOUT, 3000).unwrap();
+        let msg = [128u8, 0, 0, 0, 0, 0, 0, 9, b'v', b'6'];
+        ping.send_to(&msg, (dst, 0)).unwrap();
+        let mut buf = [0u8; 64];
+        let (n, from) = ping.recv_from(&mut buf).unwrap_or_else(|e| {
+            panic!("no ICMPv6 echo reply from {}: {}", crate::net::wire::ip6_str(&dst), aurora_abi::err::name(e))
+        });
+        assert_eq!((n, from.0, buf[0], buf[7], &buf[8..10]), (10, dst, 129, 9, &b"v6"[..]));
+    }
+    log!("net-test", "IPv6 pings answered");
+
+    // UDP over ::1.
+    let a = Socket::new(Kind::Udp, true);
+    a.bind((lo6, 5354)).unwrap();
+    a.option(aurora_abi::net::OPT_TIMEOUT, 2000).unwrap();
+    let b = Socket::new(Kind::Udp, true);
+    b.send_to(b"over six", (lo6, 5354)).unwrap();
+    let mut buf = alloc::vec![0u8; 16384];
+    let (n, from) = a.recv_from(&mut buf).unwrap();
+    assert_eq!((&buf[..n], from.0), (&b"over six"[..], lo6));
+
+    // TCP over ::1, with segments sized for IPv6.
+    crate::sched::spawn("t-tcp6-server", || {
+        let l = Socket::new(Kind::Tcp, true);
+        l.bind((crate::net::ANY_ADDR, 7071)).unwrap();
+        l.listen(1).unwrap();
+        let (c, _) = l.accept().unwrap();
+        let mut buf = alloc::vec![0u8; 16384];
+        let mut total = 0usize;
+        loop {
+            let n = c.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        c.write(alloc::format!("{total}").as_bytes()).unwrap();
+    });
+    crate::sched::sleep_ms(50);
+    let c = Socket::new(Kind::Tcp, true);
+    c.connect((lo6, 7071)).expect("TCP connect over ::1");
+    let data = alloc::vec![0x5au8; 256 * 1024];
+    assert_eq!(c.write(&data).unwrap(), data.len());
+    c.shutdown().unwrap();
+    let n = c.read(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"262144");
+    drop(c);
+
+    // The host's loopback over IPv6, through QEMU (fec0::2), when it has ::1.
+    if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
+        let c = Socket::new(Kind::Tcp, true);
+        c.option(aurora_abi::net::OPT_TIMEOUT, 5000).unwrap();
+        match c.connect((gateway, port)) {
+            Ok(()) => {
+                c.write(b"GET /big HTTP/1.1\r\nHost: host\r\n\r\n").unwrap();
+                c.option(aurora_abi::net::OPT_TIMEOUT, 20_000).unwrap();
+                let mut resp = Vec::new();
+                loop {
+                    let n = c.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    resp.extend_from_slice(&buf[..n]);
+                }
+                let head = resp.windows(4).position(|w| w == b"\r\n\r\n").expect("HTTP header") + 4;
+                assert_eq!(resp.len() - head, 1 << 20, "short body from the host over IPv6");
+                crate::kprint!("[1 MiB from the host over IPv6] ");
+            }
+            Err(e) => log!("net-test", "host over IPv6 unavailable: {}", aurora_abi::err::name(e)),
+        }
     }
 }

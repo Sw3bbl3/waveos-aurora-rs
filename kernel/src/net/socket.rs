@@ -4,12 +4,11 @@
 //! changes) and re-check, until their condition holds, the socket's timeout
 //! passes, or the process is interrupted.
 
-use super::{tcp, udp, with, Ip, Stack, ANY, PROTO_ICMP};
+use super::{as_v4, tcp, udp, v4, with, Addr, Stack, ANY_ADDR, PROTO_ICMP};
 use crate::sync::Mutex;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use aurora_abi::err::*;
-use aurora_abi::SockAddr;
 use core::sync::atomic::Ordering;
 
 /// Connecting gives up after this long when the socket has no timeout.
@@ -28,40 +27,41 @@ struct Inner {
     /// Local port (TCP: from `bind`, before `listen`; UDP: bound port).
     port: Option<u16>,
     icmp_id: Option<u16>,
-    peer: Option<(Ip, u16)>,
+    peer: Option<(Addr, u16)>,
     timeout: u64,
     nonblock: bool,
 }
 
 pub struct Socket {
     pub kind: Kind,
+    /// IPv6 (`SockAddr6` in system calls); IPv4 sockets use `SockAddr`.
+    pub v6: bool,
     inner: Mutex<Inner>,
 }
 
-fn addr(a: &SockAddr) -> (Ip, u16) {
-    (a.ip, a.port)
-}
-
-fn sockaddr((ip, port): (Ip, u16)) -> SockAddr {
-    SockAddr::new(ip, port)
-}
+/// An address and port, of either family.
+pub type Peer = (Addr, u16);
 
 impl Socket {
-    pub fn new(kind: Kind) -> Socket {
+    pub fn new(kind: Kind, v6: bool) -> Socket {
         let mut inner =
             Inner { tcp: None, listening: false, port: None, icmp_id: None, peer: None, timeout: 0, nonblock: false };
         if kind == Kind::Icmp {
             let id = with(|s| {
                 let mut id = crate::random::u32() as u16;
-                while s.icmp.contains_key(&id) {
+                while s.icmp.contains_key(&id) || s.icmp6.contains_key(&id) {
                     id = id.wrapping_add(1);
                 }
-                s.icmp.insert(id, VecDeque::new());
+                if v6 {
+                    s.icmp6.insert(id, VecDeque::new());
+                } else {
+                    s.icmp.insert(id, VecDeque::new());
+                }
                 id
             });
             inner.icmp_id = Some(id);
         }
-        Socket { kind, inner: Mutex::new(inner) }
+        Socket { kind, v6, inner: Mutex::new(inner) }
     }
 
     /// Waits until `ready` holds (checked with the stack locked).
@@ -98,26 +98,26 @@ impl Socket {
         (i.timeout, i.nonblock)
     }
 
-    pub fn bind(&self, a: &SockAddr) -> Result<(), isize> {
+    pub fn bind(&self, a: Peer) -> Result<(), isize> {
+        let port = a.1;
         let mut i = self.inner.lock();
         if i.port.is_some() || i.tcp.is_some() {
             return Err(EINVAL);
         }
         match self.kind {
-            Kind::Udp => i.port = Some(with(|s| s.udp.bind(a.port))?),
+            Kind::Udp => i.port = Some(with(|s| s.udp.bind(port))?),
             Kind::Tcp => {
-                if a.port == 0 {
+                if port == 0 {
                     return Err(EINVAL);
                 }
-                i.port = Some(a.port);
+                i.port = Some(port);
             }
             Kind::Icmp => return Err(EINVAL),
         }
         Ok(())
     }
 
-    pub fn connect(&self, a: &SockAddr) -> Result<(), isize> {
-        let remote = addr(a);
+    pub fn connect(&self, remote: Peer) -> Result<(), isize> {
         match self.kind {
             Kind::Tcp => {
                 let id = {
@@ -169,7 +169,7 @@ impl Socket {
         Ok(())
     }
 
-    pub fn accept(&self) -> Result<(Socket, SockAddr), isize> {
+    pub fn accept(&self) -> Result<(Socket, Peer), isize> {
         let (listener, timeout, nonblock) = {
             let i = self.inner.lock();
             if !i.listening {
@@ -183,17 +183,17 @@ impl Socket {
             got.is_some()
         })?;
         let id = got.unwrap();
-        let remote = with(|s| tcp::state(s, id).map(|t| t.2)).unwrap_or((ANY, 0));
-        let sock = Socket::new(Kind::Tcp);
+        let remote = with(|s| tcp::state(s, id).map(|t| t.2)).unwrap_or((ANY_ADDR, 0));
+        let sock = Socket::new(Kind::Tcp, self.v6);
         sock.inner.lock().tcp = Some(id);
-        Ok((sock, sockaddr(remote)))
+        Ok((sock, remote))
     }
 
     /// TCP: queues all of `data` (waiting for room). UDP/ICMP: one datagram to the peer.
     pub fn write(&self, data: &[u8]) -> Result<usize, isize> {
         if self.kind != Kind::Tcp {
             let peer = self.inner.lock().peer.ok_or(ENOTCONN)?;
-            return self.send_to(data, &sockaddr(peer));
+            return self.send_to(data, peer);
         }
         let (id, timeout, nonblock) = {
             let i = self.inner.lock();
@@ -231,8 +231,7 @@ impl Socket {
         }
     }
 
-    pub fn send_to(&self, data: &[u8], to: &SockAddr) -> Result<usize, isize> {
-        let dst = addr(to);
+    pub fn send_to(&self, data: &[u8], dst: Peer) -> Result<usize, isize> {
         match self.kind {
             Kind::Udp => {
                 let port = {
@@ -250,10 +249,21 @@ impl Socket {
                 super::poke();
                 Ok(data.len())
             }
+            Kind::Icmp if self.v6 => {
+                if data.len() < 8 || data[0] != 128 {
+                    return Err(EINVAL); // only echo requests
+                }
+                let id = self.inner.lock().icmp_id.unwrap();
+                let mut m = data.to_vec();
+                with(|s| s.send_echo6(dst.0, id, &mut m))?;
+                super::poke();
+                Ok(data.len())
+            }
             Kind::Icmp => {
                 if data.len() < 8 || data[0] != 8 {
                     return Err(EINVAL); // only echo requests
                 }
+                let Some(to) = as_v4(&dst.0) else { return Err(EINVAL) };
                 let id = self.inner.lock().icmp_id.unwrap();
                 let mut m = data.to_vec();
                 m[4..6].copy_from_slice(&id.to_be_bytes());
@@ -261,7 +271,7 @@ impl Socket {
                 m[3] = 0;
                 let c = super::wire::checksum(&m);
                 m[2..4].copy_from_slice(&c.to_be_bytes());
-                with(|s| s.send_ip(dst.0, PROTO_ICMP, &m))?;
+                with(|s| s.send_ip4(to, PROTO_ICMP, &m))?;
                 super::poke();
                 Ok(data.len())
             }
@@ -269,17 +279,23 @@ impl Socket {
         }
     }
 
-    pub fn recv_from(&self, out: &mut [u8]) -> Result<(usize, SockAddr), isize> {
+    pub fn recv_from(&self, out: &mut [u8]) -> Result<(usize, Peer), isize> {
         let (timeout, nonblock) = self.settings();
         let (port, icmp) = {
             let i = self.inner.lock();
             (i.port, i.icmp_id)
         };
-        let mut got: Option<(Ip, u16, Vec<u8>)> = None;
+        let mut got: Option<(Addr, u16, Vec<u8>)> = None;
+        let v6 = self.v6;
         self.wait(timeout, nonblock, |s| {
             got = match (self.kind, port, icmp) {
                 (Kind::Udp, Some(p), _) => s.udp.ports.get_mut(&p).and_then(|q| q.queue.pop_front()),
-                (Kind::Icmp, _, Some(id)) => s.icmp.get_mut(&id).and_then(|q| q.pop_front()).map(|(ip, m)| (ip, 0, m)),
+                (Kind::Icmp, _, Some(id)) if v6 => {
+                    s.icmp6.get_mut(&id).and_then(|q| q.pop_front()).map(|(ip, m)| (ip, 0, m))
+                }
+                (Kind::Icmp, _, Some(id)) => {
+                    s.icmp.get_mut(&id).and_then(|q| q.pop_front()).map(|(ip, m)| (v4(ip), 0, m))
+                }
                 _ => None,
             };
             got.is_some()
@@ -287,7 +303,7 @@ impl Socket {
         let (ip, port, data) = got.unwrap();
         let n = data.len().min(out.len());
         out[..n].copy_from_slice(&data[..n]);
-        Ok((n, SockAddr::new(ip, port)))
+        Ok((n, (ip, port)))
     }
 
     pub fn shutdown(&self) -> Result<(), isize> {
@@ -310,6 +326,9 @@ impl Socket {
                     (Kind::Udp, _, Some(p), _) => {
                         s.udp.ports.get(&p).and_then(|q| q.queue.front()).map_or(0, |d| d.2.len() as u64)
                     }
+                    (Kind::Icmp, _, _, Some(id)) if self.v6 => {
+                        s.icmp6.get(&id).and_then(|q| q.front()).map_or(0, |d| d.1.len() as u64)
+                    }
                     (Kind::Icmp, _, _, Some(id)) => {
                         s.icmp.get(&id).and_then(|q| q.front()).map_or(0, |d| d.1.len() as u64)
                     }
@@ -321,7 +340,7 @@ impl Socket {
     }
 
     /// (local, remote, state) for `sock_info`.
-    pub fn info(&self) -> (SockAddr, SockAddr, u64) {
+    pub fn info(&self) -> (Peer, Peer, u64) {
         use aurora_abi::net::*;
         let i = self.inner.lock();
         match (self.kind, i.tcp) {
@@ -337,12 +356,12 @@ impl Socket {
                             tcp::State::Closed => STATE_CLOSED,
                             _ => STATE_CLOSING,
                         };
-                        (sockaddr(local), sockaddr(remote), state)
+                        (local, remote, state)
                     }
-                    None => (SockAddr::default(), SockAddr::default(), STATE_CLOSED),
+                    None => ((ANY_ADDR, 0), (ANY_ADDR, 0), STATE_CLOSED),
                 })
             }
-            _ => (SockAddr::new(ANY, i.port.unwrap_or(0)), i.peer.map(sockaddr).unwrap_or_default(), STATE_CLOSED),
+            _ => ((ANY_ADDR, i.port.unwrap_or(0)), i.peer.unwrap_or((ANY_ADDR, 0)), STATE_CLOSED),
         }
     }
 }
@@ -363,6 +382,7 @@ impl Drop for Socket {
             }
             if let Some(id) = icmp {
                 s.icmp.remove(&id);
+                s.icmp6.remove(&id);
             }
         });
         super::poke();

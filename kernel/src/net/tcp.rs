@@ -11,7 +11,7 @@
 //! which keeps the borrow of the connection table short.
 
 use super::wire::*;
-use super::{Ip, Stack, ANY, PROTO_TCP};
+use super::{as_v4, Addr as Ip, Stack, ANY_ADDR as ANY, PROTO_TCP};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -176,9 +176,19 @@ impl Conn {
         }
     }
 
+    /// The largest segment that fits our MTU: IPv6's header is 20 bytes longer.
+    fn our_mss(&self) -> u16 {
+        if as_v4(&self.remote.0).is_some() || self.remote.0 == ANY {
+            MSS
+        } else {
+            MSS - 20
+        }
+    }
+
     fn segment(&mut self, seq: u32, flags: u8, data: &[u8]) -> Vec<u8> {
         let syn = flags & SYN != 0;
-        let opts: &[u8] = if syn { &[2, 4, (MSS >> 8) as u8, MSS as u8, 1, 3, 3, RCV_SHIFT] } else { &[] };
+        let ours = self.our_mss();
+        let opts: &[u8] = if syn { &[2, 4, (ours >> 8) as u8, ours as u8, 1, 3, 3, RCV_SHIFT] } else { &[] };
         let hlen = 20 + opts.len();
         let mut s = vec![0u8; hlen + data.len()];
         put16(&mut s, 0, self.local.1);
@@ -237,7 +247,7 @@ impl Conn {
                 return out;
             }
         }
-        let mss = self.mss.min(MSS) as u32;
+        let mss = self.mss.min(self.our_mss()) as u32;
         let window = self.snd_wnd.min(self.cwnd.max(mss));
         // Probe a closed window with one byte when nothing is in flight.
         let window = if self.snd_wnd == 0 && self.in_flight() == 0 && self.unsent() > 0 { 1 } else { window };
@@ -290,7 +300,7 @@ impl Conn {
         self.snd_nxt = self.snd_una;
         self.snd_max = self.snd_una;
         self.snd_wnd = window as u32; // never scaled in SYN segments
-        self.cwnd = 10 * self.mss.min(MSS) as u32;
+        self.cwnd = 10 * self.mss.min(self.our_mss()) as u32;
         self.rexmit_at = None;
         self.retries = 0;
         self.state = State::Established;
@@ -367,7 +377,7 @@ impl Conn {
         self.retries = 0;
         self.dup_acks = 0;
         self.rexmit_at = if self.snd_una == self.snd_max { None } else { Some(now + self.rto) };
-        let mss = self.mss.min(MSS) as u32;
+        let mss = self.mss.min(self.our_mss()) as u32;
         if self.cwnd < self.ssthresh {
             self.cwnd += acked.min(mss);
         } else {
@@ -473,9 +483,6 @@ fn flush(s: &mut Stack, id: ConnId, now: u64) {
 /// Starts connecting to `remote`; the socket waits for `State::Established`.
 pub fn connect(s: &mut Stack, remote: (Ip, u16)) -> Result<ConnId, isize> {
     let src = s.source_for(remote.0).ok_or(ENETUNREACH)?;
-    if src == ANY {
-        return Err(ENETUNREACH);
-    }
     let port = s.tcp.ephemeral().ok_or(EADDRINUSE)?;
     let mut c = Conn::new((src, port), remote, State::SynSent);
     c.rtt_probe = Some((c.iss.wrapping_add(1), crate::time::uptime_ms()));
@@ -541,7 +548,8 @@ pub fn recv(s: &mut Stack, id: ConnId, out: &mut [u8]) -> Result<usize, isize> {
     // Tell the peer when the window has opened up noticeably (pointless once
     // it has finished sending).
     let space = c.recv_space();
-    let opened = space >= c.last_adv + (2 * MSS as usize).min(RECV_CAP / 2) || c.last_adv < MSS as usize;
+    let mss = c.our_mss() as usize;
+    let opened = space >= c.last_adv + (2 * mss).min(RECV_CAP / 2) || c.last_adv < mss;
     if opened && !c.fin_received {
         c.ack_now = true;
         flush(s, id, now);
@@ -788,7 +796,7 @@ pub fn input(s: &mut Stack, src: Ip, dst: Ip, p: &[u8]) {
         c.dup_acks += 1;
         if c.dup_acks == 3 {
             // Fast retransmit: resend from the first unacknowledged byte.
-            let mss = c.mss.min(MSS) as u32;
+            let mss = c.mss.min(c.our_mss()) as u32;
             c.ssthresh = (c.in_flight() / 2).max(2 * mss);
             c.cwnd = c.ssthresh + 3 * mss;
             c.snd_nxt = c.snd_una;
@@ -863,7 +871,7 @@ pub fn tick(s: &mut Stack, now: u64) {
                 c.rexmit_at = None;
             } else {
                 // Go back to the first unacknowledged byte, slowly.
-                let mss = c.mss.min(MSS) as u32;
+                let mss = c.mss.min(c.our_mss()) as u32;
                 c.ssthresh = (c.in_flight() / 2).max(2 * mss);
                 c.cwnd = mss;
                 c.rto = (c.rto * 2).min(RTO_MAX);
@@ -900,7 +908,7 @@ pub fn tick(s: &mut Stack, now: u64) {
 #[cfg(feature = "ktest")]
 pub fn retransmission_ack_test() {
     for base in [100u32, u32::MAX - 49] {
-        let mut c = Conn::new(([127, 0, 0, 1], 8000), ([127, 0, 0, 1], 8001), State::Established);
+        let mut c = Conn::new((super::v4([127, 0, 0, 1]), 8000), (super::v4([127, 0, 0, 1]), 8001), State::Established);
         c.snd_una = base;
         c.snd_nxt = base;
         c.snd_max = base;

@@ -641,11 +641,21 @@ fn test_body() -> Vec<u8> {
 }
 
 /// A tiny HTTP server on the host for the network tests (the guest reaches
-/// the host as 10.0.2.2). Returns its port.
+/// the host as 10.0.2.2, and over IPv6 as fec0::2, QEMU's names for the
+/// host's loopback). Returns its port, the same on 127.0.0.1 and ::1.
 fn start_test_http_server() -> u16 {
-    use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("test HTTP server");
     let port = listener.local_addr().unwrap().port();
+    serve_test_http(listener);
+    // IPv6 too, where the host has it (only IPv6 tests use this one).
+    if let Ok(l6) = std::net::TcpListener::bind(("::1", port)) {
+        serve_test_http(l6);
+    }
+    port
+}
+
+fn serve_test_http(listener: std::net::TcpListener) {
+    use std::io::{Read, Write};
     std::thread::spawn(move || {
         let body = test_body();
         for conn in listener.incoming().map_while(Result::ok) {
@@ -673,7 +683,6 @@ fn start_test_http_server() -> u16 {
             });
         }
     });
-    port
 }
 
 /// A free port on the host (for forwarding into the guest).

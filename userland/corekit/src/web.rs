@@ -21,11 +21,29 @@ pub const ROOTS_PATH: &str = "/System/Certificates/roots.bin";
 
 /// Idle connections are dropped after this long (servers close them anyway).
 const IDLE_MS: u64 = 15_000;
-const MAX_IDLE: usize = 8;
+const MAX_IDLE: usize = 16;
 
 static ROOTS: Mutex<Option<Arc<Roots>>> = Mutex::new(None);
 static POOL: Mutex<Vec<Idle>> = Mutex::new(Vec::new());
 static JAR: Mutex<Jar> = Mutex::new(Jar::new());
+
+/// Where connection time goes, for the process (see [`stats`]).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Stats {
+    /// New connections, and requests that reused a pooled one.
+    pub opened: u32,
+    pub reused: u32,
+    pub dns_ms: u64,
+    pub connect_ms: u64,
+    pub tls_ms: u64,
+}
+
+static STATS: Mutex<Stats> = Mutex::new(Stats { opened: 0, reused: 0, dns_ms: 0, connect_ms: 0, tls_ms: 0 });
+
+/// The connection counters so far (they only grow).
+pub fn stats() -> Stats {
+    *STATS.lock()
+}
 
 struct Idle {
     key: String,
@@ -72,19 +90,70 @@ pub fn open(url: &Url) -> Result<Conn, Error> {
         "https" => true,
         other => return Err(Error::UnsupportedScheme(String::from(other))),
     };
-    let ip = net::resolve(&url.host).map_err(|e| Error::Io(e.0))?;
-    let tcp = TcpStream::connect(crate::abi::SockAddr::new(ip, url.port_or_default())).map_err(|e| Error::Io(e.0))?;
+    let t0 = crate::time::uptime_ms();
+    let addrs = net::resolve_all(&url.host).map_err(|e| Error::Io(e.0))?;
+    let t1 = crate::time::uptime_ms();
+    let tcp = connect_any(&addrs, url.port_or_default()).map_err(|e| Error::Io(e.0))?;
     tcp.socket().set_timeout(30_000);
+    let t2 = crate::time::uptime_ms();
+    {
+        let mut s = STATS.lock();
+        s.opened += 1;
+        s.dns_ms += t1 - t0;
+        s.connect_ms += t2 - t1;
+    }
     if !secure {
         return Ok(Conn::Plain(tcp));
     }
     let roots = roots()?;
     let config = Config { roots: &roots, now: unix_time(), random: net::random, verify: true };
-    match TlsStream::connect(tcp, &url.host, &config) {
+    let tls = TlsStream::connect(tcp, &url.host, &config);
+    STATS.lock().tls_ms += crate::time::uptime_ms() - t2;
+    match tls {
         Ok(tls) => Ok(Conn::Secure(Box::new(tls))),
         Err(nebula_secure::Error::Io(e)) => Err(Error::Io(e)),
         Err(e) => Err(Error::Secure(e.describe())),
     }
+}
+
+/// Until when (uptime ms) IPv6 is skipped after it failed outright.
+static V6_BROKEN_UNTIL: Mutex<u64> = Mutex::new(0);
+
+/// Connects to the first address that answers, Happy Eyeballs style
+/// (RFC 8305, sequential): IPv6 first when this machine has a routed IPv6
+/// address, given 300 ms before IPv4 is tried; a hard IPv6 failure (no
+/// route, refused, unreachable) skips IPv6 for ten minutes.
+fn connect_any(addrs: &[net::IpAddr], port: u16) -> Result<TcpStream, crate::Error> {
+    use net::IpAddr;
+    let now = crate::time::uptime_ms();
+    let v6_ok = *V6_BROKEN_UNTIL.lock() <= now && net::ipv6_routed();
+    let v6: Vec<IpAddr> = addrs.iter().copied().filter(|a| matches!(a, IpAddr::V6(_))).collect();
+    let v4: Vec<IpAddr> = addrs.iter().copied().filter(|a| matches!(a, IpAddr::V4(_))).collect();
+    let mut last = crate::Error(crate::abi::err::ENOENT);
+    if v6_ok {
+        if let Some(&a) = v6.first() {
+            let wait = if v4.is_empty() { 0 } else { 300 };
+            match TcpStream::connect_addr(a, port, wait) {
+                Ok(s) => return Ok(s),
+                Err(e) => {
+                    if !e.is(crate::abi::err::ETIMEDOUT) {
+                        *V6_BROKEN_UNTIL.lock() = now + 600_000;
+                    }
+                    last = e;
+                }
+            }
+        }
+    }
+    let rest = if v4.is_empty() && !v6_ok { &v6[..] } else { &v4[..] };
+    for (k, &a) in rest.iter().enumerate() {
+        // Every address but the last gets 10 s; the last the system default.
+        let wait = if k + 1 < rest.len() { 10_000 } else { 0 };
+        match TcpStream::connect_addr(a, port, wait) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
 }
 
 /// Connects to `url`'s host: a one-off connector for `nebula_web::http::fetch`.
@@ -105,6 +174,7 @@ impl Connect for Pooled {
             let mut pool = POOL.lock();
             pool.retain(|i| now - i.since < IDLE_MS);
             if let Some(p) = pool.iter().rposition(|i| i.key == k) {
+                STATS.lock().reused += 1;
                 return Ok((pool.remove(p).conn, true));
             }
         }

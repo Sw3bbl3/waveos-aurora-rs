@@ -14,9 +14,12 @@ fn main(args: corekit::Args) -> i32 {
         let dns: alloc::vec::Vec<_> = i.dns.iter().filter(|d| **d != [0; 4]).map(|d| net::ip_string(*d)).collect();
         corekit::println!("Server:  {}", dns.join(", "));
     }
-    match net::resolve(name) {
-        Ok(ip) => {
-            corekit::println!("Name:    {name}\nAddress: {}", net::ip_string(ip));
+    match net::resolve_all(name) {
+        Ok(addrs) => {
+            corekit::println!("Name:    {name}");
+            for a in addrs {
+                corekit::println!("Address: {a}");
+            }
             0
         }
         Err(e) => {

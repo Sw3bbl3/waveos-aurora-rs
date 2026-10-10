@@ -1,5 +1,9 @@
-//! The network stack (IPv4): Ethernet, ARP, IP, ICMP, UDP, TCP and DHCP,
+//! The network stack: Ethernet; IPv4 with ARP, ICMP and DHCP; IPv6 with
+//! neighbor discovery, SLAAC and ICMPv6 (`ip6`); UDP and TCP over both,
 //! with sockets for programs.
+//!
+//! Transport code names peers with [`Addr`], 16 bytes for either family:
+//! IPv4 addresses are stored IPv4-mapped (`::ffff:a.b.c.d`).
 //!
 //! Network drivers hand received frames to [`receive`] (from their interrupt
 //! handlers); the `net` task processes them, and runs the timers (TCP
@@ -9,6 +13,7 @@
 //! each batch of work.
 
 pub mod dhcp;
+pub mod ip6;
 pub mod socket;
 pub mod tcp;
 pub mod udp;
@@ -24,6 +29,25 @@ use aurora_abi::err::*;
 use wire::*;
 
 pub type Ip = [u8; 4];
+pub type Ip6 = [u8; 16];
+/// An address of either family (IPv4 as IPv4-mapped).
+pub type Addr = [u8; 16];
+/// The unspecified address (a listener's local address).
+pub const ANY_ADDR: Addr = [0; 16];
+
+/// `ip` as an [`Addr`] (`::ffff:a.b.c.d`).
+pub fn v4(ip: Ip) -> Addr {
+    let mut a = [0; 16];
+    a[10] = 0xFF;
+    a[11] = 0xFF;
+    a[12..].copy_from_slice(&ip);
+    a
+}
+
+/// The IPv4 address inside an IPv4-mapped [`Addr`].
+pub fn as_v4(a: &Addr) -> Option<Ip> {
+    (a[..10] == [0; 10] && a[10] == 0xFF && a[11] == 0xFF).then(|| [a[12], a[13], a[14], a[15]])
+}
 pub const ANY: Ip = [0; 4];
 pub const BROADCAST: Ip = [255; 4];
 pub const LOOPBACK: Ip = [127, 0, 0, 1];
@@ -35,6 +59,7 @@ pub const PROTO_UDP: u8 = 17;
 
 const ETH_ARP: u16 = 0x0806;
 const ETH_IP: u16 = 0x0800;
+const ETH_IP6: u16 = 0x86DD;
 pub const MTU: usize = 1500;
 
 /// A network card, as drivers present it.
@@ -63,6 +88,7 @@ pub struct Interface {
     pub tx_packets: u64,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+    pub v6: ip6::Config,
 }
 
 impl Interface {
@@ -96,6 +122,11 @@ pub struct Stack {
     pub tcp: tcp::Table,
     /// ICMP echo sockets by identifier: replies (source, ICMP message).
     pub icmp: BTreeMap<u16, VecDeque<(Ip, Vec<u8>)>>,
+    /// The same for ICMPv6 echo.
+    pub icmp6: BTreeMap<u16, VecDeque<(Ip6, Vec<u8>)>>,
+    /// IPv6 neighbors and packets waiting for one.
+    neighbors: BTreeMap<Ip6, ([u8; 6], u64)>,
+    pending6: Vec<ip6::Pending>,
 }
 
 enum Frame {
@@ -132,6 +163,7 @@ pub fn init() {
         tx_packets: 0,
         rx_bytes: 0,
         tx_bytes: 0,
+        v6: ip6::Config::loopback(),
     };
     *STACK.lock() = Some(Stack {
         ifaces: vec![lo],
@@ -141,6 +173,9 @@ pub fn init() {
         udp: udp::Table::default(),
         tcp: tcp::Table::default(),
         icmp: BTreeMap::new(),
+        icmp6: BTreeMap::new(),
+        neighbors: BTreeMap::new(),
+        pending6: Vec::new(),
     });
     crate::sched::spawn("net", task);
 }
@@ -164,6 +199,7 @@ pub fn register(nic: Arc<dyn Nic>) -> usize {
             tx_packets: 0,
             rx_bytes: 0,
             tx_bytes: 0,
+            v6: ip6::Config::new(mac),
         });
         s.ifaces.len() - 1
     });
@@ -200,6 +236,7 @@ fn task() {
             for f in frames {
                 match f {
                     Frame::Ether(i, data) => s.ether_input(i, &data),
+                    Frame::Local(p) if p.first().is_some_and(|b| b >> 4 == 6) => s.ip6_input(0, &p),
                     Frame::Local(p) => s.ip_input(0, &p),
                 }
             }
@@ -227,6 +264,7 @@ impl Stack {
         match be16(f, 12) {
             ETH_ARP => self.arp_input(i, &f[14..]),
             ETH_IP => self.ip_input(i, &f[14..]),
+            ETH_IP6 => self.ip6_input(i, &f[14..]),
             _ => {}
         }
     }
@@ -288,8 +326,8 @@ impl Stack {
         let payload = &p[ihl..total];
         match p[9] {
             PROTO_ICMP => self.icmp_input(src, payload),
-            PROTO_UDP => udp::input(self, i, src, dst, payload),
-            PROTO_TCP => tcp::input(self, src, dst, payload),
+            PROTO_UDP => udp::input(self, i, v4(src), v4(dst), payload),
+            PROTO_TCP => tcp::input(self, v4(src), v4(dst), payload),
             _ => {}
         }
     }
@@ -306,7 +344,7 @@ impl Stack {
                 put16(&mut r, 2, 0);
                 let c = checksum(&r);
                 put16(&mut r, 2, c);
-                let _ = self.send_ip(src, PROTO_ICMP, &r);
+                let _ = self.send_ip4(src, PROTO_ICMP, &r);
             }
             // Echo reply: to the socket that sent the request.
             0 => {
@@ -324,7 +362,7 @@ impl Stack {
                     let dst = ip_at(inner, 16);
                     let sport = be16(inner, ihl);
                     let dport = be16(inner, ihl + 2);
-                    self.tcp.unreachable(dst, sport, dport);
+                    self.tcp.unreachable(v4(dst), sport, dport);
                 }
             }
             _ => {}
@@ -350,10 +388,21 @@ impl Stack {
             .map(|i| (i, self.ifaces[i].gateway))
     }
 
-    /// Our address on the interface that reaches `dst`.
-    pub fn source_for(&self, dst: Ip) -> Option<Ip> {
+    /// Our address on the interface that reaches `dst` (None: no route, or
+    /// no address there yet).
+    pub fn source_for(&self, dst: Addr) -> Option<Addr> {
+        let Some(dst) = as_v4(&dst) else { return self.source6(&dst) };
         let (i, _) = self.route(dst)?;
-        Some(if dst[0] == 127 { LOOPBACK } else { self.ifaces[i].ip })
+        let src = if dst[0] == 127 { LOOPBACK } else { self.ifaces[i].ip };
+        (src != ANY).then(|| v4(src))
+    }
+
+    /// Sends a datagram to `dst` over IPv4 or IPv6.
+    pub fn send_ip(&mut self, dst: Addr, proto: u8, payload: &[u8]) -> Result<(), isize> {
+        match as_v4(&dst) {
+            Some(d) => self.send_ip4(d, proto, payload),
+            None => self.send_ip6(dst, proto, payload),
+        }
     }
 
     fn ip_packet(&mut self, src: Ip, dst: Ip, proto: u8, payload: &[u8]) -> Vec<u8> {
@@ -373,8 +422,8 @@ impl Stack {
         p
     }
 
-    /// Sends an IP datagram to `dst` (routing, ARP, loopback).
-    pub fn send_ip(&mut self, dst: Ip, proto: u8, payload: &[u8]) -> Result<(), isize> {
+    /// Sends an IPv4 datagram to `dst` (routing, ARP, loopback).
+    pub fn send_ip4(&mut self, dst: Ip, proto: u8, payload: &[u8]) -> Result<(), isize> {
         if 20 + payload.len() > MTU {
             return Err(EMSGSIZE);
         }
@@ -475,6 +524,7 @@ impl Stack {
         self.pending.retain(|p| now - p.since < 3500);
         self.arp.retain(|_, (_, until)| *until > now);
         dhcp::tick(self, now);
+        self.ip6_timers(now);
         tcp::tick(self, now);
     }
 }
@@ -517,6 +567,31 @@ pub fn interfaces() -> Vec<aurora_abi::NetInterface> {
                 n.tx_packets = f.tx_packets;
                 n.rx_bytes = f.rx_bytes;
                 n.tx_bytes = f.tx_bytes;
+                n
+            })
+            .collect()
+    })
+}
+
+/// Interfaces' IPv6 configuration for `net_info6` (same order as `net_info`).
+pub fn interfaces6() -> Vec<aurora_abi::NetInterface6> {
+    with(|s| {
+        s.ifaces
+            .iter()
+            .map(|f| {
+                let mut n = aurora_abi::NetInterface6::default();
+                for (k, (a, len, _)) in f.v6.addrs.iter().take(4).enumerate() {
+                    n.addrs[k] = *a;
+                    n.prefix_len[k] = *len;
+                }
+                n.addr_count = f.v6.addrs.len().min(4) as u32;
+                if let Some((r, _)) = f.v6.router {
+                    n.router = r;
+                }
+                for (k, d) in f.v6.dns.iter().take(2).enumerate() {
+                    n.dns[k] = *d;
+                }
+                n.dns_count = f.v6.dns.len().min(2) as u32;
                 n
             })
             .collect()

@@ -1,7 +1,7 @@
 //! Byte-level helpers for packet headers: big-endian fields, the internet
 //! checksum, and address formatting.
 
-use super::Ip;
+use super::{as_v4, Addr, Ip};
 use alloc::format;
 use alloc::string::String;
 
@@ -49,13 +49,52 @@ pub fn checksum(data: &[u8]) -> u16 {
     fold(sum(data, 0))
 }
 
-/// TCP/UDP checksum over the IPv4 pseudo-header and `segment`.
-pub fn transport_checksum(src: Ip, dst: Ip, proto: u8, segment: &[u8]) -> u16 {
-    let mut acc = sum(&src, 0);
-    acc = sum(&dst, acc);
+/// TCP/UDP (and ICMPv6) checksum over the pseudo-header and `segment`:
+/// IPv4's when both addresses are IPv4-mapped, else IPv6's.
+pub fn transport_checksum(src: Addr, dst: Addr, proto: u8, segment: &[u8]) -> u16 {
+    let mut acc = match (as_v4(&src), as_v4(&dst)) {
+        (Some(s), Some(d)) => sum(&d, sum(&s, 0)),
+        _ => sum(&dst, sum(&src, 0)),
+    };
     acc = acc.wrapping_add(proto as u32);
-    acc = acc.wrapping_add(segment.len() as u32);
+    acc = acc.wrapping_add((segment.len() as u32) >> 16).wrapping_add(segment.len() as u32 & 0xFFFF);
     fold(sum(segment, acc))
+}
+
+/// An address of either family as text.
+#[allow(dead_code)] // used by the kernel tests
+pub fn addr_str(a: &Addr) -> String {
+    match as_v4(a) {
+        Some(ip) => ip_str(ip),
+        None => ip6_str(a),
+    }
+}
+
+/// IPv6 text form, with the longest run of zero groups as "::".
+pub fn ip6_str(a: &[u8; 16]) -> String {
+    let g: [u16; 8] = core::array::from_fn(|i| u16::from_be_bytes([a[2 * i], a[2 * i + 1]]));
+    let (mut best, mut best_len, mut i) = (8, 0, 0);
+    while i < 8 {
+        if g[i] == 0 {
+            let start = i;
+            while i < 8 && g[i] == 0 {
+                i += 1;
+            }
+            if i - start > best_len && i - start > 1 {
+                best = start;
+                best_len = i - start;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let part =
+        |r: core::ops::Range<usize>| g[r].iter().map(|x| format!("{x:x}")).collect::<alloc::vec::Vec<_>>().join(":");
+    if best_len == 0 {
+        part(0..8)
+    } else {
+        format!("{}::{}", part(0..best), part(best + best_len..8))
+    }
 }
 
 pub fn ip_str(ip: Ip) -> String {

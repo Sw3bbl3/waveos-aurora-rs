@@ -247,22 +247,26 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         }
         nr::SOCKET => {
             use crate::net::socket::{Kind, Socket};
-            let kind = match a[0] {
-                aurora_abi::net::TCP => Kind::Tcp,
-                aurora_abi::net::UDP => Kind::Udp,
-                aurora_abi::net::ICMP => Kind::Icmp,
+            use aurora_abi::net::*;
+            let (kind, v6) = match a[0] {
+                TCP => (Kind::Tcp, false),
+                UDP => (Kind::Udp, false),
+                ICMP => (Kind::Icmp, false),
+                TCP6 => (Kind::Tcp, true),
+                UDP6 => (Kind::Udp, true),
+                ICMP6 => (Kind::Icmp, true),
                 _ => return Err(EINVAL),
             };
             let p = proc::current().ok_or(EPERM)?;
-            p.install_fd(Arc::new(Handle::Socket(Socket::new(kind)))).map(|fd| fd as u64)
+            p.install_fd(Arc::new(Handle::Socket(Socket::new(kind, v6)))).map(|fd| fd as u64)
         }
         nr::CONNECT => {
-            let addr: aurora_abi::SockAddr = user::get(a[1])?;
-            socket(a[0])?.connect(&addr).map(|_| 0)
+            let s = socket(a[0])?;
+            s.connect(read_peer(&s, a[1])?).map(|_| 0)
         }
         nr::BIND => {
-            let addr: aurora_abi::SockAddr = user::get(a[1])?;
-            socket(a[0])?.bind(&addr).map(|_| 0)
+            let s = socket(a[0])?;
+            s.bind(read_peer(&s, a[1])?).map(|_| 0)
         }
         nr::LISTEN => socket(a[0])?.listen(a[1] as usize).map(|_| 0),
         nr::ACCEPT => {
@@ -270,34 +274,36 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             let Handle::Socket(s) = &*listener else { return Err(EINVAL) };
             let (conn, peer) = s.accept()?;
             if a[1] != 0 {
-                user::put(a[1], &peer)?;
+                write_peer(s, a[1], peer)?;
             }
             let p = proc::current().ok_or(EPERM)?;
             p.install_fd(Arc::new(Handle::Socket(conn))).map(|fd| fd as u64)
         }
         nr::SENDTO => {
             let data = user::slice(a[1], a[2].min(65536))?;
-            let addr: aurora_abi::SockAddr = user::get(a[3])?;
-            socket(a[0])?.send_to(&data, &addr).map(|n| n as u64)
+            let s = socket(a[0])?;
+            s.send_to(&data, read_peer(&s, a[3])?).map(|n| n as u64)
         }
         nr::RECVFROM => {
             let mut out = user::slice_mut(a[1], a[2].min(65536))?;
-            let (n, from) = socket(a[0])?.recv_from(&mut out)?;
+            let s = socket(a[0])?;
+            let (n, from) = s.recv_from(&mut out)?;
             out.commit(n)?;
             if a[3] != 0 {
-                user::put(a[3], &from)?;
+                write_peer(&s, a[3], from)?;
             }
             Ok(n as u64)
         }
         nr::SHUTDOWN => socket(a[0])?.shutdown().map(|_| 0),
         nr::SOCKOPT => socket(a[0])?.option(a[1], a[2]),
         nr::SOCK_INFO => {
-            let (local, remote, state) = socket(a[0])?.info();
+            let s = socket(a[0])?;
+            let (local, remote, state) = s.info();
             if a[1] != 0 {
-                user::put(a[1], &local)?;
+                write_peer(&s, a[1], local)?;
             }
             if a[2] != 0 {
-                user::put(a[2], &remote)?;
+                write_peer(&s, a[2], remote)?;
             }
             Ok(state)
         }
@@ -305,6 +311,19 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             let list = crate::net::interfaces();
             let max = (a[1] as usize).min(16);
             let size = core::mem::size_of::<aurora_abi::NetInterface>();
+            let mut out = user::slice_mut(a[0], (max * size) as u64)?;
+            let n = list.len().min(max);
+            for (i, f) in list.iter().take(n).enumerate() {
+                let bytes = unsafe { core::slice::from_raw_parts(f as *const _ as *const u8, size) };
+                out[i * size..(i + 1) * size].copy_from_slice(bytes);
+            }
+            out.commit(n * size)?;
+            Ok(list.len() as u64)
+        }
+        nr::NET_INFO6 => {
+            let list = crate::net::interfaces6();
+            let max = (a[1] as usize).min(16);
+            let size = core::mem::size_of::<aurora_abi::NetInterface6>();
             let mut out = user::slice_mut(a[0], (max * size) as u64)?;
             let n = list.len().min(max);
             for (i, f) in list.iter().take(n).enumerate() {
@@ -357,6 +376,26 @@ fn socket(fd: u64) -> Result<SocketRef, isize> {
     match &*h {
         Handle::Socket(_) => Ok(SocketRef(h)),
         _ => Err(EINVAL),
+    }
+}
+
+/// A socket address from a program: `SockAddr6` for IPv6 sockets, else
+/// `SockAddr` (stored IPv4-mapped).
+fn read_peer(s: &crate::net::socket::Socket, ptr: u64) -> Result<crate::net::socket::Peer, isize> {
+    if s.v6 {
+        let a: aurora_abi::SockAddr6 = user::get(ptr)?;
+        Ok((a.ip, a.port))
+    } else {
+        let a: aurora_abi::SockAddr = user::get(ptr)?;
+        Ok((crate::net::v4(a.ip), a.port))
+    }
+}
+
+fn write_peer(s: &crate::net::socket::Socket, ptr: u64, (ip, port): crate::net::socket::Peer) -> Result<(), isize> {
+    if s.v6 {
+        user::put(ptr, &aurora_abi::SockAddr6::new(ip, port))
+    } else {
+        user::put(ptr, &aurora_abi::SockAddr::new(crate::net::as_v4(&ip).unwrap_or([0; 4]), port))
     }
 }
 

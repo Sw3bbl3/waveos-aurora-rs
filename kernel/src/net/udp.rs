@@ -1,7 +1,7 @@
 //! UDP: datagrams to and from bound ports (and DHCP's port 68).
 
 use super::wire::*;
-use super::{Ip, Stack, PROTO_UDP};
+use super::{Addr as Ip, Stack, PROTO_UDP};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -90,7 +90,7 @@ pub fn datagram(src: Ip, dst: Ip, sport: u16, dport: u16, data: &[u8]) -> Vec<u8
 }
 
 pub fn send(s: &mut Stack, sport: u16, dst: Ip, dport: u16, data: &[u8]) -> Result<(), isize> {
-    if data.len() > super::MTU - 28 {
+    if data.len() > super::MTU - if super::as_v4(&dst).is_some() { 28 } else { 48 } {
         return Err(EMSGSIZE);
     }
     let src = s.source_for(dst).ok_or(ENETUNREACH)?;
