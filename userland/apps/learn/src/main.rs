@@ -353,6 +353,13 @@ impl Learn {
                 let rect = |r: &nebula_engine::Rect| Rect::new(ox + r.x, oy + r.y, r.w, r.h);
                 match item {
                     Item::Rect { rect: r, color, radius } => cv.fill_round_rect(rect(r), *radius, *color),
+                    Item::Border { rect: r, color, radius, width } => {
+                        let r = rect(r);
+                        let radius = (*radius).min(r.w / 2).min(r.h / 2);
+                        for inset in 0..(*width).min(r.w.min(r.h) / 2) {
+                            cv.stroke_round_rect(r.inset(inset), (radius - inset).max(0), *color);
+                        }
+                    }
                     Item::Text { x, y, text, font: f, color, underline, strike } => {
                         let f = font_for(*f);
                         let y = oy + y;
@@ -367,6 +374,7 @@ impl Learn {
                             cv.fill_rect(Rect::new(ox + x, y - f.ascent as i32 / 3, w, 1), *color);
                         }
                     }
+                    Item::Canvas { .. } => {} // Learn does not execute page scripts.
                     Item::Image { rect: r, src } => {
                         if let Some(i) = self.images.get(src) {
                             cv.draw_image(&i.pixels, i.width, i.height, rect(r), 255);

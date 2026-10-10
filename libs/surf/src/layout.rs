@@ -78,6 +78,12 @@ pub enum Item {
         color: u32,
         radius: i32,
     },
+    Border {
+        rect: Rect,
+        color: u32,
+        radius: i32,
+        width: i32,
+    },
     /// A text run with its baseline at `y`.
     Text {
         x: i32,
@@ -92,6 +98,10 @@ pub enum Item {
         rect: Rect,
         src: String,
     },
+    Canvas {
+        rect: Rect,
+        node: NodeId,
+    },
     /// A list bullet: filled (disc), hollow (circle) or square.
     Bullet {
         rect: Rect,
@@ -103,7 +113,11 @@ pub enum Item {
 impl Item {
     fn shift(&mut self, dx: i32, dy: i32) {
         match self {
-            Item::Rect { rect, .. } | Item::Image { rect, .. } | Item::Bullet { rect, .. } => {
+            Item::Rect { rect, .. }
+            | Item::Border { rect, .. }
+            | Item::Image { rect, .. }
+            | Item::Canvas { rect, .. }
+            | Item::Bullet { rect, .. } => {
                 rect.x += dx;
                 rect.y += dy;
             }
@@ -444,7 +458,8 @@ impl<'a> Engine<'a> {
         let st = self.style(node);
         let tag = self.doc.tag(node);
         // Replaced elements (controls, images) size and paint themselves.
-        let replaced = matches!(tag, "img" | "input" | "select" | "textarea");
+        let replaced = matches!(tag, "img" | "canvas" | "input" | "select" | "textarea");
+        let control = matches!(tag, "input" | "select" | "textarea");
         let pad: [i32; 4] = if replaced { [0; 4] } else { core::array::from_fn(|i| st.padding[i].or_zero(cw).max(0)) };
         let border: [i32; 4] = if replaced { [0; 4] } else { st.borders().map(round_i) };
         let hext = pad[1] + pad[3] + border[1] + border[3];
@@ -453,6 +468,8 @@ impl<'a> Engine<'a> {
             ml = Some(0);
             mr = Some(0);
             (f - hext).max(0)
+        } else if control {
+            self.control_size(node, cw).0
         } else if st.display == Display::Table && st.width.is_auto() {
             // Tables shrink to fit their content.
             let avail = cw - ml.unwrap_or(0) - mr.unwrap_or(0) - hext;
@@ -525,7 +542,19 @@ impl<'a> Engine<'a> {
                     self.children(node, cx, cy, width)
                 }
             }
-            _ if matches!(tag, "img" | "input" | "select" | "textarea") => {
+            _ if control => {
+                let (_, h, label) = self.control_size(node, cw);
+                if st.visible {
+                    let mut items = self.control_items(node, &st, width, h, &label);
+                    for item in &mut items {
+                        item.shift(cx, cy);
+                    }
+                    self.out.items.extend(items);
+                }
+                self.out.fields.push(Field { rect: Rect::new(cx, cy, width, h), node });
+                h
+            }
+            _ if tag == "img" || tag == "canvas" => {
                 // A replaced element made block-level.
                 self.inline(&[node], cx, cy, width, &st)
             }
@@ -576,6 +605,10 @@ impl<'a> Engine<'a> {
 
     fn borders(&mut self, st: &Style, r: Rect, b: &[i32; 4]) {
         let color = |i: usize| st.border_color[i].unwrap_or(st.color);
+        if st.radius > 0.0 && b[0] > 0 && (1..4).all(|i| b[i] == b[0] && color(i) == color(0)) {
+            self.out.items.push(Item::Border { rect: r, color: color(0), radius: st.radius as i32, width: b[0] });
+            return;
+        }
         if b[0] > 0 {
             self.out.items.push(Item::Rect { rect: Rect::new(r.x, r.y, r.w, b[0]), color: color(0), radius: 0 });
         }
@@ -1243,12 +1276,12 @@ impl<'a> Engine<'a> {
                     }
                 }
                 match e.tag.as_str() {
-                    "img" => {
+                    "img" | "canvas" => {
                         let (w, _) = self.replaced_size(n, i32::MAX / 4);
                         return (w + ext, w + ext);
                     }
                     "input" | "select" | "textarea" | "button" if e.tag != "button" => {
-                        let (w, _, _) = self.control_size(n);
+                        let (w, _, _) = self.control_size(n, 0);
                         return (w + ext, w + ext);
                     }
                     "br" => return (0, 0),
@@ -1323,7 +1356,13 @@ impl<'a> Engine<'a> {
     fn replaced_size(&self, n: NodeId, avail: i32) -> (i32, i32) {
         let st = self.style(n);
         let e = self.doc.element(n).unwrap();
-        let natural = image_source(e).and_then(|s| self.host.image_size(&s));
+        let natural = if e.tag == "canvas" {
+            let size =
+                |name, fallback| e.attr(name).and_then(|s| s.parse::<u32>().ok()).unwrap_or(fallback).min(100_000);
+            Some((size("width", 300), size("height", 150)))
+        } else {
+            image_source(e).and_then(|s| self.host.image_size(&s))
+        };
         let w = st.width.resolve(avail.min(100_000));
         let h = match st.height {
             Len::Calc(p, px) if p == 0.0 => Some(px as i32),
@@ -1353,16 +1392,20 @@ impl<'a> Engine<'a> {
     }
 
     /// A form control's (width, height, label).
-    fn control_size(&self, n: NodeId) -> (i32, i32, String) {
+    fn control_size(&self, n: NodeId, avail: i32) -> (i32, i32, String) {
         let st = self.style(n);
         let e = self.doc.element(n).unwrap();
         let font = FontSpec::of(&st);
         let m = self.host.metrics(font);
         let line = m.ascent + m.descent;
-        let pad_v =
-            st.padding[0].or_zero(0) + st.padding[2].or_zero(0) + st.borders()[0] as i32 + st.borders()[2] as i32;
-        let pad_h =
-            st.padding[1].or_zero(0) + st.padding[3].or_zero(0) + st.borders()[1] as i32 + st.borders()[3] as i32;
+        let pad_v = st.padding[0].or_zero(avail)
+            + st.padding[2].or_zero(avail)
+            + st.borders()[0] as i32
+            + st.borders()[2] as i32;
+        let pad_h = st.padding[1].or_zero(avail)
+            + st.padding[3].or_zero(avail)
+            + st.borders()[1] as i32
+            + st.borders()[3] as i32;
         let kind = e.attr("type").unwrap_or("text").to_ascii_lowercase();
         let (label, content_w, content_h) = match (e.tag.as_str(), kind.as_str()) {
             ("input", "checkbox" | "radio") => (String::new(), 13, 13),
@@ -1392,8 +1435,8 @@ impl<'a> Engine<'a> {
                 (label, size * self.host.measure(font, "n") * 4 / 5, line)
             }
         };
-        let w = match st.width.resolve(0) {
-            Some(w) if matches!(st.width, Len::Calc(p, _) if p == 0.0) => {
+        let mut w = match st.width.resolve(avail) {
+            Some(w) => {
                 if st.border_box {
                     w
                 } else {
@@ -1402,6 +1445,13 @@ impl<'a> Engine<'a> {
             }
             _ => content_w + pad_h,
         };
+        let extra = if st.border_box { 0 } else { pad_h };
+        if let Some(max) = st.max_width.resolve(avail) {
+            w = w.min(max + extra);
+        }
+        if let Some(min) = st.min_width.resolve(avail) {
+            w = w.max(min + extra);
+        }
         let h = match st.height {
             Len::Calc(p, px) if p == 0.0 => px as i32 + if st.border_box { 0 } else { pad_v },
             _ => content_h + pad_v,
@@ -1468,7 +1518,7 @@ impl<'a> Engine<'a> {
                         out.push(Atom::Break);
                         *space = false;
                     }
-                    "img" => {
+                    "img" | "canvas" => {
                         let (w, h) = self.replaced_size(n, avail);
                         let alt = e.attr("alt").unwrap_or("").trim();
                         let src = image_source(e);
@@ -1479,7 +1529,9 @@ impl<'a> Engine<'a> {
                         } else if w > 0 && h > 0 {
                             let mut items = Vec::new();
                             if st.visible {
-                                if let Some(src) = src {
+                                if tag == "canvas" {
+                                    items.push(Item::Canvas { rect: Rect::new(0, 0, w, h), node: n });
+                                } else if let Some(src) = src {
                                     items.push(Item::Image { rect: Rect::new(0, 0, w, h), src });
                                 }
                             }
@@ -1497,7 +1549,7 @@ impl<'a> Engine<'a> {
                         }
                     }
                     "input" | "select" | "textarea" => {
-                        let (w, h, label) = self.control_size(n);
+                        let (w, h, label) = self.control_size(n, avail);
                         let items = if st.visible { self.control_items(n, &st, w, h, &label) } else { Vec::new() };
                         let font = FontSpec::of(&st);
                         let m = self.host.metrics(font);

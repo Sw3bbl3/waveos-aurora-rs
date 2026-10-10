@@ -1,0 +1,51 @@
+<!doctype html>
+<html><head><title>Browser API checks</title>
+<style>
+body { background: #edf2fa; color: #20304d; font-family: sans-serif; padding: 28px; }
+main { max-width: 780px; background: white; border: 1px solid #d4ddec; border-radius: 18px; padding: 28px; }
+h1 { font-size: 32px; margin: 12px 0; }
+.label { color: #566fa2; font-size: 12px; letter-spacing: 2px; }
+p { line-height: 1.5; }
+canvas { display: block; margin: 20px 0; border: 1px solid #d4ddec; }
+#results { color: #14664e; white-space: pre-wrap; }
+.note { color: #68748b; font-size: 14px; }
+</style></head><body><main>
+<p class="label">NEBULA / BROWSER APIS</p>
+<h1>A little more of the web.</h1>
+<p>These checks exercise image construction, text nodes, custom events, and real canvas pixels.</p>
+<canvas id="colors" width="480" height="100">Canvas rendering is unavailable.</canvas>
+<p id="results">Waiting for JavaScript...</p>
+<p class="note">Canvas currently supports solid rectangles and pixel reads. These checks do not imply full compatibility with YouTube or other complex web apps.</p>
+<p><a href="css-demo.html">Layout gallery</a> &nbsp; / &nbsp; <a href="pulsar-demo.html">Pulsar playground</a></p>
+</main><script>
+(function () {
+  const results = [];
+  function check(name, test) {
+    try { if (!test()) throw new Error('unexpected result'); results.push('PASS - ' + name); }
+    catch (e) { results.push('FAIL - ' + name + ': ' + e.message); }
+  }
+  check('Image constructor and element identity', function () {
+    const image = new Image(32, 24);
+    return image instanceof HTMLImageElement && image.width === 32 && image.height === 24;
+  });
+  check('CharacterData editing and inheritance', function () {
+    const text = new Text('Hello'); text.appendData(', Nebula');
+    return text instanceof CharacterData && text.substringData(7, 6) === 'Nebula';
+  });
+  check('Legacy CustomEvent delivery', function () {
+    let detail = null;
+    document.addEventListener('nebula-check', function (e) { detail = e.detail; });
+    const event = document.createEvent('CustomEvent');
+    event.initCustomEvent('nebula-check', true, true, 42);
+    return document.dispatchEvent(event) && detail === 42;
+  });
+  check('Canvas drawing and RGBA pixel readback', function () {
+    const canvas = document.getElementById('colors'), ctx = canvas.getContext('2d');
+    const colors = ['#6386e8', '#896fe0', '#32a890', '#e4ac56'];
+    colors.forEach(function (color, i) { ctx.fillStyle = color; ctx.fillRect(i * 120, 0, 120, 100); });
+    return Array.from(ctx.getImageData(0, 0, 1, 1).data).join(',') === '99,134,232,255';
+  });
+  document.getElementById('results').textContent = results.join('\n');
+  console.log(results.join(' | '));
+})();
+</script></body></html>

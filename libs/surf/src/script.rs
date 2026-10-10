@@ -18,6 +18,8 @@ use nebula_script::{Call, Embedder, JsResult, ObjRef, PropKey, Realm, Sym, Value
 use nebula_web::cookie::{Jar, Source};
 use nebula_web::Url;
 
+mod canvas;
+
 /// Host objects are tagged with what they wrap.
 const NODE: u32 = 1;
 /// Listeners on `window` use this target.
@@ -66,11 +68,16 @@ struct Timer {
 struct Protos {
     node: Option<ObjRef>,
     element: Option<ObjRef>,
+    svg_element: Option<ObjRef>,
     html_element: Option<ObjRef>,
+    image: Option<ObjRef>,
+    canvas: Option<ObjRef>,
+    canvas_context: Option<ObjRef>,
     text: Option<ObjRef>,
     document: Option<ObjRef>,
     fragment: Option<ObjRef>,
     event: Option<ObjRef>,
+    custom_event: Option<ObjRef>,
     style: Option<ObjRef>,
     class_list: Option<ObjRef>,
     storage: Option<ObjRef>,
@@ -80,6 +87,8 @@ struct Protos {
 pub struct Dom {
     pub doc: Document,
     wrappers: BTreeMap<NodeId, ObjRef>,
+    namespaces: BTreeMap<NodeId, String>,
+    canvas_contexts: BTreeMap<NodeId, ObjRef>,
     listeners: Vec<Listener>,
     /// Compiled `on…` attributes: (node, type) → (source, function).
     attr_handlers: BTreeMap<(NodeId, String), (String, Value)>,
@@ -123,6 +132,7 @@ pub struct Dom {
 impl Embedder for Dom {
     fn trace(&self, out: &mut Vec<ObjRef>) {
         out.extend(self.wrappers.values().copied());
+        out.extend(self.canvas_contexts.values().copied());
         let mut v = |x: &Value| {
             if let Value::Object(o) = x {
                 out.push(*o);
@@ -149,11 +159,16 @@ impl Embedder for Dom {
         for o in [
             p.node,
             p.element,
+            p.svg_element,
             p.html_element,
+            p.image,
+            p.canvas,
+            p.canvas_context,
             p.text,
             p.document,
             p.fragment,
             p.event,
+            p.custom_event,
             p.style,
             p.class_list,
             p.storage,
@@ -197,6 +212,11 @@ fn wrap(rt: &mut Realm, dom: &mut Dom, n: NodeId) -> Value {
         NodeData::Document => p.document,
         NodeData::Text(_) => p.text,
         NodeData::Element(e) if e.tag == FRAGMENT => p.fragment,
+        NodeData::Element(_) if dom.namespaces.get(&n).is_some_and(|ns| ns == "http://www.w3.org/2000/svg") => {
+            p.svg_element
+        }
+        NodeData::Element(e) if e.tag == "img" => p.image,
+        NodeData::Element(e) if e.tag == "canvas" => p.canvas,
         NodeData::Element(_) => p.html_element,
     };
     let o = rt.alloc(Obj::new(proto, Kind::Host(NODE, n as u64)));
@@ -1867,11 +1887,24 @@ fn create_element(rt: &mut Realm, c: &Call) -> JsResult {
 }
 
 fn create_element_ns(rt: &mut Realm, c: &Call) -> JsResult {
+    let namespace = if c.arg(0).is_nullish() { String::new() } else { arg_str(rt, c, 0)? };
     let tag = arg_str(rt, c, 1)?.to_ascii_lowercase();
     let tag = tag.rsplit(':').next().unwrap_or("").to_string();
     with_dom(rt, |rt, dom| {
         let n = dom.doc.create(NodeData::Element(Element { tag, attrs: Vec::new() }));
+        dom.namespaces.insert(n, namespace);
         Ok(wrap(rt, dom, n))
+    })
+}
+
+fn namespace_uri(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    with_dom(rt, |_, d| {
+        Ok(match d.namespaces.get(&n) {
+            Some(ns) if ns.is_empty() => Value::Null,
+            Some(ns) => Value::str(ns),
+            None => Value::str("http://www.w3.org/1999/xhtml"),
+        })
     })
 }
 
@@ -1891,6 +1924,66 @@ fn create_comment(rt: &mut Realm, _c: &Call) -> JsResult {
     })
 }
 
+fn image_ctor(rt: &mut Realm, c: &Call) -> JsResult {
+    let mut attrs = Vec::new();
+    for (i, name) in ["width", "height"].iter().enumerate() {
+        if i < c.args.len() {
+            attrs.push((String::from(*name), rt.to_uint32(&c.arg(i))?.to_string()));
+        }
+    }
+    with_dom(rt, |rt, dom| {
+        let n = dom.doc.create(NodeData::Element(Element { tag: String::from("img"), attrs }));
+        Ok(wrap(rt, dom, n))
+    })
+}
+
+fn text_ctor(rt: &mut Realm, c: &Call) -> JsResult {
+    if !c.is_construct() {
+        return Err(rt.type_error("Text requires 'new'"));
+    }
+    let data = if c.arg(0).is_undefined() { String::new() } else { arg_str(rt, c, 0)? };
+    with_dom(rt, |rt, dom| {
+        let n = dom.doc.create(NodeData::Text(data));
+        Ok(wrap(rt, dom, n))
+    })
+}
+
+fn dimension_get(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    let name = rt.native_slots(c.callee)[0].clone();
+    let name = rt.to_rust_string(&name)?;
+    with_dom(rt, |rt, dom| {
+        let Some(e) = dom.doc.element(n).filter(|e| matches!(e.tag.as_str(), "img" | "canvas")) else {
+            return Err(rt.type_error("Illegal image or canvas invocation"));
+        };
+        let fallback = if e.tag == "canvas" {
+            if name == "width" {
+                300
+            } else {
+                150
+            }
+        } else {
+            0
+        };
+        let value = e.attr(&name).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(fallback);
+        Ok(Value::Number(value as f64))
+    })
+}
+
+fn dimension_set(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    let name = rt.native_slots(c.callee)[0].clone();
+    let name = rt.to_rust_string(&name)?;
+    let value = rt.to_uint32(&c.arg(0))?.to_string();
+    with_dom(rt, |rt, dom| {
+        if !matches!(dom.doc.tag(n), "img" | "canvas") {
+            return Err(rt.type_error("Illegal image or canvas invocation"));
+        }
+        dom.doc.set_attr(n, &name, &value);
+        Ok(Value::Undefined)
+    })
+}
+
 fn create_fragment(rt: &mut Realm, _c: &Call) -> JsResult {
     with_dom(rt, |rt, dom| {
         let n = dom.doc.create(NodeData::Element(Element { tag: String::from(FRAGMENT), attrs: Vec::new() }));
@@ -1898,20 +1991,52 @@ fn create_fragment(rt: &mut Realm, _c: &Call) -> JsResult {
     })
 }
 
-fn create_event(rt: &mut Realm, _c: &Call) -> JsResult {
+fn create_event(rt: &mut Realm, c: &Call) -> JsResult {
+    let interface = arg_str(rt, c, 0)?.to_ascii_lowercase();
+    if !matches!(
+        interface.as_str(),
+        "event" | "events" | "htmlevents" | "customevent" | "uievent" | "uievents" | "mouseevent" | "mouseevents"
+    ) {
+        return Err(rt.error(nebula_script::ErrorKind::Error, "NotSupportedError: Unknown event interface"));
+    }
     let ev = make_event(rt, "", false, false)?;
     let Value::Object(o) = ev else { unreachable!() };
-    let init = rt.native("initEvent", 3, init_event, false);
-    rt.define(o, "initEvent", Value::Object(init), HIDDEN);
+    rt.define(o, "isTrusted", Value::Bool(false), DEFAULT);
+    if interface == "customevent" {
+        rt.heap.get_mut(o).proto = with_dom(rt, |_, dom| dom.protos.custom_event);
+        rt.define(o, "detail", Value::Null, DEFAULT);
+    }
     Ok(ev)
 }
 
 fn init_event(rt: &mut Realm, c: &Call) -> JsResult {
+    let kind = arg_str(rt, c, 0)?;
     if let Value::Object(o) = c.this {
-        rt.define(o, "type", c.arg(0), DEFAULT);
+        if rt.get_str(o, "eventPhase")? != Value::Number(0.0) {
+            return Ok(Value::Undefined);
+        }
+        rt.define(o, "type", Value::str(&kind), DEFAULT);
         rt.define(o, "bubbles", Value::Bool(c.arg(1).truthy()), DEFAULT);
         rt.define(o, "cancelable", Value::Bool(c.arg(2).truthy()), DEFAULT);
+        rt.define(o, "defaultPrevented", Value::Bool(false), DEFAULT);
+        rt.define(o, "target", Value::Null, DEFAULT);
+        rt.define(o, "isTrusted", Value::Bool(false), DEFAULT);
+        let (stop, stop_now) = with_dom(rt, |_, dom| (dom.stop_sym.unwrap(), dom.stop_now_sym.unwrap()));
+        rt.define(o, stop, Value::Bool(false), 0);
+        rt.define(o, stop_now, Value::Bool(false), 0);
     }
+    Ok(Value::Undefined)
+}
+
+fn init_custom_event(rt: &mut Realm, c: &Call) -> JsResult {
+    let Value::Object(o) = c.this else {
+        return Err(rt.type_error("Illegal invocation"));
+    };
+    if rt.get_str(o, "eventPhase")? != Value::Number(0.0) {
+        return Ok(Value::Undefined);
+    }
+    init_event(rt, c)?;
+    rt.define(o, "detail", if c.arg(3).is_undefined() { Value::Null } else { c.arg(3) }, DEFAULT);
     Ok(Value::Undefined)
 }
 
@@ -2428,6 +2553,8 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     rt.embedder = Some(Box::new(Dom {
         doc: Document::default(),
         wrappers: BTreeMap::new(),
+        namespaces: BTreeMap::new(),
+        canvas_contexts: BTreeMap::new(),
         listeners: Vec::new(),
         attr_handlers: BTreeMap::new(),
         timers: Vec::new(),
@@ -2530,6 +2657,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     interface(rt, "Element", element, None);
     parent_members(rt, element);
     accessor(rt, element, "tagName", tag_name, None);
+    accessor(rt, element, "namespaceURI", namespace_uri, None);
     accessor(rt, element, "localName", node_name, None);
     accessor(rt, element, "innerHTML", inner_html, Some(set_inner_html));
     accessor(rt, element, "outerHTML", outer_html, Some(set_outer_html));
@@ -2568,6 +2696,8 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
             ("releasePointerCapture", 1, noop),
         ],
     );
+    let svg_element = rt.new_object_with(Some(element));
+    interface(rt, "SVGElement", svg_element, None);
     let html_element = rt.new_object_with(Some(element));
     interface(rt, "HTMLElement", html_element, None);
     accessor(rt, html_element, "innerText", text_content, Some(set_text_content));
@@ -2633,15 +2763,29 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     }
 
     // Text, fragments, the document.
-    let text = rt.new_object_with(Some(node));
-    interface(rt, "Text", text, None);
-    accessor(rt, text, "data", text_content, Some(set_text_content));
-    accessor(rt, text, "nodeValue", text_content, Some(set_text_content));
+    let character_data = rt.new_object_with(Some(node));
+    interface(rt, "CharacterData", character_data, None);
+    accessor(rt, character_data, "data", text_content, Some(set_text_content));
+    accessor(rt, character_data, "nodeValue", text_content, Some(set_text_content));
     methods(
         rt,
-        text,
+        character_data,
         &[("remove", 0, remove), ("before", 0, before), ("after", 0, after), ("replaceWith", 0, replace_with)],
     );
+    let text = rt.new_object_with(Some(character_data));
+    let text_constructor = rt.native("Text", 0, text_ctor, true);
+    rt.define(text_constructor, "prototype", Value::Object(text), 0);
+    rt.define(text, "constructor", Value::Object(text_constructor), HIDDEN);
+    rt.set_global("Text", Value::Object(text_constructor));
+    let image = rt.new_object_with(Some(html_element));
+    interface(rt, "HTMLImageElement", image, None);
+    let image_constructor = rt.native("Image", 0, image_ctor, true);
+    rt.define(image_constructor, "prototype", Value::Object(image), 0);
+    rt.set_global("Image", Value::Object(image_constructor));
+    for name in ["width", "height"] {
+        accessor_with(rt, image, name, Value::str(name), dimension_get, Some(dimension_set));
+    }
+    let (canvas_element, canvas_context) = canvas::install(rt, html_element);
     let fragment = rt.new_object_with(Some(node));
     interface(rt, "DocumentFragment", fragment, None);
     parent_members(rt, fragment);
@@ -2703,10 +2847,12 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
         event,
         &[
             ("preventDefault", 0, prevent_default),
+            ("initEvent", 3, init_event),
             ("stopPropagation", 0, stop_propagation),
             ("stopImmediatePropagation", 0, stop_immediate),
         ],
     );
+    let mut custom_event = None;
     for (name, parent) in [
         ("CustomEvent", ev_ctor),
         ("KeyboardEvent", ev_ctor),
@@ -2716,6 +2862,10 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
         ("UIEvent", ev_ctor),
     ] {
         let proto = rt.new_object_with(Some(event));
+        if name == "CustomEvent" {
+            rt.method(proto, "initCustomEvent", 4, init_custom_event);
+            custom_event = Some(proto);
+        }
         let c = rt.native(name, 1, event_ctor, true);
         rt.heap.get_mut(c).proto = Some(parent);
         rt.define(c, "prototype", Value::Object(proto), 0);
@@ -2774,11 +2924,16 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
         dom.protos = Protos {
             node: Some(node),
             element: Some(element),
+            svg_element: Some(svg_element),
             html_element: Some(html_element),
+            image: Some(image),
+            canvas: Some(canvas_element),
+            canvas_context: Some(canvas_context),
             text: Some(text),
             document: Some(document),
             fragment: Some(fragment),
             event: Some(event),
+            custom_event,
             style: Some(style),
             class_list: Some(cl),
             storage: Some(storage_proto),

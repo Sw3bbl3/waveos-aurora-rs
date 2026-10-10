@@ -58,11 +58,15 @@ Each page gets a fresh realm. Scripts see clicks, keys, typing and form submissi
 
 A test runs jQuery 3.7.1 against the DOM (`libs/surf/tests/script.rs`). `cargo run -p nebula-engine --example page -- page.html URL` runs a saved page's scripts on the host and reports what they did.
 
+The DOM includes `Image`/`HTMLImageElement` construction, `Text` inheriting from `CharacterData`, text editing methods, and legacy `CustomEvent.initCustomEvent` initialization and dispatch. The software 2D canvas implements solid CSS colors, rectangle filling/clearing, pixel reads, and save/restore of fill color. Canvas pixels are displayed in Nebula; resizing resets the bitmap and drawing state. Allocations are bounded to 1 million pixels per canvas, 2 million per page, and 128 canvases. Unsupported contexts such as WebGL return null. Open `file:///System/Library/Nebula/browser-apis.html` for an offline check.
+
 ## Not yet supported
 
 Proxy, BigInt (and so BigInt64Array), resizable and shared ArrayBuffers, direct `eval` (eval always runs in the global scope), modules, Intl, Unicode normalisation (`normalize` returns its input), and locale-aware collation beyond an approximation.
 
 In the browser: there's no CORS, so `fetch` and `XMLHttpRequest` send cookies only to the page's own origin (as `credentials: "same-origin"` does) and other sites' responses never carry the user's cookies; there's no SameSite enforcement, so cookies also go with requests for other sites' images and scripts; `MutationObserver` never reports; `IntersectionObserver` reports every element as visible once; `getComputedStyle` returns inline styles; dataset is read-only.
+
+These are partial web-platform bindings: canvas paths, transforms, text, and image drawing are not implemented; detached `Image` objects do not prefetch resources or implement the full image loading lifecycle. DOM comments are represented as empty text nodes, and `NodeFilter`/`TreeWalker` are unavailable. Replaying YouTube's captured animation and SPF libraries verifies their initialization, but its web-components library still stops at `NodeFilter`; this does not establish full YouTube or video playback support.
 
 ## Try it
 

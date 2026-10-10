@@ -1,0 +1,13 @@
+@import "css-demo-theme.css";
+body { margin: 0; background: #f4f5fb; color: #202842; font-family: sans-serif }
+main { max-width: 960px; margin: 0 auto; padding: 36px 28px }
+.label { font-size: 12px; font-weight: bold; color: var(--accent) }
+h1 { font-size: 38px; margin: 18px 0 12px }
+.intro { color: #69748b; margin-bottom: 28px }
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px }
+article { background: white; padding: 20px; border: 1px solid #d9ddec; border-radius: 12px }
+h2 { font-size: 18px; margin-top: 0 }
+p { line-height: 1.6 }
+input { box-sizing: border-box; width: 100%; padding: 8px; border-radius: 6px }
+a { color: var(--accent) }
+.height { color: #69748b }

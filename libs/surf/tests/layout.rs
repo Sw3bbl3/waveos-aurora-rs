@@ -5,6 +5,39 @@ use nebula_engine::{FontSpec, Host, Metrics, Page, Rect};
 
 struct Fake;
 
+#[test]
+fn canvas_uses_its_bitmap_dimensions_and_hides_fallback_text() {
+    let page = Page::parse("<body><canvas width='480' height='100' style='display:block'>fallback</canvas></body>");
+    let layout = page.layout(800, 600, &Fake);
+    let rect = layout
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Canvas { rect, .. } => Some(*rect),
+            _ => None,
+        })
+        .expect("canvas is painted");
+    assert_eq!((rect.w, rect.h), (480, 100));
+    assert!(!layout.items.iter().any(|i| matches!(i, Item::Text { text, .. } if text.contains("fallback"))));
+}
+
+#[test]
+fn controls_resolve_percentages_and_flex_growth() {
+    let page = Page::parse("<body style='margin:0'><div style='width:400px'><input style='width:100%;box-sizing:border-box'></div><form style='display:flex;width:400px;gap:10px'><input style='width:100px;flex-grow:1;box-sizing:border-box'><button style='width:80px;box-sizing:border-box'>Go</button></form>");
+    let layout = page.layout(800, 600, &Fake);
+    assert_eq!(layout.fields[0].rect.w, 400);
+    assert_eq!(layout.fields[1].rect.w, 310);
+    assert_eq!(layout.fields[2].rect.w, 80);
+    assert_eq!(layout.fields[2].rect.x - layout.fields[1].rect.right(), 10);
+}
+
+#[test]
+fn rounded_borders_preserve_their_shape() {
+    let page = Page::parse("<div style='border:2px solid red;border-radius:12px;padding:10px'>Rounded</div>");
+    let layout = page.layout(400, 600, &Fake);
+    assert!(layout.items.iter().any(|i| matches!(i, Item::Border { color: 0xffff0000, radius: 12, width: 2, .. })));
+}
+
 impl Host for Fake {
     fn measure(&self, font: FontSpec, text: &str) -> i32 {
         text.chars().count() as i32 * font.size as i32 / 2

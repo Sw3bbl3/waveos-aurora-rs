@@ -34,7 +34,10 @@ use nebula_web::Url;
 
 corekit::entry!(main);
 
-const TOOLBAR_H: i32 = 48;
+const TAB_H: i32 = 38;
+const TOOLBAR_H: i32 = TAB_H + 48;
+const MAX_TABS: usize = 8;
+const IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const HOME: &str = "about:home";
 const SEARCH: &str = "https://html.duckduckgo.com/html/?q=";
 const IMAGE_WORKERS: usize = 3;
@@ -288,20 +291,17 @@ fn load(url: Url, job: &LoadJob) -> Result<Loaded, String> {
     if !resp.ok() && resp.body.is_empty() {
         return Err(format!("the server answered {} {}", resp.status, resp.reason));
     }
+    drop(resp);
     // Stylesheets.
     let base = document_base(&page, &final_url);
-    for (n, (slot, href)) in page.pending_stylesheets().into_iter().enumerate() {
-        if n >= MAX_STYLESHEETS || job.cancel.load(Ordering::Relaxed) {
-            break;
+    page.load_stylesheets(&base, MAX_STYLESHEETS, |u| {
+        if job.cancel.load(Ordering::Relaxed) {
+            return None;
         }
-        let Some(u) = base.join(&href) else { continue };
         *job.progress.lock() = format!("Loading styles from {}…", u.host);
-        if let Ok(r) = get(&u) {
-            if r.ok() {
-                page.set_stylesheet(slot, &nebula_engine::decode(&r.body, ""));
-            }
-        }
-    }
+        let r = get(u).ok()?;
+        r.ok().then(|| (r.url.clone(), nebula_engine::decode(&r.body, "")))
+    });
     // Scripts, in document order (external ones fetched now).
     let mut scripts = Vec::new();
     if javascript_enabled() {
@@ -344,6 +344,7 @@ fn human_size(n: u64) -> String {
 struct ImageQueue {
     queue: VecDeque<(u64, String)>,
     done: Vec<(u64, String, Option<Image>)>,
+    bytes: usize,
 }
 
 fn base64(s: &str) -> Option<Vec<u8>> {
@@ -386,17 +387,20 @@ fn load_image(url: &str) -> Option<Image> {
         r.body
     };
     let img = aurora_image::decode(&bytes).ok()?;
-    Some(shrink(img, 1600))
+    Some(shrink(img, 1200))
 }
 
-/// Halves a picture until it is at most `max` pixels wide (saves memory).
+/// Halves a picture until both dimensions fit `max` (saves memory).
 fn shrink(mut img: Image, max: u32) -> Image {
-    while img.width > max && img.height > 1 {
-        let (w, h) = (img.width / 2, img.height / 2);
+    while img.width > max || img.height > max {
+        let (w, h) = ((img.width / 2).max(1), (img.height / 2).max(1));
         let mut px = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
             for x in 0..w {
-                let at = |dx: u32, dy: u32| img.pixels[((y * 2 + dy) * img.width + x * 2 + dx) as usize];
+                let at = |dx: u32, dy: u32| {
+                    img.pixels
+                        [((y * 2 + dy).min(img.height - 1) * img.width + (x * 2 + dx).min(img.width - 1)) as usize]
+                };
                 let quad = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
                 let mut c = 0u32;
                 for shift in [0, 8, 16, 24] {
@@ -419,7 +423,18 @@ fn image_worker(q: Arc<Mutex<ImageQueue>>, generation: Arc<AtomicU64>) {
             continue;
         }
         let img = load_image(&url);
-        q.lock().done.push((g, url, img));
+        let mut q = q.lock();
+        if g != generation.load(Ordering::Relaxed) {
+            continue;
+        }
+        let bytes = img.as_ref().map_or(0, |i| i.pixels.len() * 4);
+        let img = if q.bytes + bytes <= IMAGE_BYTES {
+            q.bytes += bytes;
+            img
+        } else {
+            None
+        };
+        q.done.push((g, url, img));
     }
 }
 
@@ -493,7 +508,7 @@ struct Nebula {
     scroll: i32,
     view: Rect,
     hover: Option<String>,
-    job: Option<(Arc<LoadJob>, JoinHandle<()>)>,
+    job: Option<(Arc<LoadJob>, Option<JoinHandle<()>>)>,
     old_jobs: Vec<JoinHandle<()>>,
     loading_since: u64,
     images: BTreeMap<String, Option<Image>>,
@@ -533,6 +548,254 @@ struct Find {
 
 const ZOOMS: [i32; 12] = [50, 67, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300];
 
+/// Dropping a JoinHandle does not unmap its stack. Join finished workers.
+fn reap(handles: &mut Vec<JoinHandle<()>>) {
+    let mut i = 0;
+    while i < handles.len() {
+        if handles[i].is_finished() {
+            handles.swap_remove(i).join();
+        } else {
+            i += 1;
+        }
+    }
+}
+
+struct Browser {
+    tabs: Vec<Nebula>,
+    active: usize,
+    closed: Vec<String>,
+    retired: Vec<JoinHandle<()>>,
+}
+
+impl Browser {
+    fn new(start: &str) -> Self {
+        Self { tabs: alloc::vec![Nebula::new(start)], active: 0, closed: Vec::new(), retired: Vec::new() }
+    }
+
+    fn select(&mut self, index: usize) {
+        if index == self.active || index >= self.tabs.len() {
+            return;
+        }
+        let tab = &mut self.tabs[self.active];
+        tab.layout = None;
+        tab.styles = None;
+        tab.hover = None;
+        tab.press = None;
+        self.active = index;
+    }
+
+    fn open(&mut self, url: &str) {
+        if self.tabs.len() >= MAX_TABS {
+            return;
+        }
+        self.tabs.push(Nebula::new(url));
+        self.select(self.tabs.len() - 1);
+        if url == HOME {
+            self.tabs[self.active].editing = true;
+            self.tabs[self.active].address.set_text("");
+        }
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let mut tab = self.tabs.remove(index);
+        if let Some(url) = tab.history.get(tab.pos) {
+            self.closed.push(url.clone());
+            if self.closed.len() > 8 {
+                self.closed.remove(0);
+            }
+        }
+        tab.stop();
+        tab.generation.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut q = tab.queue.lock();
+            q.queue.clear();
+            q.done.clear();
+        }
+        self.retired.append(&mut tab.old_jobs);
+        self.retired.append(&mut tab.workers);
+        if self.tabs.is_empty() {
+            self.tabs.push(Nebula::new(HOME));
+        }
+        if index < self.active {
+            self.active -= 1;
+        }
+        self.active = self.active.min(self.tabs.len() - 1);
+    }
+
+    fn tab_width(&self, area: Rect) -> i32 {
+        ((area.w - 150).max(120) / self.tabs.len() as i32).min(210)
+    }
+
+    fn tab_rect(&self, index: usize, area: Rect) -> Rect {
+        let w = self.tab_width(area);
+        Rect::new(area.x + 8 + index as i32 * w, area.y + 5, w - 4, TAB_H - 8)
+    }
+
+    fn new_rect(&self, area: Rect) -> Rect {
+        Rect::new(area.x + 12 + self.tabs.len() as i32 * self.tab_width(area), area.y + 5, 28, 28)
+    }
+}
+
+impl App for Browser {
+    fn title(&self) -> String {
+        format!("{} — Nebula", self.tabs[self.active].title())
+    }
+    fn size(&self) -> (i32, i32) {
+        (1100, 760)
+    }
+    fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
+        self.tabs[self.active].draw(cv, area, env);
+        let t = theme::current();
+        cv.fill_rect(Rect::new(area.x, area.y, area.w, TAB_H), t.window_bg);
+        let font = theme::ui(12);
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let r = self.tab_rect(i, area);
+            if i == self.active {
+                cv.fill_round_rect(r, 8, t.control_bg);
+                cv.fill_round_rect(Rect::new(r.x + 10, r.bottom() - 2, r.w - 20, 2), 1, theme::accent());
+            }
+            let color = if i == self.active { t.text } else { t.text_secondary };
+            let dot = if tab.job.as_ref().is_some_and(|(_, h)| h.is_some()) {
+                theme::accent()
+            } else if i == self.active {
+                0xFF35B89A
+            } else {
+                t.text_secondary
+            };
+            cv.fill_round_rect(Rect::new(r.x + 9, r.y + 12, 6, 6), 3, dot);
+            cv.with_clip(Rect::new(r.x + 23, r.y, (r.w - 48).max(1), r.h), |cv| {
+                cv.text(r.x + 23, r.y + 20, &tab.title(), font, color);
+            });
+            let (x, y) = (r.right() - 13, r.y + 15);
+            cv.line(x - 3, y - 3, x + 3, y + 3, 1, color);
+            cv.line(x - 3, y + 3, x + 3, y - 3, 1, color);
+        }
+        let r = self.new_rect(area);
+        let c = if self.tabs.len() < MAX_TABS { t.text } else { t.text_secondary };
+        cv.line(r.x + 8, r.y + 14, r.x + 20, r.y + 14, 1, c);
+        cv.line(r.x + 14, r.y + 8, r.x + 14, r.y + 20, 1, c);
+        if r.right() + 82 < area.right() {
+            cv.text(
+                area.right() - 88,
+                area.y + 24,
+                &format!("{} / {} tabs", self.tabs.len(), MAX_TABS),
+                font,
+                t.text_secondary,
+            );
+        }
+    }
+    fn key(&mut self, ev: &KeyEvent, env: &mut Env) -> bool {
+        if ev.pressed && (ev.mods.ctrl || ev.mods.super_key) {
+            if ev.code == KeyCode::Tab {
+                let next = if ev.mods.shift {
+                    (self.active + self.tabs.len() - 1) % self.tabs.len()
+                } else {
+                    (self.active + 1) % self.tabs.len()
+                };
+                self.select(next);
+                return true;
+            }
+            if ev.code == KeyCode::Char {
+                match ev.ch.map(|c| c.to_ascii_lowercase()) {
+                    Some('t') => {
+                        if ev.mods.shift {
+                            if self.tabs.len() < MAX_TABS {
+                                if let Some(url) = self.closed.pop() {
+                                    self.open(&url);
+                                }
+                            }
+                        } else {
+                            self.open(HOME);
+                        }
+                        return true;
+                    }
+                    Some('w') => {
+                        self.close_tab(self.active);
+                        return true;
+                    }
+                    Some(c @ '1'..='8') => {
+                        self.select((c as u8 - b'1') as usize);
+                        return true;
+                    }
+                    Some('9') => {
+                        self.select(self.tabs.len() - 1);
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.tabs[self.active].key(ev, env)
+    }
+    fn click(&mut self, x: i32, y: i32, area: Rect, env: &mut Env) -> bool {
+        if y < TAB_H {
+            for i in 0..self.tabs.len() {
+                let r = self.tab_rect(i, area);
+                if r.contains(x, y) {
+                    if x >= r.right() - 24 {
+                        self.close_tab(i);
+                    } else {
+                        self.select(i);
+                    }
+                    return true;
+                }
+            }
+            if self.new_rect(area).contains(x, y) {
+                self.open(HOME);
+            }
+            return true;
+        }
+        if env.mods.ctrl || env.mods.super_key {
+            let tab = &self.tabs[self.active];
+            let target = tab
+                .page_point(x, y)
+                .and_then(|(px, py)| tab.layout.as_ref()?.link_at(px, py))
+                .and_then(|n| tab.href(n));
+            if let Some(url) = target {
+                self.open(&url);
+                return true;
+            }
+        }
+        self.tabs[self.active].click(x, y, area, env)
+    }
+    fn hover(&mut self, x: i32, y: i32, area: Rect) -> bool {
+        self.tabs[self.active].hover(x, y, area)
+    }
+    fn scroll(&mut self, delta: i32, area: Rect) -> bool {
+        self.tabs[self.active].scroll(delta, area)
+    }
+    fn close_tab_requested(&mut self, _env: &mut Env) -> bool {
+        if self.tabs.len() > 1 {
+            self.close_tab(self.active);
+            false
+        } else {
+            true
+        }
+    }
+    fn tick(&mut self, env: &mut Env) -> bool {
+        let mut dirty = false;
+        reap(&mut self.retired);
+        for tab in &mut self.tabs {
+            reap(&mut tab.old_jobs);
+            reap(&mut tab.workers);
+            if let Some((_, handle)) = tab.job.as_mut() {
+                if handle.as_ref().is_some_and(|h| h.is_finished()) {
+                    handle.take().unwrap().join();
+                    dirty = true;
+                }
+            }
+        }
+        // Background tabs retain documents/forms but never run script timers or layout.
+        self.tabs[self.active].tick(env) | dirty
+    }
+    fn tick_interval(&self) -> u64 {
+        self.tabs[self.active].tick_interval()
+    }
+}
+
 impl Nebula {
     fn new(start: &str) -> Nebula {
         let mut s = Nebula {
@@ -551,7 +814,7 @@ impl Nebula {
             old_jobs: Vec::new(),
             loading_since: 0,
             images: BTreeMap::new(),
-            queue: Arc::new(Mutex::new(ImageQueue { queue: VecDeque::new(), done: Vec::new() })),
+            queue: Arc::new(Mutex::new(ImageQueue { queue: VecDeque::new(), done: Vec::new(), bytes: 0 })),
             generation: Arc::new(AtomicU64::new(0)),
             workers: Vec::new(),
             relayout_at: None,
@@ -603,6 +866,9 @@ impl Nebula {
         if push {
             self.history.truncate(if self.history.is_empty() { 0 } else { self.pos + 1 });
             self.history.push(target.clone());
+            if self.history.len() > 100 {
+                self.history.remove(0);
+            }
             self.pos = self.history.len() - 1;
         }
         self.start(target);
@@ -640,7 +906,7 @@ impl Nebula {
             *j.result.lock() = Some(r);
         }) {
             Ok(h) => {
-                self.job = Some((job, h));
+                self.job = Some((job, Some(h)));
                 self.loading_since = corekit::time::uptime_ms();
                 self.fragment = url.fragment.clone();
             }
@@ -651,7 +917,9 @@ impl Nebula {
     fn stop(&mut self) {
         if let Some((job, h)) = self.job.take() {
             job.cancel.store(true, Ordering::Relaxed);
-            self.old_jobs.push(h);
+            if let Some(h) = h {
+                self.old_jobs.push(h);
+            }
         }
     }
 
@@ -675,11 +943,19 @@ impl Nebula {
     fn install(&mut self, loaded: Loaded) {
         self.find = None;
         self.styles = None;
+        self.layout = None;
         let Loaded { mut page, url, images, scripts } = loaded;
         self.generation.fetch_add(1, Ordering::Relaxed);
-        self.queue.lock().queue.clear();
+        {
+            let mut q = self.queue.lock();
+            q.queue.clear();
+            q.done.clear();
+            q.bytes = 0;
+        }
         self.images.clear();
         for (k, img) in images {
+            let img = shrink(img, 1200);
+            self.queue.lock().bytes += img.pixels.len() * 4;
             self.images.insert(k, Some(img));
         }
         self.fields.clear();
@@ -716,8 +992,12 @@ impl Nebula {
         }
         self.page = Some(page);
         self.url = Some(url);
+        self.laid_version = 0;
+        self.js_wakeup = None;
         self.after_scripts();
-        self.relayout();
+        if self.layout.is_none() {
+            self.relayout();
+        }
         // Images.
         let g = self.generation.load(Ordering::Relaxed);
         {
@@ -742,7 +1022,7 @@ impl Nebula {
     }
 
     fn spawn_workers(&mut self) {
-        self.workers.retain(|w| !w.is_finished());
+        reap(&mut self.workers);
         while self.workers.len() < IMAGE_WORKERS && !self.queue.lock().queue.is_empty() {
             let (q, g) = (self.queue.clone(), self.generation.clone());
             match corekit::thread::spawn(move || image_worker(q, g)) {
@@ -770,8 +1050,9 @@ impl Nebula {
                 };
                 loads.lock().push((g, node, u.to_string(), source));
             });
-            if spawned.is_err() {
-                self.scripts_loading -= 1;
+            match spawned {
+                Ok(h) => self.old_jobs.push(h),
+                Err(_) => self.scripts_loading -= 1,
             }
         }
         // fetch() and XMLHttpRequest, also in the background.
@@ -802,11 +1083,13 @@ impl Nebula {
                 });
                 results.lock().push((g, req.id, r));
             });
-            if spawned.is_err() {
-                self.scripts_loading -= 1;
+            match spawned {
+                Ok(h) => self.old_jobs.push(h),
+                Err(_) => self.scripts_loading -= 1,
             }
         }
         let scroll_to = js.take_scroll_request().map(|(_, y)| y * self.zoom / 100);
+        self.js_wakeup = js.next_wakeup(corekit::time::unix_ms());
         if let Some(m) = js.take_storage() {
             if let Some(u) = &self.url {
                 save_storage(u, &m);
@@ -1085,16 +1368,19 @@ impl Nebula {
     // ------------------------------------------------------------ geometry
 
     fn back_rect(&self) -> Rect {
-        Rect::new(10, 10, 28, 28)
+        Rect::new(10, TAB_H + 10, 28, 28)
     }
     fn forward_rect(&self) -> Rect {
-        Rect::new(42, 10, 28, 28)
+        Rect::new(42, TAB_H + 10, 28, 28)
     }
     fn reload_rect(&self) -> Rect {
-        Rect::new(74, 10, 28, 28)
+        Rect::new(74, TAB_H + 10, 28, 28)
+    }
+    fn home_rect(&self) -> Rect {
+        Rect::new(106, TAB_H + 10, 28, 28)
     }
     fn address_rect(&self, area: Rect) -> Rect {
-        Rect::new(112, 8, area.w - 124, 32)
+        Rect::new(146, TAB_H + 8, (area.w - 158).max(40), 32)
     }
 
     /// Page coordinates of a window point in the content area.
@@ -1129,6 +1415,20 @@ impl Nebula {
         cv.with_clip(v, |cv| {
             for item in &l.items {
                 match item {
+                    Item::Border { rect, color, radius, width } => {
+                        let r = zr(rect);
+                        if !visible(r) {
+                            continue;
+                        }
+                        let radius = z(*radius).min(r.w / 2).min(r.h / 2);
+                        for inset in 0..z(*width).max(1).min(r.w.min(r.h) / 2) {
+                            cv.stroke_round_rect(
+                                Rect::new(r.x + inset, r.y + inset, r.w - 2 * inset, r.h - 2 * inset),
+                                (radius - inset).max(0),
+                                *color,
+                            );
+                        }
+                    }
                     Item::Rect { rect, color, radius } => {
                         if *color >> 24 == 0 {
                             continue;
@@ -1165,6 +1465,16 @@ impl Nebula {
                             cv.fill_rect(Rect::new(bx, by - f.ascent as i32 * 3 / 10, w, t), *color);
                         }
                     }
+                    Item::Canvas { rect, node } => {
+                        let r = zr(rect);
+                        if visible(r) {
+                            if let Some(bitmap) = self.page.as_ref().and_then(|p| p.doc.canvases.get(node)) {
+                                if bitmap.width > 0 && bitmap.height > 0 {
+                                    cv.draw_image(&bitmap.pixels, bitmap.width, bitmap.height, r, 255);
+                                }
+                            }
+                        }
+                    }
                     Item::Image { rect, src } => {
                         let r = zr(rect);
                         if !visible(r) {
@@ -1199,13 +1509,20 @@ impl Nebula {
                 if !visible(r) {
                     continue;
                 }
-                cv.fill_rect(r, 0xFFFF_FFFF);
-                let font = theme::ui(((fr.h - 8).clamp(10, 36)) as u16);
+                let style = self.styles.as_ref().and_then(|(_, c)| c.styles.get(*node)).and_then(|s| s.as_ref());
+                let spec = style.map(|s| FontSpec::of(s));
+                let font = spec.map(|f| font_for(zfont(f))).unwrap_or_else(|| theme::ui(z(14).max(1) as u16));
+                let bg =
+                    style.map_or(0xFFFF_FFFF, |s| if s.background >> 24 == 0 { 0xFFFF_FFFF } else { s.background });
+                let color = style.map_or(0xFF1D_1D24, |s| s.color);
+                let radius = style.map_or(0, |s| z(s.radius as i32).min(fr.h / 2));
+                let padding = style.map_or(3, |s| z(s.padding[3].or_zero(f.rect.w)).max(3));
+                cv.fill_round_rect(r, (radius - 2).max(0), bg);
                 let base_y = r.y + (r.h + font.ascent as i32 + font.descent as i32) / 2;
                 cv.with_clip(r, |cv| {
                     let caret_x = font.width(&edit.text()[..edit.caret()]);
-                    let shift = (caret_x - (r.w - 8)).max(0);
-                    let tx = r.x + 3 - shift;
+                    let shift = (caret_x - (r.w - padding - 5)).max(0);
+                    let tx = r.x + padding - shift;
                     if let Some((a, b)) = edit.selection() {
                         let (xa, xb) = (font.width(&edit.text()[..a]), font.width(&edit.text()[..b]));
                         cv.fill_rect(
@@ -1213,7 +1530,7 @@ impl Nebula {
                             theme::accent() & 0x00FF_FFFF | 0x5000_0000,
                         );
                     }
-                    cv.text(tx, base_y, edit.text(), font, 0xFF1D_1D24);
+                    cv.text(tx, base_y, edit.text(), font, color);
                     if self.focus == Some(*node) {
                         cv.fill_rect(Rect::new(tx + caret_x, r.y + 3, 1, r.h - 6), theme::accent());
                     }
@@ -1254,7 +1571,7 @@ impl Nebula {
 
     fn paint_toolbar(&self, cv: &mut Canvas, area: Rect, env: &Env) {
         let t = theme::current();
-        let bar = Rect::new(area.x, area.y, area.w, TOOLBAR_H);
+        let bar = Rect::new(area.x, area.y + TAB_H, area.w, TOOLBAR_H - TAB_H);
         cv.fill_rect(bar, t.titlebar);
         cv.fill_rect(Rect::new(bar.x, bar.bottom() - 1, bar.w, 1), t.separator);
         let enabled = |on: bool| if on { t.text } else { t.text_secondary & 0x00FF_FFFF | 0x6000_0000 };
@@ -1280,6 +1597,10 @@ impl Nebula {
             cv.polyline(&[(ex - 5, ey - 3), (ex, ey), (ex + 1, ey - 6)], 2, t.text);
         }
         // The address field.
+        let home = self.home_rect();
+        let (hx, hy) = (home.x + 14, home.y + 14);
+        cv.polyline(&[(hx - 8, hy), (hx, hy - 7), (hx + 8, hy)], 2, t.text_secondary);
+        cv.polyline(&[(hx - 5, hy - 1), (hx - 5, hy + 7), (hx + 5, hy + 7), (hx + 5, hy - 1)], 1, t.text_secondary);
         let r = self.address_rect(area);
         cv.fill_round_rect(r, 9, t.control_bg);
         cv.stroke_round_rect(r, 9, if self.editing { theme::accent() } else { t.control_border });
@@ -1332,7 +1653,7 @@ impl Nebula {
             let elapsed = (env.now_ms - self.loading_since) as i32;
             let frac = 1000 - 1000 * 1000 / (1000 + elapsed);
             let w = r.w * frac / 1000;
-            cv.fill_round_rect(Rect::new(r.x + 6, r.bottom() - 3, w.max(8) - 12, 2), 1, theme::accent());
+            cv.fill_round_rect(Rect::new(r.x + 6, r.bottom() - 3, (w - 12).max(2), 2), 1, theme::accent());
         }
     }
 
@@ -1421,6 +1742,15 @@ impl Nebula {
 
 impl App for Nebula {
     fn title(&self) -> String {
+        if let Some((job, None)) = &self.job {
+            if let Some(result) = job.result.lock().as_ref() {
+                return match result {
+                    Ok(loaded) if !loaded.page.title.is_empty() => loaded.page.title.clone(),
+                    Ok(_) => String::from("Ready"),
+                    Err(_) => String::from("Can't open the page"),
+                };
+            }
+        }
         match self.page.as_ref().map(|p| p.title.as_str()) {
             Some(t) if !t.is_empty() => String::from(t),
             _ if self.loading() => String::from("Loading…"),
@@ -1433,8 +1763,11 @@ impl App for Nebula {
     }
 
     fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
-        self.view = Rect::new(area.x, area.y + TOOLBAR_H, area.w, area.h - TOOLBAR_H);
-        if self.page.is_some() && self.laid_out_width != self.view.w {
+        let old_height = self.view.h;
+        self.view = Rect::new(area.x, area.y + TOOLBAR_H, area.w, (area.h - TOOLBAR_H).max(1));
+        if self.page.is_some()
+            && (self.layout.is_none() || self.laid_out_width != self.view.w || old_height != self.view.h)
+        {
             self.relayout();
         }
         self.paint_page(cv);
@@ -1510,6 +1843,10 @@ impl App for Nebula {
         }
         if alt && ev.code == KeyCode::Right {
             self.forward();
+            return true;
+        }
+        if alt && ev.code == KeyCode::Home {
+            self.go(HOME, true);
             return true;
         }
         if let (Some(f), false, None) = (&mut self.find, self.editing, self.focus) {
@@ -1613,6 +1950,8 @@ impl App for Nebula {
                 } else {
                     self.reload();
                 }
+            } else if self.home_rect().contains(x, y) {
+                self.go(HOME, true);
             } else if self.address_rect(area).contains(x, y) {
                 if !self.editing {
                     self.editing = true;
@@ -1773,12 +2112,14 @@ impl App for Nebula {
         // Page timers and animation frames.
         if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
             let now = corekit::time::unix_ms();
-            if js.next_wakeup(now).is_some_and(|w| w <= now) {
+            if self.js_wakeup.is_some_and(|w| w <= now) {
                 page.run_timers(js, now);
                 self.after_scripts();
                 dirty = true;
             }
-            self.js_wakeup = self.js.as_mut().and_then(|j| j.next_wakeup(now));
+            if self.js_wakeup.is_none() {
+                self.js_wakeup = self.js.as_mut().and_then(|j| j.next_wakeup(now));
+            }
         } else {
             self.js_wakeup = None;
         }
@@ -1786,7 +2127,9 @@ impl App for Nebula {
         let done = self.job.as_ref().and_then(|(job, _)| job.result.lock().take());
         if let Some(result) = done {
             let (_, h) = self.job.take().unwrap();
-            h.join();
+            if let Some(h) = h {
+                h.join();
+            }
             let target = self.history.get(self.pos).cloned().unwrap_or_default();
             match result {
                 Ok(loaded) => self.install(loaded),
@@ -1814,13 +2157,14 @@ impl App for Nebula {
             self.relayout();
             dirty = true;
         }
-        self.old_jobs.retain(|h| !h.is_finished());
+        reap(&mut self.old_jobs);
+        reap(&mut self.workers);
         dirty | self.loading()
     }
 
     fn tick_interval(&self) -> u64 {
         let busy = self.loading() || self.relayout_at.is_some() || self.scripts_loading > 0;
-        let base = if busy || !self.workers.iter().all(|w| w.is_finished()) { 50 } else { 500 };
+        let base = if busy || !self.workers.is_empty() { 50 } else { 1000 };
         match self.js_wakeup {
             // Wake for the next timer (16 ms at the most often, for animations).
             Some(w) => ((w - corekit::time::unix_ms()).max(16.0) as u64).min(base),
@@ -1888,32 +2232,38 @@ fn form_encode(s: &str) -> String {
 }
 
 const HOME_PAGE: &str = r#"<!doctype html><html><head><title>Start Page</title><style>
-body { margin: 0; font-family: sans-serif; background: #f3f4f8; color: #1d1d24 }
-.hero { text-align: center; padding: 72px 16px 20px }
-.logo { font-size: 46px; font-weight: 600; color: #0a6cff; margin: 0; letter-spacing: -1px }
-.tag { color: #6e6e7a; margin: 4px 0 28px; font-size: 15px }
-form { display: flex; justify-content: center; gap: 8px }
-input[type=search] { width: 440px; font-size: 16px; padding: 9px 16px; border: 1px solid #c8c8d2; border-radius: 22px; background: #fff }
-button { font-size: 15px; padding: 9px 20px; border-radius: 22px; border: 0; background: #0a6cff; color: #fff }
-.grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; max-width: 780px; margin: 36px auto 0; padding: 0 16px }
-.card { display: block; width: 200px; padding: 14px 16px; background: #fff; border-radius: 12px; border: 1px solid #e2e2ea; text-decoration: none; color: inherit }
-.card b { display: block; font-size: 15px; margin-bottom: 3px; color: #1d1d24 }
-.card span { color: #6e6e7a; font-size: 13px }
-.foot { text-align: center; color: #9a9aa6; font-size: 12px; margin: 40px 0 }
-</style></head><body>
-<div class="hero"><p class="logo">Nebula</p><p class="tag">The web, on WaveOS Aurora</p>
-<form action="https://html.duckduckgo.com/html/" method="get"><input type="search" name="q" placeholder="Search the web"><button type="submit">Search</button></form></div>
-<div class="grid">
-<a class="card" href="https://en.wikipedia.org/wiki/Main_Page"><b>Wikipedia</b><span>The free encyclopedia</span></a>
-<a class="card" href="https://news.ycombinator.com/"><b>Hacker News</b><span>Links and discussion</span></a>
-<a class="card" href="https://text.npr.org/"><b>NPR</b><span>News in plain text</span></a>
-<a class="card" href="https://lite.cnn.com/"><b>CNN Lite</b><span>Headlines, lightly</span></a>
-<a class="card" href="https://www.rust-lang.org/"><b>Rust</b><span>The language Aurora is written in</span></a>
-<a class="card" href="https://github.com/Sw3bbl3/waveos-aurora-rs"><b>WaveOS Aurora</b><span>This system's source code</span></a>
-<a class="card" href="file:///System/Library/Nebula/pulsar-demo.html"><b>Pulsar demo</b><span>JavaScript, made here</span></a>
-</div>
-<p class="foot">Nebula 0.8 — HTML, CSS, layout, JavaScript, TLS and TCP/IP written for WaveOS Aurora</p>
-</body></html>"#;
+:root { --ink: #202842; --muted: #69748b; --accent: #5756db }
+body { margin: 0; font-family: sans-serif; background: #f4f5fb; color: var(--ink) }
+main { max-width: 900px; margin: 0 auto; padding: 36px 28px }
+.eyebrow { color: var(--accent); font-size: 12px; font-weight: bold; margin: 0 0 14px }
+h1 { font-size: 44px; margin: 0 0 10px; color: var(--ink) }
+.tag { color: var(--muted); font-size: 16px; margin: 0 0 26px }
+form { display: flex; gap: 10px; margin-bottom: 32px }
+input[type=search] { flex-grow: 1; width: 550px; max-width: 100%; box-sizing: border-box; font-size: 16px; padding: 14px 18px; border: 1px solid #d9ddec; border-radius: 12px; background: #fff }
+button { font-size: 15px; padding: 14px 24px; border-radius: 12px; border: 0; background: var(--accent); color: #fff }
+h2 { font-size: 13px; color: var(--muted); margin: 0 0 14px }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px }
+.card { display: block; padding: 20px; background: #fff; border-radius: 12px; border: 1px solid #e0e4f0; text-decoration: none; color: var(--ink) }
+.card b { display: block; font-size: 16px; margin-bottom: 8px }
+.card span { color: var(--muted); font-size: 13px }
+.tools { display: flex; gap: 12px; margin-top: 20px }
+.tools a { color: var(--accent); font-size: 13px; text-decoration: none; padding: 10px 14px; border: 1px solid #d9ddec; border-radius: 8px }
+.foot { color: var(--muted); font-size: 12px; margin: 28px 0 0; line-height: 1.8 }
+@media (max-width: 700px) { .grid { grid-template-columns: repeat(2, 1fr) } main { padding: 24px 18px } h1 { font-size: 34px } }
+</style></head><body><main>
+<p class="eyebrow">NEBULA / WAVEOS AURORA</p>
+<h1>A little space to explore.</h1><p class="tag">Search, discover, and keep your favorite pages close.</p>
+<form action="https://html.duckduckgo.com/html/" method="get"><input type="search" name="q" placeholder="Search the web or use the address bar"><button type="submit">Search</button></form>
+<h2>YOUR NEXT STOP</h2><div class="grid">
+<a class="card" href="https://en.wikipedia.org/wiki/Main_Page"><b>Wikipedia</b><span>A world of knowledge</span></a>
+<a class="card" href="https://news.ycombinator.com/"><b>Hacker News</b><span>Ideas worth discussing</span></a>
+<a class="card" href="https://text.npr.org/"><b>NPR</b><span>The news, simply</span></a>
+<a class="card" href="https://lite.cnn.com/"><b>CNN Lite</b><span>Headlines at a glance</span></a>
+<a class="card" href="https://www.rust-lang.org/"><b>Rust</b><span>Build something new</span></a>
+<a class="card" href="https://github.com/Sw3bbl3/waveos-aurora-rs"><b>WaveOS Aurora</b><span>Explore your operating system</span></a>
+</div><div class="tools"><a href="file:///System/Library/Nebula/pulsar-demo.html">Pulsar playground</a><a href="file:///System/Library/Nebula/css-demo.html">Layout gallery</a></div>
+<p class="foot">Ctrl+T New tab &nbsp; / &nbsp; Ctrl+Tab Switch tabs &nbsp; / &nbsp; Ctrl+Shift+T Reopen a closed page<br>Background tabs pause while you explore. Your place and typed text stay with each tab.</p>
+</main></body></html>"#;
 
 fn main(args: corekit::Args) -> i32 {
     let start = match args.get(1) {
@@ -1922,5 +2272,5 @@ fn main(args: corekit::Args) -> i32 {
         None => String::from(HOME),
     };
     load_cookies();
-    aurorakit::run(Nebula::new(&start))
+    aurorakit::run(Browser::new(&start))
 }

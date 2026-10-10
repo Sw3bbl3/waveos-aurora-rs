@@ -6,6 +6,7 @@
 //! Anything else makes a selector never match, so unknown rules stay inert.
 
 use crate::dom::{Document, NodeData, NodeId};
+use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -13,7 +14,13 @@ use alloc::vec::Vec;
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
     /// URLs from @import, in order.
-    pub imports: Vec<String>,
+    pub imports: Vec<Import>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Import {
+    pub url: String,
+    pub media: String,
 }
 
 #[derive(Clone, Debug)]
@@ -119,18 +126,40 @@ impl Bloom {
 // ------------------------------------------------------------------ parsing
 
 /// Removes /* comments */.
-fn strip_comments(s: &str) -> String {
+fn strip_comments(s: &str) -> Cow<'_, str> {
+    if !s.contains("/*") {
+        return Cow::Borrowed(s);
+    }
     let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(p) = rest.find("/*") {
-        out.push_str(&rest[..p]);
-        match rest[p + 2..].find("*/") {
-            Some(e) => rest = &rest[p + 2 + e + 2..],
-            None => return out,
+    let mut chars = s.chars().peekable();
+    let mut quote = None;
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            out.push(c);
+            if c == '\\' {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            } else if c == q {
+                quote = None;
+            }
+        } else if c == '\'' || c == '"' {
+            quote = Some(c);
+            out.push(c);
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(c) = chars.next() {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+            }
+            out.push(' ');
+        } else {
+            out.push(c);
         }
     }
-    out.push_str(rest);
-    out
+    Cow::Owned(out)
 }
 
 /// The index of the '}' matching the '{' before `from`, honouring strings.
@@ -180,6 +209,8 @@ fn parse_into(css: &str, media: &Vec<String>, sheet: &mut Stylesheet) {
             if quote != 0 {
                 if c == quote {
                     quote = 0;
+                } else if c == b'\\' && i + 1 < b.len() {
+                    i += 1;
                 }
             } else if c == b'"' || c == b'\'' {
                 quote = c;
@@ -194,8 +225,8 @@ fn parse_into(css: &str, media: &Vec<String>, sheet: &mut Stylesheet) {
         }
         if b[i] == b';' || b[i] == b'}' {
             if let Some(rest) = prelude.strip_prefix("@import") {
-                if let Some(url) = import_url(rest) {
-                    sheet.imports.push(url);
+                if let Some(import) = parse_import(rest) {
+                    sheet.imports.push(import);
                 }
             }
             i += 1;
@@ -229,12 +260,19 @@ fn parse_into(css: &str, media: &Vec<String>, sheet: &mut Stylesheet) {
     }
 }
 
-fn import_url(s: &str) -> Option<String> {
+fn parse_import(s: &str) -> Option<Import> {
     let s = s.trim();
-    let s = s.strip_prefix("url(").map_or(s, |r| r.split(')').next().unwrap_or(""));
-    let s = s.trim().trim_matches(|c| c == '"' || c == '\'');
-    let url = s.split(|c: char| c == '"' || c == '\'' || c.is_whitespace()).next()?;
-    (!url.is_empty()).then(|| String::from(url))
+    let (url, rest) = if let Some(s) = s.strip_prefix("url(") {
+        let (url, rest) = s.split_once(')')?;
+        (url.trim().trim_matches(['\'', '"']), rest)
+    } else {
+        let q = s.chars().next()?;
+        if q != '\'' && q != '"' {
+            return None;
+        }
+        s[1..].split_once(q)?
+    };
+    (!url.is_empty()).then(|| Import { url: String::from(url), media: rest.trim().to_ascii_lowercase() })
 }
 
 /// Splits on `sep` outside parentheses, brackets and strings.
@@ -242,9 +280,14 @@ pub fn split_top(s: &str, sep: u8) -> Vec<&str> {
     let b = s.as_bytes();
     let mut out = Vec::new();
     let (mut depth, mut quote, mut start) = (0i32, 0u8, 0);
+    let mut escaped = false;
     for (i, &c) in b.iter().enumerate() {
         if quote != 0 {
-            if c == quote {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == quote {
                 quote = 0;
             }
             continue;
@@ -265,8 +308,9 @@ pub fn split_top(s: &str, sep: u8) -> Vec<&str> {
 }
 
 pub fn parse_declarations(body: &str) -> Vec<Declaration> {
+    let body = strip_comments(body);
     let mut out = Vec::new();
-    for d in split_top(body, b';') {
+    for d in split_top(&body, b';') {
         let Some((name, value)) = d.split_once(':') else { continue };
         let name = name.trim();
         if name.is_empty() || name.contains(|c: char| c.is_whitespace() || c == '{' || c == '}') {
@@ -274,9 +318,10 @@ pub fn parse_declarations(body: &str) -> Vec<Declaration> {
         }
         let mut value = value.trim();
         let mut important = false;
-        if let Some(p) = value.to_ascii_lowercase().rfind("!important") {
+        let parts = split_top(value, b'!');
+        if parts.len() > 1 && parts.last().unwrap().trim().eq_ignore_ascii_case("important") {
             important = true;
-            value = value[..p].trim();
+            value = value[..value.len() - parts.last().unwrap().len() - 1].trim();
         }
         let name = if name.starts_with("--") { String::from(name) } else { name.to_ascii_lowercase() };
         out.push(Declaration { name, value: String::from(value), important });
@@ -950,7 +995,7 @@ mod tests {
         let s = parse(
             "/* c */ @import url('x.css'); a{color:red!important;--Brand: #fff} @media (max-width: 600px) { p, q { margin: 0 } } @font-face { src: url(x) } bad { } ",
         );
-        assert_eq!(s.imports, ["x.css"]);
+        assert_eq!(s.imports, [Import { url: "x.css".into(), media: "".into() }]);
         assert_eq!(s.rules.len(), 2);
         assert_eq!(s.rules[0].decls[0], Declaration { name: "color".into(), value: "red".into(), important: true });
         assert_eq!(s.rules[0].decls[1].name, "--Brand");

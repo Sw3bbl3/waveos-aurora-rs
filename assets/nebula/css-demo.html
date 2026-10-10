@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><title>Layout gallery</title>
+<link rel="stylesheet" href="css-demo.css">
+<style media="(max-width: 700px)">.cards { grid-template-columns: 1fr }</style>
+<style media="(min-height: 650px)">.height { color: #207a63 }</style>
+<style media="print">body { display: none }</style>
+</head><body><main>
+<p class="label">NEBULA / LAYOUT GALLERY</p>
+<h1>Everything in its place.</h1>
+<p class="intro">An offline page to explore styles, responsive layouts, and tabs.</p>
+<div class="cards">
+<article><h2>Connected styles</h2><p class="imported">This green panel is styled by an imported stylesheet.</p></article>
+<article><h2>Room to adapt</h2><p>Three columns become one when the page is narrower than 700 CSS pixels.</p></article>
+<article><h2>Your own space</h2><p>Type below, switch tabs, and come back. Your text stays here.</p><input placeholder="Leave yourself a note"></article>
+</div>
+<p class="height">This line turns green when the content viewport is at least 650 CSS pixels tall.</p>
+<p><a href="pulsar-demo.html">Open the Pulsar playground</a> &nbsp; / &nbsp; Ctrl-click to open it in a new tab.</p>
+<p id="frame">Waiting for an animation frame...</p>
+<script>requestAnimationFrame(function () { document.getElementById('frame').textContent = 'Animation frames are running.'; });</script>
+</main></body></html>

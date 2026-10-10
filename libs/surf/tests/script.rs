@@ -54,6 +54,153 @@ fn body_text(p: &Page) -> String {
 }
 
 #[test]
+fn browser_image_factory_has_real_element_identity() {
+    let (p, _, log, _) = page(
+        r#"<body><script>
+      const image = new Image(48, 24);
+      image.src = 'https://i.ytimg.com/generate_204';
+      image.alt = 'preview';
+      console.log(image instanceof Image, image instanceof HTMLImageElement, image instanceof HTMLElement, image instanceof Node);
+      console.log(image.tagName, image.width, image.height, image.getAttribute('width'), image.src);
+      document.body.appendChild(image);
+      console.log(document.querySelector('img') === image, document.createElement('img') instanceof Image);
+      console.log(new Image().width, new Image().height);
+    </script>"#,
+    );
+    assert_eq!(
+        *log.borrow(),
+        ["true true true true", "IMG 48 24 48 https://i.ytimg.com/generate_204", "true true", "0 0"]
+    );
+    assert_eq!(p.images(), ["https://i.ytimg.com/generate_204"]);
+}
+
+#[test]
+fn character_data_is_in_the_text_prototype_chain() {
+    let (p, _, log, _) = page(
+        r#"<body><p id='text'></p><script>
+      const text = new Text('hello'); document.getElementById('text').appendChild(text);
+      console.log(text instanceof Text, text instanceof CharacterData, text instanceof Node, text.length);
+      text.appendData(' world'); text.insertData(5, ','); text.deleteData(6, 1);
+      console.log(text.data, text.substringData(6, 5));
+      text.replaceData(6, 5, 'Nebula'); const tail = text.splitText(6);
+      console.log(text.data, tail.data, tail.previousSibling === text);
+      CharacterData.prototype.marker = 42;
+      console.log(document.createTextNode('x').marker, document.createTextNode('A😀B').length);
+      try { text.substringData(99, 1); } catch (e) { console.log(e.name); }
+      try { new CharacterData(); } catch (e) { console.log(e.name); }
+    </script>"#,
+    );
+    assert_eq!(
+        *log.borrow(),
+        ["true true true 5", "hello,world world", "hello, Nebula true", "42 4", "IndexSizeError", "TypeError"]
+    );
+    assert_eq!(body_text(&p), "hello, Nebula");
+}
+
+#[test]
+fn legacy_custom_event_initialization_dispatches_and_resets() {
+    let (_, _, log, _) = page(
+        r#"<body><script>
+      const event = document.createEvent('CustomEvent');
+      console.log(event instanceof CustomEvent, event instanceof Event, event.detail, event.isTrusted);
+      const payload = {page: 'home'};
+      event.initCustomEvent('spfready', true, true, payload);
+      document.addEventListener('spfready', e => {
+        e.initCustomEvent('wrong', false, false, null);
+        console.log(e.type, e.detail === payload, e.bubbles, e.cancelable); e.preventDefault();
+      });
+      console.log(document.dispatchEvent(event), event.defaultPrevented);
+      event.initCustomEvent('next', false, false);
+      console.log(event.type, event.detail, event.defaultPrevented, event.target);
+      const modern = new CustomEvent('modern', {detail: payload});
+      modern.initCustomEvent('legacy', true, true, 9); console.log(modern.type, modern.detail);
+      const plain = document.createEvent('Events'); plain.initEvent('ready', false, false); console.log(plain.type);
+    </script>"#,
+    );
+    assert_eq!(
+        *log.borrow(),
+        ["true true null false", "spfready true true true", "false true", "next null false null", "legacy 9", "ready"]
+    );
+}
+
+#[test]
+fn canvas_color_probe_paints_real_pixels_and_resets_on_resize() {
+    let (p, _, log, _) = page(
+        r#"<body><canvas id='surface' width='2' height='2'></canvas><script>
+      const canvas = document.getElementById('surface'), ctx = canvas.getContext('2d');
+      console.log(canvas instanceof HTMLCanvasElement, ctx instanceof CanvasRenderingContext2D, ctx.canvas === canvas, canvas.getContext('2d') === ctx, canvas.getContext('webgl'));
+      ctx.fillStyle = '#000'; ctx.fillStyle = 'rgba(20, 40, 60, 0.5)'; const first = ctx.fillStyle;
+      ctx.fillStyle = '#fff'; ctx.fillStyle = 'rgba(20, 40, 60, 0.5)'; console.log(first === ctx.fillStyle);
+      ctx.fillRect(0, 0, 1, 1);
+      const image = ctx.getImageData(0, 0, 2, 1);
+      console.log(image.data instanceof Uint8ClampedArray, image.width, image.height, Array.from(image.data).join(','));
+      ctx.clearRect(0, 0, 1, 1); console.log(Array.from(ctx.getImageData(0, 0, 1, 1).data).join(','));
+      ctx.fillStyle = 'red'; ctx.fillStyle = 'not-a-color'; console.log(ctx.fillStyle);
+      ctx.save(); ctx.fillStyle = 'blue'; ctx.restore(); console.log(ctx.fillStyle);
+      ctx.fillRect(2, 2, -1, -1); console.log(Array.from(ctx.getImageData(1, 1, 1, 1).data).join(','));
+      canvas.width = canvas.width;
+      console.log(ctx.fillStyle, ctx.getImageData(1, 1, 1, 1).data[3], canvas.getContext('2d') === ctx);
+      ctx.fillStyle = '#00ff00'; ctx.fillRect(0, 0, 2, 2);
+      const big = document.createElement('canvas'); big.width = big.height = 100000; console.log(big.getContext('2d'));
+    </script>"#,
+    );
+    assert_eq!(
+        *log.borrow(),
+        [
+            "true true true true null",
+            "true",
+            "true 2 1 20,40,60,128,0,0,0,0",
+            "0,0,0,0",
+            "#ff0000",
+            "#ff0000",
+            "255,0,0,255",
+            "#000000 0 true",
+            "null"
+        ]
+    );
+    let canvas = p.doc.find("canvas").unwrap();
+    assert_eq!(p.doc.canvases[&canvas].pixels, [0xff00ff00; 4]);
+}
+
+#[test]
+fn canvas_budget_is_shared_and_recovered_by_resizing() {
+    let (_, _, log, _) = page(
+        r#"<script>
+      function surface() { const c = document.createElement('canvas'); c.width = c.height = 1024; return c; }
+      const a = surface(), b = surface(), c = surface();
+      const first = a.getContext('2d');
+      console.log(!!first, !!b.getContext('2d'), c.getContext('2d'));
+      a.width = a.height = 0;
+      console.log(!!c.getContext('2d'), a.getContext('2d') === first);
+      const getter = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'width').get;
+      try { getter.call(new Text()); } catch (e) { console.log(e.name); }
+    </script>"#,
+    );
+    assert_eq!(*log.borrow(), ["true true null", "true true", "TypeError"]);
+}
+
+#[test]
+fn namespaced_svg_elements_use_the_svg_prototype() {
+    let (_, _, log, _) = page(
+        r#"<script>
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      console.log(svg instanceof SVGElement, svg instanceof Element, svg instanceof HTMLElement, svg.namespaceURI);
+      console.log(document.createElementNS(null, 'x').namespaceURI, document.createElement('p').namespaceURI);
+    </script>"#,
+    );
+    assert_eq!(*log.borrow(), ["true true false http://www.w3.org/2000/svg", "null http://www.w3.org/1999/xhtml"]);
+}
+
+#[test]
+fn bundled_browser_api_checks_pass() {
+    let html = include_str!("../../../assets/nebula/browser-apis.html");
+    let (_, _, log, _) = page(html);
+    assert_eq!(log.borrow().len(), 1, "{:?}", log.borrow());
+    assert_eq!(log.borrow()[0].matches("PASS -").count(), 4, "{:?}", log.borrow());
+    assert!(!log.borrow()[0].contains("FAIL"));
+}
+
+#[test]
 fn scripts_change_the_document() {
     let (p, _js, log, _) = page(
         r##"<!doctype html><title>Old</title><body><p id="a">hello</p><ul id="list"></ul>

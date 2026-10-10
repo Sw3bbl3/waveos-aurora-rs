@@ -56,6 +56,16 @@ pub struct Document {
     /// The current values of form controls (what was typed, or set by a
     /// script), which may differ from their `value` attributes.
     pub values: alloc::collections::BTreeMap<NodeId, String>,
+    /// Bounded software canvas surfaces; pixels are shared by script and paint.
+    pub canvases: alloc::collections::BTreeMap<NodeId, CanvasBitmap>,
+}
+
+pub struct CanvasBitmap {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u32>,
+    pub(crate) fill: u32,
+    pub(crate) saved: Vec<u32>,
 }
 
 impl Default for Document {
@@ -64,6 +74,7 @@ impl Default for Document {
             nodes: alloc::vec![Node { parent: None, children: Vec::new(), data: NodeData::Document }],
             version: 0,
             values: alloc::collections::BTreeMap::new(),
+            canvases: alloc::collections::BTreeMap::new(),
         }
     }
 }
@@ -140,6 +151,9 @@ impl Document {
     }
 
     pub fn set_attr(&mut self, n: NodeId, name: &str, value: &str) {
+        if self.tag(n) == "canvas" && matches!(name, "width" | "height") {
+            self.canvases.remove(&n);
+        }
         if let Some(e) = self.element_mut(n) {
             match e.attrs.iter_mut().find(|(k, _)| k == name) {
                 Some(slot) => slot.1 = String::from(value),
@@ -150,6 +164,9 @@ impl Document {
     }
 
     pub fn remove_attr(&mut self, n: NodeId, name: &str) {
+        if self.tag(n) == "canvas" && matches!(name, "width" | "height") {
+            self.canvases.remove(&n);
+        }
         if let Some(e) = self.element_mut(n) {
             e.attrs.retain(|(k, _)| k != name);
             self.version += 1;

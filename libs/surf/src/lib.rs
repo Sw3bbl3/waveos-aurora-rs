@@ -18,7 +18,7 @@ pub use nebula_script;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use css::Stylesheet;
 use dom::{Document, NodeId};
@@ -47,6 +47,8 @@ pub struct Page {
     /// No doctype: quirks mode.
     pub quirks: bool,
     ua: Stylesheet,
+    /// Kept until cascade time so resizing can activate media-dependent sheets.
+    sheet_media: Vec<String>,
 }
 
 /// A page's JavaScript: its realm and DOM state. Kept by the browser beside
@@ -153,14 +155,13 @@ impl Page {
         let title = doc.find("title").map(|t| collapse_ws(&doc.text_content(t))).unwrap_or_default();
         let base = doc.find("base").and_then(|b| doc.element(b)?.attr("href").map(String::from));
         let mut sheets = Vec::new();
+        let mut sheet_media = Vec::new();
         for n in doc.descendants(Document::ROOT) {
             let Some(e) = doc.element(n) else { continue };
-            let media_ok = e
-                .attr("media")
-                .is_none_or(|m| css::media_matches(&m.to_ascii_lowercase(), 1024, 768) || m.contains("width"));
+            let count = sheets.len();
             match e.tag.as_str() {
-                "style" if media_ok => sheets.push(Sheet::Inline(css::parse(&doc.text_content(n)))),
-                "link" if media_ok => {
+                "style" => sheets.push(Sheet::Inline(css::parse(&doc.text_content(n)))),
+                "link" => {
                     let rel = e.attr("rel").unwrap_or("").to_ascii_lowercase();
                     let rels: Vec<&str> = rel.split_ascii_whitespace().collect();
                     if rels.contains(&"stylesheet") && !rels.contains(&"alternate") {
@@ -171,13 +172,16 @@ impl Page {
                 }
                 _ => {}
             }
+            if sheets.len() != count {
+                sheet_media.push(e.attr("media").unwrap_or("").to_ascii_lowercase());
+            }
         }
         let quirks = !has_doctype(source);
         let mut ua = css::parse(style::UA_CSS);
         if quirks {
             ua.rules.extend(css::parse(style::QUIRKS_CSS).rules);
         }
-        Page { doc, title, sheets, base, quirks, ua }
+        Page { doc, title, sheets, base, quirks, ua, sheet_media }
     }
 
     // ------------------------------------------------------------ scripts
@@ -322,6 +326,64 @@ impl Page {
         }
     }
 
+    /// Fetches linked sheets and nested imports with one shared request budget.
+    /// The loader returns the final URL so redirects resolve relative imports correctly.
+    pub fn load_stylesheets(
+        &mut self,
+        base: &nebula_web::Url,
+        limit: usize,
+        mut fetch: impl FnMut(&nebula_web::Url) -> Option<(nebula_web::Url, String)>,
+    ) {
+        fn imports(
+            sheet: &mut Stylesheet,
+            base: &nebula_web::Url,
+            remaining: &mut usize,
+            path: &mut Vec<String>,
+            fetch: &mut impl FnMut(&nebula_web::Url) -> Option<(nebula_web::Url, String)>,
+        ) {
+            let mut rules = Vec::new();
+            for import in core::mem::take(&mut sheet.imports) {
+                let Some(url) = base.join(&import.url) else { continue };
+                if *remaining == 0 || path.contains(&url.to_string()) {
+                    continue;
+                }
+                *remaining -= 1;
+                let Some((final_url, source)) = fetch(&url) else { continue };
+                path.push(url.to_string());
+                path.push(final_url.to_string());
+                let mut child = css::parse(&source);
+                imports(&mut child, &final_url, remaining, path, fetch);
+                path.pop();
+                path.pop();
+                for rule in &mut child.rules {
+                    if !import.media.is_empty() {
+                        rule.media.push(import.media.clone());
+                    }
+                }
+                rules.append(&mut child.rules);
+            }
+            rules.append(&mut sheet.rules);
+            sheet.rules = rules;
+        }
+        let mut remaining = limit;
+        for entry in &mut self.sheets {
+            let (sheet, url) = match entry {
+                Sheet::Inline(sheet) => (sheet, base.clone()),
+                Sheet::Linked { href, sheet } => {
+                    let Some(url) = base.join(href) else { continue };
+                    if remaining == 0 {
+                        break;
+                    }
+                    remaining -= 1;
+                    let Some((url, source)) = fetch(&url) else { continue };
+                    *sheet = Some(css::parse(&source));
+                    (sheet.as_mut().unwrap(), url)
+                }
+            };
+            imports(sheet, &url, &mut remaining, &mut alloc::vec![url.to_string()], &mut fetch);
+        }
+    }
+
     /// Image sources in document order, without duplicates.
     pub fn images(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
@@ -352,7 +414,9 @@ impl Page {
         let author: Vec<&Stylesheet> = self
             .sheets
             .iter()
-            .filter_map(|s| match s {
+            .enumerate()
+            .filter(|(i, _)| self.sheet_media.get(*i).is_none_or(|m| css::media_matches(m, width, height)))
+            .filter_map(|(_, s)| match s {
                 Sheet::Inline(s) => Some(s),
                 Sheet::Linked { sheet, .. } => sheet.as_ref(),
             })

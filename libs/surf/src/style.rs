@@ -5,6 +5,7 @@
 use crate::css::{self, Declaration, Stylesheet};
 use crate::dom::{Document, NodeData, NodeId};
 use crate::values::{self, Len, Units};
+use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
@@ -485,18 +486,25 @@ fn cascade_into(s: &mut Style, decls: &[Decl], parent: &Style, root_font: f32, v
     }
     let vars = s.vars.clone();
     let lookup = |name: &str| vars.get(name).cloned();
-    let resolved: Vec<(String, String)> = decls
+    let resolved: Vec<(&str, Cow<'_, str>)> = decls
         .iter()
         .map(|d| d.3)
         .filter(|d| !d.name.starts_with("--"))
-        .filter_map(|d| Some((d.name.clone(), values::substitute_vars(&d.value, &lookup, 0)?)))
+        .filter_map(|d| {
+            let value = if d.value.contains("var(") {
+                Cow::Owned(values::substitute_vars(&d.value, &lookup, 0)?)
+            } else {
+                Cow::Borrowed(d.value.as_str())
+            };
+            Some((d.name.as_str(), value))
+        })
         .collect();
     // Font size first: em units depend on it.
-    for (name, value) in resolved.iter().filter(|(n, _)| n == "font-size" || n == "font") {
+    for (name, value) in resolved.iter().filter(|(n, _)| *n == "font-size" || *n == "font") {
         apply(s, name, value, parent, units(parent));
     }
     let own = units(s);
-    for (name, value) in resolved.iter().filter(|(n, _)| n != "font-size" && n != "font") {
+    for (name, value) in resolved.iter().filter(|(n, _)| *n != "font-size" && *n != "font") {
         apply(s, name, value, parent, own);
     }
 }
@@ -905,8 +913,9 @@ fn is_mono(family: &str) -> bool {
 /// Applies one declaration.
 fn apply(s: &mut Style, name: &str, value: &str, parent: &Style, u: Units) {
     let v = value.trim();
-    let lower = v.to_ascii_lowercase();
-    let lv = lower.as_str();
+    let lower =
+        if v.bytes().any(|b| b.is_ascii_uppercase()) { Cow::Owned(v.to_ascii_lowercase()) } else { Cow::Borrowed(v) };
+    let lv = lower.as_ref();
     if lv == "inherit" {
         inherit_property(s, name, parent);
         return;

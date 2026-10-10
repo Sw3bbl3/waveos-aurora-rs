@@ -7,6 +7,43 @@
     Object.defineProperty(global, name, { value, writable: true, configurable: true, enumerable: false });
   const later = f => setTimeout(f, 0);
 
+  // CharacterData is a real parent of Text, so libraries can patch its
+  // prototype and existing/new text wrappers see the same operations.
+  const characterText = node => {
+    if (!(node instanceof CharacterData)) throw new TypeError("Illegal CharacterData invocation");
+    return node.data;
+  };
+  const characterOffset = (text, offset) => {
+    offset = Number(offset) >>> 0;
+    if (offset > text.length) {
+      const error = new Error("Offset exceeds data length"); error.name = "IndexSizeError"; throw error;
+    }
+    return offset;
+  };
+  Object.defineProperty(CharacterData.prototype, "length", {
+    configurable: true, enumerable: true, get() { return characterText(this).length; }
+  });
+  Object.defineProperties(CharacterData.prototype, {
+    substringData: { configurable: true, writable: true, value(offset, count) {
+      const text = characterText(this); offset = characterOffset(text, offset);
+      return text.slice(offset, offset + (Number(count) >>> 0));
+    }},
+    appendData: { configurable: true, writable: true, value(data) { this.data = characterText(this) + String(data); }},
+    insertData: { configurable: true, writable: true, value(offset, data) { this.replaceData(offset, 0, data); }},
+    deleteData: { configurable: true, writable: true, value(offset, count) { this.replaceData(offset, count, ""); }},
+    replaceData: { configurable: true, writable: true, value(offset, count, data) {
+      const text = characterText(this); offset = characterOffset(text, offset);
+      this.data = text.slice(0, offset) + String(data) + text.slice(offset + (Number(count) >>> 0));
+    }}
+  });
+  Object.defineProperty(Text.prototype, "splitText", { configurable: true, writable: true, value(offset) {
+    const text = characterText(this); offset = characterOffset(text, offset);
+    const tail = document.createTextNode(text.slice(offset));
+    this.data = text.slice(0, offset);
+    if (this.parentNode) this.parentNode.insertBefore(tail, this.nextSibling);
+    return tail;
+  }});
+
   class MutationObserver {
     constructor(callback) { this._callback = callback; }
     observe() {}
