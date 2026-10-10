@@ -6,11 +6,12 @@
 //! the `Dom` between runs, and are traced by the collector.
 
 use crate::dom::{Document, Element, Mutation, NodeData, NodeId, FRAGMENT};
-use crate::{css, html};
+use crate::{css, html, sheets, style};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use nebula_script::object::{Kind, NativeFn, Obj, CONFIGURABLE};
@@ -19,6 +20,7 @@ use nebula_web::cookie::{Jar, Source};
 use nebula_web::Url;
 
 mod canvas;
+mod computed;
 
 /// Host objects are tagged with what they wrap.
 const NODE: u32 = 1;
@@ -83,6 +85,7 @@ struct Protos {
     class_list: Option<ObjRef>,
     storage: Option<ObjRef>,
     mutation_record: Option<ObjRef>,
+    computed_style: Option<ObjRef>,
 }
 
 /// What a MutationObserver watches on one node (already validated by the
@@ -155,6 +158,13 @@ pub struct Dom {
     observers: Vec<Observer>,
     notify_queued: bool,
     notify: Option<ObjRef>,
+    /// The page's stylesheets, for getComputedStyle, and its styles as of a
+    /// document version and viewport.
+    style_sources: Option<Arc<sheets::Sources>>,
+    style_dynamic: sheets::Dynamic,
+    computed: Option<(u64, (i32, i32), style::Computed)>,
+    /// Cascades run this script turn.
+    restyles: u32,
 }
 
 impl Embedder for Dom {
@@ -210,6 +220,7 @@ impl Embedder for Dom {
             p.class_list,
             p.storage,
             p.mutation_record,
+            p.computed_style,
         ]
         .into_iter()
         .flatten()
@@ -2347,13 +2358,6 @@ fn match_media(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Object(o))
 }
 
-fn get_computed_style(rt: &mut Realm, c: &Call) -> JsResult {
-    // The inline style stands in for the computed one.
-    let n = arg_node(rt, c, 0)?;
-    let proto = with_dom(rt, |_, dom| dom.protos.style);
-    Ok(Value::Object(rt.alloc(Obj::new(proto, Kind::Host(NODE + 2, n as u64)))))
-}
-
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn btoa(rt: &mut Realm, c: &Call) -> JsResult {
@@ -2655,6 +2659,10 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
         observers: Vec::new(),
         notify_queued: false,
         notify: None,
+        style_sources: None,
+        style_dynamic: sheets::Dynamic::default(),
+        computed: None,
+        restyles: 0,
     }));
 
     let op = rt.intr.object_proto;
@@ -3034,6 +3042,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
             class_list: Some(cl),
             storage: Some(storage_proto),
             mutation_record: None,
+            computed_style: None,
         };
     });
 
@@ -3061,7 +3070,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
             ("confirm", 1, confirm),
             ("prompt", 1, prompt),
             ("matchMedia", 1, match_media),
-            ("getComputedStyle", 1, get_computed_style),
+            ("getComputedStyle", 1, computed::get_computed_style),
             ("scroll", 2, scroll_to),
             ("focus", 0, noop),
             ("blur", 0, noop),
@@ -3174,9 +3183,11 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     let notify = rt.native("notify", 0, mutation_notify, false);
     let record = rt.new_object_with(Some(op));
     interface(rt, "MutationRecord", record, None);
+    let computed_style = computed::install(rt, op);
     with_dom(rt, |_, dom| {
         dom.notify = Some(notify);
         dom.protos.mutation_record = Some(record);
+        dom.protos.computed_style = Some(computed_style);
     });
 
     // Web APIs written in JavaScript.

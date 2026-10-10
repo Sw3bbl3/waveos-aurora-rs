@@ -511,6 +511,12 @@ fn cascade_into(s: &mut Style, decls: &[Decl], parent: &Style, root_font: f32, v
 
 /// Computes every element's style. Text nodes share their parent's.
 pub fn compute(doc: &Document, cascade: &Cascade, viewport: (i32, i32)) -> Computed {
+    compute_with(doc, cascade, viewport, false)
+}
+
+/// [`compute`], also styling inside `display: none` subtrees when `all`
+/// (getComputedStyle answers for those; layout never looks).
+pub fn compute_with(doc: &Document, cascade: &Cascade, viewport: (i32, i32), all: bool) -> Computed {
     let mut styles: Vec<Option<Rc<Style>>> = alloc::vec![None; doc.nodes.len()];
     let mut pseudo = BTreeMap::new();
     // Per element: the ancestor filter its children see (its ancestors' keys and its own).
@@ -523,8 +529,8 @@ pub fn compute(doc: &Document, cascade: &Cascade, viewport: (i32, i32)) -> Compu
         match &doc.nodes[n].data {
             NodeData::Text(_) | NodeData::Comment(_) => styles[n] = Some(parent_style),
             NodeData::Element(e) => {
-                // Hidden subtrees need no styles.
-                if parent_style.display == Display::None {
+                // Hidden subtrees need no styles (for layout).
+                if !all && parent_style.display == Display::None {
                     styles[n] = Some(parent_style);
                     continue;
                 }

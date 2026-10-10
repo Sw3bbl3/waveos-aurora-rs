@@ -11,6 +11,7 @@ pub mod dom;
 pub mod html;
 pub mod layout;
 pub mod script;
+pub mod sheets;
 pub mod style;
 pub mod values;
 
@@ -19,7 +20,9 @@ pub use nebula_script;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use css::Stylesheet;
 use dom::{Document, NodeId};
 pub use layout::{FontSpec, Host, Item, Layout, Metrics, Rect};
@@ -47,8 +50,13 @@ pub struct Page {
     /// No doctype: quirks mode.
     pub quirks: bool,
     ua: Stylesheet,
-    /// Kept until cascade time so resizing can activate media-dependent sheets.
-    sheet_media: Vec<String>,
+    /// The element each of `sheets` came from, and a `<style>`'s text then.
+    sheet_nodes: Vec<(NodeId, Option<String>)>,
+    /// What the cascade starts from, built once loading is done (and shared
+    /// with scripts, for getComputedStyle).
+    sources: RefCell<Option<Arc<sheets::Sources>>>,
+    /// Sheets of `<style>` elements scripts made or changed.
+    dynamic: RefCell<sheets::Dynamic>,
 }
 
 /// A page's JavaScript: its realm and DOM state. Kept by the browser beside
@@ -155,12 +163,17 @@ impl Page {
         let title = doc.find("title").map(|t| collapse_ws(&doc.text_content(t))).unwrap_or_default();
         let base = doc.find("base").and_then(|b| doc.element(b)?.attr("href").map(String::from));
         let mut sheets = Vec::new();
-        let mut sheet_media = Vec::new();
+        let mut sheet_nodes = Vec::new();
         for n in doc.descendants(Document::ROOT) {
             let Some(e) = doc.element(n) else { continue };
             let count = sheets.len();
+            let mut text = None;
             match e.tag.as_str() {
-                "style" => sheets.push(Sheet::Inline(css::parse(&doc.text_content(n)))),
+                "style" => {
+                    let t = doc.text_content(n);
+                    sheets.push(Sheet::Inline(css::parse(&t)));
+                    text = Some(t);
+                }
                 "link" => {
                     let rel = e.attr("rel").unwrap_or("").to_ascii_lowercase();
                     let rels: Vec<&str> = rel.split_ascii_whitespace().collect();
@@ -173,7 +186,7 @@ impl Page {
                 _ => {}
             }
             if sheets.len() != count {
-                sheet_media.push(e.attr("media").unwrap_or("").to_ascii_lowercase());
+                sheet_nodes.push((n, text));
             }
         }
         let quirks = !has_doctype(source);
@@ -181,7 +194,17 @@ impl Page {
         if quirks {
             ua.rules.extend(css::parse(style::QUIRKS_CSS).rules);
         }
-        Page { doc, title, sheets, base, quirks, ua, sheet_media }
+        Page {
+            doc,
+            title,
+            sheets,
+            base,
+            quirks,
+            ua,
+            sheet_nodes,
+            sources: RefCell::new(None),
+            dynamic: RefCell::new(sheets::Dynamic::default()),
+        }
     }
 
     // ------------------------------------------------------------ scripts
@@ -217,8 +240,11 @@ impl Page {
 
     /// Runs `f` with the document inside the realm.
     pub fn with_js<R>(&mut self, js: &mut Scripts, f: impl FnOnce(&mut Realm) -> R) -> R {
+        let sources = self.sources();
         let rt = &mut js.realm;
-        script::dom_mut(rt).doc = core::mem::take(&mut self.doc);
+        let dom = script::dom_mut(rt);
+        dom.doc = core::mem::take(&mut self.doc);
+        dom.set_style_sources(sources);
         // Each turn of the event loop gets a fresh budget.
         rt.steps = 0;
         rt.interrupted = false;
@@ -340,6 +366,7 @@ impl Page {
     pub fn set_stylesheet(&mut self, slot: usize, css_text: &str) {
         if let Some(Sheet::Linked { sheet, .. }) = self.sheets.get_mut(slot) {
             *sheet = Some(css::parse(css_text));
+            *self.sources.get_mut() = None;
         }
     }
 
@@ -382,6 +409,7 @@ impl Page {
             rules.append(&mut sheet.rules);
             sheet.rules = rules;
         }
+        *self.sources.get_mut() = None;
         let mut remaining = limit;
         for entry in &mut self.sheets {
             let (sheet, url) = match entry {
@@ -426,20 +454,33 @@ impl Page {
         layout::layout(&self.doc, &styles.styles, &styles.pseudo, host, width)
     }
 
-    /// Runs the cascade for a viewport.
-    pub fn styles(&self, width: i32, height: i32) -> style::Computed {
-        let author: Vec<&Stylesheet> = self
-            .sheets
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| self.sheet_media.get(*i).is_none_or(|m| css::media_matches(m, width, height)))
-            .filter_map(|(_, s)| match s {
-                Sheet::Inline(s) => Some(s),
-                Sheet::Linked { sheet, .. } => sheet.as_ref(),
+    /// The sheets the page came with, for running the cascade.
+    pub fn sources(&self) -> Arc<sheets::Sources> {
+        self.sources
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                let parsed = self
+                    .sheet_nodes
+                    .iter()
+                    .zip(&self.sheets)
+                    .map(|((n, text), sheet)| {
+                        let sheet = match sheet {
+                            Sheet::Inline(s) => Some(s.clone()),
+                            Sheet::Linked { sheet, .. } => sheet.clone(),
+                        };
+                        (*n, (text.clone(), sheet))
+                    })
+                    .collect();
+                Arc::new(sheets::Sources { ua: self.ua.clone(), parsed })
             })
-            .collect();
-        let cascade = style::Cascade::new(&self.ua, &author, width, height);
-        style::compute(&self.doc, &cascade, (width, height))
+            .clone()
+    }
+
+    /// Runs the cascade for a viewport, with the `<style>` and `<link>`
+    /// elements the document has now.
+    pub fn styles(&self, width: i32, height: i32) -> style::Computed {
+        let sources = self.sources();
+        sheets::compute(&self.doc, &sources, &mut self.dynamic.borrow_mut(), (width, height), false)
     }
 
     pub fn element(&self, n: NodeId) -> Option<&dom::Element> {

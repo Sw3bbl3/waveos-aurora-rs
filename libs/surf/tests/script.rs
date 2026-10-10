@@ -738,3 +738,54 @@ fn mutation_observer_reports_changes() {
     run(&mut p, &mut js, "shallow.disconnect()");
     assert!(!p.doc.record_mutations);
 }
+
+#[test]
+fn computed_style_follows_stylesheets_and_changes() {
+    let (p, _js, log, _) = page(
+        r#"<!doctype html><head><style>
+        :root { --gap: 12px }
+        .card { color: #336699; background-color: rgba(255, 0, 0, 0.5); margin: 4px 8px; padding: 2px; font-size: 20px; line-height: 1.5; border: 3px solid #000 }
+        .card.wide { display: flex; flex-direction: column; font-weight: bold }
+        .card::before { content: "→ "; color: red }
+        #hidden { display: none } #hidden span { color: blue }
+        </style></head><body><div class=card id=c>Card</div><div id=hidden><span id=s>x</span></div><script>
+        const c = document.getElementById("c");
+        const cs = getComputedStyle(c);
+        console.log(cs.color, cs.backgroundColor, cs.getPropertyValue("margin-left"), cs.margin, cs.padding);
+        console.log(cs.fontSize, cs.lineHeight, cs.borderTopWidth, cs.borderLeftStyle, cs.display, cs.fontWeight, cs.getPropertyValue("--gap"));
+        c.classList.add("wide");
+        console.log(cs.display, cs.flexDirection, cs.fontWeight, c.style.display === "");
+        const before = getComputedStyle(c, "::before");
+        console.log(before.content, before.color);
+        console.log(getComputedStyle(document.getElementById("s")).color, getComputedStyle(document.getElementById("hidden")).display);
+        try { cs.color = "red"; } catch (e) { console.log(e.name, e instanceof DOMException); }
+        try { cs.setProperty("color", "red"); } catch (e) { console.log(e.name); }
+        console.log(cs.length > 50, cs.item(0), String(cs), getComputedStyle(document.createElement("p")).color === "");
+        const style = document.createElement("style");
+        style.textContent = ".card { color: rgb(1, 2, 3) }";
+        document.head.appendChild(style);
+        console.log(cs.color);
+        style.textContent = ".card { color: rgb(4, 5, 6) }";
+        console.log(cs.color);
+        style.remove();
+        console.log(cs.color);
+        </script></body>"#,
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec![
+            "rgb(51, 102, 153) rgba(255, 0, 0, 0.502) 8px 4px 8px 2px",
+            "20px 30px 3px solid block 400 12px",
+            "flex column 700 true",
+            "\"→ \" rgb(255, 0, 0)",
+            "rgb(0, 0, 255) none",
+            "NoModificationAllowedError true",
+            "NoModificationAllowedError",
+            "true align-items [object CSSStyleDeclaration] true",
+            "rgb(1, 2, 3)",
+            "rgb(4, 5, 6)",
+            "rgb(51, 102, 153)",
+        ]
+    );
+    let _ = p;
+}

@@ -228,3 +228,38 @@ fn comments_take_no_space_and_split_no_words() {
     let two = t.iter().find(|w| w.2 == "two").unwrap();
     assert_eq!(two.0 - one.0, 24 + 10);
 }
+
+#[test]
+fn style_elements_added_later_apply() {
+    use nebula_engine::dom::{Element, NodeData};
+    let mut page =
+        Page::parse("<head><style>p { margin: 0 }</style></head><body style='margin:0'><p>one two</p></body>");
+    let x = |page: &Page| texts_of(page, 400)[0].0;
+    assert_eq!(x(&page), 0);
+    // As a script would: a new <style>, then edited, then removed.
+    let head = page.doc.find("head").unwrap();
+    let style = page.doc.create(NodeData::Element(Element { tag: "style".into(), attrs: Vec::new() }));
+    page.doc.set_text_content(style, "p { padding-left: 30px }");
+    page.doc.insert(head, style, None);
+    assert_eq!(x(&page), 30);
+    page.doc.set_text_content(style, "p { padding-left: 50px }");
+    assert_eq!(x(&page), 50);
+    page.doc.detach(style);
+    assert_eq!(x(&page), 0);
+    // A media attribute that doesn't match turns a sheet off.
+    let first = page.doc.find("style").unwrap();
+    page.doc.set_attr(first, "media", "(max-width: 100px)");
+    page.doc.set_text_content(first, "p { padding-left: 70px }");
+    assert_eq!(x(&page), 0);
+}
+
+fn texts_of(page: &Page, width: i32) -> Vec<(i32, i32, String)> {
+    page.layout(width, 600, &Fake)
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Text { x, y, text, .. } => Some((*x, *y, text.clone())),
+            _ => None,
+        })
+        .collect()
+}
