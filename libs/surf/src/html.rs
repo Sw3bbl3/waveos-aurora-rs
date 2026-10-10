@@ -76,6 +76,7 @@ pub fn parse(html: &str) -> Document {
                 }
             }
             Token::End(name) => b.end(&name),
+            Token::Comment(s) => b.comment(s),
         }
     }
     // Every document has <html>, <head> and <body>, as in browsers.
@@ -119,6 +120,7 @@ enum Token {
     Text(String),
     Start { name: String, attrs: Vec<(String, String)>, self_closing: bool },
     End(String),
+    Comment(String),
 }
 
 struct Tokenizer<'a> {
@@ -159,7 +161,17 @@ impl Tokenizer<'_> {
             if c == b'!' {
                 if self.rest().starts_with("<!--") {
                     self.i += 4;
-                    self.skip_past("-->");
+                    // "<!-->" and "<!--->" are empty comments.
+                    for abrupt in [">", "->"] {
+                        if self.rest().starts_with(abrupt) {
+                            self.i += abrupt.len();
+                            return Some(Token::Comment(String::new()));
+                        }
+                    }
+                    let end = self.rest().find("-->").map_or(self.s.len(), |p| self.i + p);
+                    let text = String::from(&self.s[self.i..end]);
+                    self.i = (end + 3).min(self.s.len());
+                    return Some(Token::Comment(text));
                 } else if self.rest().starts_with("<![CDATA[") {
                     self.i += 9;
                     let end = self.rest().find("]]>").map_or(self.s.len(), |p| self.i + p);
@@ -362,6 +374,12 @@ impl Builder {
                 }
             }
         }
+    }
+
+    /// A comment goes where it appears, without opening the body.
+    fn comment(&mut self, s: String) {
+        let cur = self.current();
+        self.doc.add(cur, NodeData::Comment(s));
     }
 
     fn text(&mut self, s: &str) {
@@ -867,6 +885,11 @@ fn serialize_into(doc: &Document, n: NodeId, out: &mut String) {
                 serialize_into(doc, c, out);
             }
         }
+        NodeData::Comment(t) => {
+            out.push_str("<!--");
+            out.push_str(t);
+            out.push_str("-->");
+        }
         NodeData::Text(t) => {
             let raw = doc.parent(n).is_some_and(|p| matches!(doc.tag(p), "script" | "style" | "xmp" | "plaintext"));
             if raw {
@@ -923,6 +946,7 @@ mod tests {
                 out.push('>');
             }
             NodeData::Text(t) => out.push_str(t),
+            NodeData::Comment(_) => {}
             NodeData::Document => {
                 for c in &doc.nodes[id].children {
                     outline(doc, *c, out);

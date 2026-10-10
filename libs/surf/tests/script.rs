@@ -572,3 +572,103 @@ fn node_members_called_on_the_window_throw_instead_of_panicking() {
     );
     assert_eq!(log.borrow().last().map(String::as_str), Some("survived"));
 }
+
+#[test]
+fn comments_are_nodes() {
+    let (p, _js, log, _) = page(
+        r#"<!doctype html><!-- before --><body><p id=p>a<!-- one -->b<!---->c<!-->d</p><script>
+        const p = document.getElementById("p");
+        const kinds = [...p.childNodes].map(n => n.nodeType + ":" + n.nodeName + ":" + JSON.stringify(n.nodeValue));
+        console.log(kinds.join(" "));
+        console.log(p.textContent, p.innerHTML, p.childNodes[1] instanceof Comment, p.childNodes[1] instanceof CharacterData);
+        const c = document.createComment("made");
+        c.appendData(" here");
+        p.appendChild(c);
+        console.log(c.data, c.length, Object.prototype.toString.call(c), Node.COMMENT_NODE, c.COMMENT_NODE);
+        console.log(document.childNodes[0].nodeName, document.childNodes[0].data);
+        console.log(new Comment("x").nodeType, p.cloneNode(true).innerHTML === p.innerHTML);
+        console.log(document.createDocumentFragment().nodeName);
+        </script></body>"#,
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec![
+            r#"3:#text:"a" 8:#comment:" one " 3:#text:"b" 8:#comment:"" 3:#text:"c" 8:#comment:"" 3:#text:"d""#,
+            "abcd a<!-- one -->b<!---->c<!---->d true true",
+            "made here 9 [object Comment] 8 8",
+            "#comment  before ",
+            "8 true",
+            "#document-fragment",
+        ]
+    );
+    assert!(p
+        .doc
+        .nodes
+        .iter()
+        .any(|n| matches!(&n.data, nebula_engine::dom::NodeData::Comment(c) if c == "made here")));
+}
+
+#[test]
+fn tree_walker_and_node_iterator() {
+    let (_p, _js, log, _) = page(
+        r##"<!doctype html><body><div id=root><p id=a>one<!--c--><b id=b>two</b></p><p id=skip><i id=i>three</i></p><p id=rej><u id=u>four</u></p></div><script>
+        const root = document.getElementById("root");
+        const name = n => n.nodeType === 1 ? n.id : n.nodeType === 3 ? n.data : "#" + n.data;
+        const all = [];
+        const w = document.createTreeWalker(root);
+        for (let n = w.nextNode(); n; n = w.nextNode()) all.push(name(n));
+        console.log(all.join(","));
+        const back = [];
+        for (let n = w.previousNode(); n; n = w.previousNode()) back.push(name(n));
+        console.log(back.join(","), name(w.currentNode));
+        const filter = { acceptNode(n) {
+            return n.id === "skip" ? NodeFilter.FILTER_SKIP : n.id === "rej" ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+        } };
+        const els = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, filter);
+        const seen = [];
+        for (let n = els.firstChild(); n; n = els.nextSibling()) seen.push(name(n));
+        console.log(seen.join(","), name(els.parentNode()), els.parentNode());
+        els.currentNode = document.getElementById("b");
+        console.log(name(els.nextNode()), els.nextNode());
+        const texts = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_COMMENT, n => n.data === "two" ? 3 : 1);
+        const t = [];
+        while (texts.nextNode()) t.push(name(texts.currentNode));
+        console.log(t.join(","), name(texts.lastChild() || texts.currentNode));
+        const it = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT, filter);
+        const order = [];
+        for (let n = it.nextNode(); n; n = it.nextNode()) order.push(name(n));
+        console.log(order.join(","), it.pointerBeforeReferenceNode, name(it.previousNode()), name(it.previousNode()), it.pointerBeforeReferenceNode);
+        try { document.createTreeWalker(root, 1, { acceptNode() { w2.nextNode(); return 1; } }); } catch (e) {}
+        let w2; w2 = document.createTreeWalker(root, 1, { acceptNode() { try { w2.nextNode(); } catch (e) { console.log(e.name, e.code, e instanceof DOMException); } return 1; } });
+        w2.nextNode();
+        try { document.createTreeWalker(null); } catch (e) { console.log(e.constructor.name); }
+        console.log(typeof NodeFilter, NodeFilter.SHOW_ALL, String(w), String(it), DOMException.INVALID_STATE_ERR);
+        </script></body>"##,
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec![
+            "a,one,#c,b,two,skip,i,three,rej,u,four",
+            "u,rej,three,i,skip,two,b,#c,one,a,root root",
+            "a,i root null",
+            "i null",
+            "one,#c,three,four four",
+            "root,a,b,i,u false u i true",
+            "InvalidStateError 11 true",
+            "TypeError",
+            "function 4294967295 [object TreeWalker] [object NodeIterator] 11",
+        ]
+    );
+}
+
+#[test]
+fn window_and_node_kind_interfaces_exist() {
+    let (_p, _js, log, _) = page(
+        r#"<!doctype html><body><script>
+        console.log(window instanceof Window, window instanceof EventTarget, typeof Window.prototype.addEventListener);
+        console.log(["Text", "Comment", "CDATASection", "ProcessingInstruction", "DocumentType"].map(n => typeof window[n].prototype).join());
+        console.log(Object.getPrototypeOf(CDATASection.prototype) === Text.prototype, Node.ELEMENT_NODE, Node.prototype.TEXT_NODE);
+        </script></body>"#,
+    );
+    assert_eq!(*log.borrow(), vec!["true true function", "object,object,object,object,object", "true 1 3"]);
+}

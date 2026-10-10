@@ -21,6 +21,7 @@ pub enum NodeData {
     Document,
     Element(Element),
     Text(String),
+    Comment(String),
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +176,7 @@ impl Document {
 
     /// Replaces a node's children with one text node (or none for "").
     pub fn set_text_content(&mut self, n: NodeId, text: &str) {
-        if let NodeData::Text(t) = &mut self.nodes[n].data {
+        if let NodeData::Text(t) | NodeData::Comment(t) = &mut self.nodes[n].data {
             *t = String::from(text);
             self.version += 1;
             return;
@@ -196,6 +197,7 @@ impl Document {
             NodeData::Document => NodeData::Element(Element { tag: String::from(FRAGMENT), attrs: Vec::new() }),
             NodeData::Element(e) => NodeData::Element(e.clone()),
             NodeData::Text(t) => NodeData::Text(t.clone()),
+            NodeData::Comment(t) => NodeData::Comment(t.clone()),
         };
         let copy = self.create(data);
         if deep {
@@ -214,6 +216,7 @@ impl Document {
             NodeData::Document => NodeData::Element(Element { tag: String::from(FRAGMENT), attrs: Vec::new() }),
             NodeData::Element(e) => NodeData::Element(e.clone()),
             NodeData::Text(t) => NodeData::Text(t.clone()),
+            NodeData::Comment(t) => NodeData::Comment(t.clone()),
         };
         let copy = self.create(data);
         for &c in &other.nodes[from].children {
@@ -282,10 +285,10 @@ impl Document {
         self.descendants(Self::ROOT).into_iter().filter(|n| self.tag(*n) == tag).collect()
     }
 
-    /// The concatenated text below `id`.
+    /// The concatenated text below `id` (a comment's own text, for a comment).
     pub fn text_content(&self, id: NodeId) -> String {
         let mut s = String::new();
-        if let NodeData::Text(t) = &self.nodes[id].data {
+        if let NodeData::Text(t) | NodeData::Comment(t) = &self.nodes[id].data {
             s.push_str(t);
         }
         for n in self.descendants(id) {

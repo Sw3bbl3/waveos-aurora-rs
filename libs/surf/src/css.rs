@@ -717,6 +717,7 @@ pub fn matches_compound(doc: &Document, node: NodeId, c: &Compound) -> bool {
             Pseudo::Enabled => is_control(&e.tag) && e.attr("disabled").is_none(),
             Pseudo::Empty => doc.nodes[node].children.iter().all(|c| match &doc.nodes[*c].data {
                 NodeData::Text(t) => t.is_empty(),
+                NodeData::Comment(_) => true,
                 _ => false,
             }),
             Pseudo::Not(list) => !list.iter().any(|c| matches_compound(doc, node, c)),

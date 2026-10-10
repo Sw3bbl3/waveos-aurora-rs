@@ -44,6 +44,231 @@
     return tail;
   }});
 
+  // DOMException, with the legacy codes libraries still compare against.
+  const exceptionCodes = {
+    IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5,
+    NoModificationAllowedError: 7, NotFoundError: 8, NotSupportedError: 9, InvalidStateError: 11,
+    SyntaxError: 12, InvalidModificationError: 13, NamespaceError: 14, InvalidAccessError: 15,
+    TypeMismatchError: 17, SecurityError: 18, NetworkError: 19, AbortError: 20, URLMismatchError: 21,
+    QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24, DataCloneError: 25,
+  };
+  class DOMException extends Error {
+    constructor(message = "", name = "Error") {
+      super(String(message));
+      Object.defineProperty(this, "name", { value: String(name), configurable: true, writable: true });
+    }
+    get code() { return exceptionCodes[this.name] || 0; }
+  }
+  for (const [name, code] of Object.entries(exceptionCodes)) {
+    const constant = name.replace(/Error$/, "").replace(/([a-z])([A-Z])/g, "$1_$2").toUpperCase() + "_ERR";
+    Object.defineProperty(DOMException, constant, { value: code });
+    Object.defineProperty(DOMException.prototype, constant, { value: code });
+  }
+  define("DOMException", DOMException);
+
+  // NodeFilter, TreeWalker and NodeIterator (DOM standard §6), on the tree API.
+  const ACCEPT = 1, REJECT = 2, SKIP = 3;
+  function NodeFilter() { throw new TypeError("Illegal constructor"); }
+  for (const [name, value] of Object.entries({
+    FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3, SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 0x1,
+    SHOW_ATTRIBUTE: 0x2, SHOW_TEXT: 0x4, SHOW_CDATA_SECTION: 0x8, SHOW_ENTITY_REFERENCE: 0x10,
+    SHOW_ENTITY: 0x20, SHOW_PROCESSING_INSTRUCTION: 0x40, SHOW_COMMENT: 0x80, SHOW_DOCUMENT: 0x100,
+    SHOW_DOCUMENT_TYPE: 0x200, SHOW_DOCUMENT_FRAGMENT: 0x400, SHOW_NOTATION: 0x800,
+  })) {
+    Object.defineProperty(NodeFilter, name, { value, enumerable: true });
+  }
+  define("NodeFilter", NodeFilter);
+  const traversal = new WeakMap();
+  const state = t => {
+    const s = traversal.get(t);
+    if (!s) throw new TypeError("Illegal invocation");
+    return s;
+  };
+  const filterNode = (s, node) => {
+    if (s.active) throw new DOMException("The filter is already running", "InvalidStateError");
+    if (!(s.whatToShow & (1 << (node.nodeType - 1)))) return SKIP;
+    if (s.filter === null) return ACCEPT;
+    s.active = true;
+    try {
+      const f = s.filter;
+      const result = typeof f === "function" ? f(node) : f.acceptNode(node);
+      return Number(result) & 0xFFFF;
+    } finally {
+      s.active = false;
+    }
+  };
+  const newTraversal = (kind, root, whatToShow, filter) => {
+    if (!(root instanceof Node)) throw new TypeError("parameter 1 is not of type 'Node'");
+    const t = Object.create(kind.prototype);
+    traversal.set(t, { root, whatToShow: whatToShow >>> 0, filter: filter ?? null, active: false,
+      current: root, reference: root, before: true });
+    return t;
+  };
+  function TreeWalker() { throw new TypeError("Illegal constructor"); }
+  function NodeIterator() { throw new TypeError("Illegal constructor"); }
+  const common = {
+    root: { get() { return state(this).root; } },
+    whatToShow: { get() { return state(this).whatToShow; } },
+    filter: { get() { return state(this).filter; } },
+  };
+  const walkChildren = (s, first) => {
+    let node = first ? s.current.firstChild : s.current.lastChild;
+    while (node !== null) {
+      const result = filterNode(s, node);
+      if (result === ACCEPT) return (s.current = node);
+      if (result === SKIP) {
+        const child = first ? node.firstChild : node.lastChild;
+        if (child !== null) { node = child; continue; }
+      }
+      while (node !== null) {
+        const sibling = first ? node.nextSibling : node.previousSibling;
+        if (sibling !== null) { node = sibling; break; }
+        const parent = node.parentNode;
+        if (parent === null || parent === s.root || parent === s.current) return null;
+        node = parent;
+      }
+    }
+    return null;
+  };
+  const walkSiblings = (s, next) => {
+    let node = s.current;
+    if (node === s.root) return null;
+    for (;;) {
+      let sibling = next ? node.nextSibling : node.previousSibling;
+      while (sibling !== null) {
+        node = sibling;
+        const result = filterNode(s, node);
+        if (result === ACCEPT) return (s.current = node);
+        sibling = next ? node.firstChild : node.lastChild;
+        if (result === REJECT || sibling === null) sibling = next ? node.nextSibling : node.previousSibling;
+      }
+      node = node.parentNode;
+      if (node === null || node === s.root) return null;
+      if (filterNode(s, node) === ACCEPT) return null;
+    }
+  };
+  const method = value => ({ value, writable: true, configurable: true });
+  Object.defineProperties(TreeWalker.prototype, {
+    ...common,
+    currentNode: {
+      get() { return state(this).current; },
+      set(node) {
+        if (!(node instanceof Node)) throw new TypeError("parameter 1 is not of type 'Node'");
+        state(this).current = node;
+      },
+    },
+    parentNode: method(function () {
+      const s = state(this);
+      let node = s.current;
+      while (node !== null && node !== s.root) {
+        node = node.parentNode;
+        if (node !== null && filterNode(s, node) === ACCEPT) return (s.current = node);
+      }
+      return null;
+    }),
+    firstChild: method(function () { return walkChildren(state(this), true); }),
+    lastChild: method(function () { return walkChildren(state(this), false); }),
+    previousSibling: method(function () { return walkSiblings(state(this), false); }),
+    nextSibling: method(function () { return walkSiblings(state(this), true); }),
+    previousNode: method(function () {
+      const s = state(this);
+      let node = s.current;
+      while (node !== s.root) {
+        let sibling = node.previousSibling;
+        while (sibling !== null) {
+          node = sibling;
+          let result = filterNode(s, node);
+          while (result !== REJECT && node.lastChild !== null) {
+            node = node.lastChild;
+            result = filterNode(s, node);
+          }
+          if (result === ACCEPT) return (s.current = node);
+          sibling = node.previousSibling;
+        }
+        if (node === s.root || node.parentNode === null) return null;
+        node = node.parentNode;
+        if (filterNode(s, node) === ACCEPT) return (s.current = node);
+      }
+      return null;
+    }),
+    nextNode: method(function () {
+      const s = state(this);
+      let node = s.current, result = ACCEPT;
+      for (;;) {
+        while (result !== REJECT && node.firstChild !== null) {
+          node = node.firstChild;
+          result = filterNode(s, node);
+          if (result === ACCEPT) return (s.current = node);
+        }
+        let following = null;
+        for (let n = node; n !== null && n !== s.root; n = n.parentNode) {
+          if (n.nextSibling !== null) { following = n.nextSibling; break; }
+        }
+        if (following === null) return null;
+        node = following;
+        result = filterNode(s, node);
+        if (result === ACCEPT) return (s.current = node);
+      }
+    }),
+    [Symbol.toStringTag]: { value: "TreeWalker", configurable: true },
+  });
+  const iterate = (s, next) => {
+    let node = s.reference, before = s.before;
+    for (;;) {
+      if (next) {
+        if (!before) {
+          let n = node, found = node.firstChild;
+          while (found === null && n !== null) {
+            if (n === s.root) return null;
+            found = n.nextSibling;
+            n = n.parentNode;
+          }
+          if (found === null) return null;
+          node = found;
+        } else {
+          before = false;
+        }
+      } else if (before) {
+        if (node === s.root) return null;
+        let p = node.previousSibling;
+        if (p !== null) {
+          while (p.lastChild !== null) p = p.lastChild;
+          node = p;
+        } else {
+          node = node.parentNode;
+          if (node === null) return null;
+        }
+      } else {
+        before = true;
+      }
+      if (filterNode(s, node) === ACCEPT) break;
+    }
+    s.reference = node;
+    s.before = before;
+    return node;
+  };
+  Object.defineProperties(NodeIterator.prototype, {
+    ...common,
+    referenceNode: { get() { return state(this).reference; } },
+    pointerBeforeReferenceNode: { get() { return state(this).before; } },
+    nextNode: method(function () { return iterate(state(this), true); }),
+    previousNode: method(function () { return iterate(state(this), false); }),
+    detach: method(function () {}),
+    [Symbol.toStringTag]: { value: "NodeIterator", configurable: true },
+  });
+  for (const [name, f] of Object.entries({ TreeWalker, NodeIterator })) {
+    Object.defineProperty(f.prototype, "constructor", { value: f, writable: true, configurable: true });
+    define(name, f);
+  }
+  Object.defineProperties(Document.prototype, {
+    createTreeWalker: method(function (root, whatToShow = 0xFFFFFFFF, filter = null) {
+      return newTraversal(TreeWalker, root, whatToShow, filter);
+    }),
+    createNodeIterator: method(function (root, whatToShow = 0xFFFFFFFF, filter = null) {
+      return newTraversal(NodeIterator, root, whatToShow, filter);
+    }),
+  });
+
   class MutationObserver {
     constructor(callback) { this._callback = callback; }
     observe() {}

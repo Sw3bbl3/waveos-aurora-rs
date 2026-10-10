@@ -216,3 +216,15 @@ fn grids() {
     assert_eq!((at("x").0, at("y").0, at("z").0), (8, 136, 264));
     assert!(at("x").1 > at("wide").1);
 }
+
+#[test]
+fn comments_take_no_space_and_split_no_words() {
+    let t = texts("<p>ab<!-- hidden -->cd ef</p><div style='display:flex;gap:10px'><!-- x --><span>one</span><!-- y --><span>two</span></div>", 400);
+    let words: Vec<&str> = t.iter().map(|(_, _, s)| s.as_str()).collect();
+    assert_eq!(words[0], "abcd ef");
+    assert!(!words.iter().any(|w| w.contains("hidden")));
+    // Comments aren't flex items: "two" is one 10px gap after "one" (3 chars × 8px).
+    let one = t.iter().find(|w| w.2 == "one").unwrap();
+    let two = t.iter().find(|w| w.2 == "two").unwrap();
+    assert_eq!(two.0 - one.0, 24 + 10);
+}

@@ -74,6 +74,7 @@ struct Protos {
     canvas: Option<ObjRef>,
     canvas_context: Option<ObjRef>,
     text: Option<ObjRef>,
+    comment: Option<ObjRef>,
     document: Option<ObjRef>,
     fragment: Option<ObjRef>,
     event: Option<ObjRef>,
@@ -165,6 +166,7 @@ impl Embedder for Dom {
             p.canvas,
             p.canvas_context,
             p.text,
+            p.comment,
             p.document,
             p.fragment,
             p.event,
@@ -211,6 +213,7 @@ fn wrap(rt: &mut Realm, dom: &mut Dom, n: NodeId) -> Value {
     let proto = match &dom.doc.nodes[n].data {
         NodeData::Document => p.document,
         NodeData::Text(_) => p.text,
+        NodeData::Comment(_) => p.comment,
         NodeData::Element(e) if e.tag == FRAGMENT => p.fragment,
         NodeData::Element(_) if dom.namespaces.get(&n).is_some_and(|ns| ns == "http://www.w3.org/2000/svg") => {
             p.svg_element
@@ -413,6 +416,7 @@ fn node_type(rt: &mut Realm, c: &Call) -> JsResult {
         Ok(Value::Number(match &dom.doc.nodes[n].data {
             NodeData::Document => 9.0,
             NodeData::Text(_) => 3.0,
+            NodeData::Comment(_) => 8.0,
             NodeData::Element(e) if e.tag == FRAGMENT => 11.0,
             NodeData::Element(_) => 1.0,
         }))
@@ -425,6 +429,8 @@ fn node_name(rt: &mut Realm, c: &Call) -> JsResult {
         Ok(Value::str(&match &dom.doc.nodes[n].data {
             NodeData::Document => String::from("#document"),
             NodeData::Text(_) => String::from("#text"),
+            NodeData::Comment(_) => String::from("#comment"),
+            NodeData::Element(e) if e.tag == FRAGMENT => String::from(FRAGMENT),
             NodeData::Element(e) => e.tag.to_ascii_uppercase(),
         }))
     })
@@ -1921,10 +1927,21 @@ fn create_text_node(rt: &mut Realm, c: &Call) -> JsResult {
     })
 }
 
-fn create_comment(rt: &mut Realm, _c: &Call) -> JsResult {
-    // Comments aren't kept; an empty text node stands in.
+fn create_comment(rt: &mut Realm, c: &Call) -> JsResult {
+    let data = arg_str(rt, c, 0)?;
     with_dom(rt, |rt, dom| {
-        let n = dom.doc.create(NodeData::Text(String::new()));
+        let n = dom.doc.create(NodeData::Comment(data));
+        Ok(wrap(rt, dom, n))
+    })
+}
+
+fn comment_ctor(rt: &mut Realm, c: &Call) -> JsResult {
+    if !c.is_construct() {
+        return Err(rt.type_error("Comment requires 'new'"));
+    }
+    let data = if c.arg(0).is_undefined() { String::new() } else { arg_str(rt, c, 0)? };
+    with_dom(rt, |rt, dom| {
+        let n = dom.doc.create(NodeData::Comment(data));
         Ok(wrap(rt, dom, n))
     })
 }
@@ -2606,10 +2623,19 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     // Node.
     let node = rt.new_object_with(Some(event_target));
     interface(rt, "Node", node, None);
-    for (name, v) in
-        [("ELEMENT_NODE", 1.0), ("TEXT_NODE", 3.0), ("DOCUMENT_NODE", 9.0), ("DOCUMENT_FRAGMENT_NODE", 11.0)]
-    {
+    let node_constructor = match rt.global_value("Node") {
+        Ok(Value::Object(o)) => o,
+        _ => unreachable!("Node was just installed"),
+    };
+    for (name, v) in [
+        ("ELEMENT_NODE", 1.0),
+        ("TEXT_NODE", 3.0),
+        ("COMMENT_NODE", 8.0),
+        ("DOCUMENT_NODE", 9.0),
+        ("DOCUMENT_FRAGMENT_NODE", 11.0),
+    ] {
         rt.define(node, name, Value::Number(v), 0);
+        rt.define(node_constructor, name, Value::Number(v), 0);
     }
     accessor(rt, node, "nodeType", node_type, None);
     accessor(rt, node, "nodeName", node_name, None);
@@ -2782,6 +2808,20 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     rt.define(text_constructor, "prototype", Value::Object(text), 0);
     rt.define(text, "constructor", Value::Object(text_constructor), HIDDEN);
     rt.set_global("Text", Value::Object(text_constructor));
+    nebula_script::builtins::to_string_tag(rt, text, "Text");
+    let comment = rt.new_object_with(Some(character_data));
+    let comment_constructor = rt.native("Comment", 0, comment_ctor, true);
+    rt.define(comment_constructor, "prototype", Value::Object(comment), 0);
+    rt.define(comment, "constructor", Value::Object(comment_constructor), HIDDEN);
+    rt.set_global("Comment", Value::Object(comment_constructor));
+    nebula_script::builtins::to_string_tag(rt, comment, "Comment");
+    // Interfaces for node kinds HTML documents never contain, for feature checks.
+    let cdata = rt.new_object_with(Some(text));
+    interface(rt, "CDATASection", cdata, None);
+    let instruction = rt.new_object_with(Some(character_data));
+    interface(rt, "ProcessingInstruction", instruction, None);
+    let doctype = rt.new_object_with(Some(node));
+    interface(rt, "DocumentType", doctype, None);
     let image = rt.new_object_with(Some(html_element));
     interface(rt, "HTMLImageElement", image, None);
     let image_constructor = rt.native("Image", 0, image_ctor, true);
@@ -2935,6 +2975,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
             canvas: Some(canvas_element),
             canvas_context: Some(canvas_context),
             text: Some(text),
+            comment: Some(comment),
             document: Some(document),
             fragment: Some(fragment),
             event: Some(event),
@@ -2947,7 +2988,9 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
 
     // window.
     let g = rt.global;
-    rt.heap.get_mut(g).proto = Some(event_target);
+    let window_proto = rt.new_object_with(Some(event_target));
+    interface(rt, "Window", window_proto, None);
+    rt.heap.get_mut(g).proto = Some(window_proto);
     for name in ["window", "self", "frames", "parent", "top"] {
         rt.define(g, name, Value::Object(g), HIDDEN);
     }

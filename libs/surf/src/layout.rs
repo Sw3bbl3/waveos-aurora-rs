@@ -353,6 +353,8 @@ impl<'a> Engine<'a> {
         match &self.doc.nodes[n].data {
             NodeData::Element(_) => self.style(n).hidden(),
             NodeData::Text(_) => false,
+            // Comments never render.
+            NodeData::Comment(_) => true,
             NodeData::Document => false,
         }
     }
@@ -1347,7 +1349,7 @@ impl<'a> Engine<'a> {
                 }
                 (min + ext, max.max(min) + ext)
             }
-            NodeData::Document => (0, 0),
+            NodeData::Document | NodeData::Comment(_) => (0, 0),
         }
     }
 
@@ -1642,7 +1644,7 @@ impl<'a> Engine<'a> {
                 }
                 self.link = saved_link;
             }
-            NodeData::Document => {}
+            NodeData::Document | NodeData::Comment(_) => {}
         }
     }
 

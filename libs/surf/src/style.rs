@@ -521,7 +521,7 @@ pub fn compute(doc: &Document, cascade: &Cascade, viewport: (i32, i32)) -> Compu
     for n in order {
         let parent_style = doc.parent(n).and_then(|p| styles[p].clone()).unwrap_or_else(|| root.clone());
         match &doc.nodes[n].data {
-            NodeData::Text(_) => styles[n] = Some(parent_style),
+            NodeData::Text(_) | NodeData::Comment(_) => styles[n] = Some(parent_style),
             NodeData::Element(e) => {
                 // Hidden subtrees need no styles.
                 if parent_style.display == Display::None {
