@@ -1148,7 +1148,8 @@ impl<'a> Parser<'a> {
                     PropName::Private(n) => Some(Name::from(format!("#{n}"))),
                     _ => None,
                 };
-                let f = self.function_rest(fname, kind, is_async, is_generator, member_start, true)?;
+                // A method's name isn't a binding inside it (unlike a named function expression).
+                let f = self.function_rest(fname, kind, is_async, is_generator, member_start, false)?;
                 if matches!(kind, FnKind::ClassConstructor | FnKind::DerivedConstructor) {
                     if constructor.is_some() {
                         return Err(self.err("a class may only have one constructor"));
@@ -1978,7 +1979,8 @@ impl<'a> Parser<'a> {
                 PropName::Str(s) => Some(Name::from(s.to_rust())),
                 _ => None,
             };
-            let f = self.function_rest(fname, kind, is_async, is_generator, start, true)?;
+            // A method's name isn't a binding inside it (unlike a named function expression).
+            let f = self.function_rest(fname, kind, is_async, is_generator, start, false)?;
             if kind == FnKind::Getter && (!f.params.is_empty() || f.rest.is_some()) {
                 return Err(self.err("getters take no parameters"));
             }

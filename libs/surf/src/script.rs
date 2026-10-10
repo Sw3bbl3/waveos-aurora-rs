@@ -5,7 +5,7 @@
 //! functions below find it. Element wrappers, listeners and timers stay in
 //! the `Dom` between runs, and are traced by the collector.
 
-use crate::dom::{Document, Element, NodeData, NodeId, FRAGMENT};
+use crate::dom::{Document, Element, Mutation, NodeData, NodeId, FRAGMENT};
 use crate::{css, html};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -82,6 +82,29 @@ struct Protos {
     style: Option<ObjRef>,
     class_list: Option<ObjRef>,
     storage: Option<ObjRef>,
+    mutation_record: Option<ObjRef>,
+}
+
+/// What a MutationObserver watches on one node (already validated by the
+/// prelude).
+#[derive(Clone, Default)]
+struct ObserveOptions {
+    child_list: bool,
+    attributes: bool,
+    character_data: bool,
+    subtree: bool,
+    attribute_old: bool,
+    character_data_old: bool,
+    filter: Option<Vec<String>>,
+}
+
+/// A MutationObserver: its JS object, callback, the nodes it watches and
+/// the records waiting for delivery.
+struct Observer {
+    obj: ObjRef,
+    callback: Value,
+    targets: Vec<(NodeId, ObserveOptions)>,
+    records: Vec<Value>,
 }
 
 /// The browser state scripts see, kept inside the realm.
@@ -128,6 +151,10 @@ pub struct Dom {
     /// Network requests to make, and the promise functions awaiting each.
     pub requests: Vec<HttpRequest>,
     pending_requests: BTreeMap<u32, (Value, Value)>,
+    /// MutationObservers in creation order, and whether a delivery is queued.
+    observers: Vec<Observer>,
+    notify_queued: bool,
+    notify: Option<ObjRef>,
 }
 
 impl Embedder for Dom {
@@ -156,6 +183,14 @@ impl Embedder for Dom {
             v(a);
             v(b);
         }
+        for o in &self.observers {
+            v(&Value::Object(o.obj));
+            v(&o.callback);
+            o.records.iter().for_each(&mut v);
+        }
+        if let Some(n) = self.notify {
+            v(&Value::Object(n));
+        }
         let p = &self.protos;
         for o in [
             p.node,
@@ -174,6 +209,7 @@ impl Embedder for Dom {
             p.style,
             p.class_list,
             p.storage,
+            p.mutation_record,
         ]
         .into_iter()
         .flatten()
@@ -193,7 +229,11 @@ fn with_dom<R>(rt: &mut Realm, f: impl FnOnce(&mut Realm, &mut Dom) -> R) -> R {
     let mut b = rt.embedder.take().expect("page scripts need a DOM");
     let r = {
         let dom = b.as_any().downcast_mut::<Dom>().expect("page scripts need a DOM");
-        f(rt, dom)
+        let r = f(rt, dom);
+        if !dom.doc.mutations.is_empty() {
+            queue_mutations(rt, dom);
+        }
+        r
     };
     rt.embedder = Some(b);
     r
@@ -994,6 +1034,13 @@ fn checked_set(rt: &mut Realm, c: &Call) -> JsResult {
 
 /// Checks a box or radio button (unchecking the rest of a radio group).
 pub fn set_checked(doc: &mut Document, n: NodeId, on: bool) {
+    // Checkedness isn't an attribute change to observers, as in browsers.
+    let record = core::mem::replace(&mut doc.record_mutations, false);
+    set_checked_attrs(doc, n, on);
+    doc.record_mutations = record;
+}
+
+fn set_checked_attrs(doc: &mut Document, n: NodeId, on: bool) {
     let Some(e) = doc.element(n) else { return };
     let radio = e.attr("type").is_some_and(|t| t.eq_ignore_ascii_case("radio"));
     let name = String::from(e.attr("name").unwrap_or(""));
@@ -2605,6 +2652,9 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
         scroll_request: None,
         requests: Vec::new(),
         pending_requests: BTreeMap::new(),
+        observers: Vec::new(),
+        notify_queued: false,
+        notify: None,
     }));
 
     let op = rt.intr.object_proto;
@@ -2983,6 +3033,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
             style: Some(style),
             class_list: Some(cl),
             storage: Some(storage_proto),
+            mutation_record: None,
         };
     });
 
@@ -3112,6 +3163,21 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     rt.define(g, "__nebula_random", Value::Object(rnd), 0);
     let req = rt.native("__nebula_request", 4, native_request, false);
     rt.define(g, "__nebula_request", Value::Object(req), 0);
+    for (name, len, f) in [
+        ("__nebula_observe", 4, native_observe as NativeFn),
+        ("__nebula_disconnect", 1, native_disconnect),
+        ("__nebula_take_records", 1, native_take_records),
+    ] {
+        let o = rt.native(name, len, f, false);
+        rt.define(g, name, Value::Object(o), 0);
+    }
+    let notify = rt.native("notify", 0, mutation_notify, false);
+    let record = rt.new_object_with(Some(op));
+    interface(rt, "MutationRecord", record, None);
+    with_dom(rt, |_, dom| {
+        dom.notify = Some(notify);
+        dom.protos.mutation_record = Some(record);
+    });
 
     // Web APIs written in JavaScript.
     if let Err(e) = rt.eval(PRELUDE, "prelude.js") {
@@ -3419,4 +3485,183 @@ fn native_random(rt: &mut Realm, c: &Call) -> JsResult {
         b.bytes[offset..offset + n].copy_from_slice(&bytes);
     }
     Ok(c.arg(0))
+}
+
+// ---------------------------------------------------------------- mutation observers
+
+/// Turns the document's recorded changes into MutationRecords for the
+/// observers interested in them (the DOM standard's "queue a mutation
+/// record"), and queues one delivery microtask.
+fn queue_mutations(rt: &mut Realm, dom: &mut Dom) {
+    let mutations = core::mem::take(&mut dom.doc.mutations);
+    for m in mutations {
+        let (target, name) = match &m {
+            Mutation::ChildList { target, .. } | Mutation::CharacterData { target, .. } => (*target, None),
+            Mutation::Attribute { target, name, .. } => (*target, Some(name.as_str())),
+        };
+        // (observer, whether it wants the old value), in the standard's order.
+        let mut interested: Vec<(usize, bool)> = Vec::new();
+        let mut node = Some(target);
+        while let Some(n) = node {
+            for (i, o) in dom.observers.iter().enumerate() {
+                for (_, opts) in o.targets.iter().filter(|(t, _)| *t == n) {
+                    if n != target && !opts.subtree {
+                        continue;
+                    }
+                    let (wanted, old) = match &m {
+                        Mutation::ChildList { .. } => (opts.child_list, false),
+                        Mutation::Attribute { .. } => (
+                            opts.attributes
+                                && opts.filter.as_ref().is_none_or(|f| f.iter().any(|x| Some(x.as_str()) == name)),
+                            opts.attribute_old,
+                        ),
+                        Mutation::CharacterData { .. } => (opts.character_data, opts.character_data_old),
+                    };
+                    if !wanted {
+                        continue;
+                    }
+                    match interested.iter_mut().find(|(j, _)| *j == i) {
+                        Some(e) => e.1 |= old,
+                        None => interested.push((i, old)),
+                    }
+                }
+            }
+            node = dom.doc.nodes[n].parent;
+        }
+        for (i, old) in interested {
+            let record = mutation_record(rt, dom, &m, old);
+            dom.observers[i].records.push(record);
+            if !dom.notify_queued {
+                dom.notify_queued = true;
+                rt.enqueue(Value::Object(dom.notify.expect("installed")), Vec::new());
+            }
+        }
+    }
+}
+
+fn mutation_record(rt: &mut Realm, dom: &mut Dom, m: &Mutation, with_old: bool) -> Value {
+    let o = rt.alloc(Obj::new(dom.protos.mutation_record, Kind::Ordinary));
+    let (kind, target, added, removed, previous, next, name, old) = match m {
+        Mutation::ChildList { target, added, removed, previous, next } => {
+            ("childList", *target, added.as_slice(), removed.as_slice(), *previous, *next, None, None)
+        }
+        Mutation::Attribute { target, name, old } => {
+            ("attributes", *target, &[][..], &[][..], None, None, Some(name.as_str()), old.as_deref())
+        }
+        Mutation::CharacterData { target, old } => {
+            ("characterData", *target, &[][..], &[][..], None, None, None, Some(old.as_str()))
+        }
+    };
+    let added = list(rt, dom, added.to_vec());
+    let removed = list(rt, dom, removed.to_vec());
+    let target = wrap(rt, dom, target);
+    let previous = wrap_opt(rt, dom, previous);
+    let next = wrap_opt(rt, dom, next);
+    let str_or_null = |s: Option<&str>| s.map_or(Value::Null, Value::str);
+    for (k, v) in [
+        ("type", Value::str(kind)),
+        ("target", target),
+        ("addedNodes", added),
+        ("removedNodes", removed),
+        ("previousSibling", previous),
+        ("nextSibling", next),
+        ("attributeName", str_or_null(name)),
+        ("attributeNamespace", Value::Null),
+        ("oldValue", if with_old { str_or_null(old) } else { Value::Null }),
+    ] {
+        rt.define(o, k, v, DEFAULT);
+    }
+    Value::Object(o)
+}
+
+/// The delivery microtask: each observer with records gets them, in
+/// creation order.
+fn mutation_notify(rt: &mut Realm, _c: &Call) -> JsResult {
+    let batches: Vec<(ObjRef, Value, Vec<Value>)> = with_dom(rt, |_, dom| {
+        dom.notify_queued = false;
+        dom.observers
+            .iter_mut()
+            .filter(|o| !o.records.is_empty())
+            .map(|o| (o.obj, o.callback.clone(), core::mem::take(&mut o.records)))
+            .collect()
+    });
+    for (obj, callback, records) in batches {
+        let records = rt.array_from(records);
+        let r = rt.call(&callback, Value::Object(obj), &[records, Value::Object(obj)]);
+        report(rt, r);
+    }
+    Ok(Value::Undefined)
+}
+
+fn observer_index(rt: &Realm, dom: &Dom, v: &Value) -> Option<usize> {
+    let _ = rt;
+    match v {
+        Value::Object(o) => dom.observers.iter().position(|x| x.obj == *o),
+        _ => None,
+    }
+}
+
+/// `__nebula_observe(observer, callback, target, options)`, with options
+/// normalized by the prelude.
+fn native_observe(rt: &mut Realm, c: &Call) -> JsResult {
+    let Value::Object(obj) = c.arg(0) else { return Err(rt.type_error("not a MutationObserver")) };
+    let target = arg_node(rt, c, 2)?;
+    let Value::Object(o) = c.arg(3) else { return Err(rt.type_error("bad options")) };
+    let flag = |rt: &mut Realm, k: &str| rt.get_str(o, k).map(|v| v.truthy());
+    let mut opts = ObserveOptions {
+        child_list: flag(rt, "childList")?,
+        attributes: flag(rt, "attributes")?,
+        character_data: flag(rt, "characterData")?,
+        subtree: flag(rt, "subtree")?,
+        attribute_old: flag(rt, "attributeOldValue")?,
+        character_data_old: flag(rt, "characterDataOldValue")?,
+        filter: None,
+    };
+    if let Value::Object(f) = rt.get_str(o, "attributeFilter")? {
+        let n = rt.get_str(f, "length")?;
+        let n = rt.to_uint32(&n)?;
+        let mut names = Vec::new();
+        for i in 0..n {
+            let v = rt.get_str(f, &i.to_string())?;
+            names.push(rt.to_rust_string(&v)?);
+        }
+        opts.filter = Some(names);
+    }
+    let callback = c.arg(1);
+    with_dom(rt, |rt, dom| {
+        let i = match observer_index(rt, dom, &Value::Object(obj)) {
+            Some(i) => i,
+            None => {
+                dom.observers.push(Observer { obj, callback, targets: Vec::new(), records: Vec::new() });
+                dom.observers.len() - 1
+            }
+        };
+        let targets = &mut dom.observers[i].targets;
+        match targets.iter_mut().find(|(t, _)| *t == target) {
+            Some(slot) => slot.1 = opts,
+            None => targets.push((target, opts)),
+        }
+        dom.doc.record_mutations = true;
+    });
+    Ok(Value::Undefined)
+}
+
+fn native_disconnect(rt: &mut Realm, c: &Call) -> JsResult {
+    let v = c.arg(0);
+    with_dom(rt, |rt, dom| {
+        if let Some(i) = observer_index(rt, dom, &v) {
+            dom.observers.remove(i);
+        }
+        dom.doc.record_mutations = !dom.observers.is_empty();
+    });
+    Ok(Value::Undefined)
+}
+
+fn native_take_records(rt: &mut Realm, c: &Call) -> JsResult {
+    let v = c.arg(0);
+    let records = with_dom(rt, |rt, dom| match observer_index(rt, dom, &v) {
+        Some(i) => core::mem::take(&mut dom.observers[i].records),
+        None => Vec::new(),
+    });
+    Ok(rt.array_from(records))
 }

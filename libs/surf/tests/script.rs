@@ -672,3 +672,69 @@ fn window_and_node_kind_interfaces_exist() {
     );
     assert_eq!(*log.borrow(), vec!["true true function", "object,object,object,object,object", "true 1 3"]);
 }
+
+#[test]
+fn mutation_observer_reports_changes() {
+    let (mut p, mut js, log, _) = page(
+        r#"<!doctype html><body><div id=root><p id=a class=x>text</p></div><script>
+        const root = document.getElementById("root"), a = document.getElementById("a");
+        const show = r => [r.type, r.target.id || r.target.nodeName, r.attributeName, r.oldValue,
+            r.addedNodes.length, r.removedNodes.length,
+            r.previousSibling && (r.previousSibling.id || r.previousSibling.nodeName),
+            r.nextSibling && (r.nextSibling.id || r.nextSibling.nodeName)].join("|");
+        const mo = new MutationObserver((records, observer) => {
+          console.log("batch", observer === mo, records.length, String(records[0]));
+          records.forEach(r => console.log(show(r)));
+        });
+        mo.observe(root, { childList: true, subtree: true, attributeOldValue: true, characterData: true, characterDataOldValue: true });
+        const shallow = new MutationObserver(rs => console.log("shallow", rs.map(r => r.type + ":" + r.attributeName).join()));
+        shallow.observe(root, { attributes: true, attributeFilter: ["title"] });
+        a.className = "y";
+        root.title = "t";
+        root.setAttribute("data-z", "1");
+        a.firstChild.data = "changed";
+        const b = document.createElement("b"); b.id = "b";
+        root.appendChild(b);
+        a.remove();
+        b.textContent = "bold";
+        console.log("sync", mo.takeRecords().length);
+        root.innerHTML = "<i id=i></i>";
+        Promise.resolve().then(() => console.log("after microtask"));
+        console.log("end of script");
+        try { mo.observe(root, {}); } catch (e) { console.log(e.constructor.name); }
+        try { new MutationObserver(1); } catch (e) { console.log(e.constructor.name); }
+        </script></body>"#,
+    );
+    assert_eq!(
+        *log.borrow(),
+        vec![
+            "sync 7",
+            "end of script",
+            "TypeError",
+            "TypeError",
+            "batch true 2 [object MutationRecord]",
+            "childList|root|||0|1||",
+            "childList|root|||1|0||",
+            "shallow attributes:title",
+            "after microtask",
+        ]
+    );
+    // Changes from a later turn are delivered at its microtask checkpoint;
+    // disconnect() drops undelivered records, and recording stops with the
+    // last observer.
+    log.borrow_mut().clear();
+    let run = |p: &mut Page, js: &mut Scripts, code: &str| {
+        p.with_js(js, |rt| {
+            let r = rt.eval(code, "t");
+            nebula_engine::script::report(rt, r);
+            rt.run_jobs();
+        })
+    };
+    run(&mut p, &mut js, "document.getElementById('i').setAttribute('lang', 'fr')");
+    assert_eq!(*log.borrow(), vec!["batch true 1 [object MutationRecord]", "attributes|i|lang||0|0||"]);
+    run(&mut p, &mut js, "root.append('x'); mo.disconnect(); root.title = 'u'");
+    assert_eq!(log.borrow().last().map(String::as_str), Some("shallow attributes:title"));
+    assert!(p.doc.record_mutations);
+    run(&mut p, &mut js, "shallow.disconnect()");
+    assert!(!p.doc.record_mutations);
+}

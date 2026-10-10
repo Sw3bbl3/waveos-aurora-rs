@@ -50,6 +50,28 @@ impl Element {
     }
 }
 
+/// A change to the tree, for MutationObserver (recorded only while
+/// [`Document::record_mutations`] is set).
+#[derive(Debug, Clone)]
+pub enum Mutation {
+    ChildList {
+        target: NodeId,
+        added: Vec<NodeId>,
+        removed: Vec<NodeId>,
+        previous: Option<NodeId>,
+        next: Option<NodeId>,
+    },
+    Attribute {
+        target: NodeId,
+        name: String,
+        old: Option<String>,
+    },
+    CharacterData {
+        target: NodeId,
+        old: String,
+    },
+}
+
 pub struct Document {
     pub nodes: Vec<Node>,
     /// Bumped by every change (the browser re-styles when it moves).
@@ -59,6 +81,9 @@ pub struct Document {
     pub values: alloc::collections::BTreeMap<NodeId, String>,
     /// Bounded software canvas surfaces; pixels are shared by script and paint.
     pub canvases: alloc::collections::BTreeMap<NodeId, CanvasBitmap>,
+    /// Whether changes are recorded in `mutations` (while observers exist).
+    pub record_mutations: bool,
+    pub mutations: Vec<Mutation>,
 }
 
 pub struct CanvasBitmap {
@@ -76,6 +101,8 @@ impl Default for Document {
             version: 0,
             values: alloc::collections::BTreeMap::new(),
             canvases: alloc::collections::BTreeMap::new(),
+            record_mutations: false,
+            mutations: Vec::new(),
         }
     }
 }
@@ -120,12 +147,30 @@ impl Document {
         false
     }
 
+    /// The siblings on either side of `n`.
+    fn neighbours(&self, n: NodeId) -> (Option<NodeId>, Option<NodeId>) {
+        let Some(p) = self.nodes[n].parent else { return (None, None) };
+        let siblings = &self.nodes[p].children;
+        let i = siblings.iter().position(|c| *c == n).unwrap_or(0);
+        (i.checked_sub(1).map(|j| siblings[j]), siblings.get(i + 1).copied())
+    }
+
     /// Takes a node out of its parent.
     pub fn detach(&mut self, n: NodeId) {
-        if let Some(p) = self.nodes[n].parent.take() {
-            self.nodes[p].children.retain(|c| *c != n);
-            self.version += 1;
+        let Some(p) = self.nodes[n].parent else { return };
+        if self.record_mutations {
+            let (previous, next) = self.neighbours(n);
+            self.mutations.push(Mutation::ChildList {
+                target: p,
+                added: Vec::new(),
+                removed: alloc::vec![n],
+                previous,
+                next,
+            });
         }
+        self.nodes[n].parent = None;
+        self.nodes[p].children.retain(|c| *c != n);
+        self.version += 1;
     }
 
     /// Inserts `child` into `parent` before `before` (or at the end). A
@@ -148,6 +193,16 @@ impl Document {
         self.nodes[parent].children.insert(at, child);
         self.nodes[child].parent = Some(parent);
         self.version += 1;
+        if self.record_mutations {
+            let (previous, next) = self.neighbours(child);
+            self.mutations.push(Mutation::ChildList {
+                target: parent,
+                added: alloc::vec![child],
+                removed: Vec::new(),
+                previous,
+                next,
+            });
+        }
         true
     }
 
@@ -155,12 +210,19 @@ impl Document {
         if self.tag(n) == "canvas" && matches!(name, "width" | "height") {
             self.canvases.remove(&n);
         }
+        let record = self.record_mutations;
         if let Some(e) = self.element_mut(n) {
-            match e.attrs.iter_mut().find(|(k, _)| k == name) {
-                Some(slot) => slot.1 = String::from(value),
-                None => e.attrs.push((String::from(name), String::from(value))),
-            }
+            let old = match e.attrs.iter_mut().find(|(k, _)| k == name) {
+                Some(slot) => Some(core::mem::replace(&mut slot.1, String::from(value))),
+                None => {
+                    e.attrs.push((String::from(name), String::from(value)));
+                    None
+                }
+            };
             self.version += 1;
+            if record {
+                self.mutations.push(Mutation::Attribute { target: n, name: String::from(name), old });
+            }
         }
     }
 
@@ -168,27 +230,43 @@ impl Document {
         if self.tag(n) == "canvas" && matches!(name, "width" | "height") {
             self.canvases.remove(&n);
         }
+        let record = self.record_mutations;
         if let Some(e) = self.element_mut(n) {
-            e.attrs.retain(|(k, _)| k != name);
+            let Some(i) = e.attrs.iter().position(|(k, _)| k == name) else { return };
+            let (_, old) = e.attrs.remove(i);
             self.version += 1;
+            if record {
+                self.mutations.push(Mutation::Attribute { target: n, name: String::from(name), old: Some(old) });
+            }
         }
     }
 
     /// Replaces a node's children with one text node (or none for "").
     pub fn set_text_content(&mut self, n: NodeId, text: &str) {
         if let NodeData::Text(t) | NodeData::Comment(t) = &mut self.nodes[n].data {
-            *t = String::from(text);
+            let old = core::mem::replace(t, String::from(text));
             self.version += 1;
+            if self.record_mutations {
+                self.mutations.push(Mutation::CharacterData { target: n, old });
+            }
             return;
         }
-        for c in core::mem::take(&mut self.nodes[n].children) {
+        let removed = core::mem::take(&mut self.nodes[n].children);
+        for &c in &removed {
             self.nodes[c].parent = None;
         }
+        let mut added = Vec::new();
         if !text.is_empty() {
             let t = self.create(NodeData::Text(String::from(text)));
-            self.insert(n, t, None);
+            self.nodes[n].children.push(t);
+            self.nodes[t].parent = Some(n);
+            added.push(t);
         }
         self.version += 1;
+        // One record for the whole replacement, as in browsers.
+        if self.record_mutations && !(removed.is_empty() && added.is_empty()) {
+            self.mutations.push(Mutation::ChildList { target: n, added, removed, previous: None, next: None });
+        }
     }
 
     /// A copy of a node (and its subtree, if `deep`), detached.

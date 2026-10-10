@@ -1,6 +1,7 @@
 // Web APIs written in JavaScript, run in every page's realm before its
-// scripts. Observers report once (asynchronously) and never again: enough
-// for lazy loading and feature checks, not live tracking.
+// scripts. MutationObserver is live; the intersection and resize observers
+// report once (asynchronously) and never again: enough for lazy loading and
+// feature checks, not live tracking.
 (function (global) {
   "use strict";
   const define = (name, value) =>
@@ -269,11 +270,38 @@
     }),
   });
 
+  // MutationObserver: options are validated here; the browser records
+  // changes and delivers them in a microtask.
+  const observe = __nebula_observe, unobserve = __nebula_disconnect, takeRecords = __nebula_take_records;
+  const observerCallbacks = new WeakMap();
   class MutationObserver {
-    constructor(callback) { this._callback = callback; }
-    observe() {}
-    disconnect() {}
-    takeRecords() { return []; }
+    constructor(callback) {
+      if (typeof callback !== "function") {
+        throw new TypeError("Failed to construct 'MutationObserver': parameter 1 is not of type 'MutationCallback'.");
+      }
+      observerCallbacks.set(this, callback);
+    }
+    observe(target, options = {}) {
+      if (!(target instanceof Node)) throw new TypeError("Failed to execute 'observe': parameter 1 is not of type 'Node'.");
+      let { childList = false, attributes, characterData, subtree = false,
+        attributeOldValue, characterDataOldValue, attributeFilter } = options;
+      if ((attributeOldValue !== undefined || attributeFilter !== undefined) && attributes === undefined) attributes = true;
+      if (characterDataOldValue !== undefined && characterData === undefined) characterData = true;
+      const fail = why => { throw new TypeError("Failed to execute 'observe' on 'MutationObserver': " + why); };
+      if (!childList && !attributes && !characterData) {
+        fail("The options object must set at least one of 'attributes', 'characterData', or 'childList' to true.");
+      }
+      if (attributeOldValue && !attributes) fail("'attributeOldValue' requires 'attributes'.");
+      if (attributeFilter !== undefined && !attributes) fail("'attributeFilter' requires 'attributes'.");
+      if (characterDataOldValue && !characterData) fail("'characterDataOldValue' requires 'characterData'.");
+      observe(this, observerCallbacks.get(this), target, {
+        childList: !!childList, attributes: !!attributes, characterData: !!characterData, subtree: !!subtree,
+        attributeOldValue: !!attributeOldValue, characterDataOldValue: !!characterDataOldValue,
+        attributeFilter: attributeFilter === undefined ? null : Array.from(attributeFilter, String),
+      });
+    }
+    disconnect() { unobserve(this); }
+    takeRecords() { return takeRecords(this); }
   }
 
   class IntersectionObserver {
