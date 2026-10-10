@@ -10,6 +10,7 @@ extern crate alloc;
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -21,6 +22,7 @@ use aurorakit::math::sin;
 use aurorakit::text::TextEdit;
 use aurorakit::theme;
 use aurorakit::{App, Env, KeyCode, KeyEvent};
+use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use corekit::sync::Mutex;
 use corekit::thread::JoinHandle;
@@ -33,6 +35,8 @@ use nebula_web::http::{self, Response};
 use nebula_web::Url;
 
 corekit::entry!(main);
+
+mod checks;
 
 const TAB_H: i32 = 38;
 const TOOLBAR_H: i32 = TAB_H + 48;
@@ -104,6 +108,71 @@ fn save_storage(url: &Url, m: &BTreeMap<String, String>) {
     let path = storage_path(url);
     if let Err(e) = corekit::fs::write(&path, raw.join("\u{1E}").as_bytes()) {
         corekit::io::log(&format!("[nebula] couldn't save {path}: {e}\n"));
+    }
+}
+
+/// A localStorage change: (key, old value, new value); no key means clear().
+type StorageChange = (Option<String>, Option<String>, Option<String>);
+
+/// localStorage shared by every tab: one copy per site, and a short log of
+/// changes so other tabs on the same site get `storage` events.
+#[derive(Default)]
+struct StorageHub {
+    sites: BTreeMap<String, BTreeMap<String, String>>,
+    /// (sequence, site, writing tab, page URL, changes).
+    log: VecDeque<(u64, String, u64, String, Vec<StorageChange>)>,
+    seq: u64,
+}
+
+type Hub = Rc<RefCell<StorageHub>>;
+
+impl StorageHub {
+    fn get(&mut self, url: &Url) -> BTreeMap<String, String> {
+        self.sites.entry(storage_path(url)).or_insert_with(|| load_storage(url)).clone()
+    }
+
+    /// A tab's scripts changed its site's storage to `new`.
+    fn write(&mut self, from: u64, url: &Url, new: BTreeMap<String, String>) {
+        let site = storage_path(url);
+        let old = self.sites.remove(&site).unwrap_or_else(|| load_storage(url));
+        let mut changes = Vec::new();
+        if new.is_empty() && !old.is_empty() {
+            changes.push((None, None, None));
+        } else {
+            for (k, v) in &old {
+                match new.get(k) {
+                    None => changes.push((Some(k.clone()), Some(v.clone()), None)),
+                    Some(n) if n != v => changes.push((Some(k.clone()), Some(v.clone()), Some(n.clone()))),
+                    _ => {}
+                }
+            }
+            for (k, n) in &new {
+                if !old.contains_key(k) {
+                    changes.push((Some(k.clone()), None, Some(n.clone())));
+                }
+            }
+        }
+        save_storage(url, &new);
+        self.sites.insert(site.clone(), new);
+        if !changes.is_empty() {
+            self.seq += 1;
+            self.log.push_back((self.seq, site, from, url.to_string(), changes));
+            if self.log.len() > 64 {
+                self.log.pop_front();
+            }
+        }
+    }
+
+    /// Changes other tabs made to `url`'s site after `seq`, and the newest sequence.
+    fn since(&self, seq: u64, url: &Url, me: u64) -> (u64, Vec<(String, Vec<StorageChange>)>) {
+        let site = storage_path(url);
+        let changes = self
+            .log
+            .iter()
+            .filter(|(s, at, from, _, _)| *s > seq && *at == site && *from != me)
+            .map(|(_, _, _, page, c)| (page.clone(), c.clone()))
+            .collect();
+        (self.seq, changes)
     }
 }
 
@@ -537,6 +606,15 @@ struct Nebula {
     scripts_loading: usize,
     /// Answers to scripts' network requests: (page generation, id, result).
     request_results: Arc<Mutex<Vec<(u64, u32, Result<nebula_engine::script::HttpResponse, String>)>>>,
+    /// This tab, for telling its storage changes from other tabs'.
+    id: u64,
+    storage: Hub,
+    /// The last storage change this tab has seen.
+    storage_seq: u64,
+    /// Not the selected tab: no layout, and timers at most once a second.
+    background: bool,
+    /// When a background tab last ran its timers (Unix ms).
+    timers_ran: f64,
 }
 
 /// Find in page: the query and its matches as (text item, byte range).
@@ -565,11 +643,25 @@ struct Browser {
     active: usize,
     closed: Vec<String>,
     retired: Vec<JoinHandle<()>>,
+    storage: Hub,
+    next_id: u64,
+    /// Until when (uptime ms) the tab strip says all eight tabs are open.
+    notice_until: u64,
 }
 
 impl Browser {
     fn new(start: &str) -> Self {
-        Self { tabs: alloc::vec![Nebula::new(start)], active: 0, closed: Vec::new(), retired: Vec::new() }
+        let storage = Hub::default();
+        let first = Nebula::new(start, 0, storage.clone());
+        Self {
+            tabs: alloc::vec![first],
+            active: 0,
+            closed: Vec::new(),
+            retired: Vec::new(),
+            storage,
+            next_id: 1,
+            notice_until: 0,
+        }
     }
 
     fn select(&mut self, index: usize) {
@@ -581,19 +673,30 @@ impl Browser {
         tab.styles = None;
         tab.hover = None;
         tab.press = None;
+        tab.background = true;
         self.active = index;
+        self.tabs[index].background = false;
     }
 
-    fn open(&mut self, url: &str) {
+    /// Opens `url` in a new tab, selected unless `background`. At the limit
+    /// it says so instead and returns false.
+    fn open(&mut self, url: &str, background: bool) -> bool {
         if self.tabs.len() >= MAX_TABS {
-            return;
+            self.notice_until = corekit::time::uptime_ms() + 3000;
+            return false;
         }
-        self.tabs.push(Nebula::new(url));
-        self.select(self.tabs.len() - 1);
-        if url == HOME {
-            self.tabs[self.active].editing = true;
-            self.tabs[self.active].address.set_text("");
+        let mut tab = Nebula::new(url, self.next_id, self.storage.clone());
+        self.next_id += 1;
+        tab.background = background;
+        self.tabs.push(tab);
+        if !background {
+            self.select(self.tabs.len() - 1);
+            if url == HOME {
+                self.tabs[self.active].editing = true;
+                self.tabs[self.active].address.set_text("");
+            }
         }
+        true
     }
 
     fn close_tab(&mut self, index: usize) {
@@ -617,12 +720,18 @@ impl Browser {
         self.retired.append(&mut tab.old_jobs);
         self.retired.append(&mut tab.workers);
         if self.tabs.is_empty() {
-            self.tabs.push(Nebula::new(HOME));
+            self.tabs.push(Nebula::new(HOME, self.next_id, self.storage.clone()));
+            self.next_id += 1;
         }
         if index < self.active {
             self.active -= 1;
         }
         self.active = self.active.min(self.tabs.len() - 1);
+        self.tabs[self.active].background = false;
+    }
+
+    fn notice(&self) -> bool {
+        corekit::time::uptime_ms() < self.notice_until
     }
 
     fn tab_width(&self, area: Rect) -> i32 {
@@ -677,7 +786,11 @@ impl App for Browser {
         let c = if self.tabs.len() < MAX_TABS { t.text } else { t.text_secondary };
         cv.line(r.x + 8, r.y + 14, r.x + 20, r.y + 14, 1, c);
         cv.line(r.x + 14, r.y + 8, r.x + 14, r.y + 20, 1, c);
-        if r.right() + 82 < area.right() {
+        if self.notice() {
+            let msg = "Eight tabs are already open";
+            let w = font.width(msg) as i32;
+            cv.text(area.right() - w - 12, area.y + 24, msg, font, t.text);
+        } else if r.right() + 82 < area.right() {
             cv.text(
                 area.right() - 88,
                 area.y + 24,
@@ -701,19 +814,13 @@ impl App for Browser {
             if ev.code == KeyCode::Char {
                 match ev.ch.map(|c| c.to_ascii_lowercase()) {
                     Some('t') => {
-                        if ev.mods.shift {
-                            if self.tabs.len() < MAX_TABS {
-                                if let Some(url) = self.closed.pop() {
-                                    self.open(&url);
-                                }
+                        if !ev.mods.shift {
+                            self.open(HOME, false);
+                        } else if let Some(url) = self.closed.last().cloned() {
+                            if self.open(&url, false) {
+                                self.closed.pop();
                             }
-                        } else {
-                            self.open(HOME);
                         }
-                        return true;
-                    }
-                    Some('w') => {
-                        self.close_tab(self.active);
                         return true;
                     }
                     Some(c @ '1'..='8') => {
@@ -731,7 +838,7 @@ impl App for Browser {
         self.tabs[self.active].key(ev, env)
     }
     fn click(&mut self, x: i32, y: i32, area: Rect, env: &mut Env) -> bool {
-        if y < TAB_H {
+        if y < area.y + TAB_H {
             for i in 0..self.tabs.len() {
                 let r = self.tab_rect(i, area);
                 if r.contains(x, y) {
@@ -744,7 +851,7 @@ impl App for Browser {
                 }
             }
             if self.new_rect(area).contains(x, y) {
-                self.open(HOME);
+                self.open(HOME, false);
             }
             return true;
         }
@@ -755,7 +862,11 @@ impl App for Browser {
                 .and_then(|(px, py)| tab.layout.as_ref()?.link_at(px, py))
                 .and_then(|n| tab.href(n));
             if let Some(url) = target {
-                self.open(&url);
+                // Ctrl-click opens behind (Shift: in front); with no room
+                // left, the link opens here.
+                if !self.open(&url, !env.mods.shift) {
+                    self.tabs[self.active].go(&url, true);
+                }
                 return true;
             }
         }
@@ -776,28 +887,35 @@ impl App for Browser {
         }
     }
     fn tick(&mut self, env: &mut Env) -> bool {
-        let mut dirty = false;
         reap(&mut self.retired);
-        for tab in &mut self.tabs {
-            reap(&mut tab.old_jobs);
-            reap(&mut tab.workers);
-            if let Some((_, handle)) = tab.job.as_mut() {
-                if handle.as_ref().is_some_and(|h| h.is_finished()) {
-                    handle.take().unwrap().join();
-                    dirty = true;
-                }
+        let showing = self.notice_until != 0;
+        if showing && !self.notice() {
+            self.notice_until = 0;
+        }
+        let mut dirty = showing && self.notice_until == 0;
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            if i == self.active {
+                dirty |= tab.tick(env);
+            } else {
+                // Background tabs only repaint the tab strip.
+                let before = (tab.title(), tab.loading());
+                tab.tick(env);
+                dirty |= (tab.title(), tab.loading()) != before;
             }
         }
-        // Background tabs retain documents/forms but never run script timers or layout.
-        self.tabs[self.active].tick(env) | dirty
+        dirty
     }
     fn tick_interval(&self) -> u64 {
-        self.tabs[self.active].tick_interval()
+        let mut ms = self.tabs.iter().map(Nebula::tick_interval).min().unwrap_or(1000);
+        if self.notice_until != 0 {
+            ms = ms.min(self.notice_until.saturating_sub(corekit::time::uptime_ms()).max(16));
+        }
+        ms
     }
 }
 
 impl Nebula {
-    fn new(start: &str) -> Nebula {
+    fn new(start: &str, id: u64, storage: Hub) -> Nebula {
         let mut s = Nebula {
             address: TextEdit::new("", false),
             editing: false,
@@ -831,6 +949,11 @@ impl Nebula {
             script_loads: Arc::new(Mutex::new(Vec::new())),
             scripts_loading: 0,
             request_results: Arc::new(Mutex::new(Vec::new())),
+            id,
+            storage,
+            storage_seq: 0,
+            background: false,
+            timers_ran: 0.0,
         };
         s.go(start, true);
         s
@@ -982,7 +1105,9 @@ impl Nebula {
         if javascript_enabled() && (!scripts.is_empty() || has_handlers) {
             let (w, h) = ((self.view.w * 100 / self.zoom).max(200), (self.view.h * 100 / self.zoom).max(200));
             let url_s = url.to_string();
-            let mut js = Scripts::new(alloc::boxed::Box::new(PageHost), &url_s, (w, h), load_storage(&url));
+            let stored = self.storage.borrow_mut().get(&url);
+            self.storage_seq = self.storage.borrow().seq;
+            let mut js = Scripts::new(alloc::boxed::Box::new(PageHost), &url_s, (w, h), stored);
             js.set_cookies(alloc::boxed::Box::new(BrowserCookies));
             for (name, code) in &scripts {
                 page.run_script(&mut js, code, name);
@@ -1009,8 +1134,11 @@ impl Nebula {
             }
         }
         self.spawn_workers();
-        if let Some(frag) = self.fragment.take() {
-            self.scroll_to_fragment(&frag);
+        // A background tab scrolls to its fragment once it's shown and laid out.
+        if !self.background {
+            if let Some(frag) = self.fragment.take() {
+                self.scroll_to_fragment(&frag);
+            }
         }
         if let Some((0, target)) = refresh {
             if !target.is_empty() {
@@ -1092,7 +1220,7 @@ impl Nebula {
         self.js_wakeup = js.next_wakeup(corekit::time::unix_ms());
         if let Some(m) = js.take_storage() {
             if let Some(u) = &self.url {
-                save_storage(u, &m);
+                self.storage.borrow_mut().write(self.id, u, m);
             }
         }
         if let Some(target) = js.take_navigation() {
@@ -1121,6 +1249,10 @@ impl Nebula {
     }
 
     fn relayout(&mut self) {
+        // Background tabs lay out when they're selected.
+        if self.background {
+            return;
+        }
         let Some(page) = &self.page else { return };
         if page.doc.version != self.laid_version {
             // The tree changed: the cascade must run again.
@@ -1367,20 +1499,29 @@ impl Nebula {
 
     // ------------------------------------------------------------ geometry
 
+    /// The toolbar row's top-left corner (the view sits right below it).
+    fn bar(&self) -> (i32, i32) {
+        (self.view.x, self.view.y - TOOLBAR_H + TAB_H)
+    }
     fn back_rect(&self) -> Rect {
-        Rect::new(10, TAB_H + 10, 28, 28)
+        let (x, y) = self.bar();
+        Rect::new(x + 10, y + 10, 28, 28)
     }
     fn forward_rect(&self) -> Rect {
-        Rect::new(42, TAB_H + 10, 28, 28)
+        let (x, y) = self.bar();
+        Rect::new(x + 42, y + 10, 28, 28)
     }
     fn reload_rect(&self) -> Rect {
-        Rect::new(74, TAB_H + 10, 28, 28)
+        let (x, y) = self.bar();
+        Rect::new(x + 74, y + 10, 28, 28)
     }
     fn home_rect(&self) -> Rect {
-        Rect::new(106, TAB_H + 10, 28, 28)
+        let (x, y) = self.bar();
+        Rect::new(x + 106, y + 10, 28, 28)
     }
     fn address_rect(&self, area: Rect) -> Rect {
-        Rect::new(146, TAB_H + 8, (area.w - 158).max(40), 32)
+        let (x, y) = self.bar();
+        Rect::new(x + 146, y + 8, (area.w - 158).max(40), 32)
     }
 
     /// Page coordinates of a window point in the content area.
@@ -1742,15 +1883,6 @@ impl Nebula {
 
 impl App for Nebula {
     fn title(&self) -> String {
-        if let Some((job, None)) = &self.job {
-            if let Some(result) = job.result.lock().as_ref() {
-                return match result {
-                    Ok(loaded) if !loaded.page.title.is_empty() => loaded.page.title.clone(),
-                    Ok(_) => String::from("Ready"),
-                    Err(_) => String::from("Can't open the page"),
-                };
-            }
-        }
         match self.page.as_ref().map(|p| p.title.as_str()) {
             Some(t) if !t.is_empty() => String::from(t),
             _ if self.loading() => String::from("Loading…"),
@@ -1769,6 +1901,11 @@ impl App for Nebula {
             && (self.layout.is_none() || self.laid_out_width != self.view.w || old_height != self.view.h)
         {
             self.relayout();
+        }
+        if !self.loading() && self.layout.is_some() {
+            if let Some(frag) = self.fragment.take() {
+                self.scroll_to_fragment(&frag);
+            }
         }
         self.paint_page(cv);
         self.paint_toolbar(cv, area, env);
@@ -2109,10 +2246,27 @@ impl App for Nebula {
                 dirty = true;
             }
         }
+        // localStorage changes from other tabs on this site.
+        if let Some(url) = self.url.clone() {
+            let (seq, changes) = self.storage.borrow().since(self.storage_seq, &url, self.id);
+            self.storage_seq = seq;
+            if !changes.is_empty() {
+                let contents = self.storage.borrow_mut().get(&url);
+                if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+                    for (from, c) in changes {
+                        page.storage_event(js, contents.clone(), &c, &from);
+                    }
+                    self.after_scripts();
+                    dirty = true;
+                }
+            }
+        }
         // Page timers and animation frames.
         if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
             let now = corekit::time::unix_ms();
-            if self.js_wakeup.is_some_and(|w| w <= now) {
+            let throttled = self.background && now - self.timers_ran < 1000.0;
+            if self.js_wakeup.is_some_and(|w| w <= now) && !throttled {
+                self.timers_ran = now;
                 page.run_timers(js, now);
                 self.after_scripts();
                 dirty = true;
@@ -2164,6 +2318,16 @@ impl App for Nebula {
 
     fn tick_interval(&self) -> u64 {
         let busy = self.loading() || self.relayout_at.is_some() || self.scripts_loading > 0;
+        if self.background {
+            return if busy || !self.workers.is_empty() {
+                250
+            } else if self.js_wakeup.is_some() {
+                1000
+            } else {
+                // Storage events from other tabs.
+                2000
+            };
+        }
         let base = if busy || !self.workers.is_empty() { 50 } else { 1000 };
         match self.js_wakeup {
             // Wake for the next timer (16 ms at the most often, for animations).
@@ -2262,10 +2426,13 @@ h2 { font-size: 13px; color: var(--muted); margin: 0 0 14px }
 <a class="card" href="https://www.rust-lang.org/"><b>Rust</b><span>Build something new</span></a>
 <a class="card" href="https://github.com/Sw3bbl3/waveos-aurora-rs"><b>WaveOS Aurora</b><span>Explore your operating system</span></a>
 </div><div class="tools"><a href="file:///System/Library/Nebula/pulsar-demo.html">Pulsar playground</a><a href="file:///System/Library/Nebula/css-demo.html">Layout gallery</a></div>
-<p class="foot">Ctrl+T New tab &nbsp; / &nbsp; Ctrl+Tab Switch tabs &nbsp; / &nbsp; Ctrl+Shift+T Reopen a closed page<br>Background tabs pause while you explore. Your place and typed text stay with each tab.</p>
+<p class="foot">Ctrl+T New tab &nbsp; / &nbsp; Ctrl+Tab Switch tabs &nbsp; / &nbsp; Ctrl+Shift+T Reopen a closed page<br>Ctrl-click a link to open it behind. Background tabs keep loading, with their timers slowed to once a second.</p>
 </main></body></html>"#;
 
 fn main(args: corekit::Args) -> i32 {
+    if args.get(1).is_some_and(|s| s == "--self-check") {
+        return checks::self_check();
+    }
     let start = match args.get(1) {
         Some(a) if a.starts_with('/') => format!("file://{a}"),
         Some(a) => a.clone(),

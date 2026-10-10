@@ -298,6 +298,23 @@ impl Page {
         self.with_js(js, |rt| script::fire_key(rt, node, kind, key, code, ctrl, shift, alt))
     }
 
+    /// localStorage changed in another tab of the same site: `contents` is
+    /// the new storage, `changes` (key, old value, new value) become
+    /// `storage` events. `url` is the page that made the change.
+    pub fn storage_event(
+        &mut self,
+        js: &mut Scripts,
+        contents: BTreeMap<String, String>,
+        changes: &[(Option<String>, Option<String>, Option<String>)],
+        url: &str,
+    ) {
+        self.with_js(js, |rt| {
+            script::fire_storage(rt, contents, changes, url);
+            rt.run_jobs();
+            rt.report_unhandled();
+        });
+    }
+
     /// Runs due timers and animation frames. Returns whether any ran.
     pub fn run_timers(&mut self, js: &mut Scripts, now: f64) -> bool {
         self.with_js(js, |rt| {

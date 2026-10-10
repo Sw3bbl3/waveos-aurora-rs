@@ -241,10 +241,17 @@ fn node_of(rt: &Realm, v: &Value) -> Option<NodeId> {
     }
 }
 
-fn this_node(rt: &mut Realm, c: &Call) -> Result<NodeId, Value> {
-    if c.this == Value::Object(rt.global) {
+/// `this` for EventTarget methods and `on…` handlers, which the window has
+/// too. Bare calls (`addEventListener(…)`) have an undefined `this`: the window.
+fn this_target(rt: &mut Realm, c: &Call) -> Result<NodeId, Value> {
+    if c.this == Value::Object(rt.global) || matches!(c.this, Value::Undefined | Value::Null) {
         return Ok(WINDOW);
     }
+    node_of(rt, &c.this).ok_or_else(|| rt.type_error("Illegal invocation"))
+}
+
+/// `this` for Node and Element members: never the window.
+fn this_node(rt: &mut Realm, c: &Call) -> Result<NodeId, Value> {
     node_of(rt, &c.this).ok_or_else(|| rt.type_error("Illegal invocation"))
 }
 
@@ -310,12 +317,9 @@ fn syntax_error(rt: &mut Realm, sel: &str) -> Value {
 fn query_selector(rt: &mut Realm, c: &Call) -> JsResult {
     let n = this_node(rt, c)?;
     let sel = arg_str(rt, c, 0)?;
-    with_dom(rt, |rt, dom| {
-        let root = if n == WINDOW { Document::ROOT } else { n };
-        match select(&dom.doc, root, &sel, true) {
-            Some(v) => Ok(wrap_opt(rt, dom, v.first().copied())),
-            None => Err(syntax_error(rt, &sel)),
-        }
+    with_dom(rt, |rt, dom| match select(&dom.doc, n, &sel, true) {
+        Some(v) => Ok(wrap_opt(rt, dom, v.first().copied())),
+        None => Err(syntax_error(rt, &sel)),
     })
 }
 
@@ -1620,7 +1624,7 @@ fn stop_immediate(rt: &mut Realm, c: &Call) -> JsResult {
 }
 
 fn add_event_listener(rt: &mut Realm, c: &Call) -> JsResult {
-    let n = this_node(rt, c)?;
+    let n = this_target(rt, c)?;
     let kind = arg_str(rt, c, 0)?;
     let f = c.arg(1);
     if f.is_nullish() {
@@ -1643,7 +1647,7 @@ fn add_event_listener(rt: &mut Realm, c: &Call) -> JsResult {
 }
 
 fn remove_event_listener(rt: &mut Realm, c: &Call) -> JsResult {
-    let n = this_node(rt, c)?;
+    let n = this_target(rt, c)?;
     let kind = arg_str(rt, c, 0)?;
     let f = c.arg(1);
     let capture = match c.arg(2) {
@@ -1657,7 +1661,7 @@ fn remove_event_listener(rt: &mut Realm, c: &Call) -> JsResult {
 }
 
 fn dispatch_event(rt: &mut Realm, c: &Call) -> JsResult {
-    let n = this_node(rt, c)?;
+    let n = this_target(rt, c)?;
     let ev = c.arg(0);
     if !matches!(ev, Value::Object(_)) {
         return Err(rt.type_error("parameter 1 is not of type 'Event'"));
@@ -1668,7 +1672,7 @@ fn dispatch_event(rt: &mut Realm, c: &Call) -> JsResult {
 
 /// `el.onclick` and friends (event type in slot 0).
 fn handler_get(rt: &mut Realm, c: &Call) -> JsResult {
-    let n = this_node(rt, c)?;
+    let n = this_target(rt, c)?;
     let kind = rt.native_slots(c.callee)[0].clone();
     let kind = rt.to_rust_string(&kind)?;
     with_dom(rt, |_, dom| {
@@ -1682,7 +1686,7 @@ fn handler_get(rt: &mut Realm, c: &Call) -> JsResult {
 }
 
 fn handler_set(rt: &mut Realm, c: &Call) -> JsResult {
-    let n = this_node(rt, c)?;
+    let n = this_target(rt, c)?;
     let kind = rt.native_slots(c.callee)[0].clone();
     let kind = rt.to_rust_string(&kind)?;
     let f = c.arg(0);
@@ -1730,6 +1734,7 @@ const HANDLERS: &[&str] = &[
     "transitionend",
     "hashchange",
     "popstate",
+    "storage",
     "beforeunload",
     "unload",
     "DOMContentLoaded",
@@ -3161,6 +3166,32 @@ pub fn fire(rt: &mut Realm, target: NodeId, kind: &str, bubbles: bool, cancelabl
 }
 
 pub const WINDOW_TARGET: NodeId = WINDOW;
+
+/// Another tab of the same site changed localStorage: adopt its contents
+/// (without marking them for saving) and fire `storage` at the window for
+/// each change. A `None` key means `clear()`.
+pub fn fire_storage(
+    rt: &mut Realm,
+    contents: BTreeMap<String, String>,
+    changes: &[(Option<String>, Option<String>, Option<String>)],
+    url: &str,
+) {
+    with_dom(rt, |_, dom| dom.storage = contents);
+    let area = rt.global_value("localStorage").unwrap_or(Value::Null);
+    let opt = |s: &Option<String>| s.as_deref().map_or(Value::Null, Value::str);
+    for (key, old, new) in changes {
+        let Ok(ev) = make_event(rt, "storage", false, false) else { return };
+        let Value::Object(o) = ev else { return };
+        rt.define(o, "key", opt(key), DEFAULT);
+        rt.define(o, "oldValue", opt(old), DEFAULT);
+        rt.define(o, "newValue", opt(new), DEFAULT);
+        rt.define(o, "url", Value::str(url), DEFAULT);
+        rt.define(o, "storageArea", area.clone(), DEFAULT);
+        if let Err(e) = dispatch(rt, WINDOW, ev) {
+            report(rt, Err(e));
+        }
+    }
+}
 
 /// A keyboard event at the focused element (or the body).
 pub fn fire_key(

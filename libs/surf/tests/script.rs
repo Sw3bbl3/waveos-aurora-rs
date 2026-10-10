@@ -525,3 +525,50 @@ fn document_cookie_follows_the_rules() {
     p.run_script(&mut js, "console.log(document.cookie)", "later");
     assert_eq!(log.borrow()[2], "b=2");
 }
+
+#[test]
+fn storage_events_from_other_tabs() {
+    let (mut p, mut js, log, _) = page(
+        r#"<!doctype html><body><script>
+        addEventListener("storage", e => console.log(e.type, e.key, e.oldValue, e.newValue, e.url, e.storageArea === localStorage));
+        onstorage = e => console.log("prop", localStorage.getItem("theme"));
+        </script></body>"#,
+    );
+    let mut contents = BTreeMap::new();
+    contents.insert("theme".to_string(), "dark".to_string());
+    let changes = [(Some("theme".to_string()), None, Some("dark".to_string()))];
+    p.storage_event(&mut js, contents, &changes, "https://example.com/other.html");
+    p.storage_event(&mut js, BTreeMap::new(), &[(None, None, None)], "https://example.com/other.html");
+    assert_eq!(
+        *log.borrow(),
+        vec![
+            "storage theme null dark https://example.com/other.html true",
+            "prop dark",
+            "storage null null null https://example.com/other.html true",
+            "prop null",
+        ]
+    );
+    // Adopted, not written back: this tab doesn't save another tab's change.
+    assert!(js.take_storage().is_none());
+}
+
+#[test]
+fn node_members_called_on_the_window_throw_instead_of_panicking() {
+    let (_p, _js, log, _) = page(
+        r#"<!doctype html><body><p id=a>x</p><script>
+        const fns = ["appendChild","removeChild","insertBefore","replaceChild","cloneNode","contains","getAttribute","setAttribute","removeAttribute","hasAttribute","querySelector","querySelectorAll","getElementsByTagName","getBoundingClientRect","closest","matches","remove","before","after","append","prepend","replaceWith","focus","blur","click","dispatchEvent","getElementsByClassName","insertAdjacentHTML","toggleAttribute","attachShadow","hasChildNodes","normalize","isEqualNode","compareDocumentPosition"];
+        const el = document.getElementById("a");
+        for (const n of fns) { const f = el[n]; if (typeof f !== "function") continue;
+          try { f.call(undefined, el, el); } catch (e) {}
+          try { f.call(window, el, el); } catch (e) {} }
+        const props = ["textContent","innerHTML","outerHTML","id","className","parentNode","firstChild","childNodes","children","nodeName","nodeType","tagName","style","classList","dataset","innerText","offsetWidth","value"];
+        for (const k of props) { for (const proto of [Node.prototype, Element.prototype, HTMLElement.prototype]) {
+          const d = Object.getOwnPropertyDescriptor(proto, k); if (!d) continue;
+          try { d.get && d.get.call(window); } catch (e) {}
+          try { d.set && d.set.call(window, "x"); } catch (e) {}
+          try { d.get && d.get.call(undefined); } catch (e) {} } }
+        console.log("survived");
+        </script></body>"#,
+    );
+    assert_eq!(log.borrow().last().map(String::as_str), Some("survived"));
+}
