@@ -520,6 +520,55 @@ fn font_for(f: FontSpec) -> Font {
     font::get(face, f.size)
 }
 
+/// Canvas text, with the system fonts.
+struct CanvasFonts;
+
+fn canvas_font(px: f32, bold: bool, mono: bool) -> Font {
+    let face = if mono {
+        Face::Mono
+    } else if bold {
+        Face::SemiBold
+    } else {
+        Face::Regular
+    };
+    font::get(face, (px + 0.5).clamp(4.0, 512.0) as u16)
+}
+
+impl nebula_engine::script::TextHost for CanvasFonts {
+    fn render(
+        &mut self,
+        text: &str,
+        px: f32,
+        bold: bool,
+        _italic: bool,
+        mono: bool,
+    ) -> nebula_engine::script::TextMask {
+        let f = canvas_font(px, bold, mono);
+        let advance = f.width64(text) as f32 / 64.0;
+        let (ascent, descent) = (f.ascent as i32, -(f.descent as i32));
+        let (w, h) = (advance as i32 + 2, (ascent + descent).max(1));
+        if w <= 0 || w as i64 * h as i64 > 4 << 20 {
+            return nebula_engine::script::TextMask::default();
+        }
+        // White text on transparent black: the alpha channel is the coverage.
+        let mut buf = alloc::vec![0u32; (w * h) as usize];
+        Canvas::new(&mut buf, w, h).text(0, ascent, text, f, 0xFFFF_FFFF);
+        nebula_engine::script::TextMask {
+            width: w as u32,
+            height: h as u32,
+            advance,
+            ascent: ascent as f32,
+            descent: descent as f32,
+            data: buf.iter().map(|p| (p >> 24) as u8).collect(),
+        }
+    }
+
+    fn measure(&mut self, text: &str, px: f32, bold: bool, mono: bool) -> (f32, f32, f32) {
+        let f = canvas_font(px, bold, mono);
+        (f.width64(text) as f32 / 64.0, f.ascent as f32, -(f.descent as f32))
+    }
+}
+
 struct Fonts<'a> {
     images: &'a BTreeMap<String, Option<Image>>,
     base: Option<Url>,
@@ -606,6 +655,10 @@ struct Nebula {
     scripts_loading: usize,
     /// Answers to scripts' network requests: (page generation, id, result).
     request_results: Arc<Mutex<Vec<(u64, u32, Result<nebula_engine::script::HttpResponse, String>)>>>,
+    /// Image URLs this page has asked for (decoded, failed or queued).
+    requested: alloc::collections::BTreeSet<String>,
+    /// Whether the page's canvases have been given the decoded images.
+    canvas_images: bool,
     /// This tab, for telling its storage changes from other tabs'.
     id: u64,
     storage: Hub,
@@ -949,6 +1002,8 @@ impl Nebula {
             script_loads: Arc::new(Mutex::new(Vec::new())),
             scripts_loading: 0,
             request_results: Arc::new(Mutex::new(Vec::new())),
+            requested: alloc::collections::BTreeSet::new(),
+            canvas_images: false,
             id,
             storage,
             storage_seq: 0,
@@ -1093,9 +1148,8 @@ impl Nebula {
         if let Some(h) = self.history.get_mut(self.pos) {
             *h = url_string;
         }
-        let base = document_base(&page, &url);
-        let sources: Vec<String> =
-            page.images().iter().filter_map(|s| resolve(Some(&base), s)).take(MAX_IMAGES).collect();
+        self.requested.clear();
+        self.canvas_images = false;
         let refresh = page.refresh();
         // Scripts run before the first layout, as the page finishes loading.
         let has_handlers = page.doc.nodes.iter().any(|n| match &n.data {
@@ -1109,6 +1163,7 @@ impl Nebula {
             self.storage_seq = self.storage.borrow().seq;
             let mut js = Scripts::new(alloc::boxed::Box::new(PageHost), &url_s, (w, h), stored);
             js.set_cookies(alloc::boxed::Box::new(BrowserCookies));
+            js.set_text_host(alloc::boxed::Box::new(CanvasFonts));
             for (name, code) in &scripts {
                 page.run_script(&mut js, code, name);
             }
@@ -1123,17 +1178,7 @@ impl Nebula {
         if self.layout.is_none() {
             self.relayout();
         }
-        // Images.
-        let g = self.generation.load(Ordering::Relaxed);
-        {
-            let mut q = self.queue.lock();
-            for s in sources {
-                if !self.images.contains_key(&s) {
-                    q.queue.push_back((g, s));
-                }
-            }
-        }
-        self.spawn_workers();
+        self.queue_images();
         // A background tab scrolls to its fragment once it's shown and laid out.
         if !self.background {
             if let Some(frag) = self.fragment.take() {
@@ -1146,6 +1191,30 @@ impl Nebula {
                     self.go(&u.to_string(), false);
                 }
             }
+        }
+    }
+
+    /// Queues the page's images not asked for yet: at first, and again when
+    /// scripts add images (or set the `src` of `new Image()`).
+    fn queue_images(&mut self) {
+        let (Some(page), Some(url)) = (&self.page, &self.url) else { return };
+        let base = document_base(page, url);
+        let g = self.generation.load(Ordering::Relaxed);
+        let mut added = false;
+        {
+            let mut q = self.queue.lock();
+            for s in page.images().iter().filter_map(|s| resolve(Some(&base), s)) {
+                if self.requested.len() >= MAX_IMAGES {
+                    break;
+                }
+                if self.requested.insert(s.clone()) && !self.images.contains_key(&s) {
+                    q.queue.push_back((g, s));
+                    added = true;
+                }
+            }
+        }
+        if added {
+            self.spawn_workers();
         }
     }
 
@@ -1240,7 +1309,19 @@ impl Nebula {
             }
         }
         if page.doc.version != self.laid_version {
+            self.queue_images();
             self.relayout();
+        }
+        // A page that starts drawing gets the images decoded so far.
+        if !self.canvas_images && self.js.as_mut().is_some_and(|js| js.uses_canvas()) {
+            self.canvas_images = true;
+            if let Some(js) = self.js.as_mut() {
+                for (u, img) in &self.images {
+                    if let Some(img) = img {
+                        js.set_image(u, img.width, img.height, &img.pixels);
+                    }
+                }
+            }
         }
         if let Some(y) = scroll_to {
             self.scroll = y;
@@ -2296,11 +2377,26 @@ impl App for Nebula {
         if !finished.is_empty() {
             let g = self.generation.load(Ordering::Relaxed);
             let mut any = false;
+            let page_url = self.url.as_ref().map(|u| u.to_string()).unwrap_or_default();
+            let mut scripts_ran = false;
             for (gen, url, img) in finished {
                 if gen == g {
                     any |= img.is_some();
+                    // Scripts hear about it: load or error, and canvases may draw it.
+                    if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+                        let size = img.as_ref().map(|i| (i.width, i.height));
+                        page.image_loaded(js, &page_url, &url, size);
+                        if let (true, Some(i)) = (self.canvas_images, &img) {
+                            js.set_image(&url, i.width, i.height, &i.pixels);
+                        }
+                        scripts_ran = true;
+                    }
                     self.images.insert(url, img);
                 }
+            }
+            if scripts_ran {
+                self.after_scripts();
+                dirty = true;
             }
             if any && self.relayout_at.is_none() {
                 self.relayout_at = Some(env.now_ms + 200);
@@ -2425,7 +2521,7 @@ h2 { font-size: 13px; color: var(--muted); margin: 0 0 14px }
 <a class="card" href="https://lite.cnn.com/"><b>CNN Lite</b><span>Headlines at a glance</span></a>
 <a class="card" href="https://www.rust-lang.org/"><b>Rust</b><span>Build something new</span></a>
 <a class="card" href="https://github.com/Sw3bbl3/waveos-aurora-rs"><b>WaveOS Aurora</b><span>Explore your operating system</span></a>
-</div><div class="tools"><a href="file:///System/Library/Nebula/pulsar-demo.html">Pulsar playground</a><a href="file:///System/Library/Nebula/css-demo.html">Layout gallery</a></div>
+</div><div class="tools"><a href="file:///System/Library/Nebula/pulsar-demo.html">Pulsar playground</a><a href="file:///System/Library/Nebula/css-demo.html">Layout gallery</a><a href="file:///System/Library/Nebula/canvas-demo.html">Canvas gallery</a><a href="file:///System/Library/Nebula/browser-apis.html">Browser checks</a></div>
 <p class="foot">Ctrl+T New tab &nbsp; / &nbsp; Ctrl+Tab Switch tabs &nbsp; / &nbsp; Ctrl+Shift+T Reopen a closed page<br>Ctrl-click a link to open it behind. Background tabs keep loading, with their timers slowed to once a second.</p>
 </main></body></html>"#;
 

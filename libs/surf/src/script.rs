@@ -20,6 +20,7 @@ use nebula_web::cookie::{Jar, Source};
 use nebula_web::Url;
 
 mod canvas;
+pub use canvas::{NoFonts, TextHost, TextMask, IMAGE_BYTES};
 mod computed;
 
 /// Host objects are tagged with what they wrap.
@@ -86,6 +87,7 @@ struct Protos {
     storage: Option<ObjRef>,
     mutation_record: Option<ObjRef>,
     computed_style: Option<ObjRef>,
+    gradient: Option<ObjRef>,
 }
 
 /// What a MutationObserver watches on one node (already validated by the
@@ -135,6 +137,15 @@ pub struct Dom {
     pub storage_dirty: bool,
     session: BTreeMap<String, String>,
     pub cookies: Box<dyn CookieHost>,
+    /// Glyphs for canvas text.
+    pub text: Box<dyn TextHost>,
+    /// Natural sizes of `<img>` elements that finished (None: failed).
+    pub image_sizes: BTreeMap<NodeId, Option<(u32, u32)>>,
+    /// Decoded images by URL, for drawImage: (width, height, pixels).
+    pub images: BTreeMap<String, (u32, u32, Arc<Vec<u32>>)>,
+    /// Canvas gradients: their objects, and what they paint.
+    gradients: Vec<ObjRef>,
+    gradients_data: Vec<crate::canvas2d::Gradient>,
     pub focus: Option<NodeId>,
     pub alerts: Vec<String>,
     started: f64,
@@ -171,6 +182,7 @@ impl Embedder for Dom {
     fn trace(&self, out: &mut Vec<ObjRef>) {
         out.extend(self.wrappers.values().copied());
         out.extend(self.canvas_contexts.values().copied());
+        out.extend(self.gradients.iter().copied());
         let mut v = |x: &Value| {
             if let Value::Object(o) = x {
                 out.push(*o);
@@ -221,6 +233,7 @@ impl Embedder for Dom {
             p.storage,
             p.mutation_record,
             p.computed_style,
+            p.gradient,
         ]
         .into_iter()
         .flatten()
@@ -2045,7 +2058,14 @@ fn dimension_get(rt: &mut Realm, c: &Call) -> JsResult {
         } else {
             0
         };
-        let value = e.attr(&name).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(fallback);
+        let natural = dom.image_sizes.get(&n).copied().flatten().map(|(w, h)| if name == "width" { w } else { h });
+        // An image without the attribute: its laid-out size, else its natural one.
+        let laid_out = dom.geometry.get(&n).map(|g| if name == "width" { g.2 } else { g.3 } as u32);
+        let value = e
+            .attr(&name)
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .or(if e.tag == "img" { laid_out.or(natural) } else { None })
+            .unwrap_or(fallback);
         Ok(Value::Number(value as f64))
     })
 }
@@ -2061,6 +2081,24 @@ fn dimension_set(rt: &mut Realm, c: &Call) -> JsResult {
         }
         dom.doc.set_attr(n, &name, &value);
         Ok(Value::Undefined)
+    })
+}
+
+fn natural_size(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    let height = rt.native_slots(c.callee)[0].truthy();
+    with_dom(rt, |_, dom| {
+        let size = dom.image_sizes.get(&n).copied().flatten().unwrap_or((0, 0));
+        Ok(Value::Number(if height { size.1 } else { size.0 } as f64))
+    })
+}
+
+/// Done loading (or failed), or has nothing to load.
+fn image_complete(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    with_dom(rt, |_, dom| {
+        let no_source = dom.doc.element(n).and_then(crate::layout::image_source).is_none();
+        Ok(Value::Bool(no_source || dom.image_sizes.contains_key(&n)))
     })
 }
 
@@ -2644,6 +2682,11 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
         storage_dirty: false,
         session: BTreeMap::new(),
         cookies: Box::new(nebula_web::cookie::Jar::new()),
+        text: Box::new(NoFonts),
+        images: BTreeMap::new(),
+        image_sizes: BTreeMap::new(),
+        gradients: Vec::new(),
+        gradients_data: Vec::new(),
         focus: None,
         alerts: Vec::new(),
         started,
@@ -2888,7 +2931,11 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     for name in ["width", "height"] {
         accessor_with(rt, image, name, Value::str(name), dimension_get, Some(dimension_set));
     }
-    let (canvas_element, canvas_context) = canvas::install(rt, html_element);
+    for (name, slot) in [("naturalWidth", 0.0), ("naturalHeight", 1.0)] {
+        accessor_with(rt, image, name, Value::Number(slot), natural_size, None);
+    }
+    accessor(rt, image, "complete", image_complete, None);
+    let (canvas_element, canvas_context, gradient) = canvas::install(rt, html_element);
     let fragment = rt.new_object_with(Some(node));
     interface(rt, "DocumentFragment", fragment, None);
     parent_members(rt, fragment);
@@ -3032,6 +3079,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
             image: Some(image),
             canvas: Some(canvas_element),
             canvas_context: Some(canvas_context),
+            gradient: Some(gradient),
             text: Some(text),
             comment: Some(comment),
             document: Some(document),

@@ -686,6 +686,8 @@ dependencies = [
 name = "nebula-engine"
 version = "0.7.0"
 dependencies = [
+ "libm",
+ "lumen",
  "nebula-script",
  "nebula-web",
 ]

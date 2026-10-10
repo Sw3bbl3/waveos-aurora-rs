@@ -196,7 +196,7 @@ fn bundled_browser_api_checks_pass() {
     let html = include_str!("../../../assets/nebula/browser-apis.html");
     let (_, _, log, _) = page(html);
     assert_eq!(log.borrow().len(), 1, "{:?}", log.borrow());
-    assert_eq!(log.borrow()[0].matches("PASS -").count(), 4, "{:?}", log.borrow());
+    assert_eq!(log.borrow()[0].matches("PASS -").count(), 8, "{:?}", log.borrow());
     assert!(!log.borrow()[0].contains("FAIL"));
 }
 
@@ -788,4 +788,137 @@ fn computed_style_follows_stylesheets_and_changes() {
         ]
     );
     let _ = p;
+}
+
+/// Glyphs as solid boxes: each character is a `px/2` wide block.
+struct BoxFont;
+
+impl nebula_engine::script::TextHost for BoxFont {
+    fn render(&mut self, text: &str, px: f32, _: bool, _: bool, _: bool) -> nebula_engine::script::TextMask {
+        let (w, h) = ((text.chars().count() as f32 * px / 2.0) as u32, px as u32);
+        nebula_engine::script::TextMask {
+            width: w,
+            height: h,
+            advance: w as f32,
+            ascent: px * 0.8,
+            descent: px * 0.2,
+            data: vec![255; (w * h) as usize],
+        }
+    }
+    fn measure(&mut self, text: &str, px: f32, _: bool, _: bool) -> (f32, f32, f32) {
+        (text.chars().count() as f32 * px / 2.0, px * 0.8, px * 0.2)
+    }
+}
+
+#[test]
+fn canvas_paths_strokes_transforms_and_images() {
+    let html = r##"<!doctype html><body><canvas id=a width=100 height=60></canvas><canvas id=b width=20 height=20></canvas><script>
+        const ctx = document.getElementById("a").getContext("2d");
+        const at = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data).join(",");
+        // A triangle.
+        ctx.fillStyle = "#ff0000";
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(20, 0); ctx.lineTo(0, 20); ctx.closePath(); ctx.fill();
+        console.log("tri", at(3, 3), at(18, 18));
+        // Nested squares: a hole only with evenodd.
+        ctx.clearRect(0, 0, 100, 60);
+        ctx.beginPath(); ctx.rect(0, 0, 30, 30); ctx.rect(10, 10, 10, 10);
+        ctx.fill("evenodd");
+        console.log("evenodd", at(15, 15), at(5, 5), ctx.isPointInPath(15, 15), ctx.isPointInPath(15, 15, "evenodd"));
+        ctx.fill();
+        console.log("nonzero", at(15, 15));
+        // A 4px stroke.
+        ctx.clearRect(0, 0, 100, 60);
+        ctx.strokeStyle = "rgb(0, 0, 255)"; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(10, 10.5); ctx.lineTo(40, 10.5); ctx.stroke();
+        console.log("stroke", at(20, 10), at(20, 15), ctx.isPointInStroke(20, 11));
+        // Transforms and alpha.
+        ctx.clearRect(0, 0, 100, 60);
+        ctx.save(); ctx.translate(50, 0); ctx.scale(2, 2); ctx.globalAlpha = 0.5; ctx.fillStyle = "lime";
+        ctx.fillRect(0, 0, 5, 5);
+        console.log("transform", at(58, 8), at(5, 5), ctx.globalAlpha, ctx.getTransform().e);
+        ctx.restore();
+        console.log("restored", ctx.globalAlpha, ctx.fillStyle, ctx.getTransform().a);
+        // A clip.
+        ctx.clearRect(0, 0, 100, 60);
+        ctx.save(); ctx.beginPath(); ctx.rect(0, 0, 10, 10); ctx.clip();
+        ctx.fillStyle = "black"; ctx.fillRect(0, 0, 100, 60); ctx.restore();
+        console.log("clip", at(5, 5), at(20, 20));
+        // A circle.
+        ctx.clearRect(0, 0, 100, 60);
+        ctx.beginPath(); ctx.arc(30, 30, 10, 0, Math.PI * 2); ctx.fill();
+        console.log("arc", at(30, 30), at(21, 21), at(39, 30) !== "0,0,0,0");
+        // A gradient.
+        const g = ctx.createLinearGradient(0, 0, 100, 0);
+        g.addColorStop(0, "red"); g.addColorStop(1, "blue");
+        ctx.fillStyle = g; ctx.fillRect(0, 0, 100, 60);
+        console.log("gradient", at(0, 0), at(99, 0), ctx.fillStyle === g);
+        // putImageData / getImageData round trip.
+        const img = ctx.createImageData(2, 1);
+        img.data.set([1, 2, 3, 255, 4, 5, 6, 128]);
+        ctx.putImageData(img, 10, 10);
+        console.log("put", at(10, 10), at(11, 10), img instanceof ImageData);
+        // drawImage from another canvas, scaled 2×.
+        const b = document.getElementById("b").getContext("2d");
+        b.fillStyle = "#00ff00"; b.fillRect(0, 0, 20, 20);
+        ctx.clearRect(0, 0, 100, 60);
+        ctx.drawImage(b.canvas, 60, 10, 40, 40);
+        console.log("drawImage", at(80, 30), at(50, 30));
+        // Text.
+        ctx.clearRect(0, 0, 100, 60);
+        ctx.font = "bold 20px monospace"; ctx.fillStyle = "#000";
+        ctx.textBaseline = "top";
+        ctx.fillText("ab", 5, 5);
+        console.log("text", at(10, 10), at(30, 10), ctx.measureText("abcd").width, ctx.font);
+        ctx.font = "nonsense";
+        console.log(ctx.font);
+        try { ctx.arc(0, 0, -1, 0, 1); } catch (e) { console.log(e.name); }
+        </script></body>"##;
+    let mut p = Page::parse(html);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let clock = Rc::new(RefCell::new(1000.0));
+    let mut js =
+        Scripts::new(Box::new(Capture(log.clone(), clock)), "https://example.com/", (800, 600), BTreeMap::new());
+    js.set_text_host(Box::new(BoxFont));
+    for s in p.scripts() {
+        if let ScriptSource::Inline(code) = s {
+            p.run_script(&mut js, &code, "inline");
+        }
+    }
+    assert_eq!(
+        *log.borrow(),
+        vec![
+            "tri 255,0,0,255 0,0,0,0",
+            "evenodd 0,0,0,0 255,0,0,255 true false",
+            "nonzero 255,0,0,255",
+            "stroke 0,0,255,255 0,0,0,0 true",
+            "transform 0,255,0,128 0,0,0,0 0.5 50",
+            "restored 1 #ff0000 1",
+            "clip 0,0,0,255 0,0,0,0",
+            "arc 255,0,0,255 0,0,0,0 true",
+            "gradient 254,0,1,255 1,0,254,255 true",
+            "put 1,2,3,255 4,5,6,128 true",
+            "drawImage 0,255,0,255 0,0,0,0",
+            "text 0,0,0,255 0,0,0,0 40 bold 20px monospace",
+            "bold 20px monospace",
+            "IndexSizeError",
+        ]
+    );
+}
+
+#[test]
+fn images_fire_load_and_error_with_natural_sizes() {
+    let (mut p, mut js, log, _) = page(
+        r#"<!doctype html><body><img id=i src="pic.png" onload="console.log('loaded', this.naturalWidth, this.naturalHeight, this.complete, this.width)"><script>
+        const i = document.getElementById("i");
+        console.log("before", i.complete, i.naturalWidth);
+        const pre = new Image();
+        pre.onerror = () => console.log("preload failed", pre.complete);
+        pre.src = "/missing.jpg";
+        </script></body>"#,
+    );
+    assert_eq!(p.images(), vec!["pic.png".to_string(), "/missing.jpg".to_string()]);
+    let url = "https://example.com/dir/page.html?q=1#top";
+    p.image_loaded(&mut js, url, "https://example.com/dir/pic.png", Some((40, 30)));
+    p.image_loaded(&mut js, url, "https://example.com/missing.jpg", None);
+    assert_eq!(*log.borrow(), vec!["before false 0", "loaded 40 30 true 40", "preload failed true"]);
 }

@@ -7,3 +7,5 @@ license.workspace = true
 [dependencies]
 nebula-script = { path = "../script" }
 nebula-web = { path = "../web" }
+lumen = { path = "../gfx" }
+libm = "0.2"

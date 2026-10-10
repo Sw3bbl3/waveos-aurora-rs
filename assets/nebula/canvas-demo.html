@@ -1,0 +1,102 @@
+<!doctype html>
+<html><head><title>Canvas gallery</title>
+<style>
+body { margin: 0; background: #f2f4fb; color: #1f2a44; font-family: sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 32px 24px; }
+.label { color: #5756db; font-size: 12px; font-weight: bold; letter-spacing: 2px; margin: 0 0 10px; }
+h1 { font-size: 36px; margin: 0 0 8px; }
+p { color: #5d6782; line-height: 1.5; margin: 0 0 22px; }
+.grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+figure { margin: 0; background: #fff; border: 1px solid #dde2f0; border-radius: 14px; padding: 14px; }
+figcaption { color: #5d6782; font-size: 13px; margin-top: 8px; }
+canvas { display: block; }
+</style></head><body><main>
+<p class="label">NEBULA / CANVAS</p>
+<h1>Drawn from scratch.</h1>
+<p>Every pixel here comes from Nebula's own 2D canvas: paths, curves, gradients, dashes, transforms, clipping and text, painted with Lyra's exact-area anti-aliasing.</p>
+<div class="grid">
+<figure><canvas id="bars" width="390" height="220"></canvas><figcaption>Bars with gradients and labels</figcaption></figure>
+<figure><canvas id="pie" width="390" height="220"></canvas><figcaption>Arcs, strokes and text alignment</figcaption></figure>
+<figure><canvas id="line" width="390" height="220"></canvas><figcaption>Bézier curves over a dashed grid</figcaption></figure>
+<figure><canvas id="spin" width="390" height="220"></canvas><figcaption>Transforms and clipping, animated</figcaption></figure>
+</div>
+</main><script>
+(function () {
+  const data = [42, 68, 35, 90, 57, 74];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'];
+
+  const bars = document.getElementById('bars').getContext('2d');
+  bars.font = '12px sans-serif';
+  bars.textAlign = 'center';
+  data.forEach(function (v, i) {
+    const x = 30 + i * 58, h = v * 1.8, y = 190 - h;
+    const g = bars.createLinearGradient(0, y, 0, 190);
+    g.addColorStop(0, '#7b7bf0'); g.addColorStop(1, '#4f46c8');
+    bars.fillStyle = g;
+    bars.beginPath(); bars.roundRect(x, y, 40, h, [8, 8, 0, 0]); bars.fill();
+    bars.fillStyle = '#5d6782'; bars.fillText(months[i], x + 20, 208);
+    bars.fillStyle = '#1f2a44'; bars.fillText(String(v), x + 20, y - 6);
+  });
+
+  const pie = document.getElementById('pie').getContext('2d');
+  const colors = ['#5756db', '#32a890', '#e4ac56', '#e46a6a', '#6386e8', '#9b6fe0'];
+  const total = data.reduce(function (a, b) { return a + b; }, 0);
+  let angle = -Math.PI / 2;
+  data.forEach(function (v, i) {
+    const sweep = v / total * Math.PI * 2;
+    pie.beginPath(); pie.moveTo(110, 110); pie.arc(110, 110, 86, angle, angle + sweep); pie.closePath();
+    pie.fillStyle = colors[i]; pie.fill();
+    pie.strokeStyle = '#fff'; pie.lineWidth = 3; pie.lineJoin = 'round'; pie.stroke();
+    angle += sweep;
+  });
+  pie.font = '13px sans-serif'; pie.textAlign = 'left'; pie.textBaseline = 'middle';
+  months.forEach(function (m, i) {
+    pie.fillStyle = colors[i]; pie.beginPath(); pie.arc(232, 34 + i * 30, 6, 0, Math.PI * 2); pie.fill();
+    pie.fillStyle = '#1f2a44'; pie.fillText(m + '  ' + Math.round(data[i] / total * 100) + '%', 246, 34 + i * 30);
+  });
+
+  const line = document.getElementById('line').getContext('2d');
+  line.strokeStyle = '#dde2f0'; line.lineWidth = 1; line.setLineDash([4, 4]);
+  for (let y = 30; y <= 190; y += 40) { line.beginPath(); line.moveTo(20, y + 0.5); line.lineTo(370, y + 0.5); line.stroke(); }
+  line.setLineDash([]);
+  const pts = data.map(function (v, i) { return [30 + i * 66, 200 - v * 1.9]; });
+  const fill = line.createLinearGradient(0, 20, 0, 200);
+  fill.addColorStop(0, 'rgba(50, 168, 144, 0.35)'); fill.addColorStop(1, 'rgba(50, 168, 144, 0)');
+  function curve() {
+    line.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) {
+      const mx = (pts[i - 1][0] + pts[i][0]) / 2;
+      line.bezierCurveTo(mx, pts[i - 1][1], mx, pts[i][1], pts[i][0], pts[i][1]);
+    }
+  }
+  line.beginPath(); curve(); line.lineTo(pts[pts.length - 1][0], 200); line.lineTo(pts[0][0], 200); line.closePath();
+  line.fillStyle = fill; line.fill();
+  line.beginPath(); curve(); line.strokeStyle = '#32a890'; line.lineWidth = 3; line.lineCap = 'round'; line.stroke();
+  pts.forEach(function (p) {
+    line.beginPath(); line.arc(p[0], p[1], 4.5, 0, Math.PI * 2);
+    line.fillStyle = '#fff'; line.fill(); line.lineWidth = 2; line.stroke();
+  });
+
+  const spin = document.getElementById('spin').getContext('2d');
+  function frame(t) {
+    spin.clearRect(0, 0, 390, 220);
+    spin.save();
+    spin.translate(195, 110);
+    spin.beginPath(); spin.arc(0, 0, 90, 0, Math.PI * 2); spin.clip();
+    const bg = spin.createRadialGradient(-30, -30, 10, 0, 0, 90);
+    bg.addColorStop(0, '#ffffff'); bg.addColorStop(1, '#dfe3ff');
+    spin.fillStyle = bg; spin.fillRect(-90, -90, 180, 180);
+    spin.rotate(t / 900);
+    for (let i = 0; i < 12; i++) {
+      spin.rotate(Math.PI / 6);
+      spin.fillStyle = 'rgba(87, 86, 219, ' + (0.15 + i / 14) + ')';
+      spin.beginPath(); spin.roundRect(30, -6, 54, 12, 6); spin.fill();
+    }
+    spin.restore();
+    spin.fillStyle = '#1f2a44'; spin.font = 'bold 14px sans-serif'; spin.textAlign = 'center';
+    spin.fillText('Nebula', 195, 115);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script></body></html>

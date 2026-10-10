@@ -33,7 +33,9 @@ struct Acc {
 
 impl Acc {
     fn add(&mut self, row: usize, col: i64, v: i64) {
-        if col >= 0 && (col as usize) < self.w + 2 {
+        // Area left of the mask still counts for every pixel to its right.
+        let col = col.max(0);
+        if (col as usize) < self.w + 2 {
             let i = row * (self.w + 2) + col as usize;
             self.a[i] = self.a[i].wrapping_add(v as i32);
         }
@@ -198,4 +200,47 @@ pub fn render(outline: &Outline, units_per_em: u16, px_per_em: u32, x_shift: i32
         }
     }
     Mask { width: w as u16, height: h as u16, x_min: x_min as i16, y_min: y_min as i16, data }
+}
+
+/// Exact-area coverage for arbitrary outlines (canvas paths): add closed
+/// polygons edge by edge, in 16.16 pixel coordinates (y down) relative to
+/// the mask, then take an 8-bit mask. Edges may extend past any side.
+pub struct Coverage {
+    acc: Acc,
+}
+
+impl Coverage {
+    pub fn new(width: usize, height: usize) -> Coverage {
+        Coverage { acc: Acc { w: width, h: height, a: vec![0; (width + 2) * height] } }
+    }
+
+    pub fn line(&mut self, x0: i64, y0: i64, x1: i64, y1: i64) {
+        self.acc.line(x0, y0, x1, y1);
+    }
+
+    /// The mask, `width × height`, under the non-zero or even-odd rule.
+    pub fn finish(self, even_odd: bool) -> Vec<u8> {
+        let Acc { w, h, a } = self.acc;
+        let mut data = vec![0u8; w * h];
+        for y in 0..h {
+            let mut sum: i64 = 0;
+            let row = &a[y * (w + 2)..(y + 1) * (w + 2)];
+            for x in 0..w {
+                sum += row[x] as i64;
+                let cov = if even_odd {
+                    // Fold the winding area into 0..1: every second crossing cancels.
+                    let c = sum.unsigned_abs() % (2 * ONE as u64);
+                    if c > ONE as u64 {
+                        2 * ONE as u64 - c
+                    } else {
+                        c
+                    }
+                } else {
+                    sum.unsigned_abs().min(ONE as u64)
+                };
+                data[y * w + x] = ((cov * 255 + ONE as u64 / 2) >> 16) as u8;
+            }
+        }
+        data
+    }
 }

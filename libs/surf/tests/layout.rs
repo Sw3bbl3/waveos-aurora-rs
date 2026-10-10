@@ -263,3 +263,21 @@ fn texts_of(page: &Page, width: i32) -> Vec<(i32, i32, String)> {
         })
         .collect()
 }
+
+#[test]
+fn canvas_is_inline_by_default() {
+    let page =
+        Page::parse("<body style='margin:0'>before <canvas width='50' height='20'>fallback</canvas> after</body>");
+    let layout = page.layout(800, 600, &Fake);
+    let rect = layout
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Canvas { rect, .. } => Some(*rect),
+            _ => None,
+        })
+        .expect("canvas is painted without a display rule");
+    assert_eq!((rect.w, rect.h), (50, 20));
+    assert!(rect.x > 0, "it sits in the line, after the text");
+    assert!(!layout.items.iter().any(|i| matches!(i, Item::Text { text, .. } if text.contains("fallback"))));
+}

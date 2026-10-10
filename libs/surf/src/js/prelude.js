@@ -270,6 +270,31 @@
     }),
   });
 
+  // ImageData: pixels as RGBA bytes, for canvas getImageData/putImageData.
+  class ImageData {
+    constructor(a, b, c) {
+      let data, width, height;
+      if (a instanceof Uint8ClampedArray) {
+        data = a; width = b >>> 0;
+        if (!width || data.length % 4 || (data.length / 4) % width) {
+          throw new DOMException("The input data has an invalid length", "IndexSizeError");
+        }
+        height = c === undefined ? data.length / 4 / width : c >>> 0;
+        if (height * width * 4 !== data.length) throw new DOMException("The input data has an invalid length", "IndexSizeError");
+      } else {
+        width = a >>> 0; height = b >>> 0;
+        if (!width || !height) throw new DOMException("The source width or height is 0", "IndexSizeError");
+        if (width * height > 1024 * 1024) throw new RangeError("ImageData exceeds the pixel budget");
+        data = new Uint8ClampedArray(width * height * 4);
+      }
+      Object.defineProperties(this, {
+        data: { value: data, enumerable: true }, width: { value: width, enumerable: true },
+        height: { value: height, enumerable: true }, colorSpace: { value: "srgb", enumerable: true },
+      });
+    }
+  }
+  define("ImageData", ImageData);
+
   // MutationObserver: options are validated here; the browser records
   // changes and delivers them in a microtask.
   const observe = __nebula_observe, unobserve = __nebula_disconnect, takeRecords = __nebula_take_records;

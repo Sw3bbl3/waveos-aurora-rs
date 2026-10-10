@@ -12,10 +12,10 @@ canvas { display: block; margin: 20px 0; border: 1px solid #d4ddec; }
 </style></head><body><main>
 <p class="label">NEBULA / BROWSER APIS</p>
 <h1>A little more of the web.</h1>
-<p>These checks exercise image construction, text nodes, custom events, and real canvas pixels.</p>
+<p>These checks exercise image construction, text and comment nodes, tree walkers, mutation observers, computed styles, custom events, and real canvas drawing.</p>
 <canvas id="colors" width="480" height="100">Canvas rendering is unavailable.</canvas>
-<p id="results">Waiting for JavaScript...</p>
-<p class="note">Canvas currently supports solid rectangles and pixel reads. These checks do not imply full compatibility with YouTube or other complex web apps.</p>
+<!-- comments are nodes now --><p id="results" class="results">Waiting for JavaScript...</p>
+<p class="note">The canvas below is drawn with paths, a gradient, a dashed stroke and text. These checks do not imply full compatibility with YouTube or other complex web apps.</p>
 <p><a href="css-demo.html">Layout gallery</a> &nbsp; / &nbsp; <a href="pulsar-demo.html">Pulsar playground</a></p>
 </main><script>
 (function () {
@@ -44,6 +44,47 @@ canvas { display: block; margin: 20px 0; border: 1px solid #d4ddec; }
     const colors = ['#6386e8', '#896fe0', '#32a890', '#e4ac56'];
     colors.forEach(function (color, i) { ctx.fillStyle = color; ctx.fillRect(i * 120, 0, 120, 100); });
     return Array.from(ctx.getImageData(0, 0, 1, 1).data).join(',') === '99,134,232,255';
+  });
+  check('Comments, TreeWalker and NodeIterator', function () {
+    const comments = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
+    while (walker.nextNode()) comments.push(walker.currentNode.data.trim());
+    const it = document.createNodeIterator(document.querySelector('main'), NodeFilter.SHOW_ELEMENT, function (n) {
+      return n.tagName === 'CANVAS' ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+    });
+    return comments.indexOf('comments are nodes now') >= 0 && it.nextNode().id === 'colors' && it.nextNode() === null;
+  });
+  check('MutationObserver records', function () {
+    const target = document.getElementById('results');
+    const observer = new MutationObserver(function () {});
+    observer.observe(target, { attributes: true, attributeOldValue: true, childList: true });
+    target.setAttribute('data-state', 'checking');
+    target.appendChild(document.createTextNode(''));
+    const records = observer.takeRecords();
+    observer.disconnect();
+    return records.length === 2 && records[0].attributeName === 'data-state' && records[1].addedNodes.length === 1;
+  });
+  check('getComputedStyle from stylesheets', function () {
+    const results = document.getElementById('results');
+    const style = getComputedStyle(results);
+    return style.color === 'rgb(20, 102, 78)' && style.whiteSpace === 'pre-wrap' &&
+      getComputedStyle(document.querySelector('main')).borderTopLeftRadius === '18px';
+  });
+  check('Canvas paths, gradients and text', function () {
+    const ctx = document.getElementById('colors').getContext('2d');
+    const gradient = ctx.createLinearGradient(0, 0, 480, 0);
+    gradient.addColorStop(0, 'rgba(255, 255, 255, 0.9)');
+    gradient.addColorStop(1, 'rgba(255, 255, 255, 0.2)');
+    ctx.fillStyle = gradient;
+    ctx.beginPath(); ctx.arc(60, 50, 30, 0, Math.PI * 2); ctx.fill();
+    const inCircle = ctx.isPointInPath(60, 50);
+    ctx.strokeStyle = '#20304d'; ctx.lineWidth = 3; ctx.setLineDash([8, 6]);
+    ctx.beginPath(); ctx.moveTo(110, 80); ctx.bezierCurveTo(200, 10, 300, 90, 460, 20); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#20304d'; ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText('Drawn by Nebula', 470, 92);
+    const centre = ctx.getImageData(60, 50, 1, 1).data;
+    return centre[0] > 200 && inCircle && ctx.measureText('Nebula').width > 0;
   });
   document.getElementById('results').textContent = results.join('\n');
   console.log(results.join(' | '));

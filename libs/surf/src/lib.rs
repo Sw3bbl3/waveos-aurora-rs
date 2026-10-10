@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+pub mod canvas2d;
 pub mod css;
 pub mod dom;
 pub mod html;
@@ -150,6 +151,29 @@ impl Scripts {
     /// page's own.)
     pub fn set_cookies(&mut self, cookies: Box<dyn script::CookieHost>) {
         script::dom_mut(&mut self.realm).cookies = cookies;
+    }
+
+    /// Where canvas text gets its glyphs (by default, none: text is
+    /// measured but not drawn).
+    pub fn set_text_host(&mut self, host: Box<dyn script::TextHost>) {
+        script::dom_mut(&mut self.realm).text = host;
+    }
+
+    /// Whether the page has drawn on a canvas (and so may want images).
+    pub fn uses_canvas(&mut self) -> bool {
+        !script::dom_mut(&mut self.realm).doc.canvases.is_empty()
+    }
+
+    /// A decoded image, for drawImage. Returns false once the page's image
+    /// budget is spent.
+    pub fn set_image(&mut self, url: &str, width: u32, height: u32, pixels: &[u32]) -> bool {
+        let dom = script::dom_mut(&mut self.realm);
+        let used: usize = dom.images.values().map(|(_, _, p)| p.len() * 4).sum();
+        if dom.images.contains_key(url) || used + pixels.len() * 4 > script::IMAGE_BYTES {
+            return false;
+        }
+        dom.images.insert(String::from(url), (width, height, Arc::new(pixels.to_vec())));
+        true
     }
 
     pub fn set_viewport(&mut self, w: i32, h: i32) {
@@ -430,9 +454,12 @@ impl Page {
     }
 
     /// Image sources in document order, without duplicates.
+    /// Then images scripts made but haven't attached (`new Image()` preloads).
     pub fn images(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for n in self.doc.find_all("img") {
+        let attached = self.doc.find_all("img");
+        let detached = (0..self.doc.nodes.len()).filter(|n| self.doc.tag(*n) == "img" && !self.doc.is_connected(*n));
+        for n in attached.iter().copied().chain(detached) {
             if let Some(src) = layout::image_source(self.doc.element(n).unwrap()) {
                 if !out.contains(&src) {
                     out.push(src);
@@ -440,6 +467,40 @@ impl Page {
             }
         }
         out
+    }
+
+    /// An image finished loading (with its size) or failed (None): its
+    /// `<img>` elements, attached or not, get `load` or `error`, and scripts
+    /// see its natural size and `complete`. `page_url` is the document's.
+    pub fn image_loaded(&mut self, js: &mut Scripts, page_url: &str, url: &str, size: Option<(u32, u32)>) {
+        let base = nebula_web::Url::parse(page_url).map(|u| match &self.base {
+            Some(b) => u.join(b).unwrap_or(u),
+            None => u,
+        });
+        let resolve = |src: String| -> Option<String> {
+            if src.starts_with("data:") {
+                return Some(src);
+            }
+            base.as_ref()?.join(&src).map(|u| u.to_string())
+        };
+        let targets: Vec<NodeId> = (0..self.doc.nodes.len())
+            .filter(|n| self.doc.tag(*n) == "img")
+            .filter(|n| layout::image_source(self.doc.element(*n).unwrap()).and_then(resolve).as_deref() == Some(url))
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let dom = script::dom_mut(&mut js.realm);
+        for &n in &targets {
+            dom.image_sizes.insert(n, size);
+        }
+        self.with_js(js, |rt| {
+            for n in targets {
+                script::fire(rt, n, if size.is_some() { "load" } else { "error" }, false, false);
+            }
+            rt.run_jobs();
+            rt.report_unhandled();
+        });
     }
 
     /// Lays the page out `width` × `height` CSS pixels wide (the viewport).

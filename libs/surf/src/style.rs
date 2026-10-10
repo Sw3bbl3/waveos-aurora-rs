@@ -296,7 +296,7 @@ impl Style {
 /// The user agent stylesheet.
 pub const UA_CSS: &str = r#"
 head, script, style, title, meta, link, template, base, noembed, param, source, track, datalist, area, map,
-svg, canvas, iframe, video, audio, object, embed, dialog:not([open]), [hidden], input[type=hidden], rp { display: none }
+svg, iframe, video, audio, object, embed, dialog:not([open]), [hidden], input[type=hidden], rp { display: none }
 html, body, div, section, article, aside, nav, header, footer, main, p, h1, h2, h3, h4, h5, h6, ul, ol, dl, dt, dd,
 blockquote, pre, figure, figcaption, form, fieldset, legend, address, hr, details, summary, center, menu, dir, hgroup,
 noscript, search, optgroup, picture > source { display: block }

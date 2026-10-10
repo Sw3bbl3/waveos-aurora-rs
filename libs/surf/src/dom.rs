@@ -90,8 +90,10 @@ pub struct CanvasBitmap {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u32>,
-    pub(crate) fill: u32,
-    pub(crate) saved: Vec<u32>,
+    /// Drawing state, the save() stack and the current path.
+    pub(crate) state: crate::canvas2d::State,
+    pub(crate) saved: Vec<crate::canvas2d::State>,
+    pub(crate) path: crate::canvas2d::Path,
 }
 
 impl Default for Document {
