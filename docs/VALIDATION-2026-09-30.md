@@ -141,3 +141,46 @@ Reproducible source data: [1280 baseline](measurements/everyday-2026-10-08/basel
 Additional captures: [transfer conflict](screenshots/everyday/transfer-conflict.png), [light appearance](screenshots/everyday/light.png), [accessibility preferences](screenshots/everyday/accessibility.png), [stationary Notification Center](screenshots/everyday/notification-center.png).
 
 Files, Settings and app-development handbook pages were updated in English and Canadian French and included in the built offline Learn archive. Existing Nebula improvements and regression tests are preserved; broader YouTube compatibility and hardware drivers remain outside this milestone.
+
+
+## Web milestone — 2026-10-10
+
+Nebula tabs that keep working in the background, comment nodes, TreeWalker/NodeIterator, a live MutationObserver, getComputedStyle from the cascade, `<style>` elements added by scripts, a 2D canvas with paths/gradients/text/images, image load events, faster page loading, an HTTP and DNS cache, a size-class userland allocator, and IPv6 in the kernel and corekit.
+
+### Executed checks
+
+| Check | Result |
+|---|---|
+| `cargo test -p nebula-engine -p nebula-web -p nebula-script -p lumen -p aurorafs` | All passed (engine: 28 script, 14 layout, 5 stylesheet tests; web: 15 including a 304-with-Content-Encoding regression) |
+| Glyph masks before/after Lyra's public `Coverage` | 137,106 masks hashed, identical |
+| test262 before/after the method-name binding fix | 34,415 → 34,417 passing, no new failures |
+| `cargo xtask test`, both boots | All passed, including new IPv6 tests: SLAAC (`fec0::5054:ff:fe12:3456/64` via `fe80::2`), ICMPv6 echo to `::1`, link-local, global and the gateway, UDP and TCP over `::1`, 1 MiB from the host over IPv6 through QEMU. The known ACPI interpreter panic appears as in earlier logs. |
+| `Nebula.elf --self-check` | Pass: isolation, background load, storage event, timers (3 runs in 2.5 s behind, 94 in 1 s in front), 200 switches with no memory or thread growth, eight-tab limit |
+| Browser checks page in the guest | 8 of 8 PASS |
+| `ifconfig`, `ping fec0::2`, `nslookup wikipedia.org` in Terminal | IPv6 addresses and router shown; replies 0–6 ms; AAAA and A records returned ([screenshot](screenshots/ipv6-terminal.png)) |
+
+IPv6 was validated only against QEMU's user network. The test host has no IPv6 route to the internet, so real-site IPv6 isn't measured. Corekit uses IPv6 for internet destinations only from a global unicast address (2000::/3), so QEMU's site-local `fec0::/64` falls back to IPv4 at once.
+
+### Page loads
+
+QEMU x86_64 software emulation on an Apple M2, four guest CPUs, 512 MiB, real sites over QEMU's NAT. `tools/benchmark_web.py` loads each site once cold, then again after the others (warm). "Total" runs from the start of the load to the end of the page's scripts and first layout; "paint" is when the page was first laid out and shown. In the baseline those were the same moment. One run each, and network time varies run to run.
+
+| Site | Baseline total | Now: paint / total (cold) | Now total (warm) |
+|---|---:|---:|---:|
+| example.com | 768 ms | 512 / 662 ms | 506 ms |
+| Wikipedia (Rust article) | 2,171 ms | 1,020 / 1,655 ms | 1,772 ms ¹ |
+| Hacker News | 5,881 ms ² | 876 / 942 ms | 426 ms |
+| text.npr.org | 1,225 ms | 566 / 569 ms | 496 ms |
+| lite.cnn.com | 2,056 ms | 412 / 592 ms | 519 ms |
+| rust-lang.org | 1,394 ms | 483 / 598 ms | 1,025 ms |
+| gnu.org | 1,251 ms | 8,319 / 8,414 ms ³ | 2,141 ms |
+| DuckDuckGo HTML | 1,737 ms | 958 / 977 ms | 856 ms |
+| MDN | 1,576 ms | 296 / 433 ms | 798 ms |
+| GitHub repository | 5,262 ms | 1,071 / 1,448 ms | 1,748 ms |
+| BBC News | 118,813 ms | 317 / 5,775 ms | 5,762 ms |
+
+¹ Measured in a separate revisit after fixing a 304 revalidation bug that made the benchmark's warm Wikipedia visit fail. ² The baseline figure includes work left over from the previous page (Wikipedia), which the old page no longer gets to do. ³ The TLS handshakes to gnu.org took 7.5 s that run; the warm run took 2.1 s, so this looks like the network, not the browser.
+
+Most of the difference came from four fixes: the previous page's timers, image events and relayouts no longer run while the next page loads; image arrivals no longer force a full relayout each; timers wait until the page's own scripts have run; and page scripts run in slices, so input stays responsive. Downloads in parallel and painting before scripts mainly bring the first paint forward. Data: [baseline](measurements/web-2026-10-10/baseline.json), [final](measurements/web-2026-10-10/final.json), and their timing lines. The baseline's warm pass is unusable: the harness, since fixed, credited BBC's late result to the next site.
+
+Not measured or not done: HTTP/2, TLS session resumption, incremental layout, and running page scripts off the UI thread. A heavy page's own timers can still keep the window busy.

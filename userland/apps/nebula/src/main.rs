@@ -36,7 +36,9 @@ use nebula_web::Url;
 
 corekit::entry!(main);
 
+mod cache;
 mod checks;
+mod prefetch;
 
 const TAB_H: i32 = 38;
 const TOOLBAR_H: i32 = TAB_H + 48;
@@ -44,7 +46,7 @@ const MAX_TABS: usize = 8;
 const IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const HOME: &str = "about:home";
 const SEARCH: &str = "https://html.duckduckgo.com/html/?q=";
-const IMAGE_WORKERS: usize = 3;
+const IMAGE_WORKERS: usize = 6;
 const MAX_IMAGES: usize = 80;
 const MAX_STYLESHEETS: usize = 16;
 const MAX_SCRIPTS: usize = 48;
@@ -237,19 +239,80 @@ impl http::Cookies for SameOrigin {
 
 // ------------------------------------------------------------------ loading
 
+/// Where a page load's time went (ms since the load started).
+#[derive(Clone, Copy, Default)]
+struct Timing {
+    started: u64,
+    document: u64,
+    styles: u64,
+    scripts: u64,
+    style_count: usize,
+    script_count: usize,
+    bytes: usize,
+    net: corekit::web::Stats,
+}
+
 struct Loaded {
+    timing: Timing,
     page: Page,
     url: Url,
     /// Images that came with the document (an image opened directly).
     images: Vec<(String, Image)>,
     /// The page's scripts, fetched, in order: (name, source).
     scripts: Vec<(String, String)>,
+    /// Its scripts come later, through the load job.
+    pending: bool,
 }
 
 struct LoadJob {
     cancel: AtomicBool,
     progress: Mutex<String>,
+    /// The page with its styles: shown as soon as it's here.
     result: Mutex<Option<Result<Loaded, String>>>,
+    /// Then its scripts, in order, when the page had external ones (and
+    /// when they had all arrived, uptime ms).
+    scripts: Mutex<Option<(Vec<(String, String)>, u64)>>,
+}
+
+/// What's still downloading once the page is shown: its scripts.
+struct Pending {
+    prefetch: prefetch::Prefetch,
+    scripts: Vec<ScriptSource>,
+    base: Url,
+    final_url: String,
+}
+
+/// GETs any URL Nebula opens, through the cache for the network.
+fn get_shared(url: &Url) -> Result<Arc<Response>, String> {
+    match url.scheme.as_str() {
+        "http" | "https" => cached_fetch(url),
+        _ => get(url).map(Arc::new),
+    }
+}
+
+/// Stage two of a load: the scripts, in document order.
+fn load_scripts(p: Pending, job: &LoadJob) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (i, src) in p.scripts.into_iter().enumerate() {
+        if job.cancel.load(Ordering::Relaxed) {
+            p.prefetch.cancel();
+            break;
+        }
+        match src {
+            ScriptSource::Inline(code) => out.push((format!("{} (inline script {})", p.final_url, i + 1), code)),
+            ScriptSource::External(href) => {
+                let Some(u) = p.base.join(&href) else { continue };
+                *job.progress.lock() = format!("Loading scripts from {}…", u.host);
+                if let Ok(r) = p.prefetch.take(&u, get_shared) {
+                    if r.ok() {
+                        out.push((u.to_string(), nebula_engine::decode(&r.body, "")));
+                    }
+                }
+            }
+        }
+    }
+    p.prefetch.finish();
+    out
 }
 
 fn describe(e: http::Error) -> String {
@@ -273,7 +336,7 @@ fn content_type_for(path: &str) -> &'static str {
 /// GETs a URL (http, https or file).
 fn get(url: &Url) -> Result<Response, String> {
     match url.scheme.as_str() {
-        "http" | "https" => corekit::web::fetch(url).map_err(describe),
+        "http" | "https" => cached_fetch(url).map(|r| (*r).clone()),
         "file" => {
             let path = nebula_web::url::percent_decode(&url.path, false);
             let body = corekit::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
@@ -286,6 +349,27 @@ fn get(url: &Url) -> Result<Response, String> {
             })
         }
         other => Err(format!("\"{other}:\" addresses aren't supported")),
+    }
+}
+
+/// GETs over the network through the shared cache: fresh responses come
+/// from memory, stale ones are revalidated.
+fn cached_fetch(url: &Url) -> Result<Arc<Response>, String> {
+    match cache::lookup(url) {
+        cache::Lookup::Fresh(r) => Ok(r),
+        cache::Lookup::Stale(validators) => {
+            let r = corekit::web::request("GET", url, &validators, &[]).map_err(describe)?;
+            if r.status == 304 {
+                if let Some(stored) = cache::revalidated(url, &r) {
+                    return Ok(stored);
+                }
+            }
+            Ok(cache::store(url, &r))
+        }
+        cache::Lookup::Missing => {
+            let r = corekit::web::fetch(url).map_err(describe)?;
+            Ok(cache::store(url, &r))
+        }
     }
 }
 
@@ -304,13 +388,21 @@ fn escape(s: &str) -> String {
 }
 
 /// Loads a document and its stylesheets (on a worker thread).
-fn load(url: Url, job: &LoadJob) -> Result<Loaded, String> {
+fn load(url: Url, job: &LoadJob) -> Result<(Loaded, Option<Pending>), String> {
     if url.scheme == "about" {
         let html = if url.path == "home" { HOME_PAGE } else { "<html><body></body></html>" };
-        return Ok(Loaded { page: Page::parse(html), url, images: Vec::new(), scripts: Vec::new() });
+        let page = Page::parse(html);
+        return Ok((
+            Loaded { timing: Timing::default(), page, url, images: Vec::new(), scripts: Vec::new(), pending: false },
+            None,
+        ));
     }
+    let started = corekit::time::uptime_ms();
+    let mut timing = Timing { started, net: corekit::web::stats(), ..Timing::default() };
     *job.progress.lock() = format!("Connecting to {}…", url.host);
     let resp = get(&url)?;
+    timing.document = corekit::time::uptime_ms() - started;
+    timing.bytes += resp.body.len();
     let final_url = resp.url.clone();
     let ct = resp.content_type();
     let is_html = ct.contains("html") || (ct.is_empty() && resp.body.iter().take(512).any(|b| *b == b'<'));
@@ -361,38 +453,54 @@ fn load(url: Url, job: &LoadJob) -> Result<Loaded, String> {
         return Err(format!("the server answered {} {}", resp.status, resp.reason));
     }
     drop(resp);
-    // Stylesheets.
+    // Stylesheets and scripts download together; the page shows once its
+    // styles are in, and its scripts run as they arrive.
     let base = document_base(&page, &final_url);
+    let sources = if javascript_enabled() { page.scripts() } else { Vec::new() };
+    let sources: Vec<ScriptSource> = sources.into_iter().take(MAX_SCRIPTS).collect();
+    let mut wanted: Vec<Url> =
+        page.pending_stylesheets().iter().take(MAX_STYLESHEETS).filter_map(|(_, href)| base.join(href)).collect();
+    let externals: Vec<Url> = sources
+        .iter()
+        .filter_map(|s| match s {
+            ScriptSource::External(href) => base.join(href),
+            ScriptSource::Inline(_) => None,
+        })
+        .collect();
+    timing.script_count = externals.len();
+    wanted.extend(externals.iter().cloned());
+    let prefetch = prefetch::Prefetch::start(wanted, get_shared);
+    let (mut style_count, mut style_bytes) = (0, 0);
     page.load_stylesheets(&base, MAX_STYLESHEETS, |u| {
         if job.cancel.load(Ordering::Relaxed) {
             return None;
         }
         *job.progress.lock() = format!("Loading styles from {}…", u.host);
-        let r = get(u).ok()?;
+        let r = prefetch.take(u, get_shared).ok()?;
+        style_count += 1;
+        style_bytes += r.body.len();
         r.ok().then(|| (r.url.clone(), nebula_engine::decode(&r.body, "")))
     });
-    // Scripts, in document order (external ones fetched now).
-    let mut scripts = Vec::new();
-    if javascript_enabled() {
-        for (i, src) in page.scripts().into_iter().enumerate().take(MAX_SCRIPTS) {
-            if job.cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            match src {
-                ScriptSource::Inline(code) => scripts.push((format!("{} (inline script {})", final_url, i + 1), code)),
-                ScriptSource::External(href) => {
-                    let Some(u) = base.join(&href) else { continue };
-                    *job.progress.lock() = format!("Loading scripts from {}…", u.host);
-                    if let Ok(r) = get(&u) {
-                        if r.ok() {
-                            scripts.push((u.to_string(), nebula_engine::decode(&r.body, "")));
-                        }
-                    }
-                }
-            }
-        }
+    timing.styles = corekit::time::uptime_ms() - started;
+    timing.style_count = style_count;
+    timing.bytes += style_bytes;
+    let url = final_url.clone();
+    if externals.is_empty() {
+        // Inline scripts only: they run with the page.
+        prefetch.finish();
+        let scripts = sources
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, s)| match s {
+                ScriptSource::Inline(code) => Some((format!("{} (inline script {})", final_url, i + 1), code)),
+                ScriptSource::External(_) => None,
+            })
+            .collect();
+        timing.scripts = timing.styles;
+        return Ok((Loaded { timing, page, url, images, scripts, pending: false }, None));
     }
-    Ok(Loaded { page, url: final_url, images, scripts })
+    let pending = Pending { prefetch, scripts: sources, base, final_url: final_url.to_string() };
+    Ok((Loaded { timing, page, url, images, scripts: Vec::new(), pending: true }, Some(pending)))
 }
 
 /// The URL relative links resolve against (<base href>, else the document's).
@@ -659,6 +767,23 @@ struct Nebula {
     requested: alloc::collections::BTreeSet<String>,
     /// Whether the page's canvases have been given the decoded images.
     canvas_images: bool,
+    /// When the current page started loading, until its images are done.
+    images_since: Option<u64>,
+    /// The current load's timings and when its page was shown, until logged.
+    timing: Option<(Timing, u64)>,
+    /// Page scripts still to run, a slice per tick so the window stays
+    /// responsive; and (when the first ran, when the last arrived).
+    script_queue: VecDeque<(String, String)>,
+    script_run: Option<(u64, u64)>,
+    /// Images that finished while scripts were still starting: (URL, size).
+    deferred_images: Vec<(String, Option<(u32, u32)>)>,
+    /// A new page is on its way: the old one is frozen (no timers, image
+    /// events or layout) so it can't hold up the new one.
+    awaiting_page: bool,
+    /// Images arrived while scripts were starting (lay out after them), and
+    /// when the window last repainted for a script slice.
+    images_during_scripts: bool,
+    slice_painted: u64,
     /// This tab, for telling its storage changes from other tabs'.
     id: u64,
     storage: Hub,
@@ -1004,6 +1129,14 @@ impl Nebula {
             request_results: Arc::new(Mutex::new(Vec::new())),
             requested: alloc::collections::BTreeSet::new(),
             canvas_images: false,
+            images_since: None,
+            timing: None,
+            script_queue: VecDeque::new(),
+            script_run: None,
+            deferred_images: Vec::new(),
+            awaiting_page: false,
+            images_during_scripts: false,
+            slice_painted: 0,
             id,
             storage,
             storage_seq: 0,
@@ -1076,19 +1209,52 @@ impl Nebula {
             cancel: AtomicBool::new(false),
             progress: Mutex::new(String::new()),
             result: Mutex::new(None),
+            scripts: Mutex::new(None),
         });
         let j = job.clone();
         let u = url.clone();
-        match corekit::thread::spawn(move || {
-            let r = load(u, &j);
-            *j.result.lock() = Some(r);
+        match corekit::thread::spawn(move || match load(u, &j) {
+            Ok((loaded, pending)) => {
+                *j.result.lock() = Some(Ok(loaded));
+                if let Some(p) = pending {
+                    let scripts = load_scripts(p, &j);
+                    *j.scripts.lock() = Some((scripts, corekit::time::uptime_ms()));
+                }
+            }
+            Err(e) => *j.result.lock() = Some(Err(e)),
         }) {
             Ok(h) => {
                 self.job = Some((job, Some(h)));
+                self.freeze();
                 self.loading_since = corekit::time::uptime_ms();
                 self.fragment = url.fragment.clone();
             }
             Err(e) => self.show_error(&target, &format!("couldn't start loading ({e})")),
+        }
+    }
+
+    /// Stops the current page's background work while the next one loads.
+    fn freeze(&mut self) {
+        self.awaiting_page = true;
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut q = self.queue.lock();
+            q.queue.clear();
+            q.done.clear();
+        }
+        self.relayout_at = None;
+        self.js_wakeup = None;
+        self.script_queue.clear();
+        self.script_run = None;
+        self.deferred_images.clear();
+        self.images_since = None;
+        self.images_during_scripts = false;
+    }
+
+    /// The load thread is done: join it.
+    fn finish_job(&mut self) {
+        if let Some((_, Some(h))) = self.job.take() {
+            h.join();
         }
     }
 
@@ -1111,10 +1277,12 @@ impl Nebula {
             escape(url)
         );
         self.install(Loaded {
+            timing: Timing::default(),
             page: Page::parse(&html),
             url: Url::parse(url).unwrap_or_else(|| Url::parse(HOME).unwrap()),
             images: Vec::new(),
             scripts: Vec::new(),
+            pending: false,
         });
     }
 
@@ -1122,7 +1290,8 @@ impl Nebula {
         self.find = None;
         self.styles = None;
         self.layout = None;
-        let Loaded { mut page, url, images, scripts } = loaded;
+        let Loaded { timing, page, url, images, scripts, pending } = loaded;
+        self.awaiting_page = false;
         self.generation.fetch_add(1, Ordering::Relaxed);
         {
             let mut q = self.queue.lock();
@@ -1142,6 +1311,9 @@ impl Nebula {
         self.hover = None;
         let url_string = url.to_string();
         self.js = None;
+        self.script_queue.clear();
+        self.script_run = None;
+        self.deferred_images.clear();
         if !self.editing {
             self.address.set_text(&url_string);
         }
@@ -1151,32 +1323,17 @@ impl Nebula {
         self.requested.clear();
         self.canvas_images = false;
         let refresh = page.refresh();
-        // Scripts run before the first layout, as the page finishes loading.
-        let has_handlers = page.doc.nodes.iter().any(|n| match &n.data {
-            nebula_engine::dom::NodeData::Element(e) => e.attrs.iter().any(|(k, _)| k.starts_with("on")),
-            _ => false,
-        });
-        if javascript_enabled() && (!scripts.is_empty() || has_handlers) {
-            let (w, h) = ((self.view.w * 100 / self.zoom).max(200), (self.view.h * 100 / self.zoom).max(200));
-            let url_s = url.to_string();
-            let stored = self.storage.borrow_mut().get(&url);
-            self.storage_seq = self.storage.borrow().seq;
-            let mut js = Scripts::new(alloc::boxed::Box::new(PageHost), &url_s, (w, h), stored);
-            js.set_cookies(alloc::boxed::Box::new(BrowserCookies));
-            js.set_text_host(alloc::boxed::Box::new(CanvasFonts));
-            for (name, code) in &scripts {
-                page.run_script(&mut js, code, name);
-            }
-            page.finish_loading(&mut js);
-            self.js = Some(js);
-        }
         self.page = Some(page);
         self.url = Some(url);
         self.laid_version = 0;
         self.js_wakeup = None;
-        self.after_scripts();
-        if self.layout.is_none() {
+        if pending {
+            // Shown now, without scripts; they run when they arrive.
             self.relayout();
+            self.timing = Some((timing, corekit::time::uptime_ms()));
+        } else {
+            self.timing = Some((timing, corekit::time::uptime_ms()));
+            self.start_scripts(scripts, 0);
         }
         self.queue_images();
         // A background tab scrolls to its fragment once it's shown and laid out.
@@ -1192,6 +1349,111 @@ impl Nebula {
                 }
             }
         }
+    }
+
+    /// Starts the page's scripts (as it finishes loading). They run in
+    /// slices between frames; then the page finishes loading and is laid out.
+    /// `arrived`: when the last script finished downloading (0: with the page).
+    fn start_scripts(&mut self, scripts: Vec<(String, String)>, arrived: u64) {
+        let Some(page) = self.page.as_mut() else { return };
+        let Some(url) = self.url.clone() else { return };
+        let has_handlers = page.doc.nodes.iter().any(|n| match &n.data {
+            nebula_engine::dom::NodeData::Element(e) => e.attrs.iter().any(|(k, _)| k.starts_with("on")),
+            _ => false,
+        });
+        self.script_queue.clear();
+        if javascript_enabled() && (!scripts.is_empty() || has_handlers) {
+            let (w, h) = ((self.view.w * 100 / self.zoom).max(200), (self.view.h * 100 / self.zoom).max(200));
+            let stored = self.storage.borrow_mut().get(&url);
+            self.storage_seq = self.storage.borrow().seq;
+            let mut js = Scripts::new(alloc::boxed::Box::new(PageHost), &url.to_string(), (w, h), stored);
+            js.set_cookies(alloc::boxed::Box::new(BrowserCookies));
+            js.set_text_host(alloc::boxed::Box::new(CanvasFonts));
+            self.js = Some(js);
+            self.script_queue.extend(scripts);
+        }
+        self.script_run = Some((corekit::time::uptime_ms(), arrived));
+        self.run_scripts_slice();
+    }
+
+    /// Runs queued page scripts for up to a frame's worth of time (at least
+    /// one script); after the last, finishes loading the page.
+    fn run_scripts_slice(&mut self) {
+        let Some((started, arrived)) = self.script_run else { return };
+        let slice = corekit::time::uptime_ms();
+        if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+            while let Some((name, code)) = self.script_queue.pop_front() {
+                let t = corekit::time::uptime_ms();
+                page.run_script(js, &code, &name);
+                let ms = corekit::time::uptime_ms() - t;
+                if ms >= 300 {
+                    corekit::io::log(&format!("[nebula] slow script {ms} ms ({} KB): {name}\n", code.len() >> 10));
+                }
+                if corekit::time::uptime_ms() - slice >= 40 {
+                    break;
+                }
+            }
+            if !self.script_queue.is_empty() {
+                return;
+            }
+            page.finish_loading(js);
+        }
+        self.script_queue.clear();
+        self.script_run = None;
+        let ran = corekit::time::uptime_ms() - started;
+        // Load and error events for images that came in meanwhile.
+        let page_url = self.url.as_ref().map(|u| u.to_string()).unwrap_or_default();
+        for (url, size) in core::mem::take(&mut self.deferred_images) {
+            if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+                page.image_loaded(js, &page_url, &url, size);
+                if let (true, Some(Some(i))) = (self.canvas_images, self.images.get(&url)) {
+                    js.set_image(&url, i.width, i.height, &i.pixels);
+                }
+            }
+        }
+        self.after_scripts();
+        let images = core::mem::take(&mut self.images_during_scripts);
+        self.spawn_workers();
+        if images || self.layout.is_none() || self.page.as_ref().is_some_and(|p| p.doc.version != self.laid_version) {
+            self.relayout();
+        }
+        self.log_timing(ran, corekit::time::uptime_ms() - started - ran, arrived);
+        self.queue_images();
+    }
+
+    /// One line per load: where the time went.
+    fn log_timing(&mut self, ran: u64, layout: u64, arrived: u64) {
+        let Some((t, shown)) = self.timing.take() else { return };
+        if t.started == 0 {
+            return;
+        }
+        let now = corekit::time::uptime_ms();
+        let n = corekit::web::stats();
+        let (hits, revalidated, misses) = *cache::STATS.lock();
+        corekit::io::log(&format!(
+            "[nebula] timing {} total={} paint={} document={} styles={}({}) scripts={}({}) run={} layout={} bytes={} \
+             opened={} reused={} dns={} connect={} tls={} cache={}/{}/{}\n",
+            self.url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
+            now - t.started,
+            shown - t.started,
+            t.document,
+            t.styles - t.document,
+            t.style_count,
+            if arrived > 0 { arrived.saturating_sub(t.started + t.styles) } else { 0 },
+            t.script_count,
+            ran,
+            layout,
+            t.bytes,
+            n.opened - t.net.opened,
+            n.reused - t.net.reused,
+            n.dns_ms - t.net.dns_ms,
+            n.connect_ms - t.net.connect_ms,
+            n.tls_ms - t.net.tls_ms,
+            hits,
+            revalidated,
+            misses,
+        ));
+        self.images_since = Some(t.started);
     }
 
     /// Queues the page's images not asked for yet: at first, and again when
@@ -1220,7 +1482,9 @@ impl Nebula {
 
     fn spawn_workers(&mut self) {
         reap(&mut self.workers);
-        while self.workers.len() < IMAGE_WORKERS && !self.queue.lock().queue.is_empty() {
+        // One decoder while the page's scripts are starting: they share the CPU.
+        let limit = if self.script_run.is_some() { 1 } else { IMAGE_WORKERS };
+        while self.workers.len() < limit && !self.queue.lock().queue.is_empty() {
             let (q, g) = (self.queue.clone(), self.generation.clone());
             match corekit::thread::spawn(move || image_worker(q, g)) {
                 Ok(h) => self.workers.push(h),
@@ -1310,7 +1574,7 @@ impl Nebula {
         }
         if page.doc.version != self.laid_version {
             self.queue_images();
-            self.relayout();
+            self.request_relayout();
         }
         // A page that starts drawing gets the images decoded so far.
         if !self.canvas_images && self.js.as_mut().is_some_and(|js| js.uses_canvas()) {
@@ -1329,7 +1593,19 @@ impl Nebula {
         }
     }
 
+    /// Lays out again soon: changes from scripts and events within 50 ms
+    /// share one layout (at once when there's none yet).
+    fn request_relayout(&mut self) {
+        if self.layout.is_none() {
+            self.relayout();
+            return;
+        }
+        let soon = corekit::time::uptime_ms() + 50;
+        self.relayout_at = Some(self.relayout_at.map_or(soon, |t| t.min(soon)));
+    }
+
     fn relayout(&mut self) {
+        self.relayout_at = None;
         // Background tabs lay out when they're selected.
         if self.background {
             return;
@@ -1344,10 +1620,22 @@ impl Nebula {
         let host = Fonts { images: &self.images, base };
         let w = (self.view.w * 100 / self.zoom).max(200);
         let h = (self.view.h * 100 / self.zoom).max(200);
+        let t0 = corekit::time::uptime_ms();
         if self.styles.as_ref().is_none_or(|(size, _)| *size != (w, h)) {
             self.styles = Some(((w, h), page.styles(w, h)));
         }
+        let t1 = corekit::time::uptime_ms();
         let l = page.layout_with(&self.styles.as_ref().unwrap().1, w, &host);
+        let t2 = corekit::time::uptime_ms();
+        if t2 - t0 >= 500 {
+            corekit::io::log(&format!(
+                "[nebula] slow layout: cascade={} layout={} nodes={} items={}\n",
+                t1 - t0,
+                t2 - t1,
+                page.doc.nodes.len(),
+                l.items.len()
+            ));
+        }
         self.laid_out_width = self.view.w;
         if let Some(js) = self.js.as_mut() {
             js.set_viewport(w, h);
@@ -2345,31 +2633,55 @@ impl App for Nebula {
         // Page timers and animation frames.
         if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
             let now = corekit::time::unix_ms();
-            let throttled = self.background && now - self.timers_ran < 1000.0;
+            // Timers and animation frames wait while the page's own scripts
+            // are still starting (or a new page is on its way).
+            let throttled = (self.background && now - self.timers_ran < 1000.0)
+                || self.awaiting_page
+                || !self.script_queue.is_empty();
             if self.js_wakeup.is_some_and(|w| w <= now) && !throttled {
                 self.timers_ran = now;
                 page.run_timers(js, now);
                 self.after_scripts();
                 dirty = true;
             }
-            if self.js_wakeup.is_none() {
+            if self.js_wakeup.is_none() && !self.awaiting_page {
                 self.js_wakeup = self.js.as_mut().and_then(|j| j.next_wakeup(now));
             }
         } else {
             self.js_wakeup = None;
         }
         // A finished page load.
+        // The page and its styles first, then (on the same job) its scripts.
         let done = self.job.as_ref().and_then(|(job, _)| job.result.lock().take());
         if let Some(result) = done {
-            let (_, h) = self.job.take().unwrap();
-            if let Some(h) = h {
-                h.join();
-            }
             let target = self.history.get(self.pos).cloned().unwrap_or_default();
             match result {
-                Ok(loaded) => self.install(loaded),
-                Err(msg) => self.show_error(&target, &msg),
+                Ok(loaded) => {
+                    let pending = loaded.pending;
+                    self.install(loaded);
+                    if !pending {
+                        self.finish_job();
+                    }
+                }
+                Err(msg) => {
+                    self.finish_job();
+                    self.show_error(&target, &msg);
+                }
             }
+            dirty = true;
+        }
+        if !self.script_queue.is_empty() && !self.awaiting_page {
+            self.run_scripts_slice();
+            // Repaint for script progress a few times a second, not every slice.
+            if self.script_queue.is_empty() || env.now_ms - self.slice_painted >= 250 {
+                self.slice_painted = env.now_ms;
+                dirty = true;
+            }
+        }
+        let scripts = self.job.as_ref().and_then(|(job, _)| job.scripts.lock().take());
+        if let Some((scripts, arrived)) = scripts {
+            self.finish_job();
+            self.start_scripts(scripts, arrived);
             dirty = true;
         }
         // Finished images.
@@ -2382,8 +2694,11 @@ impl App for Nebula {
             for (gen, url, img) in finished {
                 if gen == g {
                     any |= img.is_some();
-                    // Scripts hear about it: load or error, and canvases may draw it.
-                    if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
+                    // Scripts hear about it: load or error, and canvases may draw it
+                    // (once the page's own scripts have all run).
+                    if self.script_run.is_some() {
+                        self.deferred_images.push((url.clone(), img.as_ref().map(|i| (i.width, i.height))));
+                    } else if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
                         let size = img.as_ref().map(|i| (i.width, i.height));
                         page.image_loaded(js, &page_url, &url, size);
                         if let (true, Some(i)) = (self.canvas_images, &img) {
@@ -2398,11 +2713,28 @@ impl App for Nebula {
                 self.after_scripts();
                 dirty = true;
             }
-            if any && self.relayout_at.is_none() {
+            if any && self.script_run.is_some() {
+                // One layout once the scripts are done instead.
+                self.images_during_scripts = true;
+            } else if any && self.relayout_at.is_none() {
                 self.relayout_at = Some(env.now_ms + 200);
             }
         }
-        if self.relayout_at.is_some_and(|t| env.now_ms >= t) {
+        if let Some(since) = self.images_since {
+            let idle = self.queue.lock().queue.is_empty() && self.workers.iter().all(|w| w.is_finished());
+            if idle && self.requested.iter().all(|u| self.images.contains_key(u)) {
+                self.images_since = None;
+                let loaded = self.images.values().filter(|i| i.is_some()).count();
+                corekit::io::log(&format!(
+                    "[nebula] images {} done={} of {} total={}\n",
+                    self.url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
+                    loaded,
+                    self.requested.len(),
+                    corekit::time::uptime_ms() - since
+                ));
+            }
+        }
+        if self.relayout_at.is_some_and(|t| env.now_ms >= t) && !self.awaiting_page {
             self.relayout_at = None;
             self.relayout();
             dirty = true;
@@ -2413,6 +2745,9 @@ impl App for Nebula {
     }
 
     fn tick_interval(&self) -> u64 {
+        if !self.script_queue.is_empty() {
+            return if self.background { 250 } else { 1 };
+        }
         let busy = self.loading() || self.relayout_at.is_some() || self.scripts_loading > 0;
         if self.background {
             return if busy || !self.workers.is_empty() {

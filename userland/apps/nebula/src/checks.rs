@@ -33,7 +33,14 @@ fn fixture(path: &str, html: &str) -> Loaded {
             ScriptSource::External(_) => None,
         })
         .collect();
-    Loaded { page, url: Url::parse(&format!("{SITE}{path}")).unwrap(), images: Vec::new(), scripts }
+    Loaded {
+        timing: Timing::default(),
+        page,
+        url: Url::parse(&format!("{SITE}{path}")).unwrap(),
+        images: Vec::new(),
+        scripts,
+        pending: false,
+    }
 }
 
 /// Replaces whatever tab `i` was loading with `loaded`.

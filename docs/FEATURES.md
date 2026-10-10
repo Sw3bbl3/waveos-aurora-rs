@@ -28,19 +28,21 @@ Everything that works today, layer by layer. For the short tour, see the [README
 - **Apps:** Nebula, Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome.
 - **Networking**, all our own:
   - **drivers** for virtio-net and Intel e1000/e1000e, interrupt-driven where MSI allows
-  - an **IPv4 stack** in the kernel: ARP, ICMP, UDP and **TCP** (retransmission timers, fast retransmit, congestion control, window scaling), a **DHCP** client, and BSD-like sockets for programs
-  - **DNS**, and an **HTTP/1.1** client with keep-alive, chunked and gzip responses
+  - an **IPv4 and IPv6 stack** in the kernel: ARP and neighbor discovery, ICMP and ICMPv6, UDP and **TCP** over both (retransmission timers, fast retransmit, congestion control, window scaling), **DHCP** and IPv6 **autoconfiguration** (SLAAC, RDNSS), and BSD-like sockets for programs
+  - **DNS** asking for A and AAAA together, with a cache that honours TTLs; Happy Eyeballs connections that prefer IPv6 where it's routed; an **HTTP/1.1** client with keep-alive, chunked and gzip responses
   - **TLS 1.3** (and 1.2 for older servers) with our own handshake, record layer and X.509 certificate checks against Mozilla's root CAs. Cryptographic primitives come from RustCrypto.
   - a menu-bar status item, **Settings → Network**, and network graphs in Activity Monitor
 - **Nebula**, the web browser, on our own engine:
   - an HTML parser, and CSS with selectors, the cascade, custom properties, `calc()`, media queries and generated content
   - layout: blocks, inline text with line breaking, lists, tables, flexbox and grid rows, floats, form controls
   - PNG, **JPEG** (baseline and progressive) and GIF images, from our own decoders
-  - history, find in page (Ctrl+F), zoom, search forms and downloads (one window at a time; no tabs yet)
+  - history, find in page (Ctrl+F), zoom, search forms and downloads; up to eight **tabs**, which keep loading in the background
+  - fast loading: stylesheets and scripts download side by side, the page shows as soon as its styles are in, scripts run in slices so the window stays responsive, and an in-memory **HTTP cache** revalidates with ETags
+  - a 2D **canvas** with paths, gradients, transforms, clipping, text and images
 - **Pulsar**, our JavaScript engine ([details](PULSAR.md)):
   - the language through ES2023: classes with private fields, generators, `async`/`await`, destructuring, modules aside
   - the standard library, our own regular-expression engine, and `Date` in the local time zone
-  - in Nebula: the DOM, events with capture and bubbling, timers, animation frames, `fetch` and `XMLHttpRequest`, `localStorage` per site, and scripts that load more scripts; jQuery runs
+  - in Nebula: the DOM (with comments, TreeWalker and a live MutationObserver), events with capture and bubbling, timers, animation frames, `fetch` and `XMLHttpRequest`, `localStorage` per site shared across tabs, `getComputedStyle` from the cascade, and scripts that load more scripts; jQuery runs
   - `js` in Terminal: a prompt with multi-line input, files, or `-e`
 - **aurora-sh**, the Terminal shell. It runs about 35 programs from `/System/Bin` as separate processes (`ls`, `cat`, `grep`, `wc`, `ps`, `kill`, `cp`, `mv`, `neofetch`, `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play`, `ping`, `ifconfig`, `nslookup`, `fetch`…). It supports pipelines (`ls -l | grep txt`), redirection (`>`, `>>`), lists (`a && b || c; d`), Ctrl+C and Tab completion.
 - **Storage:**

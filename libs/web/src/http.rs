@@ -277,7 +277,8 @@ pub fn exchange(io: &mut dyn Io, req: &Request) -> Result<(Response, bool), Erro
         && !connection.contains("close")
         && (http11 || connection.contains("keep-alive"))
         && r.pos == r.buf.len();
-    if let Some(enc) = find("content-encoding") {
+    // A 304 (or HEAD, or 204) names the encoding of a body it doesn't carry.
+    if let Some(enc) = find("content-encoding").filter(|_| !body.is_empty()) {
         body = decode_body(body, &enc)?;
         headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-encoding"));
     }
@@ -449,6 +450,13 @@ mod tests {
         let req = String::from_utf8(io.sent).unwrap();
         assert!(req.starts_with("GET /x HTTP/1.1\r\nHost: example.com\r\n"));
         r
+    }
+
+    #[test]
+    fn not_modified_with_an_encoding_has_no_body() {
+        let r =
+            run("HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\nContent-Length: 1234\r\nETag: \"x\"\r\n\r\n");
+        assert_eq!((r.status, r.body.len()), (304, 0));
     }
 
     #[test]

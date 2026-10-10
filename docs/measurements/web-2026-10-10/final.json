@@ -1,0 +1,571 @@
+{
+ "cold": [
+  {
+   "url": "https://example.com/",
+   "timing": {
+    "total": 662,
+    "paint": 512,
+    "document": 185,
+    "styles": 4,
+    "scripts": 48,
+    "run": 10,
+    "layout": 3,
+    "bytes": 577,
+    "opened": 1,
+    "reused": 1,
+    "dns": 24,
+    "connect": 30,
+    "tls": 91,
+    "cache": 0,
+    "final_url": "https://example.com/"
+   },
+   "images": {
+    "done": 0,
+    "total": 664
+   }
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+   "timing": {
+    "total": 1655,
+    "paint": 1020,
+    "document": 304,
+    "styles": 206,
+    "scripts": 33,
+    "run": 176,
+    "layout": 372,
+    "bytes": 1285591,
+    "opened": 10,
+    "reused": 22,
+    "dns": 177,
+    "connect": 331,
+    "tls": 810,
+    "cache": 0,
+    "final_url": "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+   },
+   "images": {
+    "done": 21,
+    "total": 2558
+   }
+  },
+  {
+   "url": "https://news.ycombinator.com/",
+   "timing": {
+    "total": 942,
+    "paint": 876,
+    "document": 454,
+    "styles": 112,
+    "scripts": 240,
+    "run": 8,
+    "layout": 0,
+    "bytes": 42030,
+    "opened": 2,
+    "reused": 3,
+    "dns": 37,
+    "connect": 250,
+    "tls": 301,
+    "cache": 0,
+    "final_url": "https://news.ycombinator.com/"
+   },
+   "images": {
+    "done": 1,
+    "total": 1012
+   }
+  },
+  {
+   "url": "https://text.npr.org/",
+   "timing": {
+    "total": 569,
+    "paint": 566,
+    "document": 550,
+    "styles": 2,
+    "scripts": 0,
+    "run": 0,
+    "layout": 3,
+    "bytes": 6013,
+    "opened": 1,
+    "reused": 0,
+    "dns": 60,
+    "connect": 31,
+    "tls": 97,
+    "cache": 0,
+    "final_url": "https://text.npr.org/"
+   },
+   "images": {
+    "done": 0,
+    "total": 570
+   }
+  },
+  {
+   "url": "https://lite.cnn.com/",
+   "timing": {
+    "total": 592,
+    "paint": 412,
+    "document": 152,
+    "styles": 13,
+    "scripts": 0,
+    "run": 80,
+    "layout": 16,
+    "bytes": 333085,
+    "opened": 1,
+    "reused": 0,
+    "dns": 37,
+    "connect": 18,
+    "tls": 50,
+    "cache": 0,
+    "final_url": "https://lite.cnn.com/"
+   },
+   "images": {
+    "done": 0,
+    "total": 593
+   }
+  },
+  {
+   "url": "https://www.rust-lang.org/",
+   "timing": {
+    "total": 598,
+    "paint": 483,
+    "document": 253,
+    "styles": 131,
+    "scripts": 1,
+    "run": 41,
+    "layout": 20,
+    "bytes": 125209,
+    "opened": 7,
+    "reused": 11,
+    "dns": 74,
+    "connect": 152,
+    "tls": 369,
+    "cache": 0,
+    "final_url": "https://rust-lang.org/"
+   },
+   "images": {
+    "done": 0,
+    "total": 600
+   }
+  },
+  {
+   "url": "https://www.gnu.org/",
+   "timing": {
+    "total": 8414,
+    "paint": 8319,
+    "document": 5136,
+    "styles": 3134,
+    "scripts": 0,
+    "run": 2,
+    "layout": 25,
+    "bytes": 53768,
+    "opened": 3,
+    "reused": 1,
+    "dns": 28,
+    "connect": 2107,
+    "tls": 7476,
+    "cache": 0,
+    "final_url": "https://www.gnu.org/"
+   },
+   "images": {
+    "done": 12,
+    "total": 14760
+   }
+  },
+  {
+   "url": "https://html.duckduckgo.com/html/?q=rust",
+   "timing": {
+    "q": "rust",
+    "total": 977,
+    "paint": 958,
+    "document": 680,
+    "styles": 239,
+    "scripts": 0,
+    "run": 0,
+    "layout": 19,
+    "bytes": 138380,
+    "opened": 2,
+    "reused": 0,
+    "dns": 58,
+    "connect": 84,
+    "tls": 108,
+    "cache": 0,
+    "final_url": "https://html.duckduckgo.com/html/?q=rust"
+   },
+   "images": {
+    "q": "rust",
+    "done": 4,
+    "total": 1207
+   }
+  },
+  {
+   "url": "https://developer.mozilla.org/en-US/",
+   "timing": {
+    "total": 433,
+    "paint": 296,
+    "document": 128,
+    "styles": 144,
+    "scripts": 0,
+    "run": 3,
+    "layout": 86,
+    "bytes": 166876,
+    "opened": 6,
+    "reused": 11,
+    "dns": 37,
+    "connect": 120,
+    "tls": 282,
+    "cache": 0,
+    "final_url": "https://developer.mozilla.org/en-US/"
+   },
+   "images": {
+    "done": 1,
+    "total": 493
+   }
+  },
+  {
+   "url": "https://github.com/Sw3bbl3/waveos-aurora-rs",
+   "timing": {
+    "total": 1448,
+    "paint": 1071,
+    "document": 672,
+    "styles": 363,
+    "scripts": 0,
+    "run": 0,
+    "layout": 376,
+    "bytes": 1987132,
+    "opened": 7,
+    "reused": 10,
+    "dns": 183,
+    "connect": 204,
+    "tls": 375,
+    "cache": 0,
+    "final_url": "https://github.com/Sw3bbl3/waveos-aurora-rs"
+   },
+   "images": {
+    "done": 12,
+    "total": 4134
+   }
+  },
+  {
+   "url": "https://old.reddit.com/",
+   "timing": {
+    "reason": "lor2&dest=https%3A%2F%2Fold.reddit.com%2F",
+    "total": 1038,
+    "paint": 922,
+    "document": 324,
+    "styles": 185,
+    "scripts": 0,
+    "run": 32,
+    "layout": 25,
+    "bytes": 446235,
+    "opened": 3,
+    "reused": 0,
+    "dns": 52,
+    "connect": 78,
+    "tls": 105,
+    "cache": 0,
+    "final_url": "https://old.reddit.com/login/?reason=lor2&dest=https%3A%2F%2Fold.reddit.com%2F"
+   },
+   "images": {
+    "reason": "lor2&dest=https%3A%2F%2Fold.reddit.com%2F",
+    "done": 1,
+    "total": 1401
+   }
+  },
+  {
+   "url": "https://www.bbc.com/news",
+   "timing": {
+    "total": 5775,
+    "paint": 317,
+    "document": 147,
+    "styles": 20,
+    "scripts": 663,
+    "run": 4804,
+    "layout": 90,
+    "bytes": 376921,
+    "opened": 18,
+    "reused": 48,
+    "dns": 356,
+    "connect": 747,
+    "tls": 1204,
+    "cache": 0,
+    "final_url": "https://www.bbc.com/news"
+   },
+   "images": {
+    "done": 1,
+    "total": 5776
+   }
+  }
+ ],
+ "warm": [
+  {
+   "url": "https://example.com/",
+   "timing": {
+    "total": 506,
+    "paint": 439,
+    "document": 0,
+    "styles": 1,
+    "scripts": 0,
+    "run": 2,
+    "layout": 2,
+    "bytes": 577,
+    "opened": 0,
+    "reused": 0,
+    "dns": 0,
+    "connect": 0,
+    "tls": 0,
+    "cache": 2,
+    "final_url": "https://example.com/"
+   },
+   "images": {
+    "done": 0,
+    "total": 507
+   }
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+   "timing": null,
+   "images": null
+  },
+  {
+   "url": "https://news.ycombinator.com/",
+   "timing": {
+    "total": 426,
+    "paint": 371,
+    "document": 343,
+    "styles": 5,
+    "scripts": 0,
+    "run": 6,
+    "layout": 1,
+    "bytes": 42001,
+    "opened": 1,
+    "reused": 0,
+    "dns": 24,
+    "connect": 95,
+    "tls": 123,
+    "cache": 6,
+    "final_url": "https://news.ycombinator.com/"
+   },
+   "images": {
+    "done": 1,
+    "total": 427
+   }
+  },
+  {
+   "url": "https://text.npr.org/",
+   "timing": {
+    "total": 496,
+    "paint": 488,
+    "document": 200,
+    "styles": 2,
+    "scripts": 0,
+    "run": 0,
+    "layout": 8,
+    "bytes": 6013,
+    "opened": 1,
+    "reused": 0,
+    "dns": 54,
+    "connect": 25,
+    "tls": 84,
+    "cache": 6,
+    "final_url": "https://text.npr.org/"
+   },
+   "images": {
+    "done": 0,
+    "total": 497
+   }
+  },
+  {
+   "url": "https://lite.cnn.com/",
+   "timing": {
+    "total": 519,
+    "paint": 357,
+    "document": 159,
+    "styles": 15,
+    "scripts": 0,
+    "run": 74,
+    "layout": 12,
+    "bytes": 333085,
+    "opened": 1,
+    "reused": 0,
+    "dns": 38,
+    "connect": 17,
+    "tls": 51,
+    "cache": 6,
+    "final_url": "https://lite.cnn.com/"
+   },
+   "images": {
+    "done": 0,
+    "total": 520
+   }
+  },
+  {
+   "url": "https://www.rust-lang.org/",
+   "timing": {
+    "total": 1025,
+    "paint": 889,
+    "document": 0,
+    "styles": 20,
+    "scripts": 1,
+    "run": 52,
+    "layout": 23,
+    "bytes": 125209,
+    "opened": 0,
+    "reused": 0,
+    "dns": 0,
+    "connect": 0,
+    "tls": 0,
+    "cache": 23,
+    "final_url": "https://rust-lang.org/"
+   },
+   "images": {
+    "done": 0,
+    "total": 1026
+   }
+  },
+  {
+   "url": "https://www.gnu.org/",
+   "timing": {
+    "total": 2141,
+    "paint": 2079,
+    "document": 2041,
+    "styles": 7,
+    "scripts": 0,
+    "run": 1,
+    "layout": 17,
+    "bytes": 53768,
+    "opened": 1,
+    "reused": 0,
+    "dns": 0,
+    "connect": 39,
+    "tls": 1942,
+    "cache": 25,
+    "final_url": "https://www.gnu.org/"
+   },
+   "images": {
+    "done": 12,
+    "total": 2161
+   }
+  },
+  {
+   "url": "https://html.duckduckgo.com/html/?q=rust",
+   "timing": {
+    "q": "rust",
+    "total": 856,
+    "paint": 820,
+    "document": 707,
+    "styles": 45,
+    "scripts": 0,
+    "run": 0,
+    "layout": 36,
+    "bytes": 138380,
+    "opened": 1,
+    "reused": 0,
+    "dns": 35,
+    "connect": 41,
+    "tls": 61,
+    "cache": 38,
+    "final_url": "https://html.duckduckgo.com/html/?q=rust"
+   },
+   "images": {
+    "q": "rust",
+    "done": 4,
+    "total": 1072
+   }
+  },
+  {
+   "url": "https://developer.mozilla.org/en-US/",
+   "timing": {
+    "total": 798,
+    "paint": 564,
+    "document": 0,
+    "styles": 16,
+    "scripts": 0,
+    "run": 3,
+    "layout": 142,
+    "bytes": 166876,
+    "opened": 0,
+    "reused": 0,
+    "dns": 0,
+    "connect": 0,
+    "tls": 0,
+    "cache": 62,
+    "final_url": "https://developer.mozilla.org/en-US/"
+   },
+   "images": {
+    "done": 1,
+    "total": 860
+   }
+  },
+  {
+   "url": "https://github.com/Sw3bbl3/waveos-aurora-rs",
+   "timing": {
+    "total": 1748,
+    "paint": 1389,
+    "document": 1148,
+    "styles": 189,
+    "scripts": 0,
+    "run": 0,
+    "layout": 358,
+    "bytes": 1987133,
+    "opened": 1,
+    "reused": 0,
+    "dns": 36,
+    "connect": 38,
+    "tls": 51,
+    "cache": 79,
+    "final_url": "https://github.com/Sw3bbl3/waveos-aurora-rs"
+   },
+   "images": {
+    "done": 12,
+    "total": 2346
+   }
+  },
+  {
+   "url": "https://old.reddit.com/",
+   "timing": {
+    "reason": "lor2&dest=https%3A%2F%2Fold.reddit.com%2F",
+    "total": 531,
+    "paint": 440,
+    "document": 315,
+    "styles": 38,
+    "scripts": 0,
+    "run": 25,
+    "layout": 21,
+    "bytes": 446225,
+    "opened": 2,
+    "reused": 0,
+    "dns": 28,
+    "connect": 36,
+    "tls": 67,
+    "cache": 93,
+    "final_url": "https://old.reddit.com/login/?reason=lor2&dest=https%3A%2F%2Fold.reddit.com%2F"
+   },
+   "images": {
+    "reason": "lor2&dest=https%3A%2F%2Fold.reddit.com%2F",
+    "done": 1,
+    "total": 839
+   }
+  },
+  {
+   "url": "https://www.bbc.com/news",
+   "timing": {
+    "total": 5762,
+    "paint": 291,
+    "document": 145,
+    "styles": 24,
+    "scripts": 132,
+    "run": 5332,
+    "layout": 76,
+    "bytes": 377362,
+    "opened": 2,
+    "reused": 0,
+    "dns": 60,
+    "connect": 35,
+    "tls": 81,
+    "cache": 157,
+    "final_url": "https://www.bbc.com/news"
+   },
+   "images": {
+    "done": 1,
+    "total": 5764
+   }
+  }
+ ]
+}

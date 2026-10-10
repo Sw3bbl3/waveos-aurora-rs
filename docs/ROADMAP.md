@@ -85,7 +85,7 @@ Candidates, in no fixed order:
 - Tickless idle with TSC-deadline timers; per-CPU NVMe queues.
 - I²C-HID touchpads; USB keyboard LEDs.
 - A native GPU driver (virtio-gpu first), so the display survives sleep.
-- IPv6; more of the web platform (cookies, POST, tabs, WebP, SVG).
+- More of the web platform (WebP, SVG, CORS); a user-space window server.
 
 ## 0.8: Pulsar, JavaScript
 
@@ -93,3 +93,11 @@ Candidates, in no fixed order:
 - **In Nebula:** page scripts and scripts they insert, the DOM and events, timers and animation frames, element geometry from layout, `fetch` and `XMLHttpRequest`, per-site `localStorage`, and web APIs written in JavaScript (URL, observers, AbortController). Clicks, typing and form submission go to scripts first. jQuery runs.
 - **In Terminal:** `js`, with typed lines forwarded to a running program's stdin.
 - **Deferred:** Proxy, BigInt, typed arrays, modules, cookies, and same-origin checks on `fetch`.
+
+## 0.9: The web, faster and wider
+
+- **IPv6:** neighbor discovery, SLAAC and RDNSS, ICMPv6, TCP and UDP over IPv6 with `SockAddr6` sockets, `net_info6`; AAAA lookups and Happy Eyeballs in corekit; `ping` and `ifconfig` show IPv6. Validated against QEMU's IPv6 network (the host's loopback over IPv6), not the real internet.
+- **Loading:** parallel downloads of styles and scripts, paint before scripts, scripts in time slices, an HTTP cache with revalidation, a DNS cache, a frozen old page while the next loads, and coalesced layouts. Measured with `tools/benchmark_web.py`.
+- **Tabs** that keep working in the background, with storage events between them.
+- **Web platform:** comment nodes, TreeWalker and NodeIterator, a live MutationObserver, real getComputedStyle, `<style>` elements scripts add, a 2D canvas with paths and text, image load events.
+- **Deferred:** HTTP/2, TLS session resumption, incremental layout, running page scripts off the UI thread.
