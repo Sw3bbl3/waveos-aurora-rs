@@ -1,0 +1,24 @@
+{
+  "filesystem": "AuroraFS",
+  "guest_cpus": 4,
+  "guest_ram_mib": 512,
+  "method": "QMP quit without guest shutdown, then reboot same disposable cloned disk",
+  "phases": [
+    {
+      "phase": 0,
+      "recovered": "old",
+      "passed": true
+    },
+    {
+      "phase": 1,
+      "recovered": "old",
+      "passed": true
+    },
+    {
+      "phase": 2,
+      "recovered": "new",
+      "passed": true
+    }
+  ],
+  "limits": "File-publication boundaries only, not exhaustive torn writes or FAT32 transaction guarantees"
+}

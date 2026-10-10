@@ -158,6 +158,31 @@ fn replays_committed_journal_after_crash() {
 }
 
 #[test]
+fn staged_replacement_keeps_complete_old_or_new_file_after_power_cut() {
+    // Same protocol as Files: sync private payload, rename, then sync.
+    for phase in 0..3 {
+        let mut v = fresh(4096);
+        v.write_file("/existing.txt", b"old complete contents").unwrap();
+        v.write_file("/.transfer/payload", b"new complete contents").unwrap();
+        v.commit().unwrap();
+        if phase > 0 {
+            let staging = v.resolve("/.transfer").unwrap();
+            v.rename(staging, "payload", ROOT, "existing.txt").unwrap();
+        }
+        if phase == 2 {
+            v.commit().unwrap();
+        }
+        let mut recovered = Volume::mount(v.disk().after_power_cut(), now).unwrap();
+        recovered.fsck().unwrap();
+        let file = recovered.resolve("/existing.txt").unwrap();
+        let mut bytes = [0; 64];
+        let n = recovered.read(file, 0, &mut bytes).unwrap();
+        let expected: &[u8] = if phase == 2 { b"new complete contents" } else { b"old complete contents" };
+        assert_eq!(&bytes[..n], expected, "power cut phase {phase}");
+    }
+}
+
+#[test]
 fn uncommitted_changes_vanish_cleanly() {
     let mut v = fresh(4096);
     v.write_file("/a.txt", b"safe").unwrap();

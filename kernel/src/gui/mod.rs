@@ -169,10 +169,9 @@ fn run() {
                 None => log!("gui", "the display can't show {}x{}", nw, nh),
             }
         }
-        // Something started moving: draw the next frame promptly.
-        if desktop.wants_frames() {
-            next_tick = next_tick.min(now + 16);
-        }
+        // Input can start an animation, change focus, or unhover an expired
+        // banner. Recalculate before waiting so new work isn't delayed.
+        next_tick = next_tick.min(desktop.next_wakeup());
         if now >= next_tick {
             next_tick = now + desktop.tick(now);
         }

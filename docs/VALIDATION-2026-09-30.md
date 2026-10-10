@@ -76,3 +76,68 @@ Logs: `target/aurora-final-session.log` and `target/material-performance.log`. T
 ## Outstanding final acceptance
 
 Native Rust/Cargo/LLVM execution, a complete offline sysroot/dependency bundle, build scripts/procedural macros, rust-analyzer/rustfmt, kernel process-debug controls, source breakpoints/stepping/variable inspection, and Studio debugger integration remain outstanding. The complete offline create → design → build → install → run → debug → export → reboot sequence has not been achieved.
+
+
+## Everyday-use update — 2026-10-08
+
+This milestone adds eight session-only Files tabs, one window-owned background transfer worker with a 64 KiB buffer, explicit conflict decisions, cancellation/close cleanup, and bounded thumbnail caching. Search workers are debounced, cancelled when inactive, and joined. Settings indexes 24 exact controls with keyboard navigation, reveal/focus/highlight, and `pane/control` launch destinations. AuroraKit has an optional absolute wakeup deadline; unchanged apps retain `tick_interval`. Desktop clock, notification expiration, volume HUD, focus and animation work now determine its deadlines. Existing glass, shadows, motion preferences and filesystem/settings formats remain compatible.
+
+### Preservation and delivery
+
+The baseline includes the user's existing Nebula work, not just Git HEAD. Before this milestone, the dirty source tree and disk were preserved in `target/everyday/source-before.tar.gz`, `diff-before.patch`, `status-before.txt` and the APFS clone `disk-before.img`. All runtime checks used cloned disks. The original `target/waveos-aurora.img` was not used as a validation target. The updated kernel and system archive are built in `target/esp`; `cargo xtask run` launches the local update. No release or remote publication was performed.
+
+### Executed checks
+
+| Check | Result |
+|---|---|
+| Full `cargo xtask build` | Pass |
+| `cargo test -p nebula-engine -p aurorafs -p lumen -p xtask` | 76 tests passed, including 45 Nebula regressions |
+| Production transfer module with host I/O/fault adapter | 12 tests passed: partial/zero writes, full disk, conflict choices/apply-all, folder conflict restrictions, cancellation, retained completed items, cleanup failure, cross-volume moves, pre/post-publication sync failures, worker exclusivity and path guards |
+| `cargo xtask test` | 33 kernel tests passed on each of two boots; persistence, sound capture and bilingual Learn checks passed |
+| Native Files `--self-check` | Tab isolation, 50 search/cancel cycles after 10 warmups, verified 64 MiB copy, real AuroraFS-to-FAT32 move, cancellation and asynchronous close passed |
+| Native Settings `--self-check` | 24 unique indexed controls and deep links passed |
+| Interactive QMP checks | Tab limit/shortcuts/closure, list/icon view, conflict Keep Both and completion, Settings search/reveal, light/dark and accessibility modes exercised |
+| Stationary Notification Center | Zero scene frames during a 12-second idle sample after its opening animation |
+
+Guest resource checks on the final Files executable: search-cycle memory **2588 → 2588 KiB**, threads **1 → 1**; copying **67,108,864 bytes** used a sampled process peak of **2844 KiB**, **256 KiB** above its 2588 KiB starting level. Samples are every 20 ms; the production copy buffer is independently fixed at 64 KiB. This bounds the file-copy buffer and measures process memory, not every kernel filesystem cache allocation. Thumbnail accounting includes pixel capacity, path capacity, failed-decode entries and conservative map overhead within a 12 MiB budget.
+
+Logs remain in `target/everyday/candidate/`: `build-final.log`, `host-tests-final.log`, `transfer-tests.log`, `kernel-tests-final.log` and `1280-release.log`. The build reports the existing sha2 future-compatibility warning.
+
+### Interrupted replacement on a disposable disk
+
+`tools/test_files_powercut.py target/everyday/powercut.img` passed all three prepare/stop/reboot/verify pairs. QMP quit stopped the guest without requesting guest filesystem synchronization. A 64 KiB destination recovered complete **old** contents when stopped before publication, complete **old** contents after rename but before explicit sync, and complete **new** contents after publication and sync. Known fixture files were removed after successful verification. [Recorded outcomes](measurements/everyday-2026-10-08/powercut.json).
+
+These exercise the production AuroraFS rename/sync publication protocol on an actual cloned QEMU disk, plus host AuroraFS fault-injection tests and transfer-worker fault tests. They do not cover every possible torn device write, concurrent source mutation, or transactional replacement on FAT32. Cross-volume source deletion waits for successful destination synchronization; a power failure can still leave recoverable staging data or both copies. The original persistent disk was byte-for-byte equal to `disk-before.img` after validation.
+
+### Repeated performance measurements
+
+QEMU **11.1.1**, x86_64 software emulation on an **Apple M2 / 16 GiB Mac**, four guest CPUs, **512 MiB** guest RAM, headless display, networking and sound disabled. Each run opens Files/Documents and Settings/Appearance, performs one warmup followed by **five repetitions** of 22 seconds idle and two Alt+Tab switches. Each resolution uses identical guest configuration before/after. Static caret-free samples are selected from complete ten-second counter intervals; all final datasets have zero excluded clock discontinuities.
+
+| Resolution / measure | Baseline | Update |
+|---|---:|---:|
+| 1280×800 Files idle wakeups/second | 9.956 | 0.500 |
+| 1280×800 Settings idle wakeups/second | 9.948 | 0.500 |
+| 1920×1080 Files idle wakeups/second | 9.955 | 0.500 |
+| 1920×1080 Settings idle wakeups/second | 9.951 | 0.500 |
+| 1280×800 switching composition median / p95 | 54 / 77 ms | 58 / 86 ms |
+| 1920×1080 switching composition median / p95 | 84 / 110 ms | 85 / 117 ms |
+| 1280×800 sampled guest CPU busy, normalized across four CPUs | 1.513% | 1.176% |
+| 1920×1080 sampled guest CPU busy, normalized across four CPUs | 1.371% | 1.237% |
+| Median guest used memory, both resolutions | 151,576,576 bytes | 151,764,992 bytes |
+| Maximum guest task count, both resolutions | 10 | 10 |
+
+Idle wakeups fell **94.97–94.98%**. Each Files run contributes eight completely idle counter samples; Settings contributes seven baseline and six updated samples. CPU figures have only five baseline/four updated usable pairs per resolution and vary with host load; they do not establish a general CPU-saving percentage. Updated idle process memory is 8732 KiB for Files and 8596 KiB for Settings, with one thread each. Baseline process counters were unavailable; aggregate guest memory increased **184 KiB**, so this work does not claim lower total idle RAM.
+
+**Frame-time investigation:** initial 1080p runs showed 57 → 82 ms median; rerunning the unchanged baseline under the later host load produced 84 ms. Consecutive comparisons yielded 84 → 85 ms. The final 1280×800 p95 still increased **11.7%** (77 → 86 ms); median increased 7.4%. The runs have comparable full-screen damage/frame counts, without search-caret animation. Files' default window grew from 880×540 to 880×580 for its tab row, and host load was not isolated. The exact cause of the remaining tail regression is not isolated; it remains a measured limitation. This milestone reduces idle scheduling and copy buffering, and does **not** establish faster rendering, end-to-end input latency or a fixed frame rate.
+
+Reproducible source data: [1280 baseline](measurements/everyday-2026-10-08/baseline-1280.json), [1280 update](measurements/everyday-2026-10-08/candidate-1280.json), [1280 summary](measurements/everyday-2026-10-08/summary-1280.json), [1920 baseline](measurements/everyday-2026-10-08/baseline-1920.json), [1920 update](measurements/everyday-2026-10-08/candidate-1920.json), [1920 summary](measurements/everyday-2026-10-08/summary-1920.json). Re-run with `tools/benchmark_everyday.py` and compare with `tools/summarize_everyday.py`. Earlier exploratory logs and the invalid-launch/clock-jump runs remain in `target/everyday` and are not mixed into these final datasets.
+
+### Screenshots and guidance
+
+![Files session tabs](screenshots/everyday/files-tabs.png)
+![Settings exact-control search](screenshots/everyday/settings-search.png)
+![Selected control focused and highlighted](screenshots/everyday/settings-target.png)
+
+Additional captures: [transfer conflict](screenshots/everyday/transfer-conflict.png), [light appearance](screenshots/everyday/light.png), [accessibility preferences](screenshots/everyday/accessibility.png), [stationary Notification Center](screenshots/everyday/notification-center.png).
+
+Files, Settings and app-development handbook pages were updated in English and Canadian French and included in the built offline Learn archive. Existing Nebula improvements and regression tests are preserved; broader YouTube compatibility and hardware drivers remain outside this milestone.

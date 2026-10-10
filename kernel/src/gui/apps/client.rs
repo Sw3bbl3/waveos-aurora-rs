@@ -120,6 +120,10 @@ impl App for ClientApp {
         server::push_event(self.id, Event { kind: event::CLOSE_REQUESTED, ..Default::default() });
         false
     }
+    fn request_close_tab(&mut self) -> bool {
+        server::push_event(self.id, Event { kind: event::CLOSE_REQUESTED, a: 1, ..Default::default() });
+        false
+    }
     fn client_id(&self) -> Option<u32> {
         Some(self.id)
     }

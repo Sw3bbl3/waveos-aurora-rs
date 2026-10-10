@@ -116,6 +116,10 @@ pub trait App {
     fn close_requested(&mut self, _env: &mut Env) -> bool {
         true
     }
+    /// Ctrl+W. By default it closes the window; tabbed apps can close a tab.
+    fn close_tab_requested(&mut self, env: &mut Env) -> bool {
+        self.close_requested(env)
+    }
     /// Called about ten times a second.
     fn tick(&mut self, _env: &mut Env) -> bool {
         false
@@ -124,6 +128,12 @@ pub trait App {
     /// Return the longest time (ms) AuroraKit may sleep before calling `tick` again.
     fn tick_interval(&self) -> u64 {
         100
+    }
+    /// Absolute uptime deadline. None retains the legacy periodic tick.
+    /// Called after each tick and input event; implementations must not
+    /// postpone an existing deadline just because the pointer moved.
+    fn next_wakeup(&self, _env: &Env) -> Option<u64> {
+        None
     }
 }
 
@@ -237,12 +247,47 @@ pub fn run<A: App>(mut app: A) -> i32 {
     };
     let mut dirty = true;
     let mut next_tick = 0;
+    // Opt-in validation counters; ordinary sessions do not collect these.
+    let metrics = corekit::fs::exists("/Settings/runtime-metrics");
+    let mut sample_at = env.now_ms;
+    let mut ticks = 0u64;
+    let mut events = 0u64;
 
     loop {
         env.now_ms = corekit::time::uptime_ms();
         if env.now_ms >= next_tick {
+            ticks += 1;
             dirty |= app.tick(&mut env);
-            next_tick = env.now_ms + app.tick_interval();
+            next_tick = app.next_wakeup(&env).unwrap_or(env.now_ms + app.tick_interval());
+        }
+        if metrics && env.now_ms.saturating_sub(sample_at) >= 10_000 {
+            let stats = corekit::process::sys_stats();
+            let cpu: u64 = stats.cpu.iter().map(|c| c.busy_ms).sum();
+            if let Some(p) =
+                corekit::process::list().into_iter().find(|p| p.user == 1 && p.pid == corekit::process::pid())
+            {
+                corekit::eprintln!(
+                    "runtime-process: {}, cpu_ms={}, memory_kib={}, threads={}",
+                    title,
+                    p.cpu_ms,
+                    p.mem_kib,
+                    p.threads
+                );
+            }
+            corekit::eprintln!(
+                "runtime: {}, elapsed={}, ticks={}, events={}, cpu_ms={}, memory={}, tasks={}, frames={}",
+                title,
+                env.now_ms - sample_at,
+                ticks,
+                events,
+                cpu,
+                stats.mem_used,
+                stats.tasks,
+                stats.frames
+            );
+            sample_at = env.now_ms;
+            ticks = 0;
+            events = 0;
         }
         if dirty {
             let (sw, sh) = (win.surface.width as i32, win.surface.height as i32);
@@ -270,12 +315,18 @@ pub fn run<A: App>(mut app: A) -> i32 {
         }
         apply(core::mem::take(&mut env.requests));
 
+        // Layout can reveal an offscreen focus target and request another
+        // frame; honor that deadline before sleeping as well as after input.
+        if let Some(deadline) = app.next_wakeup(&env) {
+            next_tick = deadline;
+        }
         let timeout = next_tick.saturating_sub(corekit::time::uptime_ms()).max(1);
         let mut ev = Event::default();
         if call(nr::NEXT_EVENT, &[&mut ev as *mut Event as u64, timeout]).unwrap_or(0) == 0 {
             continue;
         }
         env.now_ms = corekit::time::uptime_ms();
+        events += 1;
         if matches!(
             ev.kind,
             event::KEY | event::POINTER_DOWN | event::POINTER_UP | event::POINTER_MOVE | event::DRAG_OVER | event::DROP
@@ -319,7 +370,7 @@ pub fn run<A: App>(mut app: A) -> i32 {
                 true
             }
             event::CLOSE_REQUESTED => {
-                if app.close_requested(&mut env) {
+                if if ev.a == 1 { app.close_tab_requested(&mut env) } else { app.close_requested(&mut env) } {
                     let _ = call(nr::WIN_CLOSE, &[id]);
                     return 0;
                 }
@@ -328,6 +379,9 @@ pub fn run<A: App>(mut app: A) -> i32 {
             _ => false,
         };
         apply(core::mem::take(&mut env.requests));
+        if let Some(deadline) = app.next_wakeup(&env) {
+            next_tick = deadline;
+        }
     }
 }
 

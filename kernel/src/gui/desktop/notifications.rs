@@ -148,6 +148,20 @@ impl Desktop {
     }
 
     /// Advances banner and panel animations; true while something moves.
+    pub(super) fn notifications_moving(&self) -> bool {
+        self.banners.iter().any(|b| self.now_ms < b.shown_at + SLIDE_MS || b.leaving_at.is_some())
+            || self.center.as_ref().is_some_and(|c| self.now_ms < c.opened_at + SLIDE_MS || c.closing_at.is_some())
+    }
+
+    pub(super) fn notification_deadline(&self) -> u64 {
+        self.banners
+            .iter()
+            .filter(|b| b.leaving_at.is_none() && self.banner_hover != Some(b.n.id))
+            .map(|b| b.shown_at + BANNER_MS)
+            .min()
+            .unwrap_or(u64::MAX)
+    }
+
     pub(super) fn step_notifications(&mut self) -> bool {
         let now = self.now_ms;
         let mut moving = false;

@@ -149,6 +149,7 @@ pub struct Desktop {
     last_click: (u64, i32, i32),
     clock: String,
     now_ms: u64,
+    last_tick: u64,
     pub power: Option<PowerAction>,
     /// Set when the user asks for a screenshot; the compositor takes it after the next frame.
     pub screenshot: bool,
@@ -208,6 +209,7 @@ impl Desktop {
             last_click: (0, 0, 0),
             clock: String::new(),
             now_ms: 0,
+            last_tick: 0,
             power: None,
             screenshot: false,
             launching: Vec::new(),
@@ -764,10 +766,32 @@ impl Desktop {
 
     /// True when the compositor should draw at full frame rate.
     pub fn wants_frames(&self) -> bool {
-        self.animating()
-            || !self.banners.is_empty()
-            || self.center.is_some()
-            || self.launching.iter().any(|&(_, t)| self.now_ms < t + 3000)
+        self.animating() || self.notifications_moving() || self.launching.iter().any(|&(_, t)| self.now_ms < t + 3000)
+    }
+
+    /// Absolute deadline, recalculated after input and client commands. Client
+    /// apps own their timers; only built-in dialogs need the legacy 100 ms tick.
+    pub fn next_wakeup(&self) -> u64 {
+        if self.focused_id() != self.last_focus {
+            return self.now_ms;
+        }
+        // Sample the wall clock at most once a second (also catches time edits).
+        let mut next = self.last_tick + 1000;
+        if self.wants_frames() {
+            next = next.min(self.last_tick + 16);
+        }
+        if self.windows.iter().any(|w| !w.minimized && w.app.client_id().is_none()) {
+            next = next.min(self.last_tick + 100);
+        }
+        for window in &self.windows {
+            if let Some(at) = window.awaiting_frame {
+                next = next.min(at + 600);
+            }
+        }
+        for &(_, at) in &self.launching {
+            next = next.min(at + 5000);
+        }
+        next.min(self.notification_deadline()).min(self.volume_deadline())
     }
 
     /// Runs `f` against window `id`'s app and applies its requests.
@@ -1191,7 +1215,15 @@ impl Desktop {
             }
             if (k.mods.alt && k.code == KeyCode::F4) || (k.mods.ctrl && matches!(k.ch, Some('w') | Some('W'))) {
                 if let Some(id) = self.focused_id() {
-                    self.request_close(id);
+                    if k.mods.ctrl && matches!(k.ch, Some('w') | Some('W')) {
+                        if let Some(i) = self.index_of(id) {
+                            if self.windows[i].app.request_close_tab() {
+                                self.close(id);
+                            }
+                        }
+                    } else {
+                        self.request_close(id);
+                    }
                 }
                 return;
             }
@@ -1214,6 +1246,7 @@ impl Desktop {
     /// Periodic work: clock, caret blink, live app data. Returns ms until the next tick.
     pub fn tick(&mut self, now_ms: u64) -> u64 {
         self.now_ms = now_ms;
+        self.last_tick = now_ms;
         let clock = shell::clock_text();
         if clock != self.clock {
             self.clock = clock;
@@ -1242,7 +1275,7 @@ impl Desktop {
         self.launching.retain(|&(_, t)| now_ms < t + 5000);
         // Client windows that never drew still appear after a moment.
         let late: Vec<u32> =
-            self.windows.iter().filter(|w| w.awaiting_frame.is_some_and(|t| now_ms > t + 600)).map(|w| w.id).collect();
+            self.windows.iter().filter(|w| w.awaiting_frame.is_some_and(|t| now_ms >= t + 600)).map(|w| w.id).collect();
         for id in late {
             self.reveal_window(id);
         }
@@ -1258,7 +1291,7 @@ impl Desktop {
         if busy {
             16
         } else {
-            100
+            self.next_wakeup().saturating_sub(now_ms).max(1)
         }
     }
 

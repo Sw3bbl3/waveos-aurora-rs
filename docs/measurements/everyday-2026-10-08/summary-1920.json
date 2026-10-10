@@ -1,0 +1,77 @@
+{
+  "baseline": {
+    "resolution": [
+      1920,
+      1080
+    ],
+    "repetitions": 5,
+    "idle": {
+      "Documents \u2014 Files": {
+        "samples": 8,
+        "median_wakeups_per_second": 9.955
+      },
+      "Settings": {
+        "samples": 7,
+        "median_wakeups_per_second": 9.951
+      }
+    },
+    "idle_guest_cpu_percent_median": 1.371,
+    "idle_cpu_sample_count": 5,
+    "excluded_clock_discontinuities": 0,
+    "median_guest_memory_bytes": 151576576,
+    "max_guest_tasks": 10,
+    "processes": {},
+    "switching": {
+      "frames": 20,
+      "median_composition_ms": 84.0,
+      "p95_composition_ms": 110
+    }
+  },
+  "candidate": {
+    "resolution": [
+      1920,
+      1080
+    ],
+    "repetitions": 5,
+    "idle": {
+      "Documents \u2014 Files": {
+        "samples": 8,
+        "median_wakeups_per_second": 0.5
+      },
+      "Settings": {
+        "samples": 6,
+        "median_wakeups_per_second": 0.5
+      }
+    },
+    "idle_guest_cpu_percent_median": 1.237,
+    "idle_cpu_sample_count": 4,
+    "excluded_clock_discontinuities": 0,
+    "median_guest_memory_bytes": 151764992.0,
+    "max_guest_tasks": 10,
+    "processes": {
+      "Settings": {
+        "median_memory_kib": 8596.0,
+        "max_threads": 1
+      },
+      "Documents \u2014 Files": {
+        "median_memory_kib": 8732.0,
+        "max_threads": 1
+      }
+    },
+    "switching": {
+      "frames": 20,
+      "median_composition_ms": 85.0,
+      "p95_composition_ms": 117
+    }
+  },
+  "idle_wakeup_reduction_percent": {
+    "Documents \u2014 Files": 94.98,
+    "Settings": 94.98
+  },
+  "caveats": [
+    "Samples spanning VM clock discontinuities are excluded from wakeup rates.",
+    "CPU values are descriptive guest counters; sparse samples and host load do not establish an overall CPU-saving percentage.",
+    "Composition time excludes client drawing and input latency. No locked frame-rate claim.",
+    "Files adds a tab row: its default window is 880x580 versus 880x540 in the baseline."
+  ]
+}

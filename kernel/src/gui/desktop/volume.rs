@@ -163,6 +163,10 @@ impl Desktop {
     }
 
     /// Hides the level display when its time is up. True while it shows.
+    pub(super) fn volume_deadline(&self) -> u64 {
+        self.volume.hud_at.map(|at| at + HUD_MS).unwrap_or(u64::MAX)
+    }
+
     pub(super) fn step_volume(&mut self) -> bool {
         match self.volume.hud_at {
             Some(t) if self.now_ms >= t + HUD_MS => {

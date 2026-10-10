@@ -25,6 +25,8 @@ use aurorakit::{App, Env, KeyEvent, Request};
 use corekit::abi::{display, pref, DateTime, DisplayMode};
 use corekit::prefs;
 
+mod search;
+
 const SIDEBAR_W: i32 = 214;
 const ROW_H: i32 = 44;
 const MODE_H: i32 = 36;
@@ -91,6 +93,11 @@ pub struct Settings {
     pane: Pane,
     search: TextField,
     search_focused: bool,
+    search_selected: usize,
+    target: Option<usize>,
+    highlight_until: u64,
+    redraw: bool,
+    last_tick: u64,
     scroll: i32,
     focus: Option<Hit>,
     hover: Option<Hit>,
@@ -122,7 +129,7 @@ impl Settings {
     pub fn new(start: Option<&str>) -> Self {
         let thumbs = (0..wallpaper::NAMES.len() as u8).map(|i| wallpaper::generate(i, THUMB_W, THUMB_H)).collect();
         let pane = start
-            .and_then(|s| PANES.iter().find(|(_, _, id, _)| *id == s))
+            .and_then(|s| PANES.iter().find(|(_, _, id, _)| *id == s.split('/').next().unwrap_or(s)))
             .map(|(p, _, _, _)| *p)
             .unwrap_or(Pane::Appearance);
         let mut s = Self {
@@ -130,6 +137,11 @@ impl Settings {
             pane,
             search: TextField::new("", "Search settings"),
             search_focused: false,
+            search_selected: 0,
+            target: None,
+            highlight_until: 0,
+            redraw: false,
+            last_tick: 0,
             scroll: 0,
             focus: None,
             hover: None,
@@ -148,6 +160,9 @@ impl Settings {
         };
         s.load_custom_thumb();
         s.sync_clock();
+        if let Some(i) = start.and_then(|id| search::SETTINGS.iter().position(|entry| entry.id == id)) {
+            s.jump_setting(i, corekit::time::uptime_ms());
+        }
         s
     }
 
@@ -192,25 +207,7 @@ impl Settings {
     }
 
     fn visible_panes(&self) -> Vec<usize> {
-        let query = self.search.text().to_ascii_lowercase();
-        PANES
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, label, id, _))| {
-                let terms = match *id {
-                    "desktop" => "dock size hide glass intensity transparency lumen",
-                    "accessibility" => "reduce motion transparency contrast",
-                    "appearance" => "light dark accent wallpaper",
-                    "keyboard" => "layout repeat typing",
-                    "display" => "resolution screen",
-                    "sound" => "volume mute",
-                    "notifications" => "do not disturb",
-                    _ => "",
-                };
-                query.is_empty() || label.to_ascii_lowercase().contains(&query) || terms.contains(&query)
-            })
-            .map(|(i, _)| i)
-            .collect()
+        (0..PANES.len()).collect()
     }
 
     fn content(&self, area: Rect) -> Rect {
@@ -319,6 +316,9 @@ impl Settings {
     fn run(&mut self, h: Hit, x: i32, env: &mut Env) {
         match h {
             Hit::Pane(i) => {
+                self.search.edit.set_text("");
+                self.target = None;
+                self.controls.focused = None;
                 self.pane = PANES[i].0;
                 self.scroll = 0;
                 self.focus = None;
@@ -950,9 +950,14 @@ impl App for Settings {
     fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
         self.area = area;
         self.draw_sidebar(cv, area);
+        if !self.search.text().trim().is_empty() {
+            self.draw_results(cv, area);
+            return;
+        }
         cv.with_clip(Rect::new(area.x + SIDEBAR_W, area.y, area.w - SIDEBAR_W, area.h), |cv| {
             self.draw_pane(cv, area, env)
         });
+        self.reveal_target(cv, area, env);
         if let Some(h) = self.focus {
             if let Some((_, r)) = self.hits(area).into_iter().find(|(k, _)| *k == h) {
                 cv.stroke_round_rect(r.inset(-2), 8, theme::accent());
@@ -961,6 +966,17 @@ impl App for Settings {
     }
 
     fn click(&mut self, x: i32, y: i32, _area: Rect, env: &mut Env) -> bool {
+        if !self.search.text().trim().is_empty() && x >= self.area.x + SIDEBAR_W {
+            for (row, i) in
+                self.matches().into_iter().skip(self.result_offset()).take(self.result_capacity()).enumerate()
+            {
+                if self.result_rect(self.area, row).contains(x, y) {
+                    self.jump_setting(i, env.now_ms);
+                    return true;
+                }
+            }
+            return false;
+        }
         if matches!(self.pane, Pane::Desktop | Pane::Accessibility) && x >= self.area.x + SIDEBAR_W {
             self.search_focused = false;
             self.focus = None;
@@ -1028,6 +1044,9 @@ impl App for Settings {
             self.controls.focused = None;
             return true;
         }
+        if self.search_focused && (!self.search.text().is_empty() || ev.code != KeyCode::Tab) {
+            return self.result_key(ev, env);
+        }
         if ev.pressed && ev.code == KeyCode::Tab {
             let hits = self.hits(self.area);
             let reverse = ev.mods.shift;
@@ -1079,20 +1098,6 @@ impl App for Settings {
                 }
             }
             return true;
-        }
-        if self.search_focused {
-            if ev.pressed && matches!(ev.code, KeyCode::Down | KeyCode::Enter) {
-                if let Some(i) = self.visible_panes().first().copied() {
-                    self.search_focused = false;
-                    self.focus = Some(Hit::Pane(i));
-                    if ev.code == KeyCode::Enter {
-                        self.run(Hit::Pane(i), 0, env);
-                        self.focus = Some(Hit::Pane(i));
-                    }
-                }
-                return true;
-            }
-            return self.search.key(ev, env.now_ms).handled;
         }
         if ev.pressed
             && self.controls.focused.is_some()
@@ -1146,7 +1151,13 @@ impl App for Settings {
     }
 
     fn tick(&mut self, env: &mut Env) -> bool {
-        let mut changed = self.search.tick(env.now_ms, env.focused && self.search_focused);
+        self.last_tick = env.now_ms;
+        let mut changed =
+            core::mem::take(&mut self.redraw) | self.search.tick(env.now_ms, env.focused && self.search_focused);
+        if self.target.is_some() && env.now_ms >= self.highlight_until {
+            self.target = None;
+            changed = true;
+        }
         if env.screen != self.screen {
             self.screen = env.screen;
             self.modes = prefs::display_modes();
@@ -1192,6 +1203,20 @@ impl App for Settings {
         changed
     }
 
+    fn next_wakeup(&self, env: &Env) -> Option<u64> {
+        if self.redraw {
+            return Some(env.now_ms + 1);
+        }
+        let interval = if env.focused && (self.search_focused || self.try_focused) {
+            500
+        } else if matches!(self.pane, Pane::DateTime | Pane::Network) {
+            1000
+        } else {
+            2000
+        };
+        Some((self.last_tick + interval).min(if self.target.is_some() { self.highlight_until } else { u64::MAX }))
+    }
+
     fn tick_interval(&self) -> u64 {
         if self.pane == Pane::DateTime {
             500
@@ -1206,5 +1231,29 @@ impl App for Settings {
 corekit::entry!(main);
 
 fn main(args: corekit::Args) -> i32 {
+    if args.get(1).is_some_and(|s| s == "--self-check") {
+        let mut settings = Settings::new(None);
+        for (i, entry) in search::SETTINGS.iter().enumerate() {
+            if search::SETTINGS.iter().filter(|s| s.id == entry.id).count() != 1 {
+                return 1;
+            }
+            settings.search.edit.set_text(entry.label);
+            if !settings.matches().contains(&i) {
+                return 2;
+            }
+            settings.jump_setting(i, 0);
+            if settings.pane != entry.pane || settings.target != Some(i) {
+                return 3;
+            }
+            let launched = Settings::new(Some(entry.id));
+            if launched.target != Some(i) {
+                return 4;
+            }
+        }
+        let report = format!("SETTINGS CHECK PASS: {} indexed controls and deep links", search::SETTINGS.len());
+        corekit::io::log(&report);
+        corekit::eprintln!("{}", report);
+        return 0;
+    }
     aurorakit::run(Settings::new(args.get(1).map(String::as_str)))
 }

@@ -1,0 +1,5 @@
+{
+  "seconds": 12,
+  "scene_frames": 0,
+  "raw": "[  4738.317] Settings: runtime-process: Settings, cpu_ms=1297, memory_kib=8596, threads=1\r\n[  4738.319] Settings: runtime: Settings, elapsed=10001, ticks=5, events=0, cpu_ms=42043, memory=151764992, tasks=10, frames=89\r\n[  4738.325] Files: runtime-process: Documents \u2014 Files, cpu_ms=2372, memory_kib=8732, threads=1\r\n[  4738.325] Files: runtime: Documents \u2014 Files, elapsed=10001, ticks=5, events=0, cpu_ms=42069, memory=151764992, tasks=10, frames=89\r\n"
+}

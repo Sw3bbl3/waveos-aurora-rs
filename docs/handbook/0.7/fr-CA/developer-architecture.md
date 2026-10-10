@@ -9,6 +9,11 @@ FirstLight charge le noyau Aster et l’archive système par UEFI. Aster gère l
 
 AuroraKit offre des libellés, titres, boutons, interrupteurs, curseurs, rangées, colonnes, grilles, défilements, cartes et panneaux de verre. Les éditeurs de texte existants restent distincts. Les matériaux transparents sont facultatifs; les applications opaques demeurent compatibles.
 
+## Réduire les réveils inutiles
+Une application peut implémenter `next_wakeup(&Env) -> Option<u64>` pour retourner une échéance absolue depuis le démarrage. AuroraKit la recalcule après les entrées, le dessin et les appels à `tick`, afin de traiter rapidement le nouveau travail. Retournez `None` pour conserver le comportement de `tick_interval`. Gardez les échéances stables lors des déplacements du pointeur sans rapport avec le travail; `tick` doit retourner vrai seulement si la vue a changé. Files et Settings utilisent des échéances espacées au repos; le suivi des transferts est limité à dix mises à jour par seconde.
+
+Pour les mesures sur une VM jetable, créez `/Settings/runtime-metrics` avant de lancer une application. AuroraKit journalise alors les réveils, les événements, les compteurs de processeur et de mémoire de la VM, ainsi que les compteurs de processeur, de mémoire et de fils du processus, toutes les dix secondes. Retirez ce fichier pour désactiver la collecte aux lancements suivants. `tools/benchmark_everyday.py` et `tools/summarize_everyday.py` comparent des essais répétés au repos et lors du changement de fenêtre; le temps de composition ne représente pas la latence complète des entrées.
+
 ## Développer une application
 Créez une application compilable sur l’hôte dans userland, implémentez title/size/draw et les gestionnaires requis, puis compilez avec xtask. Testez le redimensionnement, le focus, le thème, le travail non enregistré et l’isolation. Consultez [Paquets](developer-packages.md) pour la distribution.
 

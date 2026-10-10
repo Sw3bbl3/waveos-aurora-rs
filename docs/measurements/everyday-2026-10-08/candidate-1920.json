@@ -1,0 +1,650 @@
+{
+  "resolution": [
+    1920,
+    1080
+  ],
+  "cpus": 4,
+  "ram_mib": 512,
+  "warmup": 1,
+  "repetitions": 5,
+  "records": [
+    {
+      "repetition": 1,
+      "workload": "idle",
+      "runtime": [
+        {
+          "name": "Settings",
+          "elapsed_ms": 10002,
+          "ticks": 5,
+          "events": 3,
+          "cpu_ms": 9202,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 38,
+          "timing_valid": true
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "elapsed_ms": 10003,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 9550,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 38,
+          "timing_valid": true
+        },
+        {
+          "name": "Settings",
+          "elapsed_ms": 10001,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 9707,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 38,
+          "timing_valid": true
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "elapsed_ms": 10002,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 10027,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 38,
+          "timing_valid": true
+        }
+      ],
+      "frames": [],
+      "processes": [
+        {
+          "name": "Settings",
+          "cpu_ms": 98,
+          "memory_kib": 8596,
+          "threads": 1
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "cpu_ms": 198,
+          "memory_kib": 8732,
+          "threads": 1
+        },
+        {
+          "name": "Settings",
+          "cpu_ms": 104,
+          "memory_kib": 8596,
+          "threads": 1
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "cpu_ms": 227,
+          "memory_kib": 8732,
+          "threads": 1
+        }
+      ]
+    },
+    {
+      "repetition": 1,
+      "workload": "switching",
+      "runtime": [
+        {
+          "name": "Settings",
+          "elapsed_ms": 10000,
+          "ticks": 5,
+          "events": 3,
+          "cpu_ms": 10569,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 42,
+          "timing_valid": true
+        }
+      ],
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 92,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 83,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 114,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 81,
+          "width": 1920,
+          "height": 1080
+        }
+      ],
+      "processes": [
+        {
+          "name": "Settings",
+          "cpu_ms": 128,
+          "memory_kib": 8596,
+          "threads": 1
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "workload": "idle",
+      "runtime": [
+        {
+          "name": "Documents \u2014 Files",
+          "elapsed_ms": 10000,
+          "ticks": 5,
+          "events": 3,
+          "cpu_ms": 10932,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 42,
+          "timing_valid": true
+        },
+        {
+          "name": "Settings",
+          "elapsed_ms": 10003,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 11100,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 42,
+          "timing_valid": true
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "elapsed_ms": 10001,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 11465,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 42,
+          "timing_valid": true
+        },
+        {
+          "name": "Settings",
+          "elapsed_ms": 10002,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 11708,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 43,
+          "timing_valid": true
+        }
+      ],
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 97,
+          "width": 1920,
+          "height": 1080
+        }
+      ],
+      "processes": [
+        {
+          "name": "Documents \u2014 Files",
+          "cpu_ms": 266,
+          "memory_kib": 8732,
+          "threads": 1
+        },
+        {
+          "name": "Settings",
+          "cpu_ms": 132,
+          "memory_kib": 8596,
+          "threads": 1
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "cpu_ms": 295,
+          "memory_kib": 8732,
+          "threads": 1
+        },
+        {
+          "name": "Settings",
+          "cpu_ms": 138,
+          "memory_kib": 8596,
+          "threads": 1
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "workload": "switching",
+      "runtime": [],
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 85,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 82,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 115,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 81,
+          "width": 1920,
+          "height": 1080
+        }
+      ],
+      "processes": []
+    },
+    {
+      "repetition": 3,
+      "workload": "idle",
+      "runtime": [
+        {
+          "name": "Settings",
+          "elapsed_ms": 10003,
+          "ticks": 5,
+          "events": 3,
+          "cpu_ms": 12598,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 47,
+          "timing_valid": true
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "elapsed_ms": 10000,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 12938,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 47,
+          "timing_valid": true
+        },
+        {
+          "name": "Settings",
+          "elapsed_ms": 10003,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 13087,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 47,
+          "timing_valid": true
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "elapsed_ms": 10004,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 13433,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 47,
+          "timing_valid": true
+        }
+      ],
+      "frames": [],
+      "processes": [
+        {
+          "name": "Settings",
+          "cpu_ms": 167,
+          "memory_kib": 8596,
+          "threads": 1
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "cpu_ms": 362,
+          "memory_kib": 8732,
+          "threads": 1
+        },
+        {
+          "name": "Settings",
+          "cpu_ms": 175,
+          "memory_kib": 8596,
+          "threads": 1
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "cpu_ms": 389,
+          "memory_kib": 8732,
+          "threads": 1
+        }
+      ]
+    },
+    {
+      "repetition": 3,
+      "workload": "switching",
+      "runtime": [
+        {
+          "name": "Settings",
+          "elapsed_ms": 10004,
+          "ticks": 5,
+          "events": 2,
+          "cpu_ms": 13757,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 49,
+          "timing_valid": true
+        }
+      ],
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 86,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 82,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 118,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 81,
+          "width": 1920,
+          "height": 1080
+        }
+      ],
+      "processes": [
+        {
+          "name": "Settings",
+          "cpu_ms": 193,
+          "memory_kib": 8596,
+          "threads": 1
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "workload": "idle",
+      "runtime": [
+        {
+          "name": "Documents \u2014 Files",
+          "elapsed_ms": 10003,
+          "ticks": 5,
+          "events": 3,
+          "cpu_ms": 14274,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 51,
+          "timing_valid": true
+        },
+        {
+          "name": "Settings",
+          "elapsed_ms": 10003,
+          "ticks": 5,
+          "events": 1,
+          "cpu_ms": 14393,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 51,
+          "timing_valid": true
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "elapsed_ms": 10003,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 14707,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 51,
+          "timing_valid": true
+        },
+        {
+          "name": "Settings",
+          "elapsed_ms": 10001,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 14854,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 51,
+          "timing_valid": true
+        }
+      ],
+      "frames": [],
+      "processes": [
+        {
+          "name": "Documents \u2014 Files",
+          "cpu_ms": 433,
+          "memory_kib": 8732,
+          "threads": 1
+        },
+        {
+          "name": "Settings",
+          "cpu_ms": 211,
+          "memory_kib": 8596,
+          "threads": 1
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "cpu_ms": 455,
+          "memory_kib": 8732,
+          "threads": 1
+        },
+        {
+          "name": "Settings",
+          "cpu_ms": 221,
+          "memory_kib": 8596,
+          "threads": 1
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "workload": "switching",
+      "runtime": [],
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 90,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 84,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 105,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 103,
+          "width": 1920,
+          "height": 1080
+        }
+      ],
+      "processes": []
+    },
+    {
+      "repetition": 5,
+      "workload": "idle",
+      "runtime": [
+        {
+          "name": "Settings",
+          "elapsed_ms": 10001,
+          "ticks": 5,
+          "events": 3,
+          "cpu_ms": 15788,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 56,
+          "timing_valid": true
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "elapsed_ms": 10004,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 16111,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 56,
+          "timing_valid": true
+        },
+        {
+          "name": "Settings",
+          "elapsed_ms": 10003,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 16263,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 56,
+          "timing_valid": true
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "elapsed_ms": 10001,
+          "ticks": 5,
+          "events": 0,
+          "cpu_ms": 16606,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 56,
+          "timing_valid": true
+        }
+      ],
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 82,
+          "width": 1920,
+          "height": 1080
+        }
+      ],
+      "processes": [
+        {
+          "name": "Settings",
+          "cpu_ms": 253,
+          "memory_kib": 8596,
+          "threads": 1
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "cpu_ms": 516,
+          "memory_kib": 8732,
+          "threads": 1
+        },
+        {
+          "name": "Settings",
+          "cpu_ms": 262,
+          "memory_kib": 8596,
+          "threads": 1
+        },
+        {
+          "name": "Documents \u2014 Files",
+          "cpu_ms": 546,
+          "memory_kib": 8732,
+          "threads": 1
+        }
+      ]
+    },
+    {
+      "repetition": 5,
+      "workload": "switching",
+      "runtime": [
+        {
+          "name": "Settings",
+          "elapsed_ms": 10001,
+          "ticks": 5,
+          "events": 2,
+          "cpu_ms": 16916,
+          "memory": 151764992,
+          "tasks": 10,
+          "frames": 58,
+          "timing_valid": true
+        }
+      ],
+      "frames": [
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 84,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 85,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 117,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "kind": "full",
+          "pixels": 2073600,
+          "ms": 82,
+          "width": 1920,
+          "height": 1080
+        }
+      ],
+      "processes": [
+        {
+          "name": "Settings",
+          "cpu_ms": 278,
+          "memory_kib": 8596,
+          "threads": 1
+        }
+      ]
+    }
+  ]
+}

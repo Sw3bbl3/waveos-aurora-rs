@@ -30,6 +30,11 @@ use corekit::fs;
 use corekit::process::desktop;
 use corekit::sync::Mutex;
 
+mod transfer;
+mod window;
+use window::Files;
+type SearchWorker = Arc<Mutex<Option<corekit::thread::JoinHandle<()>>>>;
+
 const SIDEBAR_W: i32 = 190;
 const TOOLBAR_H: i32 = 50;
 const HEADER_H: i32 = 28;
@@ -191,7 +196,7 @@ struct QuickLook {
     text: Option<String>,
 }
 
-pub struct Files {
+pub struct Folder {
     cwd: String,
     items: Vec<Item>,
     selection: BTreeSet<usize>,
@@ -209,7 +214,11 @@ pub struct Files {
     menu: Option<Menu>,
     rename: Option<(usize, TextField)>,
     confirm: Option<Confirm>,
-    cut: Vec<String>,
+    cut: Arc<Mutex<Vec<String>>>,
+    transfers: transfer::Shared,
+    worker: SearchWorker,
+    search_at: Option<u64>,
+    resume_search: bool,
     status: Option<(String, u64)>,
     scroll: i32,
     press: Option<Press>,
@@ -316,8 +325,8 @@ fn human_date(secs: u64) -> String {
     format!("{} {}, {}, {}:{:02} {}", corekit::time::MONTHS[(m - 1) as usize], d, y, h12, min, ampm)
 }
 
-impl Files {
-    pub fn new(start: &str) -> Self {
+impl Folder {
+    pub fn new(start: &str, transfers: transfer::Shared, worker: SearchWorker, cut: Arc<Mutex<Vec<String>>>) -> Self {
         let mut f = Self {
             cwd: String::new(),
             items: Vec::new(),
@@ -336,7 +345,11 @@ impl Files {
             menu: None,
             rename: None,
             confirm: None,
-            cut: Vec::new(),
+            cut,
+            transfers,
+            worker,
+            search_at: None,
+            resume_search: false,
             status: None,
             scroll: 0,
             press: None,
@@ -490,6 +503,7 @@ impl Files {
     // ------------------------------------------------------------ search
 
     fn stop_search(&mut self) {
+        self.search_at = None;
         if let Some(s) = self.search_state.take() {
             s.lock().cancel.store(true, Ordering::Relaxed);
         }
@@ -497,6 +511,11 @@ impl Files {
 
     fn start_search(&mut self) {
         self.stop_search();
+        self.search_at = Some(corekit::time::uptime_ms() + 200);
+    }
+
+    fn launch_search(&mut self) {
+        self.search_at = None;
         let q = String::from(self.search.text().trim());
         self.search_query = q.clone();
         self.selection.clear();
@@ -517,10 +536,14 @@ impl Files {
             let mut found = 0usize;
             while let Some(dir) = stack.pop() {
                 if state.lock().cancel.load(Ordering::Relaxed) {
+                    state.lock().done = true;
                     return;
                 }
                 let mut batch = Vec::new();
                 for e in fs::read_dir(&dir).unwrap_or_default() {
+                    if found + batch.len() >= 2000 {
+                        break;
+                    }
                     if e.name.starts_with('.') {
                         continue;
                     }
@@ -534,14 +557,18 @@ impl Files {
                 }
                 found += batch.len();
                 state.lock().results.extend(batch);
-                if found > 2000 {
+                if found >= 2000 {
                     break;
                 }
             }
             state.lock().done = true;
         });
-        if job.is_err() {
-            self.flash(String::from("Couldn't start the search"));
+        match job {
+            Ok(h) => *self.worker.lock() = Some(h),
+            Err(_) => {
+                self.search_state = None;
+                self.flash(String::from("Couldn't start the search"));
+            }
         }
     }
 
@@ -793,7 +820,7 @@ impl Files {
                     return;
                 }
                 corekit::clipboard::set_files(&paths);
-                self.cut = if action == Action::Cut { paths.clone() } else { Vec::new() };
+                *self.cut.lock() = if action == Action::Cut { paths.clone() } else { Vec::new() };
                 let what = if paths.len() == 1 {
                     format!("“{}”", fs::file_name(&paths[0]))
                 } else {
@@ -803,15 +830,16 @@ impl Files {
             }
             Action::Paste => self.paste(),
             Action::Duplicate => {
-                for p in paths {
-                    let dir = String::from(fs::parent(&p));
-                    let (stem, ext) = split_ext(fs::file_name(&p), fs::is_dir(&p));
-                    let target = fs::unique_name(&dir, &format!("{stem} copy"), &ext);
-                    if let Err(e) = fs::copy(&p, &target) {
-                        self.flash(format!("Couldn't duplicate: {e}"));
-                    }
+                let sources = paths
+                    .into_iter()
+                    .map(|p| {
+                        let dir = String::from(fs::parent(&p));
+                        (p, dir)
+                    })
+                    .collect();
+                if !self.transfers.lock().start(sources, false) {
+                    self.flash(String::from("Finish or cancel the current transfer first"));
                 }
-                self.refresh();
             }
             Action::Trash => self.trash(paths),
             Action::PutBack => {
@@ -921,31 +949,12 @@ impl Files {
         }
     }
 
-    /// Copies (or moves) `sources` into `dir`. Returns how many succeeded.
-    fn transfer(&mut self, sources: &[String], dir: &str, mv: bool) -> usize {
-        let mut done = 0;
-        for src in sources {
-            if fs::parent(src) == dir && mv {
-                continue; // already there
-            }
-            let into_itself = (String::from(dir) + "/").starts_with(&(src.clone() + "/"));
-            if into_itself {
-                self.flash(String::from("Can't put a folder inside itself"));
-                continue;
-            }
-            let name = fs::file_name(src);
-            let mut target = fs::join(dir, name);
-            if fs::exists(&target) {
-                let (stem, ext) = split_ext(name, fs::is_dir(src));
-                target = fs::unique_name(dir, &format!("{stem} copy"), &ext);
-            }
-            let r = if mv { fs::move_path(src, &target) } else { fs::copy(src, &target) };
-            match r {
-                Ok(()) => done += 1,
-                Err(e) => self.flash(format!("Couldn't {} “{name}”: {e}", if mv { "move" } else { "copy" })),
-            }
+    fn transfer(&mut self, sources: &[String], dir: &str, moving: bool) {
+        let jobs = sources.iter().map(|p| (p.clone(), String::from(dir))).collect();
+        let started = self.transfers.lock().start(jobs, moving);
+        if !started {
+            self.flash(String::from("Finish or cancel the current transfer first"));
         }
-        done
     }
 
     fn paste(&mut self) {
@@ -957,16 +966,12 @@ impl Files {
             self.flash(String::from("Nothing to paste"));
             return;
         };
-        let mv = !self.cut.is_empty() && self.cut == paths;
+        let moving = {
+            let cut = self.cut.lock();
+            !cut.is_empty() && *cut == paths
+        };
         let cwd = self.cwd.clone();
-        let n = self.transfer(&paths, &cwd, mv);
-        if mv {
-            self.cut.clear();
-        }
-        if n > 0 {
-            self.flash(format!("{} {n} item{}", if mv { "Moved" } else { "Pasted" }, if n == 1 { "" } else { "s" }));
-        }
-        self.refresh();
+        self.transfer(&paths, &cwd, moving);
     }
 
     fn finish_rename(&mut self, commit: bool) {
@@ -1300,7 +1305,7 @@ impl Files {
                     with_alpha(t.text_secondary, 0x30)
                 };
                 let icon = icon_of(item);
-                let cut = self.cut.contains(&item.path);
+                let cut = self.cut.lock().contains(&item.path);
                 match self.view {
                     View::Icons => {
                         if selected || drop {
@@ -1592,6 +1597,16 @@ impl Files {
         let Some((_, e)) = next else { return false };
         let path = e.path.clone();
         let thumb = fs::read(&path).ok().and_then(|d| aurora_image::decode(&d).ok()).map(|img| img.thumbnail(104, 104));
+        // Charge capacity, path storage and conservative map-node overhead,
+        // including failed decodes. Negative cache entries must not grow
+        // without bound while browsing many folders of unsupported images.
+        let cost = |path: &String, image: &Option<Image>| {
+            path.capacity() + image.as_ref().map_or(0, |i| i.pixels.capacity() * 4) + 192
+        };
+        let used: usize = self.thumbs.iter().map(|(p, i)| cost(p, i)).sum();
+        if used + cost(&path, &thumb) > 12 * 1024 * 1024 {
+            self.thumbs.clear();
+        }
         self.thumbs.insert(path, thumb);
         true
     }
@@ -1604,7 +1619,7 @@ fn split_ext(name: &str, is_dir: bool) -> (String, String) {
     }
 }
 
-impl App for Files {
+impl App for Folder {
     fn title(&self) -> String {
         let name = if self.searching() {
             "Search"
@@ -1669,7 +1684,8 @@ impl App for Files {
         if let Some((s, i)) = self.place_at(area, x, y) {
             let p = self.place(s, i);
             let (path, volume) = (String::from(p.path), p.volume);
-            let row = self.place_rects(area).1[i];
+            let rows = self.place_rects(area);
+            let row = if s == 0 { rows.0[i] } else { rows.1[i] };
             if volume && Self::eject_rect(row).contains(x, y) {
                 let name = String::from(p.label);
                 match corekit::process::desktop::eject(&path) {
@@ -1933,12 +1949,7 @@ impl App for Files {
                     vol(p) == vol(&dir)
                 };
                 let copy = env.mods.ctrl || paths.iter().any(|p| !same_volume(p));
-                let n = self.transfer(&paths, &dir, !copy);
-                if n > 0 {
-                    let verb = if copy { "Copied" } else { "Moved" };
-                    self.flash(format!("{verb} {n} item{} to {}", if n == 1 { "" } else { "s" }, fs::file_name(&dir)));
-                }
-                self.refresh();
+                self.transfer(&paths, &dir, !copy);
             }
             Some(corekit::dnd::Dropped::Text(text)) => {
                 // Dropped text becomes a new text file.
@@ -2039,8 +2050,8 @@ impl App for Files {
                     self.search.edit.select_all();
                     return true;
                 }
-                (Some('1'), _) => Action::ViewIcons,
-                (Some('2'), _) => Action::ViewList,
+                (Some('1' | '!'), true) => Action::ViewIcons,
+                (Some('2' | '@'), true) => Action::ViewList,
                 _ if ev.code == KeyCode::Backspace => Action::Trash,
                 _ => return false,
             };
@@ -2103,6 +2114,16 @@ impl App for Files {
 
     fn tick(&mut self, env: &mut Env) -> bool {
         let mut changed = false;
+        {
+            let mut worker = self.worker.lock();
+            if worker.as_ref().is_some_and(|h| h.is_finished()) {
+                worker.take().unwrap().join();
+            }
+        }
+        if self.search_at.is_some_and(|at| env.now_ms >= at) && self.worker.lock().is_none() {
+            self.launch_search();
+            changed = true;
+        }
         if let Some((_, at)) = self.status {
             if env.now_ms.saturating_sub(at) > 4000 {
                 self.status = None;
@@ -2134,6 +2155,18 @@ impl App for Files {
 corekit::entry!(main);
 
 fn main(args: corekit::Args) -> i32 {
+    if matches!(args.get(1).map(String::as_str), Some("--powercut-prepare" | "--powercut-verify")) {
+        let phase = match args.get(2).map(String::as_str) {
+            Some("0") => 0,
+            Some("1") => 1,
+            Some("2") => 2,
+            _ => return 1,
+        };
+        return Files::powercut_check(phase, args.get(1).is_some_and(|s| s == "--powercut-prepare"));
+    }
+    if args.get(1).is_some_and(|s| s == "--self-check") {
+        return Files::self_check();
+    }
     let start = args.get(1).map(|p| fs::resolve(&fs::cwd(), p)).unwrap_or_else(|| String::from("/Documents"));
     aurorakit::run(Files::new(&start))
 }

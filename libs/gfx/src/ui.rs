@@ -148,12 +148,14 @@ pub struct State {
     pub focused: Option<u64>,
     pub hovered: Option<u64>,
     targets: Vec<Target>,
+    layout_targets: Vec<(u64, Rect)>,
     dragging: Option<u64>,
 }
 
 impl State {
     pub fn draw(&mut self, cv: &mut Canvas, view: &View, area: Rect) {
         self.targets.clear();
+        self.layout_targets.clear();
         self.paint(cv, view, area);
         if self.focused.is_some_and(|id| !self.targets.iter().any(|t| t.id == id)) {
             self.focused = None;
@@ -164,6 +166,9 @@ impl State {
         let hover = self.hovered == Some(v.id) && v.enabled;
         let fg = if v.enabled { t.text } else { t.text_secondary };
         let interactive = matches!(v.kind, Kind::Button | Kind::Toggle(_) | Kind::Slider(_));
+        if interactive {
+            self.layout_targets.push((v.id, r));
+        }
         let control = match v.kind {
             Kind::Toggle(_) => Rect::new(r.right() - 48, r.y + 10, 44, 24),
             Kind::Slider(_) => Rect::new(r.x + 10, r.y + 36, (r.w - 20).max(1), 24),
@@ -237,6 +242,12 @@ impl State {
     }
     pub fn rect(&self, id: u64) -> Option<Rect> {
         self.targets.iter().find(|t| t.id == id).map(|t| t.rect)
+    }
+
+    /// Full layout bounds, including controls outside the current viewport.
+    /// Useful for scrolling a deep-linked control into view before focusing it.
+    pub fn layout_rect(&self, id: u64) -> Option<Rect> {
+        self.layout_targets.iter().find(|(key, _)| *key == id).map(|(_, rect)| *rect)
     }
     pub fn click(&mut self, x: i32, y: i32) -> Option<Action> {
         let target = self.targets.iter().rev().find(|t| t.rect.contains(x, y))?;
@@ -335,6 +346,17 @@ mod tests {
         state.draw(&mut cv, &view, Rect::new(0, 0, 150, 120));
         assert_eq!(state.focused, Some(2));
         assert_eq!(state.rect(2).unwrap().y, 52);
+    }
+
+    #[test]
+    fn deep_link_bounds_include_offscreen_controls_without_hitting_them() {
+        let view = View::column(alloc::vec![View::toggle(1, "One", false), View::button(2, "Two")]).gap(8);
+        let mut pixels = alloc::vec![0; 200 * 40];
+        let mut state = State::default();
+        state.draw(&mut Canvas::new(&mut pixels, 200, 40), &view, Rect::new(0, 0, 200, 120));
+        assert!(state.rect(2).is_none());
+        assert_eq!(state.layout_rect(2).unwrap().y, 52);
+        assert_eq!(state.click(20, 60), None);
     }
     #[test]
     fn slider_activation_is_not_a_value_change_and_focus_can_leave() {

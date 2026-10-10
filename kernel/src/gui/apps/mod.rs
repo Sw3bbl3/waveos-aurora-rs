@@ -314,6 +314,10 @@ pub trait App {
     fn request_close(&mut self) -> bool {
         true
     }
+    /// Ctrl+W may close a document/tab while keeping a client window open.
+    fn request_close_tab(&mut self) -> bool {
+        self.request_close()
+    }
     /// The window-server id of a client window.
     fn client_id(&self) -> Option<u32> {
         None
