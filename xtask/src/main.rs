@@ -395,6 +395,11 @@ fn build_userland(profile: Profile) -> Vec<Program> {
 /// Packs the read-only system image mounted at /System.
 fn system_image(programs: &[Program], out: &Path) {
     let mut t = tar::Tar::new();
+    for (name, source) in
+        [("rusty_h264-decoder.txt", "vendor/rusty_h264-decoder/LICENSE"), ("rusty_aac.txt", "vendor/rusty_aac/LICENSE")]
+    {
+        t.file(&format!("Licenses/{name}"), &fs::read(root().join(source)).expect("media license"));
+    }
     t.file(
         "version.txt",
         format!("WaveOS Aurora {}\nKernel: Aster\nWindow server: Lumen Server\n", env!("CARGO_PKG_VERSION")).as_bytes(),

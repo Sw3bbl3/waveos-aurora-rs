@@ -7,7 +7,7 @@ Téléchargez l’image de la version 0.7.0 et SHA256SUMS. Vérifiez le téléch
 ## Exécuter à partir du code source
 1. Installez Rust avec rustup et QEMU avec le micrologiciel OVMF correspondant. Sous macOS, utilisez `brew install qemu`; sous Debian/Ubuntu, `sudo apt install qemu-system-x86 ovmf`.
 2. Récupérez le code source de la version. rustup installe la chaîne Rust datée.
-3. Exécutez `cargo xtask run`. La machine virtuelle utilise par défaut quatre processeurs et 512 Mio de mémoire.
+3. Exécutez `cargo xtask run`. La machine virtuelle utilise par défaut quatre processeurs et 4 Gio de mémoire. Modifiez la mémoire avec `--memory-mib N`.
 4. Enregistrez un fichier dans Documents, redémarrez WaveOS à partir de son menu et vérifiez que le fichier est toujours présent.
 
 Le lanceur met à jour la partition système en conservant le volume personnel. L’option `--fresh-disk` efface le disque sélectionné; réservez-la aux images de test jetables.

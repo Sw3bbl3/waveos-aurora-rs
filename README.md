@@ -98,3 +98,5 @@ Go deeper: [Architecture](docs/ARCHITECTURE.md) · [Every feature](docs/FEATURES
 ## License
 
 Code under the [MIT License](LICENSE). Inter and JetBrains Mono under the SIL Open Font License.
+
+Native H.264/AAC media decoding uses licensed third-party Rust components. See [third-party notices](THIRD_PARTY_NOTICES.md) for attribution and fixture provenance.

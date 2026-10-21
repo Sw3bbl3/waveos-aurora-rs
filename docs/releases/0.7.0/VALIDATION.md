@@ -1,6 +1,6 @@
 # WaveOS Aurora 0.7.0 — validation / validation
 
-October 5, 2026 / 5 octobre 2026
+October 21, 2026 / 21 octobre 2026
 
 The downloadable validation archive records the final source commit, toolchain, CI run, artifact hashes, raw measurements, serial logs, and screenshots. Its `provenance.json` identifies the release build; `SHA256SUMS` verifies the public downloads. Only seeded sample data is included in release images.
 
@@ -8,14 +8,14 @@ L’archive de validation indique le commit final, la chaîne d’outils, l’ex
 
 ## Automated checks / Vérifications automatisées
 
-- 98 host tests: help catalog/search, GINA, AuroraFS, FAT32, Lumen rendering/focus/window placement, image/audio codecs, HTTP/TLS, Nebula layout, and documentation generation.
+- 184 library/host tests plus 12 file-transfer fault tests: help catalog/search, GINA, AuroraFS, FAT32, Lumen rendering/focus/window placement, image/audio codecs, HTTP/TLS, Nebula layout, and documentation generation.
 - 33 kernel checks per boot, two boots per configuration: AHCI/1 CPU/virtio-net; AHCI/4 CPU/virtio-net; virtio-blk/4 CPU/virtio-net; NVMe/4 CPU/virtio-net; NVMe/4 CPU/e1000e.
 - Persistence is checked on the second boot. Network tests include DHCP, ICMP, UDP, loopback TCP, a 1 MiB transfer, host transfer, and inbound connections. TCP regression coverage includes delayed cumulative ACKs after retransmission, sequence wraparound, and FIN acknowledgement.
 - Process teardown retains the existing frame-reclamation invariant, with bounded waiting for asynchronous cleanup rather than a fixed sleep.
-- Learn renders all 58 articles across both languages and exercises its missing-article error path. The same check passed with QEMU networking disabled. The build rejects missing translations, invalid links/anchors/images, raw HTML, and unsupported task lists, footnotes, and strikethrough.
+- Learn renders all 60 articles across both languages and exercises its missing-article error path. The same check passed with QEMU networking disabled. The build rejects missing translations, invalid links/anchors/images, raw HTML, and unsupported task lists, footnotes, and strikethrough.
 - Root and userland formatting checks and complete normal/test builds are required. GitHub runner-acquisition cancellations are retried; they are not recorded as test passes.
 
-Les 98 tests hôtes couvrent les bibliothèques et la documentation. Chaque configuration ci-dessus exécute 33 tests du noyau par démarrage, sur deux démarrages du même disque. La persistance, les transferts réseau, les limites des accusés de réception TCP et la récupération des ressources des processus sont vérifiés. Learn charge les 58 articles dans les deux langues et traite un article absent. La compilation vérifie les traductions, liens, ancres, images et éléments Markdown pris en charge. Les annulations causées par l’absence d’un exécuteur GitHub sont reprises, sans être considérées comme des réussites.
+Les 184 tests de bibliothèques et les 12 tests de transfert couvrent les bibliothèques et la documentation. Chaque configuration ci-dessus exécute 33 tests du noyau par démarrage, sur deux démarrages du même disque. La persistance, les transferts réseau, les limites des accusés de réception TCP et la récupération des ressources des processus sont vérifiés. Learn charge les 60 articles dans les deux langues et traite un article absent. La compilation vérifie les traductions, liens, ancres, images et éléments Markdown pris en charge. Les annulations causées par l’absence d’un exécuteur GitHub sont reprises, sans être considérées comme des réussites.
 
 ## Observed desktop checks / Vérifications du bureau
 
@@ -42,6 +42,12 @@ Le processus démarre les vrais fichiers IMG et ISO UEFI, vérifie la version et
 
 ## Scope limits / Limites
 
-QEMU validation does not certify physical PCs, VirtualBox, or physical Command-key capture on the host. Native compiler/debugger completion, virtual desktops, full translation of other app interfaces, Wi-Fi, IPv6, JavaScript, and native GPU drivers remain outside this release. App smoke checks verify basic opening/closing, not every application workflow. Timing measurements are not end-to-end responsiveness or memory claims.
+QEMU validation does not certify physical PCs, VirtualBox, or physical Command-key capture on the host. Native compiler/debugger completion, virtual desktops, full translation of other app interfaces, Wi-Fi, JavaScript modules, and native GPU drivers remain outside this release. App smoke checks verify basic opening/closing, not every application workflow. Timing measurements are not end-to-end responsiveness or memory claims.
 
-La validation QEMU ne certifie ni les PC physiques, ni VirtualBox, ni la capture physique de la touche Command sur l’hôte. Le compilateur et le débogueur natifs, les bureaux virtuels, la traduction complète des autres interfaces, le Wi-Fi, IPv6, JavaScript et les pilotes GPU natifs restent hors de cette version. Les essais rapides des applications ne couvrent pas tous leurs parcours. Les mesures ne représentent ni la réactivité de bout en bout ni l’utilisation de la mémoire.
+La validation QEMU ne certifie ni les PC physiques, ni VirtualBox, ni la capture physique de la touche Command sur l’hôte. Le compilateur et le débogueur natifs, les bureaux virtuels, la traduction complète des autres interfaces, le Wi-Fi, les modules JavaScript et les pilotes GPU natifs restent hors de cette version. Les essais rapides des applications ne couvrent pas tous leurs parcours. Les mesures ne représentent ni la réactivité de bout en bout ni l’utilisation de la mémoire.
+
+## October 21 integration / Intégration du 21 octobre
+
+This release includes all Pulsar, browser/media, IPv6, Files and Settings work integrated after the original desktop milestone. The October 5 numerical tables remain historical measurements of their named builds, not a new benchmark of this combined image. The October 11 test262 report is a historical snapshot, not a zero-failure conformance guarantee. Native media tests cover real MP4/H.264 and AAC data, fragmented MP4 and malformed input; remote streaming compatibility remains incomplete. Vendored decoder licenses are included in the system image.
+
+Cette version inclut les changements Pulsar, navigateur/médias, IPv6, Files et Settings intégrés après le jalon initial du bureau. Les tableaux du 5 octobre restent des mesures historiques des compilations nommées, et non un nouveau test de l’image combinée. Le rapport test262 du 11 octobre est un instantané historique, sans garantie de conformité complète. Les tests multimédias couvrent de vraies données MP4/H.264 et AAC, le MP4 fragmenté et les entrées invalides; la compatibilité avec les services distants reste incomplète. Les licences des décodeurs sont incluses dans l’image système.

@@ -14,6 +14,9 @@ Use `tools/benchmark_desktop.py LOG OUTPUT.json` against the documented VM confi
 ## Troubleshooting
 If a report lacks a test for your hardware, treat support as unverified. Do not extrapolate a best-case percentage to the whole operating system.
 
+## Measurement scope
+The October 5 results below describe the identified early desktop and Learn builds. The October 21 release also integrates later Files, Pulsar, networking and media work. These historical measurements are not new benchmarks of the full combined release. No additional speedup percentage is claimed for that integration.
+
 ## Measured desktop results — October 5, 2026
 The comparison uses development baseline `1011e1a`, not a previous public release, and desktop code at `368d421`. Later handbook and Learn refinements do not change the measured desktop algorithm. Host: Apple M2 (8 cores), 16 GB RAM, macOS 27.0.1 (26A434), QEMU 11.1.1, TCG emulation, q35, x86-64 `-cpu max`, 4 guest CPUs, 512 MiB RAM, AHCI, 1280×800, headless display, networking disabled. Rust nightly-2026-09-28 uses commit d080e7dff1b0fc54541545252818f8cccf995d05 and LLVM 23.1.1.
 

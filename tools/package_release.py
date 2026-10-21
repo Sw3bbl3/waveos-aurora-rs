@@ -5,6 +5,7 @@ import argparse, gzip, hashlib, json, pathlib, shutil, subprocess, zipfile
 root = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser()
 parser.add_argument('--ci-run', required=True)
+parser.add_argument('--evidence', type=pathlib.Path, default=root/'target/release-0.7-evidence')
 args = parser.parse_args()
 
 def git(*args):
@@ -21,7 +22,13 @@ run = json.loads(subprocess.check_output(['gh', 'run', 'view', args.ci_run,
     '--json', 'headSha,conclusion,url'], cwd=root, text=True))
 if run['headSha'] != commit or run['conclusion'] != 'success':
     raise SystemExit('The exact release commit must have a successful CI run.')
-evidence = root / 'target/release-0.7-evidence'
+evidence = args.evidence.resolve()
+proof = json.loads((evidence/'artifact-checks.json').read_text())
+if proof.get('commit') != commit:
+    raise SystemExit('Artifact boot evidence belongs to another commit.')
+for path, key in [('target/waveos-aurora-usb.img', 'img_source_sha256'), ('target/waveos-aurora.iso', 'iso_source_sha256')]:
+    if proof.get(key) != digest(root/path):
+        raise SystemExit('Artifact changed since boot validation: '+path)
 for name in ['release-img-serial.log', 'release-iso-serial.log']:
     if 'Aurora desktop ready' not in (evidence/name).read_text(errors='replace'):
         raise SystemExit(f'Missing successful artifact boot: {name}')
@@ -55,6 +62,9 @@ provenance = {
 validation = out/f'{base}-validation.zip'
 with zipfile.ZipFile(validation, 'w', zipfile.ZIP_DEFLATED) as archive:
     archive.writestr('provenance.json', json.dumps(provenance, indent=2)+'\n')
+    archive.write(root/'THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_NOTICES.md')
+    for component in ['rusty_aac', 'rusty_h264-decoder']:
+        archive.write(root/f'vendor/{component}/LICENSE', f'licenses/{component}.txt')
     report = (root/'docs/releases/0.7.0/VALIDATION.md').read_text()
     for lang in ['en', 'fr-CA']:
         report = report.replace(f'../../handbook/0.7/{lang}/reference-validation.md', f'measurements-{lang}.md')

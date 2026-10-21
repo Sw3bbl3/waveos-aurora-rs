@@ -7,7 +7,7 @@ Download the 0.7.0 release image and SHA256SUMS. Verify the download with `shasu
 ## Run from source
 1. Install Rust with rustup and QEMU with matching OVMF firmware. On macOS use `brew install qemu`; on Debian/Ubuntu use `sudo apt install qemu-system-x86 ovmf`.
 2. Check out the release source. The dated Rust toolchain installs through rustup.
-3. Run `cargo xtask run`. The default VM uses four CPUs and 512 MiB RAM.
+3. Run `cargo xtask run`. The default VM uses four CPUs and 4 GiB RAM. Override RAM with `--memory-mib N`.
 4. Save a file in Documents, restart WaveOS from its menu, and confirm that the file remains.
 
 The launcher refreshes the system partition while preserving the home volume. `--fresh-disk` erases the selected disk; use it only for disposable test images.

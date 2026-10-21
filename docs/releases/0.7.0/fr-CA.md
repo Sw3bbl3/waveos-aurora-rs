@@ -1,30 +1,37 @@
 # WaveOS Aurora 0.7.0
 
-5 octobre 2026
+21 octobre 2026
 
-Cette mise à jour présente Learn, de nouvelles façons d’organiser les fenêtres et de passer de l’une à l’autre, ainsi que des améliorations du rendu et de la navigation au clavier.
+Cette version ajoute un guide hors ligne consultable, de nouveaux parcours pour le bureau et les fichiers, ainsi que le moteur JavaScript Pulsar et des médias natifs dans le navigateur.
 
 ## Learn
-- Consultez le guide complet de WaveOS hors ligne, en anglais ou en français canadien.
-- Trouvez les guides avec la recherche dans le texte complet, utilisez le sommaire et ajustez la taille de lecture.
-- Changez de langue en conservant le même article.
+- Consultez 60 articles hors ligne répartis entre l’anglais et le français canadien : guides d’utilisation, instructions de développement et notes de version.
+- Recherchez dans le texte complet, suivez le sommaire, ajustez la taille de lecture et changez de langue en conservant l’article.
 
-## Bureau
-- Passez d’une fenêtre ouverte ou réduite à une autre avec le sélecteur visuel Alt+Tab.
-- Organisez les fenêtres avec les aperçus aux bords de l’écran et les raccourcis Super+flèche.
-- Retrouvez les dimensions libres après l’ancrage et conservez la disposition lorsque l’affichage change.
+## Bureau et Files
+- Choisissez une fenêtre ouverte ou réduite avec le sélecteur visuel Alt+Tab.
+- Placez les fenêtres avec les aperçus de bord et Super+flèches, puis rétablissez leur taille flottante.
+- Utilisez jusqu’à huit onglets Files et des transferts en arrière-plan avec progression, choix de conflit et annulation.
 
-## Accessibilité
-- Parcourez la recherche, les pages et les commandes de Settings au clavier.
-- Utilisez des touches cohérentes pour activer les commandes et régler les curseurs dans Settings et Control Center.
-- Appliquez les préférences existantes de contraste, de transparence et de mouvement aux nouvelles commandes.
+## Nebula et Pulsar
+- Exécutez le JavaScript pris en charge avec les événements DOM, les minuteries, fetch, le stockage, les témoins et une invite interactive dans Terminal.
+- Utilisez les onglets du navigateur, les événements de stockage partagé, le canevas 2D et d’autres interfaces DOM/CSS.
+- Réutilisez les scripts compilés et les caches de propriétés; reportez la compilation des fonctions admissibles jusqu’à leur utilisation.
+- Essayez la lecture native expérimentale MP4 H.264/AAC-LC et les sources multimédias MP4 fragmentées.
+
+## Réseau et accessibilité
+- IPv6 ajoute la découverte de voisins, SLAAC, ICMPv6, TCP et UDP à la pile IPv4 existante.
+- Recherchez des pages et des commandes individuelles dans Settings; utilisez des touches cohérentes pour l’activation et les curseurs.
+- Appliquez les préférences existantes de mouvement, de transparence et de contraste au bureau et à Learn.
 
 ## Performance
-- Les mises à jour localisées admissibles redessinent moins de zones du bureau. Dans une saisie contrôlée avec Notes, le temps médian de composition et de copie à l’écran est passé de 47 à 10 ms, avec 93.0% moins de pixels peints par lot d’images par rapport à la base de développement `1011e1a`.
-- Le déplacement et le changement de fenêtre ont montré un p95 plus élevé. Consultez les [mesures et limites](../../handbook/0.7/fr-CA/reference-validation.md#resultats-du-bureau-5-octobre-2026) avant d’appliquer ces résultats à d’autres charges.
+- Les mises à jour localisées du bureau redessinent les zones modifiées admissibles. Dans la comparaison de développement identifiée du 5 octobre, le temps médian de composition/copie de Notes est passé de 47 à 10 ms, avec 93.0% moins de pixels peints par lot.
+- Ces mesures historiques décrivent les compilations nommées, avant l’intégration ultérieure du navigateur et des médias. Le p95 du déplacement et du changement de fenêtre a augmenté dans cette comparaison. Consultez la [portée des mesures et les données brutes](../../handbook/0.7/fr-CA/reference-validation.md#portee-des-mesures); aucun pourcentage d’accélération supplémentaire n’est annoncé pour la version combinée.
 
 ## Correctifs
-- Corrige un problème de retransmission TCP pouvant bloquer les transferts sur un système à un seul processeur.
+- Corrige les accusés de réception des retransmissions TCP qui pouvaient bloquer les transferts à un seul processeur.
+- Protège les valeurs JavaScript entre les rappels du navigateur et les tâches Promise pour éviter une collecte prématurée.
+- Conserve une image de démarrage optique EFI limitée tout en gardant séparément les symboles complets de débogage du noyau sur l’hôte.
 
 ## Limites connues
-Le compilateur et le débogueur natifs demeurent indisponibles. Les limites du navigateur et du matériel s’appliquent toujours. Consultez le [guide complet](../../handbook/0.7/fr-CA/start-welcome.md) et le [guide de validation](../../handbook/0.7/fr-CA/reference-validation.md).
+Les outils natifs de compilation et de débogage Rust restent absents. La compatibilité Web est partielle : modules JavaScript, BigInt, Intl, DRM et lecture générale YouTube/TikTok ne sont pas établis. Les vérifications QEMU ne certifient ni le matériel physique ni VirtualBox. Consultez le [guide complet](../../handbook/0.7/fr-CA/start-welcome.md) et le [guide de validation](../../handbook/0.7/fr-CA/reference-validation.md).

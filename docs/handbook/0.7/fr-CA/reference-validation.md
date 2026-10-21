@@ -14,6 +14,9 @@ Utilisez `tools/benchmark_desktop.py LOG OUTPUT.json` avec la configuration docu
 ## Dépannage
 Si aucun test ne couvre votre matériel, considérez sa prise en charge comme non vérifiée. N’appliquez pas un pourcentage obtenu dans le meilleur cas à tout le système.
 
+## Portée des mesures
+Les résultats du 5 octobre ci-dessous décrivent les premières compilations identifiées du bureau et de Learn. La version du 21 octobre intègre aussi les changements ultérieurs de Files, Pulsar, du réseau et des médias. Ces mesures historiques ne sont pas de nouveaux tests de la version combinée. Aucun pourcentage d’accélération supplémentaire n’est annoncé pour cette intégration.
+
 ## Résultats du bureau — 5 octobre 2026
 La comparaison utilise la base de développement `1011e1a`, et non une version publique précédente, ainsi que le code du bureau à `368d421`. Les retouches ultérieures du guide et de Learn ne changent pas l’algorithme du bureau mesuré. Hôte : Apple M2 (8 cœurs), 16 GB de mémoire, macOS 27.0.1 (26A434), QEMU 11.1.1, émulation TCG, q35, x86-64 `-cpu max`, 4 processeurs invités, 512 MiB de mémoire, AHCI, 1280×800, affichage sans fenêtre et réseau désactivé. Rust nightly-2026-09-28 utilise le commit d080e7dff1b0fc54541545252818f8cccf995d05 et LLVM 23.1.1.
 

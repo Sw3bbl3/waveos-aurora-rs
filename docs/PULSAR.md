@@ -19,7 +19,7 @@ A runaway script is stopped by an instruction budget (it can't catch the error),
 
 ## Status
 
-**test262:** 35,192 tests pass: 94.5% of the 37,255 tests that run. [Results by area](pulsar-test262.md).
+**Historical test262 snapshot (October 11, 2026; before subsequent runtime changes):** 35,192 tests pass: 94.5% of the 37,255 tests that run. [Results by area](pulsar-test262.md).
 
 Regular expressions search with [regress](https://github.com/ridiculousfish/regress) (MIT/Apache-2.0, the engine Boa uses): full Unicode property escapes, case folding and the `v` flag. Pulsar's own matcher remains for the Annex B syntax regress refuses and for sticky (`y`) matches.
 
@@ -39,7 +39,7 @@ Pulsar is an interpreter: no JIT, and so no machine code made at run time. `libs
 
 Large compiler scopes use an indexed name lookup while retaining declaration order; small scopes keep a linear lookup. The tokenizer dispatches punctuation by its first character and reads ordinary ASCII identifiers without an intermediate string allocation. `cargo run --release -p nebula-script --example compile_bench -- FILE.js` measures parsing and compilation without executing the script. See [October 10 validation](VALIDATION-2026-10-10-NEBULA.md) for bundle measurements and their limits.
 
-Large page scripts (64 KB and more) compile lazily: the parser skips the body of each ordinary function, recording every name it might use so the enclosing function knows which of its variables closures capture, and the function compiles on its first call against a snapshot of the scopes around it. A function wrapped in parentheses (`(function () { … })()`) is parsed at once, as it is almost always called straight away. YouTube's 10.6 MB application bundle parses and compiles in 343 ms instead of 562 ms on an M2; most of the difference is code the page never runs. Early errors inside a deferred body are reported when the function is first called.
+Large page scripts (64 KB and more) compile lazily: the parser skips the body of each ordinary function, recording every name it might use so the enclosing function knows which of its variables closures capture, and the function compiles on its first call against a snapshot of the scopes around it. A function wrapped in parentheses (`(function () { … })()`) is parsed at once, as it is almost always called straight away. Deferring function bodies reduces work during initial compilation; the actual benefit depends on which functions the page calls. Early errors inside a deferred body are reported when the function is first called.
 
 Property reads, method lookups and writes on a name constant go through a per-instruction cache: the object that held the name last time and the entry index, or its prototype's. A hit is checked against the key at that entry, so a stale cache only falls back to a full lookup. Identifiers are interned while tokenizing, compiler scope indexes and name sets are hashed, and `RegExp` programs are compiled once per pattern and flags. Strings built by repeated `+=` are ropes, flattened when first read.
 
