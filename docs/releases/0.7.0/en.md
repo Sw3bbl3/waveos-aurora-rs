@@ -29,6 +29,7 @@ This release brings a searchable offline handbook, new desktop and file workflow
 - These are historical measurements of the named builds, before the later browser/media integration. Dragging and switching p95 timings regressed in that comparison. Read the [measurement scope and raw evidence](../../handbook/0.7/en/reference-validation.md#measurement-scope); no extra speedup percentage is claimed for the combined release.
 
 ## Fixes
+- Enables multicast reception on Intel network adapters so IPv6 router advertisements and neighbor discovery reach the network stack.
 - Corrects TCP retransmission acknowledgement handling that could stall single-CPU transfers.
 - Keeps JavaScript values rooted across browser callbacks and promise jobs to avoid premature collection.
 - Retains a bounded EFI optical-boot image while keeping full host kernel debugging symbols available separately.

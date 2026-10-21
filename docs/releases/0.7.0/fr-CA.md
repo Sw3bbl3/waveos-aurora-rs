@@ -29,6 +29,7 @@ Cette version ajoute un guide hors ligne consultable, de nouveaux parcours pour 
 - Ces mesures historiques décrivent les compilations nommées, avant l’intégration ultérieure du navigateur et des médias. Le p95 du déplacement et du changement de fenêtre a augmenté dans cette comparaison. Consultez la [portée des mesures et les données brutes](../../handbook/0.7/fr-CA/reference-validation.md#portee-des-mesures); aucun pourcentage d’accélération supplémentaire n’est annoncé pour la version combinée.
 
 ## Correctifs
+- Active la réception multidiffusion des adaptateurs Intel pour transmettre les annonces de routeur et la découverte de voisins IPv6 à la pile réseau.
 - Corrige les accusés de réception des retransmissions TCP qui pouvaient bloquer les transferts à un seul processeur.
 - Protège les valeurs JavaScript entre les rappels du navigateur et les tâches Promise pour éviter une collecte prématurée.
 - Conserve une image de démarrage optique EFI limitée tout en gardant séparément les symboles complets de débogage du noyau sur l’hôte.

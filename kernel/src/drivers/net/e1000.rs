@@ -43,6 +43,7 @@ const CTRL_RST: u32 = 1 << 26;
 const STATUS_LU: u32 = 1 << 1;
 const RCTL_EN: u32 = 1 << 1;
 const RCTL_BAM: u32 = 1 << 15;
+const RCTL_MPE: u32 = 1 << 4;
 const RCTL_SECRC: u32 = 1 << 26;
 const TCTL_EN: u32 = 1 << 1;
 const TCTL_PSP: u32 = 1 << 3;
@@ -257,7 +258,10 @@ impl E1000 {
         self.w(RDLEN, (RING * 16) as u32);
         self.w(RDH, 0);
         self.w(RDT, (RING - 1) as u32);
-        self.w(RCTL, RCTL_EN | RCTL_BAM | RCTL_SECRC);
+        // IPv6 router advertisements and neighbor discovery use multicast.
+        // Until multicast-group programming is implemented, receive all
+        // multicast frames and let the network stack validate destinations.
+        self.w(RCTL, RCTL_EN | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
         {
             let mut tx = self.tx.lock();
             tx.ring.bytes_mut().fill(0);

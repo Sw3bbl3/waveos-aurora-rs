@@ -36,8 +36,8 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
-      # Avoid exhausting hosted-runner acquisition while retaining every configuration.
-      max-parallel: 1
+      # Bound concurrent VM builds while retaining every configuration.
+      max-parallel: 2
       matrix:
         disk: [ahci, virtio, nvme]
         smp: [4]
