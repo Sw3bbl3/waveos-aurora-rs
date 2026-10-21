@@ -11,6 +11,7 @@ pub mod css;
 pub mod dom;
 pub mod html;
 pub mod layout;
+pub mod media;
 pub mod script;
 pub mod sheets;
 pub mod style;
@@ -20,6 +21,7 @@ pub use nebula_script;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -174,6 +176,11 @@ impl Scripts {
         }
         dom.images.insert(String::from(url), (width, height, Arc::new(pixels.to_vec())));
         true
+    }
+
+    /// Compiled scripts shared with other pages (reloads and revisits reuse them).
+    pub fn set_code_cache(&mut self, cache: Rc<RefCell<nebula_script::bytecode::CodeCache>>) {
+        self.realm.code_cache = Some(cache);
     }
 
     pub fn set_viewport(&mut self, w: i32, h: i32) {
@@ -506,7 +513,13 @@ impl Page {
     /// Lays the page out `width` × `height` CSS pixels wide (the viewport).
     pub fn layout(&self, width: i32, height: i32, host: &dyn Host) -> Layout {
         let styles = self.styles(width, height);
-        self.layout_with(&styles, width, host)
+        self.layout_viewport(&styles, width, height, host)
+    }
+
+    /// [`Page::layout_with`] for a viewport `height` pixels high (fixed and
+    /// absolutely positioned boxes, percentage heights).
+    pub fn layout_viewport(&self, styles: &style::Computed, width: i32, height: i32, host: &dyn Host) -> Layout {
+        layout::layout_viewport(&self.doc, &styles.styles, &styles.pseudo, host, width, height)
     }
 
     /// Lays out with styles computed earlier by [`Page::styles`] (for the same

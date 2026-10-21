@@ -14,3 +14,5 @@ aurorakit.workspace = true
 aurora-image.workspace = true
 nebula-web.workspace = true
 nebula-engine.workspace = true
+
+nebula-media.workspace = true

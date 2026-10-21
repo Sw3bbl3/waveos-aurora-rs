@@ -38,6 +38,7 @@ corekit::entry!(main);
 
 mod cache;
 mod checks;
+mod media;
 mod prefetch;
 
 const TAB_H: i32 = 38;
@@ -124,6 +125,8 @@ struct StorageHub {
     /// (sequence, site, writing tab, page URL, changes).
     log: VecDeque<(u64, String, u64, String, Vec<StorageChange>)>,
     seq: u64,
+    /// Compiled scripts every tab reuses (revisits skip parsing them again).
+    code: Rc<RefCell<nebula_script::bytecode::CodeCache>>,
 }
 
 type Hub = Rc<RefCell<StorageHub>>;
@@ -420,6 +423,8 @@ fn load(url: Url, job: &LoadJob) -> Result<(Loaded, Option<Pending>), String> {
         );
         images.push((src, img));
         Page::parse(&html)
+    } else if ct.starts_with("video/mp4") || final_url.path.ends_with(".mp4") {
+        Page::parse(&format!("<html><head><title>{}</title></head><body style='margin:24px;background:#18181c;color:white'><video controls autoplay src=\"{}\" style='width:960px;max-width:100%'></video></body></html>", escape(corekit::fs::file_name(&final_url.path)), escape(&final_url.to_string())))
     } else if is_html {
         *job.progress.lock() = String::from("Reading the page…");
         Page::parse(&nebula_engine::decode(&resp.body, resp.header("content-type").unwrap_or("")))
@@ -793,6 +798,8 @@ struct Nebula {
     background: bool,
     /// When a background tab last ran its timers (Unix ms).
     timers_ran: f64,
+    media: media::Players,
+    logged_videos: usize,
 }
 
 /// Find in page: the query and its matches as (text item, byte range).
@@ -889,6 +896,7 @@ impl Browser {
             }
         }
         tab.stop();
+        tab.media.clear(&mut tab.workers);
         tab.generation.fetch_add(1, Ordering::Relaxed);
         {
             let mut q = tab.queue.lock();
@@ -1142,6 +1150,8 @@ impl Nebula {
             storage_seq: 0,
             background: false,
             timers_ran: 0.0,
+            media: media::Players::default(),
+            logged_videos: 0,
         };
         s.go(start, true);
         s
@@ -1287,6 +1297,7 @@ impl Nebula {
     }
 
     fn install(&mut self, loaded: Loaded) {
+        self.media.clear(&mut self.workers);
         self.find = None;
         self.styles = None;
         self.layout = None;
@@ -1369,6 +1380,11 @@ impl Nebula {
             let mut js = Scripts::new(alloc::boxed::Box::new(PageHost), &url.to_string(), (w, h), stored);
             js.set_cookies(alloc::boxed::Box::new(BrowserCookies));
             js.set_text_host(alloc::boxed::Box::new(CanvasFonts));
+            js.set_code_cache(self.storage.borrow().code.clone());
+            // Preference `nebula_profile`: sample where page scripts spend time.
+            if corekit::prefs::get_int("nebula_profile", 0) != 0 {
+                js.realm.profile = Some(BTreeMap::new());
+            }
             self.js = Some(js);
             self.script_queue.extend(scripts);
         }
@@ -1423,6 +1439,20 @@ impl Nebula {
 
     /// One line per load: where the time went.
     fn log_timing(&mut self, ran: u64, layout: u64, arrived: u64) {
+        if let Some(p) = self.js.as_mut().and_then(|js| js.realm.profile.take()) {
+            let total: u64 = p.values().sum::<u64>().max(1);
+            let mut v: Vec<_> = p.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            let mut out = format!("[nebula] profile: {total} samples\n");
+            for ((name, file, line, col), n) in v.iter().take(30) {
+                let file: String = file.chars().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect();
+                out.push_str(&format!(
+                    "[nebula]   {:5.1}% {name} …{file}:{line}:{col}\n",
+                    *n as f64 * 100.0 / total as f64
+                ));
+            }
+            corekit::io::log(&out);
+        }
         let Some((t, shown)) = self.timing.take() else { return };
         if t.started == 0 {
             return;
@@ -1530,7 +1560,7 @@ impl Nebula {
                 let r = if u.scheme == "file" {
                     get(&u)
                 } else {
-                    let body = req.body.as_bytes();
+                    let body = &req.body[..];
                     let pool = &mut corekit::web::Pooled;
                     http::request_with_cookies(&req.method, &u, &req.headers, body, pool, &mut cookies)
                         .map_err(describe)
@@ -1539,7 +1569,7 @@ impl Nebula {
                     status: resp.status,
                     status_text: resp.reason.clone(),
                     url: resp.url.to_string(),
-                    body: nebula_engine::decode(&resp.body, resp.header("content-type").unwrap_or("")),
+                    body: resp.body,
                     headers: resp.headers,
                 });
                 results.lock().push((g, req.id, r));
@@ -1625,7 +1655,7 @@ impl Nebula {
             self.styles = Some(((w, h), page.styles(w, h)));
         }
         let t1 = corekit::time::uptime_ms();
-        let l = page.layout_with(&self.styles.as_ref().unwrap().1, w, &host);
+        let l = page.layout_viewport(&self.styles.as_ref().unwrap().1, w, h, &host);
         let t2 = corekit::time::uptime_ms();
         if t2 - t0 >= 500 {
             corekit::io::log(&format!(
@@ -1637,6 +1667,18 @@ impl Nebula {
             ));
         }
         self.laid_out_width = self.view.w;
+        let videos: Vec<_> = l
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Video { rect, node } => Some((*node, rect.x, rect.y, rect.w, rect.h)),
+                _ => None,
+            })
+            .collect();
+        if !videos.is_empty() && videos.len() != self.logged_videos {
+            self.logged_videos = videos.len();
+            corekit::io::log(&format!("[nebula] video boxes {videos:?} zoom={} view={}x{}\n", self.zoom, w, h));
+        }
         if let Some(js) = self.js.as_mut() {
             js.set_viewport(w, h);
             js.set_layout(&l, (0, self.scroll * 100 / self.zoom));
@@ -1973,6 +2015,14 @@ impl Nebula {
                         }
                         if *strike {
                             cv.fill_rect(Rect::new(bx, by - f.ascent as i32 * 3 / 10, w, t), *color);
+                        }
+                    }
+                    Item::Video { rect, node } => {
+                        let r = zr(rect);
+                        if visible(r) {
+                            if let Some(page) = &self.page {
+                                self.media.paint(cv, r, *node, page);
+                            }
                         }
                     }
                     Item::Canvas { rect, node } => {
@@ -2496,6 +2546,28 @@ impl App for Nebula {
                 }
             }
         }
+        if let Some(l) = &self.layout {
+            let video = l.items.iter().find_map(|item| match item {
+                Item::Video { rect, node } if rect.contains(px, py) => Some((*node, *rect)),
+                _ => None,
+            });
+            if let (Some((node, rect)), Some(page)) = (video, self.page.as_mut()) {
+                if page.doc.element(node).is_some_and(|e| e.attr("controls").is_some()) {
+                    let duration = self.media.duration(page, node);
+                    let s = page.doc.media.entry(node).or_default();
+                    if px > rect.x + 70 && py >= rect.bottom() - 32 && duration.is_finite() {
+                        s.seek = Some(((px - rect.x) as f64 / rect.w.max(1) as f64 * duration).max(0.0));
+                    } else {
+                        s.paused = !s.paused;
+                        if !s.paused && s.ended {
+                            s.seek = Some(0.0);
+                            s.ended = false;
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
         if let Some(node) = field {
             let doc = self.doc().unwrap();
             let e = doc.element(node).unwrap();
@@ -2583,6 +2655,20 @@ impl App for Nebula {
     fn tick(&mut self, env: &mut Env) -> bool {
         let mut dirty = false;
         save_cookies();
+        if !self.awaiting_page {
+            if let (Some(page), Some(url)) = (&mut self.page, &self.url) {
+                let events = self.media.tick(page, url, env.now_ms, &mut self.workers);
+                dirty |= !events.is_empty() || self.media.take_presented();
+                if let Some(js) = &mut self.js {
+                    for (node, kind) in events {
+                        page.dispatch(js, node, kind, false, false);
+                    }
+                }
+            }
+        }
+        if dirty {
+            self.after_scripts();
+        }
         // Scripts that scripts inserted, now loaded.
         let loaded: Vec<(u64, NodeId, String, Option<String>)> = core::mem::take(&mut *self.script_loads.lock());
         if !loaded.is_empty() {
@@ -2759,7 +2845,13 @@ impl App for Nebula {
                 2000
             };
         }
-        let base = if busy || !self.workers.is_empty() { 50 } else { 1000 };
+        let base = if self.media.active() {
+            16
+        } else if busy || !self.workers.is_empty() {
+            50
+        } else {
+            1000
+        };
         match self.js_wakeup {
             // Wake for the next timer (16 ms at the most often, for animations).
             Some(w) => ((w - corekit::time::unix_ms()).max(16.0) as u64).min(base),

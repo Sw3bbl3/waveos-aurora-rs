@@ -6,6 +6,8 @@
 //!       --fresh-disk                      recreate the disk (erases files saved inside WaveOS)
 //!       --monitor                         open the live System Explorer (http://127.0.0.1:7777)
 //!       --smp N                           number of CPUs (default 4)
+//!       --memory-mib N                    guest RAM in MiB (default 4096)
+//!       --audio-wav PATH                  record guest audio to a WAV file
 //!       --headless --no-build --debug --gdb --int
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
@@ -95,7 +97,7 @@ fn main() {
             }
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
             let opts = RunOpts {
-                memory_mib: number("--memory-mib", if developer { 4096 } else { 512 }, 256, 32768),
+                memory_mib: number("--memory-mib", 4096, 256, 32768),
                 keyboard_capture: !flag("--no-keyboard-capture"),
                 headless: flag("--headless"),
                 gdb: flag("--gdb"),
@@ -104,7 +106,14 @@ fn main() {
                 allow_reboot: true,
                 telemetry: mon.as_ref().map(|m| m.socket.clone()),
                 smp,
-                audio: if flag("--no-sound") || flag("--headless") { String::from("none") } else { host_audio() },
+                audio: if let Some(i) = args.iter().position(|a| a == "--audio-wav") {
+                    let path = args.get(i + 1).filter(|p| !p.starts_with("--")).expect("--audio-wav requires a path");
+                    format!("wav:{path}")
+                } else if flag("--no-sound") || flag("--headless") {
+                    String::from("none")
+                } else {
+                    host_audio()
+                },
                 battery: flag("--battery"),
                 net,
                 netdev_extra: String::new(),
@@ -278,6 +287,24 @@ fn build(profile: Profile, test: bool) -> PathBuf {
         .expect("copy bootloader");
     fs::copy(target.join(KERNEL_TARGET).join(profile.dir()).join("aster"), esp.join("aurora/kernel.elf"))
         .expect("copy kernel");
+    if profile == Profile::Release {
+        // Keep the full ELF for host GDB. DWARF is never loaded by UEFI and
+        // would otherwise crowd the bounded El Torito EFI boot image.
+        let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().expect("rustc sysroot");
+        let version = Command::new("rustc").arg("-vV").output().expect("rustc host");
+        let version = String::from_utf8_lossy(&version.stdout);
+        let host = version.lines().find_map(|line| line.strip_prefix("host: ")).expect("rustc host triple");
+        let objcopy = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
+            .join("lib/rustlib")
+            .join(host)
+            .join("bin/llvm-objcopy");
+        let status = Command::new(objcopy)
+            .arg("--strip-debug")
+            .arg(esp.join("aurora/kernel.elf"))
+            .status()
+            .expect("llvm-objcopy (install llvm-tools-preview)");
+        assert!(status.success(), "could not strip packaged kernel debug information");
+    }
     let programs = build_userland(profile);
     system_image(&programs, &esp.join("aurora/system.tar"));
     esp
@@ -391,6 +418,12 @@ fn system_image(programs: &[Program], out: &Path) {
     // Pages Nebula ships with (its start page links the JavaScript demo).
     t.dir("Library");
     t.dir("Library/Nebula");
+    t.dir("Licenses");
+    for (name, path) in
+        [("rusty-h264.txt", "vendor/rusty_h264-decoder/LICENSE"), ("rusty-aac.txt", "vendor/rusty_aac/LICENSE")]
+    {
+        t.file(&format!("Licenses/{name}"), &fs::read(root().join(path)).unwrap());
+    }
     let pages = root().join("assets/nebula");
     let mut page_files: Vec<_> = fs::read_dir(&pages).unwrap().map(|e| e.unwrap().path()).collect();
     page_files.sort();
@@ -564,6 +597,11 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
 
     let mut cmd = Command::new("qemu-system-x86_64");
     cmd.args(["-machine", "q35", "-cpu", "max", "-vga", "std"]);
+    // Software emulation on non-x86 hosts: one translation thread per CPU and
+    // a large translation cache. AURORA_ACCEL overrides it
+    // (e.g. "tcg,thread=single").
+    let accel = env::var("AURORA_ACCEL").unwrap_or_else(|_| String::from("tcg,thread=multi,tb-size=1024"));
+    cmd.args(["-accel", &accel]);
     cmd.arg("-m").arg(opts.memory_mib.to_string());
     cmd.arg("-smp").arg(opts.smp.to_string());
     if !opts.allow_reboot {

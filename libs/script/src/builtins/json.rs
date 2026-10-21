@@ -196,6 +196,17 @@ impl<'a> JsonParser<'a> {
     }
 }
 
+/// EnumerableOwnProperties(o, key), proxies included.
+fn enumerable_strings(rt: &mut Realm, o: ObjRef) -> Result<Vec<PropKey>, Value> {
+    let mut out = Vec::new();
+    for k in rt.own_keys_v(o)? {
+        if matches!(k, PropKey::Str(_)) && rt.get_own_property_v(o, &k)?.is_some_and(|p| p.enumerable()) {
+            out.push(k);
+        }
+    }
+    Ok(out)
+}
+
 fn internalize(rt: &mut Realm, holder: ObjRef, name: PropKey, reviver: &Value) -> JsResult {
     let val = rt.get(holder, &name, Value::Object(holder))?;
     if let Value::Object(o) = val {
@@ -203,10 +214,7 @@ fn internalize(rt: &mut Realm, holder: ObjRef, name: PropKey, reviver: &Value) -
             let len = rt.length_of(o)? as u32;
             (0..len).map(PropKey::index).collect()
         } else {
-            rt.own_keys(o)
-                .into_iter()
-                .filter(|k| matches!(k, PropKey::Str(_)) && rt.get_own_property(o, k).is_some_and(|p| p.enumerable()))
-                .collect()
+            enumerable_strings(rt, o)?
         };
         for k in keys {
             let nv = internalize(rt, o, k.clone(), reviver)?;
@@ -325,11 +333,7 @@ impl Stringifier {
         self.indent.extend_from_slice(&self.gap.clone());
         let keys = match &self.allow {
             Some(a) => a.clone(),
-            None => rt
-                .own_keys(o)
-                .into_iter()
-                .filter(|k| matches!(k, PropKey::Str(_)) && rt.get_own_property(o, k).is_some_and(|p| p.enumerable()))
-                .collect(),
+            None => enumerable_strings(rt, o)?,
         };
         out.push(0x7B);
         let mut first = true;

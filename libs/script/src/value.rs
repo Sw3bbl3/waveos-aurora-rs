@@ -4,31 +4,140 @@ use crate::heap::ObjRef;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::{OnceCell, RefCell};
 use core::fmt;
 
 /// A JavaScript string: immutable UTF-16 code units, cheap to clone.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct JsStr(Rc<[u16]>);
+/// Long concatenations are ropes, flattened once when first read, so
+/// building a string piece by piece (`s += x`) takes linear time.
+#[derive(Clone)]
+pub struct JsStr(Repr);
+
+#[derive(Clone)]
+enum Repr {
+    Flat(Rc<[u16]>),
+    Rope(Rc<Rope>),
+}
+
+struct Rope {
+    len: usize,
+    parts: RefCell<Option<(JsStr, JsStr)>>,
+    flat: OnceCell<Rc<[u16]>>,
+}
+
+/// Concatenations shorter than this are copied at once.
+const ROPE_MIN: usize = 256;
+
+impl Rope {
+    fn flatten(&self) -> Rc<[u16]> {
+        let mut out = Vec::with_capacity(self.len);
+        let mut stack: Vec<JsStr> = Vec::new();
+        if let Some((l, r)) = self.parts.borrow().as_ref() {
+            stack.push(r.clone());
+            stack.push(l.clone());
+        }
+        while let Some(s) = stack.pop() {
+            match &s.0 {
+                Repr::Flat(u) => out.extend_from_slice(u),
+                Repr::Rope(n) => match n.flat.get() {
+                    Some(u) => out.extend_from_slice(u),
+                    None => {
+                        let p = n.parts.borrow();
+                        let (l, r) = p.as_ref().expect("rope without parts");
+                        stack.push(r.clone());
+                        stack.push(l.clone());
+                    }
+                },
+            }
+        }
+        Rc::from(out)
+    }
+}
+
+impl Drop for Rope {
+    // Unlinks chains iteratively: a string built from thousands of `+=`
+    // would otherwise be dropped by deep recursion.
+    fn drop(&mut self) {
+        let mut pending: Vec<JsStr> = Vec::new();
+        if let Some((l, r)) = self.parts.get_mut().take() {
+            pending.push(l);
+            pending.push(r);
+        }
+        while let Some(s) = pending.pop() {
+            if let Repr::Rope(rc) = s.0 {
+                if let Ok(mut node) = Rc::try_unwrap(rc) {
+                    if let Some((l, r)) = node.parts.get_mut().take() {
+                        pending.push(l);
+                        pending.push(r);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl PartialEq for JsStr {
+    fn eq(&self, other: &JsStr) -> bool {
+        self.len() == other.len() && self.units() == other.units()
+    }
+}
+
+impl Eq for JsStr {}
+
+impl PartialOrd for JsStr {
+    fn partial_cmp(&self, other: &JsStr) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JsStr {
+    fn cmp(&self, other: &JsStr) -> core::cmp::Ordering {
+        self.units().cmp(other.units())
+    }
+}
+
+impl core::hash::Hash for JsStr {
+    fn hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        self.units().hash(h)
+    }
+}
 
 impl JsStr {
     pub fn empty() -> JsStr {
-        JsStr(Rc::from(&[][..]))
+        JsStr(Repr::Flat(Rc::from(&[][..])))
     }
 
     pub fn from_units(units: Vec<u16>) -> JsStr {
-        JsStr(Rc::from(units))
+        JsStr(Repr::Flat(Rc::from(units)))
     }
 
     pub fn units(&self) -> &[u16] {
-        &self.0
+        match &self.0 {
+            Repr::Flat(u) => u,
+            Repr::Rope(r) => {
+                let flat = r.flat.get_or_init(|| r.flatten());
+                // The parts are no longer needed once flat.
+                if let Ok(mut p) = r.parts.try_borrow_mut() {
+                    if p.is_some() {
+                        let parts = p.take();
+                        drop(p);
+                        drop(parts);
+                    }
+                }
+                flat
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        match &self.0 {
+            Repr::Flat(u) => u.len(),
+            Repr::Rope(r) => r.len,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.len() == 0
     }
 
     pub fn concat(&self, other: &JsStr) -> JsStr {
@@ -38,10 +147,18 @@ impl JsStr {
         if self.is_empty() {
             return other.clone();
         }
-        let mut v = Vec::with_capacity(self.len() + other.len());
-        v.extend_from_slice(&self.0);
-        v.extend_from_slice(&other.0);
-        JsStr::from_units(v)
+        let len = self.len() + other.len();
+        if len < ROPE_MIN {
+            let mut v = Vec::with_capacity(len);
+            v.extend_from_slice(self.units());
+            v.extend_from_slice(other.units());
+            return JsStr::from_units(v);
+        }
+        JsStr(Repr::Rope(Rc::new(Rope {
+            len,
+            parts: RefCell::new(Some((self.clone(), other.clone()))),
+            flat: OnceCell::new(),
+        })))
     }
 
     pub fn slice(&self, from: usize, to: usize) -> JsStr {
@@ -50,16 +167,16 @@ impl JsStr {
         if from == 0 && to == self.len() {
             return self.clone();
         }
-        JsStr::from_units(self.0[from..to].to_vec())
+        JsStr::from_units(self.units()[from..to].to_vec())
     }
 
     /// Lossy conversion: lone surrogates become U+FFFD.
     pub fn to_rust(&self) -> String {
-        char::decode_utf16(self.0.iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')).collect()
+        char::decode_utf16(self.units().iter().copied()).map(|c| c.unwrap_or('\u{FFFD}')).collect()
     }
 
     pub fn eq_str(&self, s: &str) -> bool {
-        let mut it = self.0.iter().copied();
+        let mut it = self.units().iter().copied();
         for u in s.encode_utf16() {
             if it.next() != Some(u) {
                 return false;
@@ -69,7 +186,7 @@ impl JsStr {
     }
 
     pub fn find(&self, needle: &JsStr, from: usize) -> Option<usize> {
-        let (h, n) = (&self.0[..], &needle.0[..]);
+        let (h, n) = (self.units(), needle.units());
         if n.is_empty() {
             return (from <= h.len()).then_some(from);
         }
@@ -80,7 +197,7 @@ impl JsStr {
     }
 
     pub fn rfind(&self, needle: &JsStr, from: usize) -> Option<usize> {
-        let (h, n) = (&self.0[..], &needle.0[..]);
+        let (h, n) = (self.units(), needle.units());
         if n.len() > h.len() {
             return None;
         }
@@ -90,8 +207,11 @@ impl JsStr {
 
     /// The array index this string names, if it is one (canonical, < 2³² − 1).
     pub fn as_index(&self) -> Option<u32> {
-        let u = &self.0[..];
-        if u.is_empty() || u.len() > 10 || (u.len() > 1 && u[0] == b'0' as u16) {
+        if self.len() > 10 {
+            return None;
+        }
+        let u = self.units();
+        if u.is_empty() || (u.len() > 1 && u[0] == b'0' as u16) {
             return None;
         }
         let mut n: u64 = 0;
@@ -334,4 +454,36 @@ pub fn trim_units(u: &[u16], start: bool, end: bool) -> &[u16] {
         }
     }
     &u[a..b]
+}
+
+#[cfg(test)]
+mod rope_tests {
+    use super::*;
+
+    #[test]
+    fn values_stay_small() {
+        assert!(core::mem::size_of::<Value>() <= 24, "{}", core::mem::size_of::<Value>());
+    }
+
+    #[test]
+    fn ropes_read_like_flat_strings_and_drop_deep_chains() {
+        let mut s = JsStr::from("start:");
+        let piece = JsStr::from("ab");
+        for _ in 0..200_000 {
+            s = s.concat(&piece);
+        }
+        assert_eq!(s.len(), 6 + 400_000);
+        assert_eq!(&s.units()[..8], &"start:ab".encode_utf16().collect::<Vec<_>>()[..]);
+        let mut t = JsStr::from("start:");
+        for _ in 0..200_000 {
+            t = t.concat(&piece);
+        }
+        assert!(s == t);
+        // A chain dropped without ever being read.
+        let mut u = JsStr::empty();
+        for _ in 0..300_000 {
+            u = u.concat(&piece);
+        }
+        drop(u);
+    }
 }

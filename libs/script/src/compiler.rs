@@ -11,10 +11,10 @@
 
 use crate::ast::*;
 use crate::bytecode::{Code, CodeKind, Const, Op, TemplateData};
-use crate::lexer::{Name, SyntaxError};
+use crate::lexer::{Name, NameSet, SyntaxError};
 use crate::numconv;
 use crate::value::JsStr;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -60,7 +60,16 @@ struct Binding {
 
 #[derive(Default)]
 struct CScope {
+    /// The heap bindings as a lazily compiled function sees them, and the
+    /// binding count they were taken at.
+    snap: Option<(usize, Rc<SnapScope>)>,
+    /// An enclosing scope of a lazily compiled function: looked up in the
+    /// shared snapshot rather than copied.
+    shared: Option<Rc<SnapScope>>,
     bindings: Vec<Binding>,
+    /// Large bundles can put thousands of names in one scope. Keep source
+    /// order in `bindings`, but avoid scanning it for every reference.
+    index: Option<hashbrown::HashMap<Name, usize>>,
     heap: bool,
     heap_size: u16,
     /// The script's top level: names not found below here are globals.
@@ -68,9 +77,117 @@ struct CScope {
 }
 
 impl CScope {
-    fn find(&self, name: &str) -> Option<&Binding> {
-        self.bindings.iter().rev().find(|b| &*b.name == name)
+    fn position(&self, name: &str) -> Option<usize> {
+        match &self.index {
+            Some(index) => index.get(name).copied(),
+            None => self.bindings.iter().rposition(|b| &*b.name == name),
+        }
     }
+
+    fn find(&self, name: &str) -> Option<&Binding> {
+        if let Some(s) = &self.shared {
+            return s.index.get(name).map(|&i| &s.bindings[i]);
+        }
+        self.position(name).map(|i| &self.bindings[i])
+    }
+
+    fn push(&mut self, binding: Binding) {
+        if let Some(index) = &mut self.index {
+            index.insert(binding.name.clone(), self.bindings.len());
+        }
+        self.bindings.push(binding);
+        if self.index.is_none() && self.bindings.len() == 16 {
+            self.index = Some(self.bindings.iter().enumerate().map(|(i, b)| (b.name.clone(), i)).collect());
+        }
+    }
+}
+
+/// A scope as a deferred function's compilation needs it: its heap
+/// bindings (only those can be captured) and how it nests.
+pub struct SnapScope {
+    bindings: Vec<Binding>,
+    index: hashbrown::HashMap<Name, usize>,
+    heap: bool,
+    heap_size: u16,
+    global: bool,
+}
+
+impl core::fmt::Debug for LazyFn {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(f, "LazyFn({}..{})", self.paren, self.end)
+    }
+}
+
+/// A function whose body is compiled when first called.
+pub struct LazyFn {
+    src: Rc<str>,
+    file: Rc<str>,
+    line_starts: Rc<[u32]>,
+    /// Byte offsets: the parameters' `(` and the end of the function.
+    paren: u32,
+    end: u32,
+    /// Where the function's text starts (for toString).
+    start: u32,
+    name: Option<Name>,
+    is_expr: bool,
+    strict: bool,
+    /// Enclosing scopes, outermost first.
+    scopes: Vec<Rc<SnapScope>>,
+    pub compiled: core::cell::OnceCell<Rc<Code>>,
+}
+
+impl CScope {
+    fn snapshot(&mut self) -> Rc<SnapScope> {
+        if let Some(s) = &self.shared {
+            return s.clone();
+        }
+        if let Some((n, s)) = &self.snap {
+            if *n == self.bindings.len() && s.heap == self.heap {
+                return s.clone();
+            }
+        }
+        let mut bindings: Vec<Binding> = Vec::new();
+        let mut index = hashbrown::HashMap::new();
+        for b in &self.bindings {
+            if let Loc::Heap(_) = b.loc {
+                // The last binding of a name wins, as lookups find it.
+                index.insert(b.name.clone(), bindings.len());
+                bindings.push(b.clone());
+            }
+        }
+        let s = Rc::new(SnapScope { bindings, index, heap: self.heap, heap_size: self.heap_size, global: self.global });
+        self.snap = Some((self.bindings.len(), s.clone()));
+        s
+    }
+
+    fn from_snapshot(s: &Rc<SnapScope>) -> CScope {
+        CScope { heap: s.heap, global: s.global, heap_size: s.heap_size, shared: Some(s.clone()), ..CScope::default() }
+    }
+}
+
+/// Compiles a deferred function's body against its enclosing scopes.
+pub fn compile_lazy(l: &LazyFn) -> R<Rc<Code>> {
+    let text = l.src.get(l.paren as usize..l.end as usize).ok_or_else(|| err("internal error: lazy function range"))?;
+    let mut toks = crate::lexer::tokenize(text)?;
+    for t in &mut toks {
+        t.start += l.paren;
+        t.end += l.paren;
+    }
+    let f = crate::parser::parse_lazy_function(&l.src, toks, l.name.clone(), l.is_expr, l.strict, l.start)?;
+    let mut c = Compiler {
+        src: l.src.clone(),
+        line_starts: l.line_starts.clone(),
+        file: l.file.clone(),
+        fns: Vec::new(),
+        withs: Vec::new(),
+    };
+    // The enclosing functions, as one: lookups count heap scopes outward
+    // exactly as the closure's runtime scope chain nests them.
+    c.new_fn(CodeKind::Normal, l.strict, NameSet::new(), false);
+    for s in &l.scopes {
+        c.f().scopes.push(CScope::from_snapshot(s));
+    }
+    c.function_code(&f, None)
 }
 
 #[derive(Clone, Copy)]
@@ -121,7 +238,7 @@ struct FnState<'a> {
     kind: CodeKind,
     is_async: bool,
     is_generator: bool,
-    captured: BTreeSet<Name>,
+    captured: NameSet,
     capture_all: bool,
     strings: BTreeMap<JsStr, u32>,
     opt_ends: Vec<Vec<usize>>,
@@ -131,6 +248,7 @@ struct FnState<'a> {
 
 pub struct Compiler<'a> {
     src: Rc<str>,
+    line_starts: Rc<[u32]>,
     file: Rc<str>,
     fns: Vec<FnState<'a>>,
     /// Enclosing `with` statements: (function index, its scope's index,
@@ -139,7 +257,10 @@ pub struct Compiler<'a> {
 }
 
 pub fn compile_script(script: &Script, src: Rc<str>, file: Rc<str>) -> R<Rc<Code>> {
-    let mut c = Compiler { src, file, fns: Vec::new(), withs: Vec::new() };
+    let line_starts = core::iter::once(0)
+        .chain(src.bytes().enumerate().filter(|(_, b)| *b == b'\n').map(|(i, _)| i as u32 + 1))
+        .collect();
+    let mut c = Compiler { src, line_starts, file, fns: Vec::new(), withs: Vec::new() };
     c.script(script)
 }
 
@@ -445,7 +566,7 @@ impl<'a> Compiler<'a> {
         let mut scope = CScope::default();
         let mut tdz_locals = Vec::new();
         for (n, k) in names {
-            if scope.bindings.iter().any(|b| b.name == *n) {
+            if scope.find(n).is_some() {
                 continue;
             }
             let loc = if self.captured(n) {
@@ -458,7 +579,7 @@ impl<'a> Compiler<'a> {
                 }
                 Loc::Local(slot)
             };
-            scope.bindings.push(Binding { name: n.clone(), kind: *k, loc });
+            scope.push(Binding { name: n.clone(), kind: *k, loc });
         }
         scope.heap = scope.heap_size > 0;
         let heap = scope.heap;
@@ -689,7 +810,7 @@ impl<'a> Compiler<'a> {
 
     // ------------------------------------------------------------ functions
 
-    fn new_fn(&mut self, kind: CodeKind, strict: bool, captured: BTreeSet<Name>, capture_all: bool) {
+    fn new_fn(&mut self, kind: CodeKind, strict: bool, captured: NameSet, capture_all: bool) {
         self.fns.push(FnState {
             ops: Vec::new(),
             consts: Vec::new(),
@@ -722,8 +843,10 @@ impl<'a> Compiler<'a> {
     ) -> Rc<Code> {
         let f = self.fns.pop().unwrap();
         let global_cache = (0..f.consts.len()).map(|_| core::cell::Cell::new((0, 0))).collect();
+        let prop_cache = (0..f.consts.len()).map(|_| core::cell::Cell::new((0, 0))).collect();
         Rc::new(Code {
             global_cache,
+            prop_cache,
             name,
             ops: f.ops,
             consts: f.consts,
@@ -736,9 +859,11 @@ impl<'a> Compiler<'a> {
             is_generator: f.is_generator,
             keep_args,
             lines: f.lines,
+            line_starts: self.line_starts.clone(),
             callees: f.callees,
             source: span.map(|(a, b)| (self.src.clone(), a, b)),
             file: self.file.clone(),
+            lazy: None,
         })
     }
 
@@ -793,6 +918,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn function_code(&mut self, f: &'a Function, name_hint: Option<JsStr>) -> R<Rc<Code>> {
+        if let Some(paren) = f.lazy {
+            return self.lazy_stub(f, paren, name_hint);
+        }
         let kind = match f.kind {
             FnKind::Normal => CodeKind::Normal,
             FnKind::Arrow => CodeKind::Arrow,
@@ -816,6 +944,56 @@ impl<'a> Compiler<'a> {
         let simple = f.rest.is_none() && f.params.iter().all(|p| p.init.is_none() && matches!(p.pat, Pat::Ident(_)));
         let keep_args = f.rest.is_some() || (f.uses_arguments && f.kind != FnKind::Arrow) || !simple;
         Ok(self.finish_fn(name, f.params.len() as u32, f.length, keep_args, Some(f.span)))
+    }
+
+    /// A deferred function: its outward facts now, its body on first call.
+    fn lazy_stub(&mut self, f: &Function, paren: u32, name_hint: Option<JsStr>) -> R<Rc<Code>> {
+        let mut scopes = Vec::new();
+        for fs in &mut self.fns {
+            for s in &mut fs.scopes {
+                scopes.push(s.snapshot());
+            }
+        }
+        let lazy = LazyFn {
+            src: self.src.clone(),
+            file: self.file.clone(),
+            line_starts: self.line_starts.clone(),
+            paren,
+            end: f.span.1,
+            start: f.span.0,
+            name: f.name.clone(),
+            is_expr: f.is_expr,
+            strict: f.strict,
+            scopes,
+            compiled: core::cell::OnceCell::new(),
+        };
+        // Inside `with`, names resolve through objects only known here.
+        if !self.withs.is_empty() {
+            return compile_lazy(&lazy);
+        }
+        let name = name_hint.or_else(|| f.name.as_ref().map(|n| JsStr::from(&**n))).unwrap_or_else(JsStr::empty);
+        let n = f.params.len() as u32;
+        Ok(Rc::new(Code {
+            global_cache: Vec::new(),
+            prop_cache: Vec::new(),
+            name,
+            ops: Vec::new(),
+            consts: Vec::new(),
+            n_locals: n,
+            n_params: n,
+            length: f.length,
+            kind: CodeKind::Normal,
+            strict: f.strict,
+            is_async: false,
+            is_generator: false,
+            keep_args: true,
+            lines: Vec::new(),
+            line_starts: self.line_starts.clone(),
+            callees: Vec::new(),
+            source: Some((self.src.clone(), f.span.0, f.span.1)),
+            file: self.file.clone(),
+            lazy: Some(Rc::new(lazy)),
+        }))
     }
 
     fn function_body(&mut self, f: &'a Function) -> R<()> {
@@ -847,7 +1025,8 @@ impl<'a> Compiler<'a> {
         }
         let mut scope = CScope::default();
         let add = |c: &mut Self, scope: &mut CScope, name: &Name, kind: BKind, slot: Option<u32>| {
-            if let Some(b) = scope.bindings.iter_mut().find(|b| b.name == *name) {
+            if let Some(i) = scope.position(name) {
+                let b = &mut scope.bindings[i];
                 // A repeated parameter: the last one wins.
                 if let (BKind::Param, Some(s), Loc::Local(_)) = (kind, slot, b.loc) {
                     b.loc = Loc::Local(s);
@@ -860,7 +1039,7 @@ impl<'a> Compiler<'a> {
             } else {
                 Loc::Local(slot.unwrap_or_else(|| c.new_local()))
             };
-            scope.bindings.push(Binding { name: name.clone(), kind, loc });
+            scope.push(Binding { name: name.clone(), kind, loc });
         };
         if simple {
             for (i, p) in f.params.iter().enumerate() {
@@ -889,7 +1068,7 @@ impl<'a> Compiler<'a> {
             add(self, &mut scope, n, *k, None);
             tdz.push(n.clone());
         }
-        let callee_name = f.name.clone().filter(|n| f.is_expr && !scope.bindings.iter().any(|b| b.name == *n));
+        let callee_name = f.name.clone().filter(|n| f.is_expr && scope.find(n).is_none());
         if let Some(n) = &callee_name {
             add(self, &mut scope, n, BKind::Callee, None);
         }

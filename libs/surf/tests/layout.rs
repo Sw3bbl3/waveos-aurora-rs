@@ -281,3 +281,56 @@ fn canvas_is_inline_by_default() {
     assert!(rect.x > 0, "it sits in the line, after the text");
     assert!(!layout.items.iter().any(|i| matches!(i, Item::Text { text, .. } if text.contains("fallback"))));
 }
+
+fn box_of(l: &nebula_engine::Layout, page: &Page, id: &str) -> Rect {
+    let n = page
+        .doc
+        .descendants(0)
+        .into_iter()
+        .find(|&n| page.doc.element(n).and_then(|e| e.attr("id")) == Some(id))
+        .unwrap();
+    l.boxes.iter().find(|b| b.node == n).map(|b| b.rect).expect("box")
+}
+
+#[test]
+fn absolute_boxes_leave_the_flow_and_sit_in_their_containing_block() {
+    let page = Page::parse(
+        "<body style='margin:0'><div id=cb style='position:relative;width:400px;height:300px;margin-top:20px'>\
+         <div id=under style='height:50px'></div>\
+         <div id=fill style='position:absolute;top:0;left:0;right:0;bottom:0'></div>\
+         <div id=corner style='position:absolute;right:10px;bottom:20px;width:30px;height:40px'></div>\
+         <div id=pct style='height:50%'></div></div>\
+         <div id=after style='height:10px'></div>\
+         <div id=fixed style='position:fixed;left:5px;top:6px;width:7px;height:8px'></div></body>",
+    );
+    let l = page.layout(800, 600, &Fake);
+    assert_eq!(box_of(&l, &page, "cb"), Rect::new(0, 20, 400, 300));
+    assert_eq!(box_of(&l, &page, "fill"), Rect::new(0, 20, 400, 300));
+    assert_eq!(box_of(&l, &page, "corner"), Rect::new(360, 260, 30, 40));
+    // Out of flow: the next in-flow box follows the first, not the overlays.
+    assert_eq!(box_of(&l, &page, "pct"), Rect::new(0, 70, 400, 150));
+    assert_eq!(box_of(&l, &page, "after").y, 320);
+    assert_eq!(box_of(&l, &page, "fixed"), Rect::new(5, 6, 7, 8));
+}
+
+#[test]
+fn relative_offsets_move_a_box_and_its_content() {
+    let page = Page::parse(
+        "<body style='margin:0'><div id=r style='position:relative;left:15px;top:-5px;height:20px'><p id=in style='margin:0;height:5px'></p></div><div id=n style='height:5px'></div></body>",
+    );
+    let l = page.layout(800, 600, &Fake);
+    assert_eq!(box_of(&l, &page, "r"), Rect::new(15, -5, 800, 20));
+    assert_eq!(box_of(&l, &page, "in"), Rect::new(15, -5, 800, 5));
+    assert_eq!(box_of(&l, &page, "n").y, 20);
+}
+
+#[test]
+fn shrink_to_fit_absolute_and_percent_heights_from_the_viewport() {
+    let page = Page::parse(
+        "<html style='height:100%'><body style='margin:0;height:100%'><div id=full style='height:100%'></div>\
+         <span id=tag style='position:absolute;top:0;left:0'>abcd</span></body></html>",
+    );
+    let l = page.layout(800, 600, &Fake);
+    assert_eq!(box_of(&l, &page, "full").h, 600);
+    assert_eq!(box_of(&l, &page, "tag").w, 32);
+}

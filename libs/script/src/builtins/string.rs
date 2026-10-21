@@ -30,6 +30,10 @@ fn string_ctor(rt: &mut Realm, c: &Call) -> JsResult {
 }
 
 fn from_char_code(rt: &mut Realm, c: &Call) -> JsResult {
+    if c.args.len() == 1 {
+        let u = crate::numconv::to_uint32(rt.to_number(&c.args[0])?) as u16;
+        return Ok(Value::String(rt.unit_string(u)));
+    }
     let mut out = Vec::with_capacity(c.args.len());
     for a in &c.args {
         out.push(crate::numconv::to_uint32(rt.to_number(a)?) as u16);
@@ -87,7 +91,7 @@ fn char_at(rt: &mut Realm, c: &Call) -> JsResult {
     if i < 0.0 || i >= s.len() as f64 {
         return Ok(Value::str(""));
     }
-    Ok(Value::String(s.slice(i as usize, i as usize + 1)))
+    Ok(Value::String(rt.unit_string(s.units()[i as usize])))
 }
 
 fn char_code_at(rt: &mut Realm, c: &Call) -> JsResult {
@@ -488,7 +492,7 @@ fn split(rt: &mut Realm, c: &Call) -> JsResult {
     let mut parts = Vec::new();
     if r.is_empty() {
         for i in 0..s.len().min(limit as usize) {
-            parts.push(Value::String(s.slice(i, i + 1)));
+            parts.push(Value::String(rt.unit_string(s.units()[i])));
         }
         return Ok(rt.array_from(parts));
     }

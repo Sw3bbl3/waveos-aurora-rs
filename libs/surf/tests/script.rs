@@ -54,6 +54,194 @@ fn body_text(p: &Page) -> String {
 }
 
 #[test]
+fn range_clones_extracts_and_inserts_real_nodes() {
+    let (mut p, mut js, log, _) = page("<body><div id='x'>hello<b>bold</b><i>italic</i>end</div></body>");
+    p.run_script(
+        &mut js,
+        r#"
+      const x=document.getElementById('x'), r=document.createRange();
+      r.setStart(x.firstChild,2); r.setEnd(x.lastChild,2);
+      console.log(r.toString(), r.commonAncestorContainer === x, r.collapsed);
+      const c=r.cloneRange(); console.log(c.startOffset,c.endOffset);
+      const fragment=r.extractContents();
+      console.log(fragment.textContent,x.textContent,r.collapsed);
+      r.insertNode(r.createContextualFragment('<span>new</span>'));
+      console.log(x.innerHTML);
+      try { r.setStart(x,999); } catch(e) { console.log(e.name); }
+    "#,
+        "range.js",
+    );
+    assert_eq!(
+        *log.borrow(),
+        ["llobolditalicen true false", "2 2", "llobolditalicen hed true", "he<span>new</span>d", "IndexSizeError"]
+    );
+}
+
+#[test]
+fn media_play_promise_waits_for_native_playback() {
+    let (mut p, mut js, log, _) = page("<body><video id='v' controls></video><div id='d'></div></body>");
+    p.run_script(
+        &mut js,
+        r#"
+      const v=document.getElementById('v');
+      console.log(v instanceof HTMLVideoElement,v instanceof HTMLMediaElement,
+        document.getElementById('d') instanceof HTMLDivElement,v.paused,v.readyState);
+      v.play().then(()=>console.log('playing'),e=>console.log(e.name));
+      console.log('requested',v.paused); v.pause();
+      console.log(v.paused, v.canPlayType('video/mp4; codecs="avc1.42e01e"'), v.canPlayType('video/webm'));
+      v.currentTime=2; console.log(v.seeking);
+    "#,
+        "media.js",
+    );
+    assert_eq!(*log.borrow(), ["true true true true 0", "requested false", "true probably ", "true", "AbortError"]);
+    let n = p.doc.find("video").unwrap();
+    assert_eq!(p.doc.media[&n].seek, Some(2.0));
+}
+
+#[test]
+fn message_channels_queue_clone_start_and_close() {
+    let (mut p, mut js, log, _) = page("<body></body>");
+    p.run_script(
+        &mut js,
+        r#"
+      const c = new MessageChannel();
+      console.log(c.port1 instanceof MessagePort, c.port1 instanceof EventTarget);
+      const data = {n: 1}; data.self = data;
+      c.port1.postMessage(data); data.n = 9;
+      c.port2.addEventListener('message', e => console.log(e.data.n, e.data.self === e.data,
+        e.target === c.port2), {once: true});
+      console.log('sent');
+      setTimeout(() => { console.log('start'); c.port2.start(); }, 10);
+      const d = new MessageChannel();
+      d.port2.onmessage = e => console.log('should not deliver');
+      d.port1.postMessage('closed'); d.port2.close();
+      try { c.port1.postMessage(() => 1); } catch(e) { console.log(e.name); }
+      Promise.resolve().then(() => console.log('microtask'));
+    "#,
+        "channels.js",
+    );
+    assert_eq!(*log.borrow(), ["true true", "sent", "DataCloneError", "microtask"]);
+    for _ in 0..5 {
+        p.run_timers(&mut js, 1100.0);
+    }
+    assert_eq!(*log.borrow(), ["true true", "sent", "DataCloneError", "microtask", "start", "1 true true"]);
+}
+
+#[test]
+fn template_contents_are_inert_detached_and_cloneable() {
+    let (mut p, mut js, log, _) = page(
+        r#"<!doctype html><head>
+      <template id='tpl'><p id='inside'>Saved</p><template id='nested'><b>Nested</b></template>
+        <script>console.log('activated');</script></template>
+      </head><body><p>Visible</p></body>"#,
+    );
+    assert!(log.borrow().is_empty());
+    p.run_script(
+        &mut js,
+        r#"
+      const t = document.getElementById('tpl');
+      console.log(t instanceof HTMLTemplateElement, t instanceof HTMLElement);
+      console.log(t.childNodes.length, t.textContent, document.getElementById('inside'));
+      console.log(t.content instanceof DocumentFragment, t.content === t.content,
+        t.content.parentNode, t.content.isConnected);
+      console.log(t.content.querySelector('#inside').textContent,
+        t.content.querySelector('#nested').content.querySelector('b').textContent);
+      const c = t.cloneNode(true);
+      console.log(c.content !== t.content, c.content.querySelector('#inside').textContent,
+        t.cloneNode(false).content.childNodes.length);
+      const imported = document.importNode(c.content, true);
+      document.body.appendChild(imported);
+      console.log(imported.childNodes.length, document.getElementById('inside').isConnected);
+      try { t.content.appendChild(t); } catch(e) { console.log('cycle rejected'); }
+    "#,
+        "template.js",
+    );
+    assert_eq!(
+        *log.borrow(),
+        [
+            "true true",
+            "0  null",
+            "true true null false",
+            "Saved Nested",
+            "true Saved 0",
+            "activated",
+            "0 true",
+            "cycle rejected"
+        ]
+    );
+    assert!(body_text(&p).contains("Visible Saved"));
+}
+
+#[test]
+fn template_inner_html_and_nested_cloning_preserve_content() {
+    let (mut p, mut js, log, _) = page("<body></body>");
+    p.run_script(
+        &mut js,
+        r#"
+      const t = document.createElement('template');
+      t.innerHTML = '<template><span>nested</span></template><p>text</p>';
+      const c = t.cloneNode(true);
+      console.log(t.innerHTML === c.innerHTML, t.childNodes.length,
+        c.content.firstChild.content.firstChild.textContent);
+      c.content.lastChild.textContent = 'changed';
+      console.log(t.content.lastChild.textContent, c.content.lastChild.textContent);
+      t.innerHTML = '<b>replacement</b>';
+      console.log(t.content.childNodes.length, t.content.firstChild.tagName, t.outerHTML);
+      t.appendChild(document.createTextNode('ordinary child'));
+      console.log(t.textContent, t.content.textContent);
+    "#,
+        "template-inner.js",
+    );
+    assert_eq!(
+        *log.borrow(),
+        ["true 0 nested", "text changed", "1 B <template><b>replacement</b></template>", "ordinary child replacement"]
+    );
+}
+
+#[test]
+fn animation_frame_batch_survives_collection() {
+    let (mut p, mut js, log, _) = page("<body></body>");
+    p.run_script(
+        &mut js,
+        r#"
+        requestAnimationFrame(() => {
+            for (let i = 0; i < 2000; i++) { const garbage = { i }; }
+            console.log('first frame');
+        });
+        requestAnimationFrame(() => console.log('second frame'));
+    "#,
+        "frames.js",
+    );
+    js.realm.heap.set_pressure(1);
+    p.run_timers(&mut js, 1016.0);
+    assert!(js.realm.heap.collections > 0);
+    assert_eq!(*log.borrow(), ["first frame", "second frame"]);
+}
+
+#[test]
+fn dispatched_event_survives_microtask_collection() {
+    let (mut p, mut js, log, _) = page("<body></body>");
+    p.run_script(
+        &mut js,
+        r#"
+        document.body.addEventListener('click', () => {
+            queueMicrotask(() => {
+                for (let i = 0; i < 2000; i++) { const garbage = { i }; }
+                console.log('microtask');
+            });
+        });
+        document.addEventListener('click', e => console.log(e.type, e.target.tagName));
+    "#,
+        "event.js",
+    );
+    js.realm.heap.set_pressure(1);
+    let body = p.doc.find("body").unwrap();
+    assert!(p.dispatch(&mut js, body, "click", true, true));
+    assert!(js.realm.heap.collections > 0);
+    assert_eq!(*log.borrow(), ["microtask", "click BODY"]);
+}
+
+#[test]
 fn browser_image_factory_has_real_element_identity() {
     let (p, _, log, _) = page(
         r#"<body><script>
@@ -467,8 +655,8 @@ fn fetch_and_xhr_go_through_the_browser() {
     let reqs = js.take_requests();
     assert_eq!(reqs.len(), 3);
     assert_eq!(
-        (reqs[0].method.as_str(), reqs[0].url.as_str(), reqs[0].body.as_str()),
-        ("POST", "/api/items", "{\"q\":1}")
+        (reqs[0].method.as_str(), reqs[0].url.as_str(), std::str::from_utf8(&reqs[0].body).unwrap()),
+        ("POST", "https://example.com/api/items", "{\"q\":1}")
     );
     assert!(reqs[0].headers.iter().any(|(k, v)| k == "x-test" && v == "yes"));
     use nebula_engine::script::HttpResponse;
@@ -477,7 +665,7 @@ fn fetch_and_xhr_go_through_the_browser() {
         status_text: "OK".into(),
         url: "https://example.com/x".into(),
         headers: vec![(header.0.into(), header.1.into())],
-        body: body.into(),
+        body: body.as_bytes().to_vec(),
     };
     p.complete_request(&mut js, reqs[0].id, Ok(ok("{\"items\":[\"a\",\"b\"]}", ("Content-Type", "application/json"))));
     p.complete_request(&mut js, reqs[1].id, Ok(ok("hi there", ("X-Server", "nebula"))));
@@ -921,4 +1109,78 @@ fn images_fire_load_and_error_with_natural_sizes() {
     p.image_loaded(&mut js, url, "https://example.com/dir/pic.png", Some((40, 30)));
     p.image_loaded(&mut js, url, "https://example.com/missing.jpg", None);
     assert_eq!(*log.borrow(), vec!["before false 0", "loaded 40 30 true 40", "preload failed true"]);
+}
+
+#[test]
+fn prelude_loads_without_errors() {
+    let (_p, _js, log, _) =
+        page("<body><script>console.log(typeof MediaSource, typeof Blob, typeof structuredClone)</script></body>");
+    assert_eq!(*log.borrow(), vec!["function function function"]);
+}
+
+#[test]
+fn media_source_buffers_fragmented_mp4_from_script() {
+    const STREAM: &[u8] = include_bytes!("../../media/tests/fixtures/flower-fragmented.mp4");
+    let (mut p, mut js, log, clock) = page(
+        r#"<body><video id=v></video><script>
+        const v = document.getElementById("v"), ms = new MediaSource();
+        console.log(MediaSource.isTypeSupported('video/mp4; codecs="avc1.4D401E"'), MediaSource.isTypeSupported('video/webm; codecs="vp9"'),
+          MediaSource.isTypeSupported('video/mp4; codecs="avc1.4D401E"; width=3840; height=2160'), v.canPlayType("video/mp4"));
+        ms.addEventListener("sourceopen", () => {
+          console.log("open", ms.readyState, v.src.startsWith("blob:https://example.com/"));
+          const sb = ms.addSourceBuffer('video/mp4; codecs="avc1.4D401E"');
+          sb.addEventListener("updateend", () => {
+            const b = sb.buffered;
+            console.log("updateend", b.length, b.length && b.start(0).toFixed(2), b.length && b.end(0).toFixed(2), ms.duration.toFixed(2));
+            if (!window.removed && b.length) { window.removed = true; sb.remove(0, 2); }
+            else if (window.removed && !window.ended) { window.ended = true; ms.endOfStream(); console.log("ended", ms.readyState); }
+          });
+          window.feed = bytes => sb.appendBuffer(bytes);
+        });
+        v.src = URL.createObjectURL(ms);
+        v.play().catch(e => console.log("play failed", e.name));
+        </script></body>"#,
+    );
+    *clock.borrow_mut() += 10.0;
+    p.run_timers(&mut js, 1e13);
+    p.with_js(&mut js, |rt| {
+        let buf = rt.new_array_buffer(STREAM.to_vec());
+        let feed = rt.get_str(rt.global, "feed").unwrap();
+        rt.call(&feed, nebula_script::Value::Undefined, &[nebula_script::Value::Object(buf)]).unwrap();
+    });
+    for _ in 0..4 {
+        p.run_timers(&mut js, 1e13);
+    }
+    let lines = log.borrow().clone();
+    assert_eq!(lines[0], "true false false maybe");
+    assert_eq!(lines[1], "open open true");
+    assert_eq!(lines[2], "updateend 1 0.00 5.00 5.00");
+    // Removing the first two seconds drops everything up to the next keyframe.
+    assert!(lines[3].starts_with("updateend 1 ") && !lines[3].starts_with("updateend 1 0.00"), "{}", lines[3]);
+    assert_eq!(lines.last().unwrap(), "ended ended");
+}
+
+#[test]
+fn compiled_scripts_are_reused_safely_by_later_pages() {
+    use nebula_engine::nebula_script::bytecode::CodeCache;
+    let cache = Rc::new(RefCell::new(CodeCache::default()));
+    // Long enough to be cached; declares lexical globals and reads globals.
+    let script = format!(
+        "{}\nlet first = (typeof seen === 'undefined') ? 'fresh' : 'stale'; const n = 41; var seen = true; console.log(first, n + 1, typeof document);",
+        "// padding\n".repeat(400)
+    );
+    let mut outputs = Vec::new();
+    for _ in 0..2 {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let clock = Rc::new(RefCell::new(1000.0));
+        let mut p = Page::parse("<body></body>");
+        let mut js =
+            Scripts::new(Box::new(Capture(log.clone(), clock)), "https://example.com/", (800, 600), BTreeMap::new());
+        js.set_code_cache(cache.clone());
+        p.run_script(&mut js, &script, "https://example.com/app.js");
+        outputs.push(log.borrow().clone());
+    }
+    assert_eq!(outputs[0], vec!["fresh 42 object"]);
+    assert_eq!(outputs[1], outputs[0]);
+    assert_eq!(cache.borrow().hits, 1);
 }

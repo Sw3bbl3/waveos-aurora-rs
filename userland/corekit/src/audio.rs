@@ -20,13 +20,24 @@ impl Stream {
 
     /// Queues interleaved stereo samples; blocks while about a quarter of a
     /// second is already queued.
-    pub fn write(&mut self, samples: &[i16]) -> Result<()> {
+    pub fn write(&self, samples: &[i16]) -> Result<()> {
         let bytes = unsafe { core::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2) };
         let mut done = 0;
         while done < bytes.len() {
             done += crate::io::write_fd(self.fd, &bytes[done..])?;
         }
         Ok(())
+    }
+
+    pub fn pause(&self, paused: bool) -> Result<()> {
+        call(nr::AUDIO_CONTROL, &[self.fd, if paused { abi::PAUSE } else { abi::RESUME }]).map(|_| ())
+    }
+    /// Discards buffered audio and resets this stream's playback counter.
+    pub fn flush(&self) -> Result<()> {
+        call(nr::AUDIO_CONTROL, &[self.fd, abi::FLUSH]).map(|_| ())
+    }
+    pub fn position(&self) -> Result<u64> {
+        call(nr::AUDIO_CONTROL, &[self.fd, abi::POSITION])
     }
 }
 

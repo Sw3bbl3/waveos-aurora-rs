@@ -1,7 +1,7 @@
 //! A recursive-descent parser for ECMAScript 2023 scripts.
 
 use crate::ast::*;
-use crate::lexer::{tokenize, Name, SyntaxError, Tok, Token};
+use crate::lexer::{tokenize, Name, NameSet, SyntaxError, Tok, Token};
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -57,8 +57,8 @@ const MAX_DEPTH: u32 = 300;
 
 #[derive(Default)]
 struct FnCtx {
-    refs: BTreeSet<Name>,
-    inner: BTreeSet<Name>,
+    refs: NameSet,
+    inner: NameSet,
     is_arrow: bool,
     uses_arguments: bool,
     has_eval: bool,
@@ -80,9 +80,26 @@ pub struct Parser<'a> {
     fns: Vec<FnCtx>,
     next_site: u32,
     depth: u32,
+    /// Skip the bodies of ordinary functions (compiled when first called)…
+    lazy: bool,
+    /// …nested at least this deep (`fns` length).
+    lazy_from: usize,
+    /// The function being parsed is probably called at once (`(function…`).
+    eager_next: bool,
 }
 
 pub fn parse_script(src: &str) -> R<Script> {
+    parse_script_with(src, false)
+}
+
+/// Parses a script, leaving ordinary function bodies to be parsed when
+/// they are first called (large page scripts mostly define code that never
+/// runs). Early errors inside those bodies surface then.
+pub fn parse_script_lazy(src: &str) -> R<Script> {
+    parse_script_with(src, true)
+}
+
+fn parse_script_with(src: &str, lazy: bool) -> R<Script> {
     let toks = tokenize(src)?;
     let mut p = Parser {
         src,
@@ -98,6 +115,9 @@ pub fn parse_script(src: &str) -> R<Script> {
         fns: vec![FnCtx::default()],
         next_site: 0,
         depth: 0,
+        lazy,
+        lazy_from: 0,
+        eager_next: false,
     };
     let body = p.body_with_directives(true)?;
     if !p.at_eof() {
@@ -105,6 +125,42 @@ pub fn parse_script(src: &str) -> R<Script> {
     }
     let ctx = p.fns.pop().unwrap();
     Ok(Script { body, strict: p.strict, inner_refs: ctx.inner, has_eval: ctx.has_eval })
+}
+
+/// Parses a function whose body was skipped, from its tokens (offsets in
+/// `src`, starting at the parameters' `(`).
+pub fn parse_lazy_function(
+    src: &str,
+    toks: Vec<Token>,
+    name: Option<Name>,
+    is_expr: bool,
+    strict: bool,
+    start: u32,
+) -> R<Rc<Function>> {
+    let mut p = Parser {
+        src,
+        toks,
+        pos: 0,
+        strict,
+        in_function: false,
+        in_generator: false,
+        in_async: false,
+        super_prop: false,
+        super_call: false,
+        in_class_field: false,
+        fns: vec![FnCtx::default()],
+        next_site: 0,
+        depth: 0,
+        lazy: true,
+        // The function itself is parsed in full; functions inside it may wait.
+        lazy_from: 3,
+        eager_next: false,
+    };
+    let f = p.function_rest(name, FnKind::Normal, false, false, start, is_expr)?;
+    if !p.at_eof() {
+        return Err(p.unexpected());
+    }
+    Ok(f)
 }
 
 /// Parses the parameters and body given to `new Function(...)`.
@@ -229,8 +285,10 @@ impl<'a> Parser<'a> {
         Err(self.err(&format!("expected ';' but found {}", self.describe())))
     }
 
+    /// Where the current token starts, as a byte offset + 1 (0: unknown).
+    /// Stack traces turn it into a line and column.
     fn line(&self) -> u32 {
-        self.token().line
+        self.token().start.saturating_add(1)
     }
 
     fn enter(&mut self) -> R<()> {
@@ -802,6 +860,10 @@ impl<'a> Parser<'a> {
     }
 
     fn function_expression(&mut self, is_async: bool, start: u32) -> R<Expr> {
+        // `(function …` and `!function …` are almost always invoked at once:
+        // deferring them would only parse them twice.
+        self.eager_next =
+            self.pos > 0 && matches!(self.toks[self.pos - 1].tok, Tok::Punct("(") | Tok::Punct("!") | Tok::Punct(","));
         self.expect_kw("function")?;
         let is_generator = self.eat("*");
         let name = if self.is("(") {
@@ -853,11 +915,26 @@ impl<'a> Parser<'a> {
             _ => {}
         }
         self.fns.push(FnCtx::default());
+        let paren = self.token().start;
+        let mut skipped = false;
+        let eager = core::mem::take(&mut self.eager_next);
         let result = (|| {
             self.expect("(")?;
             let (params, rest) = self.formal_parameters()?;
             self.expect("{")?;
-            let body = self.body_with_directives(false)?;
+            let body = if self.lazy
+                && !eager
+                && self.fns.len() >= self.lazy_from
+                && kind == FnKind::Normal
+                && !is_async
+                && !is_generator
+                && self.skip_body()
+            {
+                skipped = true;
+                Vec::new()
+            } else {
+                self.body_with_directives(false)?
+            };
             self.expect("}")?;
             Ok((params, rest, body))
         })();
@@ -898,14 +975,80 @@ impl<'a> Parser<'a> {
                 is_generator,
                 strict,
                 is_expr,
-                inner_refs: BTreeSet::new(),
+                inner_refs: NameSet::new(),
                 has_eval: false,
                 uses_arguments: false,
                 span: (start, end),
                 line,
+                lazy: skipped.then_some(paren),
             },
             ctx,
         ))
+    }
+
+    /// Skips a function body (the current token is just after its `{`) when
+    /// it is worth deferring: moves to its closing `}`, records every name it
+    /// might refer to (a superset, so captured bindings stay correct) and a
+    /// "use strict" directive. Returns false (moving nothing) otherwise.
+    fn skip_body(&mut self) -> bool {
+        const MIN_TOKENS: usize = 40;
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, t) in self.toks[self.pos..].iter().enumerate() {
+            match &t.tok {
+                Tok::Punct("{") => depth += 1,
+                Tok::Punct("}") if depth == 0 => {
+                    end = Some(self.pos + i);
+                    break;
+                }
+                Tok::Punct("}") => depth -= 1,
+                // Private names and direct eval need the full parse now.
+                Tok::Private(_) => return false,
+                Tok::Ident(n, false) if &**n == "eval" => return false,
+                Tok::Eof => return false,
+                _ => {}
+            }
+        }
+        let Some(end) = end else { return false };
+        if end - self.pos < MIN_TOKENS {
+            return false;
+        }
+        // The directive prologue: leading string-literal statements.
+        let mut i = self.pos;
+        while let Tok::Str(_) = &self.toks[i].tok {
+            let t = &self.toks[i];
+            let raw = &self.src[t.start as usize..t.end as usize];
+            if raw == "\"use strict\"" || raw == "'use strict'" {
+                self.strict = true;
+            }
+            i += 1;
+            if matches!(self.toks[i].tok, Tok::Punct(";")) {
+                i += 1;
+            } else if !self.toks[i].nl_before && !matches!(self.toks[i].tok, Tok::Punct("}")) {
+                break;
+            }
+        }
+        // Identifiers are shared strings: deduplicate by address first.
+        let mut seen: hashbrown::HashSet<*const u8> = hashbrown::HashSet::new();
+        let names: Vec<Name> = (self.pos..end)
+            .filter_map(|k| match &self.toks[k].tok {
+                Tok::Ident(n, _)
+                    if (k == 0 || !matches!(self.toks[k - 1].tok, Tok::Punct(".") | Tok::Punct("?.")))
+                        && seen.insert(n.as_ptr()) =>
+                {
+                    Some(n.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for n in &names {
+            self.reference(n);
+        }
+        // Nested functions' names count as inner references too.
+        let ctx = self.fns.last_mut().unwrap();
+        ctx.inner.extend(names);
+        self.pos = end;
+        true
     }
 
     fn finish_function(&mut self, mut f: Function, ctx: FnCtx) -> Rc<Function> {
@@ -994,11 +1137,12 @@ impl<'a> Parser<'a> {
             is_generator: false,
             strict,
             is_expr: true,
-            inner_refs: BTreeSet::new(),
+            inner_refs: NameSet::new(),
             has_eval: false,
             uses_arguments: false,
             span: (start, end),
             line,
+            lazy: None,
         };
         Ok(Expr::Function(self.finish_function(f, ctx)))
     }
@@ -1221,12 +1365,13 @@ impl<'a> Parser<'a> {
             is_generator: false,
             strict: true,
             is_expr: true,
-            inner_refs: BTreeSet::new(),
+            inner_refs: NameSet::new(),
             has_eval: false,
             uses_arguments: false,
             span: (start, end),
             length: 0,
             line,
+            lazy: None,
         };
         Ok(self.finish_function(f, ctx))
     }
@@ -2020,12 +2165,13 @@ fn default_constructor(name: Option<Name>, derived: bool, span: (u32, u32)) -> R
         is_generator: false,
         strict: true,
         is_expr: false,
-        inner_refs: BTreeSet::new(),
+        inner_refs: NameSet::new(),
         has_eval: false,
         uses_arguments: false,
         span,
         length: 0,
         line: 0,
+        lazy: None,
     })
 }
 

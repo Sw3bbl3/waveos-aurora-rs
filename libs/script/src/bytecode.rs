@@ -308,8 +308,10 @@ pub struct Code {
     pub is_generator: bool,
     /// Keeps all arguments (for `arguments` or rest parameters).
     pub keep_args: bool,
-    /// (pc, line) pairs, sorted by pc.
+    /// (pc, source offset + 1) pairs, sorted by pc.
     pub lines: Vec<(u32, u32)>,
+    /// Byte offsets where each line of the file starts.
+    pub line_starts: Rc<[u32]>,
     /// (pc of a Call/New, constant with the callee's source text).
     pub callees: Vec<(u32, u32)>,
     pub source: Option<(Rc<str>, u32, u32)>,
@@ -318,7 +320,92 @@ pub struct Code {
     /// was last found ([`GLOBAL_LEXICAL`] | slot, or global property
     /// index + 1) and the realm's lexical epoch then.
     pub global_cache: Vec<core::cell::Cell<(u32, u32)>>,
+    /// For each name constant used as a property name: the object last
+    /// found holding it (ObjRef + 1) and the entry index, with [`PROTO_HIT`]
+    /// when it was the receiver's prototype. Hits are re-validated.
+    pub prop_cache: Vec<core::cell::Cell<(u32, u32)>>,
+    /// Set for a function whose body is compiled when first called.
+    pub lazy: Option<Rc<crate::compiler::LazyFn>>,
 }
+
+impl Code {
+    /// Forgets where global names were found (before running in another realm).
+    pub fn reset_caches(&self) {
+        let mut stack: Vec<&Code> = alloc::vec![self];
+        while let Some(c) = stack.pop() {
+            for cell in c.global_cache.iter().chain(&c.prop_cache) {
+                cell.set((0, 0));
+            }
+            for k in &c.consts {
+                if let Const::Code(inner) = k {
+                    stack.push(inner);
+                }
+            }
+            if let Some(real) = c.lazy.as_ref().and_then(|l| l.compiled.get()) {
+                stack.push(real);
+            }
+        }
+    }
+}
+
+/// Compiled scripts kept between pages (reloads and revisits skip parsing
+/// and compiling), least recently used dropped beyond a source-size budget.
+pub struct CodeCache {
+    map: alloc::collections::BTreeMap<u64, (Rc<Code>, usize, u64)>,
+    bytes: usize,
+    clock: u64,
+    pub budget: usize,
+    pub hits: u64,
+}
+
+impl Default for CodeCache {
+    fn default() -> Self {
+        CodeCache { map: Default::default(), bytes: 0, clock: 0, budget: 48 << 20, hits: 0 }
+    }
+}
+
+impl CodeCache {
+    /// Scripts smaller than this compile faster than they're looked up.
+    pub const MIN_SOURCE: usize = 2048;
+
+    pub fn key(src: &str, file: &str) -> u64 {
+        // FNV-1a over the file name and source.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in file.bytes().chain([0]).chain(src.bytes()) {
+            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h ^ (src.len() as u64).rotate_left(32)
+    }
+
+    pub fn get(&mut self, key: u64) -> Option<Rc<Code>> {
+        self.clock += 1;
+        let now = self.clock;
+        let e = self.map.get_mut(&key)?;
+        e.2 = now;
+        self.hits += 1;
+        Some(e.0.clone())
+    }
+
+    pub fn insert(&mut self, key: u64, code: Rc<Code>, size: usize) {
+        if size > self.budget {
+            return;
+        }
+        self.clock += 1;
+        if let Some(old) = self.map.insert(key, (code, size, self.clock)) {
+            self.bytes -= old.1;
+        }
+        self.bytes += size;
+        while self.bytes > self.budget {
+            let Some((&k, _)) = self.map.iter().min_by_key(|(_, e)| e.2) else { break };
+            if let Some(e) = self.map.remove(&k) {
+                self.bytes -= e.1;
+            }
+        }
+    }
+}
+
+/// Marks a property cache entry found on the receiver's prototype.
+pub const PROTO_HIT: u32 = 1 << 31;
 
 /// Marks a global cache entry as a top-level let/const/class slot.
 pub const GLOBAL_LEXICAL: u32 = 1 << 31;
@@ -341,13 +428,15 @@ impl Code {
         s
     }
 
-    pub fn line_at(&self, pc: usize) -> u32 {
+    /// The (line, column) of the code at `pc`, both from 1 ((0, 0): unknown).
+    pub fn line_at(&self, pc: usize) -> (u32, u32) {
         let i = self.lines.partition_point(|(p, _)| *p as usize <= pc);
-        if i == 0 {
-            0
-        } else {
-            self.lines[i - 1].1
+        if i == 0 || self.lines[i - 1].1 == 0 {
+            return (0, 0);
         }
+        let offset = self.lines[i - 1].1 - 1;
+        let line = self.line_starts.partition_point(|&s| s <= offset).max(1);
+        (line as u32, offset - self.line_starts[line - 1] + 1)
     }
 
     /// The source text of the callee of the call at `pc`, if recorded.

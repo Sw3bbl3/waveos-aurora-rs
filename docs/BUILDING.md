@@ -15,7 +15,8 @@ For the versioned 0.7 user and developer guides, see the [bilingual handbook](ha
 ## Everyday commands
 
 ```sh
-cargo xtask run                     # release build + boot in a QEMU window
+cargo xtask run                     # release build + boot in a QEMU window, 4 GiB RAM
+cargo xtask run --memory-mib 8192    # override guest RAM (MiB)
 cargo xtask run --monitor           # same, plus the live System Explorer at http://127.0.0.1:7777
 cargo xtask run --disk nvme         # same, with the disk on NVMe (or: ahci, virtio)
 cargo xtask run --fresh-disk        # start over with a new disk (erases files saved in WaveOS)
@@ -25,6 +26,7 @@ cargo xtask run --smp 1             # number of CPUs (default 4)
 cargo xtask run --battery           # add a test laptop battery, power adapter and lid (ACPI)
 cargo xtask run --usb-stick         # plug in a 64 MiB FAT32 USB stick (target/usb-stick.img)
 cargo xtask run --no-sound          # no host audio (sound goes nowhere)
+cargo xtask run --headless --audio-wav target/playback.wav # record native guest audio
 cargo xtask run --no-keyboard-capture # macOS: opt out of full keyboard capture
 cargo xtask run --developer         # separate 8 GiB developer disk, 4 GiB RAM
 cargo xtask run --net none          # disable networking for offline validation
@@ -68,3 +70,5 @@ If VirtualBox says **No bootable medium found**, check that the VM firmware is s
 - **Scripted control.** Scripts can drive the guest while it runs. `tools/qmp.py` wraps the common cases, for example `tools/qmp.py "click:553,752" "type:ls\n" "shot:out.png"`. The raw sockets are:
   - `target/qemu-monitor.sock` is the HMP monitor (for example `screendump shot.png -f png`).
   - `target/qemu-qmp.sock` is QMP (for example `input-send-event`).
+
+Release boot images omit kernel DWARF to stay within the EFI optical-boot size limit. The full kernel ELF, including host debugger symbols, remains at `target/x86_64-unknown-none/release/aster`.

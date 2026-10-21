@@ -316,11 +316,24 @@ const HEAD_CONTENT: &[&str] = &["meta", "title", "link", "style", "script", "bas
 
 impl Builder {
     fn current(&self) -> NodeId {
-        *self.stack.last().unwrap()
+        let n = *self.stack.last().unwrap();
+        self.doc.template_contents.get(&n).copied().unwrap_or(n)
+    }
+
+    fn in_template(&self) -> bool {
+        self.stack.iter().any(|n| self.doc.tag(*n) == "template")
     }
 
     fn open(&self, tag: &str) -> Option<usize> {
-        self.stack.iter().rposition(|n| self.doc.tag(*n) == tag)
+        for (i, &n) in self.stack.iter().enumerate().rev() {
+            if self.doc.tag(n) == tag {
+                return Some(i);
+            }
+            if self.doc.tag(n) == "template" {
+                break;
+            }
+        }
+        None
     }
 
     /// Closes an open `tags` element, unless a `boundary` element is nearer.
@@ -331,7 +344,7 @@ impl Builder {
                 self.stack.truncate(pos);
                 return;
             }
-            if boundary.contains(&t) {
+            if t == "template" || boundary.contains(&t) {
                 return;
             }
         }
@@ -386,7 +399,7 @@ impl Builder {
         if s.is_empty() {
             return;
         }
-        if self.body.is_none() {
+        if self.body.is_none() && !self.in_template() {
             if s.chars().all(|c| c.is_ascii_whitespace()) {
                 return;
             }
@@ -412,43 +425,48 @@ impl Builder {
     }
 
     fn start(&mut self, name: String, attrs: Vec<(String, String)>, is_void: bool) -> Option<NodeId> {
-        match name.as_str() {
-            "html" => {
-                match self.html {
-                    Some(h) => self.merge(h, attrs),
-                    None => {
-                        let h = self.element(Document::ROOT, "html", attrs);
-                        self.html = Some(h);
-                        self.stack = alloc::vec![Document::ROOT, h];
+        if self.in_template() && matches!(name.as_str(), "html" | "head" | "body") {
+            return None;
+        }
+        if !self.in_template() {
+            match name.as_str() {
+                "html" => {
+                    match self.html {
+                        Some(h) => self.merge(h, attrs),
+                        None => {
+                            let h = self.element(Document::ROOT, "html", attrs);
+                            self.html = Some(h);
+                            self.stack = alloc::vec![Document::ROOT, h];
+                        }
                     }
-                }
-                return None;
-            }
-            "head" => {
-                if self.head.is_some() || self.body.is_some() {
                     return None;
                 }
-                let html = self.ensure_html();
-                let h = self.element(html, "head", attrs);
-                self.head = Some(h);
-                self.stack.push(h);
-                return None;
-            }
-            "body" => {
-                match self.body {
-                    Some(b) => self.merge(b, attrs),
-                    None => {
-                        self.ensure_body();
-                        let b = self.body.unwrap();
-                        self.merge(b, attrs);
+                "head" => {
+                    if self.head.is_some() || self.body.is_some() {
+                        return None;
                     }
+                    let html = self.ensure_html();
+                    let h = self.element(html, "head", attrs);
+                    self.head = Some(h);
+                    self.stack.push(h);
+                    return None;
                 }
-                return None;
+                "body" => {
+                    match self.body {
+                        Some(b) => self.merge(b, attrs),
+                        None => {
+                            self.ensure_body();
+                            let b = self.body.unwrap();
+                            self.merge(b, attrs);
+                        }
+                    }
+                    return None;
+                }
+                n if self.body.is_none() && HEAD_CONTENT.contains(&n) => {
+                    self.ensure_html();
+                }
+                _ => self.ensure_body(),
             }
-            n if self.body.is_none() && HEAD_CONTENT.contains(&n) => {
-                self.ensure_html();
-            }
-            _ => self.ensure_body(),
         }
         match name.as_str() {
             "li" => self.close_within(&["li"], &["ul", "ol", "menu", "table"]),
@@ -488,6 +506,9 @@ impl Builder {
     }
 
     fn end(&mut self, name: &str) {
+        if self.in_template() && matches!(name, "html" | "head" | "body") {
+            return;
+        }
         match name {
             "html" | "body" => return,
             "head" => {
@@ -865,6 +886,7 @@ fn escape_into(out: &mut String, s: &str, attr: bool) {
 /// The HTML of a node's children (`innerHTML`).
 pub fn serialize_children(doc: &Document, n: NodeId) -> String {
     let mut out = String::new();
+    let n = doc.template_contents.get(&n).copied().unwrap_or(n);
     for &c in &doc.nodes[n].children {
         serialize_into(doc, c, &mut out);
     }
@@ -918,6 +940,7 @@ fn serialize_into(doc: &Document, n: NodeId, out: &mut String) {
             if VOID.contains(&e.tag.as_str()) {
                 return;
             }
+            let n = doc.template_contents.get(&n).copied().unwrap_or(n);
             for &c in &doc.nodes[n].children {
                 serialize_into(doc, c, out);
             }

@@ -10,6 +10,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub type Name = Rc<str>;
+/// A set of names (hashed: bundles have tens of thousands).
+pub type NameSet = hashbrown::HashSet<Name>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tok {
@@ -58,11 +60,36 @@ pub struct SyntaxError {
     pub col: u32,
 }
 
-const PUNCTS: &[&str] = &[
-    ">>>=", "...", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "=>", "==", "!=", "<=", ">=", "&&",
-    "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<", ">>", "**", "{", "}", "(", ")",
-    "[", "]", ";", ",", "<", ">", "+", "-", "*", "/", "%", "&", "|", "^", "!", "~", "?", ":", "=", ".", "@",
-];
+fn puncts(c: char) -> &'static [&'static str] {
+    match c {
+        '>' => &[">>>=", ">>=", ">>>", ">=", ">>", ">"],
+        '<' => &["<<=", "<=", "<<", "<"],
+        '=' => &["===", "=>", "==", "="],
+        '!' => &["!==", "!=", "!"],
+        '*' => &["**=", "*=", "**", "*"],
+        '&' => &["&&=", "&&", "&=", "&"],
+        '|' => &["||=", "||", "|=", "|"],
+        '?' => &["??=", "??", "?.", "?"],
+        '+' => &["++", "+=", "+"],
+        '-' => &["--", "-=", "-"],
+        '/' => &["/=", "/"],
+        '%' => &["%=", "%"],
+        '^' => &["^=", "^"],
+        '.' => &["...", "."],
+        '{' => &["{"],
+        '}' => &["}"],
+        '(' => &["("],
+        ')' => &[")"],
+        '[' => &["["],
+        ']' => &["]"],
+        ';' => &[";"],
+        ',' => &[","],
+        '~' => &["~"],
+        ':' => &[":"],
+        '@' => &["@"],
+        _ => &[],
+    }
+}
 
 /// Keywords after which an expression (and so a regex) may begin.
 const EXPR_KEYWORDS: &[&str] = &[
@@ -107,10 +134,21 @@ struct Lexer<'a> {
     /// For each open `{`: whether it opened a template substitution.
     braces: Vec<bool>,
     tokens: Vec<Token>,
+    /// One shared string per distinct identifier (bundles repeat names
+    /// millions of times).
+    names: hashbrown::HashMap<&'a str, Name>,
 }
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
-    let mut lx = Lexer { src, pos: 0, line: 1, line_start: 0, braces: Vec::new(), tokens: Vec::new() };
+    let mut lx = Lexer {
+        src,
+        pos: 0,
+        line: 1,
+        line_start: 0,
+        braces: Vec::new(),
+        tokens: Vec::with_capacity(src.len() / 4),
+        names: hashbrown::HashMap::new(),
+    };
     // A hashbang line.
     if src.starts_with("#!") {
         while let Some(c) = lx.peek() {
@@ -261,7 +299,7 @@ impl<'a> Lexer<'a> {
             return self.regex();
         }
         let rest = &self.src[self.pos..];
-        for p in PUNCTS {
+        for p in puncts(c) {
             if rest.starts_with(p) {
                 // `?.` followed by a digit is `?` then a number.
                 if *p == "?." && rest[2..].starts_with(|d: char| d.is_ascii_digit()) {
@@ -282,6 +320,16 @@ impl<'a> Lexer<'a> {
     }
 
     fn ident(&mut self) -> Result<(Name, bool), SyntaxError> {
+        // Minified bundles are predominantly ASCII names. Allocate their
+        // shared string once, without building an intermediate String.
+        let rest = &self.src.as_bytes()[self.pos..];
+        let len = rest.iter().take_while(|&&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$').count();
+        if len > 0 && !rest[0].is_ascii_digit() && rest.get(len).is_none_or(|b| b.is_ascii() && *b != b'\\') {
+            let text = &self.src[self.pos..self.pos + len];
+            let name = self.names.entry(text).or_insert_with(|| Name::from(text)).clone();
+            self.pos += len;
+            return Ok((name, false));
+        }
         let mut s = String::new();
         let mut escaped = false;
         let mut first = true;
@@ -679,5 +727,29 @@ mod tests {
         assert!(toks[1].nl_before);
         assert!(tokenize("'abc").is_err());
         assert!(kinds("a?.5:1").contains(&Tok::Punct("?")));
+    }
+
+    #[test]
+    fn punctuation_uses_longest_match() {
+        for p in [
+            ">>>=", "...", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "=>", "==", "!=", "<=", ">=",
+            "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<", ">>", "**", "{",
+            "}", "(", ")", "[", "]", ";", ",", "<", ">", "+", "-", "*", "/", "%", "&", "|", "^", "!", "~", "?", ":",
+            "=", ".", "@",
+        ] {
+            let tokens = kinds(&format!("x {p} y"));
+            assert_eq!(tokens[1], Tok::Punct(p), "{p}");
+            assert_eq!(tokens.len(), 4, "{p}");
+        }
+    }
+
+    #[test]
+    fn ascii_identifier_fast_path_preserves_unicode_and_escapes() {
+        let tokens = kinds(r"abc_$123 abcπ abc\u0064 \u0061bc");
+        assert_eq!(tokens[0], Tok::Ident(Name::from("abc_$123"), false));
+        assert_eq!(tokens[1], Tok::Ident(Name::from("abcπ"), false));
+        assert_eq!(tokens[2], Tok::Ident(Name::from("abcd"), true));
+        assert_eq!(tokens[3], Tok::Ident(Name::from("abc"), true));
+        assert!(tokenize("#123").is_err());
     }
 }

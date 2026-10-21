@@ -133,10 +133,12 @@ fn reject_fn(rt: &mut Realm, c: &Call) -> JsResult {
 
 pub fn run_thenable(rt: &mut Realm, promise: ObjRef, thenable: Value, then: Value) -> Result<(), Value> {
     let (res, rej) = resolving_functions(rt, promise);
-    if let Err(e) = rt.call(&then, thenable, &[res, rej.clone()]) {
-        rt.call(&rej, Value::Undefined, &[e])?;
-    }
-    Ok(())
+    rt.with_roots([res.clone(), rej.clone()], |rt| {
+        if let Err(e) = rt.call(&then, thenable, &[res, rej.clone()]) {
+            rt.call(&rej, Value::Undefined, &[e])?;
+        }
+        Ok(())
+    })
 }
 
 pub fn run_reaction(

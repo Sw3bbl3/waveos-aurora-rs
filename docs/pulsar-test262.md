@@ -1,8 +1,8 @@
 # Pulsar on test262
 
-Measured on 2026-10-07 against test262 commit `c8c79889`, every test in sloppy and strict mode as its flags require. Tests for features Pulsar doesn't have yet are skipped (see `UNSUPPORTED` in `libs/script/examples/test262.rs`).
+Measured on 2026-10-11 against test262 commit `c8c79889`, every test in sloppy and strict mode as its flags require. Tests for features Pulsar doesn't have yet are skipped (see `UNSUPPORTED` in `libs/script/examples/test262.rs`).
 
-34415 passed, 2069 failed, 11394 skipped: 94.3% of the tests run
+35192 passed, 2063 failed, 10623 skipped: 94.5% of the tests run
 
 | Area | Passed | Failed | Skipped | Pass rate |
 |---|---:|---:|---:|---:|
@@ -43,13 +43,13 @@ Measured on 2026-10-07 against test262 commit `c8c79889`, every test in sloppy a
 | built-ins/Promise | 595 | 21 | 116 | 96.6% |
 | built-ins/Proxy | 0 | 2 | 309 | 0.0% |
 | built-ins/Reflect | 142 | 1 | 10 | 99.3% |
-| built-ins/RegExp | 869 | 22 | 988 | 97.5% |
+| built-ins/RegExp | 1639 | 18 | 222 | 98.9% |
 | built-ins/RegExpStringIteratorPrototype | 17 | 0 | 0 | 100.0% |
 | built-ins/Set | 190 | 0 | 193 | 100.0% |
 | built-ins/SetIteratorPrototype | 11 | 0 | 0 | 100.0% |
 | built-ins/ShadowRealm | 0 | 0 | 64 | – |
 | built-ins/SharedArrayBuffer | 0 | 0 | 104 | – |
-| built-ins/String | 1173 | 37 | 13 | 96.9% |
+| built-ins/String | 1178 | 37 | 8 | 97.0% |
 | built-ins/StringIteratorPrototype | 7 | 0 | 0 | 100.0% |
 | built-ins/SuppressedError | 0 | 0 | 22 | – |
 | built-ins/Symbol | 73 | 1 | 24 | 98.6% |
@@ -94,6 +94,6 @@ Measured on 2026-10-07 against test262 commit `c8c79889`, every test in sloppy a
 | language/rest-parameters | 11 | 0 | 0 | 100.0% |
 | language/source-text | 1 | 0 | 0 | 100.0% |
 | language/statementList | 64 | 16 | 0 | 80.0% |
-| language/statements | 8597 | 489 | 261 | 94.6% |
+| language/statements | 8599 | 487 | 261 | 94.6% |
 | language/types | 109 | 1 | 3 | 99.1% |
 | language/white-space | 67 | 0 | 0 | 100.0% |

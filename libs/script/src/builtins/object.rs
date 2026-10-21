@@ -53,6 +53,25 @@ pub fn from_prop(rt: &mut Realm, p: &Prop) -> Value {
     Value::Object(o)
 }
 
+/// FromPropertyDescriptor for a (possibly partial) descriptor.
+pub fn from_desc(rt: &mut Realm, d: &PropDesc) -> Value {
+    let o = rt.new_object();
+    let fields = [
+        ("value", d.value.clone()),
+        ("writable", d.writable.map(Value::Bool)),
+        ("get", d.get.clone()),
+        ("set", d.set.clone()),
+        ("enumerable", d.enumerable.map(Value::Bool)),
+        ("configurable", d.configurable.map(Value::Bool)),
+    ];
+    for (k, v) in fields {
+        if let Some(v) = v {
+            rt.define(o, k, v, DEFAULT);
+        }
+    }
+    Value::Object(o)
+}
+
 /// The TypeError for a failed defineProperty, worded as V8 does.
 fn define_failed(rt: &mut Realm, o: ObjRef, k: &PropKey) -> Value {
     let n = rt.key_display(k);
@@ -83,8 +102,8 @@ fn assign(rt: &mut Realm, c: &Call) -> JsResult {
             continue;
         }
         let from = rt.to_object(src)?;
-        for k in rt.own_keys(from) {
-            if rt.get_own_property(from, &k).is_some_and(|p| p.enumerable()) {
+        for k in rt.own_keys_v(from)? {
+            if rt.get_own_property_v(from, &k)?.is_some_and(|p| p.enumerable()) {
                 let v = rt.get(from, &k, Value::Object(from))?;
                 if !rt.set(target, k.clone(), v, Value::Object(target))? {
                     let d = rt.key_display(&k);
@@ -150,9 +169,9 @@ fn define_properties(rt: &mut Realm, c: &Call) -> JsResult {
 fn enumerable_own(rt: &mut Realm, v: &Value, kind: u8) -> JsResult {
     let o = rt.to_object(v)?;
     let mut out = Vec::new();
-    for k in rt.own_keys(o) {
+    for k in rt.own_keys_v(o)? {
         let PropKey::Str(s) = &k else { continue };
-        if rt.get_own_property(o, &k).is_some_and(|p| p.enumerable()) {
+        if rt.get_own_property_v(o, &k)?.is_some_and(|p| p.enumerable()) {
             match kind {
                 0 => out.push(Value::String(s.clone())),
                 1 => out.push(rt.get(o, &k, Value::Object(o))?),
@@ -194,29 +213,73 @@ fn from_entries(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Object(o))
 }
 
+/// SetIntegrityLevel through a proxy's traps.
+fn proxy_integrity(rt: &mut Realm, o: ObjRef, frozen: bool) -> Result<(), Value> {
+    if !rt.prevent_extensions_v(o)? {
+        return Err(rt.type_error("Cannot prevent extensions"));
+    }
+    for k in rt.own_keys_v(o)? {
+        let Some(p) = rt.get_own_property_v(o, &k)? else { continue };
+        let mut d = PropDesc { configurable: Some(false), ..PropDesc::default() };
+        if frozen && matches!(p.slot, Slot::Data(_)) {
+            d.writable = Some(false);
+        }
+        if !rt.define_own(o, k.clone(), d)? {
+            return Err(define_failed(rt, o, &k));
+        }
+    }
+    Ok(())
+}
+
+/// TestIntegrityLevel through a proxy's traps.
+fn proxy_test_integrity(rt: &mut Realm, o: ObjRef, frozen: bool) -> Result<bool, Value> {
+    if rt.is_extensible_v(o)? {
+        return Ok(false);
+    }
+    for k in rt.own_keys_v(o)? {
+        if let Some(p) = rt.get_own_property_v(o, &k)? {
+            if p.configurable() || (frozen && matches!(p.slot, Slot::Data(_)) && p.writable()) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn freeze(rt: &mut Realm, c: &Call) -> JsResult {
     if let Value::Object(o) = c.arg(0) {
-        rt.set_integrity(o, true)?;
+        if rt.is_proxy(o) {
+            proxy_integrity(rt, o, true)?;
+        } else {
+            rt.set_integrity(o, true)?;
+        }
     }
     Ok(c.arg(0))
 }
 
 fn seal(rt: &mut Realm, c: &Call) -> JsResult {
     if let Value::Object(o) = c.arg(0) {
-        rt.set_integrity(o, false)?;
+        if rt.is_proxy(o) {
+            proxy_integrity(rt, o, false)?;
+        } else {
+            rt.set_integrity(o, false)?;
+        }
     }
     Ok(c.arg(0))
 }
 
 fn prevent_extensions(rt: &mut Realm, c: &Call) -> JsResult {
     if let Value::Object(o) = c.arg(0) {
-        rt.prevent_extensions(o);
+        if !rt.prevent_extensions_v(o)? {
+            return Err(rt.type_error("Cannot prevent extensions"));
+        }
     }
     Ok(c.arg(0))
 }
 
 fn is_frozen(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Bool(match c.arg(0) {
+        Value::Object(o) if rt.is_proxy(o) => proxy_test_integrity(rt, o, true)?,
         Value::Object(o) => rt.test_integrity(o, true),
         _ => true,
     }))
@@ -224,6 +287,7 @@ fn is_frozen(rt: &mut Realm, c: &Call) -> JsResult {
 
 fn is_sealed(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Bool(match c.arg(0) {
+        Value::Object(o) if rt.is_proxy(o) => proxy_test_integrity(rt, o, false)?,
         Value::Object(o) => rt.test_integrity(o, false),
         _ => true,
     }))
@@ -231,14 +295,14 @@ fn is_sealed(rt: &mut Realm, c: &Call) -> JsResult {
 
 fn is_extensible(rt: &mut Realm, c: &Call) -> JsResult {
     Ok(Value::Bool(match c.arg(0) {
-        Value::Object(o) => rt.is_extensible(o),
+        Value::Object(o) => rt.is_extensible_v(o)?,
         _ => false,
     }))
 }
 
 fn get_prototype_of(rt: &mut Realm, c: &Call) -> JsResult {
     let o = rt.to_object(&c.arg(0))?;
-    Ok(rt.proto_of(o).map(Value::Object).unwrap_or(Value::Null))
+    Ok(rt.get_prototype_of_v(o)?.map(Value::Object).unwrap_or(Value::Null))
 }
 
 fn set_prototype_of(rt: &mut Realm, c: &Call) -> JsResult {
@@ -252,7 +316,7 @@ fn set_prototype_of(rt: &mut Realm, c: &Call) -> JsResult {
         _ => return Err(rt.type_error("Object prototype may only be an Object or null")),
     };
     if let Value::Object(o) = v {
-        if !rt.set_prototype(o, proto) {
+        if !(if rt.is_proxy(o) { rt.set_prototype_of_v(o, proto)? } else { rt.set_prototype(o, proto) }) {
             return Err(rt.type_error("Cyclic __proto__ value or non-extensible object"));
         }
     }
@@ -262,7 +326,7 @@ fn set_prototype_of(rt: &mut Realm, c: &Call) -> JsResult {
 fn get_own_property_descriptor(rt: &mut Realm, c: &Call) -> JsResult {
     let o = rt.to_object(&c.arg(0))?;
     let k = rt.to_property_key(&c.arg(1))?;
-    match rt.get_own_property(o, &k) {
+    match rt.get_own_property_v(o, &k)? {
         Some(p) => Ok(from_prop(rt, &p)),
         None => Ok(Value::Undefined),
     }
@@ -271,8 +335,8 @@ fn get_own_property_descriptor(rt: &mut Realm, c: &Call) -> JsResult {
 fn get_own_property_descriptors(rt: &mut Realm, c: &Call) -> JsResult {
     let o = rt.to_object(&c.arg(0))?;
     let out = rt.new_object();
-    for k in rt.own_keys(o) {
-        if let Some(p) = rt.get_own_property(o, &k) {
+    for k in rt.own_keys_v(o)? {
+        if let Some(p) = rt.get_own_property_v(o, &k)? {
             let d = from_prop(rt, &p);
             rt.create_data_property(out, k, d)?;
         }
@@ -283,14 +347,14 @@ fn get_own_property_descriptors(rt: &mut Realm, c: &Call) -> JsResult {
 fn get_own_property_names(rt: &mut Realm, c: &Call) -> JsResult {
     let o = rt.to_object(&c.arg(0))?;
     let names: Vec<Value> =
-        rt.own_keys(o).into_iter().filter_map(|k| matches!(k, PropKey::Str(_)).then(|| k.to_value())).collect();
+        rt.own_keys_v(o)?.into_iter().filter_map(|k| matches!(k, PropKey::Str(_)).then(|| k.to_value())).collect();
     Ok(rt.array_from(names))
 }
 
 fn get_own_property_symbols(rt: &mut Realm, c: &Call) -> JsResult {
     let o = rt.to_object(&c.arg(0))?;
     let syms: Vec<Value> =
-        rt.own_keys(o).into_iter().filter_map(|k| matches!(k, PropKey::Sym(_)).then(|| k.to_value())).collect();
+        rt.own_keys_v(o)?.into_iter().filter_map(|k| matches!(k, PropKey::Sym(_)).then(|| k.to_value())).collect();
     Ok(rt.array_from(syms))
 }
 
@@ -301,7 +365,7 @@ fn is(rt: &mut Realm, c: &Call) -> JsResult {
 fn has_own(rt: &mut Realm, c: &Call) -> JsResult {
     let o = rt.to_object(&c.arg(0))?;
     let k = rt.to_property_key(&c.arg(1))?;
-    Ok(Value::Bool(rt.has_own(o, &k)))
+    Ok(Value::Bool(rt.get_own_property_v(o, &k)?.is_some()))
 }
 
 fn group_by(rt: &mut Realm, c: &Call) -> JsResult {
@@ -332,7 +396,7 @@ fn group_by(rt: &mut Realm, c: &Call) -> JsResult {
 fn has_own_property(rt: &mut Realm, c: &Call) -> JsResult {
     let k = rt.to_property_key(&c.arg(0))?;
     let o = rt.to_object(&c.this)?;
-    Ok(Value::Bool(rt.has_own(o, &k)))
+    Ok(Value::Bool(rt.get_own_property_v(o, &k)?.is_some()))
 }
 
 fn is_prototype_of(rt: &mut Realm, c: &Call) -> JsResult {
@@ -403,7 +467,7 @@ fn proto_setter(rt: &mut Realm, c: &Call) -> JsResult {
         _ => return Ok(Value::Undefined),
     };
     if let Value::Object(o) = c.this {
-        if !rt.set_prototype(o, proto) {
+        if !(if rt.is_proxy(o) { rt.set_prototype_of_v(o, proto)? } else { rt.set_prototype(o, proto) }) {
             return Err(rt.type_error("Cyclic __proto__ value"));
         }
     }

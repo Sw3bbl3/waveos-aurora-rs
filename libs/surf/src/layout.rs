@@ -6,7 +6,7 @@
 //! rows of shrink-to-fit boxes). Text is measured through [`Host`].
 
 use crate::dom::{Document, NodeData, NodeId};
-use crate::style::{Align, Display, Float, Justify, ListStyle, Style, Transform};
+use crate::style::{Align, Display, Float, Justify, ListStyle, Position, Style, Transform};
 use crate::values::{round_i, Len};
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -98,6 +98,10 @@ pub enum Item {
         rect: Rect,
         src: String,
     },
+    Video {
+        rect: Rect,
+        node: NodeId,
+    },
     Canvas {
         rect: Rect,
         node: NodeId,
@@ -117,6 +121,7 @@ impl Item {
             | Item::Border { rect, .. }
             | Item::Image { rect, .. }
             | Item::Canvas { rect, .. }
+            | Item::Video { rect, .. }
             | Item::Bullet { rect, .. } => {
                 rect.x += dx;
                 rect.y += dy;
@@ -261,6 +266,25 @@ pub struct Engine<'a> {
     depth: u32,
     /// The top of the line being built (for inline anchors).
     pending_y: i32,
+    /// Containing blocks being laid out, innermost last: each collects its
+    /// absolutely positioned descendants (node, static x, static y) until
+    /// its own box is known. The first is the viewport's.
+    cbs: Vec<Vec<(NodeId, i32, i32)>>,
+    viewport_h: i32,
+    /// The definite height percentages of the current content resolve against.
+    cb_height: Option<i32>,
+    /// Border-box heights imposed on boxes (absolutely positioned with top and bottom).
+    forced_height: BTreeMap<NodeId, i32>,
+}
+
+/// How much of the output a box has produced so far (to move it afterwards).
+#[derive(Clone, Copy)]
+struct Mark {
+    items: usize,
+    links: usize,
+    fields: usize,
+    boxes: usize,
+    anchors: usize,
 }
 
 pub fn layout(
@@ -269,6 +293,19 @@ pub fn layout(
     generated: &Generated,
     host: &dyn Host,
     width: i32,
+) -> Layout {
+    layout_viewport(doc, styles, generated, host, width, width * 10 / 16)
+}
+
+/// Lays out for a viewport `width` × `height` (the initial containing block
+/// of fixed and absolutely positioned boxes, and of percentage heights).
+pub fn layout_viewport(
+    doc: &Document,
+    styles: &[Option<Rc<Style>>],
+    generated: &Generated,
+    host: &dyn Host,
+    width: i32,
+    height: i32,
 ) -> Layout {
     let mut e = Engine {
         doc,
@@ -281,6 +318,10 @@ pub fn layout(
         pref_cache: alloc::vec![None; doc.nodes.len()],
         depth: 0,
         pending_y: 0,
+        cbs: alloc::vec![Vec::new()],
+        viewport_h: height.max(1),
+        cb_height: Some(height.max(1)),
+        forced_height: BTreeMap::new(),
     };
     let html = doc.find("html");
     let body = doc.find("body");
@@ -298,6 +339,10 @@ pub fn layout(
         let mb = st.margin[2].or_zero(width);
         mt + e.block(root, 0, mt, width, None).height + mb
     };
+    // Boxes positioned against the viewport.
+    let pending = core::mem::take(&mut e.cbs[0]);
+    let vh = e.viewport_h;
+    e.place_absolutes(pending, Rect::new(0, 0, width, vh));
     e.out.height = h;
     e.out
 }
@@ -364,6 +409,133 @@ impl<'a> Engine<'a> {
             && matches!(&self.doc.nodes[n].data, NodeData::Text(t) if t.chars().all(|c| c.is_ascii_whitespace()))
     }
 
+    /// Absolutely positioned and fixed boxes leave the flow.
+    fn out_of_flow(&self, n: NodeId) -> bool {
+        if n & GEN != 0 || self.doc.element(n).is_none() {
+            return false;
+        }
+        let st = self.style(n);
+        matches!(st.position, Position::Absolute | Position::Fixed) && !st.hidden()
+    }
+
+    /// Hands an out-of-flow box to its containing block, with where it would
+    /// have been in the flow.
+    fn defer(&mut self, n: NodeId, x: i32, y: i32) {
+        let fixed = self.style(n).position == Position::Fixed;
+        let cb = if fixed { 0 } else { self.cbs.len() - 1 };
+        self.cbs[cb].push((n, x, y));
+    }
+
+    fn mark(&self) -> Mark {
+        Mark {
+            items: self.out.items.len(),
+            links: self.out.links.len(),
+            fields: self.out.fields.len(),
+            boxes: self.out.boxes.len(),
+            anchors: self.out.anchors.len(),
+        }
+    }
+
+    /// Moves everything produced since `m`.
+    fn shift_since(&mut self, m: Mark, dx: i32, dy: i32) {
+        if dx == 0 && dy == 0 {
+            return;
+        }
+        for it in &mut self.out.items[m.items..] {
+            it.shift(dx, dy);
+        }
+        for l in &mut self.out.links[m.links..] {
+            l.rect.x += dx;
+            l.rect.y += dy;
+        }
+        for f in self.out.fields[m.fields..].iter_mut().chain(self.out.boxes[m.boxes..].iter_mut()) {
+            f.rect.x += dx;
+            f.rect.y += dy;
+        }
+        for a in &mut self.out.anchors[m.anchors..] {
+            a.1 += dy;
+        }
+    }
+
+    /// Lays out absolutely positioned boxes against a containing block
+    /// (its padding box).
+    fn place_absolutes(&mut self, pending: Vec<(NodeId, i32, i32)>, cb: Rect) {
+        for (n, sx, sy) in pending {
+            let st = self.style(n);
+            let (ow, oh) = (cb.w.max(0), cb.h.max(0));
+            let [top, right, bottom, left] = [
+                st.offsets[0].resolve(oh),
+                st.offsets[1].resolve(ow),
+                st.offsets[2].resolve(oh),
+                st.offsets[3].resolve(ow),
+            ];
+            let (ml, mr) = (st.margin[3].or_zero(ow), st.margin[1].or_zero(ow));
+            let (mt, mb) = (st.margin[0].or_zero(ow), st.margin[2].or_zero(ow));
+            let replaced = matches!(self.doc.tag(n), "img" | "canvas" | "video" | "input" | "select" | "textarea");
+            let hext = if replaced {
+                0
+            } else {
+                st.padding[1].or_zero(ow) + st.padding[3].or_zero(ow) + st.borders()[1] as i32 + st.borders()[3] as i32
+            };
+            let vext = if replaced {
+                0
+            } else {
+                st.padding[0].or_zero(ow) + st.padding[2].or_zero(ow) + st.borders()[0] as i32 + st.borders()[2] as i32
+            };
+            let avail = (ow - left.unwrap_or(0) - right.unwrap_or(0) - ml - mr).max(0);
+            let bw = match st.width.resolve(ow) {
+                Some(w) => {
+                    if st.border_box {
+                        w
+                    } else {
+                        w + hext
+                    }
+                }
+                None if left.is_some() && right.is_some() => avail,
+                None if replaced => self.replaced_size(n, avail.max(1)).0,
+                None => {
+                    let (min, max) = self.pref(n);
+                    max.min(avail).max(min.min(avail))
+                }
+            };
+            let x = match (left, right) {
+                (Some(l), _) => cb.x + l + ml,
+                (None, Some(r)) => cb.x + ow - r - mr - bw,
+                _ => sx + ml,
+            };
+            let explicit_h = match st.height {
+                Len::Calc(p, px) => {
+                    Some(round_i(p * oh as f32 / 100.0 + px)).map(|h| if st.border_box { h } else { h + vext })
+                }
+                Len::Auto => None,
+            };
+            if explicit_h.is_none() {
+                if let (Some(t), Some(b)) = (top, bottom) {
+                    self.forced_height.insert(n, (oh - t - b - mt - mb).max(0));
+                }
+            } else if let Some(h) = explicit_h {
+                self.forced_height.insert(n, h.max(0));
+            }
+            let y0 = match top {
+                Some(t) => cb.y + t + mt,
+                None => sy + mt,
+            };
+            let mark = self.mark();
+            let saved = self.cb_height.replace(oh);
+            let saved_link = self.link.take();
+            let out = self.block(n, x, y0, ow, Some(bw.max(0)));
+            self.link = saved_link;
+            self.cb_height = saved;
+            self.forced_height.remove(&n);
+            if top.is_none() {
+                if let Some(b) = bottom {
+                    let y = cb.y + oh - b - mb - out.height;
+                    self.shift_since(mark, 0, y - y0);
+                }
+            }
+        }
+    }
+
     fn link_of(&self, n: NodeId) -> Option<NodeId> {
         if n & GEN != 0 {
             return None;
@@ -388,6 +560,11 @@ impl<'a> Engine<'a> {
                 i += 1;
                 continue;
             }
+            if self.out_of_flow(c) {
+                self.defer(c, x, cursor + pending_margin + margin_neg);
+                i += 1;
+                continue;
+            }
             if self.is_block_level(c) {
                 let st = self.style(c);
                 // Consecutive floats form a row.
@@ -400,7 +577,7 @@ impl<'a> Engine<'a> {
                             j += 1;
                             continue;
                         }
-                        if self.is_block_level(k) && self.style(k).float != Float::None {
+                        if self.is_block_level(k) && !self.out_of_flow(k) && self.style(k).float != Float::None {
                             row.push(k);
                             j += 1;
                         } else {
@@ -460,7 +637,7 @@ impl<'a> Engine<'a> {
         let st = self.style(node);
         let tag = self.doc.tag(node);
         // Replaced elements (controls, images) size and paint themselves.
-        let replaced = matches!(tag, "img" | "canvas" | "input" | "select" | "textarea");
+        let replaced = matches!(tag, "img" | "canvas" | "video" | "input" | "select" | "textarea");
         let control = matches!(tag, "input" | "select" | "textarea");
         let pad: [i32; 4] = if replaced { [0; 4] } else { core::array::from_fn(|i| st.padding[i].or_zero(cw).max(0)) };
         let border: [i32; 4] = if replaced { [0; 4] } else { st.borders().map(round_i) };
@@ -514,6 +691,24 @@ impl<'a> Engine<'a> {
         let bx = x + ml;
         let cx = bx + border[3] + pad[3];
         let cy = y + border[0] + pad[0];
+        let positioned = st.position != Position::Static;
+        if positioned {
+            self.cbs.push(Vec::new());
+        }
+        let mark = self.mark();
+        // The height this box's content has, if definite (percentages of it resolve).
+        let vext = pad[0] + pad[2] + border[0] + border[2];
+        let spec_h = match self.forced_height.get(&node) {
+            Some(&h) => Some(h - vext),
+            None => match st.height {
+                Len::Calc(p, px) if p == 0.0 => Some(round_i(px) - if st.border_box { vext } else { 0 }),
+                Len::Calc(p, px) => {
+                    self.cb_height.map(|ch| round_i(p * ch as f32 / 100.0 + px) - if st.border_box { vext } else { 0 })
+                }
+                Len::Auto => None,
+            },
+        };
+        let saved_cb_height = core::mem::replace(&mut self.cb_height, spec_h.map(|h| h.max(0)));
         let bg_index = self.out.items.len();
         self.out.items.push(Item::Rect { rect: Rect::default(), color: 0, radius: 0 });
         if let Some(e) = self.doc.element(node) {
@@ -537,6 +732,10 @@ impl<'a> Engine<'a> {
                     .copied()
                     .filter(|k| !self.hidden(*k) && !self.is_blank_text(*k))
                     .collect();
+                let (kids, out): (Vec<NodeId>, Vec<NodeId>) = kids.into_iter().partition(|k| !self.out_of_flow(*k));
+                for k in out {
+                    self.defer(k, cx, cy);
+                }
                 if kids.iter().all(|k| self.doc.element(*k).is_some()) {
                     let gap = round_i(st.gap);
                     self.row(&kids, cx, cy, width, st.flex_wrap, st.justify, gap, st.center_items)
@@ -556,7 +755,7 @@ impl<'a> Engine<'a> {
                 self.out.fields.push(Field { rect: Rect::new(cx, cy, width, h), node });
                 h
             }
-            _ if tag == "img" || tag == "canvas" => {
+            _ if tag == "img" || tag == "canvas" || tag == "video" => {
                 // A replaced element made block-level.
                 self.inline(&[node], cx, cy, width, &st)
             }
@@ -570,9 +769,13 @@ impl<'a> Engine<'a> {
         self.first_baseline = saved_baseline.or(self.first_baseline);
         self.link = saved_link;
         let mut content_h = content_h;
-        if let Some(h) = st.height.resolve(0).filter(|_| matches!(st.height, Len::Calc(p, _) if p == 0.0)) {
-            let h = if st.border_box { h - pad[0] - pad[2] - border[0] - border[2] } else { h };
-            if st.overflow_hidden || h > content_h || matches!(tag, "img" | "hr") {
+        self.cb_height = saved_cb_height;
+        if let Some(h) = spec_h {
+            if st.overflow_hidden
+                || h > content_h
+                || matches!(tag, "img" | "hr")
+                || self.forced_height.contains_key(&node)
+            {
                 content_h = h.max(0);
             } else {
                 content_h = content_h.max(h);
@@ -600,6 +803,20 @@ impl<'a> Engine<'a> {
         // A block-level link is clickable across its box.
         if let Some(l) = self.link_of(node) {
             self.out.links.insert(links_start, Link { rect, node: l });
+        }
+        if positioned {
+            // Its absolutely positioned descendants, against its padding box.
+            let pending = self.cbs.pop().unwrap_or_default();
+            let padding_box =
+                Rect::new(bx + border[3], y + border[0], used - border[1] - border[3], height - border[0] - border[2]);
+            self.place_absolutes(pending, padding_box);
+            if st.position == Position::Relative {
+                let base_h = self.cb_height.unwrap_or(0);
+                let dx = st.offsets[3].resolve(cw).or_else(|| st.offsets[1].resolve(cw).map(|r| -r)).unwrap_or(0);
+                let dy =
+                    st.offsets[0].resolve(base_h).or_else(|| st.offsets[2].resolve(base_h).map(|b| -b)).unwrap_or(0);
+                self.shift_since(mark, dx, dy);
+            }
         }
         self.depth -= 1;
         BoxOut { height, bg: Some(bg_index) }
@@ -820,8 +1037,13 @@ impl<'a> Engine<'a> {
             .copied()
             .filter(|k| !self.hidden(*k) && !self.is_blank_text(*k) && self.doc.element(*k).is_some())
             .collect();
+        let (items, out): (Vec<NodeId>, Vec<NodeId>) = items.into_iter().partition(|k| !self.out_of_flow(*k));
+        for k in out {
+            self.defer(k, x, y);
+        }
         let (cgap, rgap) = (round_i(st.gap), round_i(st.row_gap));
-        let units = crate::values::Units { em: st.font_size, rem: 16.0, vw: self.out.width as f32, vh: 800.0 };
+        let units =
+            crate::values::Units { em: st.font_size, rem: 16.0, vw: self.out.width as f32, vh: self.viewport_h as f32 };
         let mut tracks = st.grid_columns.as_deref().map(|t| parse_tracks(t, w, cgap, &units)).unwrap_or_default();
         let areas = st.grid_areas.clone();
         if tracks.is_empty() {
@@ -1278,7 +1500,7 @@ impl<'a> Engine<'a> {
                     }
                 }
                 match e.tag.as_str() {
-                    "img" | "canvas" => {
+                    "img" | "canvas" | "video" => {
                         let (w, _) = self.replaced_size(n, i32::MAX / 4);
                         return (w + ext, w + ext);
                     }
@@ -1294,7 +1516,7 @@ impl<'a> Engine<'a> {
                     || (matches!(st.display, Display::Flex | Display::InlineFlex) && !st.flex_column);
                 let (mut min, mut max, mut line) = (0, 0, 0);
                 for c in kids {
-                    if self.hidden(c) {
+                    if self.hidden(c) || self.out_of_flow(c) {
                         continue;
                     }
                     let (cmin, cmax) = self.pref(c);
@@ -1358,7 +1580,9 @@ impl<'a> Engine<'a> {
     fn replaced_size(&self, n: NodeId, avail: i32) -> (i32, i32) {
         let st = self.style(n);
         let e = self.doc.element(n).unwrap();
-        let natural = if e.tag == "canvas" {
+        let natural = if e.tag == "video" {
+            Some(self.doc.media.get(&n).filter(|s| s.width > 0).map(|s| (s.width, s.height)).unwrap_or((300, 150)))
+        } else if e.tag == "canvas" {
             let size =
                 |name, fallback| e.attr(name).and_then(|s| s.parse::<u32>().ok()).unwrap_or(fallback).min(100_000);
             Some((size("width", 300), size("height", 150)))
@@ -1520,7 +1744,7 @@ impl<'a> Engine<'a> {
                         out.push(Atom::Break);
                         *space = false;
                     }
-                    "img" | "canvas" => {
+                    "img" | "canvas" | "video" => {
                         let (w, h) = self.replaced_size(n, avail);
                         let alt = e.attr("alt").unwrap_or("").trim();
                         let src = image_source(e);
@@ -1531,7 +1755,9 @@ impl<'a> Engine<'a> {
                         } else if w > 0 && h > 0 {
                             let mut items = Vec::new();
                             if st.visible {
-                                if tag == "canvas" {
+                                if tag == "video" {
+                                    items.push(Item::Video { rect: Rect::new(0, 0, w, h), node: n });
+                                } else if tag == "canvas" {
                                     items.push(Item::Canvas { rect: Rect::new(0, 0, w, h), node: n });
                                 } else if let Some(src) = src {
                                     items.push(Item::Image { rect: Rect::new(0, 0, w, h), src });

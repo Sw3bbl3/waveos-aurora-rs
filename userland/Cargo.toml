@@ -20,6 +20,7 @@ aurora-image = { path = "../libs/image" }
 aurora-wav = { path = "../libs/wav" }
 nebula-web = { path = "../libs/web" }
 nebula-secure = { path = "../libs/tls" }
+nebula-media = { path = "../libs/media" }
 nebula-engine = { path = "../libs/surf" }
 nebula-script = { path = "../libs/script" }
 

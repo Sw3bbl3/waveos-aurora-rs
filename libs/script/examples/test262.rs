@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 const UNSUPPORTED: &[&str] = &[
-    "Proxy",
     "BigInt",
     "SharedArrayBuffer",
     "Atomics",
@@ -46,8 +45,6 @@ const UNSUPPORTED: &[&str] = &[
     "Array.fromAsync",
     "regexp-modifiers",
     "regexp-duplicate-named-groups",
-    "regexp-v-flag",
-    "regexp-unicode-property-escapes",
     "RegExp.escape",
     "promise-try",
     "Math.sumPrecise",

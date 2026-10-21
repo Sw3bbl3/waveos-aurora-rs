@@ -20,7 +20,7 @@ fn main(args: corekit::Args) -> i32 {
         let path = coreutils::path(a);
         let result = match corekit::fs::read(&path) {
             Ok(data) => match audio::decode_wav(&data) {
-                Some(samples) => Stream::open().and_then(|mut s| s.write(&samples)),
+                Some(samples) => Stream::open().and_then(|s| s.write(&samples)),
                 None => {
                     corekit::eprintln!("play: {a}: not a PCM WAV file");
                     status = 1;
@@ -49,7 +49,7 @@ fn tone(hz: u32, ms: u32) -> i32 {
         samples.push(v);
         samples.push(v);
     }
-    match Stream::open().and_then(|mut s| s.write(&samples)) {
+    match Stream::open().and_then(|s| s.write(&samples)) {
         Ok(()) => 0,
         Err(e) => {
             corekit::eprintln!("play: {e}");

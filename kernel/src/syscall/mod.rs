@@ -357,6 +357,10 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             }
             Ok(crate::drivers::audio::state())
         }
+        nr::AUDIO_CONTROL => match &*proc::current().ok_or(EPERM)?.fd(a[0] as usize)? {
+            Handle::Audio(stream) => stream.control(a[1]),
+            _ => Err(EINVAL),
+        },
         nr::DESKTOP => crate::gui::server::desktop_request(a[0] as usize, a[1], a[2]),
         nr::WIN_CREATE
         | nr::WIN_MATERIALS

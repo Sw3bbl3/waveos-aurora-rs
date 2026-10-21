@@ -74,6 +74,9 @@ pub enum Mutation {
 
 pub struct Document {
     pub nodes: Vec<Node>,
+    /// Template contents live in detached fragments, outside the document
+    /// tree. They become active only when explicitly inserted into it.
+    pub template_contents: alloc::collections::BTreeMap<NodeId, NodeId>,
     /// Bumped by every change (the browser re-styles when it moves).
     pub version: u64,
     /// The current values of form controls (what was typed, or set by a
@@ -81,6 +84,11 @@ pub struct Document {
     pub values: alloc::collections::BTreeMap<NodeId, String>,
     /// Bounded software canvas surfaces; pixels are shared by script and paint.
     pub canvases: alloc::collections::BTreeMap<NodeId, CanvasBitmap>,
+    pub media: alloc::collections::BTreeMap<NodeId, crate::media::MediaState>,
+    /// Media Source Extensions objects, by id.
+    pub media_sources: alloc::collections::BTreeMap<u32, crate::media::MediaSource>,
+    /// `blob:` URLs scripts made.
+    pub object_urls: alloc::collections::BTreeMap<String, crate::media::ObjectUrl>,
     /// Whether changes are recorded in `mutations` (while observers exist).
     pub record_mutations: bool,
     pub mutations: Vec<Mutation>,
@@ -100,9 +108,13 @@ impl Default for Document {
     fn default() -> Self {
         Document {
             nodes: alloc::vec![Node { parent: None, children: Vec::new(), data: NodeData::Document }],
+            template_contents: alloc::collections::BTreeMap::new(),
             version: 0,
             values: alloc::collections::BTreeMap::new(),
             canvases: alloc::collections::BTreeMap::new(),
+            media: alloc::collections::BTreeMap::new(),
+            media_sources: alloc::collections::BTreeMap::new(),
+            object_urls: alloc::collections::BTreeMap::new(),
             record_mutations: false,
             mutations: Vec::new(),
         }
@@ -120,6 +132,9 @@ impl Document {
         let id = self.nodes.len();
         self.nodes.push(Node { parent: Some(parent), children: Vec::new(), data });
         self.nodes[parent].children.push(id);
+        if self.tag(id) == "template" {
+            self.template_content(id);
+        }
         id
     }
 
@@ -127,7 +142,20 @@ impl Document {
     pub fn create(&mut self, data: NodeData) -> NodeId {
         self.nodes.push(Node { parent: None, children: Vec::new(), data });
         self.version += 1;
-        self.nodes.len() - 1
+        let id = self.nodes.len() - 1;
+        if self.tag(id) == "template" {
+            self.template_content(id);
+        }
+        id
+    }
+
+    pub fn template_content(&mut self, template: NodeId) -> NodeId {
+        if let Some(&content) = self.template_contents.get(&template) {
+            return content;
+        }
+        let content = self.create(NodeData::Element(Element { tag: String::from(FRAGMENT), attrs: Vec::new() }));
+        self.template_contents.insert(template, content);
+        content
     }
 
     pub fn element_mut(&mut self, id: NodeId) -> Option<&mut Element> {
@@ -179,8 +207,14 @@ impl Document {
     /// fragment's children are inserted instead. Returns false (and changes
     /// nothing) if that would make a cycle.
     pub fn insert(&mut self, parent: NodeId, child: NodeId, before: Option<NodeId>) -> bool {
-        if self.is_inclusive_ancestor(child, parent) {
-            return false;
+        let mut ancestor = Some(parent);
+        while let Some(n) = ancestor {
+            if n == child {
+                return false;
+            }
+            ancestor = self.nodes[n]
+                .parent
+                .or_else(|| self.template_contents.iter().find_map(|(&host, &content)| (content == n).then_some(host)));
         }
         if self.tag(child) == FRAGMENT {
             for c in self.nodes[child].children.clone() {
@@ -285,6 +319,13 @@ impl Document {
                 let cc = self.clone_node(c, true);
                 self.insert(copy, cc, None);
             }
+            if let Some(&content) = self.template_contents.get(&n) {
+                let target = self.template_content(copy);
+                for c in self.nodes[content].children.clone() {
+                    let cc = self.clone_node(c, true);
+                    self.insert(target, cc, None);
+                }
+            }
         }
         copy
     }
@@ -302,6 +343,13 @@ impl Document {
         for &c in &other.nodes[from].children {
             let cc = self.import(other, c);
             self.insert(copy, cc, None);
+        }
+        if let Some(&content) = other.template_contents.get(&from) {
+            let target = self.template_content(copy);
+            for &c in &other.nodes[content].children {
+                let cc = self.import(other, c);
+                self.insert(target, cc, None);
+            }
         }
         copy
     }

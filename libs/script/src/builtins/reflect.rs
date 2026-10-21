@@ -59,7 +59,7 @@ fn set(rt: &mut Realm, c: &Call) -> JsResult {
 fn get_own_property_descriptor(rt: &mut Realm, c: &Call) -> JsResult {
     let o = target(rt, c, "getOwnPropertyDescriptor")?;
     let k = rt.to_property_key(&c.arg(1))?;
-    Ok(match rt.get_own_property(o, &k) {
+    Ok(match rt.get_own_property_v(o, &k)? {
         Some(p) => object::from_prop(rt, &p),
         None => Value::Undefined,
     })
@@ -67,7 +67,7 @@ fn get_own_property_descriptor(rt: &mut Realm, c: &Call) -> JsResult {
 
 fn get_prototype_of(rt: &mut Realm, c: &Call) -> JsResult {
     let o = target(rt, c, "getPrototypeOf")?;
-    Ok(rt.proto_of(o).map(Value::Object).unwrap_or(Value::Null))
+    Ok(rt.get_prototype_of_v(o)?.map(Value::Object).unwrap_or(Value::Null))
 }
 
 fn set_prototype_of(rt: &mut Realm, c: &Call) -> JsResult {
@@ -77,7 +77,7 @@ fn set_prototype_of(rt: &mut Realm, c: &Call) -> JsResult {
         Value::Null => None,
         _ => return Err(rt.type_error("Object prototype may only be an Object or null")),
     };
-    Ok(Value::Bool(rt.set_prototype(o, p)))
+    Ok(Value::Bool(if rt.is_proxy(o) { rt.set_prototype_of_v(o, p)? } else { rt.set_prototype(o, p) }))
 }
 
 fn has(rt: &mut Realm, c: &Call) -> JsResult {
@@ -88,19 +88,18 @@ fn has(rt: &mut Realm, c: &Call) -> JsResult {
 
 fn is_extensible(rt: &mut Realm, c: &Call) -> JsResult {
     let o = target(rt, c, "isExtensible")?;
-    Ok(Value::Bool(rt.is_extensible(o)))
+    Ok(Value::Bool(rt.is_extensible_v(o)?))
 }
 
 fn own_keys(rt: &mut Realm, c: &Call) -> JsResult {
     let o = target(rt, c, "ownKeys")?;
-    let keys: Vec<Value> = rt.own_keys(o).iter().map(|k| k.to_value()).collect();
+    let keys: Vec<Value> = rt.own_keys_v(o)?.iter().map(|k| k.to_value()).collect();
     Ok(rt.array_from(keys))
 }
 
 fn prevent_extensions(rt: &mut Realm, c: &Call) -> JsResult {
     let o = target(rt, c, "preventExtensions")?;
-    rt.prevent_extensions(o);
-    Ok(Value::Bool(true))
+    Ok(Value::Bool(rt.prevent_extensions_v(o)?))
 }
 
 pub fn init(rt: &mut Realm) {

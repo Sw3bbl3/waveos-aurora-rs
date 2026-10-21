@@ -63,11 +63,21 @@ struct StreamInner {
     buf: VecDeque<i16>,
     closed: bool,
     writer: Option<TaskId>,
+    paused: bool,
+    played: u64,
 }
 
 impl Stream {
     fn new() -> Arc<Stream> {
-        Arc::new(Stream { inner: IrqMutex::new(StreamInner { buf: VecDeque::new(), closed: false, writer: None }) })
+        Arc::new(Stream {
+            inner: IrqMutex::new(StreamInner {
+                buf: VecDeque::new(),
+                closed: false,
+                writer: None,
+                paused: false,
+                played: 0,
+            }),
+        })
     }
 
     /// Queues little-endian `i16` samples, blocking while the stream is full.
@@ -99,7 +109,30 @@ impl Stream {
 
     /// The stream plays out what it has queued, then goes away.
     pub fn close(&self) {
-        self.inner.lock().closed = true;
+        let mut g = self.inner.lock();
+        g.closed = true;
+        if g.paused {
+            g.buf.clear();
+        }
+    }
+
+    pub fn control(&self, op: u64) -> Result<u64, isize> {
+        use aurora_abi::audio;
+        let mut g = self.inner.lock();
+        match op {
+            audio::PAUSE => g.paused = true,
+            audio::RESUME => g.paused = false,
+            audio::FLUSH => {
+                g.buf.clear();
+                g.played = 0;
+                if let Some(t) = g.writer.take() {
+                    sched::wake(t);
+                }
+            }
+            audio::POSITION => return Ok(g.played),
+            _ => return Err(aurora_abi::err::EINVAL),
+        }
+        Ok(0)
     }
 }
 
@@ -192,7 +225,11 @@ fn mix_streams(mix: &mut [i32]) {
     let streams = STREAMS.lock().clone();
     for s in &streams {
         let mut g = s.inner.lock();
+        if g.paused {
+            continue;
+        }
         let n = mix.len().min(g.buf.len());
+        g.played += (n / 2) as u64;
         for (m, v) in mix[..n].iter_mut().zip(g.buf.drain(..n)) {
             *m += v as i32;
         }

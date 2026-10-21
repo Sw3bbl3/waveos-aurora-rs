@@ -84,6 +84,14 @@ impl Props {
         self.position(key)
     }
 
+    /// Whether a string key is present (no PropKey to build).
+    pub fn has_str(&self, key: &JsStr) -> bool {
+        match &self.index {
+            Some(ix) => ix.contains_key(&PropKey::Str(key.clone())),
+            None => self.entries.iter().any(|(k, _)| matches!(k, PropKey::Str(s) if s == key)),
+        }
+    }
+
     pub fn entry_at(&self, i: usize) -> Option<(&PropKey, &Prop)> {
         self.entries.get(i).map(|(k, p)| (k, p))
     }
@@ -503,6 +511,15 @@ pub enum Kind {
     TypedArray(Box<TypedArray>),
     /// A DataView: (buffer, offset, length).
     DataView(Box<(ObjRef, usize, usize)>),
+    Proxy(Box<ProxyData>),
+}
+
+/// A Proxy's target and handler (both None once revoked).
+pub struct ProxyData {
+    pub target: Option<ObjRef>,
+    pub handler: Option<ObjRef>,
+    pub callable: bool,
+    pub constructor: bool,
 }
 
 pub struct Obj {
@@ -519,7 +536,11 @@ impl Obj {
     }
 
     pub fn is_callable(&self) -> bool {
-        matches!(self.kind, Kind::Function(_) | Kind::Native(_) | Kind::Bound(_))
+        match &self.kind {
+            Kind::Function(_) | Kind::Native(_) | Kind::Bound(_) => true,
+            Kind::Proxy(p) => p.callable,
+            _ => false,
+        }
     }
 
     /// Every value this object references, for the collector.
@@ -555,6 +576,10 @@ impl Obj {
                 out.push(b.target);
                 v(&b.this, out);
                 b.args.iter().for_each(|x| v(x, out));
+            }
+            Kind::Proxy(p) => {
+                out.extend(p.target);
+                out.extend(p.handler);
             }
             Kind::Primitive(p) => v(p, out),
             Kind::Map(m) | Kind::Set(m) => {

@@ -374,7 +374,7 @@ impl Learn {
                             cv.fill_rect(Rect::new(ox + x, y - f.ascent as i32 / 3, w, 1), *color);
                         }
                     }
-                    Item::Canvas { .. } => {} // Learn does not execute page scripts.
+                    Item::Canvas { .. } | Item::Video { .. } => {} // Learn does not execute page scripts.
                     Item::Image { rect: r, src } => {
                         if let Some(i) = self.images.get(src) {
                             cv.draw_image(&i.pixels, i.width, i.height, rect(r), 255);

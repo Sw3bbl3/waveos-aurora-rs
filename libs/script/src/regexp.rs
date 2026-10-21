@@ -5,6 +5,11 @@
 //! Unicode escapes and (with the `u` flag) code points and \p{…}, capturing,
 //! non-capturing and named groups, backreferences, lookahead and lookbehind,
 //! and the i, m, s, u, g, y and d flags.
+//!
+//! Searches run on `regress` (the ECMAScript engine Boa uses: full Unicode
+//! properties and case folding, the `v` flag) whenever it accepts the
+//! pattern; the matcher here handles the Annex B syntax it refuses and
+//! sticky matches (which must not scan ahead).
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -21,6 +26,7 @@ pub struct Flags {
     pub unicode: bool,
     pub sticky: bool,
     pub has_indices: bool,
+    pub unicode_sets: bool,
 }
 
 impl Flags {
@@ -32,7 +38,14 @@ impl Flags {
                 'i' => &mut f.ignore_case,
                 'm' => &mut f.multiline,
                 's' => &mut f.dot_all,
-                'u' | 'v' => &mut f.unicode,
+                'u' => &mut f.unicode,
+                'v' => {
+                    if f.unicode_sets {
+                        return Err(format!("Invalid regular expression flags '{s}'"));
+                    }
+                    f.unicode_sets = true;
+                    &mut f.unicode
+                }
                 'y' => &mut f.sticky,
                 'd' => &mut f.has_indices,
                 _ => return Err(format!("Invalid regular expression flags '{s}'")),
@@ -120,6 +133,8 @@ enum Inst {
 }
 
 pub struct Program {
+    /// Set when regress accepts the pattern.
+    backend: Option<regress::Regex>,
     insts: Vec<Inst>,
     classes: Vec<Class>,
     /// Including group 0 (the whole match).
@@ -139,12 +154,53 @@ impl core::fmt::Debug for Program {
 pub type Captures = Vec<Option<(usize, usize)>>;
 
 pub fn compile(pattern: &[u16], flags: &str) -> Result<Program, String> {
-    let flags = Flags::parse(flags)?;
-    let cps: Vec<u32> = if flags.unicode {
+    let parsed = Flags::parse(flags)?;
+    let cps: Vec<u32> = if parsed.unicode {
         char::decode_utf16(pattern.iter().copied()).map(|r| r.map(|c| c as u32).unwrap_or(0xFFFD)).collect()
     } else {
         pattern.iter().map(|&u| u as u32).collect()
     };
+    let rflags = regress::Flags {
+        icase: parsed.ignore_case,
+        multiline: parsed.multiline,
+        dot_all: parsed.dot_all,
+        no_opt: false,
+        unicode: parsed.unicode && !parsed.unicode_sets,
+        unicode_sets: parsed.unicode_sets,
+    };
+    let backend = match regress::Regex::from_unicode(cps.iter().copied(), rflags) {
+        Ok(re) => Some(re),
+        // Unicode patterns have no legacy leniencies: regress's verdict stands.
+        Err(e) if parsed.unicode => return Err(format!("Invalid regular expression: {e}")),
+        Err(_) => None,
+    };
+    match compile_own(&cps, parsed) {
+        Ok(mut p) => {
+            p.backend = backend;
+            Ok(p)
+        }
+        // Syntax only regress knows (v-flag sets, property names): it alone matches.
+        Err(e) => match backend {
+            Some(b) => {
+                let mut names = Vec::new();
+                let n_groups = count_groups(&cps, &mut names) + 1;
+                Ok(Program {
+                    backend: Some(b),
+                    insts: Vec::new(),
+                    classes: Vec::new(),
+                    n_groups,
+                    names,
+                    flags: parsed,
+                    n_marks: 0,
+                })
+            }
+            None => Err(e),
+        },
+    }
+}
+
+fn compile_own(cps: &[u32], flags: Flags) -> Result<Program, String> {
+    let cps = cps.to_vec();
     // Count groups and collect names first (for forward references).
     let mut names = Vec::new();
     let n_groups = count_groups(&cps, &mut names) + 1;
@@ -159,7 +215,7 @@ pub fn compile(pattern: &[u16], flags: &str) -> Result<Program, String> {
     c.insts.push(Inst::Save(1));
     c.insts.push(Inst::Match);
     let (insts, classes, n_marks) = (c.insts, c.classes, c.marks);
-    Ok(Program { insts, classes, n_groups, names, flags, n_marks })
+    Ok(Program { backend: None, insts, classes, n_groups, names, flags, n_marks })
 }
 
 /// A group name starting at `i` (just after `<`): the name and the index
@@ -1034,8 +1090,31 @@ struct Thread {
 const NONE: usize = usize::MAX;
 
 impl Program {
+    /// regress's first match at or after `start` (anchored: only at `start`).
+    fn regress_find(&self, re: &regress::Regex, input: &[u16], start: usize, anchored: bool) -> Option<Captures> {
+        if start > input.len() {
+            return None;
+        }
+        let m = if self.flags.unicode {
+            re.find_from_utf16(input, start).next()
+        } else {
+            re.find_from_ucs2(input, start).next()
+        }?;
+        if anchored && m.start() != start {
+            return None;
+        }
+        let mut caps: Captures = Vec::with_capacity(self.n_groups);
+        caps.push(Some((m.start(), m.end())));
+        caps.extend(m.captures.iter().map(|c| c.as_ref().map(|r| (r.start, r.end))));
+        caps.resize(self.n_groups.max(1), None);
+        Some(caps)
+    }
+
     /// Matches at exactly `start`.
     pub fn match_at(&self, input: &[u16], start: usize) -> Option<Captures> {
+        if self.insts.is_empty() {
+            return self.backend.as_ref().and_then(|re| self.regress_find(re, input, start, true));
+        }
         let mut m = Matcher { prog: self, input, steps: 0 };
         let mut caps = vec![NONE; self.n_groups * 2];
         let mut marks = vec![NONE; self.n_marks as usize];
@@ -1054,6 +1133,9 @@ impl Program {
     pub fn exec(&self, input: &[u16], start: usize) -> Option<Captures> {
         if self.flags.sticky {
             return self.match_at(input, start);
+        }
+        if let Some(re) = &self.backend {
+            return self.regress_find(re, input, start, false);
         }
         let mut i = start;
         while i <= input.len() {

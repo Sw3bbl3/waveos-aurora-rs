@@ -58,6 +58,16 @@ fn golden_scripts() {
                 failures.push(format!("{name} (gc pressure {pressure:?})\n--- expected\n{expected}--- got\n{got}"));
             }
         }
+        // Again, padded past the size where function bodies compile lazily
+        // (a trailing comment changes no positions), unless the script
+        // checks early errors that laziness defers.
+        if !src.contains("SyntaxError") {
+            let padded = format!("{src}\n/*{}*/\n", " ".repeat(nebula_script::realm::LAZY_SOURCE));
+            let got = run(&padded, &name, None);
+            if got != expected {
+                failures.push(format!("{name} (lazy)\n--- expected\n{expected}--- got\n{got}"));
+            }
+        }
     }
     assert!(count > 0, "no scripts found");
     assert!(failures.is_empty(), "{} failing:\n{}", failures.len(), failures.join("\n"));
@@ -92,4 +102,82 @@ fn runaway_scripts_are_stopped() {
     let r = rt.eval("let n = 0; while (true) { try { n++; } catch (e) {} }", "loop.js");
     assert!(r.is_err());
     assert!(rt.interrupted);
+}
+
+#[test]
+fn active_promise_reaction_survives_collection() {
+    let out = Rc::new(RefCell::new(String::new()));
+    let mut rt = Realm::new(Box::new(Capture(out.clone())));
+    rt.eval(
+        r#"
+        Promise.resolve(1).then(n => {
+            for (let i = 0; i < 2000; i++) { const garbage = { i }; }
+            return n + 1;
+        }).then(n => console.log('resolved', n));
+    "#,
+        "reaction.js",
+    )
+    .unwrap();
+    rt.heap.set_pressure(1);
+    rt.run_jobs();
+    assert!(rt.heap.collections > 0);
+    assert_eq!(*out.borrow(), "resolved 2\n");
+}
+
+#[test]
+fn throwing_thenable_survives_collection() {
+    let out = Rc::new(RefCell::new(String::new()));
+    let mut rt = Realm::new(Box::new(Capture(out.clone())));
+    rt.eval(
+        r#"
+        Promise.resolve({ then() {
+            for (let i = 0; i < 2000; i++) { const garbage = { i }; }
+            throw new Error('thenable failed');
+        }}).catch(e => console.log(e.message));
+    "#,
+        "thenable.js",
+    )
+    .unwrap();
+    rt.heap.set_pressure(1);
+    rt.run_jobs();
+    assert!(rt.heap.collections > 0);
+    assert_eq!(*out.borrow(), "thenable failed\n");
+}
+
+#[test]
+fn reporting_rejections_keeps_pending_reports_alive() {
+    let out = Rc::new(RefCell::new(String::new()));
+    let mut rt = Realm::new(Box::new(Capture(out.clone())));
+    rt.eval(
+        r#"
+        Promise.reject({ toString() {
+            for (let i = 0; i < 2000; i++) { const garbage = { i }; }
+            return 'first';
+        }});
+        Promise.reject('second');
+    "#,
+        "rejections.js",
+    )
+    .unwrap();
+    rt.heap.set_pressure(1);
+    rt.report_unhandled();
+    assert!(rt.heap.collections > 0);
+    assert_eq!(*out.borrow(), "Uncaught (in promise) first\nUncaught (in promise) second\n");
+}
+
+#[test]
+fn large_scope_preserves_bindings_shadowing_and_closures() {
+    let mut src = String::from("function bundle(a, a) {");
+    for i in 0..128 {
+        src.push_str(&format!("var v{i} = {i};"));
+    }
+    src.push_str(
+        r#"
+        var v0; // A repeated var must keep the same binding.
+        { let v64 = 900; console.log(v64); }
+        return () => a + v0 + v64 + v127;
+        } console.log(bundle(1, 2)());
+    "#,
+    );
+    assert_eq!(run(&src, "large-scope.js", Some(1)), "900\n193\n");
 }

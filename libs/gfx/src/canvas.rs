@@ -364,6 +364,19 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Copies opaque pixels 1:1 at (x, y), clipped (video frames).
+    pub fn blit_opaque(&mut self, src: &[u32], src_w: u32, src_h: u32, x: i32, y: i32) {
+        let vis = Rect::new(x, y, src_w as i32, src_h as i32).intersect(&self.clip);
+        if vis.is_empty() || src.len() < (src_w * src_h) as usize {
+            return;
+        }
+        for row in vis.y..vis.bottom() {
+            let s = (row - y) as usize * src_w as usize + (vis.x - x) as usize;
+            let d = (row * self.width + vis.x) as usize;
+            self.buf[d..d + vis.w as usize].copy_from_slice(&src[s..s + vis.w as usize]);
+        }
+    }
+
     /// The grey checkerboard shown behind transparent images.
     pub fn checkerboard(&mut self, r: Rect, cell: i32, light: u32, dark: u32) {
         let vis = r.intersect(&self.clip);

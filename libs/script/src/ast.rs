@@ -1,9 +1,8 @@
 //! The syntax tree.
 
-use crate::lexer::Name;
+use crate::lexer::{Name, NameSet};
 use crate::value::JsStr;
 use alloc::boxed::Box;
-use alloc::collections::BTreeSet;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -331,7 +330,7 @@ pub struct Function {
     pub is_expr: bool,
     /// Names referenced anywhere inside nested functions: bindings with
     /// these names must live in heap scopes so closures can see them.
-    pub inner_refs: BTreeSet<Name>,
+    pub inner_refs: NameSet,
     /// Calls `eval(...)` directly: every binding is captured.
     pub has_eval: bool,
     /// Uses `arguments` (itself or through arrows).
@@ -341,6 +340,9 @@ pub struct Function {
     /// `length`: parameters before the first default or rest.
     pub length: u32,
     pub line: u32,
+    /// The body was skipped: where its parameters' `(` is, to parse it
+    /// when the function is first called.
+    pub lazy: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -376,6 +378,6 @@ pub struct Class {
 pub struct Script {
     pub body: Vec<Stmt>,
     pub strict: bool,
-    pub inner_refs: BTreeSet<Name>,
+    pub inner_refs: NameSet,
     pub has_eval: bool,
 }

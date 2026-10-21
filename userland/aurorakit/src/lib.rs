@@ -140,8 +140,12 @@ pub trait App {
 struct Window {
     id: u64,
     surface: SurfaceInfo,
+    /// What the surface shows (the compositor may read it at any time).
     previous: Vec<u32>,
     previous_size: (u32, u32),
+    /// Where frames are drawn; changes reach the surface only in `present`,
+    /// so a window is never shown half-drawn.
+    back: Vec<u32>,
 }
 
 impl Window {
@@ -152,27 +156,43 @@ impl Window {
     }
 
     fn pixels(&mut self) -> &mut [u32] {
-        let s = &self.surface;
-        unsafe { core::slice::from_raw_parts_mut(s.addr as *mut u32, (s.stride * s.height) as usize) }
+        let n = (self.surface.stride * self.surface.height) as usize;
+        if self.back.len() != n {
+            self.back.clear();
+            self.back.resize(n, 0);
+        }
+        &mut self.back
     }
 
     fn present(&mut self) {
         let s = self.surface;
-        let pixels = unsafe { core::slice::from_raw_parts(s.addr as *const u32, (s.stride * s.height) as usize) };
+        let n = (s.stride * s.height) as usize;
+        if self.back.len() != n {
+            return;
+        }
+        let resized = self.previous_size != (s.width, s.height) || self.previous.len() != n;
         let rect = lumen::canvas::changed_bounds(
             &self.previous,
-            pixels,
+            &self.back,
             s.width as i32,
             s.height as i32,
             s.stride as i32,
-            self.previous_size != (s.width, s.height),
+            resized,
         );
-        self.previous.clear();
-        self.previous.extend_from_slice(pixels);
-        self.previous_size = (s.width, s.height);
-        if let Some(r) = rect {
-            let _ = call(nr::WIN_PRESENT, &[self.id, r.x as u64, r.y as u64, r.w as u64, r.h as u64]);
+        if resized {
+            self.previous.clear();
+            self.previous.resize(n, 0);
         }
+        self.previous_size = (s.width, s.height);
+        let Some(r) = rect else { return };
+        let surface = unsafe { core::slice::from_raw_parts_mut(s.addr as *mut u32, n) };
+        for y in r.y..r.bottom() {
+            let at = (y as u32 * s.stride + r.x as u32) as usize;
+            let row = at..at + r.w as usize;
+            surface[row.clone()].copy_from_slice(&self.back[row.clone()]);
+            self.previous[row.clone()].copy_from_slice(&self.back[row]);
+        }
+        let _ = call(nr::WIN_PRESENT, &[self.id, r.x as u64, r.y as u64, r.w as u64, r.h as u64]);
     }
 
     fn set_title(&self, title: &str) {
@@ -237,7 +257,8 @@ pub fn run<A: App>(mut app: A) -> i32 {
             return 1;
         }
     };
-    let mut win = Window { id, surface: Window::surface(id), previous: Vec::new(), previous_size: (0, 0) };
+    let mut win =
+        Window { id, surface: Window::surface(id), previous: Vec::new(), previous_size: (0, 0), back: Vec::new() };
     let mut env = Env {
         now_ms: corekit::time::uptime_ms(),
         focused: true,

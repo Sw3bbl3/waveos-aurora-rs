@@ -1,0 +1,11 @@
+[package]
+name = "nebula-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusty_h264-decoder = { path = "../../vendor/rusty_h264-decoder", default-features = false, features = ["libm"] }
+rusty_h264-common = { version = "=0.16.0", default-features = false, features = ["libm"] }
+
+rusty_aac = { path = "../../vendor/rusty_aac", default-features = false }

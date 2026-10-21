@@ -14,6 +14,7 @@ pub mod math;
 pub mod number;
 pub mod object;
 pub mod promise;
+pub mod proxy;
 pub mod reflect;
 pub mod regexp;
 pub mod string;
@@ -70,6 +71,7 @@ pub fn setup(rt: &mut Realm) {
     regexp::init(rt);
     date::init(rt);
     reflect::init(rt);
+    proxy::init(rt);
     global::init(rt);
     console::init(rt);
 }

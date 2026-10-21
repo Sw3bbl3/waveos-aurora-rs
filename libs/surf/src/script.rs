@@ -20,6 +20,7 @@ use nebula_web::cookie::{Jar, Source};
 use nebula_web::Url;
 
 mod canvas;
+mod media;
 pub use canvas::{NoFonts, TextHost, TextMask, IMAGE_BYTES};
 mod computed;
 
@@ -46,7 +47,7 @@ pub struct HttpRequest {
     /// As the script wrote it (the browser resolves it against the page).
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub body: String,
+    pub body: Vec<u8>,
 }
 
 /// What came back for an [`HttpRequest`].
@@ -56,7 +57,8 @@ pub struct HttpResponse {
     pub status_text: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub body: String,
+    /// The raw bytes (scripts decode text themselves, by the content type).
+    pub body: Vec<u8>,
 }
 
 struct Timer {
@@ -73,6 +75,10 @@ struct Protos {
     element: Option<ObjRef>,
     svg_element: Option<ObjRef>,
     html_element: Option<ObjRef>,
+    html_kinds: BTreeMap<&'static str, ObjRef>,
+    template: Option<ObjRef>,
+    video: Option<ObjRef>,
+    audio: Option<ObjRef>,
     image: Option<ObjRef>,
     canvas: Option<ObjRef>,
     canvas_context: Option<ObjRef>,
@@ -213,12 +219,16 @@ impl Embedder for Dom {
         if let Some(n) = self.notify {
             v(&Value::Object(n));
         }
+        out.extend(self.protos.html_kinds.values().copied());
         let p = &self.protos;
         for o in [
             p.node,
             p.element,
             p.svg_element,
             p.html_element,
+            p.template,
+            p.video,
+            p.audio,
             p.image,
             p.canvas,
             p.canvas_context,
@@ -284,7 +294,10 @@ fn wrap(rt: &mut Realm, dom: &mut Dom, n: NodeId) -> Value {
         }
         NodeData::Element(e) if e.tag == "img" => p.image,
         NodeData::Element(e) if e.tag == "canvas" => p.canvas,
-        NodeData::Element(_) => p.html_element,
+        NodeData::Element(e) if e.tag == "template" => p.template,
+        NodeData::Element(e) if e.tag == "video" => p.video,
+        NodeData::Element(e) if e.tag == "audio" => p.audio,
+        NodeData::Element(e) => p.html_kinds.get(e.tag.as_str()).copied().or(p.html_element),
     };
     let o = rt.alloc(Obj::new(proto, Kind::Host(NODE, n as u64)));
     dom.wrappers.insert(n, o);
@@ -498,6 +511,12 @@ fn node_name(rt: &mut Realm, c: &Call) -> JsResult {
             NodeData::Element(e) => e.tag.to_ascii_uppercase(),
         }))
     })
+}
+
+/// `localName`: the tag as written in the document (lower case for HTML).
+fn local_name(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    with_dom(rt, |_, dom| Ok(dom.doc.element(n).map(|e| Value::str(&e.tag)).unwrap_or(Value::Null)))
 }
 
 fn text_of(doc: &Document, n: NodeId) -> String {
@@ -794,6 +813,27 @@ fn clone_node(rt: &mut Realm, c: &Call) -> JsResult {
     })
 }
 
+fn import_node(rt: &mut Realm, c: &Call) -> JsResult {
+    this_node(rt, c)?;
+    let n = arg_node(rt, c, 0)?;
+    let deep = c.arg(1).truthy();
+    with_dom(rt, |rt, dom| {
+        let copy = dom.doc.clone_node(n, deep);
+        Ok(wrap(rt, dom, copy))
+    })
+}
+
+fn template_content(rt: &mut Realm, c: &Call) -> JsResult {
+    let n = this_node(rt, c)?;
+    with_dom(rt, |rt, dom| {
+        if dom.doc.tag(n) != "template" {
+            return Err(rt.type_error("Illegal invocation"));
+        }
+        let content = dom.doc.template_content(n);
+        Ok(wrap(rt, dom, content))
+    })
+}
+
 fn contains(rt: &mut Realm, c: &Call) -> JsResult {
     let n = this_node(rt, c)?;
     let Some(other) = node_of(rt, &c.arg(0)) else { return Ok(Value::Bool(false)) };
@@ -918,6 +958,7 @@ fn set_inner_html(rt: &mut Realm, c: &Call) -> JsResult {
     let n = this_node(rt, c)?;
     let src = if c.arg(0).is_nullish() { String::new() } else { arg_str(rt, c, 0)? };
     with_dom(rt, |_, dom| {
+        let n = dom.doc.template_contents.get(&n).copied().unwrap_or(n);
         dom.doc.set_text_content(n, "");
         for x in parse_into(&mut dom.doc, &src) {
             dom.doc.insert(n, x, None);
@@ -1778,6 +1819,19 @@ fn handler_set(rt: &mut Realm, c: &Call) -> JsResult {
 }
 
 const HANDLERS: &[&str] = &[
+    "loadstart",
+    "loadedmetadata",
+    "loadeddata",
+    "canplay",
+    "playing",
+    "play",
+    "pause",
+    "timeupdate",
+    "ended",
+    "seeking",
+    "seeked",
+    "emptied",
+    "waiting",
     "click",
     "dblclick",
     "input",
@@ -1859,6 +1913,10 @@ fn listeners_for(rt: &mut Realm, dom: &mut Dom, n: NodeId, kind: &str, capture: 
 /// Dispatches `ev` at `target`: capture, target and bubble phases. Returns
 /// false if a listener called preventDefault().
 pub fn dispatch(rt: &mut Realm, target: NodeId, ev: Value) -> Result<bool, Value> {
+    rt.with_roots([ev.clone()], |rt| dispatch_rooted(rt, target, ev))
+}
+
+fn dispatch_rooted(rt: &mut Realm, target: NodeId, ev: Value) -> Result<bool, Value> {
     let Value::Object(eo) = ev else { return Ok(true) };
     let kind = rt.get_str(eo, "type")?;
     let kind = rt.to_rust_string(&kind)?;
@@ -1904,48 +1962,56 @@ pub fn dispatch(rt: &mut Realm, target: NodeId, ev: Value) -> Result<bool, Value
         let current = with_dom(rt, |rt, dom| if n == WINDOW { Value::Object(rt.global) } else { wrap(rt, dom, n) });
         rt.define(eo, "currentTarget", current.clone(), DEFAULT);
         rt.define(eo, "eventPhase", Value::Number(phase), DEFAULT);
-        for (f, once, index) in ls {
-            if once {
-                with_dom(rt, |_, dom| {
-                    if index < dom.listeners.len() {
-                        let l = &dom.listeners[index];
-                        let (t, k, func, c) = (l.target, l.kind.clone(), l.f.clone(), l.capture);
-                        dom.listeners.retain(|l| !(l.target == t && l.kind == k && l.f == func && l.capture == c));
+        let roots: Vec<Value> = ls.iter().map(|(f, _, _)| f.clone()).collect();
+        rt.with_roots(roots, |rt| {
+            for (f, once, index) in ls {
+                if once {
+                    with_dom(rt, |_, dom| {
+                        if index < dom.listeners.len() {
+                            let l = &dom.listeners[index];
+                            let (t, k, func, c) = (l.target, l.kind.clone(), l.f.clone(), l.capture);
+                            dom.listeners.retain(|l| !(l.target == t && l.kind == k && l.f == func && l.capture == c));
+                        }
+                    });
+                }
+                let r = if rt.is_callable(&f) {
+                    let r = rt.call(&f, current.clone(), &[ev.clone()]);
+                    // `return false` from an on… handler cancels.
+                    if let Ok(Value::Bool(false)) = r {
+                        if index == usize::MAX
+                            || with_dom(rt, |_, dom| dom.listeners.get(index).is_some_and(|l| l.property))
+                        {
+                            rt.define(eo, "defaultPrevented", Value::Bool(true), DEFAULT);
+                        }
                     }
-                });
-            }
-            let r = if rt.is_callable(&f) {
-                let r = rt.call(&f, current.clone(), &[ev.clone()]);
-                // `return false` from an on… handler cancels.
-                if let Ok(Value::Bool(false)) = r {
-                    if index == usize::MAX
-                        || with_dom(rt, |_, dom| dom.listeners.get(index).is_some_and(|l| l.property))
-                    {
-                        rt.define(eo, "defaultPrevented", Value::Bool(true), DEFAULT);
+                    r
+                } else if let Value::Object(fo) = &f {
+                    match rt.get_str(*fo, "handleEvent") {
+                        Ok(h) if rt.is_callable(&h) => rt.call(&h, f.clone(), &[ev.clone()]),
+                        Ok(_) => Ok(Value::Undefined),
+                        Err(e) => Err(e),
                     }
+                } else {
+                    Ok(Value::Undefined)
+                };
+                if let Err(e) = r {
+                    if rt.interrupted {
+                        return Err(e);
+                    }
+                    let msg = rt.describe_error(&e);
+                    rt.host.console("error", &format!("Uncaught {msg}"));
                 }
-                r
-            } else if let Value::Object(fo) = &f {
-                match rt.get_str(*fo, "handleEvent") {
-                    Ok(h) if rt.is_callable(&h) => rt.call(&h, f.clone(), &[ev.clone()]),
-                    Ok(_) => Ok(Value::Undefined),
-                    Err(e) => Err(e),
+                // A scripted dispatchEvent is nested in its caller's task.
+                // Only host-originated events checkpoint between listeners.
+                if rt.frames.is_empty() {
+                    rt.run_jobs();
                 }
-            } else {
-                Ok(Value::Undefined)
-            };
-            if let Err(e) = r {
-                if rt.interrupted {
-                    return Err(e);
+                if rt.get(eo, &PropKey::Sym(stop_now), ev.clone())?.truthy() {
+                    break;
                 }
-                let msg = rt.describe_error(&e);
-                rt.host.console("error", &format!("Uncaught {msg}"));
             }
-            rt.run_jobs();
-            if rt.get(eo, &PropKey::Sym(stop_now), ev.clone())?.truthy() {
-                break;
-            }
-        }
+            Ok(())
+        })?;
     }
     rt.define(eo, "currentTarget", Value::Null, DEFAULT);
     rt.define(eo, "eventPhase", Value::Number(0.0), DEFAULT);
@@ -2790,7 +2856,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     parent_members(rt, element);
     accessor(rt, element, "tagName", tag_name, None);
     accessor(rt, element, "namespaceURI", namespace_uri, None);
-    accessor(rt, element, "localName", node_name, None);
+    accessor(rt, element, "localName", local_name, None);
     accessor(rt, element, "innerHTML", inner_html, Some(set_inner_html));
     accessor(rt, element, "outerHTML", outer_html, Some(set_outer_html));
     accessor(rt, element, "nextElementSibling", next_element_sibling, None);
@@ -2894,6 +2960,31 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
         );
     }
 
+    let mut html_kinds = BTreeMap::new();
+    for (tag, name) in [
+        ("div", "HTMLDivElement"),
+        ("span", "HTMLSpanElement"),
+        ("p", "HTMLParagraphElement"),
+        ("body", "HTMLBodyElement"),
+        ("head", "HTMLHeadElement"),
+        ("html", "HTMLHtmlElement"),
+        ("iframe", "HTMLIFrameElement"),
+        ("a", "HTMLAnchorElement"),
+        ("style", "HTMLStyleElement"),
+        ("link", "HTMLLinkElement"),
+        ("script", "HTMLScriptElement"),
+        ("input", "HTMLInputElement"),
+        ("form", "HTMLFormElement"),
+        ("button", "HTMLButtonElement"),
+        ("select", "HTMLSelectElement"),
+        ("option", "HTMLOptionElement"),
+        ("textarea", "HTMLTextAreaElement"),
+    ] {
+        let proto = rt.new_object_with(Some(html_element));
+        interface(rt, name, proto, None);
+        html_kinds.insert(tag, proto);
+    }
+
     // Text, fragments, the document.
     let character_data = rt.new_object_with(Some(node));
     interface(rt, "CharacterData", character_data, None);
@@ -2940,6 +3031,10 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     interface(rt, "DocumentFragment", fragment, None);
     parent_members(rt, fragment);
     methods(rt, fragment, &[("getElementById", 1, get_element_by_id)]);
+    let (video, audio) = media::install(rt, html_element);
+    let template = rt.new_object_with(Some(html_element));
+    interface(rt, "HTMLTemplateElement", template, None);
+    accessor(rt, template, "content", template_content, None);
     let document = rt.new_object_with(Some(node));
     interface(rt, "Document", document, None);
     parent_members(rt, document);
@@ -2953,6 +3048,7 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
             ("createTextNode", 1, create_text_node),
             ("createComment", 1, create_comment),
             ("createDocumentFragment", 0, create_fragment),
+            ("importNode", 1, import_node),
             ("createEvent", 1, create_event),
             ("write", 1, document_write),
             ("writeln", 1, document_write),
@@ -3076,6 +3172,10 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
             element: Some(element),
             svg_element: Some(svg_element),
             html_element: Some(html_element),
+            html_kinds,
+            template: Some(template),
+            video: Some(video),
+            audio: Some(audio),
             image: Some(image),
             canvas: Some(canvas_element),
             canvas_context: Some(canvas_context),
@@ -3220,6 +3320,12 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
     rt.define(g, "__nebula_random", Value::Object(rnd), 0);
     let req = rt.native("__nebula_request", 4, native_request, false);
     rt.define(g, "__nebula_request", Value::Object(req), 0);
+    let text = rt.native("__nebula_text", 2, native_text, false);
+    rt.define(g, "__nebula_text", Value::Object(text), 0);
+    let utf8 = rt.native("__nebula_utf8", 1, native_utf8, false);
+    rt.define(g, "__nebula_utf8", Value::Object(utf8), 0);
+    let data = rt.native("__nebula_data_url", 1, native_data_url, false);
+    rt.define(g, "__nebula_data_url", Value::Object(data), 0);
     for (name, len, f) in [
         ("__nebula_observe", 4, native_observe as NativeFn),
         ("__nebula_disconnect", 1, native_disconnect),
@@ -3295,11 +3401,14 @@ pub fn fire_frames(rt: &mut Realm, now: f64) -> bool {
     let frames = with_dom(rt, |_, dom| core::mem::take(&mut dom.frames));
     let started = with_dom(rt, |_, dom| dom.started);
     let ran = !frames.is_empty();
-    for (_, f) in frames {
-        let r = rt.call(&f, Value::Undefined, &[Value::Number(now - started)]);
-        report(rt, r);
-        rt.run_jobs();
-    }
+    let roots: Vec<Value> = frames.iter().map(|(_, f)| f.clone()).collect();
+    rt.with_roots(roots, |rt| {
+        for (_, f) in frames {
+            let r = rt.call(&f, Value::Undefined, &[Value::Number(now - started)]);
+            report(rt, r);
+            rt.run_jobs();
+        }
+    });
     ran
 }
 
@@ -3467,7 +3576,11 @@ fn native_request(rt: &mut Realm, c: &Call) -> JsResult {
             }
         }
     }
-    let body = if c.arg(3).is_nullish() { String::new() } else { arg_str(rt, c, 3)? };
+    let body = match c.arg(3) {
+        v if v.is_nullish() => Vec::new(),
+        Value::Object(o) if rt.buffer_source_bytes(o).is_some() => rt.buffer_source_bytes(o).unwrap(),
+        _ => arg_str(rt, c, 3)?.into_bytes(),
+    };
     // A promise, settled by `complete_request`.
     let ctor = Value::Object(rt.intr.promise_ctor);
     let wr = rt.native("", 0, noop, false);
@@ -3508,7 +3621,8 @@ pub fn complete_request(rt: &mut Realm, id: u32, result: Result<HttpResponse, St
                 .collect();
             let h = rt.array_from(pairs);
             rt.define(o, "headers", h, DEFAULT);
-            rt.define(o, "body", Value::str(&resp.body), DEFAULT);
+            let body = rt.new_array_buffer(resp.body);
+            rt.define(o, "body", Value::Object(body), DEFAULT);
             rt.call(&res, Value::Undefined, &[Value::Object(o)])
         }
         Err(msg) => {
@@ -3518,6 +3632,56 @@ pub fn complete_request(rt: &mut Realm, id: u32, result: Result<HttpResponse, St
     };
     report(rt, r);
     rt.run_jobs();
+}
+
+/// `__nebula_text(buffer, contentType)`: bytes decoded as a document's
+/// would be (UTF-8 unless the type names a Latin-1 charset).
+fn native_text(rt: &mut Realm, c: &Call) -> JsResult {
+    let Value::Object(o) = c.arg(0) else { return Ok(Value::str("")) };
+    let Some(bytes) = rt.buffer_source_bytes(o) else { return Err(rt.type_error("not a buffer")) };
+    let ct = if c.arg(1).is_nullish() { String::new() } else { arg_str(rt, c, 1)? };
+    // A charset only from the header: response bodies aren't documents.
+    let ct = if ct.contains("charset=") { ct } else { String::from("charset=utf-8") };
+    Ok(Value::str(&crate::decode(&bytes, &ct)))
+}
+
+/// `__nebula_utf8(string)`: its UTF-8 bytes as a Uint8Array (TextEncoder).
+fn native_utf8(rt: &mut Realm, c: &Call) -> JsResult {
+    let s = rt.to_string(&c.arg(0))?;
+    let text: String = char::decode_utf16(s.units().iter().copied()).map(|r| r.unwrap_or('\u{FFFD}')).collect();
+    Ok(Value::Object(rt.new_uint8_array(text.into_bytes())))
+}
+
+/// `__nebula_data_url(url)`: `[Uint8Array, type]` for a `data:` URL, or null.
+fn native_data_url(rt: &mut Realm, c: &Call) -> JsResult {
+    let url = arg_str(rt, c, 0)?;
+    let Some(rest) = url.get(5..).filter(|_| url.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:"))) else {
+        return Ok(Value::Null);
+    };
+    let Some((meta, data)) = rest.split_once(',') else { return Ok(Value::Null) };
+    let base64 = meta.to_ascii_lowercase().ends_with(";base64");
+    let kind = if base64 { &meta[..meta.len() - 7] } else { meta };
+    let kind = if kind.is_empty() { "text/plain;charset=US-ASCII" } else { kind };
+    let raw = nebula_web::url::percent_decode(data, false);
+    let bytes = if base64 {
+        let mut bits = 0u32;
+        let mut n = 0;
+        let mut out = Vec::with_capacity(raw.len() * 3 / 4);
+        for b in raw.bytes().filter(|b| !b.is_ascii_whitespace() && *b != b'=') {
+            let Some(v) = B64.iter().position(|x| *x == b) else { return Ok(Value::Null) };
+            bits = bits << 6 | v as u32;
+            n += 6;
+            if n >= 8 {
+                n -= 8;
+                out.push((bits >> n) as u8);
+            }
+        }
+        out
+    } else {
+        raw.into_bytes()
+    };
+    let arr = rt.new_uint8_array(bytes);
+    Ok(rt.array_from(vec![Value::Object(arr), Value::str(kind)]))
 }
 
 /// `__nebula_random(typedArray)`: fills an integer typed array with random

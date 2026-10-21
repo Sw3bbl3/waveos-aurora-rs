@@ -148,7 +148,10 @@ pub mod nr {
     pub const WIN_MATERIALS: usize = 69;
     /// `net_info6(*mut NetInterface6, max) -> count` — same order as `net_info`
     pub const NET_INFO6: usize = 70;
-    pub const COUNT: usize = 71;
+    /// `audio_control(fd, op) -> value` — pause, resume, flush or read the
+    /// number of stereo frames consumed by this stream's mixer.
+    pub const AUDIO_CONTROL: usize = 71;
+    pub const COUNT: usize = 72;
 }
 
 #[repr(C)]
@@ -334,6 +337,10 @@ pub mod power {
 
 /// Sound output.
 pub mod audio {
+    pub const PAUSE: u64 = 0;
+    pub const RESUME: u64 = 1;
+    pub const FLUSH: u64 = 2;
+    pub const POSITION: u64 = 3;
     /// Sample rate of every playback stream (frames per second).
     pub const RATE: u32 = 48_000;
     pub const CHANNELS: u32 = 2;

@@ -179,6 +179,7 @@ impl Realm {
             Kind::Function(c) => (c.code.clone(), c.scope, c.this.clone(), c.new_target.clone()),
             _ => unreachable!(),
         };
+        let code = if code.lazy.is_some() { self.materialize(f, &code)? } else { code };
         if !construct && matches!(code.kind, CodeKind::ClassConstructor | CodeKind::DerivedConstructor) {
             let n = code.name.to_rust();
             return Err(self.type_error(&format!("Class constructor {n} cannot be invoked without 'new'")));
@@ -413,6 +414,9 @@ impl Realm {
     /// Counts one unit of work against the step budget.
     pub fn tick(&mut self) -> Result<(), Value> {
         self.steps += 1;
+        if self.profile.is_some() && self.steps % 32 == 0 {
+            self.sample();
+        }
         if self.step_limit != 0 && self.steps > self.step_limit {
             self.interrupted = true;
             return Err(self.range_error("Script took too long and was stopped"));
@@ -421,6 +425,79 @@ impl Realm {
             return Err(self.range_error("Script took too long and was stopped"));
         }
         Ok(())
+    }
+
+    /// A property read the cache answers: an own data property of `o`, or
+    /// one of its prototype's when `o` has none of that name.
+    #[inline]
+    fn cached_get(&self, o: ObjRef, name: u32) -> Option<Value> {
+        let code = &self.frame().code;
+        let (h, i) = code.prop_cache.get(name as usize)?.get();
+        if h == 0 {
+            return None;
+        }
+        let holder = ObjRef(h - 1);
+        let key = code.str_const(name);
+        let recv = self.heap.get(o);
+        let target = if i & crate::bytecode::PROTO_HIT != 0 {
+            if recv.proto != Some(holder) || recv.props.has_str(key) {
+                return None;
+            }
+            self.heap.get(holder)
+        } else if holder == o {
+            recv
+        } else {
+            return None;
+        };
+        match target.props.entry_at((i & !crate::bytecode::PROTO_HIT) as usize)? {
+            (PropKey::Str(s), Prop { slot: Slot::Data(v), .. }) if s == key => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    /// A property write the cache can do: an own writable data property.
+    #[inline]
+    fn cached_set(&mut self, o: ObjRef, name: u32, v: &Value) -> bool {
+        let code = self.frame().code.clone();
+        let Some(cell) = code.prop_cache.get(name as usize) else { return false };
+        let (h, i) = cell.get();
+        if h == 0 || ObjRef(h - 1) != o || i & crate::bytecode::PROTO_HIT != 0 {
+            return false;
+        }
+        let key = code.str_const(name);
+        let obj = self.heap.get_mut(o);
+        if !matches!(obj.props.entry_at(i as usize), Some((PropKey::Str(s), _)) if s == key) {
+            return false;
+        }
+        match obj.props.entry_at_mut(i as usize) {
+            Some(Prop { slot: Slot::Data(slot), flags }) if *flags & WRITABLE != 0 => {
+                *slot = v.clone();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Remembers where a property name was found on `o` (or its prototype).
+    fn record_prop(&self, o: ObjRef, name: u32) {
+        let code = &self.frame().code;
+        let Some(cell) = code.prop_cache.get(name as usize) else { return };
+        let key = PropKey::Str(code.str_const(name).clone());
+        let recv = self.heap.get(o);
+        if let Some(i) = recv.props.index_of(&key) {
+            if matches!(recv.props.entry_at(i), Some((_, Prop { slot: Slot::Data(_), .. }))) {
+                cell.set((o.0 + 1, i as u32));
+            }
+            return;
+        }
+        if let Some(p) = recv.proto {
+            let proto = self.heap.get(p);
+            if let Some(i) = proto.props.index_of(&key) {
+                if matches!(proto.props.entry_at(i), Some((_, Prop { slot: Slot::Data(_), .. }))) {
+                    cell.set((p.0 + 1, i as u32 | crate::bytecode::PROTO_HIT));
+                }
+            }
+        }
     }
 
     fn scope_at(&self, depth: u16) -> ObjRef {
@@ -681,17 +758,37 @@ impl Realm {
 
                 // -------------------------------------------- properties
                 Op::GetProp(name) => {
+                    if let Value::Object(o) = *self.stack.last().unwrap() {
+                        if let Some(v) = self.cached_get(o, name) {
+                            *self.stack.last_mut().unwrap() = v;
+                            continue;
+                        }
+                    }
                     let key = self.ckey(name);
                     let obj = self.peek(0).clone();
                     let v = self.get_v(&obj, &key)?;
+                    if let Value::Object(o) = obj {
+                        self.record_prop(o, name);
+                    }
                     *self.stack.last_mut().unwrap() = v;
                 }
                 Op::SetProp(name) => {
+                    let n = self.stack.len();
+                    if let Value::Object(o) = self.stack[n - 2] {
+                        if self.cached_set(o, name, &self.stack[n - 1].clone()) {
+                            let v = self.pop();
+                            *self.stack.last_mut().unwrap() = v;
+                            continue;
+                        }
+                    }
                     let key = self.ckey(name);
                     let v = self.pop();
                     let obj = self.peek(0).clone();
                     let strict = self.strict();
                     self.put(&obj, key, v.clone(), strict)?;
+                    if let Value::Object(o) = obj {
+                        self.record_prop(o, name);
+                    }
                     *self.stack.last_mut().unwrap() = v;
                 }
                 Op::GetElem => {
@@ -712,9 +809,22 @@ impl Realm {
                     self.stack.push(v);
                 }
                 Op::GetMethod(name) => {
-                    let key = self.ckey(name);
                     let obj = self.peek(0).clone();
-                    let f = self.get_v(&obj, &key)?;
+                    let cached = match obj {
+                        Value::Object(o) => self.cached_get(o, name),
+                        _ => None,
+                    };
+                    let f = match cached {
+                        Some(f) => f,
+                        None => {
+                            let key = self.ckey(name);
+                            let f = self.get_v(&obj, &key)?;
+                            if let Value::Object(o) = obj {
+                                self.record_prop(o, name);
+                            }
+                            f
+                        }
+                    };
                     let n = self.stack.len();
                     self.stack[n - 1] = f;
                     self.stack.push(obj);
@@ -1411,7 +1521,8 @@ impl Realm {
                         }
                     }
                     Value::String(s) if i < s.len() => {
-                        return Ok(Value::String(s.slice(i, i + 1)));
+                        let u = s.units()[i];
+                        return Ok(Value::String(self.unit_string(u)));
                     }
                     _ => {}
                 }
@@ -1635,9 +1746,25 @@ impl Realm {
             let what = self.callee_text(&f);
             return Err(self.type_error(&format!("{what} is not a function")));
         }
-        let args: Vec<Value> = self.stack.split_off(start);
+        let mut args = self.arg_pool.pop().unwrap_or_default();
+        args.extend(self.stack.drain(start..));
         let this = self.stack.pop().unwrap();
         self.stack.pop();
+        if let Value::Object(fo) = f {
+            if let Kind::Native(n) = &self.heap.get(fo).kind {
+                let nf = n.f;
+                let call = crate::realm::Call { this, args, new_target: Value::Undefined, callee: fo };
+                self.enter_run()?;
+                let r = nf(self, &call);
+                self.run_depth -= 1;
+                let mut args = call.args;
+                if args.capacity() <= 32 && self.arg_pool.len() < 16 {
+                    args.clear();
+                    self.arg_pool.push(args);
+                }
+                return r.map(Some);
+            }
+        }
         self.call_owned(&f, this, args).map(Some)
     }
 
@@ -1818,6 +1945,25 @@ impl Realm {
             self.init_fields(ctor, r)?;
         }
         Ok(result)
+    }
+
+    /// Compiles a deferred function (once; every closure of it shares the
+    /// result) and points closure `f` at the real code.
+    fn materialize(&mut self, f: ObjRef, stub: &Rc<Code>) -> Result<Rc<Code>, Value> {
+        let lazy = stub.lazy.clone().unwrap();
+        let real = match lazy.compiled.get() {
+            Some(c) => c.clone(),
+            None => {
+                let mut c = crate::compiler::compile_lazy(&lazy).map_err(|e| self.syntax_error(&e, &stub.file))?;
+                self.intern_code(&mut c);
+                let _ = lazy.compiled.set(c.clone());
+                c
+            }
+        };
+        if let Kind::Function(c) = &mut self.heap.get_mut(f).kind {
+            c.code = real.clone();
+        }
+        Ok(real)
     }
 
     pub(crate) fn make_closure(&mut self, code: Rc<Code>) -> Result<ObjRef, Value> {
@@ -2105,11 +2251,11 @@ impl Realm {
             return Ok(());
         }
         let from = self.to_object(src)?;
-        for k in self.own_keys(from) {
+        for k in self.own_keys_v(from)? {
             if excluded.contains(&k) {
                 continue;
             }
-            if let Some(p) = self.get_own_property(from, &k) {
+            if let Some(p) = self.get_own_property_v(from, &k)? {
                 if p.enumerable() {
                     let v = self.get(from, &k, Value::Object(from))?;
                     self.create_data_property(target, k, v)?;
@@ -2166,18 +2312,18 @@ impl Realm {
             let mut seen: alloc::collections::BTreeSet<PropKey> = alloc::collections::BTreeSet::new();
             let mut cur = Some(o);
             while let Some(c) = cur {
-                for k in self.own_keys(c) {
+                for k in self.own_keys_v(c)? {
                     if let PropKey::Sym(_) = k {
                         continue;
                     }
                     if !seen.insert(k.clone()) {
                         continue;
                     }
-                    if self.get_own_property(c, &k).is_some_and(|p| p.enumerable()) {
+                    if self.get_own_property_v(c, &k)?.is_some_and(|p| p.enumerable()) {
                         keys.push(k);
                     }
                 }
-                cur = self.heap.get(c).proto;
+                cur = self.get_prototype_of_v(c)?;
             }
             o
         };

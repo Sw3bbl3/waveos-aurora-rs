@@ -9,7 +9,7 @@ use crate::object::*;
 use crate::value::{JsStr, PropKey, Sym, Value};
 use crate::vm::Frame;
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -226,6 +226,24 @@ pub enum Job {
     Thenable { promise: ObjRef, thenable: Value, then: Value },
 }
 
+impl Job {
+    fn values(&self) -> Vec<Value> {
+        match self {
+            Job::Call(f, args) => core::iter::once(f.clone()).chain(args.iter().cloned()).collect(),
+            Job::Reaction { reaction_handler, capability, argument, .. } => {
+                let mut values = vec![reaction_handler.clone(), argument.clone()];
+                if let Some((a, b, c)) = capability {
+                    values.extend([a.clone(), b.clone(), c.clone()]);
+                }
+                values
+            }
+            Job::Thenable { promise, thenable, then } => {
+                vec![Value::Object(*promise), thenable.clone(), then.clone()]
+            }
+        }
+    }
+}
+
 /// A property descriptor (Object.defineProperty).
 #[derive(Clone, Default, Debug)]
 pub struct PropDesc {
@@ -274,6 +292,9 @@ pub struct Names {
     pub value: PropKey,
 }
 
+/// Scripts this large parse lazily (see [`Realm::lazy_functions`]).
+pub const LAZY_SOURCE: usize = 64 * 1024;
+
 pub struct Realm {
     pub heap: Heap,
     pub stack: Vec<Value>,
@@ -292,7 +313,10 @@ pub struct Realm {
     pub lex_epoch: u32,
     /// Short strings shared by compiled code and built-in property names,
     /// so a lookup usually finds its key by pointer.
-    atoms: BTreeSet<JsStr>,
+    atoms: hashbrown::HashSet<JsStr>,
+    /// Compiled regular expressions by (pattern, flags): literals evaluated
+    /// in loops and repeated `new RegExp` calls compile once.
+    pub(crate) regexps: hashbrown::HashMap<(JsStr, JsStr), Rc<crate::regexp::Program>>,
     pub symbols: Vec<SymbolInfo>,
     pub registry: BTreeMap<JsStr, Sym>,
     pub jobs: VecDeque<Job>,
@@ -303,6 +327,16 @@ pub struct Realm {
     pub(crate) run_depth: u32,
     /// Instructions run since the budget was reset; 0 limit = unlimited.
     pub steps: u64,
+    /// Whether large scripts compile function bodies on first call.
+    pub lazy_functions: bool,
+    /// Shared with other realms: compiled scripts to reuse.
+    pub code_cache: Option<Rc<core::cell::RefCell<crate::bytecode::CodeCache>>>,
+    /// One-unit strings below 256, made once (charAt, s[i], split("")).
+    unit_strings: Vec<JsStr>,
+    /// Argument vectors of finished native calls, reused.
+    pub(crate) arg_pool: Vec<Vec<Value>>,
+    /// When set, samples of where time goes: (function, file, line, column) → count.
+    pub profile: Option<BTreeMap<(String, String, u32, u32), u64>>,
     pub step_limit: u64,
     /// Set when the budget runs out: the script unwinds without running
     /// catch or finally blocks.
@@ -388,7 +422,8 @@ impl Realm {
             lexicals: BTreeMap::new(),
             lex: Vec::new(),
             lex_epoch: 0,
-            atoms: BTreeSet::new(),
+            atoms: hashbrown::HashSet::new(),
+            regexps: hashbrown::HashMap::new(),
             symbols: Vec::new(),
             registry: BTreeMap::new(),
             jobs: VecDeque::new(),
@@ -398,6 +433,11 @@ impl Realm {
             free_roots: Vec::new(),
             run_depth: 0,
             steps: 0,
+            profile: None,
+            lazy_functions: true,
+            code_cache: None,
+            unit_strings: Vec::new(),
+            arg_pool: Vec::new(),
             step_limit: 0,
             interrupted: false,
             rng: 0,
@@ -439,10 +479,27 @@ impl Realm {
     }
 
     pub fn compile(&mut self, src: &str, file: &str) -> Result<Rc<Code>, Value> {
-        let script = crate::parser::parse_script(src).map_err(|e| self.syntax_error(&e, file))?;
+        use crate::bytecode::CodeCache;
+        let key = (src.len() >= CodeCache::MIN_SOURCE && self.code_cache.is_some()).then(|| CodeCache::key(src, file));
+        if let (Some(k), Some(cache)) = (key, &self.code_cache) {
+            if let Some(code) = cache.borrow_mut().get(k) {
+                code.reset_caches();
+                return Ok(code);
+            }
+        }
+        // Large scripts (bundles) defer the bodies of ordinary functions.
+        let script = if src.len() >= LAZY_SOURCE && self.lazy_functions {
+            crate::parser::parse_script_lazy(src)
+        } else {
+            crate::parser::parse_script(src)
+        }
+        .map_err(|e| self.syntax_error(&e, file))?;
         let mut code = crate::compiler::compile_script(&script, Rc::from(src), Rc::from(file))
             .map_err(|e| self.syntax_error(&e, file))?;
         self.intern_code(&mut code);
+        if let (Some(k), Some(cache)) = (key, &self.code_cache) {
+            cache.borrow_mut().insert(k, code.clone(), src.len());
+        }
         Ok(code)
     }
 
@@ -470,7 +527,7 @@ impl Realm {
         }
     }
 
-    fn syntax_error(&mut self, e: &crate::lexer::SyntaxError, file: &str) -> Value {
+    pub(crate) fn syntax_error(&mut self, e: &crate::lexer::SyntaxError, file: &str) -> Value {
         let msg = if e.line > 0 { format!("{} ({}:{}:{})", e.message, file, e.line, e.col) } else { e.message.clone() };
         self.error(ErrorKind::SyntaxError, &msg)
     }
@@ -487,15 +544,17 @@ impl Realm {
                 self.jobs.clear();
                 break;
             }
-            let r = match job {
-                Job::Call(f, args) => self.call(&f, Value::Undefined, &args).map(|_| ()),
+            // The job has left the queue, but its promise capability must
+            // remain alive while a handler runs JavaScript and collects.
+            let r = self.with_roots(job.values(), |rt| match job {
+                Job::Call(f, args) => rt.call(&f, Value::Undefined, &args).map(|_| ()),
                 Job::Reaction { reaction_handler, fulfill, capability, argument } => {
-                    crate::builtins::promise::run_reaction(self, reaction_handler, fulfill, capability, argument)
+                    crate::builtins::promise::run_reaction(rt, reaction_handler, fulfill, capability, argument)
                 }
                 Job::Thenable { promise, thenable, then } => {
-                    crate::builtins::promise::run_thenable(self, promise, thenable, then)
+                    crate::builtins::promise::run_thenable(rt, promise, thenable, then)
                 }
-            };
+            });
             if let Err(e) = r {
                 let msg = self.describe_error(&e);
                 self.host.console("error", &format!("Uncaught {msg}"));
@@ -507,16 +566,19 @@ impl Realm {
     /// Reports promises that were rejected and never handled, once each.
     pub fn report_unhandled(&mut self) {
         let list = core::mem::take(&mut self.unhandled);
-        for p in list {
-            let (handled, value) = match &self.heap.get(p).kind {
-                Kind::Promise(pd) => (pd.handled, pd.value.clone()),
-                _ => continue,
-            };
-            if !handled {
-                let msg = self.describe_error(&value);
-                self.host.console("error", &format!("Uncaught (in promise) {msg}"));
+        let values: Vec<Value> = list.iter().copied().map(Value::Object).collect();
+        self.with_roots(values, |rt| {
+            for p in list {
+                let (handled, value) = match &rt.heap.get(p).kind {
+                    Kind::Promise(pd) => (pd.handled, pd.value.clone()),
+                    _ => continue,
+                };
+                if !handled {
+                    let msg = rt.describe_error(&value);
+                    rt.host.console("error", &format!("Uncaught (in promise) {msg}"));
+                }
             }
-        }
+        });
     }
 
     /// "TypeError: x is not a function" for an error, or the value as text.
@@ -621,6 +683,18 @@ impl Realm {
         self.free_roots.push(r.0);
     }
 
+    /// Keeps host-held values alive across JavaScript calls and microtasks.
+    /// Roots are released even when the closure returns a JavaScript error.
+    pub fn with_roots<R>(&mut self, values: impl IntoIterator<Item = Value>, f: impl FnOnce(&mut Self) -> R) -> R {
+        let roots: Vec<Root> =
+            values.into_iter().filter(|v| matches!(v, Value::Object(_))).map(|v| self.root(v)).collect();
+        let result = f(self);
+        for root in roots {
+            self.unroot(root);
+        }
+        result
+    }
+
     pub(crate) fn enter_run(&mut self) -> Result<(), Value> {
         if self.run_depth >= MAX_DEPTH || self.frames.len() >= MAX_FRAMES {
             return Err(self.error(ErrorKind::RangeError, "Maximum call stack size exceeded"));
@@ -701,12 +775,38 @@ impl Realm {
         Value::Object(o)
     }
 
+    /// The string of one code unit (cached below 256).
+    pub fn unit_string(&mut self, u: u16) -> JsStr {
+        if u >= 256 {
+            return JsStr::from_units(alloc::vec![u]);
+        }
+        if self.unit_strings.is_empty() {
+            self.unit_strings = (0..256u16).map(|c| JsStr::from_units(alloc::vec![c])).collect();
+        }
+        self.unit_strings[u as usize].clone()
+    }
+
+    /// Records one profile sample: the innermost function running.
+    pub fn sample(&mut self) {
+        let Some(f) = self.frames.last() else { return };
+        let (line, col) = f.code.line_at(f.pc.saturating_sub(1));
+        // Attribute to the function's start, so samples of one function add up.
+        let (fl, fc) = f.code.line_at(0);
+        let key = (
+            f.code.name.to_rust(),
+            String::from(&*f.code.file),
+            if fl > 0 { fl } else { line },
+            if fl > 0 { fc } else { col },
+        );
+        *self.profile.as_mut().unwrap().entry(key).or_insert(0) += 1;
+    }
+
     /// Sets `stack`: the message and the current call stack.
     pub fn attach_stack(&mut self, o: ObjRef, name: &str, msg: &str) {
         let mut s = if msg.is_empty() { String::from(name) } else { format!("{name}: {msg}") };
         for f in self.frames.iter().rev().take(10) {
             let fname = f.code.name.to_rust();
-            let line = f.code.line_at(f.pc.saturating_sub(1));
+            let (line, col) = f.code.line_at(f.pc.saturating_sub(1));
             let fname = if fname.is_empty() {
                 if f.code.kind == crate::bytecode::CodeKind::Script {
                     String::from("<script>")
@@ -717,7 +817,7 @@ impl Realm {
                 fname
             };
             if line > 0 {
-                s.push_str(&format!("\n    at {} ({}:{})", fname, f.code.file, line));
+                s.push_str(&format!("\n    at {} ({}:{}:{})", fname, f.code.file, line, col));
             } else {
                 s.push_str(&format!("\n    at {} ({})", fname, f.code.file));
             }
@@ -836,6 +936,41 @@ impl Realm {
         }
     }
 
+    /// The bytes an ArrayBuffer, typed array or DataView views (a copy).
+    pub fn buffer_source_bytes(&self, o: ObjRef) -> Option<Vec<u8>> {
+        let (buf, off, len) = match &self.heap.get(o).kind {
+            Kind::ArrayBuffer(b) => return Some(b.bytes.clone()),
+            Kind::TypedArray(t) => (t.buffer, t.offset, t.length * t.kind.size()),
+            Kind::DataView(d) => (d.0, d.1, d.2),
+            _ => return None,
+        };
+        match &self.heap.get(buf).kind {
+            Kind::ArrayBuffer(b) if !b.detached => b.bytes.get(off..off + len).map(|s| s.to_vec()),
+            Kind::ArrayBuffer(_) => Some(Vec::new()),
+            _ => None,
+        }
+    }
+
+    /// A new Uint8Array over its own buffer holding `bytes`.
+    pub fn new_uint8_array(&mut self, bytes: Vec<u8>) -> ObjRef {
+        let len = bytes.len();
+        let buffer = self.new_array_buffer(bytes);
+        let proto = self.intr.typed_protos[TAKind::U8 as usize];
+        self.alloc(Obj::new(
+            Some(proto),
+            Kind::TypedArray(Box::new(TypedArray { kind: TAKind::U8, buffer, offset: 0, length: len })),
+        ))
+    }
+
+    /// A new ArrayBuffer holding `bytes`.
+    pub fn new_array_buffer(&mut self, bytes: Vec<u8>) -> ObjRef {
+        let proto = self.intr.array_buffer_proto;
+        self.alloc(Obj::new(
+            Some(proto),
+            Kind::ArrayBuffer(alloc::boxed::Box::new(crate::object::ArrayBuffer { bytes, detached: false })),
+        ))
+    }
+
     /// IsValidIntegerIndex, as an element index.
     pub fn ta_index(&self, o: ObjRef, n: f64) -> Option<usize> {
         let (_, _, _, len) = self.typed_array(o)?;
@@ -904,6 +1039,9 @@ impl Realm {
         loop {
             // Ordinary objects: straight to the property map.
             let obj = self.heap.get(cur);
+            if let Kind::Proxy(_) = obj.kind {
+                return self.proxy_get(cur, key, receiver);
+            }
             if !matches!(obj.kind, Kind::TypedArray(_) | Kind::Array(_) | Kind::Primitive(Value::String(_))) {
                 match obj.props.get(key) {
                     Some(Prop { slot: Slot::Data(v), .. }) => return Ok(v.clone()),
@@ -1013,6 +1151,9 @@ impl Realm {
     }
 
     pub fn define_own(&mut self, o: ObjRef, key: PropKey, desc: PropDesc) -> Result<bool, Value> {
+        if self.is_proxy(o) {
+            return self.proxy_define(o, key, desc);
+        }
         if let Kind::TypedArray(_) = self.heap.get(o).kind {
             if let Some(n) = Self::numeric_key(&key) {
                 let Some(i) = self.ta_index(o, n) else { return Ok(false) };
@@ -1309,6 +1450,9 @@ impl Realm {
 
     /// OrdinarySet, through the prototype chain.
     pub fn set(&mut self, o: ObjRef, key: PropKey, v: Value, receiver: Value) -> Result<bool, Value> {
+        if self.is_proxy(o) {
+            return self.proxy_set(o, key, v, receiver);
+        }
         if let Kind::TypedArray(_) = self.heap.get(o).kind {
             if let Some(n) = Self::numeric_key(&key) {
                 if receiver == Value::Object(o) {
@@ -1347,6 +1491,8 @@ impl Realm {
             match self.get_own_property(cur, &key) {
                 Some(p) => break p,
                 None => match self.heap.get(cur).proto {
+                    // A proxy on the prototype chain takes over ([[Set]] on it).
+                    Some(p) if self.is_proxy(p) => return self.proxy_set(p, key, v, receiver),
                     Some(p) => cur = p,
                     None => break Prop::data(Value::Undefined, DEFAULT),
                 },
@@ -1436,6 +1582,9 @@ impl Realm {
     pub fn has_property(&mut self, o: ObjRef, key: &PropKey) -> Result<bool, Value> {
         let mut cur = o;
         loop {
+            if self.is_proxy(cur) {
+                return self.proxy_has(cur, key);
+            }
             if let Kind::TypedArray(_) = self.heap.get(cur).kind {
                 if let Some(n) = Self::numeric_key(key) {
                     return Ok(self.ta_index(cur, n).is_some());
@@ -1456,6 +1605,9 @@ impl Realm {
     }
 
     pub fn delete(&mut self, o: ObjRef, key: &PropKey) -> Result<bool, Value> {
+        if self.is_proxy(o) {
+            return self.proxy_delete(o, key);
+        }
         if let Kind::TypedArray(_) = self.heap.get(o).kind {
             if let Some(n) = Self::numeric_key(key) {
                 return Ok(self.ta_index(o, n).is_none());
@@ -1625,6 +1777,7 @@ impl Realm {
             Kind::Function(c) => c.ctor_kind != CtorKind::None,
             Kind::Native(n) => n.ctor,
             Kind::Bound(b) => self.is_constructor(&Value::Object(b.target)),
+            Kind::Proxy(p) => p.constructor,
             _ => false,
         }
     }
@@ -1667,6 +1820,7 @@ impl Realm {
                 all.extend_from_slice(args);
                 self.call(&Value::Object(target), bthis, &all)
             }
+            Kind::Proxy(p) if p.callable => self.proxy_call(fo, this, args),
             _ => Err(self.type_error("value is not a function")),
         }
     }
@@ -1694,6 +1848,7 @@ impl Realm {
                 let nt = if nt == *f { target.clone() } else { nt };
                 self.construct(&target, &all, Some(nt))
             }
+            Kind::Proxy(_) => self.proxy_construct(fo, args, nt),
             _ => Err(self.type_error("value is not a constructor")),
         }
     }
@@ -1944,7 +2099,7 @@ impl Realm {
             return Err(self.type_error("Function has non-object prototype in instanceof check"));
         };
         loop {
-            match self.heap.get(o).proto {
+            match self.get_prototype_of_v(o)? {
                 Some(x) if x == p => return Ok(true),
                 Some(x) => o = x,
                 None => return Ok(false),
@@ -1952,8 +2107,19 @@ impl Realm {
         }
     }
 
+    /// IsArray (through proxies; a revoked one isn't an array).
     pub fn is_array(&self, v: &Value) -> bool {
-        matches!(v, Value::Object(o) if matches!(self.heap.get(*o).kind, Kind::Array(_)))
+        let Value::Object(mut o) = v else { return false };
+        loop {
+            match &self.heap.get(o).kind {
+                Kind::Array(_) => return true,
+                Kind::Proxy(p) => match p.target {
+                    Some(t) => o = t,
+                    None => return false,
+                },
+                _ => return false,
+            }
+        }
     }
 
     // ------------------------------------------------------------ iteration

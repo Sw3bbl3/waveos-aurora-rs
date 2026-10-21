@@ -19,7 +19,9 @@ A runaway script is stopped by an instruction budget (it can't catch the error),
 
 ## Status
 
-**test262:** 34,415 tests pass: 94.3% of the 36,484 tests that run. [Results by area](pulsar-test262.md).
+**test262:** 35,192 tests pass: 94.5% of the 37,255 tests that run. [Results by area](pulsar-test262.md).
+
+Regular expressions search with [regress](https://github.com/ridiculousfish/regress) (MIT/Apache-2.0, the engine Boa uses): full Unicode property escapes, case folding and the `v` flag. Pulsar's own matcher remains for the Annex B syntax regress refuses and for sticky (`y`) matches.
 
 Our own regression suite (`libs/script/tests/js`) compares output byte for byte with Node, and runs every script a second time with the collector running every 64 allocations.
 
@@ -28,11 +30,24 @@ Our own regression suite (`libs/script/tests/js`) compares output byte for byte 
 | 1 | Language core: lexer, parser, compiler, VM, collector, core built-ins, `js` command, test262 runner | Done |
 | 2 | Symbols, iterators, generators, Map/Set, Promise, async/await, async generators, RegExp, Date | Done |
 | 3 | The DOM in Nebula: document and element bindings, events, timers, storage | Done; checked in WaveOS (QEMU) with the bundled demo, Wikipedia and Hacker News |
-| 4 | `fetch`, layout geometry, cookies, performance | Done: see Performance below; inline caches for property access are next |
+| 4 | `fetch`, layout geometry, cookies, performance | Done: see Performance below |
+| 5 | `Proxy`, lazy compilation, property inline caches, a compiled-code cache, regress for RegExp | Done; `BigInt`, `Intl` and modules are next |
 
 ## Performance
 
 Pulsar is an interpreter: no JIT, and so no machine code made at run time. `libs/script/bench` has small benchmarks. `cargo run --release -p nebula-script --example js -- --dump file.js` lists the bytecode a script compiles to.
+
+Large compiler scopes use an indexed name lookup while retaining declaration order; small scopes keep a linear lookup. The tokenizer dispatches punctuation by its first character and reads ordinary ASCII identifiers without an intermediate string allocation. `cargo run --release -p nebula-script --example compile_bench -- FILE.js` measures parsing and compilation without executing the script. See [October 10 validation](VALIDATION-2026-10-10-NEBULA.md) for bundle measurements and their limits.
+
+Large page scripts (64 KB and more) compile lazily: the parser skips the body of each ordinary function, recording every name it might use so the enclosing function knows which of its variables closures capture, and the function compiles on its first call against a snapshot of the scopes around it. A function wrapped in parentheses (`(function () { … })()`) is parsed at once, as it is almost always called straight away. YouTube's 10.6 MB application bundle parses and compiles in 343 ms instead of 562 ms on an M2; most of the difference is code the page never runs. Early errors inside a deferred body are reported when the function is first called.
+
+Property reads, method lookups and writes on a name constant go through a per-instruction cache: the object that held the name last time and the entry index, or its prototype's. A hit is checked against the key at that entry, so a stale cache only falls back to a full lookup. Identifiers are interned while tokenizing, compiler scope indexes and name sets are hashed, and `RegExp` programs are compiled once per pattern and flags. Strings built by repeated `+=` are ropes, flattened when first read.
+
+`Realm::code_cache` keeps compiled scripts between pages (Nebula shares one among its tabs), so reloading or returning to a site skips parsing and compiling its scripts; global-name caches are reset before a script runs in a new realm.
+
+`realm.profile` samples where scripts spend their time (the `browse` example prints it with `PROFILE=1`).
+
+Host code retaining JavaScript values across callbacks or microtasks must root them. `Realm::with_roots` keeps a batch alive until the callback returns, including error returns. Active promise jobs, thenable resolvers, rejection reports, dispatched events/listener snapshots, and animation-frame batches use this protection after leaving their traced queues.
 
 | Benchmark | What it does | Before | Now |
 |---|---|---:|---:|

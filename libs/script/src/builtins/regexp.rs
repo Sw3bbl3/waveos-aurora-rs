@@ -19,15 +19,23 @@ fn regexp_data(rt: &Realm, v: &Value) -> Option<(Rc<crate::regexp::Program>, JsS
 
 /// Creates a RegExp object (throws SyntaxError for bad patterns).
 pub fn create(rt: &mut Realm, pattern: JsStr, flags: JsStr, proto: Option<ObjRef>) -> JsResult {
-    let program = compile(pattern.units(), &flags.to_rust()).map_err(|e| {
-        let msg = alloc::format!("Invalid regular expression: /{}/{}: {}", pattern.to_rust(), flags.to_rust(), e);
-        rt.error(crate::realm::ErrorKind::SyntaxError, &msg)
-    })?;
+    let key = (pattern.clone(), flags.clone());
+    let program = match rt.regexps.get(&key) {
+        Some(p) => p.clone(),
+        None => {
+            let p = Rc::new(compile(pattern.units(), &flags.to_rust()).map_err(|e| {
+                let msg =
+                    alloc::format!("Invalid regular expression: /{}/{}: {}", pattern.to_rust(), flags.to_rust(), e);
+                rt.error(crate::realm::ErrorKind::SyntaxError, &msg)
+            })?);
+            if rt.regexps.len() < 4096 {
+                rt.regexps.insert(key, p.clone());
+            }
+            p
+        }
+    };
     let proto = proto.unwrap_or(rt.intr.regexp_proto);
-    let o = rt.alloc(Obj::new(
-        Some(proto),
-        Kind::RegExp(Box::new(RegExpData { source: pattern, flags, program: Rc::new(program) })),
-    ));
+    let o = rt.alloc(Obj::new(Some(proto), Kind::RegExp(Box::new(RegExpData { source: pattern, flags, program }))));
     rt.define(o, "lastIndex", Value::Number(0.0), WRITABLE);
     Ok(Value::Object(o))
 }
@@ -257,7 +265,9 @@ flag!(global, global, "global");
 flag!(ignore_case, ignore_case, "ignoreCase");
 flag!(multiline, multiline, "multiline");
 flag!(dot_all, dot_all, "dotAll");
-flag!(unicode, unicode, "unicode");
+fn unicode(rt: &mut Realm, c: &Call) -> JsResult {
+    flag_getter(rt, c, |f| f.unicode && !f.unicode_sets, "unicode")
+}
 flag!(sticky, sticky, "sticky");
 flag!(has_indices, has_indices, "hasIndices");
 
