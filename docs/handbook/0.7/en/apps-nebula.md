@@ -19,7 +19,9 @@ See [Desktop and windows](desktop-windows.md) for shared shortcuts and [Recovery
 
 ## Native video and audio
 1. Open a local or reachable MP4 URL containing supported H.264 video and AAC-LC audio.
-2. Use the native play/pause, seek, mute, and volume controls. Save other work before trying a large clip.
+2. Use Play/Pause and the timeline to seek. Adjust mute and volume through the system speaker control. Save other work before trying a large clip.
 3. If decoding fails, check the format and the displayed error. Try the documented small test fixture before a complex streaming site.
 
 The player decodes on worker threads and synchronizes presentation with the audio output. The bounded decoder accepts video up to 1920×1088 and mono/stereo AAC-LC up to 48 kHz. Fragmented MP4 and part of Media Source Extensions are implemented; this does not establish DRM or general streaming-site compatibility. Unsupported codecs and damaged files may be rejected. See [Pulsar and media development](developer-pulsar.md).
+
+![Native MP4 playback in Nebula on WaveOS 0.7.0](../../../screenshots/0.7/nebula-native-media.png)

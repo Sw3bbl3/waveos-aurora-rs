@@ -81,6 +81,11 @@ fn parsed(source: &str) -> Result<(Vec<Event<'_>>, Vec<(String, String)>, String
 pub fn build(root: &Path) -> Result<PathBuf, String> {
     let base = root.join("docs/handbook/0.7");
     let out = root.join("target/help");
+    // Generated files belong to this build. Old screenshots or removed articles
+    // must not cause false name collisions or remain in the offline library.
+    if out.exists() {
+        fs::remove_dir_all(&out).map_err(|e| e.to_string())?;
+    }
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let mut sources = BTreeMap::new();
     let mut ids = BTreeMap::new();
@@ -268,6 +273,15 @@ mod tests {
         }
         fs::write(&en, "# Start\n[Here](#start)").unwrap();
         assert!(build(&root).is_ok());
+        let image = root.join("docs/screenshot.png");
+        fs::write(&image, b"first screenshot").unwrap();
+        fs::write(&en, "# Start\n![Screen](../../../screenshot.png)").unwrap();
+        let out = build(&root).unwrap();
+        fs::write(out.join("removed.html"), "stale article").unwrap();
+        fs::write(&image, b"updated screenshot").unwrap();
+        build(&root).unwrap();
+        assert_eq!(fs::read(out.join("images/screenshot.png")).unwrap(), b"updated screenshot");
+        assert!(!out.join("removed.html").exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

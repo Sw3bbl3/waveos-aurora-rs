@@ -19,7 +19,9 @@ Voir [Bureau et fenêtres](desktop-windows.md) pour les raccourcis communs et [R
 
 ## Vidéo et audio natifs
 1. Ouvrez un fichier local ou une adresse MP4 accessible contenant de la vidéo H.264 et de l’audio AAC-LC pris en charge.
-2. Utilisez les commandes natives de lecture/pause, de position, de sourdine et de volume. Enregistrez les autres travaux avant d’essayer un gros fichier.
+2. Utilisez Play/Pause et la barre de progression pour changer de position. Réglez la sourdine et le volume avec le haut-parleur du système. Enregistrez les autres travaux avant d’essayer un gros fichier.
 3. Si le décodage échoue, vérifiez le format et le message affiché. Essayez le petit fichier d’essai documenté avant un site de diffusion complexe.
 
 Le lecteur décode sur des fils de travail et synchronise l’affichage avec la sortie audio. Le décodeur limité accepte la vidéo jusqu’à 1920×1088 et l’AAC-LC mono/stéréo jusqu’à 48 kHz. Le MP4 fragmenté et une partie de Media Source Extensions sont implémentés; cela n’établit pas la compatibilité avec les DRM ni avec tous les sites de diffusion. Les formats absents et les fichiers endommagés peuvent être rejetés. Voir [Développement Pulsar et multimédia](developer-pulsar.md).
+
+![Lecture MP4 native dans Nebula sur WaveOS 0.7.0](../../../screenshots/0.7/nebula-native-media.png)
