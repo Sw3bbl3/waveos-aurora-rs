@@ -150,6 +150,7 @@ impl Desktop {
                 icon: Icon::Aurora,
             }));
             self.launcher = Some(Launcher { apps, query: String::new(), group: Group::All, hover: None, page: 0 });
+            self.shoal_backdrop = None;
             self.close_menu();
             self.current = None;
         }
@@ -279,11 +280,23 @@ impl Desktop {
         }
     }
 
-    pub(super) fn paint_shoal(&self, cv: &mut Canvas) {
-        let Some(l) = &self.launcher else { return };
+    pub(super) fn paint_shoal(&mut self, cv: &mut Canvas) {
+        if self.launcher.is_none() {
+            self.shoal_backdrop = None;
+            return;
+        }
         let t = theme::current();
         let screen = Rect::new(0, 0, self.w, self.h);
-        cv.frosted(screen, 0, if t.dark { 0xB00A_0E1E } else { 0x99F4_F6FC });
+        match &self.shoal_backdrop {
+            Some(bg) if bg.len() == cv.buf.len() => cv.blit_same(bg, cv.clip),
+            _ => {
+                cv.frosted(screen, 0, if t.dark { 0xB00A_0E1E } else { 0x99F4_F6FC });
+                if cv.clip == screen {
+                    self.shoal_backdrop = Some(cv.buf.to_vec());
+                }
+            }
+        }
+        let Some(l) = &self.launcher else { return };
 
         // Account (left) and power (right).
         if let Some(acc) = &self.account {

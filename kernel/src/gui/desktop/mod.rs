@@ -131,6 +131,9 @@ pub struct Desktop {
     drag: Option<Drag>,
     damage: Vec<Rect>,
     launcher: Option<Launcher>,
+    /// Shoal's frosted backdrop, frozen on the frame it opened (so pointing
+    /// at an app repaints a tile, not the whole screen).
+    shoal_backdrop: Option<Vec<u32>>,
     menu: Option<Menu>,
     harbor: harbor::HarborState,
     /// Where a dragged window would moor, and as what.
@@ -206,6 +209,7 @@ impl Desktop {
             drag: None,
             damage: Vec::new(),
             launcher: None,
+            shoal_backdrop: None,
             menu: None,
             harbor: harbor::HarborState::default(),
             snap_preview: None,
@@ -604,6 +608,7 @@ impl Desktop {
             }
             pref::DARK => self.set_dark(super::prefs::get_bool(pref::DARK)),
             pref::ACCENT => {
+                self.shoal_backdrop = None;
                 theme::set_accent(super::prefs::get(pref::ACCENT).and_then(|v| v.parse().ok()).unwrap_or(0));
                 self.broadcast_theme();
                 self.damage_all();
@@ -677,6 +682,7 @@ impl Desktop {
     }
 
     pub fn set_dark(&mut self, dark: bool) {
+        self.shoal_backdrop = None;
         theme::set_dark(dark);
         super::save_settings();
         // Each built-in wallpaper has a day and a night picture.
@@ -690,6 +696,7 @@ impl Desktop {
     }
 
     pub fn set_wallpaper(&mut self, index: u8) {
+        self.shoal_backdrop = None;
         theme::set_wallpaper(index);
         super::save_settings();
         let (wp, bl) = Self::make_wallpaper(self.w, self.h);
@@ -1340,7 +1347,7 @@ impl Desktop {
         if self.scene.len() != (self.w * self.h) as usize
             || self.drag.is_some()
             || self.animating()
-            || self.launcher.is_some()
+            || self.launcher.is_some() && self.shoal_backdrop.is_none()
             || self.menu.is_some()
             || self.center.is_some()
             || self.spotlight.is_some()
