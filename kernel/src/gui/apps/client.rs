@@ -70,11 +70,11 @@ impl App for ClientApp {
         let (w, h) = drawn.unwrap_or((0, 0));
         if w < area.w {
             let r = Rect::new(area.x + w, area.y, area.w - w, area.h);
-            cv.with_clip(r, |cv| cv.fill_rect_round_bottom(area, WINDOW_RADIUS, bg));
+            cv.with_clip(r, |cv| cv.fill_round_rect(area, WINDOW_RADIUS, bg));
         }
         if h < area.h {
             let r = Rect::new(area.x, area.y + h, w.min(area.w), area.h - h);
-            cv.with_clip(r, |cv| cv.fill_rect_round_bottom(area, WINDOW_RADIUS, bg));
+            cv.with_clip(r, |cv| cv.fill_round_rect(area, WINDOW_RADIUS, bg));
         }
     }
     fn key(&mut self, ev: &KeyEvent, _env: &mut Env) -> bool {

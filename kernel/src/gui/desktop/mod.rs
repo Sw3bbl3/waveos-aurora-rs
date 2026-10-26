@@ -9,6 +9,7 @@ mod bar;
 mod switcher;
 use lumen::windowing::{self, Placement, Switcher};
 mod dragdrop;
+mod handle;
 mod notifications;
 mod shell;
 mod shore;
@@ -23,7 +24,7 @@ use super::canvas::Canvas;
 use super::cursor;
 use super::geom::Rect;
 use super::server::{self, Command};
-use super::theme::{self, MENUBAR_H, TITLEBAR_H, WINDOW_RADIUS};
+use super::theme::{self, MENUBAR_H, WINDOW_RADIUS};
 use super::wallpaper;
 use crate::drivers::input::{InputEvent, KeyCode, KeyEvent, BUTTON_LEFT, BUTTON_RIGHT};
 use alloc::boxed::Box;
@@ -74,28 +75,15 @@ pub struct Window {
 }
 
 impl Window {
+    /// Apps get the whole window: there is no title bar (see `handle`).
     pub fn content(&self) -> Rect {
-        Rect::new(self.rect.x, self.rect.y + TITLEBAR_H, self.rect.w, self.rect.h - TITLEBAR_H)
-    }
-
-    pub fn titlebar(&self) -> Rect {
-        Rect::new(self.rect.x, self.rect.y, self.rect.w, TITLEBAR_H)
+        self.rect
     }
 
     /// Everything this window paints, including its shadow.
     pub fn bounds(&self) -> Rect {
         let r = self.rect;
         Rect::new(r.x - SHADOW_BLUR, r.y - SHADOW_BLUR, r.w + 2 * SHADOW_BLUR, r.h + 2 * SHADOW_BLUR + SHADOW_OFFSET)
-    }
-
-    /// Close, minimize, zoom button centres.
-    pub fn traffic(&self) -> [(i32, i32); 3] {
-        let y = self.rect.y + TITLEBAR_H / 2;
-        [(self.rect.x + 22, y), (self.rect.x + 42, y), (self.rect.x + 62, y)]
-    }
-
-    fn traffic_hit(&self, x: i32, y: i32) -> Option<usize> {
-        self.traffic().iter().position(|&(cx, cy)| (x - cx).abs() <= 8 && (y - cy).abs() <= 8)
     }
 
     fn grip(&self) -> Rect {
@@ -143,8 +131,16 @@ pub struct Desktop {
     menu: Option<Menu>,
     dock_hover: Option<usize>,
     dock_revealed: bool,
-    snap_preview: Option<Rect>,
-    traffic_hover: Option<u32>,
+    /// Where a dragged window would moor, and as what.
+    snap_preview: Option<(Rect, Placement)>,
+    /// The handle of the window the pointer is near, and the pill button under it.
+    handle: Option<handle::Handle>,
+    handle_button: Option<usize>,
+    /// Moorings' layouts row is showing (a window is dragged near the top).
+    moorings_open: bool,
+    mooring_zone: Option<(u8, u8, u8, u8)>,
+    /// Super is held (Super + drag moves a window from anywhere).
+    super_down: bool,
     last_click: (u64, i32, i32),
     clock: String,
     now_ms: u64,
@@ -210,7 +206,11 @@ impl Desktop {
             dock_hover: None,
             dock_revealed: false,
             snap_preview: None,
-            traffic_hover: None,
+            handle: None,
+            handle_button: None,
+            moorings_open: false,
+            mooring_zone: None,
+            super_down: false,
             last_click: (0, 0, 0),
             clock: String::new(),
             now_ms: 0,
@@ -306,10 +306,10 @@ impl Desktop {
         self.windows.iter().position(|w| w.id == id)
     }
 
-    /// Area available to windows (between the menu bar and the dock).
+    /// Area available to windows: below the bubbles, down to the bottom
+    /// edge (Harbor sinks away from a window that reaches it).
     fn work_area(&self) -> Rect {
-        let bottom = self.h - if theme::dock_autohide() { 8 } else { theme::dock_height() + theme::DOCK_MARGIN + 8 };
-        Rect::new(8, MENUBAR_H + 8, self.w - 16, bottom - MENUBAR_H - 8)
+        Rect::new(8, MENUBAR_H + 8, self.w - 16, self.h - 8 - MENUBAR_H - 8)
     }
 
     pub fn open(&mut self, kind: AppKind) {
@@ -373,7 +373,7 @@ impl Desktop {
         let (cw, ch) = app.size();
         let wa = self.work_area();
         let w = cw.min(wa.w);
-        let h = (ch + TITLEBAR_H).min(wa.h);
+        let h = ch.min(wa.h);
         let cascade = (self.windows.len() as i32 % 6) * 28;
         let x = wa.x + (wa.w - w) / 2 + cascade - 56;
         let y = wa.y + (wa.h - h) / 3 + cascade - 28;
@@ -530,7 +530,7 @@ impl Desktop {
         let next = if placement == Placement::Floating {
             windowing::clamp(w.saved.unwrap_or(old), area)
         } else {
-            let Some(r) = windowing::target(placement, area, (mw, mh + TITLEBAR_H)) else { return };
+            let Some(r) = windowing::target(placement, area, (mw, mh)) else { return };
             if w.placement == Placement::Floating {
                 w.saved = Some(old);
             }
@@ -600,7 +600,7 @@ impl Desktop {
                     let wa = self.work_area();
                     for win in &mut self.windows {
                         let (mw, mh) = win.app.min_size();
-                        if let Some(r) = windowing::target(win.placement, wa, (mw, mh + TITLEBAR_H)) {
+                        if let Some(r) = windowing::target(win.placement, wa, (mw, mh)) {
                             win.rect = r;
                         }
                     }
@@ -653,7 +653,7 @@ impl Desktop {
             }
             if win.placement != Placement::Floating {
                 let (mw, mh) = win.app.min_size();
-                if let Some(target) = windowing::target(win.placement, wa, (mw, mh + TITLEBAR_H)) {
+                if let Some(target) = windowing::target(win.placement, wa, (mw, mh)) {
                     *r = target;
                 } else {
                     *r = windowing::clamp(win.saved.take().unwrap_or(*r), wa);
@@ -752,9 +752,8 @@ impl Desktop {
                     }
                 }
                 Command::Title(id) => {
-                    if let Some(i) = self.window_of_client(id).and_then(|w| self.index_of(w)) {
-                        let t = self.windows[i].titlebar();
-                        self.damage(t);
+                    if let Some(w) = self.window_of_client(id) {
+                        self.damage_handle(w);
                         self.damage(Rect::new(0, 0, self.w, MENUBAR_H));
                     }
                 }
@@ -853,8 +852,7 @@ impl Desktop {
             self.damage(content);
         }
         if self.windows[i].app.title() != before {
-            let t = self.windows[i].titlebar();
-            self.damage(t);
+            self.damage_handle(id);
             self.damage(Rect::new(0, 0, self.w, MENUBAR_H));
         }
         self.apply(Some(id), env);
@@ -908,17 +906,13 @@ impl Desktop {
             let drag = self.drag.take();
             if let Some(d) = drag {
                 self.damage_all(); // Restore stationary material sampling.
-                if let Some(target) = self.snap_preview.take() {
+                self.moorings_open = false;
+                self.mooring_zone = None;
+                if let Some((target, placement)) = self.snap_preview.take() {
                     if let Some(i) = self.index_of(d.window) {
                         self.windows[i].saved = Some(d.start_rect);
                         self.windows[i].rect = target;
-                        self.windows[i].placement = if target.w == self.work_area().w {
-                            Placement::Maximized
-                        } else if target.x == self.work_area().x {
-                            Placement::Left
-                        } else {
-                            Placement::Right
-                        };
+                        self.windows[i].placement = placement;
                     }
                     self.damage_all();
                 }
@@ -964,12 +958,12 @@ impl Desktop {
             let w = &mut self.windows[i];
             match d.kind {
                 DragKind::Move => {
-                    let ny = (d.start_rect.y + dy).clamp(MENUBAR_H, self.h - TITLEBAR_H);
+                    let ny = (d.start_rect.y + dy).clamp(MENUBAR_H, self.h - 40);
                     w.rect = Rect::new(d.start_rect.x + dx, ny, d.start_rect.w, d.start_rect.h);
                 }
                 DragKind::Resize(edges) => {
                     let (mw, mh) = w.app.min_size();
-                    let min_h = mh + TITLEBAR_H;
+                    let min_h = mh;
                     if edges & 1 != 0 {
                         w.rect.x = (d.start_rect.x + dx).min(d.start_rect.right() - mw);
                         w.rect.w = d.start_rect.right() - w.rect.x;
@@ -990,24 +984,7 @@ impl Desktop {
             w.placement = Placement::Floating;
             let new = w.bounds();
             if matches!(d.kind, DragKind::Move) {
-                let area = self.work_area();
-                let preview = if !self.windows[i].app.resizable() {
-                    None
-                } else if y < MENUBAR_H + 12 {
-                    Some(area)
-                } else if x < 18 {
-                    Some(Rect::new(area.x, area.y, area.w / 2 - 4, area.h))
-                } else if x > self.w - 18 {
-                    Some(Rect::new(area.x + area.w / 2 + 4, area.y, area.w - area.w / 2 - 4, area.h))
-                } else {
-                    None
-                };
-                let (mw, mh) = self.windows[i].app.min_size();
-                let preview = preview.filter(|r| r.w >= mw && r.h >= mh + TITLEBAR_H);
-                if preview != self.snap_preview {
-                    self.snap_preview = preview;
-                    self.damage_all();
-                }
+                self.moorings_drag(i, x, y);
             }
             self.damage(old.union(&new));
             return;
@@ -1030,18 +1007,8 @@ impl Desktop {
         }
         self.update_shell_hover(x, y);
 
-        // Traffic-light hover glyphs.
-        let th =
-            self.window_at(x, y).filter(|&i| self.windows[i].traffic_hit(x, y).is_some()).map(|i| self.windows[i].id);
-        if th != self.traffic_hover {
-            for id in [self.traffic_hover, th].into_iter().flatten() {
-                if let Some(i) = self.index_of(id) {
-                    let t = self.windows[i].titlebar();
-                    self.damage(t);
-                }
-            }
-            self.traffic_hover = th;
-        }
+        // The handle on a window's top edge.
+        self.handle_hover(x, y);
 
         // Hover inside the focused window's content.
         if let Some(f) = self.focused_id() {
@@ -1069,8 +1036,19 @@ impl Desktop {
         if self.shell_press(x, y) {
             return;
         }
+        if self.handle_press(x, y, double) {
+            return;
+        }
 
         let Some(i) = self.window_at(x, y) else { return };
+        // Super + drag moves a window from anywhere in it.
+        if self.super_down {
+            let id = self.windows[i].id;
+            self.super_alone = false;
+            self.raise(id);
+            self.begin_move(id, x, y);
+            return;
+        }
         let id = self.windows[i].id;
         if self.focused_id() != Some(id) {
             self.raise(id);
@@ -1100,35 +1078,7 @@ impl Desktop {
                 Some(Drag { window: id, kind: DragKind::Resize(edges), start_x: x, start_y: y, start_rect: w.rect });
             return;
         }
-        if w.titlebar().contains(x, y) {
-            match w.traffic_hit(x, y) {
-                Some(0) => self.request_close(id),
-                Some(1) => self.minimize(id),
-                Some(2) => self.toggle_zoom(id),
-                _ if double => self.toggle_zoom(id),
-                _ => {
-                    if let Some(saved) = w.saved {
-                        let mut restored = saved;
-                        restored.x = x - saved.w / 2;
-                        restored.y = y - TITLEBAR_H / 2;
-                        self.windows[i].rect = restored;
-                        self.windows[i].saved = None;
-                        self.windows[i].placement = Placement::Floating;
-                        self.drag = Some(Drag {
-                            window: id,
-                            kind: DragKind::Move,
-                            start_x: x,
-                            start_y: y,
-                            start_rect: restored,
-                        });
-                        self.damage_all();
-                        return;
-                    }
-                    self.drag =
-                        Some(Drag { window: id, kind: DragKind::Move, start_x: x, start_y: y, start_rect: w.rect })
-                }
-            }
-        } else if w.app.resizable() && w.grip().contains(x, y) {
+        if w.app.resizable() && w.grip().contains(x, y) {
             self.drag =
                 Some(Drag { window: id, kind: DragKind::Resize(10), start_x: x, start_y: y, start_rect: w.rect });
         } else if double {
@@ -1190,6 +1140,7 @@ impl Desktop {
         // The Super key alone (pressed and released) opens the launcher; with
         // another key it is a modifier (Super+Space, Super+Shift+3, …).
         if k.code == KeyCode::Super {
+            self.super_down = k.pressed;
             if k.pressed {
                 self.super_alone = true;
             } else if core::mem::take(&mut self.super_alone) {
@@ -1412,7 +1363,6 @@ impl Desktop {
             if w.minimized {
                 continue;
             }
-            materials.push(w.titlebar());
             materials.extend(w.app.materials().into_iter().map(|r| r.offset(w.content().x, w.content().y)));
         }
         windowing::safe_damage(&self.damage, &materials, 40)
@@ -1454,14 +1404,11 @@ impl Desktop {
             }
             let is_focused = Some(self.windows[i].id) == focused;
             let env = self.env(is_focused);
-            let hover = self.traffic_hover == Some(self.windows[i].id);
-            paint_window(cv, &mut self.windows[i], is_focused, hover, &env, true);
+            paint_window(cv, &mut self.windows[i], is_focused, &env, true);
         }
         self.paint_ghosts(cv);
-        if let Some(r) = self.snap_preview {
-            cv.fill_round_rect(r, 16, crate::gui::canvas::with_alpha(theme::accent(), 65));
-            cv.stroke_round_rect(r, 16, theme::accent());
-        }
+        self.paint_handle(cv);
+        self.paint_moorings(cv);
         self.paint_shell(cv);
         self.paint_bar(cv);
         self.paint_menu(cv);
@@ -1491,65 +1438,28 @@ impl Desktop {
     }
 }
 
-fn paint_window(cv: &mut Canvas, w: &mut Window, focused: bool, hover: bool, env: &Env, shadow: bool) {
+fn paint_window(cv: &mut Canvas, w: &mut Window, focused: bool, env: &Env, shadow: bool) {
     let t = theme::current();
     let r = w.rect;
     if shadow {
         let strength = if focused { t.shadow } else { t.shadow * 6 / 10 };
         cv.shadow(r, WINDOW_RADIUS, SHADOW_BLUR, if focused { SHADOW_OFFSET } else { 6 }, strength);
     }
-    // Title bar.
-    let tb = w.titlebar();
-    if shadow {
-        cv.with_clip(tb, |cv| cv.frosted(r, WINDOW_RADIUS, t.glass_tint));
-    } else {
-        cv.with_clip(tb, |cv| cv.fill_round_rect(r, WINDOW_RADIUS, t.titlebar));
-    }
     let regions = w.app.materials();
     if regions.is_empty() || !shadow {
-        cv.fill_rect_round_bottom(w.content(), WINDOW_RADIUS, t.window_bg);
+        cv.fill_round_rect(r, WINDOW_RADIUS, t.window_bg);
     } else {
         for region in regions {
-            let region = region.offset(w.content().x, w.content().y).intersect(&w.content());
+            let region = region.offset(r.x, r.y).intersect(&r);
             cv.frosted(region, 12, t.glass_tint);
         }
     }
-    cv.fill_rect(Rect::new(r.x, tb.bottom() - 1, r.w, 1), t.separator);
-    let title = w.app.title();
-    let f = theme::ui_bold(13);
-    let tw = f.width(&title).min(r.w - 180);
-    cv.text_clipped(
-        r.x + (r.w - tw) / 2,
-        tb.y + 25,
-        &title,
-        f,
-        if focused { t.text } else { t.text_secondary },
-        r.w - 180,
-    );
-
-    let colors = [theme::CLOSE, theme::MINIMIZE, theme::ZOOM];
-    let can_zoom = w.app.resizable();
-    for (i, &(cx, cy)) in w.traffic().iter().enumerate() {
-        let active = (focused || hover) && (i != 2 || can_zoom);
-        cv.fill_circle(cx, cy, 6, if active { colors[i] } else { t.traffic_inactive });
-        if hover && active {
-            let g = 0xA0_00_00_00 | 0x1A1A1A;
-            match i {
-                0 => {
-                    cv.line(cx - 2, cy - 2, cx + 2, cy + 2, 1, g);
-                    cv.line(cx + 2, cy - 2, cx - 2, cy + 2, 1, g);
-                }
-                1 => cv.fill_rect(Rect::new(cx - 3, cy, 7, 1), g),
-                _ => {
-                    cv.fill_rect(Rect::new(cx - 3, cy, 7, 1), g);
-                    cv.fill_rect(Rect::new(cx, cy - 3, 1, 7), g);
-                }
-            }
-        }
+    // App content: the whole window, its corners rounded.
+    cv.with_clip(r, |cv| w.app.draw(cv, r, env));
+    if focused && shadow {
+        cv.stroke_round_rect(r, WINDOW_RADIUS, if t.dark { 0x28FF_FFFF } else { 0x200E_1530 });
+        handle::paint_waterline(cv, r, WINDOW_RADIUS);
+    } else {
+        cv.stroke_round_rect(r, WINDOW_RADIUS, t.window_border);
     }
-
-    // App content.
-    let content = w.content();
-    cv.with_clip(content, |cv| w.app.draw(cv, content, env));
-    cv.stroke_round_rect(r, WINDOW_RADIUS, t.window_border);
 }

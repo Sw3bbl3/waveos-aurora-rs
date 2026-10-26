@@ -4,9 +4,10 @@ use crate::canvas::rgb;
 use crate::font::{self, Face, Font};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-pub const MENUBAR_H: i32 = 30;
+/// The band the top bubbles live in (8 + 38 + 8).
+pub const MENUBAR_H: i32 = 54;
 pub const TITLEBAR_H: i32 = 40;
-pub const WINDOW_RADIUS: i32 = 16;
+pub const WINDOW_RADIUS: i32 = 18;
 pub const DOCK_ICON: i32 = 48;
 pub const DOCK_PAD: i32 = 9;
 pub const DOCK_H: i32 = DOCK_ICON + 2 * DOCK_PAD + 4;

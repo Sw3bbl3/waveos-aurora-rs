@@ -155,7 +155,7 @@ impl App for Calculator {
     fn draw(&mut self, cv: &mut Canvas, area: Rect, _env: &Env) {
         let t = theme::current();
         let bg = if t.dark { rgb(0x1C, 0x1C, 0x22) } else { rgb(0xF2, 0xF2, 0xF6) };
-        cv.fill_rect_round_bottom(area, theme::WINDOW_RADIUS, bg);
+        cv.fill_rect(area, bg);
         // Pending operation hint.
         if let (Some(a), Some(op)) = (self.acc, self.op) {
             let mut tmp = Calculator::new();

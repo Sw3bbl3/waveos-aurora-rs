@@ -8,13 +8,61 @@ pub enum Placement {
     Left,
     Right,
     Maximized,
+    /// A Moorings zone: x, y, width and height in twelfths of the work area.
+    Zone(u8, u8, u8, u8),
 }
+
+/// The six Moorings layouts offered while dragging a window, each a set of
+/// zones (x, y, w, h in twelfths): halves, two thirds and a third (both
+/// ways), thirds, quarters, and the whole area.
+pub const MOORINGS: [&[(u8, u8, u8, u8)]; 6] = [
+    &[(0, 0, 6, 12), (6, 0, 6, 12)],
+    &[(0, 0, 8, 12), (8, 0, 4, 12)],
+    &[(0, 0, 4, 12), (4, 0, 8, 12)],
+    &[(0, 0, 4, 12), (4, 0, 4, 12), (8, 0, 4, 12)],
+    &[(0, 0, 6, 6), (6, 0, 6, 6), (0, 6, 6, 6), (6, 6, 6, 6)],
+    &[(0, 0, 12, 12)],
+];
+
+/// The placement for a Moorings zone (halves and the whole area keep their own names).
+pub fn zone_placement(z: (u8, u8, u8, u8)) -> Placement {
+    match z {
+        (0, 0, 6, 12) => Placement::Left,
+        (6, 0, 6, 12) => Placement::Right,
+        (0, 0, 12, 12) => Placement::Maximized,
+        (x, y, w, h) => Placement::Zone(x, y, w, h),
+    }
+}
+
+/// A zone of `area`, leaving an 8-point gap between neighbouring zones.
+fn zone(area: Rect, x: u8, y: u8, w: u8, h: u8) -> Rect {
+    let (x, y, w, h) = (x.min(12) as i32, y.min(12) as i32, w.clamp(1, 12) as i32, h.clamp(1, 12) as i32);
+    let mut left = area.x + area.w * x / 12;
+    let mut right = area.x + area.w * (x + w).min(12) / 12;
+    let mut top = area.y + area.h * y / 12;
+    let mut bottom = area.y + area.h * (y + h).min(12) / 12;
+    if x > 0 {
+        left += 4;
+    }
+    if x + w < 12 {
+        right -= 4;
+    }
+    if y > 0 {
+        top += 4;
+    }
+    if y + h < 12 {
+        bottom -= 4;
+    }
+    Rect::new(left, top, right - left, bottom - top)
+}
+
 pub fn target(p: Placement, area: Rect, minimum: (i32, i32)) -> Option<Rect> {
     let r = match p {
         Placement::Floating => return None,
-        Placement::Left => Rect::new(area.x, area.y, area.w / 2 - 4, area.h),
-        Placement::Right => Rect::new(area.x + area.w / 2 + 4, area.y, area.w - area.w / 2 - 4, area.h),
+        Placement::Left => zone(area, 0, 0, 6, 12),
+        Placement::Right => zone(area, 6, 0, 6, 12),
         Placement::Maximized => area,
+        Placement::Zone(x, y, w, h) => zone(area, x, y, w, h),
     };
     (r.w >= minimum.0 && r.h >= minimum.1).then_some(r)
 }
@@ -72,6 +120,27 @@ mod tests {
         assert!(target(Placement::Left, a, (700, 200)).is_none());
         assert_eq!(clamp(Rect::new(2000, 1000, 800, 600), a), Rect::new(480, 120, 800, 600));
     }
+    #[test]
+    fn moorings_zones_tile_the_area() {
+        let a = Rect::new(8, 62, 1264, 730);
+        for layout in MOORINGS {
+            let rects: alloc::vec::Vec<Rect> =
+                layout.iter().map(|&z| target(zone_placement(z), a, (1, 1)).unwrap()).collect();
+            // Every zone is inside the area and no two overlap.
+            for (i, r) in rects.iter().enumerate() {
+                assert_eq!(r.intersect(&a), *r);
+                for o in &rects[i + 1..] {
+                    assert!(!r.intersects(o), "{r:?} overlaps {o:?}");
+                }
+            }
+            // Together they reach every edge.
+            assert_eq!(rects.iter().map(|r| r.x).min(), Some(a.x));
+            assert_eq!(rects.iter().map(|r| r.right()).max(), Some(a.right()));
+            assert_eq!(rects.iter().map(|r| r.bottom()).max(), Some(a.bottom()));
+        }
+        assert_eq!(zone_placement((0, 0, 6, 12)), Placement::Left);
+    }
+
     #[test]
     fn switch_order_and_closed_selection() {
         let mut s = Switcher::new(alloc::vec![3, 1, 2], false);

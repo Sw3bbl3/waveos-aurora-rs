@@ -133,6 +133,17 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Fills `r` with a colour (and alpha) computed per pixel.
+    pub fn fill_rect_with(&mut self, r: Rect, color: impl Fn(i32, i32) -> u32) {
+        let area = r.intersect(&self.clip);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let c = color(x, y);
+                self.put(x, y, c, alpha(c));
+            }
+        }
+    }
+
     pub fn fill_round_rect(&mut self, r: Rect, radius: i32, c: u32) {
         self.fill_round_rect_with(r, radius, |_, _| c);
     }
@@ -163,15 +174,6 @@ impl<'a> Canvas<'a> {
                 self.put(x, y, c, a);
             }
         }
-    }
-
-    /// Fills only the bottom corners rounded (for window content under a title bar).
-    pub fn fill_rect_round_bottom(&mut self, r: Rect, radius: i32, c: u32) {
-        let top = Rect::new(r.x, r.y, r.w, (r.h - radius).max(0));
-        self.fill_rect(top, c);
-        let bottom = Rect::new(r.x, r.bottom() - 2 * radius, r.w, 2 * radius);
-        let band = Rect::new(r.x, r.bottom() - radius, r.w, radius);
-        self.with_clip(band, |cv| cv.fill_round_rect(bottom, radius, c));
     }
 
     /// A 1px anti-aliased outline of a rounded rectangle.
@@ -276,10 +278,11 @@ impl<'a> Canvas<'a> {
 
     /// Copies an opaque `src_w`×`src_h` image (row stride = `src_w`) to `dst`'s
     /// top-left corner, clipped to `dst` and the canvas clip. With `radius > 0`
-    /// the bottom corners are rounded (anti-aliased) — used for window contents.
+    /// all four corners of `dst` are rounded (anti-aliased) — window contents.
     pub fn blit(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, radius: i32) {
         let img = Rect::new(dst.x, dst.y, (src_w as i32).min(dst.w), (src_h as i32).min(dst.h));
-        let straight = if radius > 0 { Rect::new(img.x, img.y, img.w, dst.h - radius) } else { img };
+        let radius = radius.min(dst.w / 2).min(dst.h / 2).max(0);
+        let straight = Rect::new(img.x, dst.y + radius, img.w, dst.h - 2 * radius);
         let area = img.intersect(&straight).intersect(&self.clip);
         for y in area.y..area.bottom() {
             let s0 = ((y - dst.y) as u32 * src_w + (area.x - dst.x) as u32) as usize;
@@ -288,31 +291,22 @@ impl<'a> Canvas<'a> {
             self.buf[d0..d0 + n].copy_from_slice(&src[s0..s0 + n]);
         }
         if radius > 0 {
-            let band = Rect::new(dst.x, dst.bottom() - radius, dst.w, radius);
-            let shape = Rect::new(dst.x, dst.bottom() - 2 * radius, dst.w, 2 * radius);
-            self.with_clip(band.intersect(&img), |cv| {
-                cv.fill_round_rect_with(shape, radius, |x, y| {
-                    0xFF00_0000 | src[((y - dst.y) as u32 * src_w + (x - dst.x) as u32) as usize]
-                })
-            });
+            for band in [Rect::new(dst.x, dst.y, dst.w, radius), Rect::new(dst.x, dst.bottom() - radius, dst.w, radius)] {
+                self.with_clip(band.intersect(&img), |cv| {
+                    cv.fill_round_rect_with(dst, radius, |x, y| {
+                        0xFF00_0000 | src[((y - dst.y) as u32 * src_w + (x - dst.x) as u32) as usize]
+                    })
+                });
+            }
         }
     }
 
+    /// Like [`blit`](Self::blit) for a surface with transparency (glass regions).
     pub fn blit_alpha(&mut self, src: &[u32], sw: u32, sh: u32, dst: Rect, radius: i32) {
         let img = Rect::new(dst.x, dst.y, (sw as i32).min(dst.w), (sh as i32).min(dst.h));
-        let top = Rect::new(dst.x, dst.y, dst.w, (dst.h - radius).max(0));
-        self.with_clip(img.intersect(&top), |cv| {
-            cv.fill_round_rect_with(img, 0, |x, y| src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize])
+        self.with_clip(img.intersect(&self.clip), |cv| {
+            cv.fill_round_rect_with(dst, radius, |x, y| src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize])
         });
-        if radius > 0 {
-            let band = Rect::new(dst.x, dst.bottom() - radius, dst.w, radius);
-            let shape = Rect::new(dst.x, dst.bottom() - 2 * radius, dst.w, 2 * radius);
-            self.with_clip(img.intersect(&band), |cv| {
-                cv.fill_round_rect_with(shape, radius, |x, y| {
-                    src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize]
-                })
-            });
-        }
     }
 
     /// Draws a `src_w`×`src_h` image with straight alpha scaled into `dst`

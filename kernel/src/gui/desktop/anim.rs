@@ -82,7 +82,7 @@ impl Desktop {
         w.rect = Rect::new(0, 0, rw, rh);
         {
             let mut cv = Canvas::new(&mut buf, rw, rh);
-            paint_window(&mut cv, w, focused, false, &env, false);
+            paint_window(&mut cv, w, focused, &env, false);
         }
         w.rect = saved;
         Some((buf, rw as u32, rh as u32))
