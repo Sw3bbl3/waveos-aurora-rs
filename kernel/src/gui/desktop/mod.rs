@@ -2,7 +2,7 @@
 //!
 //! Rendering is damage-driven: every state change records the screen
 //! rectangles it affects, and `render` repaints only those, back to front:
-//! wallpaper → windows → dock → menu bar → launcher → menus → cursor.
+//! wallpaper → windows → Harbor → bar → Shoal → menus → cursor.
 
 mod anim;
 mod bar;
@@ -10,8 +10,10 @@ mod switcher;
 use lumen::windowing::{self, Placement, Switcher};
 mod dragdrop;
 mod handle;
+mod harbor;
 mod notifications;
 mod shell;
+mod shoal;
 mod shore;
 mod spotlight;
 
@@ -31,7 +33,8 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub use shell::{Launcher, Menu};
+pub use shell::Menu;
+pub use shoal::Launcher;
 
 /// Decodes a picture and scales it to cover `w`×`h` (cropping the overflow).
 fn picture_wallpaper(path: &str, w: i32, h: i32) -> Option<Vec<u32>> {
@@ -129,8 +132,7 @@ pub struct Desktop {
     damage: Vec<Rect>,
     launcher: Option<Launcher>,
     menu: Option<Menu>,
-    dock_hover: Option<usize>,
-    dock_revealed: bool,
+    harbor: harbor::HarborState,
     /// Where a dragged window would moor, and as what.
     snap_preview: Option<(Rect, Placement)>,
     /// The handle of the window the pointer is near, and the pill button under it.
@@ -203,8 +205,7 @@ impl Desktop {
             damage: Vec::new(),
             launcher: None,
             menu: None,
-            dock_hover: None,
-            dock_revealed: false,
+            harbor: harbor::HarborState::default(),
             snap_preview: None,
             handle: None,
             handle_button: None,
@@ -416,17 +417,6 @@ impl Desktop {
         }
     }
 
-    /// The dock icon of the app owning window `id` (for minimize/restore).
-    fn dock_icon_of(&self, id: u32) -> Rect {
-        let kind = self.index_of(id).map(|i| self.windows[i].app.kind());
-        let (dock, items) = self.dock_layout();
-        items
-            .into_iter()
-            .find(|(it, _)| matches!(it, shell::DockItem::App(k) if Some(*k) == kind))
-            .map(|(_, r)| r)
-            .unwrap_or(Rect::new(dock.x + dock.w / 2 - 24, dock.y + 8, 48, 48))
-    }
-
     fn damage_window(&mut self, id: u32) {
         if let Some(i) = self.index_of(id) {
             let b = self.windows[i].bounds();
@@ -439,6 +429,7 @@ impl Desktop {
         self.damage(Rect::new(0, 0, self.w, MENUBAR_H));
         let d = self.dock_rect();
         self.damage(d.inset(-40));
+        self.update_harbor();
     }
 
     pub fn raise(&mut self, id: u32) {
@@ -808,7 +799,7 @@ impl Desktop {
             || self.notifications_moving()
             || self.crest_moving()
             || self.shore_moving()
-            || self.launching.iter().any(|&(_, t)| self.now_ms < t + 3000)
+            || self.harbor_moving()
     }
 
     /// Absolute deadline, recalculated after input and client commands. Client
@@ -837,7 +828,7 @@ impl Desktop {
         if self.shore.is_some() {
             next = next.min(self.last_tick + 530);
         }
-        next.min(self.notification_deadline()).min(self.bar_deadline())
+        next.min(self.notification_deadline()).min(self.bar_deadline()).min(self.harbor_deadline())
     }
 
     /// Runs `f` against window `id`'s app and applies its requests.
@@ -865,6 +856,9 @@ impl Desktop {
         match ev {
             InputEvent::Pointer { x, y, buttons, wheel } => self.pointer(x, y, buttons, wheel),
             InputEvent::Key(k) => self.key(k),
+        }
+        if self.shore.is_none() {
+            self.update_harbor();
         }
     }
 
@@ -1280,12 +1274,10 @@ impl Desktop {
         busy |= self.step_notifications();
         busy |= self.step_bar();
         busy |= self.shore_moving();
-        // Dock icons bounce while their app starts.
-        if self.launching.iter().any(|&(_, t)| now_ms < t + 3000) {
-            let d = self.dock_rect();
-            self.damage(d.inset(-44));
-            busy = true;
+        if self.shore.is_none() {
+            self.update_harbor();
         }
+        busy |= self.step_harbor();
         if busy {
             16
         } else {
@@ -1352,6 +1344,8 @@ impl Desktop {
             || self.current.is_some()
             || self.shore.is_some()
             || self.crest_moving()
+            || self.harbor_moving()
+            || self.harbor.peek.is_some()
             || self.dnd.is_some()
             || self.power.is_some()
             || self.switcher.is_some()
@@ -1409,7 +1403,8 @@ impl Desktop {
         self.paint_ghosts(cv);
         self.paint_handle(cv);
         self.paint_moorings(cv);
-        self.paint_shell(cv);
+        self.paint_shoal(cv);
+        self.paint_harbor(cv);
         self.paint_bar(cv);
         self.paint_menu(cv);
         self.paint_center(cv);

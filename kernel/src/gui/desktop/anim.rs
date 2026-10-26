@@ -71,7 +71,7 @@ fn halo(r: Rect) -> Rect {
 
 impl Desktop {
     /// Renders window `id` (chrome and content, no shadow) into a buffer.
-    fn snapshot(&mut self, id: u32) -> Option<(Vec<u32>, u32, u32)> {
+    pub(super) fn snapshot(&mut self, id: u32) -> Option<(Vec<u32>, u32, u32)> {
         let i = self.index_of(id)?;
         let focused = self.focused_id() == Some(id);
         let env = self.env(focused);

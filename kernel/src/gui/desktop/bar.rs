@@ -222,7 +222,7 @@ pub(super) fn paint_ring(cv: &mut Canvas, cx: i32, cy: i32, size: i32, color: u3
 }
 
 /// The magnifying glass for Seek.
-fn paint_seek(cv: &mut Canvas, cx: i32, cy: i32, color: u32) {
+pub(super) fn paint_seek(cv: &mut Canvas, cx: i32, cy: i32, color: u32) {
     cv.stroke_arc((cx - 2) * 16, (cy - 2) * 16, 5 * 16 + 8, 28, 0, 1024, color);
     cv.line(cx + 2, cy + 2, cx + 6, cy + 6, 2, color);
 }
