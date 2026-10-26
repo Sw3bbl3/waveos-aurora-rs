@@ -159,6 +159,8 @@ pub struct Desktop {
     dnd: Option<dragdrop::Session>,
     trash_full: bool,
     ghosts: Vec<anim::Ghost>,
+    /// Glide's window pictures, taken when it opens.
+    glide: Vec<(u32, aurora_image::Image)>,
     history: Vec<super::notify::Notification>,
     center: Option<notifications::Center>,
     spotlight: Option<spotlight::Spotlight>,
@@ -224,6 +226,7 @@ impl Desktop {
             dnd: None,
             trash_full: crate::fs::trash::count() > 0,
             ghosts: Vec::new(),
+            glide: Vec::new(),
             history: Vec::new(),
             center: None,
             spotlight: None,

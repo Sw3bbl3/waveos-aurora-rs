@@ -11,14 +11,16 @@ use crate::gui::geom::Rect;
 use crate::gui::icons::{self, Icon};
 use crate::gui::notify::{self, Notification};
 use crate::gui::settings;
-use crate::gui::theme::{self, DOCK_H, DOCK_MARGIN, MENUBAR_H};
+use crate::gui::theme::{self, MENUBAR_H};
 use crate::gui::widgets;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 const SLIDE_MS: u64 = 240;
-const CENTER_W: i32 = 364;
+const CENTER_W: i32 = 700;
+const CENTER_H: i32 = 420;
+const LEFT_W: i32 = 300;
 const HISTORY: usize = 50;
 const CARD_H: i32 = 70;
 
@@ -176,9 +178,9 @@ impl Desktop {
 
     // ----------------------------------------------- notification center
 
+    /// Drift drops from Crest: two columns, the calendar and Calm on the
+    /// left, the notifications on the right.
     fn center_rect(&self) -> Rect {
-        let top = MENUBAR_H + 8;
-        let bottom = self.h - DOCK_H - DOCK_MARGIN - 12;
         let now = self.now_ms;
         let (open, close) = match &self.center {
             Some(c) => (
@@ -187,13 +189,16 @@ impl Desktop {
             ),
             None => (0, 0),
         };
-        let slide = ((1000 - open) + close) * (CENTER_W as i64 + 20) / 1000;
-        Rect::new(self.w - CENTER_W - 10 + slide as i32, top, CENTER_W, bottom - top)
+        // Grows out of Crest: narrower and higher while it opens.
+        let p = (open - close).clamp(0, 1000) as i32;
+        let w = CENTER_W - (1000 - p) * 120 / 1000;
+        let h = CENTER_H - (1000 - p) * 60 / 1000;
+        let y = MENUBAR_H + 4 - (1000 - p) * 14 / 1000;
+        Rect::new((self.w - w) / 2, y, w, h)
     }
 
     fn center_area(&self) -> Rect {
-        let r = self.center_rect();
-        Rect::new(self.w - CENTER_W - 60, r.y - 20, CENTER_W + 60, r.h + 60)
+        Rect::new((self.w - CENTER_W) / 2 - 50, MENUBAR_H - 30, CENTER_W + 100, CENTER_H + 90)
     }
 
     pub(super) fn toggle_center(&mut self) {
@@ -214,20 +219,26 @@ impl Desktop {
         self.center.as_ref().is_some_and(|c| c.closing_at.is_none())
     }
 
+    fn center_columns(&self) -> (Rect, Rect) {
+        let p = self.center_rect();
+        let left = Rect::new(p.x + 18, p.y + 18, LEFT_W, p.h - 36);
+        let right = Rect::new(left.right() + 36, p.y + 18, p.right() - 18 - (left.right() + 36), p.h - 36);
+        (left, right)
+    }
+
     /// Layout of the panel's interactive parts.
     fn center_hits(&self) -> Vec<(CenterHit, Rect)> {
-        let p = self.center_rect();
-        let cal = Rect::new(p.x + 14, p.y + 80, p.w - 28, 250);
+        let (left, right) = self.center_columns();
+        let cal = Rect::new(left.x, left.y + 66, left.w, 252);
         let mut v = alloc::vec![
             (CenterHit::PrevMonth, Rect::new(cal.right() - 64, cal.y + 12, 26, 26)),
             (CenterHit::NextMonth, Rect::new(cal.right() - 34, cal.y + 12, 26, 26)),
-            (CenterHit::Dnd, Rect::new(p.x + 14, cal.bottom() + 12, p.w - 28, 44)),
-            (CenterHit::Clear, Rect::new(p.right() - 70, cal.bottom() + 72, 56, 24)),
+            (CenterHit::Dnd, Rect::new(left.x, cal.bottom() + 12, left.w, 52)),
+            (CenterHit::Clear, Rect::new(right.right() - 60, right.y + 4, 60, 26)),
         ];
-        let list_y = cal.bottom() + 104;
         for (i, _) in self.history.iter().enumerate() {
-            let r = Rect::new(p.x + 14, list_y + i as i32 * (CARD_H + 8), p.w - 28, CARD_H);
-            if r.bottom() > p.bottom() - 10 {
+            let r = Rect::new(right.x, right.y + 44 + i as i32 * (CARD_H + 8), right.w, CARD_H);
+            if r.bottom() > right.bottom() {
                 break;
             }
             v.push((CenterHit::Card(i), r));
@@ -286,18 +297,24 @@ impl Desktop {
         }
         let t = theme::current();
         let p = self.center_rect();
-        cv.shadow(p, 18, 34, 10, t.shadow);
-        cv.glass(&self.blurred, p, 18, t.panel_tint);
-        cv.stroke_round_rect(p, 18, if t.dark { 0x30FF_FFFF } else { 0x80FF_FFFF });
+        cv.shadow(p, 24, 34, 10, t.shadow);
+        cv.frosted(p, 24, t.panel_tint);
+        cv.stroke_round_rect(p, 24, if t.dark { 0x24FF_FFFF } else { 0x80FF_FFFF });
+        if p.w < CENTER_W - 40 {
+            // Still growing out of Crest: just the shell.
+            return;
+        }
+        let (left, right) = self.center_columns();
         let d = crate::drivers::rtc::now();
         let wd = weekday(d.year as i32, d.month as u32, d.day as u32) as usize;
-        cv.text(p.x + 20, p.y + 36, DAYS[wd], theme::ui_bold(22), t.text);
+        cv.text(left.x + 4, left.y + 26, DAYS[wd], theme::display(24), t.text);
         let date = format!("{} {}, {}", MONTHS[(d.month.clamp(1, 12) - 1) as usize], d.day, d.year);
-        cv.text(p.x + 20, p.y + 60, &date, theme::ui(15), t.text_secondary);
+        cv.text(left.x + 4, left.y + 50, &date, theme::ui(14), t.text_secondary);
+        cv.fill_rect(Rect::new(left.right() + 18, p.y + 22, 1, p.h - 44), t.separator);
 
         // Calendar.
-        let cal = Rect::new(p.x + 14, p.y + 80, p.w - 28, 250);
-        cv.fill_round_rect(cal, 14, with_alpha(t.window_bg, 0xB0));
+        let cal = Rect::new(left.x, left.y + 66, left.w, 252);
+        cv.fill_round_rect(cal, 18, with_alpha(t.text, 0x0A));
         let months = d.year as i32 * 12 + d.month as i32 - 1 + c.month_offset;
         let (y, m) = (months.div_euclid(12), (months.rem_euclid(12) + 1) as u32);
         let title = format!("{} {}", MONTHS[(m - 1) as usize], y);
@@ -307,7 +324,7 @@ impl Desktop {
             match hit {
                 CenterHit::PrevMonth | CenterHit::NextMonth => {
                     if hovered {
-                        cv.fill_round_rect(r, 7, t.hover);
+                        cv.fill_round_rect(r, 13, t.hover);
                     }
                     let (cx, cy) = r.center();
                     let dd = if hit == CenterHit::PrevMonth { 1 } else { -1 };
@@ -315,17 +332,25 @@ impl Desktop {
                     cv.line(cx - 2 * dd, cy, cx + 3 * dd, cy + 5, 2, t.text);
                 }
                 CenterHit::Dnd => {
-                    cv.fill_round_rect(r, 12, with_alpha(t.window_bg, 0xB0));
-                    icons::draw(cv, Icon::Clock, Rect::new(r.x + 10, r.y + 8, 28, 28));
-                    cv.text(r.x + 48, r.y + 27, "Do Not Disturb", theme::ui_bold(13), t.text);
                     let on = settings::get_bool("dnd", false);
-                    widgets::toggle(cv, Rect::new(r.right() - 54, r.y + 11, 42, 22), on);
+                    cv.fill_round_rect(r, 18, if hovered { t.hover } else { with_alpha(t.text, 0x0A) });
+                    let dot = Rect::new(r.x + 10, r.y + 10, 32, 32);
+                    cv.fill_round_rect(dot, 16, if on { theme::accent() } else { with_alpha(t.text, 0x18) });
+                    // A crescent: Calm.
+                    let (cx, cy) = dot.center();
+                    let ink = if on { 0xFFFF_FFFF } else { t.text };
+                    let bg = cv.buf[(cy * cv.width + cx) as usize];
+                    cv.fill_circle(cx, cy, 8, ink);
+                    cv.fill_circle(cx + 4, cy - 3, 7, bg);
+                    cv.text(r.x + 52, r.y + 22, "Calm", theme::ui_bold(13), t.text);
+                    cv.text(r.x + 52, r.y + 40, if on { "Notifications wait" } else { "Off" }, theme::ui(12), t.text_secondary);
+                    widgets::toggle(cv, Rect::new(r.right() - 54, r.y + 15, 42, 22), on);
                 }
                 CenterHit::Clear if !self.history.is_empty() => {
                     if hovered {
-                        cv.fill_round_rect(r, 7, t.hover);
+                        cv.fill_round_rect(r, 13, t.hover);
                     }
-                    cv.text_centered(r, "Clear", theme::ui(12), theme::accent());
+                    cv.text_centered(r, "Clear", theme::ui_bold(12), theme::accent());
                 }
                 _ => {}
             }
@@ -353,18 +378,23 @@ impl Desktop {
             }
         }
 
-        // History.
-        let hy = cal.bottom() + 72;
-        cv.text(p.x + 20, hy + 17, "Notifications", theme::ui_bold(14), t.text);
+        // Notifications.
+        cv.text(right.x + 4, right.y + 22, "Notifications", theme::ui_bold(15), t.text);
         if self.history.is_empty() {
-            let r = Rect::new(p.x, hy + 40, p.w, 40);
-            cv.text_centered(r, "No Notifications", theme::ui(13), t.text_secondary);
+            let r = Rect::new(right.x, right.y + 40, right.w, right.h - 40);
+            let (cx, cy) = r.center();
+            // Still water: three calm lines.
+            for (k, w) in [44, 30, 18].iter().enumerate() {
+                let yy = cy - 34 + k as i32 * 9;
+                cv.fill_round_rect(Rect::new(cx - w / 2, yy, *w, 3), 2, with_alpha(theme::waterline(), 0x90 - k as u8 * 0x28));
+            }
+            cv.text_centered(Rect::new(r.x, cy - 6, r.w, 20), "All quiet", theme::ui_bold(14), t.text);
+            cv.text_centered(Rect::new(r.x, cy + 14, r.w, 20), "New notifications will drift in here.", theme::ui(12), t.text_secondary);
         }
         for (hit, r) in self.center_hits() {
             if let CenterHit::Card(i) = hit {
-                let bg =
-                    if c.hover == Some(hit) { with_alpha(t.window_bg, 0xE0) } else { with_alpha(t.window_bg, 0xB0) };
-                cv.fill_round_rect(r, 14, bg);
+                let bg = if c.hover == Some(hit) { with_alpha(t.text, 0x16) } else { with_alpha(t.text, 0x0A) };
+                cv.fill_round_rect(r, 16, bg);
                 self.paint_card(cv, r, &self.history[i]);
             }
         }

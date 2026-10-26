@@ -3,7 +3,7 @@
 
 use super::Desktop;
 use crate::gui::apps::AppKind;
-use crate::gui::canvas::{mix, with_alpha, Canvas};
+use crate::gui::canvas::{mix, Canvas};
 use crate::gui::geom::Rect;
 use crate::gui::theme::{self, MENUBAR_H};
 use alloc::vec::Vec;
@@ -218,9 +218,9 @@ impl Desktop {
         if let Some(m) = &self.menu {
             let r = m.rect();
             if r.inset(-24).intersects(&clip) {
-                cv.shadow(r, 10, 20, 8, t.shadow * 2 / 3);
-                cv.fill_round_rect(r, 10, with_alpha(t.window_bg, 0xF6));
-                cv.stroke_round_rect(r, 10, t.window_border);
+                cv.shadow(r, 16, 24, 8, t.shadow * 2 / 3);
+                cv.frosted(r, 16, t.panel_tint);
+                cv.stroke_round_rect(r, 16, if t.dark { 0x24FF_FFFF } else { 0x80FF_FFFF });
                 let f = theme::ui(13);
                 for (i, (it, ir)) in m.items.iter().zip(m.item_rects()).enumerate() {
                     if it.action.is_none() {
@@ -229,7 +229,7 @@ impl Desktop {
                     }
                     let hovered = m.hover == Some(i);
                     if hovered {
-                        cv.fill_round_rect(ir, 6, mix(theme::accent(), 0xFFFF_FFFF, 20));
+                        cv.fill_round_rect(ir, 10, mix(theme::accent(), 0xFFFF_FFFF, 20));
                     }
                     let fg = if hovered { 0xFFFF_FFFF } else { t.text };
                     cv.text(ir.x + 12, ir.y + 18, it.label, f, fg);
