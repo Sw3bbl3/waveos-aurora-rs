@@ -4,6 +4,7 @@
 //! desktop update, repaints only damaged regions into a RAM back buffer and
 //! copies those regions to the GOP framebuffer.
 
+pub mod account;
 pub mod apps;
 pub mod boot;
 pub mod clipboard;

@@ -1,15 +1,14 @@
-//! Shell chrome: the menu bar, the dock, the launcher and dropdown menus.
+//! Shell chrome: the dock, the launcher and the menus that drop from the
+//! left bubble (the WayV menu and the app's window menu).
 
 use super::Desktop;
 use crate::drivers::input::{KeyCode, KeyEvent};
-use crate::drivers::rtc;
 use crate::gui::apps::{self, AppKind, CATALOG};
 use crate::gui::canvas::{mix, with_alpha, Canvas};
 use crate::gui::geom::Rect;
 use crate::gui::icons::{self, Icon};
 use crate::gui::theme::{self, DOCK_MARGIN, DOCK_PAD, MENUBAR_H};
 use crate::gui::widgets;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -36,6 +35,7 @@ enum MenuAction {
     Launcher,
     Power,
     Sleep,
+    Lock,
     Minimize,
     Zoom,
     Close,
@@ -68,6 +68,11 @@ pub struct Menu {
 }
 
 impl Menu {
+    /// The app's window menu (as opposed to the WayV menu).
+    pub(super) fn is_app_menu(&self) -> bool {
+        self.kind == MenuKind::App
+    }
+
     fn rect(&self) -> Rect {
         let f = theme::ui(13);
         let w = self.items.iter().map(|i| f.width(i.label) + f.width(i.shortcut) + 64).max().unwrap_or(160).max(200);
@@ -128,30 +133,6 @@ impl Launcher {
     fn pages(&self) -> usize {
         let q = self.query.to_ascii_lowercase();
         self.apps.iter().filter(|a| a.name.to_ascii_lowercase().contains(q.as_str())).count().div_ceil(18).max(1)
-    }
-}
-
-/// The menu-bar clock, as the Date & Time preferences ask.
-pub fn clock_text() -> String {
-    use crate::gui::prefs::get_bool;
-    use aurora_abi::pref;
-    let d = rtc::now();
-    let secs = if get_bool(pref::CLOCK_SECONDS) { format!(":{:02}", d.second) } else { String::new() };
-    let time = if get_bool(pref::CLOCK_24H) {
-        format!("{:02}:{:02}{}", d.hour, d.minute, secs)
-    } else {
-        let (h12, ampm) = match d.hour {
-            0 => (12, "AM"),
-            1..=11 => (d.hour, "AM"),
-            12 => (12, "PM"),
-            h => (h - 12, "PM"),
-        };
-        format!("{}:{:02}{} {}", h12, d.minute, secs, ampm)
-    };
-    if get_bool(pref::CLOCK_DATE) {
-        format!("{} {} {}   {}", d.weekday_name(), d.month_name(), d.day, time)
-    } else {
-        time
     }
 }
 
@@ -372,38 +353,27 @@ impl Desktop {
     // --------------------------------------------------------------- menus
 
     fn menubar_targets(&self) -> [(MenuKind, Rect); 2] {
-        let name = self.app_name();
-        let w = theme::ui_bold(13).width(&name);
-        [
-            (MenuKind::Aurora, Rect::new(6, 2, 38, MENUBAR_H - 4)),
-            (MenuKind::App, Rect::new(46, 2, w + 20, MENUBAR_H - 4)),
-        ]
-    }
-
-    fn app_name(&self) -> String {
-        match self.focused() {
-            Some(w) if w.app.kind() == AppKind::Other => w.app.title(),
-            Some(w) => String::from(apps::info(w.app.kind()).name),
-            None => String::from("Desktop"),
-        }
+        let (_, mark, app) = self.left_bubble();
+        [(MenuKind::Aurora, mark), (MenuKind::App, app)]
     }
 
     fn open_menu(&mut self, kind: MenuKind, x: i32) {
         let items = match kind {
             MenuKind::Aurora => alloc::vec![
-                item("About WaveOS Aurora", "", MenuAction::About),
+                item("About This Computer", "", MenuAction::About),
                 item("Settings…", "", MenuAction::Settings),
                 item("Learn — WaveOS Guide", "", MenuAction::Open(AppKind::Learn)),
                 SEPARATOR,
-                item("Launcher", "Super", MenuAction::Launcher),
+                item("Shoal", "Super", MenuAction::Launcher),
                 SEPARATOR,
+                item("Lock Screen", "Super L", MenuAction::Lock),
                 item("Sleep", "", MenuAction::Sleep),
                 item("Restart…", "", MenuAction::Power),
                 item("Shut Down…", "", MenuAction::Power),
             ],
             MenuKind::App if self.focused().is_some() => alloc::vec![
-                item("Minimize", "", MenuAction::Minimize),
-                item("Zoom", "", MenuAction::Zoom),
+                item("Shrink", "Super ↓", MenuAction::Minimize),
+                item("Expand", "Super ↑", MenuAction::Zoom),
                 SEPARATOR,
                 item("Close Window", "Ctrl+W", MenuAction::Close),
             ],
@@ -434,6 +404,7 @@ impl Desktop {
             MenuAction::Launcher => self.toggle_launcher(),
             MenuAction::Power => self.open(AppKind::Power),
             MenuAction::Sleep => crate::power::sleep(),
+            MenuAction::Lock => self.lock(),
             MenuAction::Open(k) => self.open(k),
             MenuAction::Minimize => {
                 if let Some(id) = focused {
@@ -486,10 +457,11 @@ impl Desktop {
             return on_launcher_icon || y < MENUBAR_H || self.dock_rect().contains(x, y);
         }
 
+        if let Some((k, r)) = self.menubar_targets().into_iter().find(|(_, r)| r.contains(x, y)) {
+            self.open_menu(k, r.x);
+            return true;
+        }
         if y < MENUBAR_H {
-            if let Some((k, r)) = self.menubar_targets().into_iter().find(|(_, r)| r.contains(x, y)) {
-                self.open_menu(k, r.x);
-            }
             return true;
         }
 
@@ -609,31 +581,6 @@ impl Desktop {
             }
         }
 
-        // Menu bar.
-        let bar = Rect::new(0, 0, self.w, MENUBAR_H);
-        if bar.intersects(&clip) {
-            cv.glass(&self.blurred, bar, 0, t.glass_tint);
-            cv.fill_rect(Rect::new(0, MENUBAR_H - 1, self.w, 1), t.separator);
-            let targets = self.menubar_targets();
-            if let Some(m) = &self.menu {
-                if let Some((_, r)) = targets.iter().find(|(k, _)| *k == m.kind) {
-                    cv.fill_round_rect(*r, 6, t.hover);
-                }
-            }
-            icons::wave(cv, Rect::new(15, 9, 22, 12), 2, 2, t.text_on_glass);
-            let name = self.app_name();
-            cv.text(56, 20, &name, theme::ui_bold(13), t.text_on_glass);
-            if self.clock.is_empty() {
-                self.clock = clock_text();
-            }
-            let f = theme::ui(13);
-            cv.text(self.w - 18 - f.width(&self.clock), 20, &self.clock, f, t.text_on_glass);
-            self.paint_volume_icon(cv);
-            self.paint_battery_item(cv);
-            self.paint_network_item(cv);
-            self.paint_controls_icon(cv);
-        }
-
         // Launcher.
         if let Some(l) = &self.launcher {
             let p = self.launcher_rect();
@@ -699,8 +646,12 @@ impl Desktop {
                 icons::power(cv, cx, cy + 1, 18, t.text, bg);
             }
         }
+    }
 
-        // Dropdown menu.
+    /// The open menu, above the bar.
+    pub(super) fn paint_menu(&self, cv: &mut Canvas) {
+        let t = theme::current();
+        let clip = cv.clip;
         if let Some(m) = &self.menu {
             let r = m.rect();
             if r.inset(-24).intersects(&clip) {

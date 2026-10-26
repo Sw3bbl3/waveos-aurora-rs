@@ -22,10 +22,7 @@ impl Desktop {
         self.menu = None;
         self.center = None;
         self.spotlight = None;
-        self.quick_open = false;
-        self.close_volume_popover();
-        self.close_battery_popover();
-        self.close_network_popover();
+        self.current = None;
         self.super_alone = false;
         self.switcher = Some(Switcher::new(ids, reverse));
         self.damage_all();

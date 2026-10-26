@@ -5,20 +5,19 @@
 //! wallpaper → windows → dock → menu bar → launcher → menus → cursor.
 
 mod anim;
+mod bar;
 mod switcher;
 use lumen::windowing::{self, Placement, Switcher};
-mod battery;
-mod controls;
 mod dragdrop;
-mod network;
 mod notifications;
 mod shell;
+mod shore;
 mod spotlight;
-mod volume;
 
 #[cfg(feature = "ktest")]
 pub use spotlight::calc_for_test;
 
+use super::account::Account;
 use super::apps::{self, App, AppKind, ClientApp, CrashDialog, Env, Request};
 use super::canvas::Canvas;
 use super::cursor;
@@ -162,8 +161,6 @@ pub struct Desktop {
     dnd: Option<dragdrop::Session>,
     trash_full: bool,
     ghosts: Vec<anim::Ghost>,
-    banners: Vec<notifications::Banner>,
-    banner_hover: Option<u32>,
     history: Vec<super::notify::Notification>,
     center: Option<notifications::Center>,
     spotlight: Option<spotlight::Spotlight>,
@@ -175,11 +172,19 @@ pub struct Desktop {
     previous_resolution: Option<(u32, u32)>,
     /// Ask "Keep this resolution?" after the next resize.
     confirm_resolution: bool,
-    volume: volume::VolumeUi,
-    battery_popover: bool,
-    network_popover: bool,
-    quick_open: bool,
-    quick_ui: lumen::ui::State,
+    /// Crest, the island in the middle of the top bar.
+    crest: bar::Crest,
+    /// Current, the quick settings panel under the status ring.
+    current: Option<bar::Current>,
+    bar_hover: Option<bar::BarHit>,
+    /// The WayV mark for the left bubble (decoded on first use).
+    mark: Option<Option<aurora_image::Image>>,
+    /// Whether the power adapter was connected at the last check.
+    last_ac: Option<bool>,
+    /// The computer's account (None until first-boot setup).
+    account: Option<Account>,
+    /// Shore: setup, login or lock (nothing else gets input while it's up).
+    shore: Option<shore::Shore>,
 }
 
 impl Desktop {
@@ -218,8 +223,6 @@ impl Desktop {
             dnd: None,
             trash_full: crate::fs::trash::count() > 0,
             ghosts: Vec::new(),
-            banners: Vec::new(),
-            banner_hover: None,
             history: Vec::new(),
             center: None,
             spotlight: None,
@@ -227,13 +230,19 @@ impl Desktop {
             resolution_request: None,
             previous_resolution: None,
             confirm_resolution: false,
-            volume: volume::VolumeUi::default(),
-            battery_popover: false,
-            network_popover: false,
-            quick_open: false,
-            quick_ui: lumen::ui::State::default(),
+            crest: bar::Crest::default(),
+            current: None,
+            bar_hover: None,
+            mark: None,
+            last_ac: None,
+            account: None,
+            shore: None,
         };
-        d.open(AppKind::Welcome);
+        d.account = Account::load();
+        d.shore = Self::startup_shore(d.account.as_ref());
+        d.last_ac = Some(crate::acpi::power_info().flags & aurora_abi::power::AC_ONLINE != 0);
+        d.clock = bar::time_text();
+        d.crest_retarget();
         d.damage_all();
         d
     }
@@ -605,9 +614,20 @@ impl Desktop {
                 self.broadcast_theme();
                 self.damage_all();
             }
-            pref::CLOCK_24H | pref::CLOCK_SECONDS | pref::CLOCK_DATE => {
-                self.clock = shell::clock_text();
-                self.damage(Rect::new(0, 0, self.w, MENUBAR_H));
+            pref::CLOCK_24H | pref::CLOCK_SECONDS | pref::CLOCK_DATE | pref::CREST | pref::BATTERY_LEVEL => {
+                self.clock = bar::time_text();
+                self.crest_retarget();
+                self.damage(Rect::new(0, 0, self.w, MENUBAR_H + 40));
+                if self.current_open() {
+                    let r = self.current_rect();
+                    self.damage(r);
+                }
+            }
+            pref::DND => {
+                if self.current_open() {
+                    let r = self.current_rect();
+                    self.damage(r);
+                }
             }
             other => super::prefs::apply_system(other),
         }
@@ -752,9 +772,12 @@ impl Desktop {
                 Command::TrashChanged => self.refresh_trash(),
                 Command::Pref(key) => self.pref_changed(&key),
                 Command::PowerButton => self.open(AppKind::Power),
-                Command::PowerChanged => self.damage(Rect::new(0, 0, self.w, MENUBAR_H)),
-                // The screen lost its contents while asleep.
-                Command::Resumed => self.damage_all(),
+                Command::PowerChanged => self.power_changed(),
+                // The screen lost its contents while asleep; waking asks for the password.
+                Command::Resumed => {
+                    self.lock();
+                    self.damage_all();
+                }
                 Command::NetworkChanged => self.damage(Rect::new(0, 0, self.w, MENUBAR_H)),
                 Command::SetResolution(w, h) => {
                     if (w as i32, h as i32) != (self.w, self.h) {
@@ -782,7 +805,11 @@ impl Desktop {
 
     /// True when the compositor should draw at full frame rate.
     pub fn wants_frames(&self) -> bool {
-        self.animating() || self.notifications_moving() || self.launching.iter().any(|&(_, t)| self.now_ms < t + 3000)
+        self.animating()
+            || self.notifications_moving()
+            || self.crest_moving()
+            || self.shore_moving()
+            || self.launching.iter().any(|&(_, t)| self.now_ms < t + 3000)
     }
 
     /// Absolute deadline, recalculated after input and client commands. Client
@@ -807,7 +834,11 @@ impl Desktop {
         for &(_, at) in &self.launching {
             next = next.min(at + 5000);
         }
-        next.min(self.notification_deadline()).min(self.volume_deadline())
+        // The caret on Shore blinks.
+        if self.shore.is_some() {
+            next = next.min(self.last_tick + 530);
+        }
+        next.min(self.notification_deadline()).min(self.bar_deadline())
     }
 
     /// Runs `f` against window `id`'s app and applies its requests.
@@ -851,10 +882,12 @@ impl Desktop {
         }
         let pressed = buttons & !self.buttons;
         let released = self.buttons & !buttons;
-        if released & 1 != 0 {
-            self.quick_ui.release();
-        }
         self.buttons = buttons;
+        // Shore takes every click and key while it is up.
+        if self.shore.is_some() {
+            self.shore_pointer(x, y, pressed & BUTTON_LEFT != 0);
+            return;
+        }
 
         if moved {
             self.pointer_moved(x, y);
@@ -865,8 +898,8 @@ impl Desktop {
         if pressed & BUTTON_RIGHT != 0 {
             self.right_press(x, y);
         }
-        if released & BUTTON_LEFT != 0 && self.volume_release() {
-            // The volume slider had the pointer.
+        if released & BUTTON_LEFT != 0 && self.current_release() {
+            // Current's volume bar had the pointer.
         } else if released & BUTTON_LEFT != 0 && self.dnd.is_some() {
             self.grab = None;
             self.drop_drag(x, y);
@@ -914,10 +947,7 @@ impl Desktop {
         if self.switcher.is_some() {
             return;
         }
-        if self.controls_move(x, y) {
-            return;
-        }
-        if self.buttons & BUTTON_LEFT != 0 && self.volume_drag(x) {
+        if self.buttons & BUTTON_LEFT != 0 && self.current_drag(x) {
             return;
         }
         if self.dnd.is_some() {
@@ -992,7 +1022,7 @@ impl Desktop {
             self.grab = None;
         }
 
-        self.update_banner_hover(x, y);
+        self.bar_hover(x, y);
         self.update_center_hover(x, y);
         if self.spotlight_open() {
             self.spotlight_hover(x, y);
@@ -1030,22 +1060,10 @@ impl Desktop {
             && (y - self.last_click.2).abs() < 5;
         self.last_click = if double { (0, x, y) } else { (self.now_ms, x, y) };
 
-        if self.controls_press(x, y)
-            || self.network_press(x, y)
-            || self.battery_press(x, y)
-            || self.volume_press(x, y)
-            || self.spotlight_press(x, y)
-            || self.center_press(x, y)
-        {
+        if self.spotlight_press(x, y) || self.center_press(x, y) {
             return;
         }
-        if let Some(i) = self.banner_at(x, y) {
-            self.banner_click(i);
-            return;
-        }
-        // The clock opens the Notification Center.
-        if y < MENUBAR_H && x > self.w - 250 && self.menu.is_none() && self.launcher.is_none() {
-            self.toggle_center();
+        if self.menu.is_none() && self.bar_press(x, y) {
             return;
         }
         if self.shell_press(x, y) {
@@ -1142,10 +1160,21 @@ impl Desktop {
     }
 
     fn key(&mut self, k: KeyEvent) {
+        if self.shore.is_some() {
+            self.shore_key(&k);
+            return;
+        }
         if self.switcher_key(&k) {
             return;
         }
-        if self.controls_key(&k) {
+        if k.pressed && k.code == KeyCode::Escape && self.current_open() {
+            self.close_current();
+            return;
+        }
+        // Super L locks the screen.
+        if k.pressed && k.mods.super_key && matches!(k.ch, Some('l') | Some('L')) {
+            self.super_alone = false;
+            self.lock();
             return;
         }
         if self.dnd.is_some() {
@@ -1156,13 +1185,6 @@ impl Desktop {
         }
         // Volume keys work everywhere.
         if k.pressed && self.volume_key(k.code) {
-            return;
-        }
-        if k.pressed && k.code == KeyCode::Escape && (self.close_network_popover() || self.close_battery_popover()) {
-            return;
-        }
-        if k.pressed && k.code == KeyCode::Escape && self.volume_popover_open() {
-            self.close_volume_popover();
             return;
         }
         // The Super key alone (pressed and released) opens the launcher; with
@@ -1263,10 +1285,18 @@ impl Desktop {
     pub fn tick(&mut self, now_ms: u64) -> u64 {
         self.now_ms = now_ms;
         self.last_tick = now_ms;
-        let clock = shell::clock_text();
+        let clock = bar::time_text();
         if clock != self.clock {
             self.clock = clock;
-            self.damage(Rect::new(self.w - 260, 0, 260, MENUBAR_H));
+            self.crest_retarget();
+            self.damage(Rect::new(self.w / 2, 0, self.w / 2, MENUBAR_H));
+            if self.shore.is_some() {
+                self.damage_all();
+            }
+        }
+        // The caret on Shore.
+        if self.shore.is_some() {
+            self.damage_all();
         }
         let ids: Vec<u32> = self.windows.iter().filter(|w| !w.minimized).map(|w| w.id).collect();
         for id in ids {
@@ -1297,7 +1327,8 @@ impl Desktop {
         }
         let mut busy = self.step_animations();
         busy |= self.step_notifications();
-        self.step_volume();
+        busy |= self.step_bar();
+        busy |= self.shore_moving();
         // Dock icons bounce while their app starts.
         if self.launching.iter().any(|&(_, t)| now_ms < t + 3000) {
             let d = self.dock_rect();
@@ -1367,18 +1398,16 @@ impl Desktop {
             || self.menu.is_some()
             || self.center.is_some()
             || self.spotlight.is_some()
-            || self.quick_open
-            || self.battery_popover
-            || self.network_popover
-            || self.volume_popover_open()
-            || !self.banners.is_empty()
+            || self.current.is_some()
+            || self.shore.is_some()
+            || self.crest_moving()
             || self.dnd.is_some()
             || self.power.is_some()
             || self.switcher.is_some()
         {
             return false;
         }
-        let mut materials = alloc::vec![Rect::new(0, 0, self.w, MENUBAR_H), self.dock_rect()];
+        let mut materials = alloc::vec![Rect::new(0, 0, self.w, MENUBAR_H), self.crest_area(), self.dock_rect()];
         for w in &self.windows {
             if w.minimized {
                 continue;
@@ -1399,6 +1428,23 @@ impl Desktop {
             return;
         }
         cv.blit_same(&self.wallpaper, cv.clip);
+        if self.shore.is_some() {
+            self.paint_shore(cv);
+            if self.shore.as_ref().is_some_and(|s| s.mode != shore::Mode::Setup) {
+                self.paint_bar(cv);
+            }
+            if let Some(p) = self.power {
+                self.paint_power_overlay(cv, p);
+            }
+            self.scene.resize(cv.buf.len(), 0);
+            for y in cv.clip.y..cv.clip.bottom() {
+                let start = (y * cv.width + cv.clip.x) as usize;
+                let end = start + cv.clip.w as usize;
+                self.scene[start..end].copy_from_slice(&cv.buf[start..end]);
+            }
+            cursor::draw(cv, self.cursor.0, self.cursor.1);
+            return;
+        }
         let focused = self.focused_id();
         let clip = cv.clip;
         for i in 0..self.windows.len() {
@@ -1417,12 +1463,9 @@ impl Desktop {
             cv.stroke_round_rect(r, 16, theme::accent());
         }
         self.paint_shell(cv);
-        self.paint_banners(cv);
+        self.paint_bar(cv);
+        self.paint_menu(cv);
         self.paint_center(cv);
-        self.paint_volume(cv);
-        self.paint_battery_popover(cv);
-        self.paint_network_popover(cv);
-        self.paint_controls(cv);
         self.paint_spotlight(cv);
         self.paint_drag(cv);
         self.paint_switcher(cv);

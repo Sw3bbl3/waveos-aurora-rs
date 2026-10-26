@@ -1,9 +1,8 @@
-//! Notification banners and the Notification Center (with the calendar).
+//! Notifications and Drift.
 //!
-//! Banners slide in at the top right and leave after a few seconds; clicking
-//! one brings its app forward. Clicking the clock in the menu bar opens the
-//! Notification Center: today's date, a month calendar, Do Not Disturb, and
-//! the notification history.
+//! A new notification rises out of Crest for a few seconds (see `bar`);
+//! clicking it brings its app forward. Clicking Crest opens Drift: today's
+//! date, a month calendar, Calm (do not disturb) and the history.
 
 use super::Desktop;
 use crate::gui::apps;
@@ -18,19 +17,10 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const BANNER_W: i32 = 344;
-const BANNER_H: i32 = 72;
-const BANNER_MS: u64 = 5500;
 const SLIDE_MS: u64 = 240;
 const CENTER_W: i32 = 364;
 const HISTORY: usize = 50;
 const CARD_H: i32 = 70;
-
-pub struct Banner {
-    n: Notification,
-    shown_at: u64,
-    leaving_at: Option<u64>,
-}
 
 pub struct Center {
     opened_at: u64,
@@ -56,7 +46,7 @@ fn ease_out(t: i64) -> i64 {
     1000 - inv * inv / 1000 * inv / 1000
 }
 
-fn icon_for(path: &str) -> Icon {
+pub(super) fn icon_for(path: &str) -> Icon {
     apps::by_path(path).map(|a| a.icon).unwrap_or(Icon::Aurora)
 }
 
@@ -101,23 +91,8 @@ const MONTHS: [&str; 12] = [
 const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 impl Desktop {
-    // ------------------------------------------------------------ banners
-
-    fn banner_rect(&self, index: usize, b: &Banner) -> Rect {
-        let now = self.now_ms;
-        let enter = ease_out(((now.saturating_sub(b.shown_at)) * 1000 / SLIDE_MS) as i64);
-        let leave = b.leaving_at.map(|t| ease_out(((now.saturating_sub(t)) * 1000 / SLIDE_MS) as i64)).unwrap_or(0);
-        let slide = ((1000 - enter) + leave) * (BANNER_W as i64 + 24) / 1000;
-        let x = self.w - BANNER_W - 12 + slide as i32;
-        Rect::new(x, MENUBAR_H + 10 + index as i32 * (BANNER_H + 10), BANNER_W, BANNER_H)
-    }
-
-    fn banners_area(&self) -> Rect {
-        let n = self.banners.len().max(1) as i32;
-        Rect::new(self.w - BANNER_W - 60, MENUBAR_H, BANNER_W + 60, n * (BANNER_H + 10) + 40)
-    }
-
-    /// Takes new notifications from apps and the system.
+    /// Takes new notifications from apps and the system: each rises out of
+    /// Crest (unless Calm is on or Drift is open) and joins the history.
     pub(super) fn take_notifications(&mut self) {
         let dnd = settings::get_bool("dnd", false);
         let mut chime = false;
@@ -125,18 +100,10 @@ impl Desktop {
             // Apps' notifications chime; the system's own (screenshots, …) have their own sounds.
             chime |= !dnd && n.pid != 0;
             if !dnd && self.center.is_none() {
-                // At most three at once: the oldest leaves.
-                if self.banners.iter().filter(|b| b.leaving_at.is_none()).count() >= 3 {
-                    if let Some(b) = self.banners.iter_mut().find(|b| b.leaving_at.is_none()) {
-                        b.leaving_at = Some(self.now_ms);
-                    }
-                }
-                self.banners.push(Banner { n: n.clone(), shown_at: self.now_ms, leaving_at: None });
+                self.notice(n.clone());
             }
             self.history.insert(0, n);
             self.history.truncate(HISTORY);
-            let a = self.banners_area();
-            self.damage(a);
             if self.center.is_some() {
                 let r = self.center_rect();
                 self.damage(r);
@@ -147,43 +114,18 @@ impl Desktop {
         }
     }
 
-    /// Advances banner and panel animations; true while something moves.
+    /// True while Drift slides.
     pub(super) fn notifications_moving(&self) -> bool {
-        self.banners.iter().any(|b| self.now_ms < b.shown_at + SLIDE_MS || b.leaving_at.is_some())
-            || self.center.as_ref().is_some_and(|c| self.now_ms < c.opened_at + SLIDE_MS || c.closing_at.is_some())
+        self.center.as_ref().is_some_and(|c| self.now_ms < c.opened_at + SLIDE_MS || c.closing_at.is_some())
     }
 
     pub(super) fn notification_deadline(&self) -> u64 {
-        self.banners
-            .iter()
-            .filter(|b| b.leaving_at.is_none() && self.banner_hover != Some(b.n.id))
-            .map(|b| b.shown_at + BANNER_MS)
-            .min()
-            .unwrap_or(u64::MAX)
+        u64::MAX
     }
 
     pub(super) fn step_notifications(&mut self) -> bool {
         let now = self.now_ms;
         let mut moving = false;
-        for b in &mut self.banners {
-            if b.leaving_at.is_none() && now >= b.shown_at + BANNER_MS && !(self.banner_hover == Some(b.n.id)) {
-                b.leaving_at = Some(now);
-            }
-        }
-        let before = self.banners.len();
-        self.banners.retain(|b| b.leaving_at.is_none_or(|t| now < t + SLIDE_MS));
-        if before != self.banners.len() {
-            moving = true;
-        }
-        for b in &self.banners {
-            if now < b.shown_at + SLIDE_MS || b.leaving_at.is_some() {
-                moving = true;
-            }
-        }
-        if moving || !self.banners.is_empty() && before != self.banners.len() {
-            let a = self.banners_area();
-            self.damage(a);
-        }
         if let Some(c) = &self.center {
             let done_closing = c.closing_at.is_some_and(|t| now >= t + SLIDE_MS);
             let animating = now < c.opened_at + SLIDE_MS || c.closing_at.is_some();
@@ -199,15 +141,8 @@ impl Desktop {
         moving
     }
 
-    pub(super) fn banner_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.banners
-            .iter()
-            .enumerate()
-            .position(|(i, b)| b.leaving_at.is_none() && self.banner_rect(i, b).contains(x, y))
-    }
-
     /// Focuses the app that posted `n` (or opens it).
-    fn activate(&mut self, n: &Notification) {
+    pub(super) fn activate(&mut self, n: &Notification) {
         if n.pid != 0 {
             let win = self
                 .windows
@@ -221,53 +156,6 @@ impl Desktop {
         }
         if let Some(a) = apps::by_path(&n.app_path) {
             self.open(a.kind);
-        }
-    }
-
-    pub(super) fn banner_click(&mut self, i: usize) {
-        let now = self.now_ms;
-        let n = self.banners[i].n.clone();
-        self.banners[i].leaving_at = Some(now);
-        let a = self.banners_area();
-        self.damage(a);
-        // The close button dismisses without opening.
-        let r = self.banner_rect(i, &self.banners[i]);
-        let (cx, cy) = self.cursor;
-        if (cx - r.x).abs() < 14 && (cy - r.y).abs() < 14 {
-            return;
-        }
-        self.activate(&n);
-    }
-
-    pub(super) fn update_banner_hover(&mut self, x: i32, y: i32) {
-        let h = self.banner_at(x, y).map(|i| self.banners[i].n.id);
-        if h != self.banner_hover {
-            self.banner_hover = h;
-            let a = self.banners_area();
-            self.damage(a);
-        }
-    }
-
-    pub(super) fn paint_banners(&self, cv: &mut Canvas) {
-        if self.banners.is_empty() || !self.banners_area().intersects(&cv.clip) {
-            return;
-        }
-        let t = theme::current();
-        for (i, b) in self.banners.iter().enumerate() {
-            let r = self.banner_rect(i, b);
-            if !r.inset(-30).intersects(&cv.clip) {
-                continue;
-            }
-            cv.shadow(r, 16, 22, 6, t.shadow * 2 / 3);
-            cv.glass(&self.blurred, r, 16, t.panel_tint);
-            cv.stroke_round_rect(r, 16, if t.dark { 0x30FF_FFFF } else { 0x70FF_FFFF });
-            self.paint_card(cv, r, &b.n);
-            if self.banner_hover == Some(b.n.id) {
-                cv.fill_circle(r.x + 2, r.y + 2, 10, if t.dark { 0xFF3A_3A46 } else { 0xFFF2_F2F6 });
-                cv.stroke_round_rect(Rect::new(r.x - 8, r.y - 8, 20, 20), 10, t.window_border);
-                cv.line(r.x - 1, r.y - 1, r.x + 5, r.y + 5, 1, t.text);
-                cv.line(r.x + 5, r.y - 1, r.x - 1, r.y + 5, 1, t.text);
-            }
         }
     }
 
@@ -315,16 +203,10 @@ impl Desktop {
             Some(_) => {}
             None => {
                 self.center = Some(Center { opened_at: now, closing_at: None, month_offset: 0, hover: None });
-                // Banners give way to the panel.
-                for b in &mut self.banners {
-                    b.leaving_at.get_or_insert(now);
-                }
             }
         }
         let a = self.center_area();
         self.damage(a);
-        let b = self.banners_area();
-        self.damage(b);
         self.damage(Rect::new(0, 0, self.w, MENUBAR_H));
     }
 
