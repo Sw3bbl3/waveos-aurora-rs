@@ -35,16 +35,19 @@ pub const SETTINGS: &[Setting] = &[
     item!("sound/mute", "Mute sound", "audio silent speaker", Sound, Hit::Toggle(pref::MUTED)),
     item!(
         "notifications/do-not-disturb",
-        "Do Not Disturb",
-        "notifications silence focus",
+        "Calm",
+        "do not disturb notifications silence focus",
         Notifications,
         Hit::Toggle(pref::DND)
     ),
-    item!("desktop/dock-size", "Dock size", "desktop icons magnification", Desktop, Hit::DockSize, 5),
+    item!("bar/crest", "Show Crest", "clock time top bar notch", Bar, Hit::Toggle(pref::CREST)),
+    item!("bar/battery", "Show battery level", "percent power status ring", Bar, Hit::Toggle(pref::BATTERY_LEVEL)),
+    item!("login/auto", "Log in automatically", "password account startup", Login, Hit::Toggle(pref::AUTO_LOGIN)),
+    item!("desktop/dock-size", "Harbor size", "dock desktop icons magnification", Desktop, Hit::DockSize, 5),
     item!(
         "desktop/dock-autohide",
-        "Automatically hide Dock",
-        "desktop space",
+        "Hide Harbor until pointed at",
+        "dock autohide desktop space",
         Desktop,
         Hit::Toggle(pref::DOCK_AUTOHIDE),
         4

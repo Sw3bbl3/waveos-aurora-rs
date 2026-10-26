@@ -102,13 +102,13 @@ impl Installer {
 }
 impl App for Installer {
     fn title(&self) -> String {
-        "GINA Apps".into()
+        "Installer".into()
     }
     fn size(&self) -> (i32, i32) {
         (640, 540)
     }
     fn draw(&mut self, cv: &mut Canvas, r: Rect, _: &Env) {
-        let mut rows = alloc::vec![View::heading("GINA Apps"), View::label("Native applications for WaveOS Aurora")];
+        let mut rows = alloc::vec![View::heading("Installer"), View::label("Native applications for WaveOS Aurora")];
         if self.path.is_some() {
             match self.phase.lock().clone() {
                 Phase::Reading => rows.push(View::label("Reading and validating package…")),

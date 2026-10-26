@@ -1,4 +1,4 @@
-//! Constellation Studio: native projects, editing, visual layouts and GINA tools.
+//! Studio: native projects, editing, visual layouts and GINA tools.
 #![no_std]
 #![no_main]
 extern crate alloc;
@@ -366,7 +366,7 @@ impl Studio {
 }
 impl App for Studio {
     fn title(&self) -> String {
-        format!("Constellation Studio{}", if self.dirty() { " — Edited" } else { "" })
+        format!("Studio{}", if self.dirty() { " — Edited" } else { "" })
     }
     fn size(&self) -> (i32, i32) {
         (1180, 740)
@@ -421,7 +421,7 @@ impl App for Studio {
             }
             Mode::Guide => {
                 let lines = [
-                    "Constellation Studio",
+                    "Studio",
                     "Develop directly on WaveOS",
                     "1. Choose a project folder, then New or Open.",
                     "2. Edit Rust source, or use Design for the interface.",

@@ -41,6 +41,9 @@ pub fn get(key: &str) -> Option<String> {
     if key == "audio_device" {
         return audio::describe();
     }
+    if key == "account_name" {
+        return super::account::Account::load().map(|a| if a.full.is_empty() { a.name } else { a.full });
+    }
     settings::get(key).or_else(|| default(key).map(String::from))
 }
 

@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "aster"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "acpi",
  "aurora-abi",
@@ -96,18 +96,18 @@ dependencies = [
 
 [[package]]
 name = "aurora-abi"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "aurora-elf"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-mutate",
 ]
 
 [[package]]
 name = "aurora-help"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "aurora-image"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-mutate",
  "gif",
@@ -127,15 +127,15 @@ dependencies = [
 
 [[package]]
 name = "aurora-mutate"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "aurora-wav"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "aurorafs"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-mutate",
 ]
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "bootinfo"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "bumpalo"
@@ -485,7 +485,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "fat32"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-mutate",
  "fatfs",
@@ -536,7 +536,7 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "firstlight"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-elf",
  "bootinfo",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "gina"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-elf",
  "aurora-mutate",
@@ -824,7 +824,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lumen"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-mutate",
  "fontdue",
@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-mutate",
  "libm",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-media"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-mutate",
  "rusty_aac",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-script"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-mutate",
  "hashbrown 0.15.5",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-secure"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aes-gcm",
  "aurora-mutate",
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-web"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-mutate",
  "miniz_oxide 0.8.9",
@@ -1925,7 +1925,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-help",
  "aurora-wav",

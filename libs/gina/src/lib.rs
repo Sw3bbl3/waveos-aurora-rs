@@ -114,7 +114,7 @@ impl Manifest {
             return Err("This app needs a different processor architecture");
         }
         let sdk = quoted(get("sdk")?)?;
-        if sdk != "0.6" && sdk != "0.7" {
+        if sdk != "0.6" && sdk != "0.7" && sdk != "0.8" {
             return Err("Unsupported Constellation SDK version");
         }
         let m = Self {

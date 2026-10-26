@@ -39,7 +39,7 @@ struct SwitchLog {
 static SWITCH_RING: IrqMutex<SwitchLog> =
     IrqMutex::new(SwitchLog { entries: [(0, 0, 0); SWITCH_LOG], len: 0, dropped: 0 });
 
-/// Totals for Activity Monitor: (interrupts, system calls, context switches).
+/// Totals for Pulse: (interrupts, system calls, context switches).
 pub fn totals() -> (u64, u64, u64) {
     let irqs = IRQ_TIMER.load(Ordering::Relaxed)
         + IRQ_KEYBOARD.load(Ordering::Relaxed)

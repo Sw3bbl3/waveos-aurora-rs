@@ -1,4 +1,4 @@
-//! Preview — views PNG and BMP images.
+//! Lens — views PNG, JPEG, GIF and BMP pictures.
 //!
 //! Fit to window or zoom (wheel, +/−, double-click for actual size), drag to
 //! pan, rotate, step through the pictures in the same folder with ← and →,
@@ -229,7 +229,7 @@ impl App for Preview {
     fn title(&self) -> String {
         match &self.path {
             Some(p) => String::from(fs::file_name(p)),
-            None => String::from("Preview"),
+            None => String::from("Lens"),
         }
     }
 

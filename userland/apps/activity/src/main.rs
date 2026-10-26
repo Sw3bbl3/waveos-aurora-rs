@@ -1,4 +1,4 @@
-//! Activity Monitor — what the computer is doing: processes, CPU, memory,
+//! Pulse — what the computer is doing: processes, CPU, memory,
 //! disk and system counters, with live graphs. Select a process and Quit it.
 
 #![no_std]
@@ -365,7 +365,7 @@ impl Activity {
                 cv.fill_circle(r.x + 12, y + ROW_H / 2, 3, dot);
                 let name = match (info.user, info.name()) {
                     (0, n) => format!("{n} (kernel)"),
-                    (_, "Activity") => String::from("Activity Monitor"),
+                    (_, "Activity") => String::from("Pulse"),
                     (_, n) => String::from(n),
                 };
                 cv.text_clipped(
@@ -527,7 +527,7 @@ impl Activity {
 
 impl App for Activity {
     fn title(&self) -> String {
-        String::from("Activity Monitor")
+        String::from("Pulse")
     }
 
     fn size(&self) -> (i32, i32) {

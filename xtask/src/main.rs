@@ -453,8 +453,14 @@ fn system_image(programs: &[Program], out: &Path) {
         let name = f.file_name().unwrap().to_string_lossy().into_owned();
         t.file(&format!("Fonts/{name}"), &fs::read(&f).unwrap());
     }
-    // Living water design assets: app icons, wallpapers (day and night) and the WayV marks.
-    for (dir, src) in [("Icons", "assets/icons"), ("Wallpapers", "assets/wallpapers"), ("Brand", "assets/brand")] {
+    // Living water design assets: app icons, wallpapers (day and night, with
+    // small pictures for Settings) and the WayV marks.
+    for (dir, src) in [
+        ("Icons", "assets/icons"),
+        ("Wallpapers", "assets/wallpapers"),
+        ("Wallpapers/Thumbnails", "assets/wallpaper-thumbs"),
+        ("Brand", "assets/brand"),
+    ] {
         t.dir(dir);
         let mut files: Vec<_> = fs::read_dir(root().join(src)).unwrap().map(|e| e.unwrap().path()).collect();
         files.sort();
@@ -549,7 +555,7 @@ fn bundle_sdk(t: &mut tar::Tar) {
         .collect::<Vec<_>>()
         .join("\n");
     t.file("Developer/SDK/userland/Cargo.toml", user.as_bytes());
-    t.file("Developer/SDK/Cargo.toml",b"[workspace]\nmembers = [\"libs/*\"]\nresolver = \"2\"\n[workspace.package]\nversion = \"0.7.0\"\nedition = \"2021\"\nlicense = \"MIT\"\n");
+    t.file("Developer/SDK/Cargo.toml",b"[workspace]\nmembers = [\"libs/*\"]\nresolver = \"2\"\n[workspace.package]\nversion = \"0.8.0\"\nedition = \"2021\"\nlicense = \"MIT\"\n");
     t.file("Developer/STATUS.txt",b"Constellation SDK\nNative project editing, UI design and GINA packaging/installation are available.\nThe native Rust/LLVM toolchain and source debugger have not been ported.\nBuild operations fail explicitly until the native toolchain is installed.\nThe gallery package is precompiled on the build host, not compiled inside WaveOS.\n");
 }
 
