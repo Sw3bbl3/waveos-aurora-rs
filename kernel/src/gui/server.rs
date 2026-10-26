@@ -322,7 +322,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             let mut regions = Vec::new();
             let mut clients = CLIENTS.lock();
             let c = clients.get_mut(&id).ok_or(EBADF)?;
-            for data in bytes.chunks_exact(16) {
+            for data in bytes.as_chunks::<16>().0 {
                 let n = |at: usize| i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
                 let r = Rect::new(n(0), n(4), n(8), n(12));
                 if r.x < 0

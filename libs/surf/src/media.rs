@@ -188,6 +188,16 @@ pub fn supported_type(mime: &str) -> bool {
 
 const US: f64 = 1_000_000.0;
 
+/// One track of a file the browser demuxed itself (see [`MediaSource::from_tracks`]).
+pub struct DemuxedTrack {
+    pub kind: TrackKind,
+    /// The decoder configuration (avcC or AudioSpecificConfig).
+    pub config: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub frames: Vec<CodedFrame>,
+}
+
 impl MediaSource {
     pub fn new(id: u32) -> MediaSource {
         MediaSource {
@@ -372,15 +382,11 @@ impl MediaSource {
 
     /// A source for a whole file the browser demuxed itself: one buffer
     /// per track, already ended.
-    pub fn from_tracks(
-        id: u32,
-        duration: f64,
-        tracks: Vec<(TrackKind, Vec<u8>, u32, u32, Vec<CodedFrame>)>,
-    ) -> MediaSource {
+    pub fn from_tracks(id: u32, duration: f64, tracks: Vec<DemuxedTrack>) -> MediaSource {
         let mut ms = MediaSource::new(id);
         ms.duration = duration;
         ms.ready = ReadyState::Ended;
-        for (i, (kind, config, width, height, frames)) in tracks.into_iter().enumerate() {
+        for (i, DemuxedTrack { kind, config, width, height, frames }) in tracks.into_iter().enumerate() {
             let config: Arc<[u8]> = Arc::from(config);
             let frames = frames
                 .into_iter()

@@ -91,7 +91,7 @@ impl Stream {
                 let room = STREAM_CAPACITY.saturating_sub(g.buf.len());
                 if room > 0 {
                     let n = room.min(samples - done);
-                    for s in data[done * 2..(done + n) * 2].chunks_exact(2) {
+                    for s in data[done * 2..(done + n) * 2].as_chunks::<2>().0 {
                         g.buf.push_back(i16::from_le_bytes([s[0], s[1]]));
                     }
                     done += n;

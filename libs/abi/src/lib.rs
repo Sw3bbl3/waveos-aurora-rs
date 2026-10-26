@@ -284,7 +284,7 @@ pub mod report {
 
 /// Power sources, from ACPI (`power_info`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PowerInfo {
     /// Bits: [`power::BATTERY`], [`power::CHARGING`], …
     pub flags: u32,
@@ -299,22 +299,6 @@ pub struct PowerInfo {
     pub design_mwh: u32,
     pub model_len: u32,
     pub model: [u8; 32],
-}
-
-impl Default for PowerInfo {
-    fn default() -> Self {
-        PowerInfo {
-            flags: 0,
-            percent: 0,
-            minutes: 0,
-            rate_mw: 0,
-            remaining_mwh: 0,
-            full_mwh: 0,
-            design_mwh: 0,
-            model_len: 0,
-            model: [0; 32],
-        }
-    }
 }
 
 /// [`PowerInfo::flags`].

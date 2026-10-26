@@ -161,7 +161,7 @@ pub fn input(s: &mut Stack, i: usize, m: &[u8]) {
             (53, 1) => kind = v[0],
             (1, 4) => mask = ip_at(v, 0),
             (3, l) if l >= 4 => router = ip_at(v, 0),
-            (6, l) if l >= 4 => dns = v.chunks_exact(4).map(|d| ip_at(d, 0)).collect(),
+            (6, l) if l >= 4 => dns = v.as_chunks::<4>().0.iter().map(|d| ip_at(d, 0)).collect(),
             (51, 4) => lease = be32(v, 0),
             (54, 4) => server = ip_at(v, 0),
             _ => {}

@@ -33,7 +33,7 @@ pub struct BlockCache {
 impl BlockCache {
     pub fn new(dev: Arc<dyn BlockDevice>, capacity: usize) -> Result<BlockCache, isize> {
         let ss = dev.sector_size() as usize;
-        if BLOCK % ss != 0 {
+        if !BLOCK.is_multiple_of(ss) {
             return Err(EINVAL);
         }
         Ok(BlockCache {

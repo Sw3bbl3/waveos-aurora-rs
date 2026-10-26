@@ -64,7 +64,7 @@ impl UsbDisk {
             return Err(EIO);
         }
         io.tag = io.tag.wrapping_add(1);
-        let w = &io.wrapper;
+        let w = &mut io.wrapper;
         w.bytes_mut()[..31].fill(0);
         w.write::<u32>(0, CBW_SIGNATURE);
         w.write::<u32>(4, io.tag);
@@ -163,7 +163,7 @@ impl BlockDevice for UsbDisk {
         for (i, chunk) in buf.chunks_mut(per * self.block_size as usize).enumerate() {
             let n = (chunk.len() / self.block_size as usize) as u32;
             self.rw(false, lba + (i * per) as u64, n, &mut io)?;
-            chunk.copy_from_slice(&io.data.bytes_mut()[..chunk.len()]);
+            chunk.copy_from_slice(&io.data.bytes()[..chunk.len()]);
         }
         Ok(())
     }
@@ -263,7 +263,7 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
     {
         let mut io = disk.io.lock();
         if disk.command(&mut io, &[INQUIRY, 0, 0, 0, 36, 0], 36, true).is_ok() {
-            let b = &io.data.bytes_mut()[8..32];
+            let b = &io.data.bytes()[8..32];
             let text: String = b.iter().map(|&c| if c.is_ascii_graphic() { c as char } else { ' ' }).collect();
             let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
             if !text.is_empty() {
@@ -284,14 +284,14 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
             crate::sched::sleep_ms(100);
         }
         disk.command(&mut io, &[READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0], 8, true).ok()?;
-        let d = io.data.bytes_mut();
+        let d = io.data.bytes();
         let last = u32::from_be_bytes(d[0..4].try_into().unwrap());
         disk.block_size = u32::from_be_bytes(d[4..8].try_into().unwrap());
         disk.blocks = last as u64 + 1;
         if last == u32::MAX {
             let cdb = [SERVICE_ACTION_16, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0];
             disk.command(&mut io, &cdb, 32, true).ok()?;
-            let d = io.data.bytes_mut();
+            let d = io.data.bytes();
             disk.blocks = u64::from_be_bytes(d[0..8].try_into().unwrap()) + 1;
             disk.block_size = u32::from_be_bytes(d[8..12].try_into().unwrap());
         }

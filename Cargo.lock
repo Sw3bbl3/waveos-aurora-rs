@@ -88,6 +88,7 @@ dependencies = [
  "linked_list_allocator",
  "log",
  "lumen",
+ "sha2",
  "spin 0.9.9",
  "x86_64",
 ]

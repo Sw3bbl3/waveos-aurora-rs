@@ -37,7 +37,6 @@ const RTO_MAX: u64 = 60_000;
 const DELAYED_ACK: u64 = 40;
 /// TIME-WAIT is kept short: 2 × MSL would be minutes.
 const TIME_WAIT: u64 = 5000;
-const EPHEMERAL: core::ops::Range<u16> = 49152..65535;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -449,7 +448,7 @@ impl Table {
         }
         for _ in 0..(EPHEMERAL.end - EPHEMERAL.start) {
             let p = self.next_port;
-            self.next_port = if p + 1 >= EPHEMERAL.end { EPHEMERAL.start } else { p + 1 };
+            self.next_port = next_ephemeral(p);
             if !self.port_used(p) {
                 return Some(p);
             }
@@ -620,7 +619,10 @@ pub fn abort(s: &mut Stack, id: ConnId) {
     s.tcp.conns.remove(&id);
 }
 
-pub fn state(s: &Stack, id: ConnId) -> Option<(State, (Ip, u16), (Ip, u16), Option<isize>)> {
+/// A connection's state, local and remote endpoints, and pending error.
+pub type ConnInfo = (State, (Ip, u16), (Ip, u16), Option<isize>);
+
+pub fn state(s: &Stack, id: ConnId) -> Option<ConnInfo> {
     s.tcp.conns.get(&id).map(|c| (c.state, c.local, c.remote, c.error))
 }
 

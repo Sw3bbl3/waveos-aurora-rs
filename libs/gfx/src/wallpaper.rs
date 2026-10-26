@@ -35,6 +35,7 @@ struct Palette {
     stars: bool,
 }
 
+#[allow(clippy::too_many_arguments)] // one call per row of the palette tables
 const fn ribbon(
     color: u32,
     base: i32,
@@ -91,7 +92,7 @@ static PALETTES: [Palette; 3] = [
 
 fn add(dst: u32, src: u32, amount: i32) -> u32 {
     let a = amount.clamp(0, 255) as u32;
-    let ch = |s: u32| (((dst >> s) & 0xFF) + (((src >> s) & 0xFF) * a >> 8)).min(255) << s;
+    let ch = |s: u32| (((dst >> s) & 0xFF) + ((((src >> s) & 0xFF) * a) >> 8)).min(255) << s;
     0xFF00_0000 | ch(16) | ch(8) | ch(0)
 }
 
@@ -226,7 +227,7 @@ pub(crate) fn box_pass(src: &[u32], dst: &mut [u32], w: i32, h: i32, r: i32, hor
             sb += c & 0xFF;
         }
         for i in 0..len {
-            dst[idx(line, i)] = 0xFF00_0000 | (sr / n) << 16 | (sg / n) << 8 | sb / n;
+            dst[idx(line, i)] = 0xFF00_0000 | (sr / n) << 16 | (sg / n) << 8 | (sb / n);
             let out = src[idx(line, i - r)];
             let inn = src[idx(line, i + r + 1)];
             sr = sr + ((inn >> 16) & 0xFF) - ((out >> 16) & 0xFF);

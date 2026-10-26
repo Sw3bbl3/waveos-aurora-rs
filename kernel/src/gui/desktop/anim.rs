@@ -88,7 +88,9 @@ impl Desktop {
         Some((buf, rw as u32, rh as u32))
     }
 
-    fn add_ghost(&mut self, kind: Kind, id: u32, from: Rect, to: Rect, alpha: (i32, i32), duration: u64, hide: bool) {
+    fn add_ghost(&mut self, kind: Kind, id: u32, from: Rect, to: Rect, alpha: (i32, i32), duration: u64) {
+        // A window that is appearing stays hidden until its ghost lands.
+        let hide = matches!(kind, Kind::Open | Kind::Restore);
         if theme::reduce_motion() {
             self.damage(halo(from));
             self.damage(halo(to));
@@ -123,7 +125,7 @@ impl Desktop {
     pub(super) fn animate_open(&mut self, id: u32) {
         let Some(i) = self.index_of(id) else { return };
         let r = self.windows[i].rect;
-        self.add_ghost(Kind::Open, id, scaled(r, 920), r, (0, 255), 210, true);
+        self.add_ghost(Kind::Open, id, scaled(r, 920), r, (0, 255), 210);
     }
 
     /// Call before removing the window.
@@ -133,20 +135,20 @@ impl Desktop {
         if self.windows[i].minimized || self.windows[i].animating {
             return;
         }
-        self.add_ghost(Kind::Close, id, r, scaled(r, 930), (255, 0), 170, false);
+        self.add_ghost(Kind::Close, id, r, scaled(r, 930), (255, 0), 170);
     }
 
     /// Call before hiding the window; `target` is its dock icon.
     pub(super) fn animate_minimize(&mut self, id: u32, target: Rect) {
         let Some(i) = self.index_of(id) else { return };
         let r = self.windows[i].rect;
-        self.add_ghost(Kind::Minimize, id, r, target, (255, 40), 300, false);
+        self.add_ghost(Kind::Minimize, id, r, target, (255, 40), 300);
     }
 
     pub(super) fn animate_restore(&mut self, id: u32, from: Rect) {
         let Some(i) = self.index_of(id) else { return };
         let r = self.windows[i].rect;
-        self.add_ghost(Kind::Restore, id, from, r, (60, 255), 280, true);
+        self.add_ghost(Kind::Restore, id, from, r, (60, 255), 280);
     }
 
     /// Call after the window got its new rectangle; `old` is where it was.

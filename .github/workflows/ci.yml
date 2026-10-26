@@ -20,6 +20,8 @@ jobs:
         run: |
           cargo fmt --all -- --check
           (cd userland && cargo fmt --all -- --check)
+      - name: Clippy (every crate, warnings as errors)
+        run: cargo xtask lint
       - name: Validate bilingual handbook
         run: cargo xtask docs
       - name: Filesystem library tests

@@ -27,13 +27,13 @@ pub fn isqrt(n: u64) -> u64 {
 pub struct Rng(pub u64);
 
 impl Rng {
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
     pub fn range(&mut self, n: u32) -> i32 {
-        (self.next() % n as u64) as i32
+        (self.next_u64() % n as u64) as i32
     }
 }

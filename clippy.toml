@@ -1,0 +1,3 @@
+# JsStr caches a rope's flattened form in a cell; its ordering and hash come
+# from the characters, which never change, so it is a sound map key.
+ignore-interior-mutability = ["nebula_script::value::JsStr"]

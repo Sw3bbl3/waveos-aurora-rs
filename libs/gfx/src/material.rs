@@ -80,7 +80,7 @@ impl MaterialCache {
                             n += 1;
                         }
                     }
-                    let p = 0xff000000 | (red / n) << 16 | (green / n) << 8 | blue / n;
+                    let p = 0xff000000 | (red / n) << 16 | (green / n) << 8 | (blue / n);
                     let i = (y * w + x) as usize;
                     changed |= layer.source[i] != p;
                     layer.source[i] = p;

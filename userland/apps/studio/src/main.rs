@@ -240,7 +240,7 @@ impl Studio {
                                 process::Stdio { stdin: None, stdout: Some(pipe[1]), stderr: Some(pipe[1]) },
                             )
                             .map_err(|e| format!("{e}"))?;
-                            let _ = process::close(pipe[1]);
+                            process::close(pipe[1]);
                             job.lock().pid = Some(pid);
                             job.lock()
                                 .log
@@ -314,7 +314,7 @@ impl Studio {
             4 => self.mode = Mode::Code,
             5 => self.design(),
             6 => self.mode = Mode::Guide,
-            7 | 8 | 9 | 10 | 11 => self.perform(id),
+            7..=11 => self.perform(id),
             20 => {
                 if self.save() {
                     self.finish_pending(env);

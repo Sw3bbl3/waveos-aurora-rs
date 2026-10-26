@@ -100,7 +100,7 @@ pub fn init(map: &[MemoryRegion]) {
     log!(
         "mm",
         "{} MiB usable RAM ({} frames), bitmap {} KiB",
-        fa.total * PAGE_SIZE >> 20,
+        (fa.total * PAGE_SIZE) >> 20,
         fa.total,
         bitmap_bytes / 1024
     );

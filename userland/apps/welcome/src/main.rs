@@ -35,7 +35,7 @@ const TIPS: [(Icon, &str, &str); 3] = [
 ];
 
 impl Welcome {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self { hovered: None }
     }
 

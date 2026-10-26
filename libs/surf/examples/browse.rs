@@ -282,7 +282,7 @@ fn main() {
         if let Some(p) = js.realm.profile.take() {
             let total: u64 = p.values().sum();
             let mut v: Vec<_> = p.into_iter().collect();
-            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.sort_by_key(|e| core::cmp::Reverse(e.1));
             println!("profile: {total} samples");
             for ((name, file, line, col), n) in v.iter().take(40) {
                 println!("  {:5.1}% {name} {}:{line}:{col}", *n as f64 * 100.0 / total as f64, short(file));
@@ -342,7 +342,7 @@ fn report(page: &Page, url: &str, took: Duration) {
         }
     }
     let mut top: Vec<_> = tags.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|e| core::cmp::Reverse(e.1));
     let mut text = String::new();
     if let Some(b) = doc.find("body") {
         let mut stack = vec![b];

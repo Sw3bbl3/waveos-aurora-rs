@@ -22,7 +22,7 @@ pub struct About {
 }
 
 impl About {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self { info: corekit::process::sys_info(), last_second: 0 }
     }
 }

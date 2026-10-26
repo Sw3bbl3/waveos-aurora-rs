@@ -15,7 +15,7 @@ static WAITERS: IrqMutex<BTreeMap<Key, Vec<TaskId>>> = IrqMutex::new(BTreeMap::n
 
 /// Validates a 4-byte aligned, writable user word of the current process.
 fn key(addr: u64) -> Result<Key, isize> {
-    if addr % 4 != 0 {
+    if !addr.is_multiple_of(4) {
         return Err(EINVAL);
     }
     let p = super::current().ok_or(EPERM)?;

@@ -111,7 +111,7 @@ fn command_list(line: &str) -> VecDeque<(Then, String)> {
 }
 
 impl Terminal {
-    pub fn new() -> Self {
+    fn new() -> Self {
         let mut t = Self {
             lines: Vec::new(),
             input: String::new(),
@@ -368,7 +368,7 @@ impl Terminal {
                     _ => {}
                 }
                 if k == last {
-                    self.status = code.map_or(1, |c| c as i32);
+                    self.status = code.unwrap_or(1);
                 }
             }
             self.list_pending = true;

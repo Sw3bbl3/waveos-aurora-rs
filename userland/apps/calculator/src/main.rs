@@ -26,7 +26,7 @@ pub struct Calculator {
 }
 
 impl Calculator {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self { display: "0".into(), acc: None, op: None, fresh: true, hovered: None, pressed: None }
     }
 

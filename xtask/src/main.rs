@@ -12,6 +12,7 @@
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
+//!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod aml;
 mod display;
@@ -80,6 +81,7 @@ fn main() {
         Some("build") => {
             build(profile, false);
         }
+        Some("lint") => lint(),
         Some("run") => {
             let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let developer = flag("--developer");
@@ -174,7 +176,7 @@ fn main() {
         Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo xtask <build|run|image|iso|test|test262> [--debug] [--headless] [--no-build] [--gdb] [--int]"
+                "usage: cargo xtask <build|run|image|iso|test|test262|lint> [--debug] [--headless] [--no-build] [--gdb] [--int]"
             );
             exit(2);
         }
@@ -273,6 +275,38 @@ fn cargo_build(package: &str, target: &str, profile: Profile, features: &[&str])
     }
 }
 
+/// Runs clippy over everything with warnings as errors: the host libraries
+/// and tools, the kernel (with and without its self-tests), the bootloader,
+/// and user space for its own target.
+fn lint() {
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let deny = ["--", "-D", "warnings"];
+    let run = |cmd: &mut Command| {
+        let status = cmd.status().expect("failed to run cargo clippy");
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
+    };
+    run(Command::new(&cargo)
+        .current_dir(root())
+        .args(["clippy", "--workspace", "--all-targets", "--exclude", "aster", "--exclude", "firstlight"])
+        .args(deny));
+    for features in [&[][..], &["--features", "ktest"]] {
+        run(Command::new(&cargo)
+            .current_dir(root())
+            .args(["clippy", "--package", "aster", "--target", KERNEL_TARGET, "--release"])
+            .args(features)
+            .args(deny));
+    }
+    run(Command::new(&cargo)
+        .current_dir(root())
+        .args(["clippy", "--package", "firstlight", "--target", UEFI_TARGET, "--release"])
+        .args(deny));
+    let mut user = Command::new(&cargo);
+    userland_cargo(&mut user, "clippy", Profile::Release);
+    run(user.args(deny));
+}
+
 /// Builds both halves and lays out an EFI System Partition directory.
 fn build(profile: Profile, test: bool) -> PathBuf {
     verify_toolchain();
@@ -343,28 +377,9 @@ fn build_userland(profile: Profile) -> Vec<Program> {
     if !manifest.exists() {
         return Vec::new();
     }
-    let user_ld = root().join("userland/corekit/user.ld");
     let target_dir = root().join("target/user");
-    let spec = root().join("userland").join(format!("{USER_TARGET}.json"));
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    // User programs are built for our own target (ring 3 with SSE2; the kernel
-    // is soft-float), so core and alloc are rebuilt for it.
-    cmd.current_dir(root().join("userland"))
-        .args([
-            "build",
-            "--workspace",
-            "-Zjson-target-spec",
-            "-Zbuild-std=core,alloc",
-            "-Zbuild-std-features=compiler-builtins-mem",
-        ])
-        .arg("--target")
-        .arg(&spec)
-        .arg("--target-dir")
-        .arg(&target_dir)
-        .env("RUSTFLAGS", format!("-C link-arg=--script={} -C force-frame-pointers=yes", user_ld.display()));
-    if profile == Profile::Release {
-        cmd.arg("--release");
-    }
+    userland_cargo(&mut cmd, "build", profile);
     let status = cmd.status().expect("failed to run cargo for userland");
     if !status.success() {
         exit(status.code().unwrap_or(1));
@@ -390,6 +405,30 @@ fn build_userland(profile: Profile) -> Vec<Program> {
     }
     programs.sort();
     programs
+}
+
+/// Sets up `cmd` to run cargo `subcommand` over the user-space workspace.
+/// User programs are built for our own target (ring 3 with SSE2; the kernel
+/// is soft-float), so core and alloc are rebuilt for it.
+fn userland_cargo(cmd: &mut Command, subcommand: &str, profile: Profile) {
+    let user_ld = root().join("userland/corekit/user.ld");
+    let spec = root().join("userland").join(format!("{USER_TARGET}.json"));
+    cmd.current_dir(root().join("userland"))
+        .args([
+            subcommand,
+            "--workspace",
+            "-Zjson-target-spec",
+            "-Zbuild-std=core,alloc",
+            "-Zbuild-std-features=compiler-builtins-mem",
+        ])
+        .arg("--target")
+        .arg(&spec)
+        .arg("--target-dir")
+        .arg(root().join("target/user"))
+        .env("RUSTFLAGS", format!("-C link-arg=--script={} -C force-frame-pointers=yes", user_ld.display()));
+    if profile == Profile::Release {
+        cmd.arg("--release");
+    }
 }
 
 /// Packs the read-only system image mounted at /System.
@@ -828,7 +867,9 @@ fn recorded_peak(path: &Path) -> i32 {
     let data = fs::read(path).unwrap_or_default();
     data.get(44..)
         .unwrap_or_default()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|s| (i16::from_le_bytes([s[0], s[1]]) as i32).abs())
         .max()
         .unwrap_or(0)

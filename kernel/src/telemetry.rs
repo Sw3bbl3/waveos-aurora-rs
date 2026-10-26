@@ -348,6 +348,6 @@ fn snapshot() -> String {
             json_str(title)
         );
     }
-    let _ = write!(o, "]}}}}\n");
+    let _ = writeln!(o, "]}}}}");
     o
 }

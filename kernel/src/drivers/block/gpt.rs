@@ -25,7 +25,7 @@ pub fn partitions(disk: &Arc<dyn BlockDevice>) -> Vec<Partition> {
     let entries_lba = u64_at(&hdr, 72);
     let count = u32_at(&hdr, 80).min(256) as usize;
     let size = u32_at(&hdr, 84) as usize;
-    if size < 128 || size > 1024 {
+    if !(128..=1024).contains(&size) {
         return Vec::new();
     }
     let bytes = (count * size).div_ceil(ss) * ss;

@@ -579,7 +579,7 @@ impl Folder {
         if s.results.is_empty() {
             return false;
         }
-        self.items.extend(s.results.drain(..));
+        self.items.append(&mut s.results);
         drop(s);
         self.sort_items();
         true

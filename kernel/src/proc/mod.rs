@@ -260,7 +260,7 @@ struct ThreadStart {
 /// Starts another thread in the calling process at `entry(arg)` on `stack`.
 pub fn spawn_thread(entry: u64, stack: u64, arg: u64) -> Result<u64, isize> {
     let p = current().ok_or(EPERM)?;
-    if entry >= layout::USER_END || stack >= layout::USER_END || stack < 4096 {
+    if entry >= layout::USER_END || !(4096..layout::USER_END).contains(&stack) {
         return Err(EINVAL);
     }
     if p.threads.load(Ordering::Acquire) >= 64 {

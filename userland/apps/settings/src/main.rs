@@ -908,8 +908,8 @@ fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
 
 fn human(n: u64) -> String {
     match n {
-        n if n >= 1 << 30 => format!("{}.{} GB", n >> 30, (n % (1 << 30)) * 10 >> 30),
-        n if n >= 1 << 20 => format!("{}.{} MB", n >> 20, (n % (1 << 20)) * 10 >> 20),
+        n if n >= 1 << 30 => format!("{}.{} GB", n >> 30, ((n % (1 << 30)) * 10) >> 30),
+        n if n >= 1 << 20 => format!("{}.{} MB", n >> 20, ((n % (1 << 20)) * 10) >> 20),
         n if n >= 1 << 10 => format!("{} KB", n >> 10),
         n => format!("{n} bytes"),
     }

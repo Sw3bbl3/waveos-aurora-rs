@@ -6,7 +6,13 @@ use alloc::vec::Vec;
 /// Command-line arguments (`args[0]` is the program path).
 pub type Args = Vec<String>;
 
-pub fn start(block: *const u64, main: fn(Args) -> i32) -> ! {
+/// Runs `main` with the program's arguments, then exits with its status.
+///
+/// # Safety
+///
+/// `block` is null or the argument block the kernel passes to `_start`: a
+/// count followed by that many pointers to NUL-terminated strings.
+pub unsafe fn start(block: *const u64, main: fn(Args) -> i32) -> ! {
     let args = unsafe { parse_args(block) };
     let code = main(args);
     crate::process::exit(code)

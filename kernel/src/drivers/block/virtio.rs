@@ -145,7 +145,7 @@ impl BlockDevice for VirtioBlk {
         let mut q = self.queue.lock();
         for (i, chunk) in buf.chunks_mut(MAX_BYTES).enumerate() {
             q.submit(BLK_T_IN, lba + (i * MAX_BYTES / 512) as u64, chunk.len(), true)?;
-            chunk.copy_from_slice(&q.io.bytes_mut()[DATA_OFF..DATA_OFF + chunk.len()]);
+            chunk.copy_from_slice(&q.io.bytes()[DATA_OFF..DATA_OFF + chunk.len()]);
         }
         Ok(())
     }

@@ -60,10 +60,10 @@ pub fn compute(doc: &Document, sources: &Sources, dynamic: &mut Dynamic, size: (
                     }
                 }
             }
-            "link" if is_stylesheet_link(e) && media_ok() => {
-                if sources.parsed.get(&n).is_some_and(|(_, s)| s.is_some()) {
-                    picks.push((n, false));
-                }
+            "link"
+                if is_stylesheet_link(e) && media_ok() && sources.parsed.get(&n).is_some_and(|(_, s)| s.is_some()) =>
+            {
+                picks.push((n, false));
             }
             _ => {}
         }

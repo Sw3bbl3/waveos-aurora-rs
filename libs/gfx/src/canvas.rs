@@ -158,7 +158,7 @@ impl<'a> Canvas<'a> {
                 let c = color(x, y);
                 let mut a = alpha(c);
                 if in_band && (x < r.x + radius || x >= r.right() - radius) {
-                    a = a * round_rect_coverage(&r, radius, x, y) >> 8;
+                    a = (a * round_rect_coverage(&r, radius, x, y)) >> 8;
                 }
                 self.put(x, y, c, a);
             }
@@ -194,7 +194,7 @@ impl<'a> Canvas<'a> {
                 let inn = if inner.contains(x, y) { round_rect_coverage(&inner, ri, x, y) } else { 0 };
                 let cov = outer.saturating_sub(inn);
                 if cov > 0 {
-                    self.put(x, y, c, base * cov >> 8);
+                    self.put(x, y, c, (base * cov) >> 8);
                 }
             }
         }
@@ -230,7 +230,7 @@ impl<'a> Canvas<'a> {
                 return 0;
             }
             let t = ((blur256 - d256) * 256 / blur256) as u32; // 256 → 0
-            strength * t * t >> 16
+            (strength * t * t) >> 16
         };
         let rad = radius.max(1);
         // The interior of the window itself is painted on top; skip it.
@@ -518,7 +518,7 @@ impl<'a> Canvas<'a> {
                 let d = isqrt(best as u64) as i64;
                 let cov = ((hw + 8 - d) * 16).clamp(0, 256) as u32;
                 if cov > 0 {
-                    self.put(x, y, c, base * cov >> 8);
+                    self.put(x, y, c, (base * cov) >> 8);
                 }
             }
         }
@@ -546,7 +546,7 @@ impl<'a> Canvas<'a> {
                 let d = isqrt((qx * qx + qy * qy) as u64) as i64; // 1/16 px
                 let cov = ((hw as i64 + 8 - d) * 16).clamp(0, 256) as u32;
                 if cov > 0 {
-                    self.put(x, y, c, base * cov >> 8);
+                    self.put(x, y, c, (base * cov) >> 8);
                 }
             }
         }

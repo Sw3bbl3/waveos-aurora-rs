@@ -642,7 +642,7 @@ fn draw_text(rt: &mut Realm, c: &Call, stroke: bool) -> JsResult {
     let text = arg_str(rt, c, 0)?;
     let v = [rt.to_number(&c.arg(1))? as f32, rt.to_number(&c.arg(2))? as f32];
     let max_width = if c.arg(3).is_undefined() { None } else { Some(rt.to_number(&c.arg(3))? as f32) };
-    if !v[0].is_finite() || !v[1].is_finite() || max_width.is_some_and(|w| !(w > 0.0)) {
+    if !v[0].is_finite() || !v[1].is_finite() || max_width.is_some_and(|w| w.is_nan() || w <= 0.0) {
         return Ok(Value::Undefined);
     }
     // Spaces stand in for other whitespace, as the standard says.

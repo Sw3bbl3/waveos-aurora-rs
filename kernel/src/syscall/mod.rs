@@ -494,7 +494,7 @@ fn mmap(len: u64) -> SysResult {
 
 fn munmap(addr: u64, len: u64) -> SysResult {
     use aurora_abi::layout::{MMAP_BASE, MMAP_END};
-    if addr % mm::PAGE_SIZE != 0 || addr < MMAP_BASE || addr.saturating_add(len) > MMAP_END {
+    if !addr.is_multiple_of(mm::PAGE_SIZE) || addr < MMAP_BASE || addr.saturating_add(len) > MMAP_END {
         return Err(EINVAL);
     }
     let p = proc::current().ok_or(EPERM)?;

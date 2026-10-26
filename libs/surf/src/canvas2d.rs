@@ -622,7 +622,7 @@ pub fn stroke_polygons(path: &Path, s: &State) -> Vec<Vec<(f32, f32)>> {
     let scale = scale_of(&s.matrix);
     let hw = s.line_width * scale / 2.0;
     let mut out = Vec::new();
-    if !(hw > 0.0) || !hw.is_finite() {
+    if !hw.is_finite() || hw <= 0.0 {
         return out;
     }
     for sub in &path.subpaths {

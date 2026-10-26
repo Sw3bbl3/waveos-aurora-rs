@@ -120,7 +120,7 @@ impl E1000 {
                 // End of packet, no errors: one frame per buffer (no jumbo frames).
                 if status & 2 != 0 && errors == 0 && len <= BUF {
                     let start = rx.next * BUF;
-                    frames.push(rx.bufs.bytes_mut()[start..start + len].to_vec());
+                    frames.push(rx.bufs.bytes()[start..start + len].to_vec());
                 }
                 rx.ring.write::<u8>(d + 12, 0);
                 let done = rx.next;

@@ -18,7 +18,11 @@ impl Host for Capture {
     }
 }
 
-fn page(html: &str) -> (Page, Scripts, Rc<RefCell<Vec<String>>>, Rc<RefCell<f64>>) {
+/// Console lines the page logged, and the clock it reads (ms).
+type Log = Rc<RefCell<Vec<String>>>;
+type Clock = Rc<RefCell<f64>>;
+
+fn page(html: &str) -> (Page, Scripts, Log, Clock) {
     let mut p = Page::parse(html);
     let log = Rc::new(RefCell::new(Vec::new()));
     let clock = Rc::new(RefCell::new(1000.0));

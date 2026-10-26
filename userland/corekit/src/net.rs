@@ -554,7 +554,7 @@ fn query(server: IpAddr, host: &str) -> Result<(Vec<IpAddr>, u32)> {
     random(&mut idb);
     let ids = [u16::from_be_bytes([idb[0], idb[1]]), u16::from_be_bytes([idb[2], idb[3]])];
     let questions = [question(ids[0], host, 1)?, question(ids[1], host, 28)?];
-    let mut answers: [Option<Result<(Vec<IpAddr>, u32)>>; 2] = [None, None];
+    let mut answers: [Option<Records>; 2] = [None, None];
     let mut buf = [0u8; 1500];
     for attempt in 0..3u64 {
         for (k, q) in questions.iter().enumerate() {
@@ -627,8 +627,11 @@ fn skip_name(m: &[u8], mut i: usize) -> Option<usize> {
     }
 }
 
-/// The A and AAAA records of a response, and their smallest TTL.
-fn parse_answer(m: &[u8]) -> Result<(Vec<IpAddr>, u32)> {
+/// A response's addresses and their smallest TTL (seconds).
+type Records = Result<(Vec<IpAddr>, u32)>;
+
+/// The A and AAAA records of a response.
+fn parse_answer(m: &[u8]) -> Records {
     let rcode = m[3] & 0xF;
     if rcode == 3 {
         return Err(Error(err::ENOENT)); // no such name

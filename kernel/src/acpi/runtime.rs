@@ -287,14 +287,14 @@ fn read_power(interp: &Interp, d: &Devices) -> PowerInfo {
         info.rate_mw = rate as u32;
         if state & 1 != 0 {
             info.flags |= flags::DISCHARGING;
-            if rate > 0 {
-                info.minutes = (remaining * 60 / rate) as u32;
+            if let Some(m) = (remaining * 60).checked_div(rate) {
+                info.minutes = m as u32;
             }
         }
         if state & 2 != 0 {
             info.flags |= flags::CHARGING;
-            if rate > 0 {
-                info.minutes = (full.saturating_sub(remaining) * 60 / rate) as u32;
+            if let Some(m) = (full.saturating_sub(remaining) * 60).checked_div(rate) {
+                info.minutes = m as u32;
             }
         }
         if state & 4 != 0 {

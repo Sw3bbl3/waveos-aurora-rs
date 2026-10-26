@@ -374,8 +374,7 @@ fn ta_slice(rt: &mut Realm, c: &Call) -> JsResult {
         this_ta(rt, c, "slice")?;
         let end = (end as usize).min(ta_len(rt, o));
         let (sk, ok) = (rt.typed_array(o).unwrap().0, rt.typed_array(out).unwrap().0);
-        let mut n = 0;
-        for i in start as usize..end {
+        for (n, i) in (start as usize..end).enumerate() {
             if sk == ok {
                 let v = rt.ta_get(o, i);
                 rt.ta_put(out, n, v);
@@ -383,7 +382,6 @@ fn ta_slice(rt: &mut Realm, c: &Call) -> JsResult {
                 let v = rt.get(o, &PropKey::index(i as u32), Value::Object(o))?;
                 rt.set(out, PropKey::index(n as u32), v, Value::Object(out))?;
             }
-            n += 1;
         }
     }
     Ok(Value::Object(out))

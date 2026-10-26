@@ -267,6 +267,13 @@ struct Loaded {
     pending: bool,
 }
 
+/// A script ready to run: (name for errors, source).
+type NamedSource = (String, String);
+/// A script a script inserted: (page generation, element, URL, source if it loaded).
+type ScriptLoad = (u64, NodeId, String, Option<String>);
+/// The answer to a script's request: (page generation, id, result).
+type RequestResult = (u64, u32, Result<nebula_engine::script::HttpResponse, String>);
+
 struct LoadJob {
     cancel: AtomicBool,
     progress: Mutex<String>,
@@ -274,7 +281,7 @@ struct LoadJob {
     result: Mutex<Option<Result<Loaded, String>>>,
     /// Then its scripts, in order, when the page had external ones (and
     /// when they had all arrived, uptime ms).
-    scripts: Mutex<Option<(Vec<(String, String)>, u64)>>,
+    scripts: Mutex<Option<(Vec<NamedSource>, u64)>>,
 }
 
 /// What's still downloading once the page is shown: its scripts.
@@ -294,7 +301,7 @@ fn get_shared(url: &Url) -> Result<Arc<Response>, String> {
 }
 
 /// Stage two of a load: the scripts, in document order.
-fn load_scripts(p: Pending, job: &LoadJob) -> Vec<(String, String)> {
+fn load_scripts(p: Pending, job: &LoadJob) -> Vec<NamedSource> {
     let mut out = Vec::new();
     for (i, src) in p.scripts.into_iter().enumerate() {
         if job.cancel.load(Ordering::Relaxed) {
@@ -515,7 +522,7 @@ fn document_base(page: &Page, url: &Url) -> Url {
 
 fn human_size(n: u64) -> String {
     match n {
-        n if n >= 1 << 20 => format!("{}.{} MB", n >> 20, (n % (1 << 20)) * 10 >> 20),
+        n if n >= 1 << 20 => format!("{}.{} MB", n >> 20, ((n % (1 << 20)) * 10) >> 20),
         n if n >= 1 << 10 => format!("{} KB", n >> 10),
         n => format!("{n} bytes"),
     }
@@ -764,10 +771,10 @@ struct Nebula {
     js: Option<Scripts>,
     /// Scripts that scripts inserted, as they finish loading:
     /// (page generation, element, URL, source if it loaded).
-    script_loads: Arc<Mutex<Vec<(u64, NodeId, String, Option<String>)>>>,
+    script_loads: Arc<Mutex<Vec<ScriptLoad>>>,
     scripts_loading: usize,
     /// Answers to scripts' network requests: (page generation, id, result).
-    request_results: Arc<Mutex<Vec<(u64, u32, Result<nebula_engine::script::HttpResponse, String>)>>>,
+    request_results: Arc<Mutex<Vec<RequestResult>>>,
     /// Image URLs this page has asked for (decoded, failed or queued).
     requested: alloc::collections::BTreeSet<String>,
     /// Whether the page's canvases have been given the decoded images.
@@ -1365,7 +1372,7 @@ impl Nebula {
     /// Starts the page's scripts (as it finishes loading). They run in
     /// slices between frames; then the page finishes loading and is laid out.
     /// `arrived`: when the last script finished downloading (0: with the page).
-    fn start_scripts(&mut self, scripts: Vec<(String, String)>, arrived: u64) {
+    fn start_scripts(&mut self, scripts: Vec<NamedSource>, arrived: u64) {
         let Some(page) = self.page.as_mut() else { return };
         let Some(url) = self.url.clone() else { return };
         let has_handlers = page.doc.nodes.iter().any(|n| match &n.data {
@@ -1442,7 +1449,7 @@ impl Nebula {
         if let Some(p) = self.js.as_mut().and_then(|js| js.realm.profile.take()) {
             let total: u64 = p.values().sum::<u64>().max(1);
             let mut v: Vec<_> = p.into_iter().collect();
-            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.sort_by_key(|e| core::cmp::Reverse(e.1));
             let mut out = format!("[nebula] profile: {total} samples\n");
             for ((name, file, line, col), n) in v.iter().take(30) {
                 let file: String = file.chars().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect();
@@ -2508,14 +2515,12 @@ impl App for Nebula {
                 }
             } else if self.home_rect().contains(x, y) {
                 self.go(HOME, true);
-            } else if self.address_rect(area).contains(x, y) {
-                if !self.editing {
-                    self.editing = true;
-                    if self.address.text() == HOME {
-                        self.address.set_text("");
-                    }
-                    self.address.select_all();
+            } else if self.address_rect(area).contains(x, y) && !self.editing {
+                self.editing = true;
+                if self.address.text() == HOME {
+                    self.address.set_text("");
                 }
+                self.address.select_all();
             }
             return true;
         }
@@ -2670,7 +2675,7 @@ impl App for Nebula {
             self.after_scripts();
         }
         // Scripts that scripts inserted, now loaded.
-        let loaded: Vec<(u64, NodeId, String, Option<String>)> = core::mem::take(&mut *self.script_loads.lock());
+        let loaded: Vec<ScriptLoad> = core::mem::take(&mut *self.script_loads.lock());
         if !loaded.is_empty() {
             let g = self.generation.load(Ordering::Relaxed);
             for (gen, node, url, source) in loaded {

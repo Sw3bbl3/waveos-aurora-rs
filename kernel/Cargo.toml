@@ -27,3 +27,6 @@ spin = "0.9"
 linked_list_allocator = "0.10"
 acpi = "6.1"
 log = "0.4"
+# Not used directly: the kernel is soft-float and never saves SIMD state, so
+# gina's SHA-256 must not take its SSE/SHA-NI path when built in.
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }

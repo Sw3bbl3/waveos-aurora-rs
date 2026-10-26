@@ -201,9 +201,12 @@ fn program_msi(r: &MsiRoute) {
     }
 }
 
+/// A function's address (bus, device, function) and its first 64 bytes of configuration space.
+pub type SavedConfig = ((u8, u8, u8), [u32; 16]);
+
 /// The first 64 bytes of every device's configuration space (BARs, command,
 /// interrupt line), saved before sleep: devices lose it when powered off.
-pub fn save() -> Vec<((u8, u8, u8), [u32; 16])> {
+pub fn save() -> Vec<SavedConfig> {
     devices()
         .iter()
         .map(|d| ((d.bus, d.dev, d.func), core::array::from_fn(|i| read32(d.bus, d.dev, d.func, i as u16 * 4))))
@@ -211,7 +214,7 @@ pub fn save() -> Vec<((u8, u8, u8), [u32; 16])> {
 }
 
 /// Restores what `save` recorded, then the interrupt messages.
-pub fn restore(saved: &[((u8, u8, u8), [u32; 16])]) {
+pub fn restore(saved: &[SavedConfig]) {
     for &((b, d, f), regs) in saved {
         // BARs and the rest with decoding off, then the command register.
         write32(b, d, f, 0x04, regs[1] & !0x7);

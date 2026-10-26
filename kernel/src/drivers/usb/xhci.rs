@@ -144,7 +144,7 @@ impl Ring {
 
     /// Where the controller should resume after an error.
     fn dequeue_pointer(&self) -> u64 {
-        self.dma.phys + (self.enqueue * 16) as u64 | self.cycle as u64
+        (self.dma.phys + (self.enqueue * 16) as u64) | self.cycle as u64
     }
 }
 
@@ -203,6 +203,9 @@ struct Inner {
     slots: BTreeMap<u8, SlotState>,
 }
 
+/// Run when a device goes away.
+type DetachHook = Box<dyn Fn() + Send + Sync>;
+
 pub struct Controller {
     pub index: usize,
     op: u64,
@@ -225,7 +228,7 @@ pub struct Controller {
     enum_wake: WaitQueue,
     devices: IrqMutex<Vec<DeviceRecord>>,
     /// Hooks run when a device goes away (storage unmounts, …).
-    detach: IrqMutex<Vec<(u8, Box<dyn Fn() + Send + Sync>)>>,
+    detach: IrqMutex<Vec<(u8, DetachHook)>>,
     pub interrupts: AtomicU64,
     /// Set once the devices present at boot are set up: later ones are announced.
     settled: AtomicBool,
@@ -284,8 +287,8 @@ fn extended_capabilities(cap: u64, port_major: &mut [u8; 256]) {
                 let major = (head >> 24) as u8;
                 let ports = r32(addr + 8);
                 let (first, count) = ((ports & 0xFF) as usize, ((ports >> 8) & 0xFF) as usize);
-                for p in first..(first + count).min(256) {
-                    port_major[p] = major;
+                for m in port_major.iter_mut().take((first + count).min(256)).skip(first) {
+                    *m = major;
                 }
             }
             _ => {}
@@ -480,7 +483,7 @@ impl Controller {
         }
         if any {
             let ev = self.events.lock();
-            w64(self.rt + ERDP, ev.segment.phys + (ev.dequeue * 16) as u64 | 1 << 3);
+            w64(self.rt + ERDP, (ev.segment.phys + (ev.dequeue * 16) as u64) | (1 << 3));
             drop(ev);
             self.done.wake_all();
         }
@@ -516,7 +519,7 @@ impl Controller {
             let Some(p) = pipes.get_mut(&(slot, ep)) else { return };
             let Some(off) = p.trbs.remove(&trb) else { return };
             let n = p.size.saturating_sub(residual as usize);
-            let data = p.buf.bytes_mut()[off..off + n].to_vec();
+            let data = p.buf.bytes()[off..off + n].to_vec();
             (p.handler.clone(), (off, data))
         };
         if code == CC_SUCCESS || code == CC_SHORT {
@@ -621,8 +624,8 @@ impl Controller {
     /// A control transfer on endpoint 0; returns the bytes transferred.
     pub fn control(&self, slot: u8, setup: Setup, data: Option<&mut [u8]>) -> Result<usize, u8> {
         let len = setup.length as usize;
-        let buf = if len > 0 { Some(Dma::new(len).ok_or(CC_TIMEOUT)?) } else { None };
-        if let (Some(b), Some(d), false) = (&buf, &data, setup.is_in()) {
+        let mut buf = if len > 0 { Some(Dma::new(len).ok_or(CC_TIMEOUT)?) } else { None };
+        if let (Some(b), Some(d), false) = (&mut buf, &data, setup.is_in()) {
             b.bytes_mut()[..len].copy_from_slice(&d[..len]);
         }
         let trbs = {
@@ -653,7 +656,7 @@ impl Controller {
         }
         let n = len.saturating_sub(c.residual as usize);
         if let (Some(b), Some(d), true) = (&buf, data, setup.is_in()) {
-            d[..n].copy_from_slice(&b.bytes_mut()[..n]);
+            d[..n].copy_from_slice(&b.bytes()[..n]);
         }
         Ok(n)
     }
