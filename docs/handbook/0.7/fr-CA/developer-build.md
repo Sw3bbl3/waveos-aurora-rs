@@ -10,12 +10,16 @@ Compilez sous macOS ou Linux avec Rust/rustup, QEMU et OVMF. La création d’un
 
 ## Exécuter les vérifications
 ```sh
-cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask
+cargo xtask lint
+cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask
 cargo xtask test --disk ahci --smp 4 --net virtio
 cargo xtask test --disk virtio --smp 4 --net virtio
 cargo xtask test --disk nvme --smp 4 --net e1000e
 ```
-Le banc d’essai du noyau démarre deux fois le disque de test pour vérifier la persistance. Testez aussi la configuration à un processeur. Exécutez `cargo fmt --all -- --check` à la racine et dans userland avant de contribuer.
+`cargo xtask lint` exécute Clippy sur les bibliothèques hôtes, le noyau, le chargeur et userland, chacun pour sa propre cible, et traite chaque avertissement comme une erreur. Le banc d’essai du noyau démarre deux fois le disque de test pour vérifier la persistance. Testez aussi la configuration à un processeur. Exécutez `cargo fmt --all -- --check` à la racine et dans userland avant de contribuer.
+
+## Tests de robustesse
+Chaque analyseur de données externes (images, polices, vidéos, pages Web, scripts, certificats, paquets, programmes et volumes FAT32 et AuroraFS) a un test qui lui soumet des milliers de copies corrompues d’entrées valides et échoue à la moindre panique. Les exécutions sont reproductibles, et un échec nomme l’entrée qui l’a causé. Définissez `AURORA_MUTATIONS=100` pour exécuter chacun cent fois plus longtemps lorsque vous travaillez sur un analyseur.
 
 ## Dépannage
 L’espace userland utilise une cible et un script d’édition de liens personnalisés; compilez avec xtask. Si le compilateur ne correspond pas, installez la chaîne épinglée plutôt que de modifier silencieusement la référence. Consultez la sortie série avant de considérer un bureau visible comme une validation complète.
