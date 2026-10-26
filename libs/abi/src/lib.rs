@@ -605,6 +605,13 @@ pub mod pref {
     pub const DND: &str = "dnd";
     pub const VOLUME: &str = "volume";
     pub const MUTED: &str = "muted";
+    /// "1" (default): Crest, the island in the middle of the top bar. "0" moves
+    /// its time, date and activities into the right bubble.
+    pub const CREST: &str = "crest";
+    /// "1": the status ring is 28 points with the battery percentage beside it.
+    pub const BATTERY_LEVEL: &str = "battery_level";
+    /// "1": skip Shore at start-up (locking still asks for the password).
+    pub const AUTO_LOGIN: &str = "auto_login";
 }
 
 /// A screen resolution.

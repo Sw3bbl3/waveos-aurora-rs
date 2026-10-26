@@ -2,7 +2,7 @@
 
 use super::{raster, TrueType};
 
-const FONTS: [&str; 3] = ["Inter-Regular.ttf", "Inter-SemiBold.ttf", "JetBrainsMono-Regular.ttf"];
+const FONTS: [&str; 3] = ["Manrope-Medium.ttf", "Manrope-Bold.ttf", "JetBrainsMono-Regular.ttf"];
 const TEXT: &str = "AaBbGgJjQqRrWwYy0123456789&@%$#?!éüñ“”—…→";
 
 fn load(name: &str) -> Vec<u8> {
@@ -114,7 +114,7 @@ fn rasters_match_fontdue() {
 
 #[test]
 fn kerning_is_read() {
-    let data = load("Inter-Regular.ttf");
+    let data = load("Manrope-Medium.ttf");
     let tt = TrueType::parse(&data).unwrap();
     let (a, v) = (tt.glyph_index('A'), tt.glyph_index('V'));
     let (t, o) = (tt.glyph_index('T'), tt.glyph_index('o'));
@@ -141,7 +141,7 @@ fn malformed_contours_render_without_panicking() {
 
 #[test]
 fn corrupt_fonts_never_panic() {
-    let seeds = vec![load("Inter-Regular.ttf")];
+    let seeds = vec![load("Manrope-Medium.ttf")];
     // Mostly the table directory and the small tables at the front.
     let front = [0..4096, 0..seeds[0].len()];
     aurora_mutate::check_with(

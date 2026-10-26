@@ -14,8 +14,9 @@ fn valid_key(k: &str) -> bool {
 /// Defaults for preferences that have one.
 fn default(key: &str) -> Option<&'static str> {
     Some(match key {
-        pref::DARK
-        | pref::CLOCK_24H
+        pref::DARK | pref::CREST => "1",
+        pref::BATTERY_LEVEL | pref::AUTO_LOGIN => "0",
+        pref::CLOCK_24H
         | pref::CLOCK_SECONDS
         | pref::DND
         | pref::MUTED

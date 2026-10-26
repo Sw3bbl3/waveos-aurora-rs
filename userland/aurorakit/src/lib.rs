@@ -226,7 +226,7 @@ fn apply(requests: Vec<Request>) {
 /// Installs the system's TrueType faces (once per process).
 pub fn load_fonts() {
     use font::Face;
-    for face in [Face::Regular, Face::SemiBold, Face::Mono] {
+    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono] {
         if !font::installed(face) {
             if let Ok(data) = corekit::fs::read(face.file()) {
                 font::install(face, alloc::boxed::Box::leak(data.into_boxed_slice()));
@@ -235,14 +235,26 @@ pub fn load_fonts() {
     }
 }
 
+/// Decodes an app icon picture for [`lumen::icons`].
+fn load_icon(path: &str) -> Option<(alloc::vec::Vec<u32>, u32, u32)> {
+    let data = corekit::fs::read(path).ok()?;
+    let img = aurora_image::decode(&data).ok()?;
+    Some((img.pixels, img.width, img.height))
+}
+
 /// Runs `app` until its window is closed. Returns the process exit code.
 pub fn run<A: App>(mut app: A) -> i32 {
     refresh_effects();
     load_fonts();
+    lumen::icons::set_loader(load_icon);
     let (dark, wallpaper, accent) = corekit::process::desktop::theme();
     theme::set_dark(dark);
     theme::set_wallpaper(wallpaper);
     theme::set_accent(accent);
+    let custom = corekit::process::desktop::custom_accent();
+    if custom != 0 {
+        theme::set_custom_tones(theme::tones_from_fill(custom));
+    }
     let info = corekit::process::sys_info();
     let screen = (info.screen_w as i32, info.screen_h as i32);
 
@@ -384,6 +396,9 @@ pub fn run<A: App>(mut app: A) -> i32 {
                 theme::set_dark(ev.a != 0);
                 theme::set_wallpaper(ev.b as u8);
                 theme::set_accent(ev.c as u8);
+                if ev.d != 0 {
+                    theme::set_custom_tones(theme::tones_from_fill(ev.d));
+                }
                 true
             }
             event::SCREEN => {

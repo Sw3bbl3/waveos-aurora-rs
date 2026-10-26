@@ -453,6 +453,16 @@ fn system_image(programs: &[Program], out: &Path) {
         let name = f.file_name().unwrap().to_string_lossy().into_owned();
         t.file(&format!("Fonts/{name}"), &fs::read(&f).unwrap());
     }
+    // Living water design assets: app icons, wallpapers (day and night) and the WayV marks.
+    for (dir, src) in [("Icons", "assets/icons"), ("Wallpapers", "assets/wallpapers"), ("Brand", "assets/brand")] {
+        t.dir(dir);
+        let mut files: Vec<_> = fs::read_dir(root().join(src)).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        for f in files {
+            let name = f.file_name().unwrap().to_string_lossy().into_owned();
+            t.file(&format!("{dir}/{name}"), &fs::read(&f).unwrap());
+        }
+    }
     t.dir("Sounds");
     for (name, wav) in sounds::all() {
         t.file(&format!("Sounds/{name}"), &wav);

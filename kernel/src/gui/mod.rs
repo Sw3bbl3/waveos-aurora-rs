@@ -43,13 +43,21 @@ fn current_fb() -> Option<Framebuffer> {
 /// a few built-in sizes without them).
 fn load_fonts() {
     use lumen::font::{self, Face};
-    for face in [Face::Regular, Face::SemiBold, Face::Mono] {
+    lumen::icons::set_loader(load_icon);
+    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono] {
         let ok = crate::fs::read_all(face.file())
             .is_ok_and(|data| font::install(face, alloc::boxed::Box::leak(data.into_boxed_slice())));
         if !ok {
             log!("gui", "font {} unavailable; using built-in sizes", face.file());
         }
     }
+}
+
+/// Decodes an app icon picture from the system image for [`lumen::icons`].
+fn load_icon(path: &str) -> Option<(alloc::vec::Vec<u32>, u32, u32)> {
+    let data = crate::fs::read_all(path).ok()?;
+    let img = aurora_image::decode(&data).ok()?;
+    Some((img.pixels, img.width, img.height))
 }
 
 pub fn screen_size() -> (i32, i32) {
@@ -295,7 +303,7 @@ fn take_screenshot(back: &[u32], w: u32, h: u32) {
 /// Restores appearance and system preferences.
 fn load_settings() {
     settings::load();
-    theme::set_dark(settings::get_bool("dark", false));
+    theme::set_dark(settings::get_bool("dark", true));
     theme::set_accent(settings::get_int("accent", 0) as u8);
     prefs::apply_all_system();
     let wp = settings::get_int("wallpaper", 0) as u8;

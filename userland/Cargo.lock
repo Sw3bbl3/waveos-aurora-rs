@@ -215,6 +215,7 @@ version = "0.7.0"
 name = "aurorakit"
 version = "0.7.0"
 dependencies = [
+ "aurora-image",
  "corekit",
  "lumen",
 ]

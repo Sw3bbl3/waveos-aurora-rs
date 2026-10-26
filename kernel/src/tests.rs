@@ -426,7 +426,7 @@ fn persistence() {
 
 fn truetype() {
     use lumen::font::{self, Face};
-    for face in [Face::Regular, Face::SemiBold, Face::Mono] {
+    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono] {
         assert!(font::installed(face), "{} not installed from the system image", face.file());
     }
     // Any size works, and text scales with it.

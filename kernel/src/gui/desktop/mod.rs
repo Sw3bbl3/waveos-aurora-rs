@@ -238,12 +238,21 @@ impl Desktop {
         d
     }
 
+    /// The wallpaper for the current appearance: the user's picture (whose
+    /// colours become the accent), the built-in day or night picture, or —
+    /// when no picture can be read — the procedural rendering.
     fn make_wallpaper(w: i32, h: i32) -> (Vec<u32>, Vec<u32>) {
-        let custom = (theme::wallpaper() == wallpaper::CUSTOM)
+        let index = theme::wallpaper();
+        let custom = (index == wallpaper::CUSTOM)
             .then(|| super::settings::get("wallpaper_image"))
             .flatten()
             .and_then(|p| picture_wallpaper(&p, w, h));
-        let wp = custom.unwrap_or_else(|| wallpaper::generate(theme::wallpaper(), w, h));
+        if let Some(px) = &custom {
+            theme::set_custom_tones(theme::tones_from_picture(px, w, h));
+        }
+        let wp = custom
+            .or_else(|| wallpaper::file(index, theme::current().dark).and_then(|f| picture_wallpaper(f, w, h)))
+            .unwrap_or_else(|| wallpaper::generate(index, w, h));
         let blurred = wallpaper::blur(&wp, w, h, 18);
         (wp, blurred)
     }
@@ -648,6 +657,7 @@ impl Desktop {
             a: theme::current().dark as u32,
             b: theme::wallpaper() as u32,
             c: theme::accent_index() as u32,
+            d: theme::custom_fill(),
             ..Default::default()
         });
     }
@@ -655,6 +665,12 @@ impl Desktop {
     pub fn set_dark(&mut self, dark: bool) {
         theme::set_dark(dark);
         super::save_settings();
+        // Each built-in wallpaper has a day and a night picture.
+        if theme::wallpaper() != wallpaper::CUSTOM {
+            let (wp, bl) = Self::make_wallpaper(self.w, self.h);
+            self.wallpaper = wp;
+            self.blurred = bl;
+        }
         self.broadcast_theme();
         self.damage_all();
     }

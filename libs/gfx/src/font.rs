@@ -13,13 +13,17 @@ use alloc::vec::Vec;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Face {
+    /// Body text: Manrope Medium.
     Regular,
+    /// Emphasis, labels and buttons: Manrope Bold.
     SemiBold,
     Mono,
+    /// Display text (the Shore clock, large titles): Manrope ExtraBold.
+    Bold,
 }
 
 impl Face {
-    const ALL: [Face; 3] = [Face::Regular, Face::SemiBold, Face::Mono];
+    const ALL: [Face; 4] = [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono];
 
     fn index(self) -> usize {
         self as usize
@@ -28,9 +32,10 @@ impl Face {
     /// Where the face lives in the system image.
     pub fn file(self) -> &'static str {
         match self {
-            Face::Regular => "/System/Fonts/Inter-Regular.ttf",
-            Face::SemiBold => "/System/Fonts/Inter-SemiBold.ttf",
+            Face::Regular => "/System/Fonts/Manrope-Medium.ttf",
+            Face::SemiBold => "/System/Fonts/Manrope-Bold.ttf",
             Face::Mono => "/System/Fonts/JetBrainsMono-Regular.ttf",
+            Face::Bold => "/System/Fonts/Manrope-ExtraBold.ttf",
         }
     }
 }
@@ -85,7 +90,7 @@ struct Installed {
     ascii: [u16; 128],
 }
 
-static FACES: [spin::Once<Installed>; 3] = [spin::Once::new(), spin::Once::new(), spin::Once::new()];
+static FACES: [spin::Once<Installed>; 4] = [spin::Once::new(), spin::Once::new(), spin::Once::new(), spin::Once::new()];
 
 /// Makes a TrueType face available. Returns false if the data isn't a usable font.
 pub fn install(face: Face, data: &'static [u8]) -> bool {

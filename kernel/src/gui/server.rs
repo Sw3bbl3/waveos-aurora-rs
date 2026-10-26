@@ -492,7 +492,10 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
             send(Command::AppsChanged);
             Ok(0)
         }
-        GET_THEME => Ok((super::theme::accent_index() as u64) << 16
+        // Bits 0-7 wallpaper, 8 dark, 16-23 accent choice, 24-47 the accent
+        // fill sampled from a custom picture (apps derive the other tones).
+        GET_THEME => Ok((super::theme::custom_fill() as u64) << 24
+            | (super::theme::accent_index() as u64) << 16
             | ((super::theme::current().dark as u64) << 8)
             | super::theme::wallpaper() as u64),
         _ => Err(EINVAL),
