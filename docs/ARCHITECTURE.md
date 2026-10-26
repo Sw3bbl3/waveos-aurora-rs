@@ -23,11 +23,12 @@ This document is for someone about to read or change the code. It follows the ma
 | `libs/surf/` | `nebula-engine` | user + host | The browser engine: HTML, CSS, style and layout to a display list |
 | `userland/corekit/` | `aurora` | user | Runtime: entry point, heap, `print!`, files, processes, threads, clipboard, drag and drop, preferences |
 | `userland/aurorakit/` | `aurorakit` | user | UI toolkit: windows, event loop, the `App` trait, the `text` editing engine |
-| `userland/apps/*` | `app-*` | user | Nebula, Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome |
+| `userland/apps/*` | `app-*` | user | Nebula, Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About, Welcome, Learn, Studio, Installer |
 | `userland/bin/*` | — | user | Command-line tools (`coreutils`), `usertest`, `crashtest` |
 | `xtask/` | `xtask` | host | Build, run, image and test orchestration; system sounds, Mozilla's root CAs (from `webpki-roots`), a test SSDT (battery, lid) and a USB-stick image |
-| `assets/fonts/` | — | — | Inter and JetBrains Mono, shipped in `/System/Fonts` |
+| `assets/fonts/` | — | — | Manrope and JetBrains Mono, shipped in `/System/Fonts` |
 | `assets/home/` | — | — | Default folders, documents and pictures for a new home volume |
+| `assets/icons/`, `assets/wallpapers/`, `assets/wallpaper-thumbs/`, `assets/brand/` | — | — | App icons, the Tide, Aurora and Dunes wallpapers (day and night) with their Settings pictures, and the WayV logos; shipped in `/System/Icons`, `/System/Wallpapers` and `/System/Brand` |
 | `tools/qmp.py` | — | host | Scripted clicks, drags, typing and screenshots for a running VM |
 | `tools/make_sample_pictures.py` | — | host | Generates the sample pictures (procedural) |
 

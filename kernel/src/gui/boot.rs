@@ -116,7 +116,7 @@ pub fn stage(id: &str) {
     let Some(mut guard) = SCREEN.try_lock() else { return };
     let Some(s) = guard.as_mut() else { return };
     let Some(n) = STAGES.iter().position(|&st| st == id) else { return };
-    if n + 1 <= s.done {
+    if n < s.done {
         return;
     }
     s.done = n + 1;

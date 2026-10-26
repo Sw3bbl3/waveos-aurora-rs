@@ -265,7 +265,9 @@ impl Desktop {
     pub(super) fn harbor_hover(&mut self, x: i32, y: i32) {
         let (dock, items) = self.dock_layout();
         // The bottom edge (or Harbor itself) brings it up over a window.
-        let reveal = y >= self.h - 3 || (self.harbor.revealed && y >= dock.y - 24) || (!self.harbor.hidden && dock.contains(x, y));
+        let reveal = y >= self.h - 3
+            || (self.harbor.revealed && y >= dock.y - 24)
+            || (!self.harbor.hidden && dock.contains(x, y));
         if reveal != self.harbor.revealed {
             self.harbor.revealed = reveal;
             self.update_harbor();
@@ -291,7 +293,10 @@ impl Desktop {
         if hover != self.harbor.hover {
             self.harbor.hover = hover;
             self.harbor.peek_pending = hover
-                .filter(|&i| matches!(items[i].0, DockItem::App(k) if self.is_running(k)) || matches!(items[i].0, DockItem::External(_)))
+                .filter(|&i| {
+                    matches!(items[i].0, DockItem::App(k) if self.is_running(k))
+                        || matches!(items[i].0, DockItem::External(_))
+                })
                 .map(|i| (i, self.now_ms));
             if self.harbor.peek.as_ref().is_some_and(|p| Some(p.item) != hover) {
                 self.harbor.peek = None;
@@ -384,11 +389,24 @@ impl Desktop {
                 // Two rings spread from the icon while the app starts.
                 let (cx, cy) = base.center();
                 for k in 0..2u64 {
-                    let at = self.launching.iter().find(|&&(lk, _)| matches!(item, DockItem::App(kk) if *kk == lk)).map(|&(_, at)| at).unwrap_or(0);
+                    let at = self
+                        .launching
+                        .iter()
+                        .find(|&&(lk, _)| matches!(item, DockItem::App(kk) if *kk == lk))
+                        .map(|&(_, at)| at)
+                        .unwrap_or(0);
                     let phase = (self.now_ms.saturating_sub(at) + k * RIPPLE_MS / 2) % RIPPLE_MS;
                     let rr = s / 2 + (phase as i32 * 22 / RIPPLE_MS as i32);
                     let a = 220 - phase as i32 * 220 / RIPPLE_MS as i32;
-                    cv.stroke_arc(cx * 16, cy * 16, rr * 16, 28, 0, 1024, with_alpha(theme::accent_glow(), a.max(0) as u8));
+                    cv.stroke_arc(
+                        cx * 16,
+                        cy * 16,
+                        rr * 16,
+                        28,
+                        0,
+                        1024,
+                        with_alpha(theme::accent_glow(), a.max(0) as u8),
+                    );
                 }
             }
             match item {
@@ -462,9 +480,16 @@ impl Desktop {
         let f = theme::ui(12);
         cv.text(p.right() - 14 - f.width(&count), p.y + 22, &count, f, t.text_secondary);
         for (i, (r, (_, title, img))) in self.peek_thumb_rects().into_iter().zip(&peek.thumbs).enumerate() {
-            let pic = Rect::new(r.x + (r.w - img.width as i32) / 2, r.y + (r.h - 18 - img.height as i32) / 2, img.width as i32, img.height as i32);
+            let pic = Rect::new(
+                r.x + (r.w - img.width as i32) / 2,
+                r.y + (r.h - 18 - img.height as i32) / 2,
+                img.width as i32,
+                img.height as i32,
+            );
             cv.with_clip(pic.intersect(&cv.clip), |cv| {
-                cv.fill_round_rect_with(pic, 8, |x, y| img.pixels[((y - pic.y) as u32 * img.width + (x - pic.x) as u32) as usize] | 0xFF00_0000)
+                cv.fill_round_rect_with(pic, 8, |x, y| {
+                    img.pixels[((y - pic.y) as u32 * img.width + (x - pic.x) as u32) as usize] | 0xFF00_0000
+                })
             });
             if peek.hover == Some(i) {
                 cv.stroke_round_rect(pic.inset(-2), 10, theme::accent());

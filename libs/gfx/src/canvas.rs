@@ -291,7 +291,8 @@ impl<'a> Canvas<'a> {
             self.buf[d0..d0 + n].copy_from_slice(&src[s0..s0 + n]);
         }
         if radius > 0 {
-            for band in [Rect::new(dst.x, dst.y, dst.w, radius), Rect::new(dst.x, dst.bottom() - radius, dst.w, radius)] {
+            for band in [Rect::new(dst.x, dst.y, dst.w, radius), Rect::new(dst.x, dst.bottom() - radius, dst.w, radius)]
+            {
                 self.with_clip(band.intersect(&img), |cv| {
                     cv.fill_round_rect_with(dst, radius, |x, y| {
                         0xFF00_0000 | src[((y - dst.y) as u32 * src_w + (x - dst.x) as u32) as usize]
@@ -521,6 +522,7 @@ impl<'a> Canvas<'a> {
     /// Anti-aliased arc with round caps. Centre and radius are in 1/16 px so
     /// small rings sit exactly; angles use 1024 units per turn (0 at 3
     /// o'clock, growing clockwise) and the arc runs from `start` for `sweep`.
+    #[allow(clippy::too_many_arguments)] // a circle, a pen and an angle range
     pub fn stroke_arc(&mut self, cx: i32, cy: i32, r: i32, width: i32, start: i32, sweep: i32, c: u32) {
         if sweep <= 0 || r <= 0 {
             return;
@@ -531,7 +533,8 @@ impl<'a> Canvas<'a> {
         let area = bounds.intersect(&self.clip);
         let full = sweep >= 1024;
         let end = start + sweep;
-        let point = |a: i32| (cx as i64 + r as i64 * cos(a) as i64 / 16384, cy as i64 + r as i64 * sin(a) as i64 / 16384);
+        let point =
+            |a: i32| (cx as i64 + r as i64 * cos(a) as i64 / 16384, cy as i64 + r as i64 * sin(a) as i64 / 16384);
         let (s, e) = (point(start), point(end));
         let base = alpha(c);
         for y in area.y..area.bottom() {

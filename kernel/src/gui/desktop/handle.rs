@@ -100,7 +100,8 @@ impl Desktop {
             let zone = Rect::new(r.x, r.y - REACH, r.w, REACH + 26);
             if zone.contains(x, y) && (under.is_none() || under == Some(i) || y < r.y) {
                 let near_bar = self.handle_bar(i).inset_xy(-30, -6).contains(x, y);
-                let stage = if near_bar || showing.is_some_and(|h| h.stage == Stage::Pill) { Stage::Pill } else { Stage::Bar };
+                let stage =
+                    if near_bar || showing.is_some_and(|h| h.stage == Stage::Pill) { Stage::Pill } else { Stage::Bar };
                 return Some((i, stage));
             }
             // A higher window covers what's below at this point.

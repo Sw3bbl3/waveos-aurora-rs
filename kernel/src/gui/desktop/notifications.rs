@@ -343,7 +343,13 @@ impl Desktop {
                     cv.fill_circle(cx, cy, 8, ink);
                     cv.fill_circle(cx + 4, cy - 3, 7, bg);
                     cv.text(r.x + 52, r.y + 22, "Calm", theme::ui_bold(13), t.text);
-                    cv.text(r.x + 52, r.y + 40, if on { "Notifications wait" } else { "Off" }, theme::ui(12), t.text_secondary);
+                    cv.text(
+                        r.x + 52,
+                        r.y + 40,
+                        if on { "Notifications wait" } else { "Off" },
+                        theme::ui(12),
+                        t.text_secondary,
+                    );
                     widgets::toggle(cv, Rect::new(r.right() - 54, r.y + 15, 42, 22), on);
                 }
                 CenterHit::Clear if !self.history.is_empty() => {
@@ -386,10 +392,19 @@ impl Desktop {
             // Still water: three calm lines.
             for (k, w) in [44, 30, 18].iter().enumerate() {
                 let yy = cy - 34 + k as i32 * 9;
-                cv.fill_round_rect(Rect::new(cx - w / 2, yy, *w, 3), 2, with_alpha(theme::waterline(), 0x90 - k as u8 * 0x28));
+                cv.fill_round_rect(
+                    Rect::new(cx - w / 2, yy, *w, 3),
+                    2,
+                    with_alpha(theme::waterline(), 0x90 - k as u8 * 0x28),
+                );
             }
             cv.text_centered(Rect::new(r.x, cy - 6, r.w, 20), "All quiet", theme::ui_bold(14), t.text);
-            cv.text_centered(Rect::new(r.x, cy + 14, r.w, 20), "New notifications will drift in here.", theme::ui(12), t.text_secondary);
+            cv.text_centered(
+                Rect::new(r.x, cy + 14, r.w, 20),
+                "New notifications will drift in here.",
+                theme::ui(12),
+                t.text_secondary,
+            );
         }
         for (hit, r) in self.center_hits() {
             if let CenterHit::Card(i) = hit {

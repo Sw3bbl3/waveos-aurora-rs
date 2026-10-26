@@ -182,7 +182,6 @@ impl Desktop {
             return self.shoal_press(x, y);
         }
 
-
         if let Some((k, r)) = self.menubar_targets().into_iter().find(|(_, r)| r.contains(x, y)) {
             self.open_menu(k, r.x);
             return true;

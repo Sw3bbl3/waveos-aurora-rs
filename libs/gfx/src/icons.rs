@@ -107,7 +107,7 @@ fn box_scale(src: &[u32], sw: u32, sh: u32, size: i32) -> Vec<u32> {
             }
             if a > 0 {
                 let alpha = a / count.max(1);
-                out[(oy * n + ox) as usize] = (alpha << 24 | (r / a) << 16 | (g / a) << 8 | b / a) as u32;
+                out[(oy * n + ox) as usize] = (alpha << 24 | (r / a) << 16 | (g / a) << 8 | (b / a)) as u32;
             }
         }
     }
@@ -126,9 +126,8 @@ fn draw_picture(cv: &mut Canvas, icon: Icon, r: Rect) -> bool {
     let index = match pictures.iter().position(|p| p.name == name) {
         Some(i) => i,
         None => {
-            let master = loader(&alloc::format!("/System/Icons/{name}.png")).filter(|(px, w, h)| {
-                *w > 0 && *h > 0 && px.len() == (*w * *h) as usize
-            });
+            let master = loader(&alloc::format!("/System/Icons/{name}.png"))
+                .filter(|(px, w, h)| *w > 0 && *h > 0 && px.len() == (*w * *h) as usize);
             pictures.push(Picture { name, master, sized: Vec::new() });
             pictures.len() - 1
         }

@@ -203,7 +203,7 @@ pub(super) fn paint_ring(cv: &mut Canvas, cx: i32, cy: i32, size: i32, color: u3
     let (card, address) = network();
     let px = |v: i32| v * unit / 16; // design units to pixels
     let (x0, y0) = (cx / 16 - px(11), cy / 16 - px(11));
-    let at = |ux: i32, uy: i32| (x0 + px(ux) + px(ux % 1), y0 + px(uy));
+    let at = |ux: i32, uy: i32| (x0 + px(ux), y0 + px(uy));
     let stroke = if size >= 30 { 2 } else { 1 };
     if card {
         let c = if address.is_some() { color } else { with_alpha(color, 0x70) };
@@ -551,7 +551,7 @@ impl Desktop {
                 true
             }
             Some(BarHit::Mark) | Some(BarHit::App) => false, // menus (shell)
-            None => y < MENUBAR_H && y < TOP + H,
+            None => y < TOP + H,
         }
     }
 

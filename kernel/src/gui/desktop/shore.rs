@@ -260,17 +260,9 @@ impl Desktop {
             Some(Hit::Sleep) => crate::power::sleep(),
             Some(Hit::Restart) => self.power = Some(super::PowerAction::Reboot),
             Some(Hit::ShutDown) => self.power = Some(super::PowerAction::Shutdown),
-            Some(Hit::Appearance(dark)) => {
-                if theme::current().dark != dark {
-                    self.set_dark(dark);
-                }
-            }
-            Some(Hit::Wallpaper(i)) => {
-                if theme::wallpaper() != i {
-                    self.set_wallpaper(i);
-                }
-            }
-            None => {}
+            Some(Hit::Appearance(dark)) if theme::current().dark != dark => self.set_dark(dark),
+            Some(Hit::Wallpaper(i)) if theme::wallpaper() != i => self.set_wallpaper(i),
+            _ => {}
         }
         self.damage_all();
     }
@@ -498,7 +490,7 @@ impl Desktop {
         for i in 0..typed.min(20) {
             cv.fill_circle(field.x + 22 + i * 15, field.y + 21, 4, t.text_on_glass);
         }
-        if (self.now_ms / 530) % 2 == 0 {
+        if (self.now_ms / 530).is_multiple_of(2) {
             let cx = field.x + 18 + typed.min(20) * 15 + if typed > 0 { 0 } else { -2 };
             cv.fill_rect(Rect::new(cx, field.y + 12, 2, 18), theme::accent_glow());
         }
@@ -611,7 +603,7 @@ impl Desktop {
                 let focused = s.focus == i;
                 let label = if i == 4 { "Hint (optional)" } else { f.label };
                 cv.text(r.x, r.y - 8, label, theme::ui_bold(12), t.text_secondary);
-                field(cv, r, f, focused, (self.now_ms / 530) % 2 == 0);
+                field(cv, r, f, focused, (self.now_ms / 530).is_multiple_of(2));
             }
             // Password strength under the password field.
             let pr = rect(Hit::Field(2));
