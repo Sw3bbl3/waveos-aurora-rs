@@ -388,8 +388,8 @@ pub fn parse_date(s: &str) -> Option<i64> {
             day = d.parse::<i64>().ok();
             continue;
         }
-        if month.is_none() && tok.len() >= 3 {
-            let m = tok[..3].to_ascii_lowercase();
+        if let (None, Some(m)) = (month, tok.get(..3)) {
+            let m = m.to_ascii_lowercase();
             let months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
             if let Some(i) = months.iter().position(|x| *x == m) {
                 month = Some(i as i64 + 1);
@@ -430,6 +430,9 @@ mod tests {
         assert_eq!(parse_date("Wed Oct 21 07:28:00 2015"), Some(1445412480));
         assert_eq!(parse_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
         assert_eq!(parse_date("nonsense"), None);
+        // Where a month name would be, a token whose third byte is inside a character.
+        assert_eq!(parse_date("Wed, 21 Ab€ 2015 07:28:00 GMT"), None);
+        assert_eq!(parse_date("aaΏ 21 2015"), None);
     }
 
     #[test]

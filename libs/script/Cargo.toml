@@ -9,3 +9,6 @@ libm = "0.2"
 # The ECMAScript regular expression engine Boa uses (MIT/Apache-2.0).
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
 regress = { version = "0.12", default-features = false, features = ["alloc", "backend-pikevm", "utf16"] }
+
+[dev-dependencies]
+aurora-mutate = { path = "../mutate" }

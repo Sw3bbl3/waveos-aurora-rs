@@ -45,6 +45,11 @@ pub const MAGIC: [u8; 8] = *b"WAVEFS01";
 pub const VERSION: u32 = 1;
 pub const ROOT: u64 = 1;
 pub const NAME_MAX: usize = 255;
+/// The largest file, in bytes.
+pub const MAX_FILE_SIZE: u64 = 1 << 40;
+/// How much a growing `truncate` zero-fills per write, so the gap never has
+/// to fit in memory.
+const ZERO_FILL: usize = 64 * 1024;
 /// GPT partition type for AuroraFS volumes: 57415645-4653-4175-726F-72612D465331 (on-disk byte order).
 pub const PARTITION_TYPE: [u8; 16] =
     [0x45, 0x56, 0x41, 0x57, 0x53, 0x46, 0x75, 0x41, 0x72, 0x6F, 0x72, 0x61, 0x2D, 0x46, 0x53, 0x31];
@@ -214,10 +219,41 @@ impl Superblock {
             mount_count: get_u64(b, 168),
             journal_seq: get_u64(b, 176),
         };
-        if sb.data_start >= sb.blocks || sb.itable_start + sb.itable_blocks > sb.data_start {
+        if !sb.geometry_ok() {
             return Err(Error::Corrupt);
         }
         Ok(sb)
+    }
+
+    /// The regions `layout` creates: in order, without overlap, inside the
+    /// volume, and with bitmaps and an inode table big enough for what they
+    /// describe. A volume from another machine is untrusted input, and the
+    /// checksum only proves the superblock was written whole.
+    fn geometry_ok(&self) -> bool {
+        let bits = (BLOCK * 8) as u64;
+        let end = |start: u64, len: u64| start.checked_add(len);
+        let regions = [
+            (self.journal_start, self.journal_blocks),
+            (self.bbitmap_start, self.bbitmap_blocks),
+            (self.ibitmap_start, self.ibitmap_blocks),
+            (self.itable_start, self.itable_blocks),
+        ];
+        let mut next = 1;
+        for (start, len) in regions {
+            match end(start, len) {
+                Some(e) if start >= next => next = e,
+                _ => return false,
+            }
+        }
+        self.blocks >= 64
+            && next <= self.data_start
+            // The last block holds the backup superblock.
+            && self.data_start < self.blocks - 1
+            && self.journal_blocks >= 2
+            && self.inodes > ROOT
+            && self.bbitmap_blocks.checked_mul(bits).is_some_and(|n| n >= self.blocks)
+            && self.ibitmap_blocks.checked_mul(bits).is_some_and(|n| n >= self.inodes)
+            && self.itable_blocks.checked_mul(INODES_PER_BLOCK).is_some_and(|n| n >= self.inodes)
     }
 }
 
@@ -440,6 +476,11 @@ impl<D: Disk> Volume<D> {
         let mut b = zero_block();
         vol.disk.read(0, &mut b)?;
         vol.sb = Superblock::decode(&b)?;
+        if vol.sb.blocks > vol.disk.blocks() {
+            return Err(Error::Corrupt);
+        }
+        vol.dirty_bmap = vec![false; vol.sb.bbitmap_blocks as usize];
+        vol.dirty_imap = vec![false; vol.sb.ibitmap_blocks as usize];
         vol.bmap = vol.load_region(vol.sb.bbitmap_start, vol.sb.bbitmap_blocks)?;
         vol.imap = vol.load_region(vol.sb.ibitmap_start, vol.sb.ibitmap_blocks)?;
         vol.sb.mount_count += 1;
@@ -669,7 +710,7 @@ impl<D: Disk> Volume<D> {
             self.dirty_bmap[(b / (BLOCK as u64 * 8)) as usize] = true;
         }
         if used {
-            self.sb.free_blocks -= len;
+            self.sb.free_blocks = self.sb.free_blocks.saturating_sub(len);
         } else {
             self.sb.free_blocks += len;
         }
@@ -728,7 +769,7 @@ impl<D: Disk> Volume<D> {
             if !bit(&self.imap, i) {
                 set_bit(&mut self.imap, i, true);
                 self.dirty_imap[(i / (BLOCK as u64 * 8)) as usize] = true;
-                self.sb.free_inodes -= 1;
+                self.sb.free_inodes = self.sb.free_inodes.saturating_sub(1);
                 self.dirty_super();
                 return Ok(i);
             }
@@ -753,10 +794,11 @@ impl<D: Disk> Volume<D> {
     }
 
     fn read_inode(&mut self, ino: u64) -> Result<Inode> {
+        // Range first: a corrupt directory entry can name any number.
+        let (blk, off) = self.inode_location(ino)?;
         if !bit(&self.imap, ino) {
             return Err(Error::NotFound);
         }
-        let (blk, off) = self.inode_location(ino)?;
         let mut b = zero_block();
         self.meta_read(blk, &mut b)?;
         let r = &b[off..off + INODE_SIZE];
@@ -776,6 +818,18 @@ impl<D: Disk> Volume<D> {
                 extents.push(Extent { start: get_u64(&eb[..], i * 16), len: get_u32(&eb[..], i * 16 + 8) });
             }
         }
+        // Every block an inode names must lie in the data area. Checking here
+        // keeps a corrupt extent from sending readers, `free` or fsck through
+        // billions of blocks.
+        let in_data = |start: u64, len: u64| {
+            start >= self.sb.data_start && start.checked_add(len).is_some_and(|end| end < self.sb.blocks)
+        };
+        if !extents.iter().all(|e| in_data(e.start, e.len as u64))
+            || (extent_block != 0 && !in_data(extent_block, 1))
+            || (count > DIRECT_EXTENTS && extent_block == 0)
+        {
+            return Err(Error::Corrupt);
+        }
         let inode = Inode {
             kind: get_u16(r, 0),
             links: get_u32(r, 4),
@@ -786,6 +840,11 @@ impl<D: Disk> Volume<D> {
             extent_block,
         };
         inode.kind()?;
+        // Nor may its size claim more than those blocks hold (callers size
+        // buffers by it).
+        if inode.size.div_ceil(BLOCK as u64) > inode.allocated_blocks() {
+            return Err(Error::Corrupt);
+        }
         Ok(inode)
     }
 
@@ -927,7 +986,7 @@ impl<D: Disk> Volume<D> {
         let mut inode = self.read_inode(ino)?;
         let dir = inode.kind()? == Kind::Dir;
         let end = offset.checked_add(data.len() as u64).ok_or(Error::TooBig)?;
-        if end > (1u64 << 40) {
+        if end > MAX_FILE_SIZE {
             return Err(Error::TooBig);
         }
         let old_size = inode.size;
@@ -974,13 +1033,26 @@ impl<D: Disk> Volume<D> {
     pub fn truncate(&mut self, ino: u64, size: u64) -> Result<()> {
         let mut inode = self.read_inode(ino)?;
         if size > inode.size {
-            let zeros = vec![0u8; (size - inode.size) as usize];
-            return self.write(ino, inode.size, &zeros).map(|_| ());
+            if size > MAX_FILE_SIZE {
+                return Err(Error::TooBig);
+            }
+            // Fail before writing anything if the blocks can't fit.
+            if size.div_ceil(BLOCK as u64).saturating_sub(inode.allocated_blocks()) > self.sb.free_blocks {
+                return Err(Error::NoSpace);
+            }
+            let zeros = vec![0u8; ZERO_FILL];
+            let mut at = inode.size;
+            while at < size {
+                let n = (size - at).min(ZERO_FILL as u64) as usize;
+                self.write(ino, at, &zeros[..n])?;
+                at += n as u64;
+            }
+            return Ok(());
         }
         let keep = size.div_ceil(BLOCK as u64);
         self.shrink(&mut inode, keep);
         // Clear the tail of the last kept block so later growth reads zeros.
-        if size % BLOCK as u64 != 0 {
+        if !size.is_multiple_of(BLOCK as u64) {
             if let Some(pb) = inode.map(keep - 1) {
                 let dir = inode.kind()? == Kind::Dir;
                 let mut blk = zero_block();

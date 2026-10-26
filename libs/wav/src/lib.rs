@@ -72,6 +72,9 @@ pub fn parse(b: &[u8]) -> Option<Wav<'_>> {
 /// Decodes to interleaved stereo `i16` at `rate` (linear resampling).
 pub fn decode(b: &[u8], rate: usize) -> Option<Vec<i16>> {
     let w = parse(b)?;
+    if rate == 0 {
+        return None;
+    }
     let frames = w.frames();
     if frames == 0 {
         return Some(Vec::new());
@@ -83,10 +86,12 @@ pub fn decode(b: &[u8], rate: usize) -> Option<Vec<i16>> {
     for i in 0..out_frames {
         let pos = i as u64 * step;
         let f = ((pos >> 16) as usize).min(frames - 1);
-        let t = (pos & 0xFFFF) as i32;
+        // A full-scale swing times a 16-bit fraction needs more than 32 bits.
+        let t = (pos & 0xFFFF) as i64;
         let g = (f + 1).min(frames - 1);
         for c in 0..2 {
             let (a, b) = (w.sample(f, c), w.sample(g, c));
+            let (a, b) = (a as i64, b as i64);
             out.push((a + (((b - a) * t) >> 16)) as i16);
         }
     }
@@ -141,6 +146,18 @@ mod tests {
         assert_eq!(out.len(), 48_000 * 2);
         assert!(out.iter().all(|&s| s == 1000));
         assert_eq!(parse(&file).unwrap().duration_ms(), 1000);
+    }
+
+    #[test]
+    fn full_scale_swings_interpolate_without_wrapping() {
+        // From the most negative sample to the most positive: the 16-bit
+        // difference times a 16-bit fraction needs more than 32 bits.
+        let file = encode(&[i16::MIN, i16::MAX], 1, 8000);
+        let out = decode(&file, 44_100).unwrap();
+        let left: Vec<i16> = out.iter().step_by(2).copied().collect();
+        assert!(left.windows(2).all(|w| w[0] <= w[1]), "{left:?}");
+        assert!(left[5] > 20_000, "{left:?}");
+        assert!(decode(&file, 0).is_none());
     }
 
     #[test]

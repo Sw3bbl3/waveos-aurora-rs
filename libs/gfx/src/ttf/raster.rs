@@ -51,7 +51,7 @@ impl Acc {
         let mut x = px0;
         let mut row = py0 >> 16;
         if py0 < 0 {
-            x -= py0 * dxdy >> 16;
+            x -= (py0 * dxdy) >> 16;
             row = 0;
         }
         let end_row = ((py1 + ONE - 1) >> 16).min(self.h as i64);
@@ -59,7 +59,7 @@ impl Acc {
             let top = (row << 16).max(py0);
             let bottom = ((row + 1) << 16).min(py1);
             let dy = bottom - top;
-            let xnext = x + (dxdy * dy >> 16);
+            let xnext = x + ((dxdy * dy) >> 16);
             let d = dy * dir;
             let (xa, xb) = if x < xnext { (x, xnext) } else { (xnext, x) };
             let xa_floor = xa.div_euclid(ONE) * ONE;
@@ -70,28 +70,28 @@ impl Acc {
             if xbi <= xai + 1 {
                 // The edge stays within one pixel column on this row.
                 let xmf = (x + xnext) / 2 - xa_floor;
-                self.add(r, xai, d - (d * xmf >> 16));
-                self.add(r, xai + 1, d * xmf >> 16);
+                self.add(r, xai, d - ((d * xmf) >> 16));
+                self.add(r, xai + 1, (d * xmf) >> 16);
             } else {
                 let s = (1i64 << 32) / (xb - xa); // 1 / width, 16.16
                 let xaf = xa - xa_floor;
                 let a0 = ((s as i128 * ((ONE - xaf) as i128).pow(2)) >> 33) as i64;
                 let xbf = xb - xb_ceil + ONE;
                 let am = ((s as i128 * (xbf as i128).pow(2)) >> 33) as i64;
-                self.add(r, xai, d * a0 >> 16);
+                self.add(r, xai, (d * a0) >> 16);
                 if xbi == xai + 2 {
-                    self.add(r, xai + 1, d * (ONE - a0 - am) >> 16);
+                    self.add(r, xai + 1, (d * (ONE - a0 - am)) >> 16);
                 } else {
-                    let a1 = s * (3 * ONE / 2 - xaf) >> 16;
-                    self.add(r, xai + 1, d * (a1 - a0) >> 16);
-                    let step = d * s >> 16;
+                    let a1 = (s * (3 * ONE / 2 - xaf)) >> 16;
+                    self.add(r, xai + 1, (d * (a1 - a0)) >> 16);
+                    let step = (d * s) >> 16;
                     for xi in xai + 2..xbi - 1 {
                         self.add(r, xi, step);
                     }
                     let a2 = a1 + (xbi - xai - 3) * s;
-                    self.add(r, xbi - 1, d * (ONE - a2 - am) >> 16);
+                    self.add(r, xbi - 1, (d * (ONE - a2 - am)) >> 16);
                 }
-                self.add(r, xbi, d * am >> 16);
+                self.add(r, xbi, (d * am) >> 16);
             }
             x = xnext;
             row += 1;
@@ -112,9 +112,9 @@ impl Acc {
         for i in 1..=n {
             let t = (i << 16) / n;
             let mt = ONE - t;
-            let a = mt * mt >> 16;
-            let b = 2 * mt * t >> 16;
-            let c = t * t >> 16;
+            let a = (mt * mt) >> 16;
+            let b = (2 * mt * t) >> 16;
+            let c = (t * t) >> 16;
             let p = ((a * p0.0 + b * p1.0 + c * p2.0) >> 16, (a * p0.1 + b * p1.1 + c * p2.1) >> 16);
             self.line(prev.0, prev.1, p.0, p.1);
             prev = p;
@@ -144,7 +144,9 @@ pub fn render(outline: &Outline, units_per_em: u16, px_per_em: u32, x_shift: i32
 
     let mut start = 0;
     for &end in &outline.contour_ends {
-        let pts = &outline.points[start..end.min(outline.points.len())];
+        // Contour ends only ever increase in a well-formed glyph.
+        let end = end.min(outline.points.len());
+        let pts = outline.points.get(start..end).unwrap_or_default();
         start = end;
         if pts.len() < 2 {
             continue;

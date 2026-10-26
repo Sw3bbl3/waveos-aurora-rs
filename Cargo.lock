@@ -99,6 +99,9 @@ version = "0.7.0"
 [[package]]
 name = "aurora-elf"
 version = "0.7.0"
+dependencies = [
+ "aurora-mutate",
+]
 
 [[package]]
 name = "aurora-help"
@@ -112,6 +115,7 @@ dependencies = [
 name = "aurora-image"
 version = "0.7.0"
 dependencies = [
+ "aurora-mutate",
  "gif",
  "jpeg-decoder",
  "jpeg-encoder",
@@ -120,12 +124,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-mutate"
+version = "0.7.0"
+
+[[package]]
 name = "aurora-wav"
 version = "0.7.0"
 
 [[package]]
 name = "aurorafs"
 version = "0.7.0"
+dependencies = [
+ "aurora-mutate",
+]
 
 [[package]]
 name = "autocfg"
@@ -474,6 +485,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 name = "fat32"
 version = "0.7.0"
 dependencies = [
+ "aurora-mutate",
  "fatfs",
 ]
 
@@ -643,6 +655,7 @@ name = "gina"
 version = "0.7.0"
 dependencies = [
  "aurora-elf",
+ "aurora-mutate",
  "sha2",
 ]
 
@@ -811,6 +824,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 name = "lumen"
 version = "0.7.0"
 dependencies = [
+ "aurora-mutate",
  "fontdue",
  "spin 0.9.9",
 ]
@@ -845,6 +859,7 @@ dependencies = [
 name = "nebula-engine"
 version = "0.7.0"
 dependencies = [
+ "aurora-mutate",
  "libm",
  "lumen",
  "nebula-media",
@@ -856,6 +871,7 @@ dependencies = [
 name = "nebula-media"
 version = "0.7.0"
 dependencies = [
+ "aurora-mutate",
  "rusty_aac",
  "rusty_h264-common",
  "rusty_h264-decoder",
@@ -865,6 +881,7 @@ dependencies = [
 name = "nebula-script"
 version = "0.7.0"
 dependencies = [
+ "aurora-mutate",
  "hashbrown 0.15.5",
  "libm",
  "regress",
@@ -875,6 +892,7 @@ name = "nebula-secure"
 version = "0.7.0"
 dependencies = [
  "aes-gcm",
+ "aurora-mutate",
  "chacha20poly1305",
  "hkdf",
  "hmac",
@@ -893,6 +911,7 @@ dependencies = [
 name = "nebula-web"
 version = "0.7.0"
 dependencies = [
+ "aurora-mutate",
  "miniz_oxide 0.8.9",
 ]
 

@@ -88,3 +88,50 @@ pub fn parse(file: &[u8]) -> Option<Image> {
     }
     Some(Image { entry, virt_start: lo, virt_end: hi, segments })
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use alloc::vec;
+
+    /// A minimal x86-64 executable: one read+execute segment holding `ret`.
+    fn tiny() -> Vec<u8> {
+        let mut b = vec![0u8; 121];
+        b[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        b[16..18].copy_from_slice(&2u16.to_le_bytes());
+        b[18..20].copy_from_slice(&EM_X86_64.to_le_bytes());
+        b[24..32].copy_from_slice(&0x400078u64.to_le_bytes());
+        b[32..40].copy_from_slice(&64u64.to_le_bytes());
+        b[54..56].copy_from_slice(&56u16.to_le_bytes());
+        b[56..58].copy_from_slice(&1u16.to_le_bytes());
+        b[64..68].copy_from_slice(&PT_LOAD.to_le_bytes());
+        b[68..72].copy_from_slice(&(PF_R | PF_X).to_le_bytes());
+        b[80..88].copy_from_slice(&0x400000u64.to_le_bytes());
+        b[96..104].copy_from_slice(&121u64.to_le_bytes());
+        b[104..112].copy_from_slice(&121u64.to_le_bytes());
+        b[120] = 0xc3;
+        b
+    }
+
+    #[test]
+    fn reads_segments() {
+        let img = parse(&tiny()).unwrap();
+        assert_eq!(img.entry, 0x400078);
+        assert_eq!((img.virt_start, img.virt_end), (0x400000, 0x401000));
+        assert_eq!(img.segments.len(), 1);
+        assert_eq!(img.segments[0].flags, PF_R | PF_X);
+    }
+
+    /// Programs are untrusted: the kernel loads whatever is on the disk.
+    #[test]
+    fn corrupt_executables_never_panic() {
+        aurora_mutate::check("elf", &[tiny()], 20_000, |file| {
+            if let Some(img) = parse(file) {
+                for s in &img.segments {
+                    assert!(s.filesz <= s.memsz && s.offset + s.filesz <= file.len() as u64);
+                }
+            }
+        });
+    }
+}

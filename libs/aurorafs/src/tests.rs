@@ -245,3 +245,120 @@ fn backup_superblock() {
     // The backup has format-time counts but a valid layout; mount must succeed.
     assert!(Volume::mount(disk, now).is_ok());
 }
+
+/// Rewrites the first extent of `ino`'s inode on disk.
+fn corrupt_extent(v: &mut Volume<MemDisk>, ino: u64, start: u64, len: u32) {
+    let (blk, off) = v.inode_location(ino).unwrap();
+    let mut b = v.disk.blocks[blk as usize];
+    put_u64(&mut b, off + 40, start);
+    put_u32(&mut b, off + 48, len);
+    v.disk.blocks[blk as usize] = b;
+}
+
+#[test]
+fn extents_outside_the_data_area_are_corrupt() {
+    let mut v = fresh(4096);
+    let f = v.create(ROOT, "f", Kind::File).unwrap();
+    v.write(f, 0, &[1; 5000]).unwrap();
+    v.commit().unwrap();
+    // A four-billion-block extent used to send fsck (and freeing) through
+    // every block number it covered.
+    let data_start = v.sb.data_start;
+    corrupt_extent(&mut v, f, data_start, u32::MAX);
+    assert_eq!(v.stat(f).err(), Some(Error::Corrupt));
+    assert!(v.fsck().is_err());
+    corrupt_extent(&mut v, f, 0, 1); // the superblock
+    assert_eq!(v.read(f, 0, &mut [0; 16]).err(), Some(Error::Corrupt));
+    corrupt_extent(&mut v, f, u64::MAX, 2);
+    assert_eq!(v.unlink(ROOT, "f").err(), Some(Error::Corrupt));
+}
+
+#[test]
+fn superblocks_with_impossible_geometry_are_refused() {
+    let v = fresh(4096);
+    let good = v.sb.clone();
+    let disk = v.into_disk();
+    let tweaks: [fn(&mut Superblock); 6] = [
+        |sb| sb.bbitmap_blocks = 0,               // a bitmap too small for the volume
+        |sb| sb.ibitmap_blocks = 0,               // or for the inodes
+        |sb| sb.itable_blocks = 1,                // an inode table too small
+        |sb| sb.journal_start = sb.bbitmap_start, // overlapping regions
+        |sb| sb.data_start = sb.blocks - 1,       // no data area
+        |sb| sb.journal_blocks = u64::MAX,        // arithmetic that overflows
+    ];
+    for (i, tweak) in tweaks.iter().enumerate() {
+        let mut sb = good.clone();
+        tweak(&mut sb);
+        let mut d = disk.clone();
+        // A valid checksum, so only the geometry checks stand in the way.
+        d.blocks[0] = *sb.encode();
+        let last = d.blocks.len() - 1;
+        d.blocks[last] = *sb.encode();
+        assert!(Volume::mount(d, now).is_err(), "tweak {i} mounted");
+    }
+    assert!(Volume::mount(disk, now).is_ok());
+}
+
+/// Volumes come from USB sticks and other machines, and the kernel mounts
+/// them: corrupt metadata is an error, never a panic or a hang.
+#[test]
+fn corrupt_volumes_never_panic() {
+    let mut v = fresh(1024);
+    v.mkdir_all("/Documents/Sub").unwrap();
+    v.write_file("/Documents/a.txt", &[5; 10_000]).unwrap();
+    v.write_file("/Documents/Sub/b.txt", b"hello").unwrap();
+    for i in 0..20 {
+        v.write_file(&alloc::format!("/Documents/f{i}"), b"x").unwrap();
+    }
+    v.commit().unwrap();
+    let image: StdVec<u8> = v.into_disk().blocks.iter().flatten().copied().collect();
+    let used = aurora_mutate::used_blocks(&image, BLOCK);
+    aurora_mutate::check_with(
+        "aurorafs",
+        &[image],
+        150,
+        |m, seed| m.mutate_within(seed, &used),
+        |bytes| {
+            let mut disk = MemDisk::new(bytes.len() / BLOCK);
+            for (block, data) in disk.blocks.iter_mut().zip(bytes.chunks(BLOCK)) {
+                block.copy_from_slice(data);
+            }
+            let Ok(mut v) = Volume::mount(disk, now) else { return };
+            let mut dirs = vec![ROOT];
+            while let Some(dir) = dirs.pop() {
+                for e in v.readdir(dir).unwrap_or_default().into_iter().take(64) {
+                    let _ = v.stat(e.ino);
+                    match e.kind {
+                        Kind::Dir if dirs.len() < 16 => dirs.push(e.ino),
+                        _ => {
+                            let _ = v.read(e.ino, 0, &mut [0; 4096]);
+                        }
+                    }
+                }
+            }
+            let _ = v.write_file("/Documents/new.txt", &[3; 6000]);
+            let _ = v.rename(ROOT, "Documents", ROOT, "Docs");
+            let _ = v.unlink(ROOT, "Docs");
+            let _ = v.commit();
+            let _ = v.fsck();
+        },
+    );
+}
+
+#[test]
+fn growing_truncate_is_bounded_and_zero_filled() {
+    let mut v = fresh(4096);
+    let f = v.create(ROOT, "f", Kind::File).unwrap();
+    v.write(f, 0, b"abc").unwrap();
+    // Far more than the volume holds: refused up front, without trying to
+    // allocate a buffer the size of the gap (which a program could ask for).
+    assert_eq!(v.truncate(f, 1 << 39), Err(Error::NoSpace));
+    assert_eq!(v.truncate(f, MAX_FILE_SIZE + 1), Err(Error::TooBig));
+    assert_eq!(v.stat(f).unwrap().size, 3);
+    v.truncate(f, 200_000).unwrap();
+    let mut buf = vec![9u8; 200_000];
+    assert_eq!(v.read(f, 0, &mut buf).unwrap(), 200_000);
+    assert_eq!(&buf[..3], b"abc");
+    assert!(buf[3..].iter().all(|&b| b == 0));
+    v.fsck().unwrap();
+}

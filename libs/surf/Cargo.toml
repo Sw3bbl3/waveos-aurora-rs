@@ -10,3 +10,6 @@ nebula-web = { path = "../web" }
 nebula-media = { path = "../media" }
 lumen = { path = "../gfx" }
 libm = "0.2"
+
+[dev-dependencies]
+aurora-mutate = { path = "../mutate" }

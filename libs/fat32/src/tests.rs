@@ -122,3 +122,71 @@ fn time_round_trip() {
     let (d, t) = to_fat_time(now());
     assert_eq!(from_fat_time(d, t), now());
 }
+
+fn walk(fs: &mut Fat32<MemDisk>, dir: u64, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    for (name, ino, is_dir) in fs.readdir(dir).unwrap_or_default().into_iter().take(64) {
+        let _ = fs.stat(ino);
+        let _ = fs.lookup(dir, &name);
+        if is_dir {
+            walk(fs, ino, depth + 1);
+        } else {
+            let _ = fs.read(ino, 0, &mut [0; 8192]);
+        }
+    }
+}
+
+/// USB sticks are FAT32 and the kernel mounts them: a corrupt one is an
+/// error, never a panic.
+#[test]
+fn corrupt_volumes_never_panic() {
+    let mut img = Cursor::new(fresh_image());
+    {
+        let fs = fatfs::FileSystem::new(&mut img, fatfs::FsOptions::new()).unwrap();
+        let root = fs.root_dir();
+        let docs = root.create_dir("Documents").unwrap();
+        docs.create_file("A long file name.txt").unwrap().write_all(&[7; 9000]).unwrap();
+        docs.create_dir("Sub dir").unwrap().create_file("x").unwrap().write_all(b"x").unwrap();
+        root.create_file("README.TXT").unwrap().write_all(b"hello").unwrap();
+    }
+    let image = img.into_inner();
+    let used = aurora_mutate::used_blocks(&image, SECTOR);
+    aurora_mutate::check_with(
+        "fat32",
+        &[image],
+        60,
+        |m, seed| m.mutate_within(seed, &used),
+        |bytes| {
+            let Ok(mut fs) = Fat32::mount(MemDisk(bytes.to_vec()), now) else { return };
+            let _ = fs.space();
+            walk(&mut fs, ROOT, 0);
+            if let Ok(f) = fs.create(ROOT, "new file.txt", false) {
+                let _ = fs.write(f, 0, &[1; 5000]);
+            }
+            if let Ok(docs) = fs.lookup(ROOT, "Documents") {
+                let _ = fs.rename(docs, "A long file name.txt", ROOT, "moved.txt");
+                let _ = fs.unlink(docs, "Sub dir");
+                let _ = fs.truncate(docs, 0);
+            }
+            let _ = fs.flush();
+        },
+    );
+}
+
+#[test]
+fn growing_truncate_is_bounded_and_zero_filled() {
+    let mut fs = Fat32::mount(MemDisk(fresh_image()), now).unwrap();
+    let f = fs.create(ROOT, "F.BIN", false).unwrap();
+    fs.write(f, 0, b"abc").unwrap();
+    // Bigger than the volume: refused before anything is written or allocated.
+    assert_eq!(fs.truncate(f, u32::MAX as u64), Err(Error::NoSpace));
+    assert_eq!(fs.truncate(f, 1 << 40), Err(Error::NoSpace));
+    assert_eq!(fs.stat(f).unwrap().size, 3);
+    fs.truncate(f, 150_000).unwrap();
+    let mut buf = vec![9u8; 150_000];
+    assert_eq!(fs.read(f, 0, &mut buf).unwrap(), 150_000);
+    assert_eq!(&buf[..3], b"abc");
+    assert!(buf[3..].iter().all(|&b| b == 0));
+}

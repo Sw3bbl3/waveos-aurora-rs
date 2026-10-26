@@ -272,7 +272,7 @@ impl Style {
         let mut b = [0.0; 4];
         for i in 0..4 {
             if self.border_on[i] {
-                b[i] = self.border_width[i];
+                b[i] = self.border_width[i].clamp(0.0, crate::values::MAX_PX as f32);
             }
         }
         b
@@ -465,11 +465,14 @@ fn rank(origin: Origin, important: bool) -> u32 {
     origin as u32 + if important { 10 } else { 0 }
 }
 
+/// Generated content (`::before` or `::after`): its style and text.
+pub type Generated = (Rc<Style>, String);
+
 /// Styles for every node, plus generated content.
 pub struct Computed {
     pub styles: Vec<Option<Rc<Style>>>,
-    /// Per element: its ::before and ::after, each (style, text).
-    pub pseudo: BTreeMap<NodeId, [Option<(Rc<Style>, String)>; 2]>,
+    /// Per element: its ::before and ::after.
+    pub pseudo: BTreeMap<NodeId, [Option<Generated>; 2]>,
 }
 
 /// Cascades sorted declarations onto `s` (whose inherited values come from `parent`).
@@ -555,7 +558,7 @@ pub fn compute_with(doc: &Document, cascade: &Cascade, viewport: (i32, i32), all
                     decls.push((rank(Origin::Inline, d.important), (1, 0, 0), i, d));
                 }
                 // Stable sort keeps declaration order within a rule.
-                decls.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+                decls.sort_by_key(|a| (a.0, a.1, a.2));
                 let mut s = parent_style.inherit();
                 cascade_into(&mut s, &decls, &parent_style, root_font, viewport);
                 if e.tag == "html" {
@@ -571,7 +574,7 @@ pub fn compute_with(doc: &Document, cascade: &Cascade, viewport: (i32, i32), all
                         if pd.is_empty() {
                             continue;
                         }
-                        pd.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+                        pd.sort_by_key(|a| (a.0, a.1, a.2));
                         let mut ps = s.inherit();
                         cascade_into(&mut ps, &pd, &s, root_font, viewport);
                         if ps.display == Display::None {

@@ -43,13 +43,13 @@ fn reference(bytes: &[u8]) -> Image {
     let mut px = Vec::new();
     match info.color_type {
         ::png::ColorType::Rgba => {
-            for c in buf.chunks_exact(4).take((w * h) as usize) {
+            for c in buf.as_chunks::<4>().0.iter().take((w * h) as usize) {
                 px.push((c[3] as u32) << 24 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32);
             }
         }
         ::png::ColorType::GrayscaleAlpha => {
-            for c in buf.chunks_exact(2).take((w * h) as usize) {
-                px.push((c[1] as u32) << 24 | (c[0] as u32) * 0x010101);
+            for c in buf.as_chunks::<2>().0.iter().take((w * h) as usize) {
+                px.push(((c[1] as u32) << 24) | ((c[0] as u32) * 0x010101));
             }
         }
         other => panic!("unexpected reference colour type {other:?}"),
@@ -174,7 +174,9 @@ fn crc32(kind: &[u8], body: &[u8]) -> u32 {
 fn adam7_interlacing() {
     for (w, h) in [(1, 1), (3, 5), (8, 8), (33, 17)] {
         let pixels: Vec<u32> = pattern((w * h * 4) as usize, w + h)
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         let bytes = interlaced_rgba(w, h, &pixels);
@@ -252,7 +254,7 @@ fn photo(w: u32, h: u32) -> Vec<u8> {
     let mut rgb = Vec::with_capacity((w * h * 3) as usize);
     for y in 0..h {
         for x in 0..w {
-            let t = ((x * 7 + y * 13) % 32) as u32;
+            let t = (x * 7 + y * 13) % 32;
             rgb.push((x * 255 / w) as u8);
             rgb.push((y * 255 / h) as u8);
             rgb.push((128 + t * 2) as u8);
@@ -358,4 +360,56 @@ fn gif_frames_with_transparency_and_interlace() {
             assert_eq!(img.pixels[i], want, "pixel {i} (interlaced {interlaced})");
         }
     }
+}
+
+/// Small valid files in every format and variant we decode.
+fn seed_images() -> Vec<Vec<u8>> {
+    use jpeg_encoder::SamplingFactor as S;
+    let (w, h) = (19u16, 13u16);
+    let rgb = photo(w as u32, h as u32);
+    let mut seeds = vec![
+        jpeg_with(w, h, &rgb, false, S::F_2_2, None, false),
+        jpeg_with(w, h, &rgb, true, S::F_2_1, Some(2), false),
+        jpeg_with(w, h, &rgb, true, S::F_1_1, None, true),
+    ];
+    let pixels: Vec<u32> =
+        rgb.chunks(3).map(|p| 0x8000_0000 | (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32).collect();
+    let img = Image { width: w as u32, height: h as u32, pixels };
+    seeds.push(png::encode(&img));
+    seeds.push(interlaced_rgba(w as u32, h as u32, &img.pixels));
+    let palette: Vec<u8> = (0..16u8).flat_map(|i| [i * 16, 255 - i * 16, i * 7]).collect();
+    let mut gif = Vec::new();
+    {
+        let mut enc = gif::Encoder::new(&mut gif, w, h, &palette).unwrap();
+        for f in 0..2u8 {
+            let data = (0..w as usize * h as usize).map(|i| ((i + f as usize * 5) % 16) as u8).collect::<Vec<_>>();
+            let mut frame = gif::Frame::from_indexed_pixels(w, h, data, Some(3));
+            frame.interlaced = f == 1;
+            enc.write_frame(&frame).unwrap();
+        }
+    }
+    seeds.push(gif);
+    let mut bmp = vec![0u8; 54 + 4 * 2 * 2];
+    bmp[0..2].copy_from_slice(b"BM");
+    bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+    bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+    bmp[18..22].copy_from_slice(&2u32.to_le_bytes());
+    bmp[22..26].copy_from_slice(&2u32.to_le_bytes());
+    bmp[28..30].copy_from_slice(&32u16.to_le_bytes());
+    seeds.push(bmp);
+    for s in &seeds {
+        decode(s).expect("seed decodes");
+    }
+    seeds
+}
+
+/// Corrupt files of every format are rejected (or decoded as garbage),
+/// never a panic: Files, Preview and Nebula decode whatever they're given.
+#[test]
+fn corrupt_images_never_panic() {
+    aurora_mutate::check("image", &seed_images(), 6000, |d| {
+        if let Ok(img) = decode(d) {
+            let _ = img.thumbnail(8, 8);
+        }
+    });
 }

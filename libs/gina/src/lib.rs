@@ -193,7 +193,7 @@ fn cstr(b: &[u8]) -> Result<&str> {
 
 impl<'a> Package<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
-        if bytes.len() > MAX_PACKAGE || bytes.len() < 1024 || bytes.len() % 512 != 0 {
+        if bytes.len() > MAX_PACKAGE || bytes.len() < 1024 || !bytes.len().is_multiple_of(512) {
             return Err("Invalid package size");
         }
         let mut files = Vec::new();
@@ -303,7 +303,7 @@ pub fn pack(manifest: &Manifest, files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
         h[148..156].copy_from_slice(checksum.as_bytes());
         out.extend_from_slice(&h);
         out.extend_from_slice(data);
-        out.resize((out.len() + 511) / 512 * 512, 0);
+        out.resize(out.len().div_ceil(512) * 512, 0);
     }
     out.resize(out.len() + 1024, 0);
     Package::parse(&out)?;
@@ -370,6 +370,21 @@ mod tests {
         let sum: usize = b[..512].iter().map(|v| *v as usize).sum();
         b[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
         assert!(Package::parse(&b).is_err());
+    }
+    /// Packages come from anywhere; a corrupt one is refused, never a panic.
+    #[test]
+    fn corrupt_packages_never_panic() {
+        let mut m = manifest();
+        m.resources.push("Resources/readme.txt".into());
+        let package = pack(&m, &[("bin/app", &elf()), ("Resources/readme.txt", b"hello")]).unwrap();
+        aurora_mutate::check("gina", &[package], 3000, |bytes| {
+            let _ = Package::parse(bytes);
+        });
+        aurora_mutate::check("gina-manifest", &[m.encode().into_bytes()], 5000, |text| {
+            if let Ok(m) = Manifest::parse(&alloc::string::String::from_utf8_lossy(text)) {
+                assert_eq!(Manifest::parse(&m.encode()), Ok(m));
+            }
+        });
     }
     #[test]
     fn required_resources_and_abi() {

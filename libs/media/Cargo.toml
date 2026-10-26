@@ -9,3 +9,6 @@ rusty_h264-decoder = { path = "../../vendor/rusty_h264-decoder", default-feature
 rusty_h264-common = { version = "=0.16.0", default-features = false, features = ["libm"] }
 
 rusty_aac = { path = "../../vendor/rusty_aac", default-features = false }
+
+[dev-dependencies]
+aurora-mutate = { path = "../mutate" }

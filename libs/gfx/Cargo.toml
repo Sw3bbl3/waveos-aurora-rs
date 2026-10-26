@@ -8,6 +8,7 @@ license.workspace = true
 spin = "0.9"
 
 [dev-dependencies]
+aurora-mutate = { path = "../mutate" }
 fontdue = "0.9"
 
 [build-dependencies]
