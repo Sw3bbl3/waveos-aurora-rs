@@ -6,7 +6,7 @@
 
 use crate::font::Font;
 use crate::geom::Rect;
-use crate::math::isqrt;
+use crate::math::{atan2, cos, isqrt, sin};
 
 pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
     0xFF00_0000 | (r as u32) << 16 | (g as u32) << 8 | b as u32
@@ -520,6 +520,54 @@ impl<'a> Canvas<'a> {
                 if cov > 0 {
                     self.put(x, y, c, (base * cov) >> 8);
                 }
+            }
+        }
+    }
+
+    /// Anti-aliased arc with round caps. Centre and radius are in 1/16 px so
+    /// small rings sit exactly; angles use 1024 units per turn (0 at 3
+    /// o'clock, growing clockwise) and the arc runs from `start` for `sweep`.
+    pub fn stroke_arc(&mut self, cx: i32, cy: i32, r: i32, width: i32, start: i32, sweep: i32, c: u32) {
+        if sweep <= 0 || r <= 0 {
+            return;
+        }
+        let hw = width as i64 / 2;
+        let reach = (r + width) / 16 + 2;
+        let bounds = Rect::new(cx / 16 - reach, cy / 16 - reach, 2 * reach + 1, 2 * reach + 1);
+        let area = bounds.intersect(&self.clip);
+        let full = sweep >= 1024;
+        let end = start + sweep;
+        let point = |a: i32| (cx as i64 + r as i64 * cos(a) as i64 / 16384, cy as i64 + r as i64 * sin(a) as i64 / 16384);
+        let (s, e) = (point(start), point(end));
+        let base = alpha(c);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let (px, py) = ((x * 16 + 8) as i64, (y * 16 + 8) as i64);
+                let (dx, dy) = (px - cx as i64, py - cy as i64);
+                let rel = (atan2(dy, dx) - start).rem_euclid(1024);
+                let d = if full || rel <= sweep {
+                    (isqrt((dx * dx + dy * dy) as u64) as i64 - r as i64).abs()
+                } else {
+                    let ds = (px - s.0) * (px - s.0) + (py - s.1) * (py - s.1);
+                    let de = (px - e.0) * (px - e.0) + (py - e.1) * (py - e.1);
+                    isqrt(ds.min(de) as u64) as i64
+                };
+                let cov = ((hw + 8 - d) * 16).clamp(0, 256) as u32;
+                if cov > 0 {
+                    self.put(x, y, c, (base * cov) >> 8);
+                }
+            }
+        }
+    }
+
+    /// A soft coloured halo around a rounded rectangle (Crest's activity
+    /// glow, the waterline). `strength` is the alpha at the edge.
+    pub fn glow(&mut self, r: Rect, radius: i32, size: i32, c: u32, strength: u32) {
+        for i in 1..=size {
+            let falloff = (size - i + 1) as u32;
+            let a = strength * falloff * falloff / (size * size).max(1) as u32;
+            if a > 0 {
+                self.stroke_round_rect(r.inset(-i), radius + i, (c & 0x00FF_FFFF) | a.min(255) << 24);
             }
         }
     }
