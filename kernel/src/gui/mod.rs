@@ -5,6 +5,7 @@
 //! copies those regions to the GOP framebuffer.
 
 pub mod apps;
+pub mod boot;
 pub mod clipboard;
 pub mod cursor;
 pub mod desktop;
@@ -30,9 +31,10 @@ use geom::Rect;
 /// The framebuffer in use (replaced when the resolution changes).
 static FB: spin::Mutex<Option<Framebuffer>> = spin::Mutex::new(None);
 
-pub fn init(fb: Framebuffer) {
+pub fn init(fb: Framebuffer, dark: bool) {
     *FB.lock() = Some(fb);
     load_fonts();
+    boot::show(fb, dark);
 }
 
 fn current_fb() -> Option<Framebuffer> {
@@ -242,6 +244,7 @@ fn run() {
         }
         if !ready {
             ready = true;
+            boot::finish();
             log!("boot", "Aurora desktop ready");
             crate::drivers::audio::play_sound("startup");
             // Written a moment later, off the compositor, so it includes late devices.
@@ -314,8 +317,15 @@ fn load_settings() {
 
 /// Persists appearance settings to the home volume.
 pub fn save_settings() {
-    settings::set_bool("dark", theme::current().dark);
+    let dark = theme::current().dark;
+    settings::set_bool("dark", dark);
     settings::set_int("wallpaper", theme::wallpaper() as i64);
+    // The boot screen follows the appearance from the next start.
+    if prefs::boot_option("appearance").as_deref() != Some(if dark { "dark" } else { "light" }) {
+        if let Err(e) = prefs::set_boot_option("appearance", if dark { "dark" } else { "light" }) {
+            log!("gui", "could not save the boot appearance: {}", aurora_abi::err::name(e));
+        }
+    }
 }
 
 /// Fixed-size text buffer for formatting without the heap.

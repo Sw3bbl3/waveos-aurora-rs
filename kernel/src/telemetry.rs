@@ -152,6 +152,7 @@ fn emit(kind: &str, fields: fmt::Arguments) {
 /// A boot stage has begun.
 pub fn stage(id: &'static str, label: &str) {
     *STAGE.lock() = id;
+    crate::gui::boot::stage(id);
     emit("stage", format_args!("\"id\":{},\"label\":{}", json_str(id), json_str(label)));
 }
 

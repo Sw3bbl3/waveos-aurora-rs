@@ -115,6 +115,9 @@ pub const MAX_MODES: usize = 32;
 /// `verbose=1` in boot.conf: show the kernel log on screen while booting.
 pub const BOOT_VERBOSE: u32 = 1;
 
+/// `appearance=dark` in boot.conf (or no appearance line): the boot screen is dark.
+pub const BOOT_DARK: u32 = 2;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VideoMode {
