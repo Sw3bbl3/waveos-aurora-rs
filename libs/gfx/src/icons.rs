@@ -1,4 +1,8 @@
-//! Vector app icons drawn from canvas primitives (no image assets).
+//! App icons. The living water set ships as pictures in `/System/Icons`;
+//! each process installs a loader ([`set_loader`]) that decodes them, and
+//! [`draw`] keeps a box-filtered copy per size. Vector drawings remain for
+//! the few icons without a picture (folders, documents) and as a fallback
+//! when the pictures are unavailable (early boot, tests).
 
 use crate::canvas::{rgb, Canvas};
 use crate::geom::Rect;
@@ -29,6 +33,118 @@ pub enum Icon {
     Picture,
     Trash,
     TrashFull,
+    /// The code editor (Constellation Studio).
+    Studio,
+    /// The package installer.
+    Installer,
+}
+
+impl Icon {
+    /// The picture for this icon in `/System/Icons`, if it has one.
+    pub fn picture(self) -> Option<&'static str> {
+        Some(match self {
+            Icon::Aurora => "wvos",
+            Icon::Launcher => "shoal",
+            Icon::Files => "files",
+            Icon::Terminal => "terminal",
+            Icon::Notes => "notes",
+            Icon::Calculator => "calculator",
+            Icon::Settings => "settings",
+            Icon::Welcome => "welcome",
+            Icon::Learn => "learn",
+            Icon::Preview => "lens",
+            Icon::Paint => "paint",
+            Icon::Clock => "clock",
+            Icon::Activity => "pulse",
+            Icon::Nebula => "nebula",
+            Icon::Trash | Icon::TrashFull => "trash",
+            Icon::Studio => "studio",
+            Icon::Installer => "installer",
+            Icon::Folder | Icon::Document | Icon::Picture => return None,
+        })
+    }
+}
+
+/// Decodes `/System/Icons/<name>.png` into straight-alpha ARGB pixels and its size.
+pub type Loader = fn(&str) -> Option<(Vec<u32>, u32, u32)>;
+
+struct Picture {
+    name: &'static str,
+    /// The decoded master (None: not available, don't try again).
+    master: Option<(Vec<u32>, u32, u32)>,
+    /// Box-filtered copies, one per size drawn (dock, launcher, About …).
+    sized: Vec<(i32, Vec<u32>)>,
+}
+
+static LOADER: spin::Mutex<Option<Loader>> = spin::Mutex::new(None);
+static PICTURES: spin::Mutex<Vec<Picture>> = spin::Mutex::new(Vec::new());
+
+/// Lets [`draw`] use the picture icons, decoded on first use with `loader`.
+pub fn set_loader(loader: Loader) {
+    *LOADER.lock() = Some(loader);
+}
+
+/// Area-averaged downscale of a straight-alpha `sw`×`sh` image to `size`×`size`
+/// (premultiplied while averaging so transparent corners don't darken edges).
+fn box_scale(src: &[u32], sw: u32, sh: u32, size: i32) -> Vec<u32> {
+    let n = size.max(1) as u64;
+    let mut out = alloc::vec![0u32; (n * n) as usize];
+    for oy in 0..n {
+        let (y0, y1) = (oy * sh as u64 / n, ((oy + 1) * sh as u64 / n).max(oy * sh as u64 / n + 1));
+        for ox in 0..n {
+            let (x0, x1) = (ox * sw as u64 / n, ((ox + 1) * sw as u64 / n).max(ox * sw as u64 / n + 1));
+            let (mut a, mut r, mut g, mut b, mut count) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for y in y0..y1.min(sh as u64) {
+                for x in x0..x1.min(sw as u64) {
+                    let p = src[(y * sw as u64 + x) as usize] as u64;
+                    let pa = p >> 24;
+                    a += pa;
+                    r += (p >> 16 & 255) * pa;
+                    g += (p >> 8 & 255) * pa;
+                    b += (p & 255) * pa;
+                    count += 1;
+                }
+            }
+            if a > 0 {
+                let alpha = a / count.max(1);
+                out[(oy * n + ox) as usize] = (alpha << 24 | (r / a) << 16 | (g / a) << 8 | (b / a)) as u32;
+            }
+        }
+    }
+    out
+}
+
+/// Draws the picture for `icon` into `r`; false when it has none (or it couldn't be loaded).
+fn draw_picture(cv: &mut Canvas, icon: Icon, r: Rect) -> bool {
+    let Some(name) = icon.picture() else { return false };
+    let Some(loader) = *LOADER.lock() else { return false };
+    let size = r.w.min(r.h);
+    if size <= 0 {
+        return true;
+    }
+    let mut pictures = PICTURES.lock();
+    let index = match pictures.iter().position(|p| p.name == name) {
+        Some(i) => i,
+        None => {
+            let master = loader(&alloc::format!("/System/Icons/{name}.png"))
+                .filter(|(px, w, h)| *w > 0 && *h > 0 && px.len() == (*w * *h) as usize);
+            pictures.push(Picture { name, master, sized: Vec::new() });
+            pictures.len() - 1
+        }
+    };
+    let picture = &mut pictures[index];
+    let Some((master, mw, mh)) = &picture.master else { return false };
+    if !picture.sized.iter().any(|(s, _)| *s == size) {
+        // A handful of sizes are in use at once; forget the oldest beyond that.
+        if picture.sized.len() >= 6 {
+            picture.sized.remove(0);
+        }
+        picture.sized.push((size, box_scale(master, *mw, *mh, size)));
+    }
+    let pixels = &picture.sized.iter().find(|(s, _)| *s == size).unwrap().1;
+    let dst = Rect::new(r.x + (r.w - size) / 2, r.y + (r.h - size) / 2, size, size);
+    cv.draw_image(pixels, size as u32, size as u32, dst, 255);
+    true
 }
 
 fn radius(size: i32) -> i32 {
@@ -46,6 +162,9 @@ pub fn wave(cv: &mut Canvas, r: Rect, periods: i32, thickness: i32, c: u32) {
 }
 
 pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
+    if draw_picture(cv, icon, r) {
+        return;
+    }
     let s = r.w;
     let rad = radius(s);
     let u = |v: i32| v * s / 48; // design grid is 48 px
@@ -155,6 +274,18 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
         | Icon::Picture
         | Icon::Trash
         | Icon::TrashFull => draw_more(cv, icon, r),
+        Icon::Studio => {
+            cv.fill_round_rect_vgradient(r, rad, rgb(0x5B, 0x6C, 0xFF), rgb(0x1F, 0x8F, 0xC9));
+            let f = theme::mono(if s >= 40 { 14 } else { 12 });
+            cv.text_centered(r, "</>", f, 0xFFFF_FFFF);
+        }
+        Icon::Installer => {
+            cv.fill_round_rect_vgradient(r, rad, rgb(0x3D, 0x9B, 0xFF), rgb(0x0B, 0x5C, 0xC9));
+            let (cx, cy) = r.center();
+            cv.line(cx, cy - u(10), cx, cy + u(6), u(3).max(2), 0xFFFF_FFFF);
+            cv.line(cx - u(7), cy, cx, cy + u(7), u(3).max(2), 0xFFFF_FFFF);
+            cv.line(cx + u(7), cy, cx, cy + u(7), u(3).max(2), 0xFFFF_FFFF);
+        }
         Icon::Document => {
             let page = Rect::new(r.x + u(8), r.y + u(3), s - u(16), s - u(6));
             cv.fill_round_rect(page, u(3), 0xFFFF_FFFF);

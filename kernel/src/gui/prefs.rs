@@ -14,8 +14,9 @@ fn valid_key(k: &str) -> bool {
 /// Defaults for preferences that have one.
 fn default(key: &str) -> Option<&'static str> {
     Some(match key {
-        pref::DARK
-        | pref::CLOCK_24H
+        pref::DARK | pref::CREST => "1",
+        pref::BATTERY_LEVEL | pref::AUTO_LOGIN => "0",
+        pref::CLOCK_24H
         | pref::CLOCK_SECONDS
         | pref::DND
         | pref::MUTED
@@ -39,6 +40,9 @@ pub fn get(key: &str) -> Option<String> {
     // Read-only facts about the system, answered live.
     if key == "audio_device" {
         return audio::describe();
+    }
+    if key == "account_name" {
+        return super::account::Account::load().map(|a| if a.full.is_empty() { a.name } else { a.full });
     }
     settings::get(key).or_else(|| default(key).map(String::from))
 }
@@ -129,13 +133,13 @@ pub fn boot_resolution() -> Option<(u32, u32)> {
     Some((w.parse().ok()?, h.parse().ok()?))
 }
 
-/// Writes (or updates) `resolution=` in boot.conf.
-pub fn set_boot_resolution(w: u32, h: u32) -> Result<(), isize> {
+/// Writes (or updates) `key=value` in boot.conf, which the bootloader reads.
+pub fn set_boot_option(key: &str, value: &str) -> Result<(), isize> {
     let path = "/Boot/aurora/boot.conf";
     let old = crate::fs::read_all(path).unwrap_or_default();
     let mut text = String::new();
     for line in core::str::from_utf8(&old).unwrap_or("").lines() {
-        if !line.trim().starts_with("resolution=") {
+        if line.trim().split_once('=').map(|(k, _)| k.trim()) != Some(key) {
             text.push_str(line);
             text.push('\n');
         }
@@ -143,8 +147,13 @@ pub fn set_boot_resolution(w: u32, h: u32) -> Result<(), isize> {
     if text.is_empty() {
         text.push_str("# WaveOS Aurora boot options — written by Settings\n");
     }
-    text.push_str(&alloc::format!("resolution={w}x{h}\n"));
+    text.push_str(&alloc::format!("{key}={value}\n"));
     crate::fs::write_all(path, text.as_bytes())
+}
+
+/// Writes (or updates) `resolution=` in boot.conf.
+pub fn set_boot_resolution(w: u32, h: u32) -> Result<(), isize> {
+    set_boot_option("resolution", &alloc::format!("{w}x{h}"))
 }
 
 /// `set_display(w, h)`: switch now when possible, otherwise at the next start.

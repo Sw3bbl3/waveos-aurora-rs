@@ -8,7 +8,6 @@ use alloc::vec::Vec;
 use aurora_abi::err::*;
 
 const QUEUE: usize = 128;
-const EPHEMERAL: core::ops::Range<u16> = 49152..65535;
 
 #[derive(Default)]
 pub struct Port {
@@ -37,9 +36,9 @@ impl Table {
         }
         for _ in 0..(EPHEMERAL.end - EPHEMERAL.start) {
             let p = self.next;
-            self.next = if p + 1 >= EPHEMERAL.end { EPHEMERAL.start } else { p + 1 };
-            if !self.ports.contains_key(&p) {
-                self.ports.insert(p, Port::default());
+            self.next = next_ephemeral(p);
+            if let alloc::collections::btree_map::Entry::Vacant(e) = self.ports.entry(p) {
+                e.insert(Port::default());
                 return Ok(p);
             }
         }

@@ -62,8 +62,10 @@ macro_rules! entry {
     ($main:path) => {
         #[no_mangle]
         #[link_section = ".text._start"]
+        #[allow(clippy::not_unsafe_ptr_arg_deref)] // only the kernel calls it
         pub extern "C" fn _start(block: *const u64) -> ! {
-            $crate::rt::start(block, $main)
+            // SAFETY: the kernel passes the argument block to `_start`.
+            unsafe { $crate::rt::start(block, $main) }
         }
     };
 }

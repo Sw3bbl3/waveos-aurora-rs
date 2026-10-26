@@ -20,7 +20,7 @@ mod paging;
 use alloc::vec::Vec;
 use bootinfo::{
     BootInfo, Framebuffer, MemoryKind, MemoryRegion, PixelFormat, VideoMode, BOOTINFO_MAGIC, BOOTINFO_VERSION,
-    BOOT_VERBOSE, KERNEL_BASE, MAX_MODES, PHYS_OFFSET,
+    BOOT_DARK, BOOT_VERBOSE, KERNEL_BASE, MAX_MODES, PHYS_OFFSET,
 };
 use core::arch::asm;
 use log::info;
@@ -187,7 +187,7 @@ fn main() -> Status {
             initrd_len,
             modes,
             mode_count,
-            flags: if conf.verbose { BOOT_VERBOSE } else { 0 },
+            flags: if conf.verbose { BOOT_VERBOSE } else { 0 } | if conf.light { 0 } else { BOOT_DARK },
             trampoline_phys,
         });
     }
@@ -246,6 +246,8 @@ fn classify(ty: MemoryType) -> MemoryKind {
 struct BootConf {
     resolution: Option<(usize, usize)>,
     verbose: bool,
+    /// `appearance=light`: a light boot screen (dark is the default).
+    light: bool,
 }
 
 impl BootConf {
@@ -259,6 +261,7 @@ impl BootConf {
                         v.trim().split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
                 }
                 Some(("verbose", v)) => conf.verbose = v.trim() == "1",
+                Some(("appearance", v)) => conf.light = v.trim() == "light",
                 _ => {}
             }
         }

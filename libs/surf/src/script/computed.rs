@@ -149,7 +149,7 @@ pub(super) fn rgb(c: u32) -> String {
 fn len(l: Len, reference: Option<i32>, auto: &str) -> String {
     match l {
         Len::Auto => String::from(auto),
-        Len::Calc(pct, v) if pct == 0.0 => px(v),
+        Len::Calc(0.0, v) => px(v),
         Len::Calc(pct, v) => match reference {
             Some(w) => px(pct / 100.0 * w as f32 + v),
             None if v == 0.0 => format!("{}%", number(pct)),

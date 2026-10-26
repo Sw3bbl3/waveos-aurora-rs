@@ -48,6 +48,10 @@ impl Rect {
     pub fn inset(&self, d: i32) -> Rect {
         Rect::new(self.x + d, self.y + d, self.w - 2 * d, self.h - 2 * d)
     }
+    /// Insets by `dx` on the left and right and `dy` on the top and bottom.
+    pub fn inset_xy(&self, dx: i32, dy: i32) -> Rect {
+        Rect::new(self.x + dx, self.y + dy, self.w - 2 * dx, self.h - 2 * dy)
+    }
     pub fn offset(&self, dx: i32, dy: i32) -> Rect {
         Rect::new(self.x + dx, self.y + dy, self.w, self.h)
     }

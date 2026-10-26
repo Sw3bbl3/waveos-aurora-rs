@@ -76,7 +76,7 @@ impl VirtioNet {
                 let len = len as usize;
                 if len > HDR && len <= BUF {
                     let start = slot * BUF;
-                    frames.push(r.bufs.bytes_mut()[start + HDR..start + len].to_vec());
+                    frames.push(r.bufs.bytes()[start + HDR..start + len].to_vec());
                 }
                 r.free_slots.push(slot);
             }

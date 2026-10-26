@@ -284,7 +284,7 @@ pub mod report {
 
 /// Power sources, from ACPI (`power_info`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PowerInfo {
     /// Bits: [`power::BATTERY`], [`power::CHARGING`], …
     pub flags: u32,
@@ -299,22 +299,6 @@ pub struct PowerInfo {
     pub design_mwh: u32,
     pub model_len: u32,
     pub model: [u8; 32],
-}
-
-impl Default for PowerInfo {
-    fn default() -> Self {
-        PowerInfo {
-            flags: 0,
-            percent: 0,
-            minutes: 0,
-            rate_mw: 0,
-            remaining_mwh: 0,
-            full_mwh: 0,
-            design_mwh: 0,
-            model_len: 0,
-            model: [0; 32],
-        }
-    }
 }
 
 /// [`PowerInfo::flags`].
@@ -621,6 +605,13 @@ pub mod pref {
     pub const DND: &str = "dnd";
     pub const VOLUME: &str = "volume";
     pub const MUTED: &str = "muted";
+    /// "1" (default): Crest, the island in the middle of the top bar. "0" moves
+    /// its time, date and activities into the right bubble.
+    pub const CREST: &str = "crest";
+    /// "1": the status ring is 28 points with the battery percentage beside it.
+    pub const BATTERY_LEVEL: &str = "battery_level";
+    /// "1": skip Shore at start-up (locking still asks for the password).
+    pub const AUTO_LOGIN: &str = "auto_login";
 }
 
 /// A screen resolution.

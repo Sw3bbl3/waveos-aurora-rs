@@ -1,6 +1,6 @@
 //! The compositor's half of drag and drop (see `gui::dnd` for the protocol).
 
-use super::shell::DockItem;
+use super::harbor::DockItem;
 use super::Desktop;
 use crate::gui::apps::{self, AppKind};
 use crate::gui::canvas::{with_alpha, Canvas};
@@ -125,8 +125,8 @@ impl Desktop {
             Target::Trash => items.iter().position(|(i, _)| *i == DockItem::Trash),
             _ => None,
         };
-        if dh != self.dock_hover {
-            self.dock_hover = dh;
+        if dh != self.harbor.hover {
+            self.harbor.hover = dh;
             self.damage(dock.inset(-44));
         }
         let new_image = self.drag_image_rect();
@@ -141,7 +141,7 @@ impl Desktop {
         self.damage(s.image);
         let image = self.drag_image_rect();
         self.damage(image);
-        self.dock_hover = None;
+        self.harbor.hover = None;
         let d = self.dock_rect();
         self.damage(d.inset(-44));
         // Tell the source (e.g. Files refreshes after a move).

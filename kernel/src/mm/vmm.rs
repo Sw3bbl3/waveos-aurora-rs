@@ -198,6 +198,7 @@ pub fn service_shootdown() {
 // ---------------------------------------------------------- address spaces
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(clippy::enum_variant_names)] // the usual names for page protections
 pub enum Prot {
     ReadOnly,
     ReadWrite,
@@ -246,7 +247,7 @@ impl AddressSpace {
     /// a page.
     pub fn map_anon(&mut self, va: u64, pages: u64, prot: Prot) -> Result<(), isize> {
         use aurora_abi::err::*;
-        if va % PAGE_SIZE != 0 || va.checked_add(pages * PAGE_SIZE).is_none_or(|e| e > layout::USER_END) {
+        if !va.is_multiple_of(PAGE_SIZE) || va.checked_add(pages * PAGE_SIZE).is_none_or(|e| e > layout::USER_END) {
             return Err(EINVAL);
         }
         for i in 0..pages {

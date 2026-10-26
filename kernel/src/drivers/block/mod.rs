@@ -129,7 +129,7 @@ pub fn register(dev: Arc<dyn BlockDevice>) {
         "block",
         "{}: {} MiB ({} × {} B) — {}",
         dev.name(),
-        dev.sectors() * dev.sector_size() as u64 >> 20,
+        (dev.sectors() * dev.sector_size() as u64) >> 20,
         dev.sectors(),
         dev.sector_size(),
         dev.describe()
@@ -201,7 +201,7 @@ impl Dma {
     pub fn new(bytes: usize) -> Option<Dma> {
         let pages = (bytes as u64).div_ceil(PAGE_SIZE).max(1);
         let phys = frame::alloc_contiguous(pages)?;
-        let d = Dma { phys, pages };
+        let mut d = Dma { phys, pages };
         d.bytes_mut().fill(0);
         Some(d)
     }
@@ -211,7 +211,12 @@ impl Dma {
     pub fn virt(&self) -> u64 {
         phys_to_virt(self.phys)
     }
-    pub fn bytes_mut(&self) -> &mut [u8] {
+    /// The buffer's contents. Devices write it only while a command the
+    /// owner started is in flight, so between commands it is ordinary memory.
+    pub fn bytes(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.virt() as *const u8, self.len()) }
+    }
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.virt() as *mut u8, self.len()) }
     }
     /// Volatile access to a device-visible structure at `offset`.
@@ -264,7 +269,7 @@ pub fn wait_irq(irq: Option<&crate::sync::WaitQueue>, timeout_ms: u64, done: imp
 /// Validates a transfer against a device's geometry.
 pub fn check_io(dev: &dyn BlockDevice, lba: u64, len: usize) -> BlockResult<u64> {
     let ss = dev.sector_size() as usize;
-    if len % ss != 0 {
+    if !len.is_multiple_of(ss) {
         return Err(EINVAL);
     }
     let count = (len / ss) as u64;

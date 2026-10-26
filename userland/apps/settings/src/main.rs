@@ -13,7 +13,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aurora_image::Image;
-use aurorakit::canvas::{with_alpha, Canvas};
+use aurorakit::canvas::{mix, with_alpha, Canvas};
 use aurorakit::geom::Rect;
 use aurorakit::icons::{self, Icon};
 use aurorakit::text::TextField;
@@ -46,10 +46,12 @@ enum Pane {
     Notifications,
     About,
     Desktop,
+    Bar,
+    Login,
     Accessibility,
 }
 
-const PANES: [(Pane, &str, &str, u32); 10] = [
+const PANES: [(Pane, &str, &str, u32); 12] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
@@ -57,7 +59,9 @@ const PANES: [(Pane, &str, &str, u32); 10] = [
     (Pane::DateTime, "Date & Time", "datetime", 0xFFFF9F0A),
     (Pane::Sound, "Sound", "sound", 0xFFFF375F),
     (Pane::Notifications, "Notifications", "notifications", 0xFFFF453A),
-    (Pane::Desktop, "Desktop & Dock", "desktop", 0xFF5856D6),
+    (Pane::Desktop, "Desktop & Harbor", "desktop", 0xFF5856D6),
+    (Pane::Bar, "Bar & Crest", "bar", 0xFF2F62F5),
+    (Pane::Login, "Login", "login", 0xFF8E5CF5),
     (Pane::Accessibility, "Accessibility", "accessibility", 0xFF147EFB),
     (Pane::About, "About", "about", 0xFF30B0C7),
 ];
@@ -101,7 +105,8 @@ pub struct Settings {
     scroll: i32,
     focus: Option<Hit>,
     hover: Option<Hit>,
-    thumbs: Vec<Vec<u32>>,
+    /// Wallpaper pictures, day and night.
+    thumbs: Vec<[Vec<u32>; 2]>,
     custom_thumb: Option<Image>,
     modes: Vec<DisplayMode>,
     note: Option<(String, u64)>,
@@ -127,7 +132,7 @@ fn days_in(y: i32, m: i32) -> i32 {
 
 impl Settings {
     pub fn new(start: Option<&str>) -> Self {
-        let thumbs = (0..wallpaper::NAMES.len() as u8).map(|i| wallpaper::generate(i, THUMB_W, THUMB_H)).collect();
+        let thumbs = (0..wallpaper::NAMES.len() as u8).map(|i| [wallpaper_thumb(i, false), wallpaper_thumb(i, true)]).collect();
         let pane = start
             .and_then(|s| PANES.iter().find(|(_, _, id, _)| *id == s.split('/').next().unwrap_or(s)))
             .map(|(p, _, _, _)| *p)
@@ -294,6 +299,14 @@ impl Settings {
             }
             Pane::Notifications => {
                 v.push((Hit::Toggle(pref::DND), Self::toggle_rect(Rect::new(c.x, c.y + 70, c.w, ROW_H))));
+            }
+            Pane::Bar => {
+                let rows = Self::rows(c, c.y + 190, 2);
+                v.push((Hit::Toggle(pref::CREST), Self::toggle_rect(rows[0])));
+                v.push((Hit::Toggle(pref::BATTERY_LEVEL), Self::toggle_rect(rows[1])));
+            }
+            Pane::Login => {
+                v.push((Hit::Toggle(pref::AUTO_LOGIN), Self::toggle_rect(Rect::new(c.x, c.y + 168, c.w, ROW_H))));
             }
             Pane::About => {
                 v.push((Hit::AboutMore, Rect::new(c.x + (c.w - 160) / 2, c.y + 420, 160, 32)));
@@ -514,7 +527,7 @@ impl Settings {
                 Self::heading(cv, c, c.y + 306, "Wallpaper");
                 for i in 0..wallpaper::NAMES.len() as u8 {
                     let r = rect_of(Hit::Wallpaper(i)).unwrap();
-                    let img = &self.thumbs[i as usize];
+                    let img = &self.thumbs[i as usize][t.dark as usize];
                     cv.fill_round_rect_with(r, 10, |px, py| img[((py - r.y) * THUMB_W + (px - r.x)) as usize]);
                     self.ring(cv, r, theme::wallpaper() == i, Hit::Wallpaper(i));
                     let label = wallpaper::NAMES[i as usize];
@@ -534,7 +547,7 @@ impl Settings {
                     self.ring(cv, r, theme::wallpaper() == wallpaper::CUSTOM, Hit::CustomWallpaper);
                     cv.text_centered(Rect::new(r.x, r.bottom() + 6, r.w, 20), "Your Picture", theme::ui(13), t.text);
                 }
-                let tip = "Tip: choose Set as Wallpaper in Preview or Files to use any picture.";
+                let tip = "Tip: choose Set as Wallpaper in Lens or Files to use any picture.";
                 cv.text_clipped(c.x, c.y + 450, tip, theme::ui(12), t.text_secondary, c.w);
             }
             Pane::Display => {
@@ -763,13 +776,53 @@ impl Settings {
             Pane::Notifications => {
                 let r = Rect::new(c.x, c.y + 70, c.w, ROW_H);
                 Self::card(cv, r, 1);
-                cv.text(r.x + 16, r.y + 27, "Do Not Disturb", theme::ui(14), t.text);
+                cv.text(r.x + 16, r.y + 27, "Calm", theme::ui(14), t.text);
                 widgets::toggle(cv, rect_of(Hit::Toggle(pref::DND)).unwrap(), prefs::get_bool(pref::DND));
-                let text = "While Do Not Disturb is on, notifications don't show banners. They still \
-                            collect in the Notification Center: click the clock in the menu bar.";
+                let text = "While Calm is on, notifications don't rise from Crest. They still drift \
+                            into Drift: click Crest at the top of the screen to see them.";
                 let f = theme::ui(13);
                 for (k, (a, b)) in widgets::wrap(text, f, c.w).into_iter().enumerate() {
                     cv.text(c.x, c.y + 142 + k as i32 * 20, &text[a..b], f, t.text_secondary);
+                }
+            }
+            Pane::Bar => {
+                let crest = prefs::get_bool(pref::CREST);
+                let battery = prefs::get_bool(pref::BATTERY_LEVEL);
+                bar_preview(cv, Rect::new(c.x, c.y + 52, c.w, 120), crest, battery);
+                let card = Rect::new(c.x, c.y + 190, c.w, 2 * ROW_H);
+                Self::card(cv, card, 2);
+                cv.text(c.x + 16, card.y + 27, "Show Crest", theme::ui(14), t.text);
+                widgets::toggle(cv, rect_of(Hit::Toggle(pref::CREST)).unwrap(), crest);
+                cv.text(c.x + 16, card.y + ROW_H + 27, "Show battery level", theme::ui(14), t.text);
+                widgets::toggle(cv, rect_of(Hit::Toggle(pref::BATTERY_LEVEL)).unwrap(), battery);
+                let text = "Crest sits at the top centre and shows the time; point at it for the date, click it \
+                            for Drift. Without Crest, the time and date move into the right bubble. The battery \
+                            level appears next to the status ring on computers with a battery.";
+                let f = theme::ui(13);
+                for (k, (a, b)) in widgets::wrap(text, f, c.w).into_iter().enumerate() {
+                    cv.text(c.x, card.bottom() + 28 + k as i32 * 20, &text[a..b], f, t.text_secondary);
+                }
+            }
+            Pane::Login => {
+                let name = prefs::get("account_name").unwrap_or_else(|| String::from("This computer"));
+                let card = Rect::new(c.x, c.y + 64, c.w, 84);
+                cv.fill_round_rect(card, 16, t.window_bg_alt);
+                let av = Rect::new(card.x + 16, card.y + 16, 52, 52);
+                cv.fill_round_rect_dgradient(av, 26, theme::accent(), theme::ACCENT_2);
+                let initials: String =
+                    name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect::<String>().to_uppercase();
+                cv.text_centered(av, &initials, theme::ui_bold(18), 0xFFFF_FFFF);
+                cv.text(av.right() + 16, card.y + 38, &name, theme::ui_bold(16), t.text);
+                cv.text(av.right() + 16, card.y + 58, "Owner · password protected", theme::ui(13), t.text_secondary);
+                let r = Rect::new(c.x, c.y + 168, c.w, ROW_H);
+                Self::card(cv, r, 1);
+                cv.text(r.x + 16, r.y + 27, "Log in automatically", theme::ui(14), t.text);
+                widgets::toggle(cv, rect_of(Hit::Toggle(pref::AUTO_LOGIN)).unwrap(), prefs::get_bool(pref::AUTO_LOGIN));
+                let text = "With automatic login, WaveOS opens straight to the desktop when it starts. Lock Screen \
+                            (Super L) and waking from sleep still ask for your password.";
+                let f = theme::ui(13);
+                for (k, (a, b)) in widgets::wrap(text, f, c.w).into_iter().enumerate() {
+                    cv.text(c.x, r.bottom() + 28 + k as i32 * 20, &text[a..b], f, t.text_secondary);
                 }
             }
             Pane::Desktop | Pane::Accessibility => {
@@ -777,8 +830,8 @@ impl Settings {
                     alloc::vec![
                         View::label("Make the desktop yours"),
                         View::card(alloc::vec![
-                            View::slider(5, "Dock size", (theme::dock_icon_size() - 32) * 1000 / 32),
-                            View::toggle(4, "Automatically hide Dock", prefs::get_bool(pref::DOCK_AUTOHIDE))
+                            View::slider(5, "Harbor size", (theme::dock_icon_size() - 32) * 1000 / 32),
+                            View::toggle(4, "Hide Harbor until pointed at", prefs::get_bool(pref::DOCK_AUTOHIDE))
                         ]),
                         View::card(alloc::vec![
                             View::slider(6, "Liquid glass intensity", theme::glass_intensity() as i32 * 10),
@@ -806,12 +859,16 @@ impl Settings {
                 self.controls.draw(cv, &View::column(children), Rect::new(c.x, c.y + 52, c.w, 600));
             }
             Pane::About => {
-                let (cx, _) = c.center();
-                icons::draw(cv, Icon::Aurora, Rect::new(cx - 44, c.y + 50, 88, 88));
-                cv.text_centered(Rect::new(c.x, c.y + 150, c.w, 34), "WaveOS Aurora", theme::ui_bold(26), t.text);
+                // The WVOS card.
+                let hero = Rect::new(c.x, c.y + 52, c.w, 148);
+                cv.fill_round_rect_dgradient(hero, 20, mix(theme::accent(), 0xFF06_0A1A, 150), theme::accent());
+                cv.glow(Rect::new(hero.x + 30, hero.y + 26, 96, 96), 24, 24, 0xFFFF_FFFF, 40);
+                icons::draw(cv, Icon::Aurora, Rect::new(hero.x + 30, hero.y + 26, 96, 96));
+                cv.text(hero.x + 148, hero.y + 66, "WaveOS Aurora", theme::display(28), 0xFFFF_FFFF);
                 let i = &self.info;
                 let version = format!("Version {}", corekit::process::fixed_str(&i.version, i.version_len));
-                cv.text_centered(Rect::new(c.x, c.y + 184, c.w, 20), &version, theme::ui(14), t.text_secondary);
+                cv.text(hero.x + 150, hero.y + 92, &version, theme::ui(14), 0xE6FF_FFFF);
+                cv.text(hero.x + 150, hero.y + 116, "Made by WayV", theme::ui_bold(13), 0xCCFF_FFFF);
                 let rows = [
                     ("Processor", corekit::process::fixed_str(&i.cpu, i.cpu_len)),
                     ("Memory", format!("{} MiB", i.mem_total >> 20)),
@@ -899,6 +956,16 @@ fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
             cv.fill_round_rect(Rect::new(cx - 6, cy - 6, 12, 12), 3, w);
             cv.fill_circle(cx + 5, cy - 5, 3, 0xFFFFD60A);
         }
+        Pane::Bar => {
+            cv.fill_round_rect(Rect::new(cx - 7, cy - 6, 14, 5), 2, w);
+            cv.fill_round_rect(Rect::new(cx - 3, cy - 5, 6, 3), 1, 0xFF2F62F5);
+            cv.fill_rect(Rect::new(cx - 7, cy + 2, 14, 1), w);
+            cv.fill_rect(Rect::new(cx - 7, cy + 5, 9, 1), w);
+        }
+        Pane::Login => {
+            cv.fill_circle(cx, cy - 3, 3, w);
+            cv.fill_round_rect(Rect::new(cx - 6, cy + 2, 12, 6), 3, w);
+        }
         Pane::Desktop | Pane::Accessibility | Pane::About => {
             cv.fill_circle(cx, cy - 4, 1, w);
             cv.fill_rect(Rect::new(cx - 1, cy - 1, 2, 7), w);
@@ -908,8 +975,8 @@ fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
 
 fn human(n: u64) -> String {
     match n {
-        n if n >= 1 << 30 => format!("{}.{} GB", n >> 30, (n % (1 << 30)) * 10 >> 30),
-        n if n >= 1 << 20 => format!("{}.{} MB", n >> 20, (n % (1 << 20)) * 10 >> 20),
+        n if n >= 1 << 30 => format!("{}.{} GB", n >> 30, ((n % (1 << 30)) * 10) >> 30),
+        n if n >= 1 << 20 => format!("{}.{} MB", n >> 20, ((n % (1 << 20)) * 10) >> 20),
         n if n >= 1 << 10 => format!("{} KB", n >> 10),
         n => format!("{n} bytes"),
     }
@@ -1256,4 +1323,57 @@ fn main(args: corekit::Args) -> i32 {
         return 0;
     }
     aurorakit::run(Settings::new(args.get(1).map(String::as_str)))
+}
+
+/// A small picture of the bar: the left bubble, Crest (or the time on the
+/// right) and the status ring (with the battery level).
+fn bar_preview(cv: &mut Canvas, r: Rect, crest: bool, battery: bool) {
+    let t = theme::current();
+    cv.fill_round_rect_vgradient(r, 16, mix(theme::accent(), 0xFF06_0A1A, 170), theme::accent());
+    let pill = |cv: &mut Canvas, p: Rect| {
+        cv.fill_round_rect(p, p.h / 2, if t.dark { 0x8010_162E } else { 0xA0FF_FFFF });
+    };
+    let ink = if t.dark { 0xFFF2_F4FA } else { 0xFF0E_1530 };
+    let y = r.y + 14;
+    let left = Rect::new(r.x + 14, y, 96, 28);
+    pill(cv, left);
+    cv.fill_circle(left.x + 15, left.y + 14, 6, theme::accent());
+    cv.text(left.x + 28, left.y + 19, "Desktop", theme::ui_bold(12), ink);
+    let f = theme::ui_bold(13);
+    if crest {
+        let c = Rect::new(r.x + r.w / 2 - 40, y, 80, 28);
+        pill(cv, c);
+        cv.text_centered(c, "10:30", f, ink);
+    }
+    let rw = if crest { 64 } else { 172 } + if battery { 34 } else { 0 };
+    let right = Rect::new(r.right() - 14 - rw, y, rw, 28);
+    pill(cv, right);
+    let mut x = right.right() - 22;
+    cv.stroke_round_rect(Rect::new(x - 8, right.y + 6, 16, 16), 8, ink);
+    // Seek.
+    let sx = if crest { right.x + 18 } else { x - 28 - if battery { 34 } else { 0 } };
+    cv.stroke_round_rect(Rect::new(sx - 6, right.y + 7, 10, 10), 5, ink);
+    cv.line(sx + 2, right.y + 15, sx + 6, right.y + 19, 2, ink);
+    if battery {
+        x -= 34;
+        cv.text(x - 4, right.y + 19, "82%", theme::ui_bold(11), ink);
+    }
+    if !crest {
+        let label = "Mon 26 Oct  10:30";
+        cv.text(right.x + 12, right.y + 19, label, theme::ui_bold(11), ink);
+    }
+    let note = if crest { "Crest on: the time sits in the middle" } else { "Crest off: the time moves to the right" };
+    cv.text_centered(Rect::new(r.x, r.bottom() - 34, r.w, 20), note, theme::ui_bold(13), 0xFFFF_FFFF);
+}
+
+/// The small picture of built-in wallpaper `i` (pre-scaled in the system
+/// image), or a drawn stand-in.
+fn wallpaper_thumb(i: u8, dark: bool) -> Vec<u32> {
+    let path = wallpaper::file(i, dark).map(|p| p.replace("/System/Wallpapers/", "/System/Wallpapers/Thumbnails/"));
+    path.and_then(|p| corekit::fs::read(&p).ok())
+        .and_then(|d| aurora_image::decode(&d).ok())
+        .map(|img| img.thumbnail(THUMB_W as u32, THUMB_H as u32))
+        .filter(|img| img.width == THUMB_W as u32 && img.height == THUMB_H as u32)
+        .map(|img| img.pixels)
+        .unwrap_or_else(|| wallpaper::generate(i, THUMB_W, THUMB_H))
 }

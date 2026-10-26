@@ -1,10 +1,10 @@
-//! Spotlight (Super+Space): one search box for apps, files, settings,
+//! Seek (Super+Space): one search box for apps, files, settings,
 //! quick calculations and system commands.
 
 use super::{Desktop, PowerAction};
 use crate::drivers::input::{KeyCode, KeyEvent};
 use crate::gui::apps::{self, AppKind, CATALOG};
-use crate::gui::canvas::{with_alpha, Canvas};
+use crate::gui::canvas::Canvas;
 use crate::gui::geom::Rect;
 use crate::gui::icons::{self, Icon};
 use crate::gui::theme::{self, MENUBAR_H};
@@ -39,9 +39,11 @@ const COMMANDS: [(Command, &str, &str); 7] = [
 ];
 
 /// Settings panes Spotlight can open (the argument Settings understands).
-const PANES: [(&str, &str); 11] = [
+const PANES: [(&str, &str); 13] = [
     ("Appearance", "appearance"),
-    ("Desktop & Dock", "desktop"),
+    ("Desktop & Harbor", "desktop"),
+    ("Bar & Crest", "bar"),
+    ("Login", "login"),
     ("Liquid Glass", "desktop"),
     ("Accessibility", "accessibility"),
     ("Wallpaper", "appearance"),
@@ -401,18 +403,17 @@ impl Desktop {
         }
         let t = theme::current();
         let r = self.spotlight_rect();
-        cv.shadow(r, 18, 40, 14, t.shadow);
-        cv.glass(&self.blurred, r, 18, t.panel_tint);
-        cv.stroke_round_rect(r, 18, if t.dark { 0x30FF_FFFF } else { 0x80FF_FFFF });
-        // Magnifying glass.
-        let (mx, my) = (r.x + 30, r.y + FIELD_H / 2 - 2);
-        cv.fill_circle(mx, my, 9, t.text_secondary);
-        cv.fill_circle(mx, my, 6, with_alpha(t.window_bg, 0xFF));
-        cv.line(mx + 6, my + 6, mx + 12, my + 12, 3, t.text_secondary);
+        cv.shadow(r, 24, 40, 14, t.shadow);
+        cv.frosted(r, 24, t.panel_tint);
+        cv.stroke_round_rect(r, 24, if t.dark { 0x24FF_FFFF } else { 0x80FF_FFFF });
+        // Magnifying glass, as on the bar.
+        let (mx, my) = (r.x + 30, r.y + FIELD_H / 2);
+        cv.stroke_arc((mx - 3) * 16, (my - 3) * 16, 8 * 16, 40, 0, 1024, t.text_secondary);
+        cv.line(mx + 3, my + 3, mx + 9, my + 9, 3, t.text_secondary);
         let f = theme::ui(22);
         let base = r.y + (FIELD_H + f.ascent as i32 + f.descent as i32) / 2;
         if s.query.is_empty() {
-            cv.text(r.x + 56, base, "Spotlight Search", f, t.text_secondary);
+            cv.text(r.x + 56, base, "Seek apps, files and settings", f, t.text_secondary);
         } else {
             let w = cv.text(r.x + 56, base, &s.query, f, t.text);
             cv.fill_rect(Rect::new(r.x + 58 + w, r.y + 14, 2, FIELD_H - 28), theme::accent());
@@ -425,7 +426,7 @@ impl Desktop {
         for (i, (res, row)) in s.results.iter().zip(self.spotlight_rows()).enumerate() {
             let sel = i == s.selected;
             if sel {
-                cv.fill_round_rect(row, 10, theme::accent());
+                cv.fill_round_rect(row, 14, theme::accent());
             }
             let fg = if sel { 0xFFFF_FFFF } else { t.text };
             let fg2 = if sel { 0xDDFF_FFFF } else { t.text_secondary };
@@ -433,7 +434,7 @@ impl Desktop {
             let (title, subtitle, kind): (String, String, &str) = match res {
                 Result::Installed(name, _) => {
                     icons::draw(cv, Icon::Aurora, ir);
-                    (name.clone(), String::from("GINA application"), "Application")
+                    (name.clone(), String::from("Installed app"), "Application")
                 }
                 Result::App(k) => {
                     let a = apps::info(*k);

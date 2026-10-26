@@ -677,6 +677,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is test input, not π
     fn radix() {
         assert_eq!(to_radix(255.0, 16), "ff");
         assert_eq!(to_radix(-255.0, 2), "-11111111");
@@ -688,6 +689,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is test input, not π
     fn parsing() {
         assert_eq!(parse(&u("  42 ")), 42.0);
         assert_eq!(parse(&u("")), 0.0);

@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 
 [dev-dependencies]
+aurora-mutate = { path = "../mutate" }
 fatfs = "0.3"

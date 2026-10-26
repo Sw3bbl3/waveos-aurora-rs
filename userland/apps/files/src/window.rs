@@ -1,6 +1,10 @@
 use super::*;
 use transfer::{Choice, Manager};
 
+/// What the transfer panel shows (bytes, completed, errors, running, cancelling,
+/// committing, conflict serial, current item), to notice when it changes.
+type ProgressSnapshot = (u64, usize, usize, bool, bool, bool, u64, String);
+
 pub struct Files {
     tabs: Vec<Folder>,
     active: usize,
@@ -10,7 +14,7 @@ pub struct Files {
     panel_focus: bool,
     panel_button: usize,
     conflict_serial: u64,
-    progress: Option<(u64, usize, usize, bool, bool, bool, u64, String)>,
+    progress: Option<ProgressSnapshot>,
     last_tick: u64,
     close_prompt: bool,
     closing: bool,

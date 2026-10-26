@@ -1975,7 +1975,7 @@ fn dispatch_rooted(rt: &mut Realm, target: NodeId, ev: Value) -> Result<bool, Va
                     });
                 }
                 let r = if rt.is_callable(&f) {
-                    let r = rt.call(&f, current.clone(), &[ev.clone()]);
+                    let r = rt.call(&f, current.clone(), core::slice::from_ref(&ev));
                     // `return false` from an on… handler cancels.
                     if let Ok(Value::Bool(false)) = r {
                         if index == usize::MAX
@@ -1987,7 +1987,7 @@ fn dispatch_rooted(rt: &mut Realm, target: NodeId, ev: Value) -> Result<bool, Va
                     r
                 } else if let Value::Object(fo) = &f {
                     match rt.get_str(*fo, "handleEvent") {
-                        Ok(h) if rt.is_callable(&h) => rt.call(&h, f.clone(), &[ev.clone()]),
+                        Ok(h) if rt.is_callable(&h) => rt.call(&h, f.clone(), core::slice::from_ref(&ev)),
                         Ok(_) => Ok(Value::Undefined),
                         Err(e) => Err(e),
                     }
@@ -3471,6 +3471,7 @@ pub fn fire_storage(
 }
 
 /// A keyboard event at the focused element (or the body).
+#[allow(clippy::too_many_arguments)] // the KeyboardEvent fields, one by one
 pub fn fire_key(
     rt: &mut Realm,
     target: NodeId,

@@ -167,7 +167,7 @@ impl BlockDevice for NvmeDisk {
         let per = (MAX_BYTES / self.sector_size as usize) as u64;
         for (i, chunk) in buf.chunks_mut(MAX_BYTES).enumerate() {
             self.transfer(IO_READ, lba + i as u64 * per, chunk.len(), &mut io)?;
-            chunk.copy_from_slice(&io.buf.bytes_mut()[..chunk.len()]);
+            chunk.copy_from_slice(&io.buf.bytes()[..chunk.len()]);
         }
         Ok(())
     }

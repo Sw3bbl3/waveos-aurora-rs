@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 exclude = ["vendor/rusty_h264-decoder", "vendor/rusty_aac"]
-members = ["libs/help", "libs/gina", "xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/aurorafs", "libs/fat32", "libs/image", "libs/wav", "libs/web", "libs/tls", "libs/surf", "libs/script", "libs/media"]
+members = ["libs/help", "libs/gina", "xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/aurorafs", "libs/fat32", "libs/image", "libs/wav", "libs/web", "libs/tls", "libs/surf", "libs/script", "libs/media", "libs/mutate"]
 default-members = ["libs/gina", "xtask"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 

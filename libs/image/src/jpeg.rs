@@ -72,6 +72,11 @@ impl Huffman {
             let n = counts[len - 1] as i32;
             h.valptr[len] = k;
             h.mincode[len] = code;
+            // More codes than this length can hold: the table is corrupt (and
+            // the fast table fill below would run past its end).
+            if code + n > (1 << len) {
+                return Err(Error::Corrupt);
+            }
             if n > 0 {
                 h.maxcode[len] = code + n - 1;
                 // Fill the fast table.
@@ -90,9 +95,6 @@ impl Huffman {
             }
             code += n;
             k += n;
-            if code > (1 << len) {
-                return Err(Error::Corrupt);
-            }
             code <<= 1;
         }
         h.maxcode[17] = i32::MAX;
@@ -283,7 +285,7 @@ pub fn decode(data: &[u8]) -> Result<Image, Error> {
         let len = u16_at(data, i)?;
         let seg = data.get(i + 2..i + len).ok_or(Error::Corrupt)?;
         match marker {
-            0xC0 | 0xC1 | 0xC2 => {
+            0xC0..=0xC2 => {
                 d.progressive = marker == 0xC2;
                 d.frame(seg)?;
             }
@@ -482,7 +484,7 @@ impl<'a> Decoder<'a> {
             let t = bits.decode(&self.dc[dc_table])? as u32;
             let diff = bits.receive_extend(t.min(16));
             let c = &mut self.comps[ci];
-            c.dc_pred += diff;
+            c.dc_pred = c.dc_pred.wrapping_add(diff);
             c.coefs[base] = c.dc_pred as i16;
             let mut k = 1;
             while k < 64 {
@@ -510,7 +512,7 @@ impl<'a> Decoder<'a> {
                 let t = bits.decode(&self.dc[dc_table])? as u32;
                 let diff = bits.receive_extend(t.min(16));
                 let c = &mut self.comps[ci];
-                c.dc_pred += diff;
+                c.dc_pred = c.dc_pred.wrapping_add(diff);
                 c.coefs[base] = (c.dc_pred << al) as i16;
             } else if bits.bit() {
                 self.comps[ci].coefs[base] |= 1 << al;
@@ -570,7 +572,7 @@ impl<'a> Decoder<'a> {
                     let z = ZIGZAG[k];
                     if coefs[z] != 0 {
                         if bits.bit() && coefs[z] & p1 == 0 {
-                            coefs[z] += if coefs[z] >= 0 { p1 } else { m1 };
+                            coefs[z] = coefs[z].wrapping_add(if coefs[z] >= 0 { p1 } else { m1 });
                         }
                     } else {
                         r -= 1;
@@ -590,7 +592,7 @@ impl<'a> Decoder<'a> {
             while k <= se {
                 let z = ZIGZAG[k];
                 if coefs[z] != 0 && bits.bit() && coefs[z] & p1 == 0 {
-                    coefs[z] += if coefs[z] >= 0 { p1 } else { m1 };
+                    coefs[z] = coefs[z].wrapping_add(if coefs[z] >= 0 { p1 } else { m1 });
                 }
                 k += 1;
             }
@@ -614,7 +616,7 @@ impl<'a> Decoder<'a> {
                     for bx in 0..c.bw {
                         let src = &c.coefs[(by * c.bw + bx) * 64..][..64];
                         for i in 0..64 {
-                            block[i] = src[i] as i32 * q[i] as i32;
+                            block[i] = src[i] as i32 * q[i] as i32; // |i16 × u16| < 2^31
                         }
                         idct(&block, &mut plane[by * 8 * stride + bx * 8..], stride);
                     }
@@ -685,31 +687,36 @@ impl<'a> Decoder<'a> {
 }
 
 /// 8×8 inverse DCT (stb_image's integer version), writing clamped samples.
+///
+/// Arithmetic wraps: valid images never come near `i32` limits, and a corrupt
+/// one only produces wrong pixels, never a panic.
 fn idct(input: &[i32; 64], out: &mut [u8], stride: usize) {
-    const fn f2f(x: f32) -> i32 {
-        (x * 4096.0 + 0.5) as i32
+    use core::num::Wrapping as W;
+    const fn f2f(x: f32) -> W<i32> {
+        W((x * 4096.0 + 0.5) as i32)
     }
-    const C0: i32 = f2f(0.541_196_1);
-    const C1: i32 = f2f(-1.847_759_1);
-    const C2: i32 = f2f(0.765_366_85);
-    const C3: i32 = f2f(1.175_875_6);
-    const C4: i32 = f2f(0.298_631_34);
-    const C5: i32 = f2f(2.053_119_9);
-    const C6: i32 = f2f(3.072_711);
-    const C7: i32 = f2f(1.501_321_1);
-    const C8: i32 = f2f(-0.899_976_2);
-    const C9: i32 = f2f(-2.562_915_3);
-    const C10: i32 = f2f(-1.961_570_6);
-    const C11: i32 = f2f(-0.390_180_64);
+    const C0: W<i32> = f2f(0.541_196_1);
+    const C1: W<i32> = f2f(-1.847_759_1);
+    const C2: W<i32> = f2f(0.765_366_85);
+    const C3: W<i32> = f2f(1.175_875_6);
+    const C4: W<i32> = f2f(0.298_631_34);
+    const C5: W<i32> = f2f(2.053_12);
+    const C6: W<i32> = f2f(3.072_711);
+    const C7: W<i32> = f2f(1.501_321_1);
+    const C8: W<i32> = f2f(-0.899_976_2);
+    const C9: W<i32> = f2f(-2.562_915_3);
+    const C10: W<i32> = f2f(-1.961_570_6);
+    const C11: W<i32> = f2f(-0.390_180_64);
+    const SCALE: W<i32> = W(4096);
     #[inline(always)]
-    fn idct_1d(s: [i32; 8]) -> [i32; 8] {
+    fn idct_1d(s: [W<i32>; 8]) -> [W<i32>; 8] {
         let (p2, p3) = (s[2], s[6]);
         let p1 = (p2 + p3) * C0;
         let t2 = p1 + p3 * C1;
         let t3 = p1 + p2 * C2;
         let (p2, p3) = (s[0], s[4]);
-        let t0 = (p2 + p3) * 4096;
-        let t1 = (p2 - p3) * 4096;
+        let t0 = (p2 + p3) * SCALE;
+        let t1 = (p2 - p3) * SCALE;
         let (x0, x3, x1, x2) = (t0 + t3, t0 - t3, t1 + t2, t1 - t2);
         let (mut t0, mut t1, mut t2, mut t3) = (s[7], s[5], s[3], s[1]);
         let p3 = t0 + t2;
@@ -731,27 +738,19 @@ fn idct(input: &[i32; 64], out: &mut [u8], stride: usize) {
         t0 += p1 + p3;
         [x0, x1, x2, x3, t0, t1, t2, t3]
     }
-    let mut v = [0i32; 64];
+    let mut v = [W(0i32); 64];
     for i in 0..8 {
-        let col = [
-            input[i],
-            input[8 + i],
-            input[16 + i],
-            input[24 + i],
-            input[32 + i],
-            input[40 + i],
-            input[48 + i],
-            input[56 + i],
-        ];
-        if col[1..].iter().all(|c| *c == 0) {
-            let dc = col[0] * 4;
+        let col: [W<i32>; 8] = core::array::from_fn(|r| W(input[r * 8 + i]));
+        if col[1..].iter().all(|c| c.0 == 0) {
+            let dc = col[0] * W(4);
             for r in 0..8 {
                 v[r * 8 + i] = dc;
             }
             continue;
         }
         let [x0, x1, x2, x3, t0, t1, t2, t3] = idct_1d(col);
-        let (x0, x1, x2, x3) = (x0 + 512, x1 + 512, x2 + 512, x3 + 512);
+        let round = W(512);
+        let (x0, x1, x2, x3) = (x0 + round, x1 + round, x2 + round, x3 + round);
         v[i] = (x0 + t3) >> 10;
         v[56 + i] = (x0 - t3) >> 10;
         v[8 + i] = (x1 + t2) >> 10;
@@ -762,12 +761,12 @@ fn idct(input: &[i32; 64], out: &mut [u8], stride: usize) {
         v[32 + i] = (x3 - t0) >> 10;
     }
     for r in 0..8 {
-        let row: [i32; 8] = v[r * 8..r * 8 + 8].try_into().unwrap();
+        let row: [W<i32>; 8] = v[r * 8..r * 8 + 8].try_into().unwrap();
         let [x0, x1, x2, x3, t0, t1, t2, t3] = idct_1d(row);
-        let bias = 65536 + (128 << 17);
+        let bias = W(65536 + (128 << 17));
         let (x0, x1, x2, x3) = (x0 + bias, x1 + bias, x2 + bias, x3 + bias);
         let o = &mut out[r * stride..r * stride + 8];
-        let c = |v: i32| (v >> 17).clamp(0, 255) as u8;
+        let c = |v: W<i32>| (v.0 >> 17).clamp(0, 255) as u8;
         o[0] = c(x0 + t3);
         o[7] = c(x0 - t3);
         o[1] = c(x1 + t2);
@@ -776,5 +775,37 @@ fn idct(input: &[i32; 64], out: &mut [u8], stride: usize) {
         o[5] = c(x2 - t1);
         o[3] = c(x3 + t0);
         o[4] = c(x3 - t0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn huffman_tables_with_too_many_codes_are_corrupt() {
+        // Three codes of length 1 can't exist; filling the fast table for
+        // the third used to index past its end.
+        let mut counts = [0u8; 16];
+        counts[0] = 3;
+        assert!(Huffman::new(&counts, &[1, 2, 3]).is_err());
+        counts[0] = 2;
+        assert!(Huffman::new(&counts, &[1, 2]).is_ok());
+    }
+
+    #[test]
+    fn idct_survives_extreme_coefficients() {
+        let mut out = [0u8; 64];
+        for v in [i32::MAX, i32::MIN, 1 << 30, -(1 << 30)] {
+            idct(&[v; 64], &mut out, 8);
+            let mut alternating = [0i32; 64];
+            alternating.iter_mut().enumerate().for_each(|(i, c)| *c = if i % 2 == 0 { v } else { v / -2 });
+            idct(&alternating, &mut out, 8);
+        }
+        // An ordinary DC-only block still decodes to its flat grey.
+        let mut dc = [0i32; 64];
+        dc[0] = 80;
+        idct(&dc, &mut out, 8);
+        assert!(out.iter().all(|&p| p == out[0]) && out[0] > 128);
     }
 }

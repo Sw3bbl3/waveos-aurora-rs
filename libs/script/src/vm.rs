@@ -414,7 +414,7 @@ impl Realm {
     /// Counts one unit of work against the step budget.
     pub fn tick(&mut self) -> Result<(), Value> {
         self.steps += 1;
-        if self.profile.is_some() && self.steps % 32 == 0 {
+        if self.profile.is_some() && self.steps.is_multiple_of(32) {
             self.sample();
         }
         if self.step_limit != 0 && self.steps > self.step_limit {

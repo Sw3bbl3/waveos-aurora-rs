@@ -322,7 +322,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             let mut regions = Vec::new();
             let mut clients = CLIENTS.lock();
             let c = clients.get_mut(&id).ok_or(EBADF)?;
-            for data in bytes.chunks_exact(16) {
+            for data in bytes.as_chunks::<16>().0 {
                 let n = |at: usize| i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
                 let r = Rect::new(n(0), n(4), n(8), n(12));
                 if r.x < 0
@@ -492,7 +492,10 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
             send(Command::AppsChanged);
             Ok(0)
         }
-        GET_THEME => Ok((super::theme::accent_index() as u64) << 16
+        // Bits 0-7 wallpaper, 8 dark, 16-23 accent choice, 24-47 the accent
+        // fill sampled from a custom picture (apps derive the other tones).
+        GET_THEME => Ok((super::theme::custom_fill() as u64) << 24
+            | (super::theme::accent_index() as u64) << 16
             | ((super::theme::current().dark as u64) << 8)
             | super::theme::wallpaper() as u64),
         _ => Err(EINVAL),

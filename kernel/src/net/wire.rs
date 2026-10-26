@@ -25,13 +25,24 @@ pub fn ip_at(b: &[u8], o: usize) -> Ip {
     [b[o], b[o + 1], b[o + 2], b[o + 3]]
 }
 
+/// Local ports handed out to sockets that don't bind one (TCP and UDP).
+pub const EPHEMERAL: core::ops::Range<u16> = 49152..65535;
+
+/// The ephemeral port after `p`, wrapping around the range.
+pub fn next_ephemeral(p: u16) -> u16 {
+    match p.checked_add(1) {
+        Some(n) if EPHEMERAL.contains(&n) => n,
+        _ => EPHEMERAL.start,
+    }
+}
+
 /// One's-complement sum of 16-bit words (not yet folded or inverted).
 pub fn sum(data: &[u8], mut acc: u32) -> u32 {
-    let mut chunks = data.chunks_exact(2);
-    for c in &mut chunks {
-        acc = acc.wrapping_add(u16::from_be_bytes([c[0], c[1]]) as u32);
+    let (words, rest) = data.as_chunks::<2>();
+    for &w in words {
+        acc = acc.wrapping_add(u16::from_be_bytes(w) as u32);
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = rest {
         acc = acc.wrapping_add((*last as u32) << 8);
     }
     acc

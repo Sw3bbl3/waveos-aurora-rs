@@ -51,15 +51,16 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "app-about"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "aurora-image",
  "aurorakit",
  "corekit",
 ]
 
 [[package]]
 name = "app-activity"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -67,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "app-calculator"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -75,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "app-clock"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -83,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "app-files"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-image",
  "aurorakit",
@@ -92,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "app-installer"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -101,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "app-learn"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-help",
  "aurora-image",
@@ -112,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "app-nebula"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-image",
  "aurorakit",
@@ -124,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "app-notes"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -132,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "app-paint"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-image",
  "aurorakit",
@@ -142,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "app-preview"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-image",
  "aurorakit",
@@ -151,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "app-settings"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-image",
  "aurorakit",
@@ -160,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "app-studio"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurorakit",
  "constellation-sdk",
@@ -170,7 +171,7 @@ dependencies = [
 
 [[package]]
 name = "app-terminal"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -178,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "app-welcome"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -186,15 +187,15 @@ dependencies = [
 
 [[package]]
 name = "aurora-abi"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "aurora-elf"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "aurora-help"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -202,19 +203,20 @@ dependencies = [
 
 [[package]]
 name = "aurora-image"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "miniz_oxide",
 ]
 
 [[package]]
 name = "aurora-wav"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "aurorakit"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "aurora-image",
  "corekit",
  "lumen",
 ]
@@ -301,7 +303,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "constellation"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "constellation-sdk",
  "corekit",
@@ -310,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "constellation-sdk"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "corekit",
  "gina",
@@ -327,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "corekit"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-abi",
  "aurora-wav",
@@ -339,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "coreutils"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "corekit",
  "libm",
@@ -357,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "crashtest"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "corekit",
 ]
@@ -541,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "gina"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurora-elf",
  "sha2",
@@ -549,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "gina-check"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "corekit",
  "gina",
@@ -557,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "gina-demo"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aurorakit",
  "corekit",
@@ -598,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "hello"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "corekit",
 ]
@@ -638,7 +640,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "js"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "corekit",
  "nebula-script",
@@ -685,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "lumen"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "fontdue",
  "spin 0.9.9",
@@ -708,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "libm",
  "lumen",
@@ -719,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-media"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "rusty_aac",
  "rusty_h264-common",
@@ -728,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-script"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "hashbrown 0.15.5",
  "libm",
@@ -737,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-secure"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
@@ -754,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-web"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "miniz_oxide",
 ]
@@ -1231,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "usertest"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "corekit",
 ]

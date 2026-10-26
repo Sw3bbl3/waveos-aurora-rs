@@ -4,11 +4,9 @@
 use crate::sync::IrqMutex;
 use alloc::collections::VecDeque;
 use alloc::string::String;
-use core::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Clone)]
 pub struct Notification {
-    pub id: u32,
     /// Posting process (0 = the system).
     pub pid: u32,
     /// Program path of the poster, for its icon and to focus it on click.
@@ -20,7 +18,6 @@ pub struct Notification {
 }
 
 static INCOMING: IrqMutex<VecDeque<Notification>> = IrqMutex::new(VecDeque::new());
-static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
 fn clip(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
@@ -49,7 +46,6 @@ fn time_now() -> String {
 /// Queues a notification; the desktop shows it on its next frame.
 pub fn post(pid: u32, app_path: &str, title: &str, body: &str) {
     let n = Notification {
-        id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         pid,
         app_path: String::from(app_path),
         title: clip(title, 80),

@@ -32,7 +32,7 @@ fn aac_tone_preserves_pitch_and_channel_separation() {
         bytes = &bytes[size..];
     }
     for (channel, hz) in [(0, 440), (1, 660)] {
-        let samples: Vec<_> = pcm.chunks_exact(2).skip(8000).take(24000).map(|s| s[channel]).collect();
+        let samples: Vec<_> = pcm.as_chunks::<2>().0.iter().skip(8000).take(24000).map(|s| s[channel]).collect();
         let crossings = samples.windows(2).filter(|s| s[0] < 0 && s[1] >= 0).count();
         assert!((hz / 2 - 2..=hz / 2 + 2).contains(&crossings), "channel {channel}: {crossings}");
         assert!(samples.iter().any(|s| s.unsigned_abs() > 5000));

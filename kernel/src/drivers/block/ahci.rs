@@ -208,13 +208,13 @@ impl BlockDevice for AhciDisk {
         for (i, chunk) in buf.chunks_mut(MAX_SECTORS * 512).enumerate() {
             let n = chunk.len() / 512;
             port.command(ATA_READ_DMA_EXT, lba + (i * MAX_SECTORS) as u64, n as u16, chunk.len(), false)?;
-            chunk.copy_from_slice(&port.buf.bytes_mut()[..chunk.len()]);
+            chunk.copy_from_slice(&port.buf.bytes()[..chunk.len()]);
         }
         Ok(())
     }
     fn write(&self, lba: u64, buf: &[u8]) -> BlockResult<()> {
         check_io(self, lba, buf.len())?;
-        let port = self.port.lock();
+        let mut port = self.port.lock();
         for (i, chunk) in buf.chunks(MAX_SECTORS * 512).enumerate() {
             let n = chunk.len() / 512;
             port.buf.bytes_mut()[..chunk.len()].copy_from_slice(chunk);
@@ -298,8 +298,10 @@ fn enable_interrupts(hba: &Hba) {
 }
 
 /// Every controller and its disks, for resume after sleep.
-static CONTROLLERS: crate::sync::IrqMutex<alloc::vec::Vec<(&'static Hba, alloc::vec::Vec<Arc<AhciDisk>>)>> =
+static CONTROLLERS: crate::sync::IrqMutex<alloc::vec::Vec<Controller>> =
     crate::sync::IrqMutex::new(alloc::vec::Vec::new());
+
+type Controller = (&'static Hba, alloc::vec::Vec<Arc<AhciDisk>>);
 
 pub fn probe(dev: &pci::Device) {
     dev.enable();
@@ -331,7 +333,7 @@ pub fn probe(dev: &pci::Device) {
         if !start_port(&port) || port.command(ATA_IDENTIFY, 0, 0, 512, false).is_err() {
             continue;
         }
-        let id = &port.buf.bytes_mut()[..512];
+        let id = &port.buf.bytes()[..512];
         let word = |w: usize| u16::from_le_bytes([id[w * 2], id[w * 2 + 1]]) as u64;
         let lba48 = word(83) & (1 << 10) != 0;
         let sectors = if lba48 {

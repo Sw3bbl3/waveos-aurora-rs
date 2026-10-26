@@ -274,3 +274,60 @@ fn prefers_tls13() {
     let tls = connect(server, "example.test", &pki).unwrap();
     assert_eq!(tls.version(), "TLS 1.3");
 }
+
+/// A network that corrupts what the server sends: a handful of bytes in each
+/// of the first `budget` reads.
+struct Tampered {
+    server: Server,
+    m: aurora_mutate::Mutator,
+    budget: usize,
+}
+
+impl Io for Tampered {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, isize> {
+        let n = self.server.read(buf)?;
+        if n > 0 && self.budget > 0 {
+            self.budget -= 1;
+            let all = 0..n;
+            let corrupted = self.m.mutate_within(&buf[..n], core::slice::from_ref(&all));
+            buf[..n].copy_from_slice(&corrupted);
+        }
+        Ok(n)
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> Result<(), isize> {
+        self.server.write_all(data)
+    }
+}
+
+/// A corrupted handshake fails with an error, never a panic: in TLS 1.2 the
+/// certificates and key exchange cross the network in the clear.
+#[test]
+fn corrupted_handshakes_fail_cleanly() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let roots = Roots::from_certs(&[&pki.ca]);
+    let mut m = aurora_mutate::Mutator::new(0x7115);
+    for i in 0..60 * aurora_mutate::scale() {
+        let server = if i % 2 == 0 { Server::new(&pki, |_| {}) } else { Server::tls12(&pki, |_| {}) };
+        let tampered = Tampered { server, m: aurora_mutate::Mutator::new(m.next_u64()), budget: 1 + i % 3 };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            TlsStream::connect(tampered, "example.test", &config(&roots)).map(|_| ())
+        }));
+        assert!(result.is_ok(), "handshake {i} panicked");
+    }
+}
+
+#[test]
+fn corrupt_certificates_never_panic() {
+    let pkis =
+        [pki(&rcgen::PKCS_ECDSA_P256_SHA256), pki(&rcgen::PKCS_ECDSA_P384_SHA384), pki_with(rsa_key(), rsa_key())];
+    let seeds: Vec<Vec<u8>> = pkis.iter().flat_map(|p| [p.ca.clone(), p.leaf.clone()]).collect();
+    aurora_mutate::check("x509", &seeds, 3000, |der| {
+        if let Some(cert) = nebula_secure::x509::Certificate::parse(der) {
+            let _ = cert.matches_host("example.test");
+            if let Some(key) = cert.public_key() {
+                let _ = cert.signed_by(&key);
+            }
+        }
+    });
+}

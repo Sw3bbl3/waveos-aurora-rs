@@ -579,7 +579,7 @@ impl Folder {
         if s.results.is_empty() {
             return false;
         }
-        self.items.extend(s.results.drain(..));
+        self.items.append(&mut s.results);
         drop(s);
         self.sort_items();
         true
@@ -1033,8 +1033,9 @@ impl Folder {
             let pictures = paths.iter().all(|p| is_image(p));
             if paths.iter().all(|p| !fs::is_dir(p)) {
                 items.push(Some((
+                    // Program names: Lens is Preview.elf.
                     Action::OpenWith(if pictures { "Notes" } else { "Preview" }),
-                    if pictures { "Open with Notes" } else { "Open with Preview" },
+                    if pictures { "Open with Notes" } else { "Open with Lens" },
                 )));
             }
             items.push(Some((Action::QuickLook, "Quick Look")));

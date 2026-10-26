@@ -148,8 +148,11 @@ pub fn unmount(path: &str) -> FsResult<()> {
     synced
 }
 
-/// (mount point, description, (total, free) bytes) for every mounted filesystem.
-pub fn mounts() -> Vec<(String, String, Option<(u64, u64)>)> {
+/// A mounted filesystem: (mount point, description, (total, free) bytes).
+pub type MountInfo = (String, String, Option<(u64, u64)>);
+
+/// Every mounted filesystem.
+pub fn mounts() -> Vec<MountInfo> {
     let list: Vec<(String, Arc<dyn Filesystem>)> =
         MOUNTS.lock().iter().map(|m| (m.path.clone(), m.fs.clone())).collect();
     list.into_iter().map(|(p, fs)| (p, fs.describe(), fs.space())).collect()
@@ -273,7 +276,7 @@ pub fn readdir(path: &str) -> FsResult<Vec<Entry>> {
             out.push(Entry { name, kind: Kind::Dir, size: 0, mtime: 0 });
         }
     }
-    out.sort_by(|a, b| (a.kind != Kind::Dir, a.name.to_lowercase()).cmp(&(b.kind != Kind::Dir, b.name.to_lowercase())));
+    out.sort_by_cached_key(|e| (e.kind != Kind::Dir, e.name.to_lowercase()));
     Ok(out)
 }
 

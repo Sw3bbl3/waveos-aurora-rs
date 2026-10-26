@@ -2,7 +2,7 @@
 
 use super::{raster, TrueType};
 
-const FONTS: [&str; 3] = ["Inter-Regular.ttf", "Inter-SemiBold.ttf", "JetBrainsMono-Regular.ttf"];
+const FONTS: [&str; 3] = ["Manrope-Medium.ttf", "Manrope-Bold.ttf", "JetBrainsMono-Regular.ttf"];
 const TEXT: &str = "AaBbGgJjQqRrWwYy0123456789&@%$#?!éüñ“”—…→";
 
 fn load(name: &str) -> Vec<u8> {
@@ -114,10 +114,49 @@ fn rasters_match_fontdue() {
 
 #[test]
 fn kerning_is_read() {
-    let data = load("Inter-Regular.ttf");
+    let data = load("Manrope-Medium.ttf");
     let tt = TrueType::parse(&data).unwrap();
     let (a, v) = (tt.glyph_index('A'), tt.glyph_index('V'));
     let (t, o) = (tt.glyph_index('T'), tt.glyph_index('o'));
     assert!(tt.kerning(a, v) < 0, "AV should kern tighter: {}", tt.kerning(a, v));
     assert!(tt.kerning(t, o) < 0, "To should kern tighter: {}", tt.kerning(t, o));
+}
+
+#[test]
+fn malformed_contours_render_without_panicking() {
+    use super::{Outline, Point};
+    let p = |x, y| Point { x, y, on_curve: true };
+    // Contour ends must increase; a corrupt glyph's can go backwards.
+    let outline = Outline {
+        points: vec![p(0, 0), p(1000, 0), p(1000, 1000), p(0, 1000), p(500, 500)],
+        contour_ends: vec![4, 2, 9, 0],
+        x_min: 0,
+        y_min: 0,
+        x_max: 1000,
+        y_max: 1000,
+    };
+    let mask = raster::render(&outline, 2048, 24, 0);
+    assert!(mask.width > 0);
+}
+
+#[test]
+fn corrupt_fonts_never_panic() {
+    let seeds = vec![load("Manrope-Medium.ttf")];
+    // Mostly the table directory and the small tables at the front.
+    let front = [0..4096, 0..seeds[0].len()];
+    aurora_mutate::check_with(
+        "ttf",
+        &seeds,
+        300,
+        |m, seed| m.mutate_within(seed, &front),
+        |data| {
+            if let Some(font) = TrueType::parse(data) {
+                for c in ['A', 'g', 'é', '€', '中'] {
+                    let g = font.glyph_index(c);
+                    let _ = (font.advance(g), font.kerning(g, 3));
+                    let _ = raster::render(&font.outline(g), font.units_per_em, 24, 0);
+                }
+            }
+        },
+    );
 }

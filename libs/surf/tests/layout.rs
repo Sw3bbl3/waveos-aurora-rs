@@ -139,7 +139,7 @@ fn css_hides_and_flexes() {
     assert_eq!(t, [(8, String::from("A")), (284, String::from("B"))]);
     let wide = page.layout(600, 600, &Fake);
     assert!(wide.items.iter().any(|i| matches!(i, Item::Text { text, .. } if text == "wide only")));
-    assert_eq!(wide.height > narrow.height, true);
+    assert!(wide.height > narrow.height);
     let _ = Rect::default();
 }
 

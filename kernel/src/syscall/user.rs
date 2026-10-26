@@ -46,7 +46,8 @@ extern "sysv64" {
 /// returns where to resume if the fault happened inside `user_copy`.
 pub fn fixup(rip: u64, addr: u64) -> Option<u64> {
     let insn = unsafe { &aurora_user_copy_insn as *const u8 as u64 };
-    (rip == insn && addr < aurora_abi::layout::USER_END).then(|| unsafe { &aurora_user_copy_fault as *const u8 as u64 })
+    (rip == insn && addr < aurora_abi::layout::USER_END)
+        .then_some(unsafe { &aurora_user_copy_fault as *const u8 as u64 })
 }
 
 fn check(ptr: u64, len: u64, write: bool) -> Result<(), isize> {

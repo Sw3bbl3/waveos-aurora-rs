@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 aurora-elf = { path = "../elf" }
 sha2 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+aurora-mutate = { path = "../mutate" }

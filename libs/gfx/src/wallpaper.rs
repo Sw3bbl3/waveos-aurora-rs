@@ -1,13 +1,25 @@
-//! Procedural wallpapers: a night sky with aurora ribbons over layered waves.
-//! Pure integer math, resolution independent (the same code renders the
-//! full-screen wallpaper and the thumbnails in Settings).
+//! Wallpapers. The living water set (Tide, Aurora, Dunes) ships as a day and
+//! a night picture each in `/System/Wallpapers`; the appearance picks one
+//! ([`file`]). The procedural renderings below — a sky with aurora ribbons
+//! over layered waves, pure integer math and resolution independent — stand
+//! in when the pictures can't be read and draw quick thumbnails.
 
 use crate::canvas::{blend, mix, rgb};
 use crate::math::{sin, Rng};
 use alloc::vec;
 use alloc::vec::Vec;
 
-pub const NAMES: [&str; 3] = ["Aurora", "Ocean", "Sunset"];
+pub const NAMES: [&str; 3] = ["Tide", "Aurora", "Dunes"];
+
+/// The picture for wallpaper `index` in the given appearance.
+pub fn file(index: u8, dark: bool) -> Option<&'static str> {
+    const FILES: [[&str; 2]; 3] = [
+        ["/System/Wallpapers/tide-day.jpg", "/System/Wallpapers/tide-night.jpg"],
+        ["/System/Wallpapers/aurora-day.jpg", "/System/Wallpapers/aurora-night.jpg"],
+        ["/System/Wallpapers/dunes-day.jpg", "/System/Wallpapers/dunes-night.jpg"],
+    ];
+    FILES.get(index as usize).map(|f| f[dark as usize])
+}
 
 /// Wallpaper index meaning "the user's own picture" (see `desktop::SET_WALLPAPER_IMAGE`).
 pub const CUSTOM: u8 = 255;
@@ -35,6 +47,7 @@ struct Palette {
     stars: bool,
 }
 
+#[allow(clippy::too_many_arguments)] // one call per row of the palette tables
 const fn ribbon(
     color: u32,
     base: i32,
@@ -52,18 +65,6 @@ const fn ribbon(
 
 static PALETTES: [Palette; 3] = [
     Palette {
-        sky_top: rgb(0x05, 0x08, 0x1C),
-        sky_bottom: rgb(0x14, 0x22, 0x4E),
-        ribbons: [
-            ribbon(rgb(0x3B, 0xF5, 0xA8), 400, 70, 900, 0, 30, 2300, 190, 26, 230),
-            ribbon(rgb(0x2D, 0xD4, 0xBF), 320, 55, 1300, 300, 25, 3100, 150, 22, 170),
-            ribbon(rgb(0x9B, 0x5C, 0xFF), 250, 60, 700, 650, 35, 1900, 170, 30, 190),
-        ],
-        waves: [rgb(0x12, 0x1E, 0x4A), rgb(0x0C, 0x16, 0x3A), rgb(0x07, 0x0E, 0x28)],
-        crest: rgb(0x6E, 0xE7, 0xD0),
-        stars: true,
-    },
-    Palette {
         sky_top: rgb(0x02, 0x16, 0x2C),
         sky_bottom: rgb(0x0A, 0x55, 0x78),
         ribbons: [
@@ -73,6 +74,18 @@ static PALETTES: [Palette; 3] = [
         ],
         waves: [rgb(0x0E, 0x5E, 0x86), rgb(0x08, 0x46, 0x6C), rgb(0x04, 0x2C, 0x4C)],
         crest: rgb(0xB8, 0xF4, 0xFF),
+        stars: true,
+    },
+    Palette {
+        sky_top: rgb(0x05, 0x08, 0x1C),
+        sky_bottom: rgb(0x14, 0x22, 0x4E),
+        ribbons: [
+            ribbon(rgb(0x3B, 0xF5, 0xA8), 400, 70, 900, 0, 30, 2300, 190, 26, 230),
+            ribbon(rgb(0x2D, 0xD4, 0xBF), 320, 55, 1300, 300, 25, 3100, 150, 22, 170),
+            ribbon(rgb(0x9B, 0x5C, 0xFF), 250, 60, 700, 650, 35, 1900, 170, 30, 190),
+        ],
+        waves: [rgb(0x12, 0x1E, 0x4A), rgb(0x0C, 0x16, 0x3A), rgb(0x07, 0x0E, 0x28)],
+        crest: rgb(0x6E, 0xE7, 0xD0),
         stars: true,
     },
     Palette {
@@ -91,7 +104,7 @@ static PALETTES: [Palette; 3] = [
 
 fn add(dst: u32, src: u32, amount: i32) -> u32 {
     let a = amount.clamp(0, 255) as u32;
-    let ch = |s: u32| (((dst >> s) & 0xFF) + (((src >> s) & 0xFF) * a >> 8)).min(255) << s;
+    let ch = |s: u32| (((dst >> s) & 0xFF) + ((((src >> s) & 0xFF) * a) >> 8)).min(255) << s;
     0xFF00_0000 | ch(16) | ch(8) | ch(0)
 }
 
@@ -226,7 +239,7 @@ pub(crate) fn box_pass(src: &[u32], dst: &mut [u32], w: i32, h: i32, r: i32, hor
             sb += c & 0xFF;
         }
         for i in 0..len {
-            dst[idx(line, i)] = 0xFF00_0000 | (sr / n) << 16 | (sg / n) << 8 | sb / n;
+            dst[idx(line, i)] = 0xFF00_0000 | (sr / n) << 16 | (sg / n) << 8 | (sb / n);
             let out = src[idx(line, i - r)];
             let inn = src[idx(line, i + r + 1)];
             sr = sr + ((inn >> 16) & 0xFF) - ((out >> 16) & 0xFF);

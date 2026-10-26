@@ -7,7 +7,7 @@
 
 use crate::dom::{Document, NodeData, NodeId};
 use crate::style::{Align, Display, Float, Justify, ListStyle, Position, Style, Transform};
-use crate::values::{round_i, Len};
+use crate::values::{round_i, trunc_i, Len};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
@@ -701,7 +701,7 @@ impl<'a> Engine<'a> {
         let spec_h = match self.forced_height.get(&node) {
             Some(&h) => Some(h - vext),
             None => match st.height {
-                Len::Calc(p, px) if p == 0.0 => Some(round_i(px) - if st.border_box { vext } else { 0 }),
+                Len::Calc(0.0, px) => Some(round_i(px) - if st.border_box { vext } else { 0 }),
                 Len::Calc(p, px) => {
                     self.cb_height.map(|ch| round_i(p * ch as f32 / 100.0 + px) - if st.border_box { vext } else { 0 })
                 }
@@ -1495,7 +1495,7 @@ impl<'a> Engine<'a> {
                     + st.margin[3].or_zero(0).max(0);
                 if let Some(Len::Calc(p, px)) = Some(st.width).filter(|w| !w.is_auto()) {
                     if p == 0.0 {
-                        let w = px as i32 + if st.border_box { 0 } else { ext };
+                        let w = trunc_i(px) + if st.border_box { 0 } else { ext };
                         return (w, w);
                     }
                 }
@@ -1522,7 +1522,7 @@ impl<'a> Engine<'a> {
                     let (cmin, cmax) = self.pref(c);
                     min = min.max(cmin);
                     if horizontal {
-                        max += cmax + st.gap as i32;
+                        max += cmax + trunc_i(st.gap);
                         if st.display == Display::TableRow {
                             min = min.max(0);
                         }
@@ -1591,7 +1591,7 @@ impl<'a> Engine<'a> {
         };
         let w = st.width.resolve(avail.min(100_000));
         let h = match st.height {
-            Len::Calc(p, px) if p == 0.0 => Some(px as i32),
+            Len::Calc(0.0, px) => Some(trunc_i(px)),
             _ => None,
         };
         let (mut w, mut h) = match (w, h, natural) {
@@ -1679,7 +1679,7 @@ impl<'a> Engine<'a> {
             w = w.max(min + extra);
         }
         let h = match st.height {
-            Len::Calc(p, px) if p == 0.0 => px as i32 + if st.border_box { 0 } else { pad_v },
+            Len::Calc(0.0, px) => trunc_i(px) + if st.border_box { 0 } else { pad_v },
             _ => content_h + pad_v,
         };
         (w.max(0), h.max(0), label)

@@ -31,7 +31,9 @@ cargo xtask run --no-keyboard-capture # macOS: opt out of full keyboard capture
 cargo xtask run --developer         # separate 8 GiB developer disk, 4 GiB RAM
 cargo xtask run --net none          # disable networking for offline validation
 cargo xtask test [--disk virtio] [--smp 1]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
-cargo test -p aurorafs -p fat32 -p lumen -p gina -p aurora-image -p aurora-wav -p xtask   # host-side tests
+cargo xtask lint                    # Clippy on every crate, for its own target; warnings are errors
+cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
+AURORA_MUTATIONS=100 cargo test -p aurorafs --release   # robustness tests, 100x longer than CI runs them
 cargo xtask image                   # target/waveos-aurora-usb.img for USB boot
 cargo xtask iso                     # target/waveos-aurora.iso for UEFI virtual machines
 cargo xtask iso --no-build          # package an existing target/esp without rebuilding

@@ -247,7 +247,7 @@ pub fn parse_string(b: &[u8]) -> String {
         return String::new();
     }
     let n = (b[0] as usize).min(b.len());
-    let units: Vec<u16> = b[2..n].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = b[2..n].as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect();
     String::from_utf16_lossy(&units).trim().into()
 }
 

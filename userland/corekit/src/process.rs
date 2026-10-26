@@ -139,6 +139,12 @@ pub mod desktop {
         (v >> 8 & 0xFF != 0, v as u8, (v >> 16) as u8)
     }
 
+    /// The accent fill sampled from a custom wallpaper picture (0 if none).
+    pub fn custom_accent() -> u32 {
+        let v = call(nr::DESKTOP, &[abi::desktop::GET_THEME as u64, 0, 0]).unwrap_or(0);
+        (v >> 24) as u32 & 0x00FF_FFFF
+    }
+
     pub fn shutdown() {
         let _ = call(nr::DESKTOP, &[abi::desktop::SHUTDOWN as u64, 0, 0]);
     }

@@ -146,12 +146,12 @@ pub fn build(project: &str, mut log: impl FnMut(&str), cancel: &core::sync::atom
     ) {
         Ok(pid) => pid,
         Err(e) => {
-            let _ = process::close(pipe[0]);
-            let _ = process::close(pipe[1]);
+            process::close(pipe[0]);
+            process::close(pipe[1]);
             return Err(io(e));
         }
     };
-    let _ = process::close(pipe[1]);
+    process::close(pipe[1]);
     let mut reader = unsafe { fs::File::from_owned_fd(pipe[0]) };
     let mut buf = [0u8; 2048];
     let code = loop {

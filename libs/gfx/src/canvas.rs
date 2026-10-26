@@ -6,7 +6,7 @@
 
 use crate::font::Font;
 use crate::geom::Rect;
-use crate::math::isqrt;
+use crate::math::{atan2, cos, isqrt, sin};
 
 pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
     0xFF00_0000 | (r as u32) << 16 | (g as u32) << 8 | b as u32
@@ -133,6 +133,17 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Fills `r` with a colour (and alpha) computed per pixel.
+    pub fn fill_rect_with(&mut self, r: Rect, color: impl Fn(i32, i32) -> u32) {
+        let area = r.intersect(&self.clip);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let c = color(x, y);
+                self.put(x, y, c, alpha(c));
+            }
+        }
+    }
+
     pub fn fill_round_rect(&mut self, r: Rect, radius: i32, c: u32) {
         self.fill_round_rect_with(r, radius, |_, _| c);
     }
@@ -158,20 +169,11 @@ impl<'a> Canvas<'a> {
                 let c = color(x, y);
                 let mut a = alpha(c);
                 if in_band && (x < r.x + radius || x >= r.right() - radius) {
-                    a = a * round_rect_coverage(&r, radius, x, y) >> 8;
+                    a = (a * round_rect_coverage(&r, radius, x, y)) >> 8;
                 }
                 self.put(x, y, c, a);
             }
         }
-    }
-
-    /// Fills only the bottom corners rounded (for window content under a title bar).
-    pub fn fill_rect_round_bottom(&mut self, r: Rect, radius: i32, c: u32) {
-        let top = Rect::new(r.x, r.y, r.w, (r.h - radius).max(0));
-        self.fill_rect(top, c);
-        let bottom = Rect::new(r.x, r.bottom() - 2 * radius, r.w, 2 * radius);
-        let band = Rect::new(r.x, r.bottom() - radius, r.w, radius);
-        self.with_clip(band, |cv| cv.fill_round_rect(bottom, radius, c));
     }
 
     /// A 1px anti-aliased outline of a rounded rectangle.
@@ -194,7 +196,7 @@ impl<'a> Canvas<'a> {
                 let inn = if inner.contains(x, y) { round_rect_coverage(&inner, ri, x, y) } else { 0 };
                 let cov = outer.saturating_sub(inn);
                 if cov > 0 {
-                    self.put(x, y, c, base * cov >> 8);
+                    self.put(x, y, c, (base * cov) >> 8);
                 }
             }
         }
@@ -230,7 +232,7 @@ impl<'a> Canvas<'a> {
                 return 0;
             }
             let t = ((blur256 - d256) * 256 / blur256) as u32; // 256 → 0
-            strength * t * t >> 16
+            (strength * t * t) >> 16
         };
         let rad = radius.max(1);
         // The interior of the window itself is painted on top; skip it.
@@ -276,10 +278,11 @@ impl<'a> Canvas<'a> {
 
     /// Copies an opaque `src_w`×`src_h` image (row stride = `src_w`) to `dst`'s
     /// top-left corner, clipped to `dst` and the canvas clip. With `radius > 0`
-    /// the bottom corners are rounded (anti-aliased) — used for window contents.
+    /// all four corners of `dst` are rounded (anti-aliased) — window contents.
     pub fn blit(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, radius: i32) {
         let img = Rect::new(dst.x, dst.y, (src_w as i32).min(dst.w), (src_h as i32).min(dst.h));
-        let straight = if radius > 0 { Rect::new(img.x, img.y, img.w, dst.h - radius) } else { img };
+        let radius = radius.min(dst.w / 2).min(dst.h / 2).max(0);
+        let straight = Rect::new(img.x, dst.y + radius, img.w, dst.h - 2 * radius);
         let area = img.intersect(&straight).intersect(&self.clip);
         for y in area.y..area.bottom() {
             let s0 = ((y - dst.y) as u32 * src_w + (area.x - dst.x) as u32) as usize;
@@ -288,31 +291,23 @@ impl<'a> Canvas<'a> {
             self.buf[d0..d0 + n].copy_from_slice(&src[s0..s0 + n]);
         }
         if radius > 0 {
-            let band = Rect::new(dst.x, dst.bottom() - radius, dst.w, radius);
-            let shape = Rect::new(dst.x, dst.bottom() - 2 * radius, dst.w, 2 * radius);
-            self.with_clip(band.intersect(&img), |cv| {
-                cv.fill_round_rect_with(shape, radius, |x, y| {
-                    0xFF00_0000 | src[((y - dst.y) as u32 * src_w + (x - dst.x) as u32) as usize]
-                })
-            });
+            for band in [Rect::new(dst.x, dst.y, dst.w, radius), Rect::new(dst.x, dst.bottom() - radius, dst.w, radius)]
+            {
+                self.with_clip(band.intersect(&img), |cv| {
+                    cv.fill_round_rect_with(dst, radius, |x, y| {
+                        0xFF00_0000 | src[((y - dst.y) as u32 * src_w + (x - dst.x) as u32) as usize]
+                    })
+                });
+            }
         }
     }
 
+    /// Like [`blit`](Self::blit) for a surface with transparency (glass regions).
     pub fn blit_alpha(&mut self, src: &[u32], sw: u32, sh: u32, dst: Rect, radius: i32) {
         let img = Rect::new(dst.x, dst.y, (sw as i32).min(dst.w), (sh as i32).min(dst.h));
-        let top = Rect::new(dst.x, dst.y, dst.w, (dst.h - radius).max(0));
-        self.with_clip(img.intersect(&top), |cv| {
-            cv.fill_round_rect_with(img, 0, |x, y| src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize])
+        self.with_clip(img.intersect(&self.clip), |cv| {
+            cv.fill_round_rect_with(dst, radius, |x, y| src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize])
         });
-        if radius > 0 {
-            let band = Rect::new(dst.x, dst.bottom() - radius, dst.w, radius);
-            let shape = Rect::new(dst.x, dst.bottom() - 2 * radius, dst.w, 2 * radius);
-            self.with_clip(img.intersect(&band), |cv| {
-                cv.fill_round_rect_with(shape, radius, |x, y| {
-                    src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize]
-                })
-            });
-        }
     }
 
     /// Draws a `src_w`×`src_h` image with straight alpha scaled into `dst`
@@ -518,8 +513,58 @@ impl<'a> Canvas<'a> {
                 let d = isqrt(best as u64) as i64;
                 let cov = ((hw + 8 - d) * 16).clamp(0, 256) as u32;
                 if cov > 0 {
-                    self.put(x, y, c, base * cov >> 8);
+                    self.put(x, y, c, (base * cov) >> 8);
                 }
+            }
+        }
+    }
+
+    /// Anti-aliased arc with round caps. Centre and radius are in 1/16 px so
+    /// small rings sit exactly; angles use 1024 units per turn (0 at 3
+    /// o'clock, growing clockwise) and the arc runs from `start` for `sweep`.
+    #[allow(clippy::too_many_arguments)] // a circle, a pen and an angle range
+    pub fn stroke_arc(&mut self, cx: i32, cy: i32, r: i32, width: i32, start: i32, sweep: i32, c: u32) {
+        if sweep <= 0 || r <= 0 {
+            return;
+        }
+        let hw = width as i64 / 2;
+        let reach = (r + width) / 16 + 2;
+        let bounds = Rect::new(cx / 16 - reach, cy / 16 - reach, 2 * reach + 1, 2 * reach + 1);
+        let area = bounds.intersect(&self.clip);
+        let full = sweep >= 1024;
+        let end = start + sweep;
+        let point =
+            |a: i32| (cx as i64 + r as i64 * cos(a) as i64 / 16384, cy as i64 + r as i64 * sin(a) as i64 / 16384);
+        let (s, e) = (point(start), point(end));
+        let base = alpha(c);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                let (px, py) = ((x * 16 + 8) as i64, (y * 16 + 8) as i64);
+                let (dx, dy) = (px - cx as i64, py - cy as i64);
+                let rel = (atan2(dy, dx) - start).rem_euclid(1024);
+                let d = if full || rel <= sweep {
+                    (isqrt((dx * dx + dy * dy) as u64) as i64 - r as i64).abs()
+                } else {
+                    let ds = (px - s.0) * (px - s.0) + (py - s.1) * (py - s.1);
+                    let de = (px - e.0) * (px - e.0) + (py - e.1) * (py - e.1);
+                    isqrt(ds.min(de) as u64) as i64
+                };
+                let cov = ((hw + 8 - d) * 16).clamp(0, 256) as u32;
+                if cov > 0 {
+                    self.put(x, y, c, (base * cov) >> 8);
+                }
+            }
+        }
+    }
+
+    /// A soft coloured halo around a rounded rectangle (Crest's activity
+    /// glow, the waterline). `strength` is the alpha at the edge.
+    pub fn glow(&mut self, r: Rect, radius: i32, size: i32, c: u32, strength: u32) {
+        for i in 1..=size {
+            let falloff = (size - i + 1) as u32;
+            let a = strength * falloff * falloff / (size * size).max(1) as u32;
+            if a > 0 {
+                self.stroke_round_rect(r.inset(-i), radius + i, (c & 0x00FF_FFFF) | a.min(255) << 24);
             }
         }
     }
@@ -546,7 +591,7 @@ impl<'a> Canvas<'a> {
                 let d = isqrt((qx * qx + qy * qy) as u64) as i64; // 1/16 px
                 let cov = ((hw as i64 + 8 - d) * 16).clamp(0, 256) as u32;
                 if cov > 0 {
-                    self.put(x, y, c, base * cov >> 8);
+                    self.put(x, y, c, (base * cov) >> 8);
                 }
             }
         }

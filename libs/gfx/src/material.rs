@@ -80,7 +80,7 @@ impl MaterialCache {
                             n += 1;
                         }
                     }
-                    let p = 0xff000000 | (red / n) << 16 | (green / n) << 8 | blue / n;
+                    let p = 0xff000000 | (red / n) << 16 | (green / n) << 8 | (blue / n);
                     let i = (y * w + x) as usize;
                     changed |= layer.source[i] != p;
                     layer.source[i] = p;
@@ -112,10 +112,12 @@ impl MaterialCache {
                             fy % 256,
                         );
                         let base = blend(p, tint, opacity);
-                        // A soft vertical sheen gives the material depth without obscuring content.
-                        let shine = (1 - (y - rect.y) * 10 / rect.h.max(1)).max(0) as u32;
+                        // A soft sheen fading down the top of the material gives it depth
+                        // without obscuring content (over at most 40 px, never a hard edge).
+                        let band = (rect.h / 4).clamp(1, 40);
+                        let shine = ((band - (y - rect.y)).max(0) * 256 / band) as u32;
                         layer.rendered[((y - visible.y) * visible.w + x - visible.x) as usize] =
-                            blend(base, 0xffffffff, if dark { shine * 9 } else { shine * 22 });
+                            blend(base, 0xffffffff, shine * if dark { 10 } else { 24 } / 256);
                     }
                 }
                 layer.render_key = Some(key);

@@ -1,6 +1,6 @@
 //! lumen build script.
 //!
-//! Pre-rasterizes a few sizes of the UI fonts (Inter, JetBrains Mono) with
+//! Pre-rasterizes a few sizes of the UI fonts (Manrope, JetBrains Mono) with
 //! fontdue on the host — the fallback used before the TrueType engine has its
 //! faces (early boot, the kernel panic screen) — and generates an integer
 //! sine table.
@@ -11,8 +11,8 @@ use std::path::PathBuf;
 /// (face id, font file, pixel sizes) — only what text needs before the
 /// TrueType faces are installed at run time (early boot, the panic screen).
 const FACES: &[(&str, &str, &[u32])] = &[
-    ("Regular", "Inter-Regular.ttf", &[14]),
-    ("SemiBold", "Inter-SemiBold.ttf", &[20, 40]),
+    ("Regular", "Manrope-Medium.ttf", &[14]),
+    ("SemiBold", "Manrope-Bold.ttf", &[20, 40]),
     ("Mono", "JetBrainsMono-Regular.ttf", &[13]),
 ];
 

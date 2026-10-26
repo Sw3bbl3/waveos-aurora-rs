@@ -451,7 +451,7 @@ pub fn probe(dev: &pci::Device) -> Option<Arc<dyn Output>> {
         cmd: Mutex::new(cmd),
         sd: 0x80 + inputs as u64 * 0x20,
         ring,
-        bdl: bdl,
+        bdl,
         irq: WaitQueue::new(),
         has_irq: AtomicBool::new(false),
         cad: 0,

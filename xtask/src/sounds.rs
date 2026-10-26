@@ -129,7 +129,8 @@ fn screenshot() -> Vec<i16> {
 
 /// (file name, WAV bytes) for every system sound.
 pub fn all() -> Vec<(&'static str, Vec<u8>)> {
-    let sounds: [(&str, fn() -> Vec<i16>); 7] = [
+    type Synth = fn() -> Vec<i16>;
+    let sounds: [(&str, Synth); 7] = [
         ("startup.wav", startup),
         ("notify.wav", notify),
         ("volume.wav", volume),

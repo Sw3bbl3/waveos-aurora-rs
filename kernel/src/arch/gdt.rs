@@ -50,7 +50,8 @@ struct Gdt {
 static GDT: Once<Gdt> = Once::new();
 
 fn tss(cpu: usize) -> &'static TaskStateSegment {
-    unsafe { &(*(&raw const TSS))[cpu] }
+    let all = &raw const TSS;
+    unsafe { &(*all)[cpu] }
 }
 
 fn build() -> Gdt {
@@ -84,7 +85,8 @@ pub fn init(cpu: usize) {
         [alloc(), alloc(), alloc()]
     };
     unsafe {
-        let t = &mut (*(&raw mut TSS))[cpu];
+        let all = &raw mut TSS;
+        let t = &mut (*all)[cpu];
         t.interrupt_stack_table[DOUBLE_FAULT_IST as usize] = tops[0];
         t.interrupt_stack_table[PAGE_FAULT_IST as usize] = tops[1];
         t.interrupt_stack_table[NMI_IST as usize] = tops[2];
@@ -113,5 +115,6 @@ pub fn reload(cpu: usize) {
 /// Sets the kernel stack used for interrupts taken in ring 3 on this CPU.
 pub fn set_kernel_stack(top: u64) {
     let cpu = super::percpu::cpu_id();
-    unsafe { (*(&raw mut TSS))[cpu].privilege_stack_table[0] = VirtAddr::new(top) };
+    let all = &raw mut TSS;
+    unsafe { (*all)[cpu].privilege_stack_table[0] = VirtAddr::new(top) };
 }

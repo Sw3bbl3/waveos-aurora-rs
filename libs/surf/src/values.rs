@@ -3,8 +3,20 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Rounds to the nearest integer (no_std has no `f32::round`).
+/// The largest length layout works with, in pixels (about a million). Like
+/// browsers' layout units, lengths saturate here, so `1e40px` and friends
+/// leave room for the sums layout makes, including inline layout's in
+/// 1/64 px, without overflowing `i32`.
+pub const MAX_PX: i32 = 1 << 20;
+
+/// Truncates to an integer, like `as i32`, within ±`MAX_PX`.
+pub fn trunc_i(x: f32) -> i32 {
+    x.clamp(-MAX_PX as f32, MAX_PX as f32) as i32
+}
+
+/// Rounds to the nearest integer (no_std has no `f32::round`), within ±`MAX_PX`.
 pub fn round_i(x: f32) -> i32 {
+    let x = x.clamp(-MAX_PX as f32, MAX_PX as f32);
     if x >= 0.0 {
         (x + 0.5) as i32
     } else {
@@ -119,7 +131,7 @@ pub fn length(s: &str, u: &Units) -> Option<Len> {
 /// A length that must not be a percentage (borders, font sizes use their own rules).
 pub fn px_length(s: &str, u: &Units) -> Option<f32> {
     match length(s, u)? {
-        Len::Calc(p, px) if p == 0.0 => Some(px),
+        Len::Calc(0.0, px) => Some(px),
         _ => None,
     }
 }

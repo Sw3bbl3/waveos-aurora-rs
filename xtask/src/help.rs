@@ -19,7 +19,10 @@ fn slug(s: &str) -> String {
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
-fn parsed(source: &str) -> Result<(Vec<Event<'_>>, Vec<(String, String)>, String), String> {
+/// An article's Markdown events, its (id, title) headings and its plain text.
+type Parsed<'a> = (Vec<Event<'a>>, Vec<(String, String)>, String);
+
+fn parsed(source: &str) -> Result<Parsed<'_>, String> {
     let mut events: Vec<_> = Parser::new_ext(
         source,
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES | Options::ENABLE_TASKLISTS,

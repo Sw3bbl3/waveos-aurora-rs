@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use aurorakit::canvas::{with_alpha, Canvas};
+use aurorakit::canvas::{alpha, blend, with_alpha, Canvas};
 use aurorakit::font::Font;
 use aurorakit::geom::Rect;
 use aurorakit::text::{TextField, TextView};
@@ -44,6 +44,7 @@ enum Hit {
     Folder(usize),
 }
 
+#[allow(clippy::large_enum_variant)] // at most one sheet is open
 enum Sheet {
     SaveAs { name: TextField, folder: usize, then_close: bool },
     ConfirmClose,
@@ -425,7 +426,9 @@ impl Notes {
                     Hit::Larger => cv.text_centered(r, "A", theme::ui_bold(17), c),
                     Hit::Find => {
                         cv.fill_circle(cx - 2, cy - 2, 6, c);
-                        cv.fill_circle(cx - 2, cy - 2, 4, if hovered { t.titlebar } else { t.titlebar });
+                        // The lens shows the button's background through it.
+                        let bg = if hovered { blend(t.titlebar, t.hover, alpha(t.hover)) } else { t.titlebar };
+                        cv.fill_circle(cx - 2, cy - 2, 4, bg);
                         cv.line(cx + 2, cy + 2, cx + 7, cy + 7, 2, c);
                     }
                     Hit::FindPrev | Hit::FindNext => {
@@ -476,7 +479,7 @@ impl Notes {
 
 impl App for Notes {
     fn title(&self) -> String {
-        format!("{}{} — Notes", self.name(), if self.dirty() { " •" } else { "" })
+        format!("{} — {}", self.name(), if self.dirty() { "Edited" } else { "Notes" })
     }
 
     fn size(&self) -> (i32, i32) {

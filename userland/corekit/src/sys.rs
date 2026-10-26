@@ -3,6 +3,12 @@
 use crate::{Error, Result};
 use core::arch::asm;
 
+/// Makes system call `n`.
+///
+/// # Safety
+///
+/// Arguments that the call treats as pointers must be valid for what it does
+/// with them (see `aurora_abi`).
 #[inline(always)]
 pub unsafe fn syscall6(n: usize, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> isize {
     let ret: isize;

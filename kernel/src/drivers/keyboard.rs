@@ -180,11 +180,8 @@ impl Decoder {
             KeyCode::Char => {
                 // Ctrl+Alt works as AltGr (as on Windows).
                 let altgr = self.altgr || (self.mods.ctrl && self.mods.alt);
-                match keymap::translate(usage(sc), self.mods.shift, self.mods.caps, altgr) {
-                    Some(c) => Some(c),
-                    // A dead key (accent waiting for a letter) produces no event.
-                    None => return None,
-                }
+                // A dead key (accent waiting for a letter) produces no event.
+                Some(keymap::translate(usage(sc), self.mods.shift, self.mods.caps, altgr)?)
             }
             KeyCode::Enter => Some('\n'),
             KeyCode::Tab => Some('\t'),

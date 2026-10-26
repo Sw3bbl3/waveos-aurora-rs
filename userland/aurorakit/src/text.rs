@@ -636,10 +636,10 @@ impl TextView {
                         let tail = &line[offset..];
                         let (len, color) = if tail.starts_with("//") {
                             (tail.len(), 0xff6c9b86)
-                        } else if tail.starts_with('"') {
+                        } else if let Some(quoted) = tail.strip_prefix('"') {
                             let mut end = 1;
                             let mut escape = false;
-                            for (i, c) in tail[1..].char_indices() {
+                            for (i, c) in quoted.char_indices() {
                                 end = i + 1 + c.len_utf8();
                                 if c == '"' && !escape {
                                     break;

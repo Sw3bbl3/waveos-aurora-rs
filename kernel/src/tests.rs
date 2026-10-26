@@ -17,6 +17,7 @@ const TESTS: &[Test] = &[
     ("frame allocator", frame_allocator),
     ("heap", heap),
     ("isqrt", sqrt),
+    ("account_password_hash", crate::gui::account::self_test),
     ("rect math", rects),
     ("keyboard decoder", keyboard),
     ("ramfs + vfs", ramfs),
@@ -426,7 +427,7 @@ fn persistence() {
 
 fn truetype() {
     use lumen::font::{self, Face};
-    for face in [Face::Regular, Face::SemiBold, Face::Mono] {
+    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono] {
         assert!(font::installed(face), "{} not installed from the system image", face.file());
     }
     // Any size works, and text scales with it.

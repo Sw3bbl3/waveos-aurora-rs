@@ -35,7 +35,7 @@ const TIPS: [(Icon, &str, &str); 3] = [
 ];
 
 impl Welcome {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self { hovered: None }
     }
 
@@ -87,7 +87,7 @@ impl App for Welcome {
 
         let [start, about] = Self::buttons(area);
         button(cv, start, "Get Started", ButtonStyle::Primary, self.hovered == Some(0));
-        button(cv, about, "About Aurora", ButtonStyle::Secondary, self.hovered == Some(1));
+        button(cv, about, "About This Computer", ButtonStyle::Secondary, self.hovered == Some(1));
     }
 
     fn click(&mut self, x: i32, y: i32, area: Rect, env: &mut Env) -> bool {

@@ -3,7 +3,7 @@
 //! MP4 file Nebula downloads and demuxes itself (`<video src=…mp4>`). Frames
 //! are decoded on worker threads and presented against the audio clock.
 use super::*;
-use nebula_engine::media::{CodedFrame, MediaSource, ReadyState, TrackKind};
+use nebula_engine::media::{CodedFrame, DemuxedTrack, MediaSource, ReadyState, TrackKind};
 
 /// How far ahead of the playback position frames are handed to decoders.
 /// Compressed frames are small: hand over seconds of them, so decoding and
@@ -18,7 +18,6 @@ const FILE_SOURCE: u32 = 0x8000_0000;
 struct Picture {
     epoch: u64,
     pts: i64,
-    duration: i64,
     /// Scaled to the size it was last shown at.
     image: Image,
     /// The coded picture's own size (for the aspect ratio).
@@ -806,7 +805,6 @@ fn video_worker(shared: Arc<Mutex<VideoShared>>) {
         held.push(Picture {
             epoch,
             pts: frame.pts,
-            duration: frame.duration,
             image: Image { width: tw, height: th, pixels },
             native: (picture.width as u32, picture.height as u32),
         });
@@ -969,15 +967,21 @@ fn load_file(src: &str, id: u32) -> Result<MediaSource, String> {
             })
             .collect()
     };
-    let mut tracks = alloc::vec![(
-        TrackKind::Video,
-        video.config.clone(),
-        video.width as u32,
-        video.height as u32,
-        frames(&video.samples)
-    )];
+    let mut tracks = alloc::vec![DemuxedTrack {
+        kind: TrackKind::Video,
+        config: video.config.clone(),
+        width: video.width as u32,
+        height: video.height as u32,
+        frames: frames(&video.samples),
+    }];
     if let Some(a) = &video.audio {
-        tracks.push((TrackKind::Audio, a.config.clone(), 0, 0, frames(&a.samples)));
+        tracks.push(DemuxedTrack {
+            kind: TrackKind::Audio,
+            config: a.config.clone(),
+            width: 0,
+            height: 0,
+            frames: frames(&a.samples),
+        });
     }
     Ok(MediaSource::from_tracks(id, video.duration_ms as f64 / 1000.0, tracks))
 }

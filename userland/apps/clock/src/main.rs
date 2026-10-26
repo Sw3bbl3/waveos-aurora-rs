@@ -135,7 +135,7 @@ fn fmt_time(h: u32, m: u32, h24: bool) -> String {
 }
 
 /// Draws an analog clock face.
-fn face(cv: &mut Canvas, cx: i32, cy: i32, r: i32, h: u32, m: u32, s: Option<u32>, dark_face: bool) {
+fn face(cv: &mut Canvas, cx: i32, cy: i32, r: i32, (h, m, s): (u32, u32, Option<u32>), dark_face: bool) {
     let t = theme::current();
     let (bg, fg) = if dark_face { (0xFF1C_1C22, 0xFFF4_F4F8) } else { (0xFFFF_FFFF, 0xFF1D_1D24) };
     cv.fill_circle(cx, cy + 2, r + 1, with_alpha(0x000000, 0x30));
@@ -368,7 +368,7 @@ impl Clock {
         let local_offset = prefs::get_int("utc_offset", 0) as i32;
         // Local: large.
         let (cx, cy) = (body.x + 130, body.y + 150);
-        face(cv, cx, cy, 100, d.hour as u32, d.minute as u32, Some(d.second as u32), t.dark);
+        face(cv, cx, cy, 100, (d.hour as u32, d.minute as u32, Some(d.second as u32)), t.dark);
         cv.text(body.x + 260, body.y + 110, "Local time", theme::ui(14), t.text_secondary);
         cv.text(body.x + 260, body.y + 160, &fmt_time(d.hour as u32, d.minute as u32, h24), theme::ui_bold(42), t.text);
         cv.text(body.x + 260, body.y + 192, &time::format_date(&d)[..10], theme::ui(15), t.text_secondary);
@@ -402,7 +402,7 @@ impl Clock {
             let m = utc_min + off;
             let day = m.div_euclid(1440);
             let m = m.rem_euclid(1440);
-            face(cv, r.x + 44, r.y + 46, 30, (m / 60) as u32, (m % 60) as u32, None, t.dark);
+            face(cv, r.x + 44, r.y + 46, 30, ((m / 60) as u32, (m % 60) as u32, None), t.dark);
             cv.text_clipped(r.x + 86, r.y + 30, city, theme::ui_bold(13), t.text, r.w - 94);
             cv.text(r.x + 86, r.y + 54, &fmt_time((m / 60) as u32, (m % 60) as u32, h24), theme::ui(15), t.text);
             let rel = off - local_offset;

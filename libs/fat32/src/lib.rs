@@ -140,7 +140,7 @@ fn from_fat_time(date: u16, time: u16) -> u64 {
 }
 
 fn lfn_checksum(short: &[u8]) -> u8 {
-    short.iter().fold(0u8, |sum, &c| (sum >> 1 | sum << 7).wrapping_add(c))
+    short.iter().fold(0u8, |sum, &c| sum.rotate_right(1).wrapping_add(c))
 }
 
 fn short_name_string(e: &[u8]) -> String {
@@ -459,7 +459,8 @@ impl<D: SectorDisk> Fat32<D> {
         }
         let (chain, mut data, _) = self.parse_dir(n.parent)?;
         let o = n.offset as usize;
-        let e = &mut data[o..o + 32];
+        // The parent may have changed under us on a corrupt volume.
+        let e = data.get_mut(o..o + 32).ok_or(Error::Corrupt)?;
         e[20..22].copy_from_slice(&((n.first >> 16) as u16).to_le_bytes());
         e[26..28].copy_from_slice(&(n.first as u16).to_le_bytes());
         e[28..32].copy_from_slice(&(if n.is_dir { 0 } else { n.size }).to_le_bytes());
@@ -772,8 +773,24 @@ impl<D: SectorDisk> Fat32<D> {
             return Err(Error::IsDir);
         }
         if size > n.size as u64 {
-            let zeros = vec![0u8; (size - n.size as u64) as usize];
-            return self.write(ino, n.size as u64, &zeros).map(|_| ());
+            if size > u32::MAX as u64 {
+                return Err(Error::NoSpace);
+            }
+            // Fail before writing anything if the clusters can't fit.
+            let cb = self.cluster_bytes() as u64;
+            let have = (n.size as u64).div_ceil(cb);
+            if size.div_ceil(cb).saturating_sub(have) * cb > self.space().1 {
+                return Err(Error::NoSpace);
+            }
+            // Zero-fill in pieces, so the gap never has to fit in memory.
+            let zeros = vec![0u8; 64 * 1024];
+            let mut at = n.size as u64;
+            while at < size {
+                let len = (size - at).min(zeros.len() as u64) as usize;
+                self.write(ino, at, &zeros[..len])?;
+                at += len as u64;
+            }
+            return Ok(());
         }
         let cb = self.cluster_bytes() as u64;
         let keep = size.div_ceil(cb) as usize;
