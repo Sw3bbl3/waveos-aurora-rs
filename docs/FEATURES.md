@@ -20,18 +20,21 @@ Everything that works today, layer by layer. For the short tour, see the [README
 - **Lumen Server window server**, in the kernel like Windows NT's:
   - apps draw into shared-memory surfaces that Lumen Server composites
   - rendering is damage-tracked, with anti-aliased shapes, soft shadows and frosted glass
-- **Aurora desktop:**
-  - a menu bar, dock and searchable launcher
-  - windows you can drag, resize, minimize and zoom
-  - light and dark mode, broadcast live to every app
-  - three procedurally generated wallpapers
-- **Apps:** Nebula, Files, Terminal, Notes, Calculator, Settings, Preview, Paint, Clock, Activity Monitor, About, Welcome.
+- **Boot and Shore:** a boot screen with the WayV logo, start-up progress and the version, in the Light or Dark appearance; first-start setup of the one account (its password is salted and hashed with PBKDF2-HMAC-SHA256), then login, Lock Screen (Super L) and optional automatic login.
+- **The living-water desktop:**
+  - a top bar of glass bubbles: the WayV menu and the app on the left; **Crest** in the middle with the time (the date on pointing, activities such as volume and new notifications), which can be turned off; **Seek** and the status ring on the right, opening **Current** (network, Calm, appearance, lock, sound, battery)
+  - **Harbor**, a floating dock in three bays (pinned apps, open apps, the Downloads and Documents stacks and Trash), with a waterline under open apps, window peeks, ripples while an app starts, and sinking away from a window that reaches it
+  - windows without title bars: a handle appears at the top edge and rises into a pill to shrink, expand or close; the focused window has a waterline; **Moorings** snaps windows into six layouts
+  - **Shoal** (all apps, full screen, with search and groups), **Seek** (apps, files, settings and sums), **Drift** (calendar, Calm and notifications) and **Glide** (Alt+Tab with window pictures)
+  - Manrope throughout, light and dark everywhere, broadcast live to every app, and an accent colour that can follow the wallpaper
+  - the Tide, Aurora and Dunes wallpapers, each with a day and a night picture
+- **Apps:** Nebula, Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About This Computer, Welcome, Learn, Studio and Installer.
 - **Networking**, all our own:
   - **drivers** for virtio-net and Intel e1000/e1000e, interrupt-driven where MSI allows
   - an **IPv4 and IPv6 stack** in the kernel: ARP and neighbor discovery, ICMP and ICMPv6, UDP and **TCP** over both (retransmission timers, fast retransmit, congestion control, window scaling), **DHCP** and IPv6 **autoconfiguration** (SLAAC, RDNSS), and BSD-like sockets for programs
   - **DNS** asking for A and AAAA together, with a cache that honours TTLs; Happy Eyeballs connections that prefer IPv6 where it's routed; an **HTTP/1.1** client with keep-alive, chunked and gzip responses
   - **TLS 1.3** (and 1.2 for older servers) with our own handshake, record layer and X.509 certificate checks against Mozilla's root CAs. Cryptographic primitives come from RustCrypto.
-  - a menu-bar status item, **Settings → Network**, and network graphs in Activity Monitor
+  - the network in **Current**, **Settings → Network**, and network graphs in Pulse
 - **Nebula**, the web browser, on our own engine:
   - an HTML parser, and CSS with selectors, the cascade, custom properties, `calc()`, media queries and generated content
   - layout: blocks, inline text with line breaking, lists, tables, flexbox and grid rows, floats, form controls
@@ -51,12 +54,12 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - your files live on **AuroraFS**, our own journaled filesystem, and survive reboots and power cuts
   - the EFI partition is readable and writable at `/Boot` (FAT32 with long file names)
   - `/System` is the read-only system image
-- **Files**, a real file manager: icon and sortable list views, multiple selection with a rubber band, **drag and drop** (between windows, onto folders, onto the dock), search as you type, Quick Look (Space), picture thumbnails, and a **Trash** with Put Back.
+- **Files**, a real file manager: icon and sortable list views, multiple selection with a rubber band, **drag and drop** (between windows, onto folders, onto Harbor), search as you type, Quick Look (Space), picture thumbnails, and a **Trash** with Put Back.
 - **Lyra, our TrueType engine,** draws text at any size, with kerning and exact anti-aliasing, even in the kernel.
 - **Spotlight** (Super+Space or Ctrl+Space) finds apps, files, settings and system commands, and does quick calculations.
 - **Notifications:** banners, and a Notification Center with a calendar and Do Not Disturb (click the clock).
-- **Smooth windows:** open, close, minimize-to-dock and zoom animations.
-- **Notes** is a proper editor: selection, the system clipboard, undo, find, fonts, Save As. **Preview** opens PNG, JPEG, GIF and BMP pictures (our own codecs), **Paint** draws and saves PNGs, **Clock** has world clocks, alarms, a stopwatch and timers, and **Activity Monitor** shows every process, CPU, memory and disk.
+- **Smooth windows:** open, close, shrink-to-Harbor and expand animations.
+- **Notes** is a proper editor: selection, the system clipboard, undo, find, fonts, Save As. **Lens** opens PNG, JPEG, GIF and BMP pictures (our own codecs), **Paint** draws and saves PNGs, **Clock** has world clocks, alarms, a stopwatch and timers, and **Pulse** shows every process, CPU, memory and disk.
 - **Settings:** appearance with accent colours and any picture as wallpaper, display resolution (live on QEMU), six keyboard layouts with dead keys, date and time, and more. Everything is remembered.
 - **Threads** in user space, with futex-based locks, and SSE for apps.
 - **USB:** an xHCI (USB 3) driver with hubs, keyboards, mice, tablets and storage, plugged in at any time.
@@ -80,21 +83,22 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
 
 ## Using the desktop
 
-- **Launcher**: click the grid icon in the dock, or press and release the **Windows/Super** key. Start typing to search, and press Enter to open.
-- **Spotlight**: **Super+Space** (or Ctrl+Space). Try an app name, a file name, `12*7+1`, `dark mode` or `keyboard`.
-- **Notification Center**: click the clock in the menu bar.
+- **Shoal** (all apps): click the first icon in Harbor, or press and release the **Windows/Super** key. Start typing to search, pick a group, and press Enter to open.
+- **Seek**: **Super+Space** (or Ctrl+Space), or the magnifying glass at top right. Try an app name, a file name, `12*7+1`, `dark mode` or `keyboard`.
+- **Drift**: click Crest (the time at the top centre) for the calendar, Calm and notifications.
+- **Current**: click the status ring at top right for the network, Calm, appearance, sound and battery.
 - **Windows**:
-  - drag the title bar to move a window
-  - double-click the title bar to zoom
+  - bring the pointer to a window's top edge: its handle rises into a pill; drag the pill to move the window, double-click it to expand, or use its buttons to shrink, expand or close
+  - hold **Super** and drag anywhere in a window to move it
+  - drag a window to the top of the screen to choose a Moorings layout (halves, thirds, quarters)
   - drag the bottom-right corner to resize
-  - traffic-light buttons close, minimize and zoom
 - **Shortcuts**:
   - `Alt+Tab` cycles windows
   - `Ctrl+W` or `Alt+F4` closes the front window
   - `Print Screen` or `Super+Shift+3` saves a screenshot to Pictures
   - in text: `Ctrl+A/C/X/V`, `Ctrl+Z` / `Ctrl+Shift+Z`, `Ctrl+F` to find, `Ctrl+S` to save
-- **Aurora menu** (the wave at top-left): About, Settings, Sleep, Restart, Shut Down.
-- **Menu bar**: click the network item for the connection, the speaker for the volume, the battery (on laptops) for its details, and the clock for the Notification Center. The volume keys work anywhere.
+- **WayV menu** (the mark at top-left): About This Computer, Settings, Learn, Shoal, Lock Screen, Sleep, Restart, Shut Down.
+- **Super+L** locks the screen. The volume keys work anywhere; Crest shows the level.
 - **Nebula**: type an address or a search in the address bar (Ctrl+L). Alt+←/→ go back and forward, Ctrl+R reloads, Ctrl+F finds on the page, Ctrl +/−/0 zoom, Space and Page Up/Down scroll. `.html` files open in Nebula too.
 - **Files**: drag items onto folders, the sidebar, another Files window, a dock app or the Trash (hold Ctrl to copy). Right-click for more; Space opens Quick Look, F2 renames, Delete moves to the Trash, Ctrl+1/2 switch views, Ctrl+F searches.
 - **Terminal**: try `help`, `ps`, `df`, `neofetch`, `cpuinfo`, `lsusb`, `play --tone 440 500`, `ls -l | grep txt`, `echo hi > hi.txt`, `cat hi.txt | wc`, `ls /Boot`, `open notes`, `theme dark`, `ping example.com`, `ifconfig`, `fetch -i https://example.com`.

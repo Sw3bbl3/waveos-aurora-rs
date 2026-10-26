@@ -479,7 +479,7 @@ impl Notes {
 
 impl App for Notes {
     fn title(&self) -> String {
-        format!("{}{} — Notes", self.name(), if self.dirty() { " •" } else { "" })
+        format!("{} — {}", self.name(), if self.dirty() { "Edited" } else { "Notes" })
     }
 
     fn size(&self) -> (i32, i32) {
