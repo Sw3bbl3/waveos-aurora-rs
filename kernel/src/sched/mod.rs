@@ -149,6 +149,7 @@ fn adopt_idle(s: &mut Scheduler, cpu: usize, id: TaskId) {
     pc.idle.store(true, Ordering::Relaxed);
     pc.task.store(id, Ordering::Relaxed);
     pc.pid.store(0, Ordering::Relaxed);
+    pc.simd.store(false, Ordering::Relaxed);
     pc.cr3.store(vmm::kernel_pml4(), Ordering::Relaxed);
 }
 
@@ -221,15 +222,27 @@ pub fn spawn_on_bsp(name: &str, f: fn()) -> TaskId {
         let f: fn() = unsafe { core::mem::transmute(f as usize) };
         f();
     }
-    spawn_inner(name, call, f as usize as u64, 0, vmm::kernel_pml4(), true)
+    spawn_inner(name, call, f as usize as u64, 0, vmm::kernel_pml4(), true, false)
 }
 
 /// Spawns a task running `f(arg)` in process `pid` with page tables `cr3`.
 pub fn spawn_task(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64) -> TaskId {
-    spawn_inner(name, f, arg, pid, cr3, false)
+    spawn_inner(name, f, arg, pid, cr3, false, false)
 }
 
-fn spawn_inner(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64, bsp_only: bool) -> TaskId {
+/// Spawns a kernel thread that keeps its own SIMD registers across switches,
+/// so it may run SSE2 code (the compositor's drawing).
+pub fn spawn_simd(name: &str, f: fn()) -> TaskId {
+    fn call(f: u64) {
+        let f: fn() = unsafe { core::mem::transmute(f as usize) };
+        f();
+    }
+    let id = spawn_inner(name, call, f as usize as u64, 0, vmm::kernel_pml4(), false, true);
+    log!("sched", "spawned task {} '{}' (with SIMD state)", id, name);
+    id
+}
+
+fn spawn_inner(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64, bsp_only: bool, simd: bool) -> TaskId {
     let stack = alloc::vec![0u8; STACK_SIZE].into_boxed_slice();
     let top = (stack.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -240,6 +253,9 @@ fn spawn_inner(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64, bsp_only: b
         let cpu = if bsp_only { 0 } else { least_loaded(s) };
         let mut t = new_task(name, rsp, Some(stack), pid, cr3, top, cpu);
         t.bsp_only = bsp_only;
+        if simd {
+            t.fpu = Some(Box::new(FpuState::new()));
+        }
         s.tasks.insert(id, t);
         enqueue(s, id, cpu)
     });
@@ -383,6 +399,7 @@ fn schedule() {
         pc.pid.store(next.pid, Ordering::Relaxed);
         pc.cr3.store(next.cr3, Ordering::Relaxed);
         pc.idle.store(next.idle, Ordering::Relaxed);
+        pc.simd.store(next.pid == 0 && next.fpu.is_some(), Ordering::Relaxed);
         // Its saved stack pointer is read only after the hand-off below: if
         // the task is still leaving another CPU, that CPU has yet to store it.
         let load = &next.rsp as *const u64;

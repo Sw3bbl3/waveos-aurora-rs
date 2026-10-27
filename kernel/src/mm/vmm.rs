@@ -17,6 +17,8 @@ const PRESENT: u64 = 1 << 0;
 const WRITABLE: u64 = 1 << 1;
 const USER: u64 = 1 << 2;
 const HUGE: u64 = 1 << 7;
+/// In a 4 KiB page entry the same bit selects the PAT slot (see `arch::pat`).
+const PAT_4K: u64 = 1 << 7;
 /// Software bit: the frame is owned elsewhere (e.g. a shared surface); don't free it.
 const SHARED: u64 = 1 << 9;
 const NO_EXECUTE: u64 = 1 << 63;
@@ -116,6 +118,40 @@ pub fn kmap(frames: &[u64]) -> Option<u64> {
         x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
     }
     Some(base)
+}
+
+/// Maps `size` bytes of device memory at `phys` (a framebuffer) into the
+/// kernel virtual area, write-combining where the CPU supports it.
+pub fn kmap_wc(phys: u64, size: u64) -> Option<u64> {
+    if !crate::arch::pat::write_combining() {
+        return None;
+    }
+    let start = phys & !(PAGE_SIZE - 1);
+    let pages = (phys + size - start).div_ceil(PAGE_SIZE);
+    let base = {
+        let mut k = KVA.lock();
+        let b = k.next;
+        k.next += (pages + 1) * PAGE_SIZE;
+        if k.next > KVA_BASE + KVA_SIZE {
+            return None;
+        }
+        b
+    };
+    let pml4 = kernel_pml4();
+    for i in 0..pages {
+        let va = base + i * PAGE_SIZE;
+        let e = walk(pml4, va, true, false)?;
+        // Bit 7 of a 4 KiB entry selects PAT slot 4: write-combining.
+        *e = (start + i * PAGE_SIZE) | PRESENT | WRITABLE | NO_EXECUTE | PAT_4K;
+        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+    }
+    Some(base + (phys - start))
+}
+
+/// The page-table entry mapping kernel address `va` (tests).
+#[cfg(feature = "ktest")]
+pub fn kernel_entry(va: u64) -> Option<u64> {
+    walk(kernel_pml4(), va, false, false).map(|e| *e)
 }
 
 /// Unmaps a `kmap` range on every CPU. Must not be called while holding an

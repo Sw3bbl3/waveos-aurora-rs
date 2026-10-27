@@ -33,6 +33,9 @@ pub struct PerCpu {
     /// The task running here, and its process (read without the scheduler lock).
     pub task: AtomicU64,
     pub pid: AtomicU32,
+    /// The running task is a kernel task with its own saved SIMD state
+    /// (so drawing code may use SSE2; see `lumen::simd`).
+    pub simd: AtomicBool,
 }
 
 impl PerCpu {
@@ -46,6 +49,7 @@ impl PerCpu {
             tlb_pending: AtomicBool::new(false),
             task: AtomicU64::new(0),
             pid: AtomicU32::new(0),
+            simd: AtomicBool::new(false),
         }
     }
 }

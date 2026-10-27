@@ -266,7 +266,7 @@ impl Desktop {
 
     /// (bubble, chip, seek, ring, ring size, percent text, date/time text)
     #[allow(clippy::type_complexity)]
-    fn right_bubble(&self) -> (Rect, Option<Rect>, Rect, Rect, i32, Option<Rect>, Option<Rect>) {
+    pub(super) fn right_bubble(&self) -> (Rect, Option<Rect>, Rect, Rect, i32, Option<Rect>, Option<Rect>) {
         let crest_on = crest_on();
         let percent = (prefs::get_bool(pref::BATTERY_LEVEL) && battery().is_some()).then(|| {
             let f = theme::ui_bold(13);

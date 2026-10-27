@@ -18,6 +18,7 @@ const TESTS: &[Test] = &[
     ("heap", heap),
     ("isqrt", sqrt),
     ("account_password_hash", crate::gui::account::self_test),
+    ("write-combining mappings", crate::arch::pat::self_test),
     ("rect math", rects),
     ("keyboard decoder", keyboard),
     ("ramfs + vfs", ramfs),

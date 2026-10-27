@@ -12,6 +12,7 @@ pub mod geom;
 pub mod icons;
 pub mod material;
 pub mod math;
+pub mod simd;
 pub mod theme;
 pub mod ttf;
 /// Lyra font parsing and rasterization; `ttf` remains a compatibility alias.

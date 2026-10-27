@@ -39,6 +39,9 @@ impl App for ClientApp {
     fn materials(&self) -> alloc::vec::Vec<Rect> {
         server::material_regions(self.id)
     }
+    fn covers_window(&self) -> bool {
+        true
+    }
     fn kind(&self) -> AppKind {
         self.kind
     }

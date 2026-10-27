@@ -626,26 +626,49 @@ impl<'a> Decoder<'a> {
             .collect();
         let (w, h) = (self.width, self.height);
         let mut pixels = Vec::with_capacity(w * h);
-        // Subsampled planes are interpolated bilinearly at each pixel's centre.
-        let sample = |ci: usize, x: usize, y: usize| -> i32 {
+        // Subsampled planes are interpolated bilinearly at each pixel's
+        // centre. The horizontal positions and weights depend only on x, so
+        // they are worked out once; each output row then fills one line of
+        // samples per component.
+        let xmaps: Vec<Option<Vec<(usize, usize, i32)>>> = self
+            .comps
+            .iter()
+            .zip(&planes)
+            .map(|(c, (_, stride))| {
+                (c.h != self.hmax || c.v != self.vmax).then(|| {
+                    (0..w)
+                        .map(|x| {
+                            // Position in the plane, 1/256 units: (x + 0.5) * h / hmax - 0.5.
+                            let fx = (((2 * x + 1) * c.h * 128) / self.hmax) as i32 - 128;
+                            let x0 = (fx.max(0) >> 8) as usize;
+                            (x0, (x0 + 1).min(stride - 1), if fx < 0 { 0 } else { fx & 255 })
+                        })
+                        .collect()
+                })
+            })
+            .collect();
+        let mut lines: Vec<Vec<i32>> = self.comps.iter().map(|_| vec![0i32; w]).collect();
+        let fill_line = |ci: usize, y: usize, line: &mut [i32]| {
             let c = &self.comps[ci];
             let (plane, stride) = &planes[ci];
-            if c.h == self.hmax && c.v == self.vmax {
-                return plane[y * stride + x] as i32;
-            }
+            let Some(xmap) = &xmaps[ci] else {
+                for (v, &p) in line.iter_mut().zip(&plane[y * stride..y * stride + w]) {
+                    *v = p as i32;
+                }
+                return;
+            };
             let rows = plane.len() / stride;
-            // Position in the plane, 1/256 units: (x + 0.5) * h / hmax - 0.5.
-            let fx = (((2 * x + 1) * c.h * 128) / self.hmax) as i32 - 128;
             let fy = (((2 * y + 1) * c.v * 128) / self.vmax) as i32 - 128;
-            let (x0, y0) = (fx.max(0) >> 8, fy.max(0) >> 8);
-            let (ax, ay) = (if fx < 0 { 0 } else { fx & 255 }, if fy < 0 { 0 } else { fy & 255 });
-            let (x0, y0) = (x0 as usize, y0 as usize);
-            let x1 = (x0 + 1).min(stride - 1);
+            let y0 = (fy.max(0) >> 8) as usize;
+            let ay = if fy < 0 { 0 } else { fy & 255 };
             let y1 = (y0 + 1).min(rows - 1);
-            let p = |xx: usize, yy: usize| plane[yy * stride + xx] as i32;
-            let top = p(x0, y0) * (256 - ax) + p(x1, y0) * ax;
-            let bottom = p(x0, y1) * (256 - ax) + p(x1, y1) * ax;
-            (top * (256 - ay) + bottom * ay + 32768) >> 16
+            let stride = *stride;
+            let (r0, r1) = (&plane[y0 * stride..][..stride], &plane[y1 * stride..][..stride]);
+            for (v, &(x0, x1, ax)) in line.iter_mut().zip(xmap) {
+                let top = r0[x0] as i32 * (256 - ax) + r0[x1] as i32 * ax;
+                let bottom = r1[x0] as i32 * (256 - ax) + r1[x1] as i32 * ax;
+                *v = (top * (256 - ay) + bottom * ay + 32768) >> 16;
+            }
         };
         let clamp = |v: i32| v.clamp(0, 255) as u32;
         let ycc = |y: i32, cb: i32, cr: i32| {
@@ -658,6 +681,10 @@ impl<'a> Decoder<'a> {
         let rgb_ids =
             self.comps.len() == 3 && self.comps[0].id == b'R' && self.comps[1].id == b'G' && self.comps[2].id == b'B';
         for y in 0..h {
+            for (ci, line) in lines.iter_mut().enumerate() {
+                fill_line(ci, y, line);
+            }
+            let sample = |ci: usize, x: usize, _y: usize| lines[ci][x];
             for x in 0..w {
                 let (r, g, b) = match self.comps.len() {
                     1 => {

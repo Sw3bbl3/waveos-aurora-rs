@@ -104,6 +104,26 @@ impl Switcher {
     }
 }
 /// Conservative dependency check: padded material bounds must be untouched.
+/// Grows damage so that every rectangle touching a glass material (padded
+/// by `padding`, the distance the blur samples) contains all of it: glass
+/// must be recomputed from a backdrop repainted in the same pass, never
+/// from stale pixels outside the clip.
+pub fn grow_damage(damage: &mut [Rect], materials: &[Rect], padding: i32) {
+    let padded: alloc::vec::Vec<Rect> = materials.iter().map(|m| m.inset(-padding)).collect();
+    for r in damage.iter_mut() {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for m in &padded {
+                if r.intersects(m) && r.union(m) != *r {
+                    *r = r.union(m);
+                    changed = true;
+                }
+            }
+        }
+    }
+}
+
 pub fn safe_damage(damage: &[Rect], materials: &[Rect], padding: i32) -> bool {
     damage.iter().all(|r| materials.iter().all(|m| !r.intersects(&m.inset(-padding))))
 }
@@ -180,6 +200,31 @@ mod tests {
         draw(&mut partial, damage, 0xffabcdef);
         let mut reference = alloc::vec![0;160*160];
         draw(&mut reference, full, 0xffabcdef);
+        assert_eq!(partial, reference);
+    }
+    #[test]
+    fn grown_damage_near_glass_matches_full_reference() {
+        use crate::{canvas::Canvas, material::MaterialCache};
+        fn draw(pixels: &mut [u32], clip: Rect, y: i32) {
+            let mut cache = MaterialCache::default();
+            let mut cv = Canvas::new(pixels, 160, 160);
+            cv.clip = clip;
+            cv.materials = Some(&mut cache);
+            cv.fill_rect(Rect::new(0, 0, 160, 160), 0xff102040);
+            // A window just below the glass bar, moving down.
+            cv.fill_round_rect(Rect::new(20, y, 100, 60), 8, 0xffeeeeee);
+            cv.frosted(Rect::new(0, 0, 160, 24), 6, 0x80607080);
+        }
+        let full = Rect::new(0, 0, 160, 160);
+        let mut partial = alloc::vec![0; 160 * 160];
+        draw(&mut partial, full, 30);
+        // The window moves from y = 30 to y = 50: damage is old ∪ new.
+        let mut damage = [Rect::new(20, 30, 100, 80)];
+        grow_damage(&mut damage, &[Rect::new(0, 0, 160, 24)], 40);
+        assert!(damage[0].contains(0, 0) && damage[0].contains(159, 63));
+        draw(&mut partial, damage[0], 50);
+        let mut reference = alloc::vec![0; 160 * 160];
+        draw(&mut reference, full, 50);
         assert_eq!(partial, reference);
     }
 }
