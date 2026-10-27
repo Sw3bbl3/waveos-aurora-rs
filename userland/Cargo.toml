@@ -2,7 +2,7 @@
 # xtask supplies the target, linker script and flags for ring-3 programs.
 [workspace]
 resolver = "2"
-members = ["constellation", "corekit", "aurorakit", "apps/*", "bin/*"]
+members = ["constellation", "corekit", "aurorakit", "waveui", "apps/*", "bin/*"]
 
 [workspace.package]
 version = "0.8.0"
@@ -14,6 +14,7 @@ constellation-sdk = { path = "constellation" }
 gina = { path = "../libs/gina" }
 corekit = { path = "corekit" }
 aurorakit = { path = "aurorakit" }
+waveui = { path = "waveui" }
 aurora-abi = { path = "../libs/abi" }
 lumen = { path = "../libs/gfx" }
 aurora-image = { path = "../libs/image" }

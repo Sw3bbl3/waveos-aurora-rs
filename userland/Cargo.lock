@@ -54,8 +54,8 @@ name = "app-about"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -70,8 +70,8 @@ dependencies = [
 name = "app-calculator"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -95,9 +95,9 @@ dependencies = [
 name = "app-installer"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
  "gina",
+ "waveui",
 ]
 
 [[package]]
@@ -146,8 +146,8 @@ name = "app-preview"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -155,8 +155,8 @@ name = "app-settings"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -181,8 +181,8 @@ dependencies = [
 name = "app-welcome"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -1243,6 +1243,16 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "waveui"
+version = "0.8.0"
+dependencies = [
+ "aurora-image",
+ "aurorakit",
+ "corekit",
+ "lumen",
+]
 
 [[package]]
 name = "wide"

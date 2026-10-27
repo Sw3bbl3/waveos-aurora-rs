@@ -11,4 +11,4 @@ path = "src/main.rs"
 [dependencies]
 aurora-image.workspace = true
 corekit.workspace = true
-aurorakit.workspace = true
+waveui.workspace = true

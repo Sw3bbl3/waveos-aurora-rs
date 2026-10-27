@@ -1,0 +1,11 @@
+[package]
+name = "waveui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+corekit.workspace = true
+aurorakit.workspace = true
+lumen.workspace = true
+aurora-image.workspace = true

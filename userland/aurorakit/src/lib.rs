@@ -99,6 +99,12 @@ pub trait App {
     fn scroll(&mut self, _delta: i32, _area: Rect) -> bool {
         false
     }
+    /// Scrolling with its precise amounts: `notches` whole wheel notches
+    /// down, and `dx`, `dy` in 1/120 notch (touchpads move by fractions).
+    /// By default it calls [`App::scroll`] with the notches.
+    fn wheel(&mut self, notches: i32, _dx: i32, _dy: i32, area: Rect) -> bool {
+        notches != 0 && self.scroll(notches, area)
+    }
     /// Something is dragged over the window (`x < 0`: it left). Return true to redraw.
     fn drag_over(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
         false
@@ -375,7 +381,7 @@ pub fn run<A: App>(mut app: A) -> i32 {
             event::POINTER_UP => app.release(ev.x, ev.y, area, &mut env),
             event::POINTER_MOVE if ev.a != 0 => app.drag(ev.x, ev.y, area, &mut env),
             event::POINTER_MOVE => app.hover(ev.x, ev.y, area),
-            event::SCROLL => app.scroll(ev.a as i32, area),
+            event::SCROLL => app.wheel(ev.a as i32, ev.x, ev.y, area),
             event::DRAG_OVER => app.drag_over(ev.x, ev.y, area, &mut env),
             event::DRAG_LEAVE => app.drag_over(-1, -1, area, &mut env),
             event::DROP => app.drop(ev.x, ev.y, ev.a, area, &mut env),

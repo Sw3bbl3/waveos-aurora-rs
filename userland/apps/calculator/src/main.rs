@@ -5,13 +5,9 @@
 
 extern crate alloc;
 
-use alloc::format;
-use alloc::string::{String, ToString};
-use aurorakit::canvas::{mix, rgb, Canvas};
-use aurorakit::geom::Rect;
-use aurorakit::theme;
-use aurorakit::{App, Env};
-use aurorakit::{KeyCode, KeyEvent};
+use waveui::lumen::canvas::rgb;
+use waveui::prelude::*;
+use waveui::style::Weight;
 
 const KEYS: [[&str; 4]; 5] =
     [["C", "±", "%", "÷"], ["7", "8", "9", "×"], ["4", "5", "6", "−"], ["1", "2", "3", "+"], ["0", "", ".", "="]];
@@ -21,13 +17,18 @@ pub struct Calculator {
     acc: Option<f64>,
     op: Option<char>,
     fresh: bool,
-    hovered: Option<(usize, usize)>,
-    pressed: Option<(usize, usize)>,
+}
+
+#[derive(Clone)]
+pub enum Msg {
+    Key(&'static str),
+    Digit(char),
+    Backspace,
 }
 
 impl Calculator {
     fn new() -> Self {
-        Self { display: "0".into(), acc: None, op: None, fresh: true, hovered: None, pressed: None }
+        Self { display: "0".into(), acc: None, op: None, fresh: true }
     }
 
     fn value(&self) -> f64 {
@@ -69,7 +70,7 @@ impl Calculator {
 
     fn press(&mut self, key: &str) {
         match key {
-            "C" => *self = Self { hovered: self.hovered, ..Self::new() },
+            "C" => *self = Self::new(),
             "±" => {
                 let v = -self.value();
                 self.show(v);
@@ -105,43 +106,36 @@ impl Calculator {
                 self.fresh = true;
             }
             d => {
+                let d = d.to_string();
                 if self.fresh || self.display == "0" || self.display == "Error" {
                     self.display.clear();
                     self.fresh = false;
                 }
                 if self.display.len() < 16 {
-                    self.display.push_str(d);
+                    self.display.push_str(&d);
                 }
             }
         }
     }
 
-    fn cell(area: Rect, row: usize, col: usize) -> Rect {
-        let pad = 14;
-        let gap = 10;
-        let top = area.y + 110;
-        let cw = (area.w - 2 * pad - 3 * gap) / 4;
-        let ch = (area.bottom() - pad - top - 4 * gap) / 5;
-        let mut r = Rect::new(area.x + pad + col as i32 * (cw + gap), top + row as i32 * (ch + gap), cw, ch);
-        if row == 4 && col == 0 {
-            r.w = cw * 2 + gap;
-        }
-        r
-    }
-
-    fn key_at(area: Rect, x: i32, y: i32) -> Option<(usize, usize)> {
-        for (r, row) in KEYS.iter().enumerate() {
-            for (c, k) in row.iter().enumerate() {
-                if !k.is_empty() && Self::cell(area, r, c).contains(x, y) {
-                    return Some((r, c));
-                }
-            }
-        }
-        None
+    /// The pending operation ("12 ×"), shown above the display.
+    fn hint(&self) -> Option<String> {
+        let (a, op) = (self.acc?, self.op?);
+        let mut tmp = Calculator::new();
+        tmp.show(a);
+        let sym = match op {
+            '+' => "+",
+            '-' => "−",
+            '*' => "×",
+            _ => "÷",
+        };
+        Some(format!("{} {}", tmp.display, sym))
     }
 }
 
 impl App for Calculator {
+    type Message = Msg;
+
     fn title(&self) -> String {
         "Calculator".into()
     }
@@ -152,114 +146,106 @@ impl App for Calculator {
         false
     }
 
-    fn draw(&mut self, cv: &mut Canvas, area: Rect, _env: &Env) {
-        let t = theme::current();
-        let bg = if t.dark { rgb(0x1C, 0x1C, 0x22) } else { rgb(0xF2, 0xF2, 0xF6) };
-        cv.fill_rect(area, bg);
-        // Pending operation hint.
-        if let (Some(a), Some(op)) = (self.acc, self.op) {
-            let mut tmp = Calculator::new();
-            tmp.show(a);
-            let sym = match op {
-                '+' => "+",
-                '-' => "−",
-                '*' => "×",
-                _ => "÷",
-            };
-            let hint = format!("{} {}", tmp.display, sym);
-            let f = theme::ui(14);
-            cv.text(area.right() - 20 - f.width(&hint), area.y + 36, &hint, f, t.text_secondary);
-        }
-        let f = theme::ui(if self.display.len() > 11 { 28 } else { 40 });
-        let w = f.width(&self.display);
-        cv.text(area.right() - 20 - w, area.y + 88, &self.display, f, t.text);
-
-        for (r, row) in KEYS.iter().enumerate() {
-            for (c, k) in row.iter().enumerate() {
-                if k.is_empty() {
-                    continue;
-                }
-                let cell = Self::cell(area, r, c);
-                let (base, fg) = if c == 3 {
-                    (rgb(0xFF, 0x9F, 0x0A), 0xFFFF_FFFF)
-                } else if r == 0 {
-                    (if t.dark { rgb(0x5A, 0x5A, 0x66) } else { rgb(0xD4, 0xD4, 0xDC) }, t.text)
-                } else {
-                    (if t.dark { rgb(0x36, 0x36, 0x40) } else { 0xFFFF_FFFF }, t.text)
-                };
-                let mut color = base;
-                if self.pressed == Some((r, c)) {
-                    color = mix(base, 0xFF00_0000, 40);
-                } else if self.hovered == Some((r, c)) {
-                    color = mix(base, 0xFFFF_FFFF, 36);
-                }
-                cv.fill_round_rect(cell, cell.h.min(cell.w) / 2, color);
-                if c != 3 && r != 0 && !t.dark {
-                    cv.stroke_round_rect(cell, cell.h.min(cell.w) / 2, 0x14000000);
-                }
-                cv.text_centered(cell, k, theme::ui(20), fg);
-            }
-        }
-    }
-
-    fn click(&mut self, x: i32, y: i32, area: Rect, _env: &mut Env) -> bool {
-        if let Some((r, c)) = Self::key_at(area, x, y) {
-            self.press(KEYS[r][c]);
-            self.pressed = Some((r, c));
-            return true;
-        }
-        false
-    }
-
-    fn hover(&mut self, x: i32, y: i32, area: Rect) -> bool {
-        let h = Self::key_at(area, x, y);
-        let changed = self.hovered != h || self.pressed.is_some();
-        self.hovered = h;
-        self.pressed = None;
-        changed
-    }
-
-    fn key(&mut self, ev: &KeyEvent, _env: &mut Env) -> bool {
-        if !ev.pressed {
-            return false;
-        }
-        let key = match (ev.code, ev.ch) {
-            (KeyCode::Enter, _) => "=",
-            (KeyCode::Escape, _) => "C",
-            (KeyCode::Backspace, _) => {
+    fn update(&mut self, msg: Msg, _cx: &mut Context<Msg>) {
+        match msg {
+            Msg::Key(k) => self.press(k),
+            Msg::Digit(c) => self.press(c.encode_utf8(&mut [0; 4])),
+            Msg::Backspace => {
                 if !self.fresh && self.display.len() > 1 {
                     self.display.pop();
                 } else {
                     self.display = "0".into();
                     self.fresh = true;
                 }
-                return true;
             }
-            (_, Some(c)) => match c {
-                '0'..='9' => {
-                    let s = c.to_string();
-                    self.press(&s);
-                    return true;
-                }
-                '.' | ',' => ".",
-                '+' => "+",
-                '-' => "−",
-                '*' | 'x' => "×",
-                '/' => "÷",
-                '=' => "=",
-                '%' => "%",
-                'c' | 'C' => "C",
-                _ => return false,
-            },
-            _ => return false,
-        };
-        self.press(key);
-        true
+        }
+    }
+
+    fn key(&self, ev: &KeyEvent) -> Option<Msg> {
+        Some(match (ev.code, ev.ch) {
+            (KeyCode::Enter, _) => Msg::Key("="),
+            (KeyCode::Escape, _) => Msg::Key("C"),
+            (KeyCode::Backspace, _) => Msg::Backspace,
+            (_, Some(c @ '0'..='9')) => Msg::Digit(c),
+            (_, Some('.' | ',')) => Msg::Key("."),
+            (_, Some('+')) => Msg::Key("+"),
+            (_, Some('-')) => Msg::Key("−"),
+            (_, Some('*' | 'x')) => Msg::Key("×"),
+            (_, Some('/')) => Msg::Key("÷"),
+            (_, Some('=')) => Msg::Key("="),
+            (_, Some('%')) => Msg::Key("%"),
+            (_, Some('c' | 'C')) => Msg::Key("C"),
+            _ => return None,
+        })
+    }
+
+    fn view(&self, env: &Env) -> View<'_, Msg> {
+        let dark = env.dark;
+        let (pad, gap) = (14, 10);
+        let cw = (env.size.0 - 2 * pad - 3 * gap) / 4;
+        let ch = 56;
+        let keypad = VStack::with(
+            KEYS.iter()
+                .enumerate()
+                .map(|(r, keys)| {
+                    HStack::with(
+                        keys.iter()
+                            .enumerate()
+                            .filter(|(_, k)| !k.is_empty())
+                            .map(|(c, k)| {
+                                let w = if r == 4 && c == 0 { 2 * cw + gap } else { cw };
+                                let (style, tint) = if c == 3 {
+                                    (ButtonStyle::Prominent, Color::Orange)
+                                } else if r == 0 {
+                                    let g = if dark { rgb(0x5A, 0x5A, 0x66) } else { rgb(0xD4, 0xD4, 0xDC) };
+                                    (ButtonStyle::Bordered, Color::Custom(g))
+                                } else {
+                                    let g = if dark { rgb(0x36, 0x36, 0x40) } else { 0xFFFF_FFFF };
+                                    (ButtonStyle::Bordered, Color::Custom(g))
+                                };
+                                Button::with(Text::new(*k).style(TextStyle::Sized(20, Weight::Regular)))
+                                    .action(Msg::Key(k))
+                                    .button_style(style)
+                                    .tint(tint)
+                                    .corner_radius(ch / 2)
+                                    .size(w, ch)
+                                    .accessibility_label(*k)
+                            })
+                            .collect(),
+                    )
+                    .spacing(gap)
+                })
+                .collect(),
+        )
+        .spacing(gap);
+        let size = if self.display.len() > 11 { 28 } else { 40 };
+        let bg = if dark { rgb(0x1C, 0x1C, 0x22) } else { rgb(0xF2, 0xF2, 0xF6) };
+        VStack::new()
+            .push(
+                Text::new(self.hint().unwrap_or_default())
+                    .style(TextStyle::Sized(14, Weight::Regular))
+                    .foreground(Color::SecondaryLabel)
+                    .text_align(Align::End)
+                    .fill_width(),
+            )
+            .push(
+                Text::new(self.display.clone())
+                    .style(TextStyle::Sized(size, Weight::Regular))
+                    .text_align(Align::End)
+                    .fill_width(),
+            )
+            .push(Spacer::new())
+            .push(keypad)
+            .spacing(4)
+            .alignment(Align::End)
+            .padding_insets(Insets { top: 18, leading: 20, bottom: pad, trailing: 20 })
+            .background(Color::Custom(bg))
+            .fill()
     }
 }
 
 corekit::entry!(main);
 
 fn main(_: corekit::Args) -> i32 {
-    aurorakit::run(Calculator::new())
+    waveui::run(Calculator::new())
 }

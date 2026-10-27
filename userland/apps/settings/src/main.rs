@@ -1,60 +1,59 @@
-//! Settings — appearance, display, keyboard, date and time, sound,
-//! notifications, and information about this computer.
+//! Settings — appearance, display, keyboard, trackpad and mouse, game
+//! controllers, network, date and time, sound, notifications, the desktop,
+//! login, accessibility, and information about this computer.
 //!
-//! Start with a pane name (`Settings.elf keyboard`) to open that pane, as
-//! Spotlight does.
+//! Start with a pane name (`Settings.elf keyboard`) or a setting
+//! (`Settings.elf keyboard/repeat-rate`) to open it, as Seek does.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
-use alloc::format;
-use alloc::string::String;
-use alloc::vec::Vec;
-use aurora_image::Image;
-use aurorakit::canvas::{mix, with_alpha, Canvas};
-use aurorakit::geom::Rect;
-use aurorakit::icons::{self, Icon};
-use aurorakit::text::TextField;
-use aurorakit::theme;
-use aurorakit::ui::{self, View};
-use aurorakit::wallpaper;
-use aurorakit::widgets::{self, button, ButtonStyle};
-use aurorakit::{App, Env, KeyEvent, Request};
+use alloc::rc::Rc;
+use aurora_image::Image as Picture;
 use corekit::abi::{display, pref, DateTime, DisplayMode};
+use corekit::gamepad::{Button as Pad, Gamepad, State as PadState};
 use corekit::prefs;
+use waveui::lumen::canvas::{mix, with_alpha, Canvas as Surface};
+use waveui::lumen::geom::Rect;
+use waveui::lumen::icons::{self, Icon};
+use waveui::lumen::{theme, wallpaper};
+use waveui::prelude::*;
+use waveui::style::Weight;
+use waveui::Request;
 
 mod search;
 
-const SIDEBAR_W: i32 = 214;
-const ROW_H: i32 = 44;
-const MODE_H: i32 = 36;
-/// Widths of the year, month, day, hour and minute steppers.
-const FIELD_W: [i32; 5] = [100, 84, 84, 84, 84];
 const THUMB_W: i32 = 132;
 const THUMB_H: i32 = 84;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Pane {
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Pane {
     Appearance,
     Display,
     Keyboard,
+    Trackpad,
+    Mouse,
+    Controllers,
     Network,
     DateTime,
     Sound,
     Notifications,
-    About,
     Desktop,
     Bar,
     Login,
     Accessibility,
+    About,
 }
 
-const PANES: [(Pane, &str, &str, u32); 12] = [
+const PANES: [(Pane, &str, &str, u32); 15] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
+    (Pane::Trackpad, "Trackpad", "trackpad", 0xFF64D2FF),
+    (Pane::Mouse, "Mouse", "mouse", 0xFF6E6E80),
+    (Pane::Controllers, "Game Controllers", "controllers", 0xFF34C759),
     (Pane::Network, "Network", "network", 0xFF30D158),
     (Pane::DateTime, "Date & Time", "datetime", 0xFFFF9F0A),
     (Pane::Sound, "Sound", "sound", 0xFFFF375F),
@@ -69,84 +68,62 @@ const PANES: [(Pane, &str, &str, u32); 12] = [
 const LAYOUTS: [(&str, &str); 6] =
     [("us", "U.S."), ("uk", "British"), ("de", "German"), ("fr", "French"), ("es", "Spanish"), ("se", "Swedish")];
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Hit {
-    Pane(usize),
-    Light,
-    Dark,
+#[derive(Clone)]
+pub enum Msg {
+    Pane(Pane),
+    Search(String),
+    SearchMove(i32),
+    SearchOpen,
+    OpenSetting(usize),
+    SetDark(bool),
     Accent(usize),
     Wallpaper(u8),
     CustomWallpaper,
     Mode(usize),
-    Layout(usize),
-    RepeatDelay,
-    RepeatRate,
-    TryField,
-    Toggle(&'static str),
-    Field(usize, i32),
+    Layout(&'static str),
+    Try(String),
+    Toggle(&'static str, bool),
+    Int(&'static str, i64),
+    Clock(usize, i64),
     SetClock,
-    Zone(i32),
-    Volume,
-    Glass,
-    DockSize,
-    AboutMore,
-    /// A network in the Wi-Fi list.
-    WifiNetwork(usize),
+    Zone(i64),
+    WifiChoose(usize),
+    WifiPassword(String),
     WifiJoin,
+    WifiCancel,
     WifiDisconnect,
+    Rumble(u32),
+    OpenAbout,
+    ClearNote,
 }
-
-/// Where the Wi-Fi section's parts go (shared by drawing and hit-testing).
-struct WifiLayout {
-    header: Rect,
-    disconnect: Option<Rect>,
-    /// Network rows, by index into the list.
-    rows: Vec<(usize, Rect)>,
-    /// The password field and Join button, under the chosen network.
-    password: Option<(Rect, Rect)>,
-    bottom: i32,
-}
-
-const WIFI_ROW_H: i32 = 40;
-const WIFI_MAX_ROWS: usize = 8;
 
 pub struct Settings {
-    controls: ui::State,
     pane: Pane,
-    search: TextField,
-    search_focused: bool,
-    search_selected: usize,
-    target: Option<usize>,
-    highlight_until: u64,
-    redraw: bool,
-    last_tick: u64,
-    scroll: i32,
-    focus: Option<Hit>,
-    hover: Option<Hit>,
+    query: String,
+    selected: usize,
+    /// The setting a search or deep link pointed at, to focus once shown.
+    target: Option<&'static str>,
     /// Wallpaper pictures, day and night.
-    thumbs: Vec<[Vec<u32>; 2]>,
-    custom_thumb: Option<Image>,
+    thumbs: Vec<[Rc<Vec<u32>>; 2]>,
+    custom_thumb: Option<Rc<Picture>>,
     modes: Vec<DisplayMode>,
-    note: Option<(String, u64)>,
-    try_field: TextField,
-    try_focused: bool,
+    note: Option<String>,
+    try_text: String,
     /// Date and time being edited: year, month, day, hour, minute.
-    clock: [i32; 5],
+    clock: [i64; 5],
     clock_edited: bool,
-    dragging: Option<Hit>,
-    area: Rect,
     info: corekit::abi::SysInfo,
-    screen: (i32, i32),
     /// Wi-Fi: the adapter's state and the networks around (refreshed each second).
     wifi: Option<corekit::abi::WifiStatus>,
     wifi_nets: Vec<corekit::abi::WifiNetwork>,
     /// The protected network whose password is being typed.
     wifi_chosen: Option<Vec<u8>>,
-    wifi_pass: TextField,
-    wifi_pass_focused: bool,
+    wifi_password: String,
+    pads: Vec<(Gamepad, Option<PadState>)>,
+    now: corekit::abi::DateTime,
 }
 
-fn days_in(y: i32, m: i32) -> i32 {
+fn days_in(y: i64, m: i64) -> i64 {
     match m {
         2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
         2 => 28,
@@ -157,390 +134,1071 @@ fn days_in(y: i32, m: i32) -> i32 {
 
 impl Settings {
     pub fn new(start: Option<&str>) -> Self {
-        let thumbs =
-            (0..wallpaper::NAMES.len() as u8).map(|i| [wallpaper_thumb(i, false), wallpaper_thumb(i, true)]).collect();
-        let pane = start
-            .and_then(|s| PANES.iter().find(|(_, _, id, _)| *id == s.split('/').next().unwrap_or(s)))
-            .map(|(p, _, _, _)| *p)
-            .unwrap_or(Pane::Appearance);
+        let thumbs = (0..wallpaper::NAMES.len() as u8)
+            .map(|i| [Rc::new(wallpaper_thumb(i, false)), Rc::new(wallpaper_thumb(i, true))])
+            .collect();
         let mut s = Self {
-            controls: ui::State::default(),
-            pane,
-            search: TextField::new("", "Search settings"),
-            search_focused: false,
-            search_selected: 0,
+            pane: Pane::Appearance,
+            query: String::new(),
+            selected: 0,
             target: None,
-            highlight_until: 0,
-            redraw: false,
-            last_tick: 0,
-            scroll: 0,
-            focus: None,
-            hover: None,
             thumbs,
             custom_thumb: None,
             modes: prefs::display_modes(),
             note: None,
-            try_field: TextField::new("", "Type here to try your layout"),
-            try_focused: false,
+            try_text: String::new(),
             clock: [0; 5],
             clock_edited: false,
-            dragging: None,
-            area: Rect::new(0, 0, 820, 560),
             info: corekit::process::sys_info(),
-            screen: (0, 0),
             wifi: None,
             wifi_nets: Vec::new(),
             wifi_chosen: None,
-            wifi_pass: TextField::password("Password"),
-            wifi_pass_focused: false,
+            wifi_password: String::new(),
+            pads: Vec::new(),
+            now: corekit::time::now(),
         };
         s.load_custom_thumb();
         s.sync_clock();
-        if let Some(i) = start.and_then(|id| search::SETTINGS.iter().position(|entry| entry.id == id)) {
-            s.jump_setting(i, corekit::time::uptime_ms());
+        if let Some(start) = start {
+            if let Some(i) = search::SETTINGS.iter().position(|e| e.id == start) {
+                s.jump_setting(i);
+            } else if let Some(p) = PANES.iter().find(|p| p.2 == start.split('/').next().unwrap_or(start)) {
+                s.pane = p.0;
+            }
         }
+        s.refresh();
         s
     }
 
     fn load_custom_thumb(&mut self) {
-        let path = prefs::get("wallpaper_image");
-        self.custom_thumb = path
+        self.custom_thumb = prefs::get("wallpaper_image")
             .and_then(|p| corekit::fs::read(&p).ok())
             .and_then(|d| aurora_image::decode(&d).ok())
-            .map(|img| img.thumbnail(THUMB_W as u32 * 2, THUMB_H as u32 * 2));
+            .map(|img| Rc::new(img.thumbnail(THUMB_W as u32 * 2, THUMB_H as u32 * 2)));
     }
 
     fn sync_clock(&mut self) {
         let d = corekit::time::now();
-        self.clock = [d.year as i32, d.month as i32, d.day as i32, d.hour as i32, d.minute as i32];
+        self.clock = [d.year as i64, d.month as i64, d.day as i64, d.hour as i64, d.minute as i64];
     }
 
-    fn flash(&mut self, msg: String) {
-        self.note = Some((msg, corekit::time::uptime_ms()));
+    fn jump_setting(&mut self, i: usize) {
+        let s = search::SETTINGS[i];
+        self.pane = s.pane;
+        self.query.clear();
+        self.target = Some(s.id);
     }
 
-    fn control_action(&mut self, action: Option<ui::Action>) -> bool {
-        let Some(action) = action else { return false };
-        let (id, value) = match action {
-            ui::Action::Toggle(id, on) => (id, format!("{}", on as u8)),
-            ui::Action::Change(5, v) => (5, format!("{}", 32 + v * 32 / 1000)),
-            ui::Action::Change(6, v) => (6, format!("{}", v / 10)),
-            _ => return false,
-        };
-        let key = match id {
-            1 => pref::REDUCE_TRANSPARENCY,
-            2 => pref::REDUCE_MOTION,
-            3 => pref::HIGH_CONTRAST,
-            4 => pref::DOCK_AUTOHIDE,
-            5 => pref::DOCK_SIZE,
-            6 => pref::GLASS,
-            _ => return false,
-        };
-        if let Err(e) = prefs::set(key, &value) {
-            self.flash(format!("Could not save: {e}"));
-        }
-        true
-    }
-
-    fn visible_panes(&self) -> Vec<usize> {
-        (0..PANES.len()).collect()
-    }
-
-    fn content(&self, area: Rect) -> Rect {
-        Rect::new(area.x + SIDEBAR_W + 28, area.y + 24 - self.scroll, area.w - SIDEBAR_W - 56, area.h - 48)
-    }
-
-    /// A grouped card of `n` rows starting at `y`.
-    fn rows(c: Rect, y: i32, n: usize) -> Vec<Rect> {
-        (0..n as i32).map(|i| Rect::new(c.x, y + i * ROW_H, c.w, ROW_H)).collect()
-    }
-
-    fn toggle_rect(row: Rect) -> Rect {
-        Rect::new(row.right() - 58, row.y + (ROW_H - 24) / 2, 44, 24)
-    }
-
-    /// The Wi-Fi section at the top of the Network pane (`None` without Wi-Fi).
-    fn wifi_layout(&self, c: Rect) -> Option<WifiLayout> {
-        let st = self.wifi.as_ref()?;
-        let header = Rect::new(c.x, c.y + 64, c.w, 52);
-        let connected = st.state == corekit::abi::wifi::CONNECTED;
-        let disconnect = connected.then(|| Rect::new(header.right() - 126, header.y + 11, 110, 30));
-        let mut y = header.bottom() + 8;
-        let mut rows = Vec::new();
-        let mut password = None;
-        if st.state != corekit::abi::wifi::UNAVAILABLE {
-            for (i, n) in self.wifi_nets.iter().take(WIFI_MAX_ROWS).enumerate() {
-                rows.push((i, Rect::new(c.x, y, c.w, WIFI_ROW_H)));
-                y += WIFI_ROW_H;
-                if self.wifi_chosen.as_deref() == Some(&n.ssid[..n.ssid_len as usize]) {
-                    password =
-                        Some((Rect::new(c.x + 16, y + 6, c.w - 150, 34), Rect::new(c.right() - 118, y + 8, 102, 30)));
-                    y += 48;
-                }
-            }
-            if rows.is_empty() {
-                y += WIFI_ROW_H; // "Looking for networks…"
-            }
-        }
-        Some(WifiLayout { header, disconnect, rows, password, bottom: y + 20 })
-    }
-
-    /// Every clickable thing on screen, for drawing and hit-testing alike.
-    fn hits(&self, area: Rect) -> Vec<(Hit, Rect)> {
-        let mut v = Vec::new();
-        for (row, i) in self.visible_panes().into_iter().enumerate() {
-            v.push((Hit::Pane(i), Rect::new(area.x + 10, area.y + 98 + row as i32 * 36, SIDEBAR_W - 20, 32)));
-        }
-        let c = self.content(area);
+    /// Re-reads what the open pane shows.
+    fn refresh(&mut self) {
         match self.pane {
-            Pane::Appearance => {
-                v.push((Hit::Light, Rect::new(c.x, c.y + 70, THUMB_W, THUMB_H)));
-                v.push((Hit::Dark, Rect::new(c.x + THUMB_W + 20, c.y + 70, THUMB_W, THUMB_H)));
-                for i in 0..theme::ACCENTS.len() {
-                    v.push((Hit::Accent(i), Rect::new(c.x + i as i32 * 38, c.y + 222, 28, 28)));
-                }
-                let n = wallpaper::NAMES.len() as i32;
-                for i in 0..n {
-                    v.push((Hit::Wallpaper(i as u8), Rect::new(c.x + i * (THUMB_W + 16), c.y + 318, THUMB_W, THUMB_H)));
-                }
-                if self.custom_thumb.is_some() {
-                    v.push((Hit::CustomWallpaper, Rect::new(c.x + n * (THUMB_W + 16), c.y + 318, THUMB_W, THUMB_H)));
-                }
-            }
-            Pane::Display => {
-                for i in 0..self.modes.len().min(12) {
-                    v.push((Hit::Mode(i), Rect::new(c.x, c.y + 70 + i as i32 * MODE_H, c.w, MODE_H)));
-                }
-            }
-            Pane::Keyboard => {
-                for (i, r) in Self::rows(c, c.y + 64, LAYOUTS.len()).into_iter().enumerate() {
-                    v.push((Hit::Layout(i), r));
-                }
-                let y = c.y + 64 + LAYOUTS.len() as i32 * ROW_H + 56;
-                v.push((Hit::RepeatDelay, Rect::new(c.right() - 240, y + 12, 220, 20)));
-                v.push((Hit::RepeatRate, Rect::new(c.right() - 240, y + ROW_H + 12, 220, 20)));
-                v.push((Hit::TryField, Rect::new(c.x, y + 2 * ROW_H + 18, c.w, 34)));
-            }
+            Pane::Display => self.modes = prefs::display_modes(),
             Pane::DateTime => {
-                let rows = Self::rows(c, c.y + 132, 3);
-                for (r, key) in rows.iter().zip([pref::CLOCK_24H, pref::CLOCK_SECONDS, pref::CLOCK_DATE]) {
-                    v.push((Hit::Toggle(key), Self::toggle_rect(*r)));
-                }
-                let y = c.y + 132 + 3 * ROW_H + 60;
-                let mut x = c.x;
-                for (i, w) in FIELD_W.iter().enumerate() {
-                    v.push((Hit::Field(i, -1), Rect::new(x, y + 36, 26, 26)));
-                    v.push((Hit::Field(i, 1), Rect::new(x + w - 26, y + 36, 26, 26)));
-                    x += w + 10 + if i == 2 { 24 } else { 0 };
-                }
-                v.push((Hit::SetClock, Rect::new(c.right() - 120, y + 34, 110, 30)));
-                let zy = y + 104;
-                v.push((Hit::Zone(-30), Rect::new(c.right() - 150, zy + 8, 28, 28)));
-                v.push((Hit::Zone(30), Rect::new(c.right() - 38, zy + 8, 28, 28)));
-            }
-            Pane::Desktop => {
-                v.push((Hit::DockSize, Rect::new(c.x + 160, c.y + 86, c.w - 190, 24)));
-                v.push((Hit::Toggle(pref::DOCK_AUTOHIDE), Self::toggle_rect(Rect::new(c.x, c.y + 126, c.w, ROW_H))));
-                v.push((Hit::Glass, Rect::new(c.x + 160, c.y + 244, c.w - 190, 24)));
-            }
-            Pane::Accessibility => {
-                for (i, key) in [pref::REDUCE_TRANSPARENCY, pref::REDUCE_MOTION, pref::HIGH_CONTRAST].iter().enumerate()
-                {
-                    v.push((Hit::Toggle(key), Self::toggle_rect(Rect::new(c.x, c.y + 76 + i as i32 * 84, c.w, ROW_H))));
+                self.now = corekit::time::now();
+                if !self.clock_edited {
+                    self.sync_clock();
                 }
             }
             Pane::Network => {
-                if let Some(l) = self.wifi_layout(c) {
-                    v.extend(l.disconnect.map(|r| (Hit::WifiDisconnect, r)));
-                    for (i, r) in &l.rows {
-                        v.push((Hit::WifiNetwork(*i), *r));
-                    }
-                    v.extend(l.password.map(|(_, join)| (Hit::WifiJoin, join)));
+                self.wifi = corekit::net::wifi_status();
+                if self.wifi.is_some() {
+                    self.wifi_nets = corekit::net::wifi_networks();
                 }
             }
-            Pane::Sound => {
-                v.push((Hit::Volume, Rect::new(c.x + 110, c.y + 70 + 12, c.w - 140, 20)));
-                v.push((Hit::Toggle(pref::MUTED), Self::toggle_rect(Rect::new(c.x, c.y + 70 + ROW_H, c.w, ROW_H))));
+            Pane::Controllers => {
+                self.pads = corekit::gamepad::connected()
+                    .into_iter()
+                    .map(|p| {
+                        let s = p.state();
+                        (p, s)
+                    })
+                    .collect();
             }
-            Pane::Notifications => {
-                v.push((Hit::Toggle(pref::DND), Self::toggle_rect(Rect::new(c.x, c.y + 70, c.w, ROW_H))));
-            }
-            Pane::Bar => {
-                let rows = Self::rows(c, c.y + 190, 2);
-                v.push((Hit::Toggle(pref::CREST), Self::toggle_rect(rows[0])));
-                v.push((Hit::Toggle(pref::BATTERY_LEVEL), Self::toggle_rect(rows[1])));
-            }
-            Pane::Login => {
-                v.push((Hit::Toggle(pref::AUTO_LOGIN), Self::toggle_rect(Rect::new(c.x, c.y + 168, c.w, ROW_H))));
-            }
-            Pane::About => {
-                v.push((Hit::AboutMore, Rect::new(c.x + (c.w - 160) / 2, c.y + 420, 160, 32)));
-            }
-        }
-        v
-    }
-
-    fn draw_wifi(&mut self, cv: &mut Canvas, l: &WifiLayout, focused: bool) {
-        use corekit::abi::wifi as w;
-        let Some(st) = self.wifi else { return };
-        let t = theme::current();
-        let f = theme::ui(13);
-        let text = |b: &[u8], n: u32| String::from_utf8_lossy(&b[..(n as usize).min(b.len())]).into_owned();
-        let (ssid, message, driver) =
-            (text(&st.ssid, st.ssid_len), text(&st.message, st.message_len), text(&st.driver, st.driver_len));
-        let (status, color) = match st.state {
-            w::CONNECTED => (format!("Connected to {ssid}"), 0xFF30_D158),
-            w::CONNECTING => (format!("{ssid} · {message}"), 0xFFFF_9F0A),
-            w::FAILED => (message, 0xFFFF_453A),
-            w::UNAVAILABLE => (message, 0xFF8E_8E93),
-            _ => (String::from("Not connected"), 0xFF8E_8E93),
-        };
-        let head = l.header;
-        cv.fill_round_rect(head, 12, t.window_bg_alt);
-        cv.fill_circle(head.x + 22, head.y + 26, 6, color);
-        cv.text(head.x + 40, head.y + 22, "Wi-Fi", theme::ui_bold(14), t.text);
-        cv.text(head.x + 40, head.y + 40, &status, f, t.text_secondary);
-        if let Some(r) = l.disconnect {
-            button(cv, r, "Disconnect", ButtonStyle::Secondary, self.hover == Some(Hit::WifiDisconnect));
-        } else if f.width(&status) + f.width(&driver) < head.w - 80 {
-            cv.text(head.right() - 16 - f.width(&driver), head.y + 31, &driver, f, t.text_secondary);
-        }
-        if st.state == w::UNAVAILABLE {
-            return;
-        }
-        let top = head.bottom() + 8;
-        let card = Rect::new(head.x, top, head.w, (l.bottom - 20 - top).max(WIFI_ROW_H));
-        cv.fill_round_rect(card, 12, t.window_bg_alt);
-        if l.rows.is_empty() {
-            cv.text(card.x + 16, card.y + 25, "Looking for networks…", f, t.text_secondary);
-        }
-        for (k, (i, r)) in l.rows.iter().enumerate() {
-            let n = self.wifi_nets[*i];
-            let name = corekit::net::wifi_name(&n.ssid[..n.ssid_len as usize]);
-            if self.hover == Some(Hit::WifiNetwork(*i)) {
-                cv.fill_round_rect(r.inset(3), 9, t.hover);
-            }
-            if k > 0 {
-                cv.fill_rect(Rect::new(r.x + 16, r.y, r.w - 32, 1), t.separator);
-            }
-            let joined = st.state == w::CONNECTED && name == ssid;
-            let label = match n.security {
-                w::OPEN => "Open",
-                w::WPA2 => "WPA2",
-                w::WPA2_WPA3 => "WPA2/WPA3",
-                _ => "Not supported",
-            };
-            let base = r.y + 25;
-            if joined {
-                cv.text(r.x + 16, base, "\u{2713}", theme::ui_bold(14), theme::accent());
-            }
-            let unsupported = n.security == w::UNSUPPORTED;
-            cv.text(r.x + 40, base, &name, theme::ui(14), if unsupported { t.text_secondary } else { t.text });
-            cv.text(r.right() - 16 - f.width(label), base, label, f, t.text_secondary);
-        }
-        if let Some((field, join)) = l.password {
-            self.wifi_pass.draw(cv, field, focused && self.wifi_pass_focused);
-            button(cv, join, "Join", ButtonStyle::Primary, self.hover == Some(Hit::WifiJoin));
+            Pane::About => self.info = corekit::process::sys_info(),
+            _ => {}
         }
     }
 
-    fn join_chosen(&mut self) {
-        let Some(ssid) = self.wifi_chosen.clone() else { return };
-        let password = String::from(self.wifi_pass.text());
-        if !(8..=63).contains(&password.len()) {
-            self.flash(String::from("The password must be 8 to 63 characters"));
-            return;
+    fn flash(&mut self, cx: &mut Context<Msg>, msg: String) {
+        self.note = Some(msg);
+        cx.cancel(|m| matches!(m, Msg::ClearNote));
+        cx.after(4000, Msg::ClearNote);
+    }
+
+    fn set(&mut self, cx: &mut Context<Msg>, key: &str, value: &str) {
+        if let Err(e) = prefs::set(key, value) {
+            self.flash(cx, format!("Could not save: {e}"));
         }
-        self.wifi_join(&ssid, &password);
     }
 
     /// Starts joining the network named `ssid` (with the typed password, if any).
-    fn wifi_join(&mut self, ssid: &[u8], password: &str) {
+    fn wifi_join(&mut self, cx: &mut Context<Msg>, ssid: &[u8], password: &str) {
         match corekit::net::wifi_connect(ssid, password) {
             Ok(_) => {
                 self.wifi_chosen = None;
-                self.wifi_pass_focused = false;
-                self.wifi_pass.set_text("");
+                self.wifi_password.clear();
             }
-            Err(e) => self.flash(format!("Could not join: {e}")),
+            Err(e) => self.flash(cx, format!("Could not join: {e}")),
         }
         self.wifi = corekit::net::wifi_status();
     }
+}
 
-    fn hit_at(&self, x: i32, y: i32) -> Option<Hit> {
-        self.hits(self.area)
-            .into_iter()
-            .find(|(h, r)| {
-                r.contains(x, y)
-                    && (matches!(h, Hit::Pane(_))
-                        || (x >= self.area.x + SIDEBAR_W && y >= self.area.y && y < self.area.bottom()))
-            })
-            .map(|(h, _)| h)
+// ------------------------------------------------------------------ views
+
+/// A page: its title, then its sections.
+fn page<'a>(title: &str, sections: Vec<View<'a, Msg>>) -> View<'a, Msg> {
+    VStack::new()
+        .push(Text::new(title).style(TextStyle::Title).padding_insets(Insets { bottom: 2, ..Default::default() }))
+        .extend(sections)
+        .spacing(18)
+        .alignment(Align::Start)
+        .padding_insets(Insets { top: 22, leading: 28, bottom: 28, trailing: 28 })
+        .fill_width()
+}
+
+fn titled<'a>(title: &str, rows: Vec<View<'a, Msg>>) -> View<'a, Msg> {
+    Section::titled(title, Section::new().extend(rows))
+}
+
+fn card<'a>(rows: Vec<View<'a, Msg>>) -> View<'a, Msg> {
+    Section::new().extend(rows).fill_width()
+}
+
+fn footer<'a>(text: &str) -> View<'a, Msg> {
+    Text::paragraph(text).style(TextStyle::Callout).foreground(Color::SecondaryLabel).padding_xy(4, 0)
+}
+
+/// A switch bound to a yes/no preference.
+fn pref_toggle<'a>(id: &'static str, label: &str, key: &'static str) -> View<'a, Msg> {
+    Toggle::new(label, prefs::get_bool(key)).on_change(move |on| Msg::Toggle(key, on)).id(id).min_height(size::ROW)
+}
+
+/// A labelled slider over an integer preference.
+#[allow(clippy::too_many_arguments)]
+fn pref_slider<'a>(
+    id: &'static str,
+    label: &str,
+    key: &'static str,
+    value: i64,
+    min: i64,
+    max: i64,
+    step: i64,
+    ends: Option<(&str, &str)>,
+) -> View<'a, Msg> {
+    let slider = Slider::new(value as f32, min as f32..=max as f32)
+        .step(step as f32)
+        .on_change(move |v: f32| Msg::Int(key, v as i64))
+        .id(id)
+        .grow(1);
+    let mut controls = HStack::new().spacing(10);
+    match ends {
+        Some((lo, hi)) => {
+            controls = controls
+                .push(Text::new(lo).style(TextStyle::Footnote).foreground(Color::SecondaryLabel))
+                .push(slider)
+                .push(Text::new(hi).style(TextStyle::Footnote).foreground(Color::SecondaryLabel))
+        }
+        None => controls = controls.push(slider),
+    }
+    HStack::new().push(Text::new(label).width(170)).push(controls.grow(1)).spacing(12).min_height(44).fill_width()
+}
+
+/// The small coloured tile of a pane, with its glyph.
+fn pane_tile<'a>(pane: Pane, color: u32) -> View<'a, Msg> {
+    Canvas::new(move |cv, r| {
+        cv.fill_round_rect(r, 6, color);
+        pane_glyph(cv, pane, r, color);
+    })
+    .size(22, 22)
+}
+
+impl Settings {
+    fn sidebar(&self) -> View<'_, Msg> {
+        let items = PANES.iter().map(|&(pane, label, _, color)| {
+            HStack::new()
+                .push(pane_tile(pane, color))
+                .push(Text::new(label).grow(1))
+                .spacing(10)
+                .padding_xy(8, 0)
+                .height(size::SIDEBAR_ROW)
+                .fill_width()
+                .selected(self.query.trim().is_empty() && pane == self.pane)
+                .on_tap(Msg::Pane(pane))
+        });
+        VStack::new()
+            .push(Text::new("Settings").style(TextStyle::Title2).padding_insets(Insets {
+                top: 18,
+                leading: 10,
+                bottom: 0,
+                trailing: 0,
+            }))
+            .push(
+                TextField::search("Search", self.query.clone())
+                    .on_change(Msg::Search)
+                    .on_submit(Msg::SearchOpen)
+                    .shortcut(Shortcut::ctrl('f'))
+                    .id("search"),
+            )
+            .push(ScrollView::new(VStack::with(items.collect()).spacing(2).fill_width()))
+            .spacing(10)
+            .alignment(Align::Stretch)
+            .padding_insets(Insets { top: 0, leading: 10, bottom: 10, trailing: 10 })
+            .fill()
     }
 
-    fn run(&mut self, h: Hit, x: i32, env: &mut Env) {
-        match h {
-            Hit::Pane(i) => {
-                self.search.edit.set_text("");
-                self.target = None;
-                self.controls.focused = None;
-                self.pane = PANES[i].0;
-                self.scroll = 0;
-                self.focus = None;
-                self.try_focused = false;
-                if self.pane == Pane::Display {
-                    self.modes = prefs::display_modes();
+    fn results(&self) -> View<'_, Msg> {
+        let matches = search::matches(&self.query);
+        let title = match matches.len() {
+            1 => String::from("1 matching setting"),
+            n => format!("{n} matching settings"),
+        };
+        let mut v = VStack::new().push(Text::new(title).style(TextStyle::Title2)).spacing(6).alignment(Align::Stretch);
+        if matches.is_empty() {
+            v = v.push(footer("Try a setting name, such as motion, volume, or keyboard."));
+        }
+        for (k, &i) in matches.iter().enumerate() {
+            let s = search::SETTINGS[i];
+            let pane = PANES.iter().find(|p| p.0 == s.pane).map(|p| p.1).unwrap_or("");
+            v = v.push(
+                VStack::new()
+                    .push(Text::new(s.label).style(TextStyle::Headline))
+                    .push(Text::new(pane).style(TextStyle::Footnote).foreground(Color::SecondaryLabel))
+                    .spacing(2)
+                    .alignment(Align::Start)
+                    .padding_xy(12, 8)
+                    .fill_width()
+                    .selected(k == self.selected)
+                    .on_tap(Msg::OpenSetting(i)),
+            );
+        }
+        ScrollView::new(v.padding(24).fill_width())
+    }
+
+    fn appearance(&self, env: &Env) -> View<'_, Msg> {
+        let mode = |dark: bool| {
+            let selected = env.dark == dark;
+            VStack::new()
+                .push(
+                    Canvas::new(move |cv, r| {
+                        mode_preview(cv, r.inset(3), dark);
+                        ring(cv, r.inset(3), selected);
+                    })
+                    .size(THUMB_W + 6, THUMB_H + 6),
+                )
+                .push(Text::new(if dark { "Dark" } else { "Light" }))
+                .spacing(6)
+                .on_tap(Msg::SetDark(dark))
+                .corner_radius(12)
+                .id(if dark { "appearance/dark" } else { "appearance/light" })
+        };
+        let accent = theme::accent_index() as usize;
+        let accents = HStack::with(
+            theme::ACCENTS
+                .iter()
+                .enumerate()
+                .map(|(i, (name, color))| {
+                    let (color, on) = (*color, i == accent);
+                    Canvas::new(move |cv, r| {
+                        let (cx, cy) = r.center();
+                        if on {
+                            cv.fill_circle(cx, cy, 14, with_alpha(color, 0x50));
+                        }
+                        cv.fill_circle(cx, cy, 11, color);
+                        if on {
+                            cv.fill_circle(cx, cy, 4, 0xFFFF_FFFF);
+                        }
+                    })
+                    .size(30, 30)
+                    .on_tap(Msg::Accent(i))
+                    .corner_radius(15)
+                    .help(*name)
+                })
+                .collect(),
+        )
+        .spacing(8)
+        .push(
+            Text::new(theme::ACCENTS.get(accent).map(|a| a.0).unwrap_or(""))
+                .foreground(Color::SecondaryLabel)
+                .padding_xy(6, 0),
+        )
+        .id("appearance/accent");
+        let current = theme::wallpaper();
+        let mut walls = Grid::new(THUMB_W + 6).spacing(14);
+        for i in 0..wallpaper::NAMES.len() as u8 {
+            let img = self.thumbs[i as usize][env.dark as usize].clone();
+            let on = current == i;
+            walls = walls.push(
+                VStack::new()
+                    .push(
+                        Canvas::new(move |cv, r| {
+                            let r = Rect::new(r.x + 3, r.y + 3, THUMB_W, THUMB_H);
+                            cv.fill_round_rect_with(r, 10, |px, py| img[((py - r.y) * THUMB_W + (px - r.x)) as usize]);
+                            ring(cv, r, on);
+                        })
+                        .size(THUMB_W + 6, THUMB_H + 6),
+                    )
+                    .push(Text::new(wallpaper::NAMES[i as usize]))
+                    .spacing(6)
+                    .on_tap(Msg::Wallpaper(i))
+                    .corner_radius(12),
+            );
+        }
+        if let Some(img) = &self.custom_thumb {
+            let img = img.clone();
+            let on = current == wallpaper::CUSTOM;
+            walls = walls.push(
+                VStack::new()
+                    .push(
+                        Canvas::new(move |cv, r| {
+                            let r = Rect::new(r.x + 3, r.y + 3, THUMB_W, THUMB_H);
+                            cv.with_clip(r, |cv| {
+                                let s = (r.w as u32 * img.height / img.width.max(1)) as i32;
+                                let fill = if s >= r.h {
+                                    Rect::new(r.x, r.y + (r.h - s) / 2, r.w, s)
+                                } else {
+                                    let w = (r.h as u32 * img.width / img.height.max(1)) as i32;
+                                    Rect::new(r.x + (r.w - w) / 2, r.y, w, r.h)
+                                };
+                                cv.draw_image(&img.pixels, img.width, img.height, fill, 255);
+                            });
+                            ring(cv, r, on);
+                        })
+                        .size(THUMB_W + 6, THUMB_H + 6),
+                    )
+                    .push(Text::new("Your Picture"))
+                    .spacing(6)
+                    .on_tap(Msg::CustomWallpaper)
+                    .corner_radius(12),
+            );
+        }
+        page(
+            "Appearance",
+            vec![
+                Section::titled("Mode", HStack::new().push(mode(false)).push(mode(true)).spacing(20)),
+                Section::titled("Accent colour", accents),
+                Section::titled("Wallpaper", walls.id("appearance/wallpaper").fill_width()),
+                footer("Tip: choose Set as Wallpaper in Lens or Files to use any picture."),
+            ],
+        )
+    }
+
+    fn display_pane(&self) -> View<'_, Msg> {
+        let live = self.modes.iter().any(|m| m.flags & display::LIVE != 0);
+        let sub = if live {
+            "Changes apply right away; you'll be asked to keep them."
+        } else {
+            "This display is set up by the firmware: changes apply when you restart."
+        };
+        let rows = self.modes.iter().take(12).enumerate().map(|(i, m)| {
+            let mut tags = Vec::new();
+            let current = m.flags & display::CURRENT != 0;
+            if current {
+                tags.push("In use");
+            }
+            if m.flags & display::AT_BOOT != 0 && !current {
+                tags.push("After restart");
+            }
+            if (m.width, m.height) == (1280, 800) {
+                tags.push("Designed for");
+            }
+            HStack::new()
+                .push(Text::new(format!("{} × {}", m.width, m.height)).grow(1))
+                .push(Text::new(tags.join(" · ")).style(TextStyle::Callout).foreground(Color::SecondaryLabel))
+                .push(radio(current))
+                .spacing(12)
+                .min_height(38)
+                .fill_width()
+                .on_tap(Msg::Mode(i))
+        });
+        page("Display", vec![footer(sub), Section::titled("Resolution", card(rows.collect()).id("display/resolution"))])
+    }
+
+    fn keyboard(&self) -> View<'_, Msg> {
+        let current = prefs::get(pref::KEYBOARD).unwrap_or_default();
+        let layouts = LAYOUTS.iter().map(|&(id, name)| {
+            row(
+                name,
+                if current == id { Image::symbol(Symbol::Check).foreground(Color::Accent) } else { View::empty() },
+            )
+            .on_tap(Msg::Layout(id))
+        });
+        let delay = prefs::get_int(pref::REPEAT_DELAY, 1).clamp(0, 3);
+        let rate = prefs::get_int(pref::REPEAT_RATE, 8).clamp(0, 31);
+        page(
+            "Keyboard",
+            vec![
+                Section::titled("Layout", card(layouts.collect()).id("keyboard/layout")),
+                titled(
+                    "Key repeat",
+                    vec![
+                        pref_slider(
+                            "keyboard/repeat-delay",
+                            "Delay until repeat",
+                            pref::REPEAT_DELAY,
+                            3 - delay,
+                            0,
+                            3,
+                            1,
+                            Some(("Long", "Short")),
+                        ),
+                        pref_slider(
+                            "keyboard/repeat-rate",
+                            "Repeat speed",
+                            pref::REPEAT_RATE,
+                            31 - rate,
+                            0,
+                            31,
+                            1,
+                            Some(("Slow", "Fast")),
+                        ),
+                    ],
+                ),
+                TextField::new("Type here to try your layout", self.try_text.clone())
+                    .on_change(Msg::Try)
+                    .id("keyboard/test"),
+            ],
+        )
+    }
+
+    fn trackpad(&self) -> View<'_, Msg> {
+        let speed = prefs::get_int(pref::TRACKING_SPEED, 5).clamp(1, 10);
+        page(
+            "Trackpad",
+            vec![
+                card(vec![
+                    pref_toggle("trackpad/tap-to-click", "Tap to click", pref::TAP_TO_CLICK),
+                    pref_toggle("trackpad/natural-scrolling", "Natural scrolling", pref::NATURAL_SCROLLING),
+                    pref_slider(
+                        "trackpad/tracking-speed",
+                        "Tracking speed",
+                        pref::TRACKING_SPEED,
+                        speed,
+                        1,
+                        10,
+                        1,
+                        Some(("Slow", "Fast")),
+                    ),
+                ]),
+                footer(
+                    "Tap with one finger to click and two to secondary-click; tap, then drag to move \
+                     things. Scroll with two fingers: with natural scrolling the content follows your \
+                     fingers, as on a phone.",
+                ),
+            ],
+        )
+    }
+
+    fn mouse(&self) -> View<'_, Msg> {
+        let speed = prefs::get_int(pref::POINTER_SPEED, 5).clamp(1, 10);
+        page(
+            "Mouse",
+            vec![
+                card(vec![pref_slider(
+                    "mouse/pointer-speed",
+                    "Pointer speed",
+                    pref::POINTER_SPEED,
+                    speed,
+                    1,
+                    10,
+                    1,
+                    Some(("Slow", "Fast")),
+                )]),
+                footer(
+                    "The side buttons of five-button mice go back and forward in Nebula and Files. \
+                     Scroll wheels scroll smoothly a notch at a time.",
+                ),
+            ],
+        )
+    }
+
+    fn controllers(&self) -> View<'_, Msg> {
+        let mut sections = Vec::new();
+        if self.pads.is_empty() {
+            sections.push(
+                card(vec![VStack::new()
+                    .push(Image::symbol(Symbol::Gamepad).symbol_size(36).foreground(Color::SecondaryLabel))
+                    .push(Text::new("No game controllers").style(TextStyle::Headline))
+                    .push(
+                        Text::centered("Connect an Xbox, PlayStation or Switch Pro controller, or any USB gamepad.")
+                            .style(TextStyle::Callout)
+                            .foreground(Color::SecondaryLabel),
+                    )
+                    .spacing(8)
+                    .padding(28)
+                    .fill_width()])
+                .id("controllers/list"),
+            );
+        }
+        for (k, (pad, state)) in self.pads.iter().enumerate() {
+            let family = match pad.family {
+                corekit::gamepad::Family::Xbox => "Xbox controller",
+                corekit::gamepad::Family::PlayStation => "PlayStation controller",
+                corekit::gamepad::Family::Nintendo => "Nintendo controller",
+                corekit::gamepad::Family::Generic => "Game controller",
+            };
+            let state = *state;
+            let fam = pad.family;
+            let mut rows = vec![
+                row_detail(
+                    pad.name.clone(),
+                    format!("{family} · {:04x}:{:04x}", pad.vendor, pad.product),
+                    if pad.has_rumble {
+                        Button::new("Test Vibration").action(Msg::Rumble(pad.id))
+                    } else {
+                        View::empty()
+                    },
+                ),
+                Canvas::new(move |cv, r| pad_picture(cv, r, state, fam)).height(150).fill_width(),
+            ];
+            if state.is_none() {
+                rows.push(footer("Waiting for the controller to report…"));
+            }
+            let s = card(rows);
+            sections.push(if k == 0 { s.id("controllers/list") } else { s });
+        }
+        sections.push(footer(
+            "Press buttons and move the sticks to try them. Games read controllers with the \
+             WaveSDK's gamepad module.",
+        ));
+        page("Game Controllers", sections)
+    }
+
+    fn network(&self) -> View<'_, Msg> {
+        use corekit::abi::wifi as w;
+        let mut sections = Vec::new();
+        let text = |b: &[u8], n: u32| String::from_utf8_lossy(&b[..(n as usize).min(b.len())]).into_owned();
+        if let Some(st) = self.wifi {
+            let (ssid, message, driver) =
+                (text(&st.ssid, st.ssid_len), text(&st.message, st.message_len), text(&st.driver, st.driver_len));
+            let (status, color) = match st.state {
+                w::CONNECTED => (format!("Connected to {ssid}"), Color::Green),
+                w::CONNECTING => (format!("{ssid} · {message}"), Color::Orange),
+                w::FAILED => (message, Color::Red),
+                w::UNAVAILABLE => (message, Color::Gray),
+                _ => (String::from("Not connected"), Color::Gray),
+            };
+            sections.push(
+                card(vec![HStack::new()
+                    .push(status_dot(color))
+                    .push(
+                        VStack::new()
+                            .push(Text::new("Wi-Fi").style(TextStyle::Headline))
+                            .push(Text::new(status).style(TextStyle::Callout).foreground(Color::SecondaryLabel))
+                            .spacing(2)
+                            .alignment(Align::Start)
+                            .grow(1),
+                    )
+                    .push(if st.state == w::CONNECTED {
+                        Button::new("Disconnect").action(Msg::WifiDisconnect)
+                    } else {
+                        Text::new(driver).style(TextStyle::Callout).foreground(Color::SecondaryLabel)
+                    })
+                    .spacing(12)
+                    .min_height(56)
+                    .fill_width()])
+                .id("network/wifi"),
+            );
+            if st.state != w::UNAVAILABLE {
+                let mut rows = Vec::new();
+                if self.wifi_nets.is_empty() {
+                    rows.push(row("Looking for networks…", ProgressView::spinner()));
                 }
-                if self.pane == Pane::DateTime {
-                    self.sync_clock();
-                    self.clock_edited = false;
+                for (i, n) in self.wifi_nets.iter().take(8).enumerate() {
+                    let raw = &n.ssid[..n.ssid_len as usize];
+                    let name = corekit::net::wifi_name(raw);
+                    let joined = st.state == w::CONNECTED && name == ssid;
+                    let label = match n.security {
+                        w::OPEN => "Open",
+                        w::WPA2 => "WPA2",
+                        w::WPA2_WPA3 => "WPA2/WPA3",
+                        _ => "Not supported",
+                    };
+                    let unsupported = n.security == w::UNSUPPORTED;
+                    rows.push(
+                        HStack::new()
+                            .push(Image::symbol(Symbol::Check).foreground(Color::Accent).opacity(if joined {
+                                255
+                            } else {
+                                0
+                            }))
+                            .push(Image::symbol(Symbol::Wifi).foreground(Color::SecondaryLabel))
+                            .push(
+                                Text::new(name)
+                                    .foreground(if unsupported { Color::SecondaryLabel } else { Color::Label })
+                                    .grow(1),
+                            )
+                            .push(Text::new(label).style(TextStyle::Callout).foreground(Color::SecondaryLabel))
+                            .spacing(10)
+                            .min_height(40)
+                            .fill_width()
+                            .on_tap(Msg::WifiChoose(i)),
+                    );
+                    if self.wifi_chosen.as_deref() == Some(raw) {
+                        rows.push(
+                            HStack::new()
+                                .push(
+                                    TextField::secure("Password", self.wifi_password.clone())
+                                        .on_change(Msg::WifiPassword)
+                                        .on_submit(Msg::WifiJoin)
+                                        .focused()
+                                        .grow(1),
+                                )
+                                .push(Button::new("Cancel").action(Msg::WifiCancel))
+                                .push(Button::new("Join").action(Msg::WifiJoin).button_style(ButtonStyle::Prominent))
+                                .spacing(8)
+                                .padding_xy(0, 8)
+                                .fill_width(),
+                        );
+                    }
+                }
+                sections.push(titled("Networks", rows));
+            }
+        }
+        let ifaces: Vec<_> =
+            corekit::net::interfaces().into_iter().filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0).collect();
+        if ifaces.is_empty() && self.wifi.is_none() {
+            sections.push(footer("No network adapter was found."));
+        }
+        for i in &ifaces {
+            let ip = |a: [u8; 4]| if a == [0; 4] { String::from("—") } else { corekit::net::ip_string(a) };
+            let wireless = corekit::net::name_of(i).starts_with("wlan");
+            let (status, color) = match (i.flags & corekit::abi::net::IF_LINK != 0, i.ip != [0; 4]) {
+                (true, true) => ("Connected", Color::Green),
+                (true, false) => ("Getting an address…", Color::Orange),
+                (false, _) if wireless => ("Not connected", Color::Gray),
+                (false, _) => ("Cable unplugged", Color::Red),
+            };
+            let kind = if wireless { "Wi-Fi" } else { "Ethernet" };
+            let mac = i.mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
+            let dns: Vec<String> =
+                i.dns.iter().filter(|d| **d != [0; 4]).map(|d| corekit::net::ip_string(*d)).collect();
+            let lease = if i.lease_secs == 0 {
+                String::from("—")
+            } else {
+                format!("{} h {} min left", i.lease_secs / 3600, i.lease_secs / 60 % 60)
+            };
+            let details = [
+                ("IP address", ip(i.ip)),
+                ("Subnet mask", ip(i.netmask)),
+                ("Router", ip(i.gateway)),
+                ("DNS servers", if dns.is_empty() { String::from("—") } else { dns.join(", ") }),
+                ("Hardware address", mac),
+                ("DHCP lease", lease),
+                ("Received", format!("{} ({} packets)", human(i.rx_bytes), i.rx_packets)),
+                ("Sent", format!("{} ({} packets)", human(i.tx_bytes), i.tx_packets)),
+            ];
+            let mut rows = vec![HStack::new()
+                .push(status_dot(color))
+                .push(
+                    VStack::new()
+                        .push(Text::new(format!("{kind} ({})", corekit::net::name_of(i))).style(TextStyle::Headline))
+                        .push(Text::new(status).style(TextStyle::Callout).foreground(Color::SecondaryLabel))
+                        .spacing(2)
+                        .alignment(Align::Start)
+                        .grow(1),
+                )
+                .push(Text::new(corekit::net::driver_of(i)).style(TextStyle::Callout).foreground(Color::SecondaryLabel))
+                .spacing(12)
+                .min_height(56)
+                .fill_width()];
+            rows.extend(details.into_iter().map(|(k, v)| {
+                row(k, Text::new(v).foreground(Color::SecondaryLabel)).height(34).foreground(Color::Label)
+            }));
+            sections.push(card(rows));
+        }
+        sections.push(footer(
+            "Addresses come from the network's DHCP server. Test the connection with `ping` or `fetch` \
+             in Terminal, or browse with Nebula.",
+        ));
+        page("Network", sections)
+    }
+
+    fn date_time(&self) -> View<'_, Msg> {
+        let d = self.now;
+        let time = if prefs::get_bool(pref::CLOCK_24H) {
+            format!("{:02}:{:02}:{:02}", d.hour, d.minute, d.second)
+        } else {
+            let h = match d.hour % 12 {
+                0 => 12,
+                h => h,
+            };
+            format!("{}:{:02}:{:02} {}", h, d.minute, d.second, if d.hour < 12 { "AM" } else { "PM" })
+        };
+        let c = self.clock;
+        let fields = [
+            ("Year", 2000, 2099),
+            ("Month", 1, 12),
+            ("Day", 1, days_in(c[0], c[1])),
+            ("Hour", 0, 23),
+            ("Minute", 0, 59),
+        ];
+        let mut set_rows: Vec<View<'_, Msg>> = fields
+            .iter()
+            .enumerate()
+            .map(|(i, &(label, lo, hi))| {
+                Stepper::new(label, c[i], lo..=hi).on_change(move |v: i64| Msg::Clock(i, v)).min_height(size::ROW)
+            })
+            .collect();
+        set_rows.push(
+            HStack::new()
+                .push(Spacer::new())
+                .push(
+                    Button::new("Set")
+                        .action(Msg::SetClock)
+                        .button_style(if self.clock_edited { ButtonStyle::Prominent } else { ButtonStyle::Bordered })
+                        .min_width(80),
+                )
+                .min_height(48)
+                .fill_width(),
+        );
+        let off = prefs::get_int("utc_offset", 0);
+        let zone = if off == 0 {
+            String::from("UTC")
+        } else {
+            format!("UTC{}{}:{:02}", if off < 0 { "−" } else { "+" }, off.abs() / 60, off.abs() % 60)
+        };
+        page(
+            "Date & Time",
+            vec![
+                VStack::new()
+                    .push(Text::new(time).style(TextStyle::Sized(36, Weight::Bold)))
+                    .push(Text::new(corekit::time::format_date(&d)).foreground(Color::SecondaryLabel))
+                    .spacing(2)
+                    .alignment(Align::Start),
+                card(vec![
+                    pref_toggle("datetime/24-hour", "24-hour time", pref::CLOCK_24H),
+                    pref_toggle("datetime/seconds", "Show seconds in the bar", pref::CLOCK_SECONDS),
+                    pref_toggle("datetime/date", "Show the date in the bar", pref::CLOCK_DATE),
+                ]),
+                Section::titled("Set date and time", card(set_rows).id("datetime/set-clock")),
+                card(vec![row(
+                    "Time zone",
+                    HStack::new()
+                        .push(Text::new(zone).style(TextStyle::Headline))
+                        .push(Button::symbol(Symbol::Minus).action(Msg::Zone(off - 30)).help("30 minutes west"))
+                        .push(Button::symbol(Symbol::Plus).action(Msg::Zone(off + 30)).help("30 minutes east"))
+                        .spacing(4),
+                )
+                .id("datetime/time-zone")]),
+            ],
+        )
+    }
+
+    fn sound(&self) -> View<'_, Msg> {
+        let vol = prefs::get_int(pref::VOLUME, 70).clamp(0, 100);
+        let out = prefs::get("audio_device").unwrap_or_else(|| String::from("No output device found"));
+        page(
+            "Sound",
+            vec![card(vec![
+                pref_slider("sound/volume", "Volume", pref::VOLUME, vol, 0, 100, 5, None),
+                pref_toggle("sound/mute", "Mute", pref::MUTED),
+                row("Output", Text::new(out).foreground(Color::SecondaryLabel)),
+            ])],
+        )
+    }
+
+    fn notifications(&self) -> View<'_, Msg> {
+        page(
+            "Notifications",
+            vec![
+                card(vec![pref_toggle("notifications/do-not-disturb", "Calm", pref::DND)]),
+                footer(
+                    "While Calm is on, notifications don't rise from Crest. They still drift into Drift: \
+                     click Crest at the top of the screen to see them.",
+                ),
+            ],
+        )
+    }
+
+    fn desktop(&self) -> View<'_, Msg> {
+        let dock = prefs::get_int(pref::DOCK_SIZE, 48).clamp(32, 64);
+        let glass = prefs::get_int(pref::GLASS, 70).clamp(0, 100);
+        page(
+            "Desktop & Harbor",
+            vec![
+                titled(
+                    "Harbor",
+                    vec![
+                        pref_slider(
+                            "desktop/dock-size",
+                            "Size",
+                            pref::DOCK_SIZE,
+                            dock,
+                            32,
+                            64,
+                            2,
+                            Some(("Small", "Large")),
+                        ),
+                        pref_toggle("desktop/dock-autohide", "Hide Harbor until pointed at", pref::DOCK_AUTOHIDE),
+                    ],
+                ),
+                titled(
+                    "Liquid glass",
+                    vec![pref_slider(
+                        "desktop/glass",
+                        "Intensity",
+                        pref::GLASS,
+                        glass,
+                        0,
+                        100,
+                        5,
+                        Some(("Clear", "Frosted")),
+                    )],
+                ),
+                footer("Changes apply across the desktop immediately."),
+            ],
+        )
+    }
+
+    fn bar(&self) -> View<'_, Msg> {
+        let crest = prefs::get_bool(pref::CREST);
+        let battery = prefs::get_bool(pref::BATTERY_LEVEL);
+        page(
+            "Bar & Crest",
+            vec![
+                Canvas::new(move |cv, r| bar_preview(cv, r, crest, battery)).height(120).fill_width(),
+                card(vec![
+                    pref_toggle("bar/crest", "Show Crest", pref::CREST),
+                    pref_toggle("bar/battery", "Show battery level", pref::BATTERY_LEVEL),
+                ]),
+                footer(
+                    "Crest sits at the top centre and shows the time; point at it for the date, click it for \
+                     Drift. Without Crest, the time and date move into the right bubble. The battery level \
+                     appears next to the status ring on computers with a battery.",
+                ),
+            ],
+        )
+    }
+
+    fn login(&self) -> View<'_, Msg> {
+        let name = prefs::get("account_name").unwrap_or_else(|| String::from("This computer"));
+        let initials: String =
+            name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect::<String>().to_uppercase();
+        let avatar = Canvas::new(move |cv, r| {
+            cv.fill_round_rect_dgradient(r, r.w / 2, theme::accent(), theme::ACCENT_2);
+            cv.text_centered(r, &initials, theme::ui_bold(18), 0xFFFF_FFFF);
+        })
+        .size(52, 52);
+        page(
+            "Login",
+            vec![
+                card(vec![HStack::new()
+                    .push(avatar)
+                    .push(
+                        VStack::new()
+                            .push(Text::new(name).style(TextStyle::Title2))
+                            .push(Text::new("Owner · password protected").foreground(Color::SecondaryLabel))
+                            .spacing(2)
+                            .alignment(Align::Start),
+                    )
+                    .push(Spacer::new())
+                    .spacing(16)
+                    .padding_xy(0, 14)
+                    .fill_width()]),
+                card(vec![pref_toggle("login/auto", "Log in automatically", pref::AUTO_LOGIN)]),
+                footer(
+                    "With automatic login, WaveOS opens straight to the desktop when it starts. Lock Screen \
+                     (Super L) and waking from sleep still ask for your password.",
+                ),
+            ],
+        )
+    }
+
+    fn accessibility(&self) -> View<'_, Msg> {
+        let item = |id: &'static str, label: &str, detail: &str, key: &'static str| {
+            row_detail(label, detail, Toggle::new("", prefs::get_bool(key)).on_change(move |on| Msg::Toggle(key, on)))
+                .id(id)
+        };
+        page(
+            "Accessibility",
+            vec![
+                titled(
+                    "Display",
+                    vec![
+                        item(
+                            "accessibility/transparency",
+                            "Reduce transparency",
+                            "Use solid surfaces for easier reading.",
+                            pref::REDUCE_TRANSPARENCY,
+                        ),
+                        item(
+                            "accessibility/contrast",
+                            "Increase contrast",
+                            "Stronger text, borders and control outlines.",
+                            pref::HIGH_CONTRAST,
+                        ),
+                    ],
+                ),
+                titled(
+                    "Motion",
+                    vec![item(
+                        "accessibility/motion",
+                        "Reduce motion",
+                        "Arrange windows and open sheets without animated transitions.",
+                        pref::REDUCE_MOTION,
+                    )],
+                ),
+            ],
+        )
+    }
+
+    fn about(&self, env: &Env) -> View<'_, Msg> {
+        let i = &self.info;
+        let version = format!("Version {}", corekit::process::fixed_str(&i.version, i.version_len));
+        let hero = Canvas::new(move |cv, r| {
+            cv.fill_round_rect_dgradient(r, 20, mix(theme::accent(), 0xFF06_0A1A, 150), theme::accent());
+            let icon = Rect::new(r.x + 30, r.y + 26, 96, 96);
+            cv.glow(icon, 24, 24, 0xFFFF_FFFF, 40);
+            icons::draw(cv, Icon::Aurora, icon);
+            cv.text(r.x + 148, r.y + 66, "WaveOS Aurora", theme::display(28), 0xFFFF_FFFF);
+            cv.text(r.x + 150, r.y + 92, &version, theme::ui(14), 0xE6FF_FFFF);
+            cv.text(r.x + 150, r.y + 116, "Made by WayV", theme::ui_bold(13), 0xCCFF_FFFF);
+        })
+        .height(148)
+        .fill_width();
+        let rows = [
+            ("Processor", corekit::process::fixed_str(&i.cpu, i.cpu_len)),
+            ("Memory", format!("{} MiB", i.mem_total >> 20)),
+            ("Display", format!("{} × {}", env.screen.0, env.screen.1)),
+            ("Startup disk", corekit::process::fixed_str(&i.root, i.root_len)),
+            ("Available", format!("{} MB of {} MB", i.disk_free >> 20, i.disk_total >> 20)),
+        ];
+        page(
+            "About",
+            vec![
+                hero,
+                card(
+                    rows.into_iter()
+                        .map(|(k, v)| row(k, Text::new(v).foreground(Color::SecondaryLabel)).height(36))
+                        .collect(),
+                )
+                .id("about/info"),
+                HStack::new()
+                    .push(Spacer::new())
+                    .push(Button::new("More Info…").action(Msg::OpenAbout))
+                    .push(Spacer::new())
+                    .fill_width(),
+            ],
+        )
+    }
+}
+
+fn status_dot<'a>(c: Color) -> View<'a, Msg> {
+    Canvas::new(move |cv, r| {
+        let (x, y) = r.center();
+        cv.fill_circle(x, y, 6, c.argb());
+    })
+    .size(16, 16)
+}
+
+fn radio<'a>(on: bool) -> View<'a, Msg> {
+    Canvas::new(move |cv, r| {
+        let t = theme::current();
+        let (cx, cy) = r.center();
+        if on {
+            cv.fill_circle(cx, cy, 8, theme::accent());
+            cv.fill_circle(cx, cy, 3, 0xFFFF_FFFF);
+        } else {
+            cv.fill_circle(cx, cy, 8, t.control_border);
+            cv.fill_circle(cx, cy, 7, t.control_bg);
+        }
+    })
+    .size(18, 18)
+}
+
+fn ring(cv: &mut Surface, r: Rect, selected: bool) {
+    if selected {
+        cv.stroke_round_rect(r.inset(-3), 13, theme::accent());
+        cv.stroke_round_rect(r.inset(-2), 12, theme::accent());
+    }
+}
+
+impl App for Settings {
+    type Message = Msg;
+
+    fn title(&self) -> String {
+        "Settings".into()
+    }
+
+    fn size(&self) -> (i32, i32) {
+        (880, 620)
+    }
+
+    fn started(&mut self, cx: &mut Context<Msg>) {
+        if let Some(id) = self.target.take() {
+            cx.focus_ring(id);
+        }
+    }
+
+    fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
+        match msg {
+            Msg::Pane(p) => {
+                self.pane = p;
+                self.query.clear();
+                self.clock_edited = false;
+                self.refresh();
+            }
+            Msg::Search(q) => {
+                self.query = q;
+                self.selected = 0;
+            }
+            Msg::SearchMove(d) => {
+                let n = search::matches(&self.query).len();
+                if n > 0 {
+                    self.selected = (self.selected as i32 + d).clamp(0, n as i32 - 1) as usize;
                 }
             }
-            Hit::Light => env.requests.push(Request::SetDark(false)),
-            Hit::Dark => env.requests.push(Request::SetDark(true)),
-            Hit::Accent(i) => {
-                let _ = prefs::set(pref::ACCENT, &format!("{i}"));
+            Msg::SearchOpen => {
+                if let Some(&i) = search::matches(&self.query).get(self.selected) {
+                    cx.send(Msg::OpenSetting(i));
+                }
             }
-            Hit::Wallpaper(i) => env.requests.push(Request::SetWallpaper(i)),
-            Hit::CustomWallpaper => {
+            Msg::OpenSetting(i) => {
+                self.jump_setting(i);
+                self.refresh();
+                if let Some(id) = self.target.take() {
+                    cx.focus_ring(id);
+                }
+            }
+            Msg::SetDark(d) => cx.request(Request::SetDark(d)),
+            Msg::Accent(i) => self.set(cx, pref::ACCENT, &format!("{i}")),
+            Msg::Wallpaper(i) => cx.request(Request::SetWallpaper(i)),
+            Msg::CustomWallpaper => {
                 if let Some(p) = prefs::get("wallpaper_image") {
-                    env.requests.push(Request::SetWallpaperImage(p));
+                    cx.request(Request::SetWallpaperImage(p));
                 }
             }
-            Hit::Mode(i) => {
+            Msg::Mode(i) => {
                 if let Some(m) = self.modes.get(i).copied() {
                     match prefs::set_display(m.width, m.height) {
                         Ok(true) => {}
-                        Ok(false) => self.flash(format!("{} × {} will be used when you restart", m.width, m.height)),
-                        Err(e) => self.flash(format!("Couldn't change the resolution: {e}")),
+                        Ok(false) => {
+                            self.flash(cx, format!("{} × {} will be used when you restart", m.width, m.height))
+                        }
+                        Err(e) => self.flash(cx, format!("Couldn't change the resolution: {e}")),
                     }
                     self.modes = prefs::display_modes();
                 }
             }
-            Hit::Layout(i) => {
-                let _ = prefs::set(pref::KEYBOARD, LAYOUTS[i].0);
+            Msg::Layout(id) => self.set(cx, pref::KEYBOARD, id),
+            Msg::Try(t) => self.try_text = t,
+            Msg::Toggle(key, on) => self.set(cx, key, if on { "1" } else { "0" }),
+            Msg::Int(key, v) => {
+                // Repeat delay and rate run the other way round on screen.
+                let v = match key {
+                    pref::REPEAT_DELAY => 3 - v,
+                    pref::REPEAT_RATE => 31 - v,
+                    _ => v,
+                };
+                self.set(cx, key, &format!("{v}"));
             }
-            Hit::RepeatDelay | Hit::RepeatRate => self.slide(h, x),
-            Hit::TryField => self.try_focused = true,
-            Hit::Toggle(key) => {
-                if let Err(e) = prefs::set(key, if prefs::get_bool(key) { "0" } else { "1" }) {
-                    self.flash(format!("Could not save: {e}"));
-                }
-            }
-            Hit::Field(i, d) => {
-                let c = &mut self.clock;
-                c[i] += d;
-                let limits = [(2000, 2099), (1, 12), (1, days_in(c[0], c[1])), (0, 23), (0, 59)];
-                let (lo, hi) = limits[i];
-                if c[i] < lo {
-                    c[i] = hi;
-                } else if c[i] > hi {
-                    c[i] = lo;
-                }
-                c[2] = c[2].min(days_in(c[0], c[1]));
+            Msg::Clock(i, v) => {
+                self.clock[i] = v;
+                self.clock[2] = self.clock[2].min(days_in(self.clock[0], self.clock[1]));
                 self.clock_edited = true;
             }
-            Hit::SetClock => {
+            Msg::SetClock => {
                 let c = self.clock;
                 let d = DateTime {
                     year: c[0] as u16,
@@ -554,553 +1212,149 @@ impl Settings {
                 match prefs::set_datetime(&d) {
                     Ok(()) => {
                         self.clock_edited = false;
-                        self.flash(String::from("The date and time were set"));
+                        self.flash(cx, String::from("The date and time were set"));
                     }
-                    Err(e) => self.flash(format!("Couldn't set the clock: {e}")),
+                    Err(e) => self.flash(cx, format!("Couldn't set the clock: {e}")),
                 }
             }
-            Hit::Zone(d) => {
-                let v = (prefs::get_int("utc_offset", 0) + d as i64).clamp(-12 * 60, 14 * 60);
-                let _ = prefs::set("utc_offset", &format!("{v}"));
-            }
-            Hit::Volume | Hit::Glass | Hit::DockSize => self.slide(h, x),
-            Hit::AboutMore => env.requests.push(Request::OpenApp(String::from("About"))),
-            Hit::WifiNetwork(i) => {
+            Msg::Zone(v) => self.set(cx, "utc_offset", &format!("{}", v.clamp(-12 * 60, 14 * 60))),
+            Msg::WifiChoose(i) => {
                 let Some(n) = self.wifi_nets.get(i).copied() else { return };
                 let ssid = n.ssid[..n.ssid_len as usize].to_vec();
                 match n.security {
-                    corekit::abi::wifi::OPEN => self.wifi_join(&ssid, ""),
+                    corekit::abi::wifi::OPEN => self.wifi_join(cx, &ssid, ""),
                     corekit::abi::wifi::UNSUPPORTED => {
-                        self.flash(String::from("WaveOS can join open and WPA2 Personal networks"))
+                        self.flash(cx, String::from("WaveOS can join open and WPA2 Personal networks"))
                     }
                     _ => {
                         if self.wifi_chosen.as_deref() != Some(&ssid[..]) {
-                            self.wifi_pass.set_text("");
+                            self.wifi_password.clear();
                         }
                         self.wifi_chosen = Some(ssid);
-                        self.wifi_pass_focused = true;
-                        self.search_focused = false;
                     }
                 }
             }
-            Hit::WifiJoin => self.join_chosen(),
-            Hit::WifiDisconnect => {
+            Msg::WifiPassword(p) => self.wifi_password = p,
+            Msg::WifiJoin => {
+                let Some(ssid) = self.wifi_chosen.clone() else { return };
+                if !(8..=63).contains(&self.wifi_password.len()) {
+                    self.flash(cx, String::from("The password must be 8 to 63 characters"));
+                    return;
+                }
+                let password = self.wifi_password.clone();
+                self.wifi_join(cx, &ssid, &password);
+            }
+            Msg::WifiCancel => {
+                self.wifi_chosen = None;
+                self.wifi_password.clear();
+            }
+            Msg::WifiDisconnect => {
                 corekit::net::wifi_disconnect();
                 self.wifi = corekit::net::wifi_status();
             }
-        }
-    }
-
-    /// Sets a slider preference from the pointer position.
-    fn slide(&mut self, h: Hit, x: i32) {
-        let Some(r) = self.hits(self.area).into_iter().find(|(k, _)| *k == h).map(|(_, r)| r) else { return };
-        let v = widgets::slider_value(r, x);
-        match h {
-            // Delay: 4 steps (long → short, shown left to right as the value grows shorter).
-            Hit::RepeatDelay => {
-                let _ = prefs::set(pref::REPEAT_DELAY, &format!("{}", 3 - (v * 3 + 500) / 1000));
-            }
-            // Rate: 32 steps, faster to the right.
-            Hit::RepeatRate => {
-                let _ = prefs::set(pref::REPEAT_RATE, &format!("{}", 31 - (v * 31 + 500) / 1000));
-            }
-            Hit::Glass => {
-                if let Err(e) = prefs::set(pref::GLASS, &format!("{}", v / 10)) {
-                    self.flash(format!("Could not save: {e}"));
+            Msg::Rumble(id) => {
+                if let Some((pad, _)) = self.pads.iter().find(|(p, _)| p.id == id) {
+                    pad.rumble(0.8, 0.5, 400);
                 }
             }
-            Hit::DockSize => {
-                if let Err(e) = prefs::set(pref::DOCK_SIZE, &format!("{}", 32 + v * 32 / 1000)) {
-                    self.flash(format!("Could not save: {e}"));
-                }
-            }
-            Hit::Volume => {
-                let _ = prefs::set(pref::VOLUME, &format!("{}", (v + 5) / 10));
-            }
-            _ => {}
-        }
-        self.dragging = Some(h);
-    }
-
-    // ------------------------------------------------------------ drawing
-
-    fn heading(cv: &mut Canvas, c: Rect, y: i32, text: &str) {
-        cv.text(c.x, y, text, theme::ui_bold(13), theme::current().text_secondary);
-    }
-
-    fn card(cv: &mut Canvas, r: Rect, rows: usize) {
-        let t = theme::current();
-        cv.fill_round_rect(r, 12, t.window_bg_alt);
-        cv.stroke_round_rect(r, 12, t.separator);
-        for i in 1..rows as i32 {
-            cv.fill_rect(Rect::new(r.x + 16, r.y + i * ROW_H, r.w - 32, 1), t.separator);
+            Msg::OpenAbout => cx.open_app("About"),
+            Msg::ClearNote => self.note = None,
         }
     }
 
-    fn draw_sidebar(&mut self, cv: &mut Canvas, area: Rect) {
-        let t = theme::current();
-        let side = Rect::new(area.x, area.y, SIDEBAR_W, area.h);
-        cv.fill_rect(side, with_alpha(t.window_bg_alt, 24));
-        cv.fill_rect(Rect::new(side.right() - 1, side.y, 1, side.h), t.separator);
-        cv.text(area.x + 20, area.y + 34, "Settings", theme::ui_bold(18), t.text);
-        self.search.draw(cv, Rect::new(area.x + 12, area.y + 50, SIDEBAR_W - 24, 34), self.search_focused);
-        let visible = self.visible_panes();
-        if visible.is_empty() {
-            cv.text(area.x + 20, area.y + 120, "No matching settings", theme::ui(12), t.text_secondary);
+    fn key(&self, ev: &KeyEvent) -> Option<Msg> {
+        if self.query.trim().is_empty() {
+            return None;
         }
-        for (row, i) in visible.into_iter().enumerate() {
-            let (pane, label, _, color) = &PANES[i];
-            let r = Rect::new(area.x + 10, area.y + 98 + row as i32 * 36, SIDEBAR_W - 20, 32);
-            if *pane == self.pane {
-                cv.fill_round_rect(r, 8, theme::accent());
-            } else if self.hover == Some(Hit::Pane(i)) {
-                cv.fill_round_rect(r, 8, t.hover);
-            }
-            let ic = Rect::new(r.x + 8, r.y + 5, 20, 20);
-            cv.fill_round_rect(ic, 6, *color);
-            pane_glyph(cv, *pane, ic);
-            let fg = if *pane == self.pane { 0xFFFF_FFFF } else { t.text };
-            cv.text(r.x + 38, r.y + 20, label, theme::ui(13), fg);
+        match ev.code {
+            KeyCode::Up => Some(Msg::SearchMove(-1)),
+            KeyCode::Down => Some(Msg::SearchMove(1)),
+            KeyCode::Escape => Some(Msg::Search(String::new())),
+            _ => None,
         }
     }
 
-    fn draw_pane(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
-        let t = theme::current();
-        let c = self.content(area);
-        let title = PANES.iter().find(|p| p.0 == self.pane).map(|p| p.1).unwrap_or("");
-        cv.text(c.x, c.y + 24, title, theme::ui_bold(22), t.text);
-        let hits = self.hits(area);
-        let rect_of = |h: Hit| hits.iter().find(|(k, _)| *k == h).map(|(_, r)| *r);
+    fn poll_interval(&self) -> Option<u64> {
         match self.pane {
-            Pane::Appearance => {
-                Self::heading(cv, c, c.y + 58, "Appearance");
-                for (h, dark) in [(Hit::Light, false), (Hit::Dark, true)] {
-                    let r = rect_of(h).unwrap();
-                    mode_preview(cv, r, dark);
-                    let selected = t.dark == dark;
-                    self.ring(cv, r, selected, h);
-                    let label = if dark { "Dark" } else { "Light" };
-                    cv.text_centered(Rect::new(r.x, r.bottom() + 6, r.w, 20), label, theme::ui(13), t.text);
-                }
-                Self::heading(cv, c, c.y + 210, "Accent colour");
-                for (i, (name, color)) in theme::ACCENTS.iter().enumerate() {
-                    let r = rect_of(Hit::Accent(i)).unwrap();
-                    let (cx, cy) = r.center();
-                    let selected = theme::accent_index() as usize == i;
-                    if selected {
-                        cv.fill_circle(cx, cy, 14, with_alpha(*color, 0x50));
-                    }
-                    cv.fill_circle(cx, cy, 11, *color);
-                    if selected {
-                        cv.fill_circle(cx, cy, 4, 0xFFFF_FFFF);
-                    }
-                    if selected || self.hover == Some(Hit::Accent(i)) {
-                        let label_x = c.x + theme::ACCENTS.len() as i32 * 38 + 8;
-                        cv.text(label_x, cy + 5, name, theme::ui(13), t.text_secondary);
-                    }
-                }
-                Self::heading(cv, c, c.y + 306, "Wallpaper");
-                for i in 0..wallpaper::NAMES.len() as u8 {
-                    let r = rect_of(Hit::Wallpaper(i)).unwrap();
-                    let img = &self.thumbs[i as usize][t.dark as usize];
-                    cv.fill_round_rect_with(r, 10, |px, py| img[((py - r.y) * THUMB_W + (px - r.x)) as usize]);
-                    self.ring(cv, r, theme::wallpaper() == i, Hit::Wallpaper(i));
-                    let label = wallpaper::NAMES[i as usize];
-                    cv.text_centered(Rect::new(r.x, r.bottom() + 6, r.w, 20), label, theme::ui(13), t.text);
-                }
-                if let (Some(r), Some(img)) = (rect_of(Hit::CustomWallpaper), &self.custom_thumb) {
-                    cv.with_clip(r, |cv| {
-                        let (w, h) = aurora_image::fit(img.width, img.height, 10_000, r.h as u32);
-                        let fill = if (w as i32) < r.w {
-                            let s = r.w as u32 * img.height / img.width.max(1);
-                            Rect::new(r.x, r.y + (r.h - s as i32) / 2, r.w, s as i32)
-                        } else {
-                            Rect::new(r.x + (r.w - w as i32) / 2, r.y, w as i32, h as i32)
-                        };
-                        cv.draw_image(&img.pixels, img.width, img.height, fill, 255);
-                    });
-                    self.ring(cv, r, theme::wallpaper() == wallpaper::CUSTOM, Hit::CustomWallpaper);
-                    cv.text_centered(Rect::new(r.x, r.bottom() + 6, r.w, 20), "Your Picture", theme::ui(13), t.text);
-                }
-                let tip = "Tip: choose Set as Wallpaper in Lens or Files to use any picture.";
-                cv.text_clipped(c.x, c.y + 450, tip, theme::ui(12), t.text_secondary, c.w);
-            }
-            Pane::Display => {
-                let s = self.info;
-                let live = self.modes.iter().any(|m| m.flags & display::LIVE != 0);
-                let sub = if live {
-                    "Changes apply right away; you'll be asked to keep them."
-                } else {
-                    "This display is set up by the firmware: changes apply when you restart."
-                };
-                cv.text(c.x, c.y + 52, sub, theme::ui(13), t.text_secondary);
-                let n = self.modes.len().min(12);
-                let card = Rect::new(c.x, c.y + 70, c.w, n as i32 * MODE_H);
-                cv.fill_round_rect(card, 12, t.window_bg_alt);
-                cv.stroke_round_rect(card, 12, t.separator);
-                for i in 1..n as i32 {
-                    cv.fill_rect(Rect::new(card.x + 16, card.y + i * MODE_H, card.w - 32, 1), t.separator);
-                }
-                for (i, m) in self.modes.iter().take(n).enumerate() {
-                    let r = rect_of(Hit::Mode(i)).unwrap();
-                    if self.hover == Some(Hit::Mode(i)) {
-                        cv.with_clip(card, |cv| cv.fill_rect(r.inset(1), t.hover));
-                    }
-                    let label = format!("{} × {}", m.width, m.height);
-                    cv.text(r.x + 16, r.y + 24, &label, theme::ui(14), t.text);
-                    let mut tags = Vec::new();
-                    if m.flags & display::CURRENT != 0 {
-                        tags.push("In use");
-                    }
-                    if m.flags & display::AT_BOOT != 0 && m.flags & display::CURRENT == 0 {
-                        tags.push("After restart");
-                    }
-                    if (m.width, m.height) == (1280, 800) {
-                        tags.push("Designed for");
-                    }
-                    let tag = tags.join(" · ");
-                    let f = theme::ui(12);
-                    cv.text(r.right() - 50 - f.width(&tag), r.y + 24, &tag, f, t.text_secondary);
-                    let (cx, cy) = (r.right() - 26, r.y + MODE_H / 2);
-                    if m.flags & display::CURRENT != 0 {
-                        cv.fill_circle(cx, cy, 8, theme::accent());
-                        cv.fill_circle(cx, cy, 3, 0xFFFF_FFFF);
-                    } else {
-                        cv.fill_circle(cx, cy, 8, t.control_border);
-                        cv.fill_circle(cx, cy, 7, t.control_bg);
-                    }
-                }
-                let _ = s;
-            }
-            Pane::Keyboard => {
-                Self::heading(cv, c, c.y + 52, "Layout");
-                let card = Rect::new(c.x, c.y + 64, c.w, LAYOUTS.len() as i32 * ROW_H);
-                Self::card(cv, card, LAYOUTS.len());
-                let current = prefs::get(pref::KEYBOARD).unwrap_or_default();
-                for (i, (id, name)) in LAYOUTS.iter().enumerate() {
-                    let r = rect_of(Hit::Layout(i)).unwrap();
-                    if self.hover == Some(Hit::Layout(i)) {
-                        cv.with_clip(card, |cv| cv.fill_rect(r.inset(1), t.hover));
-                    }
-                    cv.text(r.x + 16, r.y + 27, name, theme::ui(14), t.text);
-                    if current == *id {
-                        let (cx, cy) = (r.right() - 26, r.y + ROW_H / 2);
-                        cv.line(cx - 6, cy, cx - 2, cy + 5, 2, theme::accent());
-                        cv.line(cx - 2, cy + 5, cx + 6, cy - 5, 2, theme::accent());
-                    }
-                }
-                let y = c.y + 64 + LAYOUTS.len() as i32 * ROW_H + 44;
-                Self::heading(cv, c, y - 2, "Key repeat");
-                let card2 = Rect::new(c.x, y + 8, c.w, 2 * ROW_H);
-                Self::card(cv, Rect::new(card2.x, card2.y - 4, card2.w, card2.h), 2);
-                cv.text(c.x + 16, y + 32, "Delay until repeat", theme::ui(14), t.text);
-                cv.text(c.x + 16, y + 32 + ROW_H, "Repeat speed", theme::ui(14), t.text);
-                let delay = prefs::get_int(pref::REPEAT_DELAY, 1).clamp(0, 3) as i32;
-                let rate = prefs::get_int(pref::REPEAT_RATE, 8).clamp(0, 31) as i32;
-                let dr = rect_of(Hit::RepeatDelay).unwrap();
-                widgets::slider(cv, dr, (3 - delay) * 1000 / 3, self.hover == Some(Hit::RepeatDelay));
-                let rr = rect_of(Hit::RepeatRate).unwrap();
-                widgets::slider(cv, rr, (31 - rate) * 1000 / 31, self.hover == Some(Hit::RepeatRate));
-                let fr = rect_of(Hit::TryField).unwrap();
-                self.try_field.draw(cv, fr, env.focused && self.try_focused);
-            }
-            Pane::DateTime => {
-                let d = corekit::time::now();
-                let h24 = prefs::get_bool(pref::CLOCK_24H);
-                let time = if h24 {
-                    format!("{:02}:{:02}:{:02}", d.hour, d.minute, d.second)
-                } else {
-                    let h = match d.hour % 12 {
-                        0 => 12,
-                        h => h,
-                    };
-                    format!("{}:{:02}:{:02} {}", h, d.minute, d.second, if d.hour < 12 { "AM" } else { "PM" })
-                };
-                cv.text(c.x, c.y + 80, &time, theme::ui_bold(36), t.text);
-                cv.text(c.x, c.y + 108, &corekit::time::format_date(&d), theme::ui(14), t.text_secondary);
-                let rows = Self::rows(c, c.y + 132, 3);
-                Self::card(cv, Rect::new(c.x, rows[0].y, c.w, 3 * ROW_H), 3);
-                for (r, (key, label)) in rows.iter().zip([
-                    (pref::CLOCK_24H, "24-hour time"),
-                    (pref::CLOCK_SECONDS, "Show seconds in the menu bar"),
-                    (pref::CLOCK_DATE, "Show the date in the menu bar"),
-                ]) {
-                    cv.text(r.x + 16, r.y + 27, label, theme::ui(14), t.text);
-                    widgets::toggle(cv, Self::toggle_rect(*r), prefs::get_bool(key));
-                }
-                let y = c.y + 132 + 3 * ROW_H + 60;
-                Self::heading(cv, c, y - 12, "Set date and time");
-                Self::card(cv, Rect::new(c.x - 10, y + 22, c.w + 20, 56), 1);
-                let labels = ["Year", "Month", "Day", "Hour", "Minute"];
-                let mut x = c.x;
-                for i in 0..5 {
-                    let w = FIELD_W[i];
-                    cv.text_centered(Rect::new(x, y + 2, w, 16), labels[i], theme::ui(11), t.text_secondary);
-                    let value = if i >= 3 { format!("{:02}", self.clock[i]) } else { format!("{}", self.clock[i]) };
-                    cv.text_centered(Rect::new(x, y + 36, w, 26), &value, theme::ui_bold(14), t.text);
-                    for (d, glyph) in [(-1, "−"), (1, "+")] {
-                        let r = rect_of(Hit::Field(i, d)).unwrap();
-                        if self.hover == Some(Hit::Field(i, d)) {
-                            cv.fill_round_rect(r, 6, t.hover);
-                        }
-                        cv.text_centered(r, glyph, theme::ui(14), t.text_secondary);
-                    }
-                    x += w + 10 + if i == 2 { 24 } else { 0 };
-                }
-                let sr = rect_of(Hit::SetClock).unwrap();
-                let style = if self.clock_edited { ButtonStyle::Primary } else { ButtonStyle::Secondary };
-                button(cv, sr, "Set", style, self.hover == Some(Hit::SetClock));
-                // Time zone (used by the world clock).
-                let zy = y + 104;
-                let zr = Rect::new(c.x, zy, c.w, ROW_H);
-                Self::card(cv, zr, 1);
-                cv.text(zr.x + 16, zr.y + 27, "Time zone", theme::ui(14), t.text);
-                let off = prefs::get_int("utc_offset", 0) as i32;
-                let zone = if off == 0 {
-                    String::from("UTC")
-                } else {
-                    format!("UTC{}{}:{:02}", if off < 0 { "−" } else { "+" }, off.abs() / 60, off.abs() % 60)
-                };
-                let zf = theme::ui_bold(14);
-                cv.text(zr.right() - 94 - zf.width(&zone) / 2, zr.y + 27, &zone, zf, t.text);
-                for (d, glyph) in [(-30, "−"), (30, "+")] {
-                    let r = rect_of(Hit::Zone(d)).unwrap();
-                    if self.hover == Some(Hit::Zone(d)) {
-                        cv.fill_round_rect(r, 6, t.hover);
-                    }
-                    cv.text_centered(r, glyph, theme::ui(16), t.text_secondary);
-                }
-            }
-            Pane::Sound => {
-                let card = Rect::new(c.x, c.y + 70, c.w, 3 * ROW_H);
-                Self::card(cv, card, 3);
-                cv.text(c.x + 16, c.y + 70 + 27, "Volume", theme::ui(14), t.text);
-                let vol = prefs::get_int(pref::VOLUME, 70).clamp(0, 100) as i32;
-                let vr = rect_of(Hit::Volume).unwrap();
-                widgets::slider(cv, vr, vol * 10, self.hover == Some(Hit::Volume));
-                cv.text(c.x + 16, c.y + 70 + ROW_H + 27, "Mute", theme::ui(14), t.text);
-                widgets::toggle(cv, rect_of(Hit::Toggle(pref::MUTED)).unwrap(), prefs::get_bool(pref::MUTED));
-                cv.text(c.x + 16, c.y + 70 + 2 * ROW_H + 27, "Output", theme::ui(14), t.text);
-                let out = prefs::get("audio_device").unwrap_or_else(|| String::from("No output device found"));
-                let f = theme::ui(13);
-                cv.text(card.right() - 16 - f.width(&out), c.y + 70 + 2 * ROW_H + 27, &out, f, t.text_secondary);
-            }
-            Pane::Network => {
-                let ifaces: Vec<_> = corekit::net::interfaces()
-                    .into_iter()
-                    .filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0)
-                    .collect();
-                let f = theme::ui(13);
-                if ifaces.is_empty() && self.wifi.is_none() {
-                    cv.text(c.x, c.y + 80, "No network adapter was found.", theme::ui(14), t.text_secondary);
-                }
-                let mut y = c.y + 64;
-                if let Some(l) = self.wifi_layout(c) {
-                    self.draw_wifi(cv, &l, env.focused);
-                    y = l.bottom;
-                }
-                for i in &ifaces {
-                    let ip = |a: [u8; 4]| if a == [0; 4] { String::from("—") } else { corekit::net::ip_string(a) };
-                    let wireless = corekit::net::name_of(i).starts_with("wlan");
-                    let (status, color) = match (i.flags & corekit::abi::net::IF_LINK != 0, i.ip != [0; 4]) {
-                        (true, true) => ("Connected", 0xFF30_D158),
-                        (true, false) => ("Getting an address…", 0xFFFF_9F0A),
-                        (false, _) if wireless => ("Not connected", 0xFF8E_8E93),
-                        (false, _) => ("Cable unplugged", 0xFFFF_453A),
-                    };
-                    // Header: adapter name and status.
-                    let head = Rect::new(c.x, y, c.w, 52);
-                    cv.fill_round_rect(head, 12, t.window_bg_alt);
-                    cv.fill_circle(head.x + 22, head.y + 26, 6, color);
-                    let kind = if wireless { "Wi-Fi" } else { "Ethernet" };
-                    let title = format!("{kind} ({})", corekit::net::name_of(i));
-                    cv.text(head.x + 40, head.y + 22, &title, theme::ui_bold(14), t.text);
-                    cv.text(head.x + 40, head.y + 40, status, f, t.text_secondary);
-                    let drv = corekit::net::driver_of(i);
-                    cv.text(head.right() - 16 - f.width(drv), head.y + 31, drv, f, t.text_secondary);
-                    y += 60;
-                    let mac = i.mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
-                    let dns: Vec<String> =
-                        i.dns.iter().filter(|d| **d != [0; 4]).map(|d| corekit::net::ip_string(*d)).collect();
-                    let lease = if i.lease_secs == 0 {
-                        String::from("—")
-                    } else {
-                        format!("{} h {} min left", i.lease_secs / 3600, i.lease_secs / 60 % 60)
-                    };
-                    let rows = [
-                        ("IP address", ip(i.ip)),
-                        ("Subnet mask", ip(i.netmask)),
-                        ("Router", ip(i.gateway)),
-                        ("DNS servers", if dns.is_empty() { String::from("—") } else { dns.join(", ") }),
-                        ("Hardware address", mac),
-                        ("DHCP lease", lease),
-                        ("Received", format!("{} ({} packets)", human(i.rx_bytes), i.rx_packets)),
-                        ("Sent", format!("{} ({} packets)", human(i.tx_bytes), i.tx_packets)),
-                    ];
-                    let card = Rect::new(c.x, y, c.w, rows.len() as i32 * 34);
-                    cv.fill_round_rect(card, 12, t.window_bg_alt);
-                    for (k, (label, value)) in rows.iter().enumerate() {
-                        let ry = card.y + k as i32 * 34 + 22;
-                        cv.text(card.x + 16, ry, label, f, t.text_secondary);
-                        cv.text(card.right() - 16 - f.width(value), ry, value, f, t.text);
-                        if k > 0 {
-                            cv.fill_rect(Rect::new(card.x + 16, card.y + k as i32 * 34, card.w - 32, 1), t.separator);
-                        }
-                    }
-                    y = card.bottom() + 20;
-                }
-                let note = "Addresses come from the network's DHCP server. Test the connection with `ping` or \
-                            `fetch` in Terminal, or browse with Nebula.";
-                for (k, (a, b)) in widgets::wrap(note, f, c.w).into_iter().enumerate() {
-                    cv.text(c.x, y + 10 + k as i32 * 20, &note[a..b], f, t.text_secondary);
-                }
-            }
-            Pane::Notifications => {
-                let r = Rect::new(c.x, c.y + 70, c.w, ROW_H);
-                Self::card(cv, r, 1);
-                cv.text(r.x + 16, r.y + 27, "Calm", theme::ui(14), t.text);
-                widgets::toggle(cv, rect_of(Hit::Toggle(pref::DND)).unwrap(), prefs::get_bool(pref::DND));
-                let text = "While Calm is on, notifications don't rise from Crest. They still drift \
-                            into Drift: click Crest at the top of the screen to see them.";
-                let f = theme::ui(13);
-                for (k, (a, b)) in widgets::wrap(text, f, c.w).into_iter().enumerate() {
-                    cv.text(c.x, c.y + 142 + k as i32 * 20, &text[a..b], f, t.text_secondary);
-                }
-            }
-            Pane::Bar => {
-                let crest = prefs::get_bool(pref::CREST);
-                let battery = prefs::get_bool(pref::BATTERY_LEVEL);
-                bar_preview(cv, Rect::new(c.x, c.y + 52, c.w, 120), crest, battery);
-                let card = Rect::new(c.x, c.y + 190, c.w, 2 * ROW_H);
-                Self::card(cv, card, 2);
-                cv.text(c.x + 16, card.y + 27, "Show Crest", theme::ui(14), t.text);
-                widgets::toggle(cv, rect_of(Hit::Toggle(pref::CREST)).unwrap(), crest);
-                cv.text(c.x + 16, card.y + ROW_H + 27, "Show battery level", theme::ui(14), t.text);
-                widgets::toggle(cv, rect_of(Hit::Toggle(pref::BATTERY_LEVEL)).unwrap(), battery);
-                let text = "Crest sits at the top centre and shows the time; point at it for the date, click it \
-                            for Drift. Without Crest, the time and date move into the right bubble. The battery \
-                            level appears next to the status ring on computers with a battery.";
-                let f = theme::ui(13);
-                for (k, (a, b)) in widgets::wrap(text, f, c.w).into_iter().enumerate() {
-                    cv.text(c.x, card.bottom() + 28 + k as i32 * 20, &text[a..b], f, t.text_secondary);
-                }
-            }
-            Pane::Login => {
-                let name = prefs::get("account_name").unwrap_or_else(|| String::from("This computer"));
-                let card = Rect::new(c.x, c.y + 64, c.w, 84);
-                cv.fill_round_rect(card, 16, t.window_bg_alt);
-                let av = Rect::new(card.x + 16, card.y + 16, 52, 52);
-                cv.fill_round_rect_dgradient(av, 26, theme::accent(), theme::ACCENT_2);
-                let initials: String =
-                    name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect::<String>().to_uppercase();
-                cv.text_centered(av, &initials, theme::ui_bold(18), 0xFFFF_FFFF);
-                cv.text(av.right() + 16, card.y + 38, &name, theme::ui_bold(16), t.text);
-                cv.text(av.right() + 16, card.y + 58, "Owner · password protected", theme::ui(13), t.text_secondary);
-                let r = Rect::new(c.x, c.y + 168, c.w, ROW_H);
-                Self::card(cv, r, 1);
-                cv.text(r.x + 16, r.y + 27, "Log in automatically", theme::ui(14), t.text);
-                widgets::toggle(cv, rect_of(Hit::Toggle(pref::AUTO_LOGIN)).unwrap(), prefs::get_bool(pref::AUTO_LOGIN));
-                let text = "With automatic login, WaveOS opens straight to the desktop when it starts. Lock Screen \
-                            (Super L) and waking from sleep still ask for your password.";
-                let f = theme::ui(13);
-                for (k, (a, b)) in widgets::wrap(text, f, c.w).into_iter().enumerate() {
-                    cv.text(c.x, r.bottom() + 28 + k as i32 * 20, &text[a..b], f, t.text_secondary);
-                }
-            }
-            Pane::Desktop | Pane::Accessibility => {
-                let children = if self.pane == Pane::Desktop {
-                    alloc::vec![
-                        View::label("Make the desktop yours"),
-                        View::card(alloc::vec![
-                            View::slider(5, "Harbor size", (theme::dock_icon_size() - 32) * 1000 / 32),
-                            View::toggle(4, "Hide Harbor until pointed at", prefs::get_bool(pref::DOCK_AUTOHIDE))
-                        ]),
-                        View::card(alloc::vec![
-                            View::slider(6, "Liquid glass intensity", theme::glass_intensity() as i32 * 10),
-                            View::label("Changes apply across the desktop immediately.")
-                        ]),
-                        View::glass(alloc::vec![View::heading("Lumen"), View::label("Liquid glass material preview")])
-                    ]
-                } else {
-                    alloc::vec![
-                        View::label("Comfort and clarity"),
-                        View::card(alloc::vec![
-                            View::toggle(1, "Reduce transparency", theme::reduce_transparency()),
-                            View::label("Use solid surfaces for easier reading.")
-                        ]),
-                        View::card(alloc::vec![
-                            View::toggle(2, "Reduce motion", theme::reduce_motion()),
-                            View::label("Arrange windows without animated transitions.")
-                        ]),
-                        View::card(alloc::vec![
-                            View::toggle(3, "Increase contrast", theme::high_contrast()),
-                            View::label("Stronger text, borders and control outlines.")
-                        ])
-                    ]
-                };
-                self.controls.draw(cv, &View::column(children), Rect::new(c.x, c.y + 52, c.w, 600));
-            }
-            Pane::About => {
-                // The WVOS card.
-                let hero = Rect::new(c.x, c.y + 52, c.w, 148);
-                cv.fill_round_rect_dgradient(hero, 20, mix(theme::accent(), 0xFF06_0A1A, 150), theme::accent());
-                cv.glow(Rect::new(hero.x + 30, hero.y + 26, 96, 96), 24, 24, 0xFFFF_FFFF, 40);
-                icons::draw(cv, Icon::Aurora, Rect::new(hero.x + 30, hero.y + 26, 96, 96));
-                cv.text(hero.x + 148, hero.y + 66, "WaveOS Aurora", theme::display(28), 0xFFFF_FFFF);
-                let i = &self.info;
-                let version = format!("Version {}", corekit::process::fixed_str(&i.version, i.version_len));
-                cv.text(hero.x + 150, hero.y + 92, &version, theme::ui(14), 0xE6FF_FFFF);
-                cv.text(hero.x + 150, hero.y + 116, "Made by WayV", theme::ui_bold(13), 0xCCFF_FFFF);
-                let rows = [
-                    ("Processor", corekit::process::fixed_str(&i.cpu, i.cpu_len)),
-                    ("Memory", format!("{} MiB", i.mem_total >> 20)),
-                    ("Display", format!("{} × {}", env.screen.0, env.screen.1)),
-                    ("Startup disk", corekit::process::fixed_str(&i.root, i.root_len)),
-                    ("Available", format!("{} MB of {} MB", i.disk_free >> 20, i.disk_total >> 20)),
-                ];
-                let card = Rect::new(c.x, c.y + 216, c.w, rows.len() as i32 * 36);
-                cv.fill_round_rect(card, 12, t.window_bg_alt);
-                for (k, (label, value)) in rows.iter().enumerate() {
-                    let y = card.y + k as i32 * 36 + 23;
-                    cv.text(card.x + 16, y, label, theme::ui(13), t.text_secondary);
-                    let f = theme::ui(13);
-                    let w = f.width(value).min(card.w - 150);
-                    cv.text_clipped(card.right() - 16 - w, y, value, f, t.text, card.w - 150);
-                }
-                let r = rect_of(Hit::AboutMore).unwrap();
-                button(cv, r, "More Info…", ButtonStyle::Secondary, self.hover == Some(Hit::AboutMore));
-            }
+            Pane::Controllers => Some(50),
+            Pane::DateTime | Pane::Network => Some(1000),
+            Pane::Appearance | Pane::About => Some(2000),
+            _ => None,
         }
-        if let Some((msg, at)) = &self.note {
-            if env.now_ms < at + 4000 {
-                let f = theme::ui_bold(13);
-                let w = f.width(msg) + 32;
-                let r = Rect::new(c.x + (c.w - w) / 2, area.bottom() - 54, w, 34);
-                cv.fill_round_rect(r, 17, 0xE025_2530);
-                cv.text_centered(r, msg, f, 0xFFFF_FFFF);
+    }
+
+    fn poll(&mut self, _cx: &mut Context<Msg>) -> bool {
+        match self.pane {
+            Pane::Controllers => {
+                let before: Vec<_> = self.pads.iter().map(|(p, s)| (p.id, s.map(|s| s.sequence()))).collect();
+                self.refresh();
+                let after: Vec<_> = self.pads.iter().map(|(p, s)| (p.id, s.map(|s| s.sequence()))).collect();
+                before != after
+            }
+            // Pick up a new custom wallpaper chosen elsewhere.
+            Pane::Appearance => {
+                let missing = theme::wallpaper() == wallpaper::CUSTOM && self.custom_thumb.is_none();
+                if missing {
+                    self.load_custom_thumb();
+                }
+                missing
+            }
+            _ => {
+                self.refresh();
+                true
             }
         }
     }
 
-    fn ring(&self, cv: &mut Canvas, r: Rect, selected: bool, h: Hit) {
-        if selected {
-            cv.stroke_round_rect(r.inset(-3), 13, theme::accent());
-            cv.stroke_round_rect(r.inset(-2), 12, theme::accent());
-        } else if self.hover == Some(h) {
-            cv.stroke_round_rect(r.inset(-2), 12, with_alpha(theme::accent(), 0x80));
-        }
+    fn view(&self, env: &Env) -> View<'_, Msg> {
+        let detail = if !self.query.trim().is_empty() {
+            self.results()
+        } else {
+            let content = match self.pane {
+                Pane::Appearance => self.appearance(env),
+                Pane::Display => self.display_pane(),
+                Pane::Keyboard => self.keyboard(),
+                Pane::Trackpad => self.trackpad(),
+                Pane::Mouse => self.mouse(),
+                Pane::Controllers => self.controllers(),
+                Pane::Network => self.network(),
+                Pane::DateTime => self.date_time(),
+                Pane::Sound => self.sound(),
+                Pane::Notifications => self.notifications(),
+                Pane::Desktop => self.desktop(),
+                Pane::Bar => self.bar(),
+                Pane::Login => self.login(),
+                Pane::Accessibility => self.accessibility(),
+                Pane::About => self.about(env),
+            };
+            ScrollView::new(content).id(("pane", self.pane))
+        };
+        let note = self.note.as_ref().map(|n| {
+            VStack::new()
+                .push(Spacer::new())
+                .push(
+                    Text::new(n.clone())
+                        .style(TextStyle::Headline)
+                        .foreground(Color::Custom(0xFFFF_FFFF))
+                        .padding_xy(16, 8)
+                        .background_rounded(Color::Custom(0xE025_2530), 17),
+                )
+                .padding(20)
+                .fill()
+        });
+        SplitView::new(self.sidebar(), ZStack::with(vec![detail]).push_if(note).fill()).sidebar_width(220)
     }
 }
 
-/// A small white glyph on a pane's colored tile.
-fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
+/// A small white glyph on a pane's coloured tile.
+fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
     let (cx, cy) = r.center();
     let w = 0xFFFF_FFFF;
     match pane {
         Pane::Appearance => {
             cv.fill_circle(cx, cy, 6, w);
-            cv.with_clip(Rect::new(cx, cy - 7, 8, 14), |cv| cv.fill_circle(cx, cy, 6, 0xFF5E5CE6));
-            cv.fill_circle(cx, cy, 4, 0xFF5E5CE6);
+            cv.with_clip(Rect::new(cx, cy - 7, 8, 14), |cv| cv.fill_circle(cx, cy, 6, tile));
+            cv.fill_circle(cx, cy, 4, tile);
             cv.with_clip(Rect::new(cx - 6, cy - 7, 6, 14), |cv| cv.fill_circle(cx, cy, 4, w));
         }
         Pane::Display => {
@@ -1110,12 +1364,26 @@ fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
         Pane::Keyboard => {
             cv.fill_round_rect(Rect::new(cx - 7, cy - 4, 14, 9), 2, w);
             for k in 0..3 {
-                cv.fill_rect(Rect::new(cx - 5 + k * 4, cy - 2, 2, 2), 0xFF8E8E93);
+                cv.fill_rect(Rect::new(cx - 5 + k * 4, cy - 2, 2, 2), tile);
             }
-            cv.fill_rect(Rect::new(cx - 4, cy + 2, 8, 1), 0xFF8E8E93);
+            cv.fill_rect(Rect::new(cx - 4, cy + 2, 8, 1), tile);
+        }
+        Pane::Trackpad => {
+            cv.fill_round_rect(Rect::new(cx - 7, cy - 6, 14, 12), 3, w);
+            cv.fill_rect(Rect::new(cx - 5, cy + 2, 10, 1), tile);
+            cv.fill_rect(Rect::new(cx, cy + 2, 1, 3), tile);
+        }
+        Pane::Mouse => {
+            cv.fill_round_rect(Rect::new(cx - 5, cy - 7, 10, 14), 5, w);
+            cv.fill_rect(Rect::new(cx, cy - 6, 1, 4), tile);
+        }
+        Pane::Controllers => {
+            cv.fill_round_rect(Rect::new(cx - 8, cy - 4, 16, 9), 4, w);
+            cv.fill_rect(Rect::new(cx - 6, cy, 4, 1), tile);
+            cv.fill_rect(Rect::new(cx - 4, cy - 2, 1, 5), tile);
+            cv.fill_circle(cx + 4, cy, 1, tile);
         }
         Pane::Network => {
-            // Three nodes joined (a small network).
             cv.line(cx - 5, cy + 4, cx, cy - 4, 2, w);
             cv.line(cx + 5, cy + 4, cx, cy - 4, 2, w);
             cv.line(cx - 5, cy + 4, cx + 5, cy + 4, 2, w);
@@ -1125,8 +1393,8 @@ fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
         }
         Pane::DateTime => {
             cv.fill_circle(cx, cy, 7, w);
-            cv.line(cx, cy, cx, cy - 5, 1, 0xFFFF9F0A);
-            cv.line(cx, cy, cx + 3, cy, 1, 0xFFFF9F0A);
+            cv.line(cx, cy, cx, cy - 5, 1, tile);
+            cv.line(cx, cy, cx + 3, cy, 1, tile);
         }
         Pane::Sound => {
             cv.fill_rect(Rect::new(cx - 6, cy - 2, 4, 5), w);
@@ -1140,7 +1408,7 @@ fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
         }
         Pane::Bar => {
             cv.fill_round_rect(Rect::new(cx - 7, cy - 6, 14, 5), 2, w);
-            cv.fill_round_rect(Rect::new(cx - 3, cy - 5, 6, 3), 1, 0xFF2F62F5);
+            cv.fill_round_rect(Rect::new(cx - 3, cy - 5, 6, 3), 1, tile);
             cv.fill_rect(Rect::new(cx - 7, cy + 2, 14, 1), w);
             cv.fill_rect(Rect::new(cx - 7, cy + 5, 9, 1), w);
         }
@@ -1148,10 +1416,82 @@ fn pane_glyph(cv: &mut Canvas, pane: Pane, r: Rect) {
             cv.fill_circle(cx, cy - 3, 3, w);
             cv.fill_round_rect(Rect::new(cx - 6, cy + 2, 12, 6), 3, w);
         }
-        Pane::Desktop | Pane::Accessibility | Pane::About => {
+        Pane::Desktop => {
+            cv.fill_round_rect(Rect::new(cx - 7, cy - 6, 14, 10), 2, w);
+            cv.fill_round_rect(Rect::new(cx - 5, cy + 5, 10, 2), 1, w);
+        }
+        Pane::Accessibility => {
+            cv.fill_circle(cx, cy - 5, 2, w);
+            cv.fill_rect(Rect::new(cx - 6, cy - 2, 12, 2), w);
+            cv.fill_rect(Rect::new(cx - 1, cy - 2, 2, 5), w);
+            cv.line(cx - 1, cy + 3, cx - 3, cy + 7, 2, w);
+            cv.line(cx + 1, cy + 3, cx + 3, cy + 7, 2, w);
+        }
+        Pane::About => {
             cv.fill_circle(cx, cy - 4, 1, w);
             cv.fill_rect(Rect::new(cx - 1, cy - 1, 2, 7), w);
         }
+    }
+}
+
+/// A controller drawn with what is pressed and where the sticks are.
+fn pad_picture(cv: &mut Surface, r: Rect, state: Option<PadState>, family: corekit::gamepad::Family) {
+    let t = theme::current();
+    let body = Rect::new(r.x + (r.w - 300) / 2, r.y + 10, 300, 130);
+    let shell = if t.dark { mix(t.window_bg, 0xFFFF_FFFF, 24) } else { mix(t.window_bg, 0xFF00_0000, 14) };
+    cv.fill_round_rect(body, 52, shell);
+    let s = state.unwrap_or_default();
+    let on = |b: Pad| s.pressed(b);
+    let lit = |b: bool| if b { theme::accent() } else { t.control_bg };
+    let ink = |b: bool| if b { 0xFFFF_FFFF } else { t.text };
+    // Shoulders and triggers.
+    let (lt, rt) = s.triggers();
+    for (x, sh, tr, v) in [
+        (body.x + 34, Pad::LeftShoulder, Pad::LeftTrigger, lt),
+        (body.right() - 94, Pad::RightShoulder, Pad::RightTrigger, rt),
+    ] {
+        let bar = Rect::new(x, r.y, 60, 6);
+        cv.fill_round_rect(bar, 3, t.control_bg);
+        cv.fill_round_rect(Rect::new(x, r.y, (60.0 * v) as i32, 6), 3, theme::accent());
+        if on(tr) && v == 0.0 {
+            cv.fill_round_rect(bar, 3, theme::accent());
+        }
+        cv.fill_round_rect(Rect::new(x, body.y - 2, 60, 8), 4, lit(on(sh)));
+    }
+    // D-pad.
+    let (dx, dy) = (body.x + 70, body.y + 66);
+    for (b, rr) in [
+        (Pad::Up, Rect::new(dx - 7, dy - 22, 14, 16)),
+        (Pad::Down, Rect::new(dx - 7, dy + 6, 14, 16)),
+        (Pad::Left, Rect::new(dx - 22, dy - 7, 16, 14)),
+        (Pad::Right, Rect::new(dx + 6, dy - 7, 16, 14)),
+    ] {
+        cv.fill_round_rect(rr, 3, lit(on(b)));
+    }
+    // Face buttons, labelled for this controller.
+    let (fx, fy) = (body.right() - 70, body.y + 66);
+    let f = theme::ui_bold(10);
+    for (b, x, y) in
+        [(Pad::North, fx, fy - 18), (Pad::South, fx, fy + 18), (Pad::West, fx - 18, fy), (Pad::East, fx + 18, fy)]
+    {
+        cv.fill_circle(x, y, 10, lit(on(b)));
+        let label = family.label(b);
+        let short: String = label.chars().take(2).collect();
+        cv.text_centered(Rect::new(x - 10, y - 10, 20, 20), &short, f, ink(on(b)));
+    }
+    // Back, guide, start.
+    let (cx, cy) = (body.x + body.w / 2, body.y + 40);
+    cv.fill_round_rect(Rect::new(cx - 38, cy - 4, 18, 8), 4, lit(on(Pad::Back)));
+    cv.fill_round_rect(Rect::new(cx + 20, cy - 4, 18, 8), 4, lit(on(Pad::Start)));
+    cv.fill_circle(cx, cy, 8, lit(on(Pad::Guide)));
+    // Sticks.
+    for ((sx, sy), (x, y), click) in [
+        (s.left_stick(), (body.x + 112, body.y + 100), Pad::LeftStick),
+        (s.right_stick(), (body.right() - 112, body.y + 100), Pad::RightStick),
+    ] {
+        cv.fill_circle(x, y, 18, t.control_bg);
+        cv.stroke_round_rect(Rect::new(x - 18, y - 18, 36, 36), 18, t.control_border);
+        cv.fill_circle(x + (sx * 10.0) as i32, y + (sy * 10.0) as i32, 10, lit(on(click) || sx != 0.0 || sy != 0.0));
     }
 }
 
@@ -1164,7 +1504,7 @@ fn human(n: u64) -> String {
     }
 }
 
-fn mode_preview(cv: &mut Canvas, r: Rect, dark: bool) {
+fn mode_preview(cv: &mut Surface, r: Rect, dark: bool) {
     let t = if dark { &theme::DARK } else { &theme::LIGHT };
     let bg = if dark { 0xFF10_1426 } else { 0xFFBF_D6F5 };
     cv.fill_round_rect(r, 10, bg);
@@ -1184,345 +1524,20 @@ fn mode_preview(cv: &mut Canvas, r: Rect, dark: bool) {
     cv.fill_round_rect(Rect::new(win.x + 10, win.bottom() - 14, 26, 8), 4, theme::accent());
 }
 
-impl App for Settings {
-    fn materials(&self, area: Rect) -> Vec<corekit::abi::MaterialRegion> {
-        alloc::vec![corekit::abi::MaterialRegion { x: 0, y: 0, width: SIDEBAR_W.min(area.w), height: area.h }]
-    }
-    fn title(&self) -> String {
-        "Settings".into()
-    }
-
-    fn size(&self) -> (i32, i32) {
-        (840, 580)
-    }
-
-    fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
-        self.area = area;
-        self.draw_sidebar(cv, area);
-        if !self.search.text().trim().is_empty() {
-            self.draw_results(cv, area);
-            return;
-        }
-        cv.with_clip(Rect::new(area.x + SIDEBAR_W, area.y, area.w - SIDEBAR_W, area.h), |cv| {
-            self.draw_pane(cv, area, env)
-        });
-        self.reveal_target(cv, area, env);
-        if let Some(h) = self.focus {
-            if let Some((_, r)) = self.hits(area).into_iter().find(|(k, _)| *k == h) {
-                cv.stroke_round_rect(r.inset(-2), 8, theme::accent());
-            }
-        }
-    }
-
-    fn click(&mut self, x: i32, y: i32, _area: Rect, env: &mut Env) -> bool {
-        if !self.search.text().trim().is_empty() && x >= self.area.x + SIDEBAR_W {
-            for (row, i) in
-                self.matches().into_iter().skip(self.result_offset()).take(self.result_capacity()).enumerate()
-            {
-                if self.result_rect(self.area, row).contains(x, y) {
-                    self.jump_setting(i, env.now_ms);
-                    return true;
-                }
-            }
-            return false;
-        }
-        if matches!(self.pane, Pane::Desktop | Pane::Accessibility) && x >= self.area.x + SIDEBAR_W {
-            self.search_focused = false;
-            self.focus = None;
-            let action = self.controls.click(x, y);
-            if self.control_action(action) {
-                return true;
-            }
-        }
-        self.search_focused = self.search.click(x, y, env.mods.shift, env.now_ms);
-        if self.search_focused {
-            self.try_focused = false;
-            return true;
-        }
-        if self.pane == Pane::Keyboard && self.try_field.click(x, y, env.mods.shift, env.now_ms) {
-            self.try_focused = true;
-            return true;
-        }
-        self.try_focused = false;
-        if self.pane == Pane::Network && self.wifi_chosen.is_some() {
-            self.wifi_pass_focused = self.wifi_pass.click(x, y, env.mods.shift, env.now_ms);
-            if self.wifi_pass_focused {
-                return true;
-            }
-        }
-        match self.hit_at(x, y) {
-            Some(h) => {
-                self.run(h, x, env);
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn drag(&mut self, x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
-        if matches!(self.pane, Pane::Desktop | Pane::Accessibility) {
-            let action = self.controls.drag(x);
-            if self.control_action(action) {
-                return true;
-            }
-        }
-        if self.try_focused && self.try_field.drag(x) {
-            return true;
-        }
-        if let Some(h) = self.dragging {
-            self.slide(h, x);
-            return true;
-        }
-        false
-    }
-
-    fn release(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
-        self.controls.release();
-        self.try_field.release();
-        self.dragging = None;
-        false
-    }
-
-    fn hover(&mut self, x: i32, y: i32, _area: Rect) -> bool {
-        if matches!(self.pane, Pane::Desktop | Pane::Accessibility) && self.controls.hover(x, y) {
-            return true;
-        }
-        let h = if x < 0 { None } else { self.hit_at(x, y) };
-        core::mem::replace(&mut self.hover, h) != h
-    }
-
-    fn key(&mut self, ev: &KeyEvent, env: &mut Env) -> bool {
-        use aurorakit::KeyCode;
-        if ev.pressed && ev.mods.ctrl && matches!(ev.ch, Some('f') | Some('F')) {
-            self.search_focused = true;
-            self.focus = None;
-            self.controls.focused = None;
-            return true;
-        }
-        if self.search_focused && (!self.search.text().is_empty() || ev.code != KeyCode::Tab) {
-            return self.result_key(ev, env);
-        }
-        if ev.pressed && ev.code == KeyCode::Tab {
-            let hits = self.hits(self.area);
-            let reverse = ev.mods.shift;
-            let declarative = matches!(self.pane, Pane::Desktop | Pane::Accessibility);
-            if self.search_focused {
-                self.search_focused = false;
-                self.try_focused = false;
-                if reverse && declarative && self.controls.traverse(true) {
-                    self.focus = None;
-                } else {
-                    self.focus = if reverse { hits.last() } else { hits.first() }.map(|(h, _)| *h);
-                }
-            } else if declarative && self.controls.focused.is_some() {
-                if !self.controls.traverse(reverse) {
-                    if reverse {
-                        self.focus = hits.last().map(|(h, _)| *h);
-                    } else {
-                        self.search_focused = true;
-                        self.focus = None;
-                    }
-                }
-            } else {
-                let old = self.focus.and_then(|h| hits.iter().position(|(k, _)| *k == h));
-                let next = match old {
-                    Some(i) => {
-                        if reverse {
-                            i.checked_sub(1)
-                        } else {
-                            Some(i + 1)
-                        }
-                    }
-                    None => Some(0),
-                };
-                if let Some((h, r)) = next.and_then(|i| hits.get(i)) {
-                    self.focus = Some(*h);
-                    if !matches!(h, Hit::Pane(_)) {
-                        if r.bottom() > self.area.bottom() - 12 {
-                            self.scroll += r.bottom() - (self.area.bottom() - 12);
-                        }
-                        if r.y < self.area.y + 12 {
-                            self.scroll = (self.scroll - (self.area.y + 12 - r.y)).max(0);
-                        }
-                    }
-                } else if !reverse && declarative && self.controls.traverse(false) {
-                    self.focus = None;
-                } else {
-                    self.search_focused = true;
-                    self.focus = None;
-                }
-            }
-            return true;
-        }
-        if ev.pressed
-            && self.controls.focused.is_some()
-            && self.focus.is_none()
-            && matches!(self.pane, Pane::Desktop | Pane::Accessibility)
-        {
-            let key = match ev.code {
-                KeyCode::Enter => Some(ui::Key::Activate),
-                KeyCode::Left => Some(ui::Key::Left),
-                KeyCode::Right => Some(ui::Key::Right),
-                _ if ev.ch == Some(' ') => Some(ui::Key::Activate),
-                _ => None,
-            };
-            if let Some(key) = key {
-                let action = self.controls.key(key);
-                self.control_action(action);
-                return true;
-            }
-        }
-        if ev.pressed && (ev.code == KeyCode::Enter || ev.ch == Some(' ')) {
-            if let Some(h) = self.focus {
-                if let Some((_, r)) = self.hits(self.area).into_iter().find(|(k, _)| *k == h) {
-                    if !matches!(h, Hit::Volume | Hit::RepeatDelay | Hit::RepeatRate | Hit::Glass | Hit::DockSize) {
-                        self.run(h, r.x + r.w / 2, env);
-                        self.focus = Some(h);
-                    }
-                    return true;
-                }
-            }
-        }
-        if ev.pressed && matches!(ev.code, KeyCode::Left | KeyCode::Right) {
-            if let Some(h) = self.focus {
-                if matches!(h, Hit::Volume | Hit::RepeatDelay | Hit::RepeatRate | Hit::Glass | Hit::DockSize) {
-                    let step = if ev.code == KeyCode::Left { -1 } else { 1 };
-                    let (key, current, min, max, delta) = match h {
-                        Hit::Volume => (pref::VOLUME, prefs::get_int(pref::VOLUME, 70), 0, 100, 5),
-                        Hit::RepeatDelay => (pref::REPEAT_DELAY, prefs::get_int(pref::REPEAT_DELAY, 1), 0, 3, -1),
-                        Hit::RepeatRate => (pref::REPEAT_RATE, prefs::get_int(pref::REPEAT_RATE, 20), 0, 31, -1),
-                        Hit::Glass => (pref::GLASS, prefs::get_int(pref::GLASS, 70), 0, 100, 5),
-                        _ => (pref::DOCK_SIZE, prefs::get_int(pref::DOCK_SIZE, 48), 32, 64, 2),
-                    };
-                    let _ = prefs::set(key, &format!("{}", (current + step * delta).clamp(min, max)));
-                    return true;
-                }
-            }
-        }
-        if self.try_focused {
-            return self.try_field.key(ev, env.now_ms).handled;
-        }
-        if self.wifi_pass_focused && self.pane == Pane::Network {
-            if ev.pressed && ev.code == KeyCode::Enter {
-                self.join_chosen();
-                return true;
-            }
-            if ev.pressed && ev.code == KeyCode::Escape {
-                self.wifi_chosen = None;
-                self.wifi_pass_focused = false;
-                return true;
-            }
-            return self.wifi_pass.key(ev, env.now_ms).handled;
-        }
-        false
-    }
-
-    fn tick(&mut self, env: &mut Env) -> bool {
-        self.last_tick = env.now_ms;
-        let mut changed =
-            core::mem::take(&mut self.redraw) | self.search.tick(env.now_ms, env.focused && self.search_focused);
-        if self.target.is_some() && env.now_ms >= self.highlight_until {
-            self.target = None;
-            changed = true;
-        }
-        if env.screen != self.screen {
-            self.screen = env.screen;
-            self.modes = prefs::display_modes();
-            changed = true;
-        }
-        if self.try_focused {
-            changed |= self.try_field.tick(env.now_ms, env.focused);
-        }
-        if self.pane == Pane::DateTime {
-            if !self.clock_edited {
-                self.sync_clock();
-            }
-            changed = true; // the big clock ticks
-        }
-        if self.pane == Pane::Network {
-            changed = true; // traffic counters
-            self.wifi = corekit::net::wifi_status();
-            if self.wifi.is_some() {
-                self.wifi_nets = corekit::net::wifi_networks();
-            }
-            if self.wifi_pass_focused {
-                self.wifi_pass.tick(env.now_ms, env.focused);
-            }
-        }
-        if let Some((_, at)) = self.note {
-            if env.now_ms > at + 4000 {
-                self.note = None;
-                changed = true;
-            }
-        }
-        // Pick up a new custom wallpaper chosen elsewhere.
-        if self.pane == Pane::Appearance && theme::wallpaper() == wallpaper::CUSTOM && self.custom_thumb.is_none() {
-            self.load_custom_thumb();
-            changed = true;
-        }
-        // Preference broadcasts trigger redraws. Static pages must not force
-        // full desktop compositions ten times per second while idle.
-        changed
-    }
-
-    fn scroll(&mut self, delta: i32, area: Rect) -> bool {
-        let height = match self.pane {
-            Pane::Keyboard => 650,
-            Pane::DateTime => 610,
-            Pane::Network => 760 + WIFI_MAX_ROWS as i32 * WIFI_ROW_H,
-            _ => 540,
-        };
-        let next = (self.scroll + delta * 36).clamp(0, (height - area.h).max(0));
-        let changed = next != self.scroll;
-        self.scroll = next;
-        changed
-    }
-
-    fn next_wakeup(&self, env: &Env) -> Option<u64> {
-        if self.redraw {
-            return Some(env.now_ms + 1);
-        }
-        let interval = if env.focused && (self.search_focused || self.try_focused) {
-            500
-        } else if matches!(self.pane, Pane::DateTime | Pane::Network) {
-            1000
-        } else {
-            2000
-        };
-        Some((self.last_tick + interval).min(if self.target.is_some() { self.highlight_until } else { u64::MAX }))
-    }
-
-    fn tick_interval(&self) -> u64 {
-        if self.pane == Pane::DateTime {
-            500
-        } else if self.pane == Pane::Network {
-            1000
-        } else {
-            100
-        }
-    }
-}
-
 corekit::entry!(main);
 
 fn main(args: corekit::Args) -> i32 {
     if args.get(1).is_some_and(|s| s == "--self-check") {
-        let mut settings = Settings::new(None);
         for (i, entry) in search::SETTINGS.iter().enumerate() {
             if search::SETTINGS.iter().filter(|s| s.id == entry.id).count() != 1 {
                 return 1;
             }
-            settings.search.edit.set_text(entry.label);
-            if !settings.matches().contains(&i) {
+            if !search::matches(entry.label).contains(&i) {
                 return 2;
             }
-            settings.jump_setting(i, 0);
-            if settings.pane != entry.pane || settings.target != Some(i) {
-                return 3;
-            }
             let launched = Settings::new(Some(entry.id));
-            if launched.target != Some(i) {
-                return 4;
+            if launched.pane != entry.pane || launched.target != Some(entry.id) {
+                return 3;
             }
         }
         let report = format!("SETTINGS CHECK PASS: {} indexed controls and deep links", search::SETTINGS.len());
@@ -1530,15 +1545,15 @@ fn main(args: corekit::Args) -> i32 {
         corekit::eprintln!("{}", report);
         return 0;
     }
-    aurorakit::run(Settings::new(args.get(1).map(String::as_str)))
+    waveui::run(Settings::new(args.get(1).map(String::as_str)))
 }
 
 /// A small picture of the bar: the left bubble, Crest (or the time on the
 /// right) and the status ring (with the battery level).
-fn bar_preview(cv: &mut Canvas, r: Rect, crest: bool, battery: bool) {
+fn bar_preview(cv: &mut Surface, r: Rect, crest: bool, battery: bool) {
     let t = theme::current();
     cv.fill_round_rect_vgradient(r, 16, mix(theme::accent(), 0xFF06_0A1A, 170), theme::accent());
-    let pill = |cv: &mut Canvas, p: Rect| {
+    let pill = |cv: &mut Surface, p: Rect| {
         cv.fill_round_rect(p, p.h / 2, if t.dark { 0x8010_162E } else { 0xA0FF_FFFF });
     };
     let ink = if t.dark { 0xFFF2_F4FA } else { 0xFF0E_1530 };
