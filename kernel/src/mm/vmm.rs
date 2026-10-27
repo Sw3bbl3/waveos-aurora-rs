@@ -148,6 +148,25 @@ pub fn kmap_wc(phys: u64, size: u64) -> Option<u64> {
     Some(base + (phys - start))
 }
 
+/// The physical address behind kernel address `va`, if it is mapped
+/// (following 2 MiB and 1 GiB pages too).
+pub fn translate(va: u64) -> Option<u64> {
+    let mut t = kernel_pml4();
+    for level in (1..=3).rev() {
+        let e = table(t)[idx(va, level)];
+        if e & PRESENT == 0 {
+            return None;
+        }
+        if e & HUGE != 0 && level < 3 {
+            let span = 1u64 << (12 + 9 * level);
+            return Some((e & ADDR & !(span - 1)) | (va & (span - 1)));
+        }
+        t = e & ADDR;
+    }
+    let e = table(t)[idx(va, 0)];
+    (e & PRESENT != 0).then_some((e & ADDR) | (va & (PAGE_SIZE - 1)))
+}
+
 /// The page-table entry mapping kernel address `va` (tests).
 #[cfg(feature = "ktest")]
 pub fn kernel_entry(va: u64) -> Option<u64> {

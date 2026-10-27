@@ -19,6 +19,7 @@ const TESTS: &[Test] = &[
     ("isqrt", sqrt),
     ("account_password_hash", crate::gui::account::self_test),
     ("write-combining mappings", crate::arch::pat::self_test),
+    ("LinuxKPI: runtime, DRM and the GPU display", linux_kpi),
     ("rect math", rects),
     ("keyboard decoder", keyboard),
     ("ramfs + vfs", ramfs),
@@ -95,6 +96,25 @@ fn heap() {
     drop(boxes);
     let big = alloc::vec![0u32; 1280 * 800];
     assert_eq!(big.len(), 1_024_000);
+}
+
+/// The C self-test of the Linux compatibility layer, and — when the machine
+/// has a virtio GPU — that the ported driver brought its display up.
+fn linux_kpi() {
+    #[cfg(linuxkpi)]
+    {
+        extern "C" {
+            fn waveos_lkpi_selftest() -> i32;
+        }
+        let line = unsafe { waveos_lkpi_selftest() };
+        assert_eq!(line, 0, "LinuxKPI self-test failed at waveos_selftest.c line {line}");
+        let gpu = crate::drivers::pci::devices().iter().any(|d| d.vendor == 0x1AF4 && d.device == 0x1050);
+        if gpu {
+            let d = crate::linux::display().expect("virtio-gpu present but no display");
+            assert!(d.width >= 640 && d.height >= 480 && d.pitch >= d.width * 4);
+            crate::kprint!("(GPU display {}x{}) ", d.width, d.height);
+        }
+    }
 }
 
 fn sqrt() {

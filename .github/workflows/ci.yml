@@ -82,6 +82,13 @@ jobs:
           sed 's/\x1b\[[0-9;]*[A-Za-z]//g' serial.log | grep -v '^\s*$' | tail -40
           grep -q "Aurora desktop ready" serial.log
           grep -q "mounted AuroraFS" serial.log
+      - name: Boot to desktop on virtio-gpu (the ported Linux DRM driver)
+        run: |
+          timeout 180 cargo xtask run --no-build --headless --gpu virtio > serial-gpu.log 2>&1 || true
+          sed 's/\x1b\[[0-9;]*[A-Za-z]//g' serial-gpu.log | grep -E 'linux|virtio-gpu|desktop ready' | tail -20
+          grep -q "Linux virtio-gpu driver bound" serial-gpu.log
+          grep -q "WaveOS display:" serial-gpu.log
+          grep -q "Aurora desktop ready" serial-gpu.log
       - name: Build USB disk image
         run: cargo xtask image
       - name: Build UEFI ISO

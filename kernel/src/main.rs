@@ -14,6 +14,7 @@ mod acpi;
 mod arch;
 mod fs;
 mod gui;
+mod linux;
 mod mm;
 mod net;
 mod power;
@@ -91,6 +92,8 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     telemetry::stage("storage", "PCI, disk drivers and filesystems");
     drivers::pci::init(ecam);
     drivers::display::init(boot_info);
+    telemetry::stage("gpu", "GPU drivers");
+    linux::init();
     drivers::block::init();
     fs::mount_disks();
     telemetry::stage("network", "Network cards and the TCP/IP stack");

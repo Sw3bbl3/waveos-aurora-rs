@@ -7,6 +7,7 @@ For the versioned 0.7 user and developer guides, see the [bilingual handbook](ha
 | Tool | macOS | Debian / Ubuntu |
 |---|---|---|
 | Rust | [rustup](https://rustup.rs), with the exact Rust/LLVM baseline in `tools/toolchain-baseline.toml` | same |
+| clang (for the Linux GPU drivers in `kernel/linux`; without it the kernel builds without them) | Xcode command-line tools, or `brew install llvm` | `sudo apt install clang` |
 | QEMU + OVMF | `brew install qemu` (bundles `edk2-x86_64-code.fd`) | `sudo apt install qemu-system-x86 ovmf` |
 | xorriso (ISO only) | `brew install xorriso` | `sudo apt install xorriso` |
 
@@ -32,7 +33,8 @@ cargo xtask run --headless --audio-wav target/playback.wav # record native guest
 cargo xtask run --no-keyboard-capture # macOS: opt out of full keyboard capture
 cargo xtask run --developer         # separate 8 GiB developer disk, 4 GiB RAM
 cargo xtask run --net none          # disable networking for offline validation
-cargo xtask test [--disk virtio] [--smp 1]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
+cargo xtask run --gpu virtio        # virtio-vga display, driven by the ported Linux DRM virtio-gpu driver
+cargo xtask test [--disk virtio] [--smp 1] [--gpu virtio]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
 cargo xtask lint                    # Clippy on every crate, for its own target; warnings are errors
 cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
 AURORA_MUTATIONS=100 cargo test -p aurorafs --release   # robustness tests, 100x longer than CI runs them

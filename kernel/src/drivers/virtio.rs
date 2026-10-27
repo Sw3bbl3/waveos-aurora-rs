@@ -151,6 +151,12 @@ impl Transport {
         ok
     }
 
+    /// Resets the device: it forgets its queues and features.
+    pub fn reset(&self) {
+        self.w8(DEVICE_STATUS, 0);
+        let _ = wait_for(500, || self.r8(DEVICE_STATUS) == 0);
+    }
+
     pub fn no_config_interrupt(&self) {
         self.w16(MSIX_CONFIG, NO_VECTOR);
     }
@@ -254,6 +260,11 @@ impl Virtqueue {
             id = self.mem.read::<u16>(d + 14);
         }
         Some((head, len))
+    }
+
+    /// Descriptors not in use.
+    pub fn num_free(&self) -> usize {
+        self.free.len()
     }
 
     pub fn has_used(&self) -> bool {

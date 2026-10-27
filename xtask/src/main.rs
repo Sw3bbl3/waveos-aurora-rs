@@ -8,6 +8,7 @@
 //!       --smp N                           number of CPUs (default 4)
 //!       --memory-mib N                    guest RAM in MiB (default 4096)
 //!       --audio-wav PATH                  record guest audio to a WAV file
+//!       --gpu std|virtio                  display adapter (default std; virtio runs the ported Linux driver)
 //!       --headless --no-build --debug --gdb --int
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
@@ -61,6 +62,11 @@ fn main() {
         args.iter().position(|a| a == "--net").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("virtio");
     if !["virtio", "e1000", "e1000e", "none"].contains(&net) {
         eprintln!("--net must be virtio, e1000, e1000e or none");
+        exit(2);
+    }
+    let gpu = args.iter().position(|a| a == "--gpu").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("std");
+    if !["std", "virtio"].contains(&gpu) {
+        eprintln!("--gpu must be std or virtio");
         exit(2);
     }
 
@@ -125,6 +131,7 @@ fn main() {
                 }),
                 net,
                 netdev_extra: String::new(),
+                gpu,
                 usb_stick: flag("--usb-stick").then(|| {
                     let stick = root().join("target/usb-stick.img");
                     image::create_usb_stick(&stick).expect("USB stick image");
@@ -178,7 +185,7 @@ fn main() {
             }
             println!("wrote {}", out.display());
         }
-        Some("test") => test(profile, disk, smp, net),
+        Some("test") => test(profile, disk, smp, net, gpu),
         Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
@@ -648,6 +655,8 @@ struct RunOpts<'a> {
     net: &'a str,
     /// Extra user-networking options, e.g. host port forwards.
     netdev_extra: String,
+    /// Display adapter: std (Bochs VGA) or virtio (virtio-vga, driven by the ported Linux driver).
+    gpu: &'a str,
 }
 
 /// The host's own sound output, for interactive runs.
@@ -664,7 +673,12 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let _ = fs::remove_file(&qmp);
 
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-cpu", "max", "-vga", "std"]);
+    cmd.args(["-machine", "q35", "-cpu", "max"]);
+    if opts.gpu == "virtio" {
+        cmd.args(["-vga", "none", "-device", "virtio-vga"]);
+    } else {
+        cmd.args(["-vga", "std"]);
+    }
     // Software emulation on non-x86 hosts: one translation thread per CPU and
     // a large translation cache. AURORA_ACCEL overrides it
     // (e.g. "tcg,thread=single").
@@ -829,10 +843,10 @@ fn inbound_check(port: u16) {
     });
 }
 
-fn test(profile: Profile, disk: &str, smp: u32, net: &str) {
+fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str) {
     let esp = build(profile, true);
     let img = root().join("target/test-disk.img");
-    println!("running kernel tests with the disk on {disk}, network {net}");
+    println!("running kernel tests with the disk on {disk}, network {net}, display {gpu}");
     let http_port = start_test_http_server();
     let fwd_port = free_port();
     // AURORA_TEST_SLEEP=off skips the sleep test (firmware that can't resume).
@@ -849,7 +863,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str) {
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let output = match run_tests_once(&img, disk, smp, net, fwd_port) {
+            let output = match run_tests_once(&img, disk, smp, net, gpu, fwd_port) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
                     // The firmware never handed back control: some OVMF builds
@@ -911,7 +925,7 @@ fn recorded_peak(path: &Path) -> i32 {
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
 /// as an error if the tests failed or timed out.
-fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, fwd_port: u16) -> Result<String, String> {
+fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, gpu: &str, fwd_port: u16) -> Result<String, String> {
     use std::io::{BufRead, BufReader};
     let audio = root().join("target/test-audio.wav");
     let _ = fs::remove_file(&audio);
@@ -928,6 +942,7 @@ fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, fwd_port: u16) ->
         audio: format!("wav:{}", audio.display()),
         net,
         netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
+        gpu,
         battery: true,
         host_battery: None,
         usb_stick: Some({

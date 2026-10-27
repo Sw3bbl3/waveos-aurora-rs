@@ -121,7 +121,15 @@ pub fn power_changed(old: Option<aurora_abi::PowerInfo>, new: aurora_abi::PowerI
 
 /// The framebuffer, mapped write-combining when the CPU allows (so copies
 /// to it go out in bursts) and through the physical window otherwise.
+///
+/// When a ported GPU driver runs the display (`linux::display`), its
+/// framebuffer — ordinary memory the driver copies to the GPU on flush —
+/// takes the firmware framebuffer's place.
 fn front_buffer(fb: &Framebuffer) -> &'static mut [u32] {
+    #[cfg(linuxkpi)]
+    if let Some(d) = crate::linux::display() {
+        return unsafe { core::slice::from_raw_parts_mut(d.pixels, (d.pitch / 4 * d.height) as usize) };
+    }
     // (physical address, length in pixels, virtual address) of the last mapping.
     static MAPPED: spin::Mutex<(u64, usize, u64)> = spin::Mutex::new((0, 0, 0));
     let len = (fb.stride * fb.height) as usize;
@@ -141,6 +149,20 @@ fn front_buffer(fb: &Framebuffer) -> &'static mut [u32] {
 
 /// Copies `r` from the back buffer to the framebuffer.
 fn flush(front: &mut [u32], back: &[u32], fb: &Framebuffer, r: Rect) {
+    #[cfg(linuxkpi)]
+    if let Some(d) = crate::linux::display() {
+        // XRGB8888 in memory is the back buffer's own layout.
+        let r = r.intersect(&Rect::new(0, 0, fb.width.min(d.width) as i32, fb.height.min(d.height) as i32));
+        let (w, stride) = (fb.width as usize, (d.pitch / 4) as usize);
+        for y in r.y as usize..r.bottom() as usize {
+            front[y * stride + r.x as usize..y * stride + r.right() as usize]
+                .copy_from_slice(&back[y * w + r.x as usize..y * w + r.right() as usize]);
+        }
+        if r.w > 0 && r.h > 0 {
+            crate::linux::display_flush(r.x, r.y, r.w, r.h);
+        }
+        return;
+    }
     let w = fb.width as usize;
     let stride = fb.stride as usize;
     for y in r.y as usize..r.bottom() as usize {
