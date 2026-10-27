@@ -419,7 +419,9 @@ fn build_userland(profile: Profile) -> Vec<Program> {
     for entry in fs::read_dir(&out_dir).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if !path.is_file() || name.contains('.') || name.starts_with("lib") {
+        // `constellation` is the WaveSDK command's old name: an alias below,
+        // never a leftover binary from an older build.
+        if !path.is_file() || name.contains('.') || name.starts_with("lib") || name == "constellation" {
             continue;
         }
         let dest = match name.strip_prefix("app-") {
@@ -430,6 +432,9 @@ fn build_userland(profile: Profile) -> Vec<Program> {
             }
             None => format!("Bin/{name}"),
         };
+        if name == "wavesdk" {
+            programs.push((String::from("Bin/constellation"), path.clone()));
+        }
         programs.push((dest, path));
     }
     programs.sort();
@@ -528,8 +533,8 @@ fn system_image(programs: &[Program], out: &Path) {
     if let Some((_, elf)) = programs.iter().find(|(p, _)| p == "Bin/gina-demo") {
         let manifest = gina::Manifest {
             id: "dev.example.gallery".into(),
-            name: "AuroraKit Gallery".into(),
-            developer: "Constellation SDK Example".into(),
+            name: "WaveUI Gallery".into(),
+            developer: "WaveSDK Example".into(),
             version: "1.0.0".into(),
             entry: "bin/app".into(),
             icon: String::new(),
@@ -538,7 +543,7 @@ fn system_image(programs: &[Program], out: &Path) {
         };
         let executable = fs::read(elf).unwrap();
         let package = gina::pack(&manifest, &[("bin/app", &executable)]).expect("package gallery");
-        t.file("Developer/Examples/AuroraKitGallery.gina", &package);
+        t.file("Developer/Examples/WaveUIGallery.gina", &package);
     }
     t.finish(out).expect("write system.tar");
 }
@@ -562,6 +567,7 @@ fn bundle_sdk(t: &mut tar::Tar) {
     for relative in [
         "userland/corekit",
         "userland/aurorakit",
+        "userland/waveui",
         "libs/abi",
         "libs/elf",
         "libs/gfx",
@@ -580,12 +586,12 @@ fn bundle_sdk(t: &mut tar::Tar) {
     let user = fs::read_to_string(base.join("userland/Cargo.toml")).unwrap();
     let user = user
         .lines()
-        .map(|l| if l.starts_with("members =") { "members = [\"corekit\", \"aurorakit\"]" } else { l })
+        .map(|l| if l.starts_with("members =") { "members = [\"corekit\", \"aurorakit\", \"waveui\"]" } else { l })
         .collect::<Vec<_>>()
         .join("\n");
     t.file("Developer/SDK/userland/Cargo.toml", user.as_bytes());
     t.file("Developer/SDK/Cargo.toml",b"[workspace]\nmembers = [\"libs/*\"]\nresolver = \"2\"\n[workspace.package]\nversion = \"0.8.0\"\nedition = \"2021\"\nlicense = \"MIT\"\n");
-    t.file("Developer/STATUS.txt",b"Constellation SDK\nNative project editing, UI design and GINA packaging/installation are available.\nThe native Rust/LLVM toolchain and source debugger have not been ported.\nBuild operations fail explicitly until the native toolchain is installed.\nThe gallery package is precompiled on the build host, not compiled inside WaveOS.\n");
+    t.file("Developer/STATUS.txt",b"WaveSDK\nNative project editing, declarative interfaces (WaveUI), UI design and GINA packaging/installation are available.\nThe native Rust/LLVM toolchain and source debugger have not been ported.\nBuild operations fail explicitly until the native toolchain is installed.\nThe gallery package is precompiled on the build host, not compiled inside WaveOS.\n");
 }
 
 /// Mozilla's root CAs (via webpki-roots) for HTTPS, in nebula-secure's

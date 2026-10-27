@@ -5,22 +5,21 @@ use alloc::{
     format,
     string::{String, ToString},
 };
-use constellation_sdk as sdk;
 use corekit::{apps, fs, println};
+use wavesdk as sdk;
 corekit::entry!(main);
 fn main(args: corekit::Args) -> i32 {
     match run(&args) {
         Ok(()) => 0,
         Err(e) => {
-            corekit::eprintln!("constellation: {e}");
+            corekit::eprintln!("wavesdk: {e}");
             1
         }
     }
 }
 fn run(args: &[String]) -> sdk::Result<()> {
-    let required = |i: usize| {
-        args.get(i).map(String::as_str).ok_or_else(|| String::from("Missing argument. Run constellation help."))
-    };
+    let required =
+        |i: usize| args.get(i).map(String::as_str).ok_or_else(|| String::from("Missing argument. Run wavesdk help."));
     match args.get(1).map(String::as_str).unwrap_or("help") {
         "new"=>{sdk::new_project(required(2)?,required(3)?,args.get(4).map(String::as_str).unwrap_or("My App"))?;println!("Created {}",required(2)?);}
         "doctor"=>{let missing=sdk::doctor();if missing.is_empty(){println!("All native tool executables are present.");}else{for line in &missing{println!("{line}");}return Err("Native compilation is not available in this image.".into());}}
@@ -33,7 +32,7 @@ fn run(args: &[String]) -> sdk::Result<()> {
         "launch"=>{println!("Started pid {}",apps::launch(required(2)?)?);}
         "uninstall"=>{apps::uninstall(required(2)?,args.iter().any(|a|a=="--delete-data"))?;println!("Uninstalled.");}
         "generate"=>sdk::generate_ui(required(2)?)?,
-        _=>println!("Constellation SDK\n  new /Documents/Projects/App dev.example.app \"My App\"\n  doctor\n  build PROJECT\n  generate PROJECT\n  run PROJECT\n  package PROJECT\n  inspect PACKAGE.gina\n  install PACKAGE.gina\n  list\n  launch APP_ID\n  uninstall APP_ID [--delete-data]"),
+        _=>println!("WaveSDK\n  new /Documents/Projects/App dev.example.app \"My App\"\n  doctor\n  build PROJECT\n  generate PROJECT\n  run PROJECT\n  package PROJECT\n  inspect PACKAGE.gina\n  install PACKAGE.gina\n  list\n  launch APP_ID\n  uninstall APP_ID [--delete-data]"),
     }
     Ok(())
 }

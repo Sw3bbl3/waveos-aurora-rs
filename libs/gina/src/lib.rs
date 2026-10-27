@@ -114,8 +114,9 @@ impl Manifest {
             return Err("This app needs a different processor architecture");
         }
         let sdk = quoted(get("sdk")?)?;
-        if sdk != "0.6" && sdk != "0.7" && sdk != "0.8" {
-            return Err("Unsupported Constellation SDK version");
+        // Packages made with the Constellation SDK (0.6–0.8) still install.
+        if !matches!(sdk.as_str(), "0.6" | "0.7" | "0.8" | "0.9") {
+            return Err("Unsupported WaveSDK version");
         }
         let m = Self {
             id: quoted(get("id")?)?,
@@ -164,7 +165,7 @@ impl Manifest {
             format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
         }
         let array = |v: &[String]| format!("[{}]", v.iter().map(|s| q(s)).collect::<Vec<_>>().join(", "));
-        format!("format = 1\nid = {}\nname = {}\ndeveloper = {}\nversion = {}\narchitecture = \"x86_64\"\nsdk = \"0.7\"\nabi = 1\nentry = {}\nicon = {}\nresources = {}\nextensions = {}\n",q(&self.id),q(&self.name),q(&self.developer),q(&self.version),q(&self.entry),q(&self.icon),array(&self.resources),array(&self.extensions))
+        format!("format = 1\nid = {}\nname = {}\ndeveloper = {}\nversion = {}\narchitecture = \"x86_64\"\nsdk = \"0.9\"\nabi = 1\nentry = {}\nicon = {}\nresources = {}\nextensions = {}\n",q(&self.id),q(&self.name),q(&self.developer),q(&self.version),q(&self.entry),q(&self.icon),array(&self.resources),array(&self.extensions))
     }
 }
 

@@ -10,16 +10,15 @@ use alloc::{
 };
 use aurora_help::{search, Article};
 use aurora_image::Image;
-use aurorakit::{
-    canvas::Canvas,
+use core::cell::RefCell;
+use nebula_engine::{layout::Item, style::ListStyle, FontSpec, Host, Layout, Metrics, Page};
+use waveui::lumen::{
+    canvas::Canvas as Surface,
     font::{self, Face, Font},
     geom::Rect,
-    text::TextField,
     theme,
-    widgets::{button, ButtonStyle},
-    App, Env, KeyCode, KeyEvent,
 };
-use nebula_engine::{layout::Item, style::ListStyle, FontSpec, Host, Layout, Metrics, Page};
+use waveui::prelude::*;
 fn font_for(f: FontSpec) -> Font {
     font::get(
         if f.mono {
@@ -48,48 +47,55 @@ impl Host for Fonts<'_> {
         self.0.get(src).map(|i| (i.width, i.height))
     }
 }
-#[derive(Clone, PartialEq, Eq)]
-enum Action {
+#[derive(Clone)]
+pub enum Msg {
     Back,
     Forward,
     Home,
-    Language,
+    Language(usize),
     Smaller,
     Larger,
-    Contents,
-    Search,
+    Heading(usize),
+    Query(String),
+    OpenFirst,
     Category(usize),
     Article(usize),
-    Link(usize),
+    Resize(i32, i32),
+    Scroll(i32),
+    Click(i32, i32),
+    Page(i32),
 }
-struct Learn {
+
+/// The open guide: parsed, its pictures, and laid out for the view.
+#[derive(Default)]
+struct Doc {
+    page: Option<Page>,
+    layout: Option<Layout>,
+    images: BTreeMap<String, Image>,
+    /// What the layout was made for: width, text size, dark, high contrast.
+    key: (i32, i32, bool, bool),
+}
+
+pub struct Learn {
     catalog: Vec<Article>,
     locale: String,
-    query: TextField,
+    query: String,
     results: Vec<usize>,
     category: usize,
     current: Option<usize>,
     history: Vec<(String, i32)>,
     history_pos: usize,
-    page: Option<Page>,
-    layout: Option<Layout>,
-    images: BTreeMap<String, Image>,
+    doc: RefCell<Doc>,
     scroll: i32,
-    side_scroll: i32,
     size: i32,
-    area: Rect,
-    view: Rect,
-    layout_key: (i32, i32, bool, bool),
-    targets: Vec<(Action, Rect)>,
-    focus: Action,
-    hover: Option<Action>,
+    /// The size of the reading area.
+    view: (i32, i32),
     error: Option<String>,
-    show_contents: bool,
     started: u64,
-    first_draw: bool,
-    pending_scroll: bool,
 }
+
 const CATEGORIES: [&str; 8] = ["all", "start", "desktop", "apps", "system", "developer", "reference", "release"];
+
 impl Learn {
     fn tr<'a>(&self, en: &'a str, fr: &'a str) -> &'a str {
         if self.locale == "fr-CA" {
@@ -98,6 +104,7 @@ impl Learn {
             en
         }
     }
+
     fn new() -> Self {
         let started = corekit::time::uptime_ms();
         let loaded = corekit::fs::read("/System/Help/catalog.json")
@@ -113,48 +120,39 @@ impl Learn {
         let mut s = Self {
             catalog,
             locale,
-            query: TextField::new("", "Search / Rechercher"),
+            query: String::new(),
             results: Vec::new(),
             category: 0,
             current: None,
             history: Vec::new(),
             history_pos: 0,
-            page: None,
-            layout: None,
-            images: BTreeMap::new(),
+            doc: RefCell::new(Doc::default()),
             scroll: 0,
-            side_scroll: 0,
             size: corekit::prefs::get_int("learn_size", 16).clamp(14, 24) as i32,
-            area: Rect::default(),
-            view: Rect::default(),
-            layout_key: (0, 0, false, false),
-            targets: Vec::new(),
-            focus: Action::Search,
-            hover: None,
+            view: (720, 500),
             error,
-            show_contents: false,
             started,
-            first_draw: true,
-            pending_scroll: false,
         };
         s.refresh_results();
         s.open_id("start-welcome", true);
         s
     }
+
     fn refresh_results(&mut self) {
         let now = corekit::time::uptime_ms();
-        self.results = search(&self.catalog, &self.locale, self.query.text());
+        self.results = search(&self.catalog, &self.locale, &self.query);
         if self.category > 0 {
             self.results.retain(|i| self.catalog[*i].category == CATEGORIES[self.category]);
         }
-        self.side_scroll = 0;
         corekit::println!("learn-perf search {} ms, {} results", corekit::time::uptime_ms() - now, self.results.len());
     }
+
     fn remember_scroll(&mut self) {
         if let Some(h) = self.history.get_mut(self.history_pos) {
             h.1 = self.scroll;
         }
     }
+
     fn open_id(&mut self, id: &str, record: bool) {
         let Some(i) = self.catalog.iter().position(|a| a.id == id && a.locale == self.locale) else { return };
         self.remember_scroll();
@@ -167,160 +165,108 @@ impl Learn {
         }
         self.current = Some(i);
         self.scroll = 0;
-        self.show_contents = false;
         self.load();
     }
+
+    /// Reads and parses the current guide (in the current appearance).
     fn load(&mut self) {
-        self.page = None;
-        self.layout = None;
-        self.images.clear();
-        self.layout_key.0 = 0;
-        let Some(i) = self.current else { return };
+        let error = self.load_doc();
+        if let Some(e) = error {
+            self.error = Some(e);
+        } else if self.current.is_some() {
+            self.error = None;
+        }
+    }
+
+    fn load_doc(&self) -> Option<String> {
+        let mut doc = self.doc.borrow_mut();
+        *doc = Doc::default();
+        let i = self.current?;
         let path = format!("/System/Help/{}", self.catalog[i].path);
-        match corekit::fs::read(&path) {
-            Ok(bytes) => {
-                let t = theme::current();
-                let html = String::from_utf8_lossy(&bytes)
-                    .replace("font-size:16px", &format!("font-size:{}px", self.size))
-                    .replace("font-size:30px", &format!("font-size:{}px", self.size * 30 / 16))
-                    .replace("font-size:23px", &format!("font-size:{}px", self.size * 23 / 16))
-                    .replace("#202331", &format!("#{:06x}", t.text & 0xffffff))
-                    .replace("#edf0f6", if t.dark { "#252c3b" } else { "#edf0f6" })
-                    .replace("#5550c8", if t.dark { "#b7a8ff" } else { "#5550c8" });
-                let page = Page::parse(&html);
-                let mut missing_image = false;
-                for src in page.images().into_iter().take(12) {
-                    if let Some(name) = src.strip_prefix("../images/").filter(|s| !s.contains('/') && !s.contains(".."))
-                    {
-                        if let Ok(data) = corekit::fs::read(&format!("/System/Help/images/{name}")) {
-                            if let Ok(image) = aurora_image::decode(&data) {
-                                self.images.insert(src.clone(), image);
-                            }
-                        }
-                    }
-                    missing_image |= !self.images.contains_key(&src);
-                }
-                self.page = Some(page);
-                self.error = missing_image.then(|| {
-                    self.tr(
-                        "An image is missing or invalid. Reinstall the help library.",
-                        "Une image est absente ou invalide. Réinstallez la bibliothèque d’aide.",
-                    )
-                    .into()
-                });
-            }
-            Err(_) => {
-                self.error = Some(
-                    self.tr(
-                        "This guide could not be opened. Rebuild or reinstall the system image.",
-                        "Impossible d’ouvrir ce guide. Reconstruisez ou réinstallez l’image système.",
-                    )
-                    .into(),
+        let Ok(bytes) = corekit::fs::read(&path) else {
+            return Some(
+                self.tr(
+                    "This guide could not be opened. Rebuild or reinstall the system image.",
+                    "Impossible d’ouvrir ce guide. Reconstruisez ou réinstallez l’image système.",
                 )
-            }
-        }
-    }
-    fn ensure_layout(&mut self) {
+                .into(),
+            );
+        };
         let t = theme::current();
-        let key = (self.view.w, self.size, t.dark, theme::high_contrast());
-        if key != self.layout_key {
-            // The first page is parsed before AuroraKit receives the system theme.
-            // Reload on the first draw too when booting directly into dark mode.
-            if self.layout_key.2 != t.dark || self.layout_key.3 != theme::high_contrast() {
-                self.load();
+        let html = String::from_utf8_lossy(&bytes)
+            .replace("font-size:16px", &format!("font-size:{}px", self.size))
+            .replace("font-size:30px", &format!("font-size:{}px", self.size * 30 / 16))
+            .replace("font-size:23px", &format!("font-size:{}px", self.size * 23 / 16))
+            .replace("#202331", &format!("#{:06x}", t.text & 0xffffff))
+            .replace("#edf0f6", if t.dark { "#252c3b" } else { "#edf0f6" })
+            .replace("#5550c8", if t.dark { "#b7a8ff" } else { "#5550c8" });
+        let page = Page::parse(&html);
+        let mut missing_image = false;
+        for src in page.images().into_iter().take(12) {
+            if let Some(name) = src.strip_prefix("../images/").filter(|s| !s.contains('/') && !s.contains("..")) {
+                if let Ok(data) = corekit::fs::read(&format!("/System/Help/images/{name}")) {
+                    if let Ok(image) = aurora_image::decode(&data) {
+                        doc.images.insert(src.clone(), image);
+                    }
+                }
             }
-            self.layout = self.page.as_ref().map(|p| p.layout(self.view.w, self.view.h, &Fonts(&self.images)));
-            self.layout_key = key;
-            self.scroll = self.scroll.clamp(0, self.max_scroll());
+            missing_image |= !doc.images.contains_key(&src);
         }
+        doc.page = Some(page);
+        doc.key = (0, 0, t.dark, theme::high_contrast());
+        missing_image.then(|| {
+            self.tr(
+                "An image is missing or invalid. Reinstall the help library.",
+                "Une image est absente ou invalide. Réinstallez la bibliothèque d’aide.",
+            )
+            .into()
+        })
     }
+
+    /// Lays the guide out for the view (again when the width, the text
+    /// size or the appearance changed).
+    fn ensure_layout(&self) {
+        let t = theme::current();
+        let key = (self.view.0, self.size, t.dark, theme::high_contrast());
+        let stale_theme = {
+            let doc = self.doc.borrow();
+            if doc.key == key && doc.layout.is_some() {
+                return;
+            }
+            (doc.key.2, doc.key.3) != (key.2, key.3)
+        };
+        if stale_theme {
+            let _ = self.load_doc();
+        }
+        let mut doc = self.doc.borrow_mut();
+        let layout = doc.page.as_ref().map(|p| p.layout(self.view.0, self.view.1, &Fonts(&doc.images)));
+        doc.layout = layout;
+        doc.key = key;
+    }
+
     fn max_scroll(&self) -> i32 {
-        self.layout.as_ref().map_or(0, |l| (l.height - self.view.h).max(0))
+        self.ensure_layout();
+        self.doc.borrow().layout.as_ref().map_or(0, |l| (l.height - self.view.1).max(0))
     }
-    fn action(&mut self, a: Action) {
-        match a {
-            Action::Back | Action::Forward => {
-                let next = if a == Action::Back { self.history_pos.checked_sub(1) } else { Some(self.history_pos + 1) };
-                if let Some(n) = next.filter(|n| *n < self.history.len()) {
-                    self.remember_scroll();
-                    let (id, scroll) = self.history[n].clone();
-                    self.open_id(&id, false);
-                    self.history_pos = n;
-                    self.scroll = scroll;
-                }
-            }
-            Action::Home => {
-                self.category = 0;
-                self.query.set_text("");
-                self.refresh_results();
-                self.open_id("start-welcome", true);
-            }
-            Action::Language => {
-                let id = self.current.map(|i| self.catalog[i].id.clone());
-                let scroll = self.scroll;
-                self.locale = if self.locale == "en" { "fr-CA" } else { "en" }.into();
-                if corekit::prefs::set("learn_language", &self.locale).is_err() {
-                    self.error = Some(
-                        self.tr("Could not save language preference", "Impossible d’enregistrer la langue").into(),
-                    );
-                }
-                self.refresh_results();
-                if let Some(id) = id {
-                    self.open_id(&id, false);
-                    self.scroll = scroll;
-                }
-            }
-            Action::Smaller | Action::Larger => {
-                self.size = (self.size + if a == Action::Smaller { -2 } else { 2 }).clamp(14, 24);
-                let _ = corekit::prefs::set("learn_size", &format!("{}", self.size));
-                self.load();
-            }
-            Action::Contents => {
-                self.show_contents = !self.show_contents;
-            }
-            Action::Search => {
-                self.focus = Action::Search;
-            }
-            Action::Category(n) => {
-                self.category = n;
-                self.query.set_text("");
-                self.refresh_results();
-            }
-            Action::Article(i) => {
-                let id = self.catalog[i].id.clone();
-                self.open_id(&id, true);
-            }
-            Action::Link(n) => {
-                if self.show_contents {
-                    if let Some(i) = self.current {
-                        if let Some((id, _)) = self.catalog[i].headings.get(n) {
-                            if let Some(y) = self.layout.as_ref().and_then(|l| l.anchor(id)) {
-                                self.scroll = y.clamp(0, self.max_scroll());
-                                self.show_contents = false;
-                            }
-                        }
-                    }
-                } else {
-                    let href = self
-                        .layout
-                        .as_ref()
-                        .and_then(|l| l.links.get(n))
-                        .and_then(|link| self.page.as_ref()?.element(link.node)?.attr("href"))
-                        .map(String::from);
-                    if let Some(href) = href {
-                        self.follow(&href);
-                    }
-                }
-            }
+
+    fn go(&mut self, back: bool) {
+        let next = if back { self.history_pos.checked_sub(1) } else { Some(self.history_pos + 1) };
+        if let Some(n) = next.filter(|n| *n < self.history.len()) {
+            self.remember_scroll();
+            let (id, scroll) = self.history[n].clone();
+            self.open_id(&id, false);
+            self.history_pos = n;
+            self.scroll = scroll;
         }
     }
+
     fn follow(&mut self, href: &str) {
         if href.starts_with("https://") || href.starts_with("http://") {
             let _ = corekit::process::spawn("/System/Apps/Nebula.elf", &[href], corekit::process::Stdio::default());
             return;
         }
         if href.ends_with("index.html") {
-            self.action(Action::Home);
+            self.home();
             return;
         }
         let (path, anchor) = href.split_once('#').unwrap_or((href, ""));
@@ -328,25 +274,28 @@ impl Learn {
             let filename = path.rsplit('/').next().unwrap_or("");
             if let Some(id) = filename.strip_suffix(".html") {
                 self.open_id(id, true);
-                self.ensure_layout();
             }
         }
         if !anchor.is_empty() {
-            if let Some(y) = self.layout.as_ref().and_then(|l| l.anchor(anchor)) {
+            self.ensure_layout();
+            let y = self.doc.borrow().layout.as_ref().and_then(|l| l.anchor(anchor));
+            if let Some(y) = y {
                 self.scroll = y.clamp(0, self.max_scroll());
             }
         }
     }
-    fn control(&mut self, cv: &mut Canvas, a: Action, r: Rect, label: &str) {
-        button(cv, r, label, ButtonStyle::Secondary, self.hover.as_ref() == Some(&a));
-        if self.focus == a {
-            cv.stroke_round_rect(r.inset(-2), 8, theme::accent());
-        }
-        self.targets.push((a, r));
+
+    fn home(&mut self) {
+        self.category = 0;
+        self.query.clear();
+        self.refresh_results();
+        self.open_id("start-welcome", true);
     }
-    fn paint_document(&self, cv: &mut Canvas) {
-        let Some(layout) = &self.layout else { return };
-        let v = self.view;
+
+    fn paint_document(&self, cv: &mut Surface, v: Rect) {
+        self.ensure_layout();
+        let doc = self.doc.borrow();
+        let Some(layout) = &doc.layout else { return };
         let (ox, oy) = (v.x, v.y - self.scroll);
         cv.with_clip(v, |cv| {
             for item in &layout.items {
@@ -376,7 +325,7 @@ impl Learn {
                     }
                     Item::Canvas { .. } | Item::Video { .. } => {} // Learn does not execute page scripts.
                     Item::Image { rect: r, src } => {
-                        if let Some(i) = self.images.get(src) {
+                        if let Some(i) = doc.images.get(src) {
                             cv.draw_image(&i.pixels, i.width, i.height, rect(r), 255);
                         }
                     }
@@ -391,51 +340,8 @@ impl Learn {
             }
         });
     }
-}
-impl App for Learn {
-    fn title(&self) -> String {
-        self.tr("Learn — WaveOS Guide", "Learn — Guide WaveOS").into()
-    }
-    fn size(&self) -> (i32, i32) {
-        (1020, 620)
-    }
-    fn draw(&mut self, cv: &mut Canvas, area: Rect, _: &Env) {
-        let draw_started = corekit::time::uptime_ms();
-        self.area = area;
-        self.targets.clear();
-        let t = theme::current();
-        cv.fill_rect(area, t.window_bg);
-        let side = if area.w > 750 { 240 } else { 180 };
-        cv.fill_rect(Rect::new(area.x, area.y, area.w, 98), t.window_bg_alt);
-        cv.text(area.x + 18, area.y + 34, "Learn", theme::ui_bold(24), t.text);
-        cv.text(
-            area.x + 105,
-            area.y + 32,
-            self.tr("The WaveOS guide", "Le guide WaveOS"),
-            theme::ui(14),
-            t.text_secondary,
-        );
-        let lang = if self.locale == "en" { "English" } else { "Français (Canada)" };
-        self.control(cv, Action::Language, Rect::new(area.right() - 186, area.y + 10, 172, 34), lang);
-        let labels = [
-            (Action::Back, "←"),
-            (Action::Forward, "→"),
-            (Action::Home, self.tr("Home", "Accueil")),
-            (Action::Contents, self.tr("Contents", "Sommaire")),
-            (Action::Smaller, "A−"),
-            (Action::Larger, "A+"),
-        ];
-        let mut x = area.x + 14;
-        for (a, label) in labels {
-            let w = if matches!(a, Action::Home | Action::Contents) { 100 } else { 42 };
-            self.control(cv, a, Rect::new(x, area.y + 54, w, 32), label);
-            x += w + 8;
-        }
-        let sidebar = Rect::new(area.x, area.y + 98, side, area.h - 98);
-        cv.fill_rect(sidebar, t.window_bg_alt);
-        let search_rect = Rect::new(sidebar.x + 12, sidebar.y + 12, side - 24, 34);
-        self.query.draw(cv, search_rect, self.focus == Action::Search);
-        self.targets.push((Action::Search, search_rect));
+
+    fn sidebar(&self) -> View<'_, Msg> {
         let cats = if self.locale == "en" {
             ["All guides", "Getting started", "Desktop", "Apps", "System", "Developers", "Reference", "What’s New"]
         } else {
@@ -450,225 +356,225 @@ impl App for Learn {
                 "Nouveautés",
             ]
         };
-        for (i, label) in cats.iter().enumerate() {
-            let r = Rect::new(sidebar.x + 12, sidebar.y + 56 + i as i32 * 27, side - 24, 24);
-            if self.category == i {
-                cv.fill_round_rect(r, 6, t.hover);
-            }
-            cv.text(r.x + 8, r.y + 17, label, theme::ui(12), t.text);
-            if self.focus == Action::Category(i) {
-                cv.stroke_round_rect(r, 6, theme::accent());
-            }
-            self.targets.push((Action::Category(i), r));
-        }
-        let list = Rect::new(sidebar.x + 8, sidebar.y + 282, side - 16, (sidebar.h - 292).max(0));
-        cv.with_clip(list, |cv| {
-            if self.results.is_empty() {
-                cv.text(
-                    list.x + 6,
-                    list.y + 22,
-                    self.tr("No matching guides", "Aucun guide trouvé"),
-                    theme::ui(12),
-                    t.text_secondary,
-                );
-            }
-            for (row, i) in self.results.iter().copied().enumerate() {
-                let r = Rect::new(list.x, list.y + row as i32 * 36 - self.side_scroll, list.w, 32);
-                if !r.intersects(&list) {
-                    continue;
-                }
-                if self.current == Some(i) {
-                    cv.fill_round_rect(r, 6, t.hover);
-                }
-                cv.text_clipped(r.x + 8, r.y + 21, &self.catalog[i].title, theme::ui(12), t.text, r.w - 16);
-                if self.focus == Action::Article(i) {
-                    cv.stroke_round_rect(r, 6, theme::accent());
-                }
-                self.targets.push((Action::Article(i), r.intersect(&list)));
-            }
-        });
-        self.view = Rect::new(area.x + side + 8, area.y + 102, area.w - side - 20, area.h - 126);
-        self.ensure_layout();
-        if let Some(error) = &self.error {
-            cv.text_clipped(self.view.x + 18, self.view.y + 45, error, theme::ui(14), t.text, self.view.w - 36);
+        let categories = Picker::new(cats, self.category).on_change(Msg::Category).picker_style(PickerStyle::Menu);
+        let results = &self.results;
+        let catalog = &self.catalog;
+        let list: View<'_, Msg> = if results.is_empty() {
+            Text::new(self.tr("No matching guides", "Aucun guide trouvé")).foreground(Color::SecondaryLabel).padding(8)
         } else {
-            self.paint_document(cv);
-        }
-        if let Some(l) = &self.layout {
-            for (n, link) in l.links.iter().enumerate() {
-                let r = Rect::new(
-                    self.view.x + link.rect.x,
-                    self.view.y + link.rect.y - self.scroll,
-                    link.rect.w,
-                    link.rect.h,
-                )
-                .intersect(&self.view);
-                if r.is_empty() {
-                    continue;
-                }
-                if self.focus == Action::Link(n) {
-                    cv.stroke_round_rect(r.inset(-1), 2, theme::accent());
-                }
-                self.targets.push((Action::Link(n), r));
-            }
-        }
-        cv.text_clipped(
-            self.view.x + 8,
-            area.bottom() - 7,
-            self.tr(
-                "Offline library · External links open in Nebula and require a network",
-                "Bibliothèque hors ligne · Les liens externes exigent le réseau et ouvrent Nebula",
-            ),
-            theme::ui(10),
-            t.text_secondary,
-            self.view.w - 16,
-        );
-        if self.show_contents {
-            let panel = Rect::new(self.view.x + 10, self.view.y + 8, (self.view.w - 20).min(460), self.view.h.min(360));
-            cv.fill_round_rect(panel, 12, t.window_bg_alt);
-            cv.stroke_round_rect(panel, 12, t.separator);
-            self.targets.retain(|(a, _)| !matches!(a, Action::Link(_)));
-            if let Some(i) = self.current {
-                for (n, (_, title)) in self.catalog[i].headings.iter().enumerate() {
-                    let r = Rect::new(panel.x + 12, panel.y + 12 + n as i32 * 34, panel.w - 24, 30);
-                    if r.bottom() > panel.bottom() {
-                        break;
-                    }
-                    cv.text_clipped(r.x + 6, r.y + 20, title, theme::ui(13), t.text, r.w - 12);
-                    if self.focus == Action::Link(n) {
-                        cv.stroke_round_rect(r, 6, theme::accent());
-                    }
-                    self.targets.push((Action::Link(n), r));
-                }
-            }
-        }
-        if self.pending_scroll {
-            corekit::println!("learn-perf scroll-render {} ms", corekit::time::uptime_ms() - draw_started);
-            self.pending_scroll = false;
-        }
-        if self.first_draw {
-            corekit::println!("learn-perf startup {} ms", corekit::time::uptime_ms() - self.started);
-            self.first_draw = false;
-        }
+            List::new(results.len(), 34, move |row| {
+                Text::new(catalog[results[row]].title.clone()).padding_xy(14, 0).fill()
+            })
+            .selection(self.current.and_then(|c| results.iter().position(|&i| i == c)))
+            .on_select(Msg::Article)
+            .id("guides")
+        };
+        VStack::new()
+            .push(
+                TextField::search(self.tr("Search", "Rechercher"), self.query.clone())
+                    .on_change(Msg::Query)
+                    .on_submit(Msg::OpenFirst)
+                    .shortcut(Shortcut::ctrl('f'))
+                    .id("search"),
+            )
+            .push(categories)
+            .push(list.grow(1))
+            .spacing(10)
+            .alignment(Align::Stretch)
+            .padding_insets(Insets { top: 14, leading: 10, bottom: 10, trailing: 10 })
+            .fill()
     }
-    fn click(&mut self, x: i32, y: i32, _: Rect, env: &mut Env) -> bool {
-        if self.query.click(x, y, env.mods.shift, env.now_ms) {
-            self.focus = Action::Search;
-            return true;
-        }
-        if let Some((a, _)) = self.targets.iter().rev().find(|(_, r)| r.contains(x, y)) {
-            let a = a.clone();
-            self.focus = a.clone();
-            self.action(a);
-            return true;
-        }
-        false
+}
+
+impl App for Learn {
+    type Message = Msg;
+
+    fn title(&self) -> String {
+        self.tr("Learn — WaveOS Guide", "Learn — Guide WaveOS").into()
     }
-    fn hover(&mut self, x: i32, y: i32, _: Rect) -> bool {
-        let h = self.targets.iter().rev().find(|(_, r)| r.contains(x, y)).map(|(a, _)| a.clone());
-        let changed = h != self.hover;
-        self.hover = h;
-        changed
+
+    fn size(&self) -> (i32, i32) {
+        (1020, 620)
     }
-    fn key(&mut self, k: &KeyEvent, env: &mut Env) -> bool {
-        if !k.pressed {
-            return false;
-        }
-        if k.mods.ctrl && matches!(k.ch, Some('f') | Some('F')) {
-            self.focus = Action::Search;
-            return true;
-        }
-        if k.mods.alt && matches!(k.code, KeyCode::Left | KeyCode::Right) {
-            self.action(if k.code == KeyCode::Left { Action::Back } else { Action::Forward });
-            return true;
-        }
-        if k.code == KeyCode::Escape {
-            self.show_contents = false;
-            self.focus = Action::Home;
-            return true;
-        }
-        if k.code == KeyCode::Tab {
-            let n = self.targets.len();
-            if n == 0 {
-                return false;
+
+    fn update(&mut self, msg: Msg, _cx: &mut Context<Msg>) {
+        match msg {
+            Msg::Back => self.go(true),
+            Msg::Forward => self.go(false),
+            Msg::Home => self.home(),
+            Msg::Language(i) => {
+                let locale = if i == 0 { "en" } else { "fr-CA" };
+                if locale == self.locale {
+                    return;
+                }
+                let id = self.current.map(|i| self.catalog[i].id.clone());
+                let scroll = self.scroll;
+                self.locale = locale.into();
+                if corekit::prefs::set("learn_language", &self.locale).is_err() {
+                    self.error = Some(
+                        self.tr("Could not save language preference", "Impossible d’enregistrer la langue").into(),
+                    );
+                }
+                self.refresh_results();
+                if let Some(id) = id {
+                    self.open_id(&id, false);
+                    self.scroll = scroll;
+                }
             }
-            let i = self.targets.iter().position(|(a, _)| *a == self.focus).unwrap_or(0);
-            let next = (i + if k.mods.shift { n - 1 } else { 1 }) % n;
-            self.focus = self.targets[next].0.clone();
-            return true;
-        }
-        if self.focus == Action::Search {
-            if matches!(k.code, KeyCode::Down | KeyCode::Enter) {
-                if let Some(i) = self.results.first().copied() {
-                    self.focus = Action::Article(i);
-                    if k.code == KeyCode::Enter {
-                        self.action(Action::Article(i));
+            Msg::Smaller | Msg::Larger => {
+                self.size = (self.size + if matches!(msg, Msg::Smaller) { -2 } else { 2 }).clamp(14, 24);
+                let _ = corekit::prefs::set("learn_size", &format!("{}", self.size));
+                self.load();
+            }
+            Msg::Heading(n) => {
+                if let Some(i) = self.current {
+                    if let Some((id, _)) = self.catalog[i].headings.get(n) {
+                        self.ensure_layout();
+                        let y = self.doc.borrow().layout.as_ref().and_then(|l| l.anchor(id));
+                        if let Some(y) = y {
+                            self.scroll = y.clamp(0, self.max_scroll());
+                        }
                     }
                 }
-                return true;
             }
-            let changed = self.query.key(k, env.now_ms);
-            if changed.handled {
+            Msg::Query(q) => {
+                self.query = q;
                 self.refresh_results();
             }
-            return changed.handled;
-        }
-        if let Action::Article(i) = self.focus {
-            if matches!(k.code, KeyCode::Down | KeyCode::Up) {
-                if let Some(row) = self.results.iter().position(|j| *j == i) {
-                    let n = if k.code == KeyCode::Down {
-                        (row + 1).min(self.results.len() - 1)
-                    } else {
-                        row.saturating_sub(1)
-                    };
-                    self.focus = Action::Article(self.results[n]);
-                    let h = (self.area.h - 390).max(36);
-                    self.side_scroll = self.side_scroll.min(n as i32 * 36).max((n as i32 * 36 + 36 - h).max(0));
+            Msg::OpenFirst => {
+                if let Some(&i) = self.results.first() {
+                    let id = self.catalog[i].id.clone();
+                    self.open_id(&id, true);
                 }
-                return true;
+            }
+            Msg::Category(n) => {
+                self.category = n;
+                self.query.clear();
+                self.refresh_results();
+            }
+            Msg::Article(row) => {
+                if let Some(&i) = self.results.get(row) {
+                    let id = self.catalog[i].id.clone();
+                    self.open_id(&id, true);
+                }
+            }
+            Msg::Resize(w, h) => {
+                self.view = (w, h);
+                self.scroll = self.scroll.clamp(0, self.max_scroll());
+            }
+            Msg::Scroll(dy) => {
+                let t = corekit::time::uptime_ms();
+                self.scroll = (self.scroll + dy).clamp(0, self.max_scroll());
+                corekit::println!("learn-perf scroll-update {} ms", corekit::time::uptime_ms() - t);
+            }
+            Msg::Page(d) => {
+                let page = self.view.1 - 40;
+                self.scroll = match d {
+                    i32::MIN => 0,
+                    i32::MAX => self.max_scroll(),
+                    d => (self.scroll + d * page).clamp(0, self.max_scroll()),
+                };
+            }
+            Msg::Click(x, y) => {
+                self.ensure_layout();
+                let href = {
+                    let doc = self.doc.borrow();
+                    doc.layout.as_ref().and_then(|l| {
+                        let link = l.links.iter().find(|k| {
+                            k.rect.x <= x
+                                && x < k.rect.x + k.rect.w
+                                && k.rect.y <= y + self.scroll
+                                && y + self.scroll < k.rect.y + k.rect.h
+                        })?;
+                        doc.page.as_ref()?.element(link.node)?.attr("href").map(String::from)
+                    })
+                };
+                if let Some(href) = href {
+                    self.follow(&href);
+                }
             }
         }
-        if k.code == KeyCode::Enter || k.ch == Some(' ') {
-            let a = self.focus.clone();
-            self.action(a);
-            return true;
+    }
+
+    fn key(&self, k: &KeyEvent) -> Option<Msg> {
+        if k.mods.alt && matches!(k.code, KeyCode::Left | KeyCode::Right) {
+            return Some(if k.code == KeyCode::Left { Msg::Back } else { Msg::Forward });
         }
         match k.code {
-            KeyCode::PageDown => {
-                self.pending_scroll = true;
-                self.scroll = (self.scroll + self.view.h - 40).min(self.max_scroll());
-                true
-            }
-            KeyCode::PageUp => {
-                self.pending_scroll = true;
-                self.scroll = (self.scroll - self.view.h + 40).max(0);
-                true
-            }
-            KeyCode::Home => {
-                self.pending_scroll = true;
-                self.scroll = 0;
-                true
-            }
-            KeyCode::End => {
-                self.pending_scroll = true;
-                self.scroll = self.max_scroll();
-                true
-            }
-            _ => false,
+            KeyCode::PageDown => Some(Msg::Page(1)),
+            KeyCode::PageUp => Some(Msg::Page(-1)),
+            KeyCode::Home => Some(Msg::Page(i32::MIN)),
+            KeyCode::End => Some(Msg::Page(i32::MAX)),
+            KeyCode::Down => Some(Msg::Scroll(48)),
+            KeyCode::Up => Some(Msg::Scroll(-48)),
+            _ => None,
         }
     }
-    fn scroll(&mut self, delta: i32, _: Rect) -> bool {
-        self.pending_scroll = true;
-        if matches!(self.hover, Some(Action::Article(_) | Action::Category(_) | Action::Search)) {
-            self.side_scroll = (self.side_scroll + delta * 36)
-                .clamp(0, (self.results.len() as i32 * 36 - (self.area.h - 390).max(36)).max(0));
-        } else {
-            self.scroll = (self.scroll + delta * 48).clamp(0, self.max_scroll());
-        }
-        true
+
+    fn started(&mut self, _cx: &mut Context<Msg>) {
+        corekit::println!("learn-perf startup {} ms", corekit::time::uptime_ms() - self.started);
     }
-    fn tick(&mut self, env: &mut Env) -> bool {
-        self.query.tick(env.now_ms, env.focused && self.focus == Action::Search)
+
+    fn view(&self, _env: &Env) -> View<'_, Msg> {
+        let headings: Vec<MenuItem<Msg>> = self
+            .current
+            .map(|i| {
+                self.catalog[i]
+                    .headings
+                    .iter()
+                    .enumerate()
+                    .map(|(n, (_, t))| MenuItem::new(t.clone(), Msg::Heading(n)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let bar = toolbar(vec![
+            Button::symbol(Symbol::ChevronLeft)
+                .action(Msg::Back)
+                .disabled(self.history_pos == 0)
+                .help(self.tr("Back", "Précédent")),
+            Button::symbol(Symbol::ChevronRight)
+                .action(Msg::Forward)
+                .disabled(self.history_pos + 1 >= self.history.len())
+                .help(self.tr("Forward", "Suivant")),
+            Button::symbol(Symbol::Home).action(Msg::Home).help(self.tr("Home", "Accueil")),
+            Button::with(label(Symbol::List, self.tr("Contents", "Sommaire")))
+                .button_style(ButtonStyle::Toolbar)
+                .menu(headings),
+            Spacer::new(),
+            Button::with(Text::new("A").style(TextStyle::Sized(11, waveui::style::Weight::Bold)))
+                .action(Msg::Smaller)
+                .button_style(ButtonStyle::Toolbar)
+                .help(self.tr("Smaller text", "Texte plus petit")),
+            Button::with(Text::new("A").style(TextStyle::Sized(17, waveui::style::Weight::Bold)))
+                .action(Msg::Larger)
+                .button_style(ButtonStyle::Toolbar)
+                .help(self.tr("Larger text", "Texte plus grand")),
+            Picker::new(["English", "Français (Canada)"], (self.locale != "en") as usize)
+                .on_change(Msg::Language)
+                .picker_style(PickerStyle::Menu)
+                .width(180),
+        ]);
+        let reading: View<'_, Msg> = match &self.error {
+            Some(e) => Text::paragraph(e.clone()).padding(24).fill(),
+            None => Canvas::new(move |cv, r| self.paint_document(cv, r))
+                .on_input(|e| match e {
+                    CanvasEvent::Scroll { dy, .. } if dy != 0 => Some(Msg::Scroll(dy)),
+                    CanvasEvent::Press { x, y, button: 1, .. } => Some(Msg::Click(x, y)),
+                    CanvasEvent::Resize { w, h } => Some(Msg::Resize(w, h)),
+                    _ => None,
+                })
+                .padding_insets(Insets { top: 4, leading: 12, bottom: 0, trailing: 12 })
+                .fill(),
+        };
+        let footer = Text::new(self.tr(
+            "Offline library · External links open in Nebula and require a network",
+            "Bibliothèque hors ligne · Les liens externes exigent le réseau et ouvrent Nebula",
+        ))
+        .style(TextStyle::Caption)
+        .foreground(Color::SecondaryLabel)
+        .padding_xy(20, 6);
+        let detail = VStack::new().push(bar).push(Divider::new()).push(reading).push(footer).spacing(0).fill();
+        SplitView::new(self.sidebar(), detail).sidebar_width(250)
     }
 }
 corekit::entry!(main);
@@ -682,12 +588,12 @@ fn main(args: corekit::Args) -> i32 {
             corekit::println!("learn-check FAILED: missing catalog");
             return 1;
         }
+        learn.view = (720, 550);
         for a in catalog {
             learn.locale = a.locale.clone();
             learn.open_id(&a.id, false);
-            learn.view = Rect::new(0, 0, 720, 550);
             learn.ensure_layout();
-            if learn.error.is_some() || learn.layout.as_ref().is_none_or(|l| l.items.is_empty()) {
+            if learn.error.is_some() || learn.doc.borrow().layout.as_ref().is_none_or(|l| l.items.is_empty()) {
                 corekit::println!("learn-check FAILED {} {}", a.locale, a.id);
                 return 1;
             }
@@ -697,7 +603,7 @@ fn main(args: corekit::Args) -> i32 {
         learn.current = Some(0);
         learn.catalog[0].path = "missing-guide.html".into();
         learn.load();
-        if learn.error.is_none() || learn.page.is_some() {
+        if learn.error.is_none() || learn.doc.borrow().page.is_some() {
             corekit::println!("learn-check FAILED: missing article did not produce an error");
             return 1;
         }
@@ -708,5 +614,5 @@ fn main(args: corekit::Args) -> i32 {
     if let Some(id) = args.get(1) {
         learn.open_id(id, false);
     }
-    aurorakit::run(learn)
+    waveui::run(learn)
 }

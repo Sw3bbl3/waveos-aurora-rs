@@ -9,6 +9,7 @@ path = "src/main.rs"
 [dependencies]
 corekit.workspace = true
 aurorakit.workspace = true
+waveui.workspace = true
 aurora-image.workspace = true
 nebula-engine.workspace = true
 aurora-help = { path = "../../../libs/help" }
