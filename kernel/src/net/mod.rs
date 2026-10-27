@@ -227,6 +227,8 @@ pub fn link_changed(iface: usize, up: bool) {
         }
     });
     WAKE.wake_all();
+    // The status ring and Current show the connection.
+    crate::gui::network_changed();
 }
 
 /// A received Ethernet frame (drivers call this, also from interrupt handlers).

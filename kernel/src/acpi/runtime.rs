@@ -400,8 +400,12 @@ fn worker() {
         gpes
     );
     publish(read_power(&interp, &devices));
+    // Firmware notifies us of most power changes, but not all (and a
+    // mirrored host battery never does): with a battery or adapter, look
+    // every few seconds so the status ring follows the charger promptly.
+    let poll_ms = if devices.batteries.is_empty() && devices.adapters.is_empty() { 30_000 } else { 5_000 };
     loop {
-        WAKE.wait(30_000, || KICKED.load(Ordering::Acquire));
+        WAKE.wait(poll_ms, || KICKED.load(Ordering::Acquire));
         KICKED.store(false, Ordering::Release);
         if let Some(r) = REQUEST.lock().take() {
             let arg = |s: u8| vec![Object::Integer(s as u64).wrap()];
