@@ -157,7 +157,8 @@ fn days_in(y: i32, m: i32) -> i32 {
 
 impl Settings {
     pub fn new(start: Option<&str>) -> Self {
-        let thumbs = (0..wallpaper::NAMES.len() as u8).map(|i| [wallpaper_thumb(i, false), wallpaper_thumb(i, true)]).collect();
+        let thumbs =
+            (0..wallpaper::NAMES.len() as u8).map(|i| [wallpaper_thumb(i, false), wallpaper_thumb(i, true)]).collect();
         let pane = start
             .and_then(|s| PANES.iter().find(|(_, _, id, _)| *id == s.split('/').next().unwrap_or(s)))
             .map(|(p, _, _, _)| *p)
@@ -272,7 +273,8 @@ impl Settings {
                 rows.push((i, Rect::new(c.x, y, c.w, WIFI_ROW_H)));
                 y += WIFI_ROW_H;
                 if self.wifi_chosen.as_deref() == Some(&n.ssid[..n.ssid_len as usize]) {
-                    password = Some((Rect::new(c.x + 16, y + 6, c.w - 150, 34), Rect::new(c.right() - 118, y + 8, 102, 30)));
+                    password =
+                        Some((Rect::new(c.x + 16, y + 6, c.w - 150, 34), Rect::new(c.right() - 118, y + 8, 102, 30)));
                     y += 48;
                 }
             }

@@ -96,7 +96,12 @@ impl App for About {
                 let total = f3.width(made) + 8 + img.width as i32;
                 let x = cx - total / 2;
                 cv.text(x, foot_y + 4, made, f3, t.text_secondary);
-                let r = Rect::new(x + f3.width(made) + 8, foot_y + 4 - img.height as i32 / 2 - 4, img.width as i32, img.height as i32);
+                let r = Rect::new(
+                    x + f3.width(made) + 8,
+                    foot_y + 4 - img.height as i32 / 2 - 4,
+                    img.width as i32,
+                    img.height as i32,
+                );
                 cv.draw_image(&img.pixels, img.width, img.height, r, 255);
             }
             None => {
