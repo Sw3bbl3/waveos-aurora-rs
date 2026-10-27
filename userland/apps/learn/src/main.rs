@@ -580,7 +580,7 @@ impl App for Learn {
 corekit::entry!(main);
 fn main(args: corekit::Args) -> i32 {
     if args.get(1).is_some_and(|s| s == "--check-library") {
-        aurorakit::load_fonts();
+        waveui::load_fonts();
         let mut learn = Learn::new();
         let mut checked = 0;
         let catalog = learn.catalog.clone();

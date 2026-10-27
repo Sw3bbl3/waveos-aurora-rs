@@ -106,7 +106,6 @@ version = "0.8.0"
 dependencies = [
  "aurora-help",
  "aurora-image",
- "aurorakit",
  "corekit",
  "nebula-engine",
  "waveui",
@@ -117,11 +116,11 @@ name = "app-nebula"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
  "nebula-engine",
  "nebula-media",
  "nebula-web",
+ "waveui",
 ]
 
 [[package]]

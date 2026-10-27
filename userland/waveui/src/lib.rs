@@ -61,7 +61,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub use aurorakit::{KeyCode, KeyEvent, Modifiers, Request};
+pub use aurorakit::{load_fonts, text, KeyCode, KeyEvent, Modifiers, Request};
 pub use lumen;
 pub use style::{Align, Color, Insets, TextStyle};
 pub use view::*;

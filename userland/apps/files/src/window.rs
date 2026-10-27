@@ -528,41 +528,51 @@ impl Files {
                 }
                 ViewMode::List => {
                     let header = HStack::with(
-                        [
-                            (SortKey::Name, "Name", 0),
-                            (SortKey::Date, "Date Modified", 170),
-                            (SortKey::Size, "Size", 80),
-                            (SortKey::Kind, "Kind", 126),
-                        ]
-                        .into_iter()
-                        .map(|(k, label, w)| {
-                            let arrow = if tab.sort.0 == k {
-                                if tab.sort.1 {
-                                    " ↑"
-                                } else {
-                                    " ↓"
-                                }
-                            } else {
-                                ""
-                            };
-                            let t = Text::new(format!("{label}{arrow}"))
-                                .style(if tab.sort.0 == k { TextStyle::Headline } else { TextStyle::Subheadline })
-                                .foreground(Color::SecondaryLabel)
-                                .text_align(if k == SortKey::Size { Align::End } else { Align::Start })
-                                .padding_xy(if k == SortKey::Kind { 16 } else { 0 }, 0)
-                                .fill_height()
-                                .on_tap(Msg::Sort(k))
-                                .corner_radius(6);
-                            if w == 0 {
-                                t.grow(1)
-                            } else {
-                                t.width(w)
-                            }
-                        })
-                        .collect(),
+                        core::iter::once(View::empty().width(18))
+                            .chain(
+                                [
+                                    (SortKey::Name, "Name", 0),
+                                    (SortKey::Date, "Date Modified", 170),
+                                    (SortKey::Size, "Size", 80),
+                                    (SortKey::Kind, "Kind", 126),
+                                ]
+                                .into_iter()
+                                .map(|(k, label, w)| {
+                                    let arrow = if tab.sort.0 == k {
+                                        if tab.sort.1 {
+                                            " ↑"
+                                        } else {
+                                            " ↓"
+                                        }
+                                    } else {
+                                        ""
+                                    };
+                                    let t = Text::new(format!("{label}{arrow}"))
+                                        .style(if tab.sort.0 == k {
+                                            TextStyle::Headline
+                                        } else {
+                                            TextStyle::Subheadline
+                                        })
+                                        .foreground(Color::SecondaryLabel)
+                                        .text_align(if k == SortKey::Size { Align::End } else { Align::Start })
+                                        .padding_insets(Insets {
+                                            leading: if k == SortKey::Kind { 16 } else { 0 },
+                                            ..Default::default()
+                                        })
+                                        .fill_height()
+                                        .on_tap(Msg::Sort(k))
+                                        .corner_radius(6);
+                                    if w == 0 {
+                                        t.grow(1)
+                                    } else {
+                                        t.width(w)
+                                    }
+                                }),
+                            )
+                            .collect(),
                     )
                     .spacing(8)
-                    .padding_insets(Insets { top: 0, leading: 44, bottom: 0, trailing: 18 })
+                    .padding_insets(Insets { top: 0, leading: 18, bottom: 0, trailing: 18 })
                     .height(30)
                     .fill_width();
                     VStack::new()

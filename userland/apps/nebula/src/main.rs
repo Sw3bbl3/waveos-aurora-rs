@@ -15,13 +15,6 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use aurora_image::Image;
-use aurorakit::canvas::Canvas;
-use aurorakit::font::{self, Face, Font};
-use aurorakit::geom::Rect;
-use aurorakit::math::sin;
-use aurorakit::text::TextEdit;
-use aurorakit::theme;
-use aurorakit::{App, Env, KeyCode, KeyEvent};
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use corekit::sync::Mutex;
@@ -33,16 +26,21 @@ use nebula_engine::style::ListStyle;
 use nebula_engine::{FontSpec, Host, Layout, Metrics, Page, ScriptSource, Scripts};
 use nebula_web::http::{self, Response};
 use nebula_web::Url;
+use waveui::lumen::canvas::Canvas;
+use waveui::lumen::font::{self, Face, Font};
+use waveui::lumen::geom::Rect;
+use waveui::lumen::theme;
+use waveui::text::TextEdit;
+use waveui::{KeyCode, KeyEvent};
 
 corekit::entry!(main);
 
 mod cache;
 mod checks;
+mod chrome;
 mod media;
 mod prefetch;
 
-const TAB_H: i32 = 38;
-const TOOLBAR_H: i32 = TAB_H + 48;
 const MAX_TABS: usize = 8;
 const IMAGE_BYTES: usize = 12 * 1024 * 1024;
 const HOME: &str = "about:home";
@@ -927,159 +925,8 @@ impl Browser {
         corekit::time::uptime_ms() < self.notice_until
     }
 
-    fn tab_width(&self, area: Rect) -> i32 {
-        ((area.w - 150).max(120) / self.tabs.len() as i32).min(210)
-    }
-
-    fn tab_rect(&self, index: usize, area: Rect) -> Rect {
-        let w = self.tab_width(area);
-        Rect::new(area.x + 8 + index as i32 * w, area.y + 5, w - 4, TAB_H - 8)
-    }
-
-    fn new_rect(&self, area: Rect) -> Rect {
-        Rect::new(area.x + 12 + self.tabs.len() as i32 * self.tab_width(area), area.y + 5, 28, 28)
-    }
-}
-
-impl App for Browser {
-    fn title(&self) -> String {
-        format!("{} — Nebula", self.tabs[self.active].title())
-    }
-    fn size(&self) -> (i32, i32) {
-        (1100, 760)
-    }
-    fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
-        self.tabs[self.active].draw(cv, area, env);
-        let t = theme::current();
-        cv.fill_rect(Rect::new(area.x, area.y, area.w, TAB_H), t.window_bg);
-        let font = theme::ui(12);
-        for (i, tab) in self.tabs.iter().enumerate() {
-            let r = self.tab_rect(i, area);
-            if i == self.active {
-                cv.fill_round_rect(r, 8, t.control_bg);
-                cv.fill_round_rect(Rect::new(r.x + 10, r.bottom() - 2, r.w - 20, 2), 1, theme::accent());
-            }
-            let color = if i == self.active { t.text } else { t.text_secondary };
-            let dot = if tab.job.as_ref().is_some_and(|(_, h)| h.is_some()) {
-                theme::accent()
-            } else if i == self.active {
-                0xFF35B89A
-            } else {
-                t.text_secondary
-            };
-            cv.fill_round_rect(Rect::new(r.x + 9, r.y + 12, 6, 6), 3, dot);
-            cv.with_clip(Rect::new(r.x + 23, r.y, (r.w - 48).max(1), r.h), |cv| {
-                cv.text(r.x + 23, r.y + 20, &tab.title(), font, color);
-            });
-            let (x, y) = (r.right() - 13, r.y + 15);
-            cv.line(x - 3, y - 3, x + 3, y + 3, 1, color);
-            cv.line(x - 3, y + 3, x + 3, y - 3, 1, color);
-        }
-        let r = self.new_rect(area);
-        let c = if self.tabs.len() < MAX_TABS { t.text } else { t.text_secondary };
-        cv.line(r.x + 8, r.y + 14, r.x + 20, r.y + 14, 1, c);
-        cv.line(r.x + 14, r.y + 8, r.x + 14, r.y + 20, 1, c);
-        if self.notice() {
-            let msg = "Eight tabs are already open";
-            let w = font.width(msg) as i32;
-            cv.text(area.right() - w - 12, area.y + 24, msg, font, t.text);
-        } else if r.right() + 82 < area.right() {
-            cv.text(
-                area.right() - 88,
-                area.y + 24,
-                &format!("{} / {} tabs", self.tabs.len(), MAX_TABS),
-                font,
-                t.text_secondary,
-            );
-        }
-    }
-    fn key(&mut self, ev: &KeyEvent, env: &mut Env) -> bool {
-        if ev.pressed && (ev.mods.ctrl || ev.mods.super_key) {
-            if ev.code == KeyCode::Tab {
-                let next = if ev.mods.shift {
-                    (self.active + self.tabs.len() - 1) % self.tabs.len()
-                } else {
-                    (self.active + 1) % self.tabs.len()
-                };
-                self.select(next);
-                return true;
-            }
-            if ev.code == KeyCode::Char {
-                match ev.ch.map(|c| c.to_ascii_lowercase()) {
-                    Some('t') => {
-                        if !ev.mods.shift {
-                            self.open(HOME, false);
-                        } else if let Some(url) = self.closed.last().cloned() {
-                            if self.open(&url, false) {
-                                self.closed.pop();
-                            }
-                        }
-                        return true;
-                    }
-                    Some(c @ '1'..='8') => {
-                        self.select((c as u8 - b'1') as usize);
-                        return true;
-                    }
-                    Some('9') => {
-                        self.select(self.tabs.len() - 1);
-                        return true;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        self.tabs[self.active].key(ev, env)
-    }
-    fn click(&mut self, x: i32, y: i32, area: Rect, env: &mut Env) -> bool {
-        if y < area.y + TAB_H {
-            for i in 0..self.tabs.len() {
-                let r = self.tab_rect(i, area);
-                if r.contains(x, y) {
-                    if x >= r.right() - 24 {
-                        self.close_tab(i);
-                    } else {
-                        self.select(i);
-                    }
-                    return true;
-                }
-            }
-            if self.new_rect(area).contains(x, y) {
-                self.open(HOME, false);
-            }
-            return true;
-        }
-        if env.mods.ctrl || env.mods.super_key {
-            let tab = &self.tabs[self.active];
-            let target = tab
-                .page_point(x, y)
-                .and_then(|(px, py)| tab.layout.as_ref()?.link_at(px, py))
-                .and_then(|n| tab.href(n));
-            if let Some(url) = target {
-                // Ctrl-click opens behind (Shift: in front); with no room
-                // left, the link opens here.
-                if !self.open(&url, !env.mods.shift) {
-                    self.tabs[self.active].go(&url, true);
-                }
-                return true;
-            }
-        }
-        self.tabs[self.active].click(x, y, area, env)
-    }
-    fn hover(&mut self, x: i32, y: i32, area: Rect) -> bool {
-        self.tabs[self.active].hover(x, y, area)
-    }
-    fn scroll(&mut self, delta: i32, area: Rect) -> bool {
-        self.tabs[self.active].scroll(delta, area)
-    }
-    fn close_tab_requested(&mut self, _env: &mut Env) -> bool {
-        if self.tabs.len() > 1 {
-            self.close_tab(self.active);
-            false
-        } else {
-            true
-        }
-    }
-    fn tick(&mut self, env: &mut Env) -> bool {
+    /// Ticks every tab; true if the selected one (or the tab strip) changed.
+    fn tick_all(&mut self, now: u64) -> bool {
         reap(&mut self.retired);
         let showing = self.notice_until != 0;
         if showing && !self.notice() {
@@ -1088,22 +935,31 @@ impl App for Browser {
         let mut dirty = showing && self.notice_until == 0;
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             if i == self.active {
-                dirty |= tab.tick(env);
+                dirty |= tab.tick(now);
             } else {
                 // Background tabs only repaint the tab strip.
                 let before = (tab.title(), tab.loading());
-                tab.tick(env);
+                tab.tick(now);
                 dirty |= (tab.title(), tab.loading()) != before;
             }
         }
         dirty
     }
+
     fn tick_interval(&self) -> u64 {
         let mut ms = self.tabs.iter().map(Nebula::tick_interval).min().unwrap_or(1000);
         if self.notice_until != 0 {
             ms = ms.min(self.notice_until.saturating_sub(corekit::time::uptime_ms()).max(16));
         }
         ms
+    }
+
+    /// Lays out and paints the selected tab into `cv` (the self-check's frame).
+    #[allow(dead_code)]
+    fn render(&mut self, cv: &mut Canvas, r: Rect) {
+        let tab = &mut self.tabs[self.active];
+        tab.prepare(r.w, r.h);
+        tab.paint(cv, r);
     }
 }
 
@@ -1119,7 +975,7 @@ impl Nebula {
             layout: None,
             laid_out_width: 0,
             scroll: 0,
-            view: Rect::new(0, TOOLBAR_H, 1100, 700),
+            view: Rect::new(0, 0, 1100, 680),
             hover: None,
             job: None,
             old_jobs: Vec::new(),
@@ -1776,10 +1632,6 @@ impl Nebula {
         self.reveal_match();
     }
 
-    fn find_rect(&self) -> Rect {
-        Rect::new(self.view.right() - 372, self.view.y + 8, 360, 36)
-    }
-
     fn max_scroll(&self) -> i32 {
         self.layout.as_ref().map_or(0, |l| (self.z(l.height) - self.view.h).max(0))
     }
@@ -1918,30 +1770,6 @@ impl Nebula {
     // ------------------------------------------------------------ geometry
 
     /// The toolbar row's top-left corner (the view sits right below it).
-    fn bar(&self) -> (i32, i32) {
-        (self.view.x, self.view.y - TOOLBAR_H + TAB_H)
-    }
-    fn back_rect(&self) -> Rect {
-        let (x, y) = self.bar();
-        Rect::new(x + 10, y + 10, 28, 28)
-    }
-    fn forward_rect(&self) -> Rect {
-        let (x, y) = self.bar();
-        Rect::new(x + 42, y + 10, 28, 28)
-    }
-    fn reload_rect(&self) -> Rect {
-        let (x, y) = self.bar();
-        Rect::new(x + 74, y + 10, 28, 28)
-    }
-    fn home_rect(&self) -> Rect {
-        let (x, y) = self.bar();
-        Rect::new(x + 106, y + 10, 28, 28)
-    }
-    fn address_rect(&self, area: Rect) -> Rect {
-        let (x, y) = self.bar();
-        Rect::new(x + 146, y + 8, (area.w - 158).max(40), 32)
-    }
-
     /// Page coordinates of a window point in the content area.
     fn page_point(&self, x: i32, y: i32) -> Option<(i32, i32)> {
         (self.view.contains(x, y))
@@ -1950,8 +1778,8 @@ impl Nebula {
 
     // ------------------------------------------------------------ painting
 
-    fn paint_page(&self, cv: &mut Canvas) {
-        let v = self.view;
+    fn paint_page(&self, cv: &mut Canvas, origin: Rect) {
+        let v = self.view.offset(origin.x, origin.y);
         let Some(l) = &self.layout else {
             cv.fill_rect(v, 0xFFFF_FFFF);
             return;
@@ -2136,138 +1964,7 @@ impl Nebula {
         }
     }
 
-    fn paint_toolbar(&self, cv: &mut Canvas, area: Rect, env: &Env) {
-        let t = theme::current();
-        let bar = Rect::new(area.x, area.y + TAB_H, area.w, TOOLBAR_H - TAB_H);
-        cv.fill_rect(bar, t.titlebar);
-        cv.fill_rect(Rect::new(bar.x, bar.bottom() - 1, bar.w, 1), t.separator);
-        let enabled = |on: bool| if on { t.text } else { t.text_secondary & 0x00FF_FFFF | 0x6000_0000 };
-        // Back / forward chevrons.
-        let (bx, by) = (self.back_rect().x + 14, self.back_rect().y + 14);
-        cv.polyline(&[(bx + 3, by - 7), (bx - 4, by), (bx + 3, by + 7)], 2, enabled(self.pos > 0));
-        let (fx, fy) = (self.forward_rect().x + 14, self.forward_rect().y + 14);
-        cv.polyline(&[(fx - 3, fy - 7), (fx + 4, fy), (fx - 3, fy + 7)], 2, enabled(self.pos + 1 < self.history.len()));
-        // Reload (a circular arrow) or stop (×).
-        let (rx, ry) = (self.reload_rect().x + 14, self.reload_rect().y + 14);
-        if self.loading() {
-            cv.line(rx - 6, ry - 6, rx + 6, ry + 6, 2, t.text);
-            cv.line(rx - 6, ry + 6, rx + 6, ry - 6, 2, t.text);
-        } else {
-            let pts: Vec<(i32, i32)> = (0..=20)
-                .map(|i| {
-                    let a = 128 + i * 800 / 20;
-                    (rx + 7 * sin(a + 256) / 16384, ry + 7 * sin(a) / 16384)
-                })
-                .collect();
-            cv.polyline(&pts, 2, t.text);
-            let (ex, ey) = *pts.last().unwrap();
-            cv.polyline(&[(ex - 5, ey - 3), (ex, ey), (ex + 1, ey - 6)], 2, t.text);
-        }
-        // The address field.
-        let home = self.home_rect();
-        let (hx, hy) = (home.x + 14, home.y + 14);
-        cv.polyline(&[(hx - 8, hy), (hx, hy - 7), (hx + 8, hy)], 2, t.text_secondary);
-        cv.polyline(&[(hx - 5, hy - 1), (hx - 5, hy + 7), (hx + 5, hy + 7), (hx + 5, hy - 1)], 1, t.text_secondary);
-        let r = self.address_rect(area);
-        cv.fill_round_rect(r, 9, t.control_bg);
-        cv.stroke_round_rect(r, 9, if self.editing { theme::accent() } else { t.control_border });
-        let font = theme::ui(14);
-        let text_x = r.x + 30;
-        let base_y = r.y + (r.h + font.ascent as i32 + font.descent as i32) / 2;
-        let secure = self.url.as_ref().is_some_and(|u| u.scheme == "https");
-        // Lock (https) or globe.
-        let (ix, iy) = (r.x + 15, r.y + r.h / 2);
-        if secure && !self.editing {
-            cv.stroke_round_rect(Rect::new(ix - 4, iy - 7, 8, 8), 4, t.text_secondary);
-            cv.fill_round_rect(Rect::new(ix - 5, iy - 2, 10, 8), 2, t.text_secondary);
-        } else {
-            cv.stroke_round_rect(Rect::new(ix - 6, iy - 6, 12, 12), 6, t.text_secondary);
-            cv.fill_rect(Rect::new(ix - 6, iy, 12, 1), t.text_secondary);
-        }
-        cv.with_clip(Rect::new(text_x, r.y, r.w - 40, r.h), |cv| {
-            let text = self.address.text();
-            if self.editing {
-                let caret_x = font.width(&text[..self.address.caret()]);
-                let shift = (caret_x - (r.w - 50)).max(0);
-                let tx = text_x - shift;
-                if let Some((a, b)) = self.address.selection() {
-                    let (xa, xb) = (font.width(&text[..a]), font.width(&text[..b]));
-                    cv.fill_rect(
-                        Rect::new(tx + xa, r.y + 6, xb - xa, r.h - 12),
-                        theme::accent() & 0x00FF_FFFF | 0x5000_0000,
-                    );
-                }
-                cv.text(tx, base_y, text, font, t.text);
-                if env.focused {
-                    cv.fill_rect(Rect::new(tx + caret_x, r.y + 7, 2, r.h - 14), theme::accent());
-                }
-            } else if text == HOME || text.is_empty() {
-                cv.text(text_x, base_y, "Search or enter an address", font, t.text_secondary);
-            } else {
-                // Host in full colour, the rest dimmed.
-                let (pre, rest) = text.split_once("://").unwrap_or(("", text));
-                let (host, path) = rest.find('/').map_or((rest, ""), |p| rest.split_at(p));
-                let mut x = text_x;
-                if !pre.is_empty() && pre != "https" {
-                    x += cv.text(x, base_y, &format!("{pre}://"), font, t.text_secondary);
-                }
-                x += cv.text(x, base_y, host, font, t.text);
-                cv.text(x, base_y, path, font, t.text_secondary);
-            }
-        });
-        // Progress.
-        if self.loading() {
-            let elapsed = (env.now_ms - self.loading_since) as i32;
-            let frac = 1000 - 1000 * 1000 / (1000 + elapsed);
-            let w = r.w * frac / 1000;
-            cv.fill_round_rect(Rect::new(r.x + 6, r.bottom() - 3, (w - 12).max(2), 2), 1, theme::accent());
-        }
-    }
-
-    fn paint_find(&self, cv: &mut Canvas, env: &Env) {
-        let Some(f) = &self.find else { return };
-        let t = theme::current();
-        let r = self.find_rect();
-        cv.shadow(r, 10, 14, 4, t.shadow);
-        cv.fill_round_rect(r, 10, t.window_bg);
-        cv.stroke_round_rect(r, 10, t.separator);
-        let font = theme::ui(13);
-        let base_y = r.y + (r.h + font.ascent as i32 + font.descent as i32) / 2;
-        let count = if f.edit.text().is_empty() {
-            String::new()
-        } else if f.matches.is_empty() {
-            String::from("No matches")
-        } else {
-            format!("{} of {}", f.current + 1, f.matches.len())
-        };
-        let cw = font.width(&count);
-        let field = Rect::new(r.x + 10, r.y + 5, r.w - 40 - cw - 16, r.h - 10);
-        cv.with_clip(field, |cv| {
-            let text = f.edit.text();
-            if text.is_empty() {
-                cv.text(field.x, base_y, "Find on page", font, t.text_secondary);
-            } else {
-                cv.text(field.x, base_y, text, font, t.text);
-            }
-            if env.focused {
-                let cx = field.x + font.width(&text[..f.edit.caret()]);
-                cv.fill_rect(Rect::new(cx, field.y + 4, 2, field.h - 8), theme::accent());
-            }
-        });
-        cv.text(
-            r.right() - 34 - cw,
-            base_y,
-            &count,
-            font,
-            if f.matches.is_empty() && !count.is_empty() { 0xFFFF_453A } else { t.text_secondary },
-        );
-        // Close (×).
-        let (xx, xy) = (r.right() - 18, r.y + r.h / 2);
-        cv.line(xx - 5, xy - 5, xx + 5, xy + 5, 2, t.text_secondary);
-        cv.line(xx - 5, xy + 5, xx + 5, xy - 5, 2, t.text_secondary);
-    }
-
-    fn paint_status(&self, cv: &mut Canvas) {
+    fn paint_status(&self, cv: &mut Canvas, origin: Rect) {
         let text = match (&self.hover, &self.job) {
             (Some(h), _) => h.clone(),
             (None, Some((job, _))) => job.progress.lock().clone(),
@@ -2278,8 +1975,9 @@ impl Nebula {
         }
         let t = theme::current();
         let font = theme::ui(12);
-        let w = (font.width(&text) + 20).min(self.view.w - 20);
-        let r = Rect::new(self.view.x + 8, self.view.bottom() - 30, w, 24);
+        let v = self.view.offset(origin.x, origin.y);
+        let w = (font.width(&text) + 20).min(v.w - 20);
+        let r = Rect::new(v.x + 8, v.bottom() - 30, w, 24);
         cv.fill_round_rect(r, 7, t.panel_tint | 0xFF00_0000);
         cv.stroke_round_rect(r, 7, t.separator);
         cv.text_clipped(r.x + 10, r.y + 16, &text, font, t.text, r.w - 20);
@@ -2307,7 +2005,7 @@ impl Nebula {
     }
 }
 
-impl App for Nebula {
+impl Nebula {
     fn title(&self) -> String {
         match self.page.as_ref().map(|p| p.title.as_str()) {
             Some(t) if !t.is_empty() => String::from(t),
@@ -2316,15 +2014,11 @@ impl App for Nebula {
         }
     }
 
-    fn size(&self) -> (i32, i32) {
-        (1100, 760)
-    }
-
-    fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
-        let old_height = self.view.h;
-        self.view = Rect::new(area.x, area.y + TOOLBAR_H, area.w, (area.h - TOOLBAR_H).max(1));
-        if self.page.is_some()
-            && (self.layout.is_none() || self.laid_out_width != self.view.w || old_height != self.view.h)
+    /// The page area is `w` × `h`: lays the page out again if that changed.
+    fn prepare(&mut self, w: i32, h: i32) {
+        let old = self.view;
+        self.view = Rect::new(0, 0, w.max(1), h.max(1));
+        if self.page.is_some() && (self.layout.is_none() || self.laid_out_width != self.view.w || old.h != self.view.h)
         {
             self.relayout();
         }
@@ -2333,13 +2027,15 @@ impl App for Nebula {
                 self.scroll_to_fragment(&frag);
             }
         }
-        self.paint_page(cv);
-        self.paint_toolbar(cv, area, env);
-        self.paint_find(cv, env);
-        self.paint_status(cv);
     }
 
-    fn key(&mut self, ev: &KeyEvent, env: &mut Env) -> bool {
+    /// Paints the page (and the link under the pointer) at `origin`.
+    fn paint(&self, cv: &mut Canvas, origin: Rect) {
+        self.paint_page(cv, origin);
+        self.paint_status(cv, origin);
+    }
+
+    fn key(&mut self, ev: &KeyEvent, now: u64) -> bool {
         if !ev.pressed {
             return false;
         }
@@ -2424,7 +2120,7 @@ impl App for Nebula {
                 }
                 KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {}
                 _ => {
-                    let r = f.edit.handle_key(ev, env.now_ms);
+                    let r = f.edit.handle_key(ev, now);
                     if r.edited {
                         self.search(true);
                     }
@@ -2447,7 +2143,7 @@ impl App for Nebula {
                     self.address.set_text(&cur);
                     return true;
                 }
-                _ => return self.address.handle_key(ev, env.now_ms).handled,
+                _ => return self.address.handle_key(ev, now).handled,
             }
         }
         if let (Some(page), Some(js)) = (self.page.as_mut(), self.js.as_mut()) {
@@ -2477,7 +2173,7 @@ impl App for Nebula {
                     }
                     let e = self.fields.get_mut(&node).unwrap();
                     let before = String::from(e.text());
-                    let handled = e.handle_key(ev, env.now_ms).handled;
+                    let handled = e.handle_key(ev, now).handled;
                     let after = String::from(e.text());
                     if after != before {
                         if let Some(page) = self.page.as_mut() {
@@ -2499,40 +2195,9 @@ impl App for Nebula {
         self.page_key(ev)
     }
 
-    fn click(&mut self, x: i32, y: i32, area: Rect, _env: &mut Env) -> bool {
+    /// A click in the page, at page-area coordinates.
+    fn click(&mut self, x: i32, y: i32) -> bool {
         self.press = Some((x, y));
-        if y < TOOLBAR_H {
-            self.focus = None;
-            if self.back_rect().contains(x, y) {
-                self.back();
-            } else if self.forward_rect().contains(x, y) {
-                self.forward();
-            } else if self.reload_rect().contains(x, y) {
-                if self.loading() {
-                    self.stop();
-                } else {
-                    self.reload();
-                }
-            } else if self.home_rect().contains(x, y) {
-                self.go(HOME, true);
-            } else if self.address_rect(area).contains(x, y) && !self.editing {
-                self.editing = true;
-                if self.address.text() == HOME {
-                    self.address.set_text("");
-                }
-                self.address.select_all();
-            }
-            return true;
-        }
-        if self.find.is_some() && self.find_rect().contains(x, y) {
-            let r = self.find_rect();
-            if x >= r.right() - 30 {
-                self.find = None;
-            }
-            self.focus = None;
-            self.editing = false;
-            return true;
-        }
         let was_editing = core::mem::take(&mut self.editing);
         if was_editing {
             let cur = self.history.get(self.pos).cloned().unwrap_or_default();
@@ -2640,7 +2305,7 @@ impl App for Nebula {
         true
     }
 
-    fn hover(&mut self, x: i32, y: i32, _area: Rect) -> bool {
+    fn hover(&mut self, x: i32, y: i32) -> bool {
         let link = self.page_point(x, y).and_then(|(px, py)| self.layout.as_ref()?.link_at(px, py));
         let text = link.and_then(|l| self.href(l));
         if text != self.hover {
@@ -2650,19 +2315,20 @@ impl App for Nebula {
         false
     }
 
-    fn scroll(&mut self, delta: i32, _area: Rect) -> bool {
+    /// Scrolls by `dy` pixels (down positive).
+    fn scroll(&mut self, dy: i32) -> bool {
         let before = self.scroll;
-        self.scroll -= delta * 48;
+        self.scroll += dy;
         self.clamp_scroll();
         self.scroll != before
     }
 
-    fn tick(&mut self, env: &mut Env) -> bool {
+    fn tick(&mut self, now: u64) -> bool {
         let mut dirty = false;
         save_cookies();
         if !self.awaiting_page {
             if let (Some(page), Some(url)) = (&mut self.page, &self.url) {
-                let events = self.media.tick(page, url, env.now_ms, &mut self.workers);
+                let events = self.media.tick(page, url, now, &mut self.workers);
                 dirty |= !events.is_empty() || self.media.take_presented();
                 if let Some(js) = &mut self.js {
                     for (node, kind) in events {
@@ -2764,8 +2430,8 @@ impl App for Nebula {
         if !self.script_queue.is_empty() && !self.awaiting_page {
             self.run_scripts_slice();
             // Repaint for script progress a few times a second, not every slice.
-            if self.script_queue.is_empty() || env.now_ms - self.slice_painted >= 250 {
-                self.slice_painted = env.now_ms;
+            if self.script_queue.is_empty() || now - self.slice_painted >= 250 {
+                self.slice_painted = now;
                 dirty = true;
             }
         }
@@ -2808,7 +2474,7 @@ impl App for Nebula {
                 // One layout once the scripts are done instead.
                 self.images_during_scripts = true;
             } else if any && self.relayout_at.is_none() {
-                self.relayout_at = Some(env.now_ms + 200);
+                self.relayout_at = Some(now + 200);
             }
         }
         if let Some(since) = self.images_since {
@@ -2825,7 +2491,7 @@ impl App for Nebula {
                 ));
             }
         }
-        if self.relayout_at.is_some_and(|t| env.now_ms >= t) && !self.awaiting_page {
+        if self.relayout_at.is_some_and(|t| now >= t) && !self.awaiting_page {
             self.relayout_at = None;
             self.relayout();
             dirty = true;
@@ -2967,5 +2633,5 @@ fn main(args: corekit::Args) -> i32 {
         None => String::from(HOME),
     };
     load_cookies();
-    aurorakit::run(Browser::new(&start))
+    waveui::run(Browser::new(&start))
 }

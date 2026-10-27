@@ -151,7 +151,7 @@ fn resolve(child: i32, p: i32, fixed: Option<i32>, min: Option<i32>, max: Option
     }
     let mut w = child;
     if let Some(m) = max {
-        w = if p < INF { w.max(p.min(m)) } else { w.min(m) };
+        w = if p < INF { w.max(p.min(m)).min(m) } else { w.min(m) };
     }
     if let Some(m) = min {
         w = w.max(m);
@@ -496,9 +496,17 @@ fn allot<M>(
             let s = match c.node {
                 Node::Spacer { min } => (if share >= INF { min } else { share.max(min) }, 0),
                 _ => {
+                    // A frame's maximum caps what a growing view takes.
+                    let cap = match axis {
+                        Axis::Horizontal => c.mods.frame.max_width,
+                        Axis::Vertical => c.mods.frame.max_height,
+                    }
+                    .filter(|&m| m != i32::MAX)
+                    .unwrap_or(INF);
+                    let share = share.min(cap);
                     let s = size(c, share, pcross, lay);
                     if share < INF {
-                        (share.max(s.0.min(share)), s.1)
+                        (share, s.1)
                     } else {
                         s
                     }
@@ -643,9 +651,11 @@ pub(crate) fn place<'a, M>(v: &View<'a, M>, rect: Rect, key: u64, inh: Inherit, 
                 Axis::Horizontal => (cw.max(node.w), node.w),
             };
             let off = lay.scroll.entry(key).or_default().layout(content, viewport, *stick_to_end);
+            // Content shorter than the view starts at the top (or fills it, if it fills).
+            let fills = flex(child, *axis) > 0;
             let r = match axis {
-                Axis::Vertical => Rect::new(node.x, node.y - off, node.w, content),
-                Axis::Horizontal => Rect::new(node.x - off, node.y, content, node.h),
+                Axis::Vertical => Rect::new(node.x, node.y - off, node.w, if fills { content } else { ch }),
+                Axis::Horizontal => Rect::new(node.x - off, node.y, if fills { content } else { cw }, node.h),
             };
             out.kids.push(place(child, r, child_key(key, 0), inh, lay));
         }

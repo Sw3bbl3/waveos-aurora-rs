@@ -312,7 +312,10 @@ impl Studio {
     fn sidebar(&self) -> View<'_, Msg> {
         let files = &self.files;
         let list: View<'_, Msg> = if files.is_empty() {
-            Text::paragraph("Open a project to see its files.").foreground(Color::SecondaryLabel).padding(10)
+            Text::paragraph("Open a project to see its files.")
+                .foreground(Color::SecondaryLabel)
+                .padding(10)
+                .align(Align::Start)
         } else {
             List::new(files.len(), 30, move |i| {
                 let f = &files[i];
