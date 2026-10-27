@@ -556,6 +556,7 @@ impl<A: App> Host<A> {
                 timers: &mut self.timers,
                 queue: &mut self.queue,
                 now,
+                mods: self.env.mods,
             },
         )
     }
@@ -1337,6 +1338,7 @@ impl<A: App> aurorakit::App for Host<A> {
     }
 
     fn click(&mut self, x: i32, y: i32, _area: Rect, env: &mut aurorakit::Env) -> bool {
+        self.env.mods = env.mods;
         let now = env.now_ms;
         self.rt.pointer = (x, y);
         self.tooltip = None;
@@ -1420,6 +1422,7 @@ impl<A: App> aurorakit::App for Host<A> {
     }
 
     fn double_click(&mut self, x: i32, y: i32, area: Rect, env: &mut aurorakit::Env) -> bool {
+        self.env.mods = env.mods;
         let now = env.now_ms;
         if self.rt.menu.is_some() {
             return self.click(x, y, area, env);
@@ -1457,6 +1460,7 @@ impl<A: App> aurorakit::App for Host<A> {
     }
 
     fn right_click(&mut self, x: i32, y: i32, _area: Rect, env: &mut aurorakit::Env) -> bool {
+        self.env.mods = env.mods;
         self.rt.pointer = (x, y);
         self.tooltip = None;
         self.rt.menu = None;
@@ -1473,6 +1477,7 @@ impl<A: App> aurorakit::App for Host<A> {
     }
 
     fn release(&mut self, x: i32, y: i32, _area: Rect, env: &mut aurorakit::Env) -> bool {
+        self.env.mods = env.mods;
         let Some(p) = self.press.take() else { return false };
         self.rt.pressed = None;
         let h = p.hit;
@@ -1505,6 +1510,7 @@ impl<A: App> aurorakit::App for Host<A> {
     }
 
     fn drag(&mut self, x: i32, y: i32, area: Rect, env: &mut aurorakit::Env) -> bool {
+        self.env.mods = env.mods;
         self.rt.pointer = (x, y);
         let Some(p) = &mut self.press else {
             return self.hover(x, y, area);
@@ -1617,6 +1623,7 @@ impl<A: App> aurorakit::App for Host<A> {
     }
 
     fn drop(&mut self, x: i32, y: i32, kind: u32, _area: Rect, env: &mut aurorakit::Env) -> bool {
+        self.env.mods = env.mods;
         self.rt.drop_target = None;
         let Some(h) = self.top_hit(x, y, |h| h.drop) else { return true };
         let Some(items) = corekit::dnd::dropped(kind) else { return true };
@@ -1631,6 +1638,15 @@ impl<A: App> aurorakit::App for Host<A> {
         let (app, mut cx) = self.cx();
         let close = app.close_requested(&mut cx);
         self.flush(env);
+        self.redraw = true;
+        close
+    }
+
+    fn close_tab_requested(&mut self, env: &mut aurorakit::Env) -> bool {
+        let (app, mut cx) = self.cx();
+        let close = app.close_tab_requested(&mut cx);
+        self.flush(env);
+        self.redraw = true;
         close
     }
 

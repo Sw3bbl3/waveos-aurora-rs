@@ -164,6 +164,11 @@ pub trait App: Sized {
     fn close_requested(&mut self, _cx: &mut Context<Self::Message>) -> bool {
         true
     }
+
+    /// Ctrl+W. Closes the window unless the app has tabs to close instead.
+    fn close_tab_requested(&mut self, cx: &mut Context<Self::Message>) -> bool {
+        self.close_requested(cx)
+    }
 }
 
 /// What `update` can ask of the system and of the interface.
@@ -173,12 +178,19 @@ pub struct Context<'r, M> {
     pub(crate) timers: &'r mut Vec<(u64, M)>,
     pub(crate) queue: &'r mut VecDeque<M>,
     pub(crate) now: u64,
+    pub(crate) mods: Modifiers,
 }
 
 impl<M> Context<'_, M> {
     /// Milliseconds since the computer started.
     pub fn now(&self) -> u64 {
         self.now
+    }
+
+    /// The modifier keys held during the input that led here (Shift- and
+    /// Ctrl-click to extend a selection, say).
+    pub fn mods(&self) -> Modifiers {
+        self.mods
     }
 
     /// Sends another message after this one.

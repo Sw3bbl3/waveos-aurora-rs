@@ -87,8 +87,8 @@ name = "app-files"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]

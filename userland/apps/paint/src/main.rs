@@ -458,7 +458,6 @@ impl Paint {
         }
     }
 
-
     // ------------------------------------------------------------ drawing
 
     fn draw_tool_icon(cv: &mut Surface, tool: Tool, r: Rect, c: u32) {
@@ -605,7 +604,10 @@ impl Paint {
             tools,
             Divider::new().height(28),
             Slider::new(self.size as f32, 1.0..=64.0).step(1.0).on_change(Msg::Size).width(120).help("Brush size"),
-            Text::new(format!("{} px", self.size)).style(TextStyle::Callout).foreground(Color::SecondaryLabel).width(44),
+            Text::new(format!("{} px", self.size))
+                .style(TextStyle::Callout)
+                .foreground(Color::SecondaryLabel)
+                .width(44),
             Toggle::checkbox("Fill shapes", self.fill_shapes).on_change(Msg::FillShapes),
             Divider::new().height(28),
             current,
