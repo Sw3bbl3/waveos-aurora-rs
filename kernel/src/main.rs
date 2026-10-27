@@ -99,6 +99,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     telemetry::stage("network", "Network cards and the TCP/IP stack");
     net::init();
     drivers::net::init();
+    drivers::wifi::init();
     telemetry::stage("usb", "USB controllers and devices");
     drivers::usb::init();
     if !fs::root_persistent() {

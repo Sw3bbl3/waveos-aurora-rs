@@ -90,7 +90,25 @@ enum Hit {
     Glass,
     DockSize,
     AboutMore,
+    /// A network in the Wi-Fi list.
+    WifiNetwork(usize),
+    WifiJoin,
+    WifiDisconnect,
 }
+
+/// Where the Wi-Fi section's parts go (shared by drawing and hit-testing).
+struct WifiLayout {
+    header: Rect,
+    disconnect: Option<Rect>,
+    /// Network rows, by index into the list.
+    rows: Vec<(usize, Rect)>,
+    /// The password field and Join button, under the chosen network.
+    password: Option<(Rect, Rect)>,
+    bottom: i32,
+}
+
+const WIFI_ROW_H: i32 = 40;
+const WIFI_MAX_ROWS: usize = 8;
 
 pub struct Settings {
     controls: ui::State,
@@ -119,6 +137,13 @@ pub struct Settings {
     area: Rect,
     info: corekit::abi::SysInfo,
     screen: (i32, i32),
+    /// Wi-Fi: the adapter's state and the networks around (refreshed each second).
+    wifi: Option<corekit::abi::WifiStatus>,
+    wifi_nets: Vec<corekit::abi::WifiNetwork>,
+    /// The protected network whose password is being typed.
+    wifi_chosen: Option<Vec<u8>>,
+    wifi_pass: TextField,
+    wifi_pass_focused: bool,
 }
 
 fn days_in(y: i32, m: i32) -> i32 {
@@ -162,6 +187,11 @@ impl Settings {
             area: Rect::new(0, 0, 820, 560),
             info: corekit::process::sys_info(),
             screen: (0, 0),
+            wifi: None,
+            wifi_nets: Vec::new(),
+            wifi_chosen: None,
+            wifi_pass: TextField::password("Password"),
+            wifi_pass_focused: false,
         };
         s.load_custom_thumb();
         s.sync_clock();
@@ -228,6 +258,31 @@ impl Settings {
         Rect::new(row.right() - 58, row.y + (ROW_H - 24) / 2, 44, 24)
     }
 
+    /// The Wi-Fi section at the top of the Network pane (`None` without Wi-Fi).
+    fn wifi_layout(&self, c: Rect) -> Option<WifiLayout> {
+        let st = self.wifi.as_ref()?;
+        let header = Rect::new(c.x, c.y + 64, c.w, 52);
+        let connected = st.state == corekit::abi::wifi::CONNECTED;
+        let disconnect = connected.then(|| Rect::new(header.right() - 126, header.y + 11, 110, 30));
+        let mut y = header.bottom() + 8;
+        let mut rows = Vec::new();
+        let mut password = None;
+        if st.state != corekit::abi::wifi::UNAVAILABLE {
+            for (i, n) in self.wifi_nets.iter().take(WIFI_MAX_ROWS).enumerate() {
+                rows.push((i, Rect::new(c.x, y, c.w, WIFI_ROW_H)));
+                y += WIFI_ROW_H;
+                if self.wifi_chosen.as_deref() == Some(&n.ssid[..n.ssid_len as usize]) {
+                    password = Some((Rect::new(c.x + 16, y + 6, c.w - 150, 34), Rect::new(c.right() - 118, y + 8, 102, 30)));
+                    y += 48;
+                }
+            }
+            if rows.is_empty() {
+                y += WIFI_ROW_H; // "Looking for networks…"
+            }
+        }
+        Some(WifiLayout { header, disconnect, rows, password, bottom: y + 20 })
+    }
+
     /// Every clickable thing on screen, for drawing and hit-testing alike.
     fn hits(&self, area: Rect) -> Vec<(Hit, Rect)> {
         let mut v = Vec::new();
@@ -292,7 +347,15 @@ impl Settings {
                     v.push((Hit::Toggle(key), Self::toggle_rect(Rect::new(c.x, c.y + 76 + i as i32 * 84, c.w, ROW_H))));
                 }
             }
-            Pane::Network => {}
+            Pane::Network => {
+                if let Some(l) = self.wifi_layout(c) {
+                    v.extend(l.disconnect.map(|r| (Hit::WifiDisconnect, r)));
+                    for (i, r) in &l.rows {
+                        v.push((Hit::WifiNetwork(*i), *r));
+                    }
+                    v.extend(l.password.map(|(_, join)| (Hit::WifiJoin, join)));
+                }
+            }
             Pane::Sound => {
                 v.push((Hit::Volume, Rect::new(c.x + 110, c.y + 70 + 12, c.w - 140, 20)));
                 v.push((Hit::Toggle(pref::MUTED), Self::toggle_rect(Rect::new(c.x, c.y + 70 + ROW_H, c.w, ROW_H))));
@@ -313,6 +376,93 @@ impl Settings {
             }
         }
         v
+    }
+
+    fn draw_wifi(&mut self, cv: &mut Canvas, l: &WifiLayout, focused: bool) {
+        use corekit::abi::wifi as w;
+        let Some(st) = self.wifi else { return };
+        let t = theme::current();
+        let f = theme::ui(13);
+        let text = |b: &[u8], n: u32| String::from_utf8_lossy(&b[..(n as usize).min(b.len())]).into_owned();
+        let (ssid, message, driver) =
+            (text(&st.ssid, st.ssid_len), text(&st.message, st.message_len), text(&st.driver, st.driver_len));
+        let (status, color) = match st.state {
+            w::CONNECTED => (format!("Connected to {ssid}"), 0xFF30_D158),
+            w::CONNECTING => (format!("{ssid} · {message}"), 0xFFFF_9F0A),
+            w::FAILED => (message, 0xFFFF_453A),
+            w::UNAVAILABLE => (message, 0xFF8E_8E93),
+            _ => (String::from("Not connected"), 0xFF8E_8E93),
+        };
+        let head = l.header;
+        cv.fill_round_rect(head, 12, t.window_bg_alt);
+        cv.fill_circle(head.x + 22, head.y + 26, 6, color);
+        cv.text(head.x + 40, head.y + 22, "Wi-Fi", theme::ui_bold(14), t.text);
+        cv.text(head.x + 40, head.y + 40, &status, f, t.text_secondary);
+        if let Some(r) = l.disconnect {
+            button(cv, r, "Disconnect", ButtonStyle::Secondary, self.hover == Some(Hit::WifiDisconnect));
+        } else if f.width(&status) + f.width(&driver) < head.w - 80 {
+            cv.text(head.right() - 16 - f.width(&driver), head.y + 31, &driver, f, t.text_secondary);
+        }
+        if st.state == w::UNAVAILABLE {
+            return;
+        }
+        let top = head.bottom() + 8;
+        let card = Rect::new(head.x, top, head.w, (l.bottom - 20 - top).max(WIFI_ROW_H));
+        cv.fill_round_rect(card, 12, t.window_bg_alt);
+        if l.rows.is_empty() {
+            cv.text(card.x + 16, card.y + 25, "Looking for networks…", f, t.text_secondary);
+        }
+        for (k, (i, r)) in l.rows.iter().enumerate() {
+            let n = self.wifi_nets[*i];
+            let name = corekit::net::wifi_name(&n.ssid[..n.ssid_len as usize]);
+            if self.hover == Some(Hit::WifiNetwork(*i)) {
+                cv.fill_round_rect(r.inset(3), 9, t.hover);
+            }
+            if k > 0 {
+                cv.fill_rect(Rect::new(r.x + 16, r.y, r.w - 32, 1), t.separator);
+            }
+            let joined = st.state == w::CONNECTED && name == ssid;
+            let label = match n.security {
+                w::OPEN => "Open",
+                w::WPA2 => "WPA2",
+                w::WPA2_WPA3 => "WPA2/WPA3",
+                _ => "Not supported",
+            };
+            let base = r.y + 25;
+            if joined {
+                cv.text(r.x + 16, base, "\u{2713}", theme::ui_bold(14), theme::accent());
+            }
+            let unsupported = n.security == w::UNSUPPORTED;
+            cv.text(r.x + 40, base, &name, theme::ui(14), if unsupported { t.text_secondary } else { t.text });
+            cv.text(r.right() - 16 - f.width(label), base, label, f, t.text_secondary);
+        }
+        if let Some((field, join)) = l.password {
+            self.wifi_pass.draw(cv, field, focused && self.wifi_pass_focused);
+            button(cv, join, "Join", ButtonStyle::Primary, self.hover == Some(Hit::WifiJoin));
+        }
+    }
+
+    fn join_chosen(&mut self) {
+        let Some(ssid) = self.wifi_chosen.clone() else { return };
+        let password = String::from(self.wifi_pass.text());
+        if !(8..=63).contains(&password.len()) {
+            self.flash(String::from("The password must be 8 to 63 characters"));
+            return;
+        }
+        self.wifi_join(&ssid, &password);
+    }
+
+    /// Starts joining the network named `ssid` (with the typed password, if any).
+    fn wifi_join(&mut self, ssid: &[u8], password: &str) {
+        match corekit::net::wifi_connect(ssid, password) {
+            Ok(_) => {
+                self.wifi_chosen = None;
+                self.wifi_pass_focused = false;
+                self.wifi_pass.set_text("");
+            }
+            Err(e) => self.flash(format!("Could not join: {e}")),
+        }
+        self.wifi = corekit::net::wifi_status();
     }
 
     fn hit_at(&self, x: i32, y: i32) -> Option<Hit> {
@@ -413,6 +563,29 @@ impl Settings {
             }
             Hit::Volume | Hit::Glass | Hit::DockSize => self.slide(h, x),
             Hit::AboutMore => env.requests.push(Request::OpenApp(String::from("About"))),
+            Hit::WifiNetwork(i) => {
+                let Some(n) = self.wifi_nets.get(i).copied() else { return };
+                let ssid = n.ssid[..n.ssid_len as usize].to_vec();
+                match n.security {
+                    corekit::abi::wifi::OPEN => self.wifi_join(&ssid, ""),
+                    corekit::abi::wifi::UNSUPPORTED => {
+                        self.flash(String::from("WaveOS can join open and WPA2 Personal networks"))
+                    }
+                    _ => {
+                        if self.wifi_chosen.as_deref() != Some(&ssid[..]) {
+                            self.wifi_pass.set_text("");
+                        }
+                        self.wifi_chosen = Some(ssid);
+                        self.wifi_pass_focused = true;
+                        self.search_focused = false;
+                    }
+                }
+            }
+            Hit::WifiJoin => self.join_chosen(),
+            Hit::WifiDisconnect => {
+                corekit::net::wifi_disconnect();
+                self.wifi = corekit::net::wifi_status();
+            }
         }
     }
 
@@ -716,22 +889,29 @@ impl Settings {
                     .filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0)
                     .collect();
                 let f = theme::ui(13);
-                if ifaces.is_empty() {
+                if ifaces.is_empty() && self.wifi.is_none() {
                     cv.text(c.x, c.y + 80, "No network adapter was found.", theme::ui(14), t.text_secondary);
                 }
                 let mut y = c.y + 64;
+                if let Some(l) = self.wifi_layout(c) {
+                    self.draw_wifi(cv, &l, env.focused);
+                    y = l.bottom;
+                }
                 for i in &ifaces {
                     let ip = |a: [u8; 4]| if a == [0; 4] { String::from("—") } else { corekit::net::ip_string(a) };
+                    let wireless = corekit::net::name_of(i).starts_with("wlan");
                     let (status, color) = match (i.flags & corekit::abi::net::IF_LINK != 0, i.ip != [0; 4]) {
                         (true, true) => ("Connected", 0xFF30_D158),
                         (true, false) => ("Getting an address…", 0xFFFF_9F0A),
+                        (false, _) if wireless => ("Not connected", 0xFF8E_8E93),
                         (false, _) => ("Cable unplugged", 0xFFFF_453A),
                     };
                     // Header: adapter name and status.
                     let head = Rect::new(c.x, y, c.w, 52);
                     cv.fill_round_rect(head, 12, t.window_bg_alt);
                     cv.fill_circle(head.x + 22, head.y + 26, 6, color);
-                    let title = format!("Ethernet ({})", corekit::net::name_of(i));
+                    let kind = if wireless { "Wi-Fi" } else { "Ethernet" };
+                    let title = format!("{kind} ({})", corekit::net::name_of(i));
                     cv.text(head.x + 40, head.y + 22, &title, theme::ui_bold(14), t.text);
                     cv.text(head.x + 40, head.y + 40, status, f, t.text_secondary);
                     let drv = corekit::net::driver_of(i);
@@ -1062,6 +1242,12 @@ impl App for Settings {
             return true;
         }
         self.try_focused = false;
+        if self.pane == Pane::Network && self.wifi_chosen.is_some() {
+            self.wifi_pass_focused = self.wifi_pass.click(x, y, env.mods.shift, env.now_ms);
+            if self.wifi_pass_focused {
+                return true;
+            }
+        }
         match self.hit_at(x, y) {
             Some(h) => {
                 self.run(h, x, env);
@@ -1214,6 +1400,18 @@ impl App for Settings {
         if self.try_focused {
             return self.try_field.key(ev, env.now_ms).handled;
         }
+        if self.wifi_pass_focused && self.pane == Pane::Network {
+            if ev.pressed && ev.code == KeyCode::Enter {
+                self.join_chosen();
+                return true;
+            }
+            if ev.pressed && ev.code == KeyCode::Escape {
+                self.wifi_chosen = None;
+                self.wifi_pass_focused = false;
+                return true;
+            }
+            return self.wifi_pass.key(ev, env.now_ms).handled;
+        }
         false
     }
 
@@ -1241,6 +1439,13 @@ impl App for Settings {
         }
         if self.pane == Pane::Network {
             changed = true; // traffic counters
+            self.wifi = corekit::net::wifi_status();
+            if self.wifi.is_some() {
+                self.wifi_nets = corekit::net::wifi_networks();
+            }
+            if self.wifi_pass_focused {
+                self.wifi_pass.tick(env.now_ms, env.focused);
+            }
         }
         if let Some((_, at)) = self.note {
             if env.now_ms > at + 4000 {
@@ -1262,6 +1467,7 @@ impl App for Settings {
         let height = match self.pane {
             Pane::Keyboard => 650,
             Pane::DateTime => 610,
+            Pane::Network => 760 + WIFI_MAX_ROWS as i32 * WIFI_ROW_H,
             _ => 540,
         };
         let next = (self.scroll + delta * 36).clamp(0, (height - area.h).max(0));

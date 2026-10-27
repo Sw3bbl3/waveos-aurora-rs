@@ -9,6 +9,7 @@
 //!       --memory-mib N                    guest RAM in MiB (default 4096)
 //!       --audio-wav PATH                  record guest audio to a WAV file
 //!       --gpu std|virtio                  display adapter (default std; virtio runs the ported Linux driver)
+//!       --wifi-sim                        simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
 //!       --headless --no-build --debug --gdb --int
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
@@ -103,6 +104,8 @@ fn main() {
             if !flag("--no-refresh") {
                 prepare_disk(&esp, &img, flag("--fresh-disk"), size);
             }
+            // Simulated Wi-Fi networks (the kernel's software radio).
+            image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" }).expect("write boot.conf");
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
             let opts = RunOpts {
                 memory_mib: number("--memory-mib", 4096, 256, 32768),

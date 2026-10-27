@@ -852,6 +852,8 @@ impl TextView {
 pub struct TextField {
     pub edit: TextEdit,
     pub placeholder: String,
+    /// A password field: shows bullets and won't copy or cut.
+    pub secure: bool,
     scroll_x: i32,
     rect: Rect,
     caret_on: bool,
@@ -865,6 +867,7 @@ impl TextField {
         Self {
             edit: TextEdit::new(text, false),
             placeholder: String::from(placeholder),
+            secure: false,
             scroll_x: 0,
             rect: Rect::new(0, 0, 0, 0),
             caret_on: true,
@@ -872,6 +875,13 @@ impl TextField {
             dragging: false,
             clicks: Clicks::default(),
         }
+    }
+
+    /// A password field.
+    pub fn password(placeholder: &str) -> Self {
+        let mut f = Self::new("", placeholder);
+        f.secure = true;
+        f
     }
 
     pub fn text(&self) -> &str {
@@ -887,9 +897,19 @@ impl TextField {
         theme::ui(14)
     }
 
+    /// What the field shows: the text, or a bullet per character.
+    fn shown(&self) -> String {
+        let text = self.edit.text();
+        if self.secure {
+            "\u{2022}".repeat(text.chars().count())
+        } else {
+            String::from(text)
+        }
+    }
+
     fn pos_at(&self, x: i32) -> usize {
         let text = self.edit.text();
-        let stops = Self::font().caret_stops(text);
+        let stops = Self::font().caret_stops(&self.shown());
         let rel = x - (self.rect.x + 12) + self.scroll_x;
         for (k, (i, _)) in text.char_indices().enumerate() {
             if rel < (stops[k] + stops[k + 1]) / 2 {
@@ -907,8 +927,9 @@ impl TextField {
         cv.stroke_round_rect(r, 8, if focused { with_alpha(theme::accent(), 0xC0) } else { t.control_border });
         let inner = Rect::new(r.x + 12, r.y, r.w - 24, r.h);
         let base = r.y + (r.h + f.ascent as i32 + f.descent as i32) / 2;
+        let shown = self.shown();
         let text = self.edit.text();
-        let stops = f.caret_stops(text);
+        let stops = f.caret_stops(&shown);
         let at = |p: usize| stops[text.char_indices().position(|(k, _)| k >= p).unwrap_or(stops.len() - 1)];
         // Keep the caret in view.
         let cx = at(self.edit.caret());
@@ -926,7 +947,7 @@ impl TextField {
                 let (x0, x1) = (at(a), at(b));
                 cv.fill_rect(Rect::new(inner.x + x0 - self.scroll_x, r.y + 6, x1 - x0, r.h - 12), c);
             }
-            cv.text(inner.x - self.scroll_x, base, text, f, t.text);
+            cv.text(inner.x - self.scroll_x, base, &shown, f, t.text);
             if focused && self.caret_on && self.edit.selection().is_none() {
                 cv.fill_rect(Rect::new(inner.x + cx - self.scroll_x, r.y + 8, 2, r.h - 16), theme::accent());
             }
@@ -977,6 +998,10 @@ impl TextField {
     pub fn key(&mut self, ev: &KeyEvent, now: u64) -> KeyResult {
         self.caret_on = true;
         self.last_blink = now;
+        // A password never leaves the field through the clipboard.
+        if self.secure && (ev.mods.ctrl || ev.mods.super_key) && matches!(ev.ch, Some('c' | 'C' | 'x' | 'X')) {
+            return KeyResult { handled: true, edited: false };
+        }
         self.edit.handle_key(ev, now)
     }
 

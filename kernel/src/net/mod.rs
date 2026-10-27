@@ -73,6 +73,10 @@ pub trait Nic: Send + Sync {
     /// Called by the network task every few milliseconds: cards without an
     /// interrupt collect received frames here.
     fn poll(&self) {}
+    /// Wireless cards are named wlanN instead of ethN.
+    fn wireless(&self) -> bool {
+        false
+    }
 }
 
 pub struct Interface {
@@ -184,10 +188,11 @@ pub fn init() {
 pub fn register(nic: Arc<dyn Nic>) -> usize {
     let mac = nic.mac();
     let driver = nic.driver();
+    let prefix = if nic.wireless() { "wlan" } else { "eth" };
     let index = with(|s| {
-        let n = s.ifaces.iter().filter(|i| !i.loopback()).count();
+        let n = s.ifaces.iter().filter(|i| i.name.starts_with(prefix)).count();
         s.ifaces.push(Interface {
-            name: alloc::format!("eth{n}"),
+            name: alloc::format!("{prefix}{n}"),
             nic: Some(nic),
             mac,
             ip: ANY,
@@ -203,9 +208,25 @@ pub fn register(nic: Arc<dyn Nic>) -> usize {
         });
         s.ifaces.len() - 1
     });
-    log!("net", "eth{}: {} ({})", index - 1, mac_str(mac), driver);
+    log!("net", "{}: {} ({})", with(|s| s.ifaces[index].name.clone()), mac_str(mac), driver);
     WAKE.wake_all();
     index
+}
+
+/// A card's link came up or went down (Wi-Fi joined or left a network):
+/// forget the old address and start DHCP over.
+pub fn link_changed(iface: usize, up: bool) {
+    with(|s| {
+        if let Some(f) = s.ifaces.get_mut(iface) {
+            f.ip = ANY;
+            f.mask = ANY;
+            f.gateway = ANY;
+            f.dns.clear();
+            f.dhcp = Some(dhcp::Client::new());
+            log!("net", "{}: link {}", f.name, if up { "up" } else { "down" });
+        }
+    });
+    WAKE.wake_all();
 }
 
 /// A received Ethernet frame (drivers call this, also from interrupt handlers).

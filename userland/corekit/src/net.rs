@@ -674,3 +674,34 @@ pub fn describe(e: Error) -> &'static str {
         _ => abi::err::name(e.0),
     }
 }
+
+// -------------------------------------------------------------------- Wi-Fi
+
+/// The Wi-Fi adapter's state; `None` without Wi-Fi hardware.
+pub fn wifi_status() -> Option<abi::WifiStatus> {
+    let mut s = abi::WifiStatus::default();
+    call(nr::WIFI_STATUS, &[&mut s as *mut _ as u64]).ok().map(|_| s)
+}
+
+/// Networks heard recently (asks for a new scan too).
+pub fn wifi_networks() -> Vec<abi::WifiNetwork> {
+    let mut v = vec![abi::WifiNetwork::default(); 64];
+    let n = call(nr::WIFI_NETWORKS, &[v.as_mut_ptr() as u64, v.len() as u64]).unwrap_or(0) as usize;
+    v.truncate(n.min(64));
+    v
+}
+
+/// Starts joining a network (progress shows in [`wifi_status`]); an empty
+/// password for open networks.
+pub fn wifi_connect(ssid: &[u8], password: &str) -> Result<u64> {
+    call(nr::WIFI_CONNECT, &[ssid.as_ptr() as u64, ssid.len() as u64, password.as_ptr() as u64, password.len() as u64])
+}
+
+pub fn wifi_disconnect() {
+    let _ = call(nr::WIFI_DISCONNECT, &[]);
+}
+
+/// The SSID bytes as text.
+pub fn wifi_name(ssid: &[u8]) -> String {
+    String::from_utf8_lossy(ssid).into_owned()
+}
