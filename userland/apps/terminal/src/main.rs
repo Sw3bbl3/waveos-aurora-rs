@@ -17,13 +17,15 @@ use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use aurorakit::canvas::{rgb, Canvas};
-use aurorakit::geom::Rect;
-use aurorakit::theme;
-use aurorakit::{App, Env, KeyCode, KeyEvent, Request};
+use core::cell::Cell;
 use corekit::abi::open;
 use corekit::fs;
 use corekit::process::{self, Stdio};
+use waveui::lumen::canvas::{rgb, Canvas as Surface};
+use waveui::lumen::geom::Rect;
+use waveui::lumen::theme;
+use waveui::prelude::*;
+use waveui::Request;
 
 const BG: u32 = rgb(0x14, 0x16, 0x1D);
 const FG: u32 = rgb(0xD8, 0xDE, 0xE9);
@@ -50,7 +52,7 @@ pub struct Terminal {
     input: String,
     history: Vec<String>,
     hist_pos: usize,
-    scroll_back: i32,
+    scroll_back: Cell<i32>,
     caret_on: bool,
     last_blink: u64,
     job: Option<Job>,
@@ -117,7 +119,7 @@ impl Terminal {
             input: String::new(),
             history: Vec::new(),
             hist_pos: 0,
-            scroll_back: 0,
+            scroll_back: Cell::new(0),
             caret_on: true,
             last_blink: 0,
             job: None,
@@ -149,14 +151,14 @@ impl Terminal {
         format!("aurora:{}$ ", fs::cwd())
     }
 
-    fn run(&mut self, cmdline: &str, env: &mut Env) {
+    fn run(&mut self, cmdline: &str, env: &mut Vec<Request>) {
         self.queue = command_list(cmdline);
         self.status = 0;
         self.run_queue(env);
     }
 
     /// Runs queued commands until one starts a program (or the list ends).
-    fn run_queue(&mut self, env: &mut Env) {
+    fn run_queue(&mut self, env: &mut Vec<Request>) {
         while self.job.is_none() {
             let Some((then, cmd)) = self.queue.pop_front() else { return };
             let go = match then {
@@ -170,7 +172,7 @@ impl Terminal {
         }
     }
 
-    fn run_one(&mut self, cmdline: &str, env: &mut Env) {
+    fn run_one(&mut self, cmdline: &str, env: &mut Vec<Request>) {
         let stages: Vec<Vec<String>> = cmdline.split('|').map(tokenize).collect();
         if stages.iter().any(|s| s.is_empty()) {
             if stages.len() > 1 {
@@ -189,7 +191,7 @@ impl Terminal {
         }
     }
 
-    fn builtin(&mut self, argv: &[String], env: &mut Env) -> bool {
+    fn builtin(&mut self, argv: &[String], env: &mut Vec<Request>) -> bool {
         let arg = |i: usize| argv.get(i).map(String::as_str);
         match argv[0].as_str() {
             "help" => self.out(
@@ -202,7 +204,7 @@ impl Terminal {
                 FG,
             ),
             "clear" => self.lines.clear(),
-            "exit" => env.requests.push(Request::Close),
+            "exit" => env.push(Request::Close),
             "cd" => {
                 let target = fs::resolve(&fs::cwd(), arg(1).unwrap_or("/"));
                 if let Err(e) = fs::chdir(&target) {
@@ -216,8 +218,8 @@ impl Terminal {
                 self.out(&h.join("\n"), FG);
             }
             "theme" => match arg(1) {
-                Some("dark") => env.requests.push(Request::SetDark(true)),
-                Some("light") => env.requests.push(Request::SetDark(false)),
+                Some("dark") => env.push(Request::SetDark(true)),
+                Some("light") => env.push(Request::SetDark(false)),
                 _ => self.out("usage: theme light|dark", RED),
             },
             "open" => match arg(1) {
@@ -226,24 +228,24 @@ impl Terminal {
                     let path = fs::resolve(&fs::cwd(), target);
                     let is_file = fs::stat(&path).is_ok_and(|s| s.kind == corekit::abi::KIND_FILE);
                     if is_file && (path.ends_with(".elf") || path.starts_with("/System/Bin/")) {
-                        env.requests.push(Request::OpenApp(path));
+                        env.push(Request::OpenApp(path));
                     } else if is_file {
-                        env.requests.push(Request::OpenFile(path));
+                        env.push(Request::OpenFile(path));
                     } else {
                         let mut name = String::from(target);
                         if let Some(c) = name.get_mut(0..1) {
                             c.make_ascii_uppercase();
                         }
                         if fs::exists(&format!("/System/Apps/{name}.elf")) {
-                            env.requests.push(Request::OpenApp(name));
+                            env.push(Request::OpenApp(name));
                         } else {
                             self.out(&format!("open: no app or file called '{target}'"), RED);
                         }
                     }
                 }
             },
-            "shutdown" | "poweroff" => env.requests.push(Request::Shutdown),
-            "reboot" | "restart" => env.requests.push(Request::Reboot),
+            "shutdown" | "poweroff" => env.push(Request::Shutdown),
+            "reboot" | "restart" => env.push(Request::Reboot),
             _ => return false,
         }
         true
@@ -420,15 +422,14 @@ fn tokenize(line: &str) -> Vec<String> {
     out
 }
 
-impl App for Terminal {
-    fn title(&self) -> String {
-        format!("Terminal — {}", fs::cwd())
-    }
-    fn size(&self) -> (i32, i32) {
-        (680, 420)
-    }
+#[derive(Clone)]
+pub enum Msg {
+    Key(KeyEvent),
+    Scroll(i32),
+}
 
-    fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
+impl Terminal {
+    fn draw(&self, cv: &mut Surface, area: Rect, active: bool) {
         cv.fill_rect(area, BG);
         let f = theme::mono(14);
         let cw = f.advance('M').max(1);
@@ -450,20 +451,20 @@ impl App for Terminal {
             }
         }
         let max_back = screen.len().saturating_sub(rows) as i32;
-        self.scroll_back = self.scroll_back.clamp(0, max_back);
-        let end = screen.len() - self.scroll_back as usize;
+        let back = self.scroll_back.get().clamp(0, max_back);
+        self.scroll_back.set(back);
+        let end = screen.len() - back as usize;
         let start = end.saturating_sub(rows);
         for (i, (s, c)) in screen[start..end].iter().enumerate() {
             let y = area.y + PAD + i as i32 * LINE_H + 14;
-            if start + i + 1 == screen.len() && !prompt.is_empty() && s.starts_with("aurora:") && self.scroll_back == 0
-            {
+            if start + i + 1 == screen.len() && !prompt.is_empty() && s.starts_with("aurora:") && back == 0 {
                 let pw = cv.text(area.x + PAD, y, &prompt, f, GREEN);
                 cv.text(area.x + PAD + pw, y, s.get(prompt.len()..).unwrap_or(""), f, *c);
             } else {
                 cv.text(area.x + PAD, y, s, f, *c);
             }
         }
-        if env.focused && self.caret_on && self.scroll_back == 0 {
+        if active && self.caret_on && back == 0 {
             let total = input_line.chars().count();
             let row = (end - start - 1) as i32;
             let col = (total % cols) as i32;
@@ -472,13 +473,13 @@ impl App for Terminal {
         }
     }
 
-    fn key(&mut self, ev: &KeyEvent, env: &mut Env) -> bool {
+    fn key(&mut self, ev: &KeyEvent, now: u64, env: &mut Vec<Request>) -> bool {
         if !ev.pressed {
             return false;
         }
         self.caret_on = true;
-        self.last_blink = env.now_ms;
-        self.scroll_back = 0;
+        self.last_blink = now;
+        self.scroll_back.set(0);
         if ev.mods.ctrl && matches!(ev.ch, Some('l') | Some('L')) {
             self.lines.clear();
             return true;
@@ -528,31 +529,66 @@ impl App for Terminal {
         }
         true
     }
+}
 
-    fn scroll(&mut self, delta: i32, _area: Rect) -> bool {
-        self.scroll_back = (self.scroll_back - delta * 3).max(0);
-        true
+impl App for Terminal {
+    type Message = Msg;
+
+    fn title(&self) -> String {
+        format!("Terminal — {}", fs::cwd())
+    }
+    fn size(&self) -> (i32, i32) {
+        (680, 420)
     }
 
-    fn tick(&mut self, env: &mut Env) -> bool {
+    fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
+        let mut requests = Vec::new();
+        match msg {
+            Msg::Key(ev) => {
+                self.key(&ev, cx.now(), &mut requests);
+            }
+            Msg::Scroll(lines) => self.scroll_back.set((self.scroll_back.get() - lines).max(0)),
+        }
+        for r in requests {
+            cx.request(r);
+        }
+    }
+
+    fn poll_interval(&self) -> Option<u64> {
+        Some(if self.job.is_some() { 20 } else { 100 })
+    }
+
+    fn poll(&mut self, cx: &mut Context<Msg>) -> bool {
         let mut changed = self.poll_job();
         if core::mem::take(&mut self.list_pending) {
-            self.run_queue(env);
+            let mut requests = Vec::new();
+            self.run_queue(&mut requests);
+            for r in requests {
+                cx.request(r);
+            }
+            changed = true;
         }
-        if env.focused && env.now_ms - self.last_blink >= 530 {
+        let now = cx.now();
+        if now - self.last_blink >= 530 {
             self.caret_on = !self.caret_on;
-            self.last_blink = env.now_ms;
+            self.last_blink = now;
             changed = true;
         }
         changed
     }
 
-    fn tick_interval(&self) -> u64 {
-        if self.job.is_some() {
-            20
-        } else {
-            100
-        }
+    fn view(&self, env: &Env) -> View<'_, Msg> {
+        let active = env.active;
+        Canvas::new(move |cv, r| self.draw(cv, r, active))
+            .on_input(|e| match e {
+                CanvasEvent::Key(k) => Some(Msg::Key(k)),
+                CanvasEvent::Scroll { dy, .. } if dy != 0 => Some(Msg::Scroll(dy / 16)),
+                _ => None,
+            })
+            .focusable()
+            .focused()
+            .id("terminal")
+            .fill()
     }
 }
 
@@ -617,5 +653,5 @@ corekit::entry!(main);
 
 fn main(_: corekit::Args) -> i32 {
     let _ = fs::chdir("/Documents");
-    aurorakit::run(Terminal::new())
+    waveui::run(Terminal::new())
 }

@@ -161,6 +161,13 @@ fn resolve(child: i32, p: i32, fixed: Option<i32>, min: Option<i32>, max: Option
 
 /// How eagerly a view takes extra space along `axis` (0: not at all).
 pub(crate) fn flex<M>(v: &View<'_, M>, axis: Axis) -> u16 {
+    flex_of(v, axis, false)
+}
+
+/// `cross`: `v` sits in a stack running the other way, so only views that
+/// fill whatever they're given (scroll views, lists, frames to the edge)
+/// make it grow; its spacers and `.grow()` share that stack's other axis.
+fn flex_of<M>(v: &View<'_, M>, axis: Axis, cross: bool) -> u16 {
     if v.mods.hidden {
         return 0;
     }
@@ -172,7 +179,7 @@ pub(crate) fn flex<M>(v: &View<'_, M>, axis: Axis) -> u16 {
     if fixed.is_some() {
         return 0;
     }
-    if v.mods.grow > 0 {
+    if v.mods.grow > 0 && !cross {
         return v.mods.grow;
     }
     if max == Some(i32::MAX) {
@@ -182,16 +189,15 @@ pub(crate) fn flex<M>(v: &View<'_, M>, axis: Axis) -> u16 {
         return 0;
     }
     match &v.node {
-        Node::Spacer { .. } => 1,
+        Node::Spacer { .. } => !cross as u16,
         Node::Scroll { axis: a, .. } if *a == axis => 1,
         Node::Scroll { .. } => 0,
         Node::List { .. } | Node::Split { .. } | Node::TextEditor { .. } | Node::Canvas { .. } => 1,
         Node::Stack { axis: a, children, .. } if *a == axis => {
-            children.iter().map(|c| flex(c, axis)).max().unwrap_or(0)
+            children.iter().map(|c| flex_of(c, axis, cross)).max().unwrap_or(0)
         }
-        Node::Stack { children, .. } | Node::ZStack { children, .. } => {
-            children.iter().map(|c| flex(c, axis)).max().unwrap_or(0)
-        }
+        Node::Stack { children, .. } => children.iter().map(|c| flex_of(c, axis, true)).max().unwrap_or(0),
+        Node::ZStack { children, .. } => children.iter().map(|c| flex_of(c, axis, cross)).max().unwrap_or(0),
         Node::TextField { .. } | Node::Slider { .. } | Node::Progress { circular: false, .. } => {
             (axis == Axis::Horizontal) as u16
         }

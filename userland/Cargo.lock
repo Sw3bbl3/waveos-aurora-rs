@@ -62,8 +62,8 @@ dependencies = [
 name = "app-activity"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -78,8 +78,8 @@ dependencies = [
 name = "app-clock"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -127,8 +127,8 @@ dependencies = [
 name = "app-notes"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -173,8 +173,8 @@ dependencies = [
 name = "app-terminal"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]

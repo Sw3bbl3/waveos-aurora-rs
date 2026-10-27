@@ -363,6 +363,11 @@ pub(crate) enum Node<'a, M> {
         value: String,
         mono: bool,
         action: Option<Handler<String, M>>,
+        caret: Option<Handler<(usize, usize), M>>,
+        highlights: Vec<(usize, usize)>,
+        current: Option<usize>,
+        placeholder: String,
+        rust: bool,
     },
     Progress {
         value: Option<f32>,
@@ -951,10 +956,55 @@ pub struct TextEditor;
 impl TextEditor {
     #[allow(clippy::new_ret_no_self)]
     pub fn new<'a, M>(value: impl Into<String>) -> View<'a, M> {
-        View::of(Node::TextEditor { value: value.into(), mono: false, action: None })
+        View::of(Node::TextEditor {
+            value: value.into(),
+            mono: false,
+            action: None,
+            caret: None,
+            highlights: Vec::new(),
+            current: None,
+            placeholder: String::new(),
+            rust: false,
+        })
     }
     pub fn monospaced<'a, M>(value: impl Into<String>) -> View<'a, M> {
-        View::of(Node::TextEditor { value: value.into(), mono: true, action: None })
+        let mut v = TextEditor::new(value);
+        if let Node::TextEditor { mono, .. } = &mut v.node {
+            *mono = true;
+        }
+        v
+    }
+}
+
+impl<'a, M> View<'a, M> {
+    /// For text editors: told the caret's line and column (1-based) when it moves.
+    pub fn on_caret(mut self, f: impl Fn((usize, usize)) -> M + 'static) -> Self {
+        if let Node::TextEditor { caret, .. } = &mut self.node {
+            *caret = Some(Rc::new(f));
+        }
+        self
+    }
+    /// For text editors: byte ranges to highlight (find matches), `current` stronger.
+    pub fn highlights(mut self, ranges: Vec<(usize, usize)>, current: Option<usize>) -> Self {
+        if let Node::TextEditor { highlights, current: c, .. } = &mut self.node {
+            *highlights = ranges;
+            *c = current;
+        }
+        self
+    }
+    /// For text editors: what shows while empty.
+    pub fn placeholder(mut self, text: impl Into<String>) -> Self {
+        if let Node::TextEditor { placeholder, .. } = &mut self.node {
+            *placeholder = text.into();
+        }
+        self
+    }
+    /// For text editors: colours Rust keywords, strings and comments.
+    pub fn rust_syntax(mut self) -> Self {
+        if let Node::TextEditor { rust, .. } = &mut self.node {
+            *rust = true;
+        }
+        self
     }
 }
 

@@ -294,6 +294,8 @@ pub(crate) struct Rt {
     editors: BTreeMap<u64, TextView>,
     anims: BTreeMap<u64, Anim>,
     canvas_sizes: BTreeMap<u64, (i32, i32)>,
+    /// Where each editor's caret was last reported.
+    carets: BTreeMap<u64, (usize, usize)>,
     pending_resize: Vec<(Vec<u32>, i32, i32)>,
     pub seen: BTreeSet<u64>,
     appeared: BTreeSet<u64>,
@@ -327,6 +329,7 @@ impl Rt {
             editors: BTreeMap::new(),
             anims: BTreeMap::new(),
             canvas_sizes: BTreeMap::new(),
+            carets: BTreeMap::new(),
             pending_resize: Vec::new(),
             seen: BTreeSet::new(),
             appeared: BTreeSet::new(),
@@ -434,6 +437,7 @@ impl Rt {
         self.anims.retain(|k, _| seen.contains(k));
         self.scroll.retain(|k, _| seen.contains(k));
         self.canvas_sizes.retain(|k, _| seen.contains(k));
+        self.carets.retain(|k, _| seen.contains(k));
         self.appeared.retain(|k| seen.contains(k));
         for s in self.scroll.values_mut() {
             self.animating |= s.step();
@@ -701,6 +705,19 @@ impl<A: App> Host<A> {
         });
         self.send(m);
         true
+    }
+
+    /// Tells an editor's `on_caret` where its caret went, if it moved.
+    fn caret_moved(&mut self, h: &Hit) {
+        let Some(at) = self.rt.editors.get(&h.key).map(|e| e.caret_line_col()) else { return };
+        if self.rt.carets.insert(h.key, at) == Some(at) {
+            return;
+        }
+        let m = self.message(h, |v| match &v.node {
+            Node::TextEditor { caret: Some(f), .. } => Some(f(at)),
+            _ => None,
+        });
+        self.send(m);
     }
 
     fn submit(&mut self, h: &Hit) -> Option<bool> {
@@ -998,12 +1015,13 @@ impl<A: App> Host<A> {
                             self.text_changed(h);
                         }
                         if r.handled {
+                            self.caret_moved(h);
                             self.redraw = true;
                             return true;
                         }
                     }
                 }
-                HitKind::Canvas if !(ctrl && self.shortcut_hit(ev).is_some()) && ev.code != KeyCode::Tab => {
+                HitKind::Canvas if !(ctrl && self.shortcut_hit(ev).is_some()) && !(ev.code == KeyCode::Tab && ctrl) => {
                     if self.canvas_event(h, CanvasEvent::Key(*ev)) {
                         return true;
                     }
@@ -1014,7 +1032,7 @@ impl<A: App> Host<A> {
         if let Some(h) = self.shortcut_hit(ev) {
             return self.activate(&h);
         }
-        if ev.code == KeyCode::Tab && !ctrl {
+        if ev.code == KeyCode::Tab {
             return self.traverse(ev.mods.shift);
         }
         if let Some(h) = &focused {
@@ -1378,7 +1396,11 @@ impl<A: App> aurorakit::App for Host<A> {
                 self.choose(&h, i)
             }
             HitKind::Field => self.rt.fields.get_mut(&h.key).is_some_and(|f| f.click(x, y, shift, now)),
-            HitKind::Editor => self.rt.editors.get_mut(&h.key).is_some_and(|e| e.click(x, y, shift, now)),
+            HitKind::Editor => {
+                let r = self.rt.editors.get_mut(&h.key).is_some_and(|e| e.click(x, y, shift, now));
+                self.caret_moved(&h);
+                r
+            }
             HitKind::List { count, row_h, top, selection, .. } => {
                 let row = (y - top) / row_h.max(1);
                 if row >= 0 && (row as usize) < count && selection != Some(row as usize) {
@@ -1418,7 +1440,9 @@ impl<A: App> aurorakit::App for Host<A> {
             }
             HitKind::Editor => {
                 self.press = Some(Press { key: h.key, x, y, hit: h.clone(), dragged: false });
-                self.rt.editors.get_mut(&h.key).is_some_and(|e| e.double_click(x, y, now))
+                let r = self.rt.editors.get_mut(&h.key).is_some_and(|e| e.double_click(x, y, now));
+                self.caret_moved(&h);
+                r
             }
             HitKind::Canvas => {
                 self.press = Some(Press { key: h.key, x, y, hit: h.clone(), dragged: false });
@@ -1509,7 +1533,11 @@ impl<A: App> aurorakit::App for Host<A> {
                 self.set_slider(&cur, x)
             }
             HitKind::Field => self.rt.fields.get_mut(&h.key).is_some_and(|f| f.drag(x)),
-            HitKind::Editor => self.rt.editors.get_mut(&h.key).is_some_and(|e| e.drag(x, y)),
+            HitKind::Editor => {
+                let r = self.rt.editors.get_mut(&h.key).is_some_and(|e| e.drag(x, y));
+                self.caret_moved(&h);
+                r
+            }
             HitKind::Canvas => self.canvas_event(&h, CanvasEvent::Drag { x: x - h.full.x, y: y - h.full.y }),
             HitKind::Tap | HitKind::Toggle(_) | HitKind::Button { .. } => {
                 let inside = h.rect.contains(x, y) && !self.press.as_ref().is_some_and(|p| p.dragged);

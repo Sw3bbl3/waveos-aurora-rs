@@ -505,10 +505,19 @@ fn node<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &mut Canvas, p: Paint, rt: &mut
                 rt.hit(control_hit(v, l, cv, p, path, HitKind::Field));
             }
         }
-        Node::TextEditor { value, mono, .. } => {
+        Node::TextEditor { value, mono, highlights, current, placeholder, rust, .. } => {
             let font = if *mono { theme::mono(13) } else { body };
             let active = focused && rt.active && enabled;
-            rt.editor(key, value, font).draw(cv, n, active);
+            let e = rt.editor(key, value, font);
+            if e.highlights != *highlights {
+                e.highlights = highlights.clone();
+            }
+            e.current_highlight = *current;
+            if e.placeholder != *placeholder {
+                e.placeholder = placeholder.clone();
+            }
+            e.rust_syntax = *rust;
+            e.draw(cv, n, active);
             if enabled {
                 rt.hit(control_hit(v, l, cv, p, path, HitKind::Editor));
                 rt.scrollers.push(Scroller {
