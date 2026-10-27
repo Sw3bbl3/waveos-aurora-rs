@@ -1249,9 +1249,12 @@ impl Desktop {
                 self.damage_all();
             }
         }
-        // The caret on Shore.
+        // The caret on Shore blinks: repaint just its field.
         if self.shore.is_some() {
-            self.damage_all();
+            match self.caret_area() {
+                Some(r) => self.damage(r),
+                None => self.damage_all(),
+            }
         }
         let ids: Vec<u32> = self.windows.iter().filter(|w| !w.minimized).map(|w| w.id).collect();
         for id in ids {
@@ -1361,7 +1364,7 @@ impl Desktop {
             || self.center.is_some()
             || self.spotlight.is_some()
             || self.current.is_some()
-            || self.shore.is_some()
+            || self.shore_moving()
             || self.crest_moving()
             || self.harbor_moving()
             || self.harbor.peek.is_some()
@@ -1375,6 +1378,7 @@ impl Desktop {
         // The bar's glass is its bubbles, not the whole strip.
         let mut materials =
             alloc::vec![self.left_bubble().0, self.right_bubble().0, self.crest_area(), self.dock_rect()];
+        materials.extend(self.shore_materials());
         for w in &self.windows {
             if w.minimized {
                 continue;
