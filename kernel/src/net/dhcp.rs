@@ -92,6 +92,7 @@ pub fn tick(s: &mut Stack, now: u64) {
             iface.ip = ANY;
             iface.gateway = ANY;
             iface.dhcp.as_mut().unwrap().state = State::Init;
+            crate::gui::network_changed();
             continue;
         }
         if c.state == State::Bound && now < c.renew_at {

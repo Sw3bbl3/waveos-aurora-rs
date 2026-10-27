@@ -1,6 +1,6 @@
 //! Kernel build script: passes the linker script and compiles the C half of
 //! the kernel — the Linux compatibility layer in `linux/` and the Linux
-//! drivers built on it — into a static library.
+//! drivers built on it — and hands the objects to the linker.
 //!
 //! The C code needs clang (any recent version). Without it the kernel still
 //! builds, minus the ported drivers; `cfg(linuxkpi)` tells the Rust side.
@@ -39,10 +39,12 @@ fn main() {
         found.sort();
         files.extend(found);
     }
-    let objects = compile_all(&cc, &linux, &out, &files);
-    archive(&out, &objects);
-    println!("cargo:rustc-link-search=native={}", out.display());
-    println!("cargo:rustc-link-lib=static=waveoslinux");
+    // The objects go straight to the linker. (An archive would need an
+    // archiver that indexes ELF objects; macOS's `ar` doesn't, and the link
+    // then can't find any of the C symbols.)
+    for obj in compile_all(&cc, &linux, &out, &files) {
+        println!("cargo:rustc-link-arg-bins={}", obj.display());
+    }
     println!("cargo:rustc-cfg=linuxkpi");
 }
 
@@ -120,18 +122,4 @@ fn compile_all(cc: &str, linux: &Path, out: &Path, files: &[PathBuf]) -> Vec<Pat
         panic!("C compilation failed:\n{}", failures.join("\n"));
     }
     objects
-}
-
-/// Bundles the objects into libwaveoslinux.a (llvm-ar, else ar).
-fn archive(out: &Path, objects: &[PathBuf]) {
-    let lib = out.join("libwaveoslinux.a");
-    let _ = std::fs::remove_file(&lib);
-    for ar in ["llvm-ar", "ar"] {
-        if let Ok(status) = Command::new(ar).arg("crs").arg(&lib).args(objects).status() {
-            if status.success() {
-                return;
-            }
-        }
-    }
-    panic!("could not run llvm-ar or ar to archive the C objects");
 }
