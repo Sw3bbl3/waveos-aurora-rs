@@ -197,7 +197,6 @@ pub fn route_isa_irq(acpi: &AcpiInfo, irq: u8, vector: u8) {
 
 /// Routes global system interrupt `gsi` (e.g. a PCI INTx line from `_PRT`, or
 /// the ACPI SCI) to `vector` on the boot CPU.
-#[allow(dead_code)] // first user: the ACPI SCI
 pub fn route_gsi(gsi: u32, vector: u8, level: bool, active_low: bool) -> bool {
     let base = IOAPIC_GSI_BASE.load(Ordering::Relaxed) as u32;
     let max = (ioapic_read(1) >> 16) & 0xFF;
@@ -206,6 +205,14 @@ pub fn route_gsi(gsi: u32, vector: u8, level: bool, active_low: bool) -> bool {
     ioapic_write(0x10 + 2 * pin + 1, boot_apic_id() << 24);
     ioapic_write(0x10 + 2 * pin, low);
     true
+}
+
+/// Masks a global system interrupt (a stuck shared line).
+pub fn mask_gsi(gsi: u32) {
+    let base = IOAPIC_GSI_BASE.load(Ordering::Relaxed) as u32;
+    if let Some(pin) = gsi.checked_sub(base) {
+        ioapic_write(0x10 + 2 * pin, ioapic_read(0x10 + 2 * pin) | LVT_MASKED);
+    }
 }
 
 /// The local APIC id of CPU 0, where device interrupts are delivered.

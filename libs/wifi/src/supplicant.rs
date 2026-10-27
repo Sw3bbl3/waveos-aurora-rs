@@ -271,4 +271,3 @@ fn gtk_from(data: &[u8]) -> Option<Gtk> {
     }
     Some(Gtk { key_id: kde[6] & 3, key, rsc: 0 })
 }
-

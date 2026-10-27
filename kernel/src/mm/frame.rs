@@ -45,9 +45,9 @@ impl FrameAllocator {
         None
     }
 
-    fn alloc_contiguous(&mut self, count: u64) -> Option<u64> {
+    fn alloc_contiguous(&mut self, count: u64, limit: u64) -> Option<u64> {
         let mut run = 0;
-        for f in 0..self.frames {
+        for f in 0..self.frames.min(limit / PAGE_SIZE) {
             if self.is_free(f) {
                 run += 1;
                 if run == count {
@@ -114,7 +114,13 @@ pub fn alloc() -> Option<u64> {
 
 /// Allocates `count` physically contiguous frames.
 pub fn alloc_contiguous(count: u64) -> Option<u64> {
-    FRAMES.lock().as_mut()?.alloc_contiguous(count)
+    FRAMES.lock().as_mut()?.alloc_contiguous(count, u64::MAX)
+}
+
+/// Allocates `count` physically contiguous frames that end below `limit`
+/// (for devices that address only the first 4 GiB).
+pub fn alloc_contiguous_below(count: u64, limit: u64) -> Option<u64> {
+    FRAMES.lock().as_mut()?.alloc_contiguous(count, limit)
 }
 
 #[allow(dead_code)] // used by the self-tests; the GUI never frees frames yet

@@ -128,12 +128,7 @@ fn wifi() {
 
     wifi::connect(b"Harbor Cafe", sim::PASSWORD).unwrap();
     assert!(eventually(5000, || state() == CONNECTED), "did not connect: state {}", state());
-    let wlan_ip = || {
-        crate::net::interfaces()
-            .into_iter()
-            .find(|i| i.name.starts_with(b"wlan"))
-            .map(|i| i.ip)
-    };
+    let wlan_ip = || crate::net::interfaces().into_iter().find(|i| i.name.starts_with(b"wlan")).map(|i| i.ip);
     assert!(eventually(10_000, || wlan_ip() == Some(sim::CLIENT_IP)), "no DHCP address: {:?}", wlan_ip());
     crate::kprint!("(wlan0 {:?} over WPA2) ", sim::CLIENT_IP);
     wifi::disconnect();

@@ -186,7 +186,14 @@ impl AccessPoint {
         kd.extend_from_slice(&self.gtk);
         let wrapped = crypto::wrap_key(&ptk.kek, &pad(kd))?;
         self.replay += 1;
-        let k = key_frame(KI_V2 | KI_ACK | KI_MIC | KI_SECURE | KI_ENCRYPTED, self.replay, &[0; 32], 0, &wrapped, Some(&ptk.kck));
+        let k = key_frame(
+            KI_V2 | KI_ACK | KI_MIC | KI_SECURE | KI_ENCRYPTED,
+            self.replay,
+            &[0; 32],
+            0,
+            &wrapped,
+            Some(&ptk.kck),
+        );
         self.send_to_station(ETHERTYPE_EAPOL, &k)
     }
 

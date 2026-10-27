@@ -63,6 +63,28 @@ jobs:
       - name: Kernel self-tests, two boots on the same disk
         run: cargo xtask test --disk ${{ matrix.disk }} --smp ${{ matrix.smp }} --net ${{ matrix.net }}
 
+  usb:
+    name: USB controllers (EHCI with UHCI or OHCI companions, OHCI, UHCI)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU and OVMF
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf xorriso
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # The default (xHCI) runs with every kernel test above; here each older
+      # controller drives the stick, the tablet and a hub with a keyboard.
+      - name: USB tests on EHCI (both companion kinds), OHCI and UHCI
+        env:
+          AURORA_TEST_FILTER: USB
+        run: |
+          cargo xtask test --usb ehci
+          cargo xtask test --usb ehci-ohci
+          cargo xtask test --usb ohci
+          cargo xtask test --usb uhci
+
   boot:
     name: Boot to desktop and build the USB image
     runs-on: ubuntu-24.04

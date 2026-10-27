@@ -290,7 +290,15 @@ pub struct WifiStatus {
 
 impl Default for WifiStatus {
     fn default() -> Self {
-        WifiStatus { state: 0, ssid_len: 0, ssid: [0; 32], message_len: 0, driver_len: 0, message: [0; 96], driver: [0; 48] }
+        WifiStatus {
+            state: 0,
+            ssid_len: 0,
+            ssid: [0; 32],
+            message_len: 0,
+            driver_len: 0,
+            message: [0; 96],
+            driver: [0; 48],
+        }
     }
 }
 

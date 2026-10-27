@@ -5,8 +5,7 @@
 //! into characters, exactly as for PS/2. USB keyboards don't repeat keys by
 //! themselves, so held keys repeat in software with the Keyboard settings.
 
-use super::xhci::PipeHandler;
-use super::{Interface, Setup, UsbDevice, DESC_REPORT};
+use super::{Interface, PipeHandler, Setup, UsbDevice, DESC_REPORT};
 use crate::drivers::input::{self, InputEvent, KeyCode, KeyEvent, Modifiers};
 use crate::drivers::keymap;
 use crate::sync::IrqMutex;
@@ -157,7 +156,11 @@ impl PipeHandler for Keyboard {
         }
         st.keys = new;
         st.mods = d[0];
+        let repeating = st.repeat.is_some();
         drop(st);
+        if repeating {
+            super::kick_ticks();
+        }
         for e in events {
             input::push(InputEvent::Key(e));
         }
@@ -401,7 +404,7 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
         let _ = dev.control(Setup::class_interface(SET_PROTOCOL, 0, iface.number, 0, false), None);
         let _ = dev.control(Setup::class_interface(SET_IDLE, 0, iface.number, 0, false), None);
     }
-    if !dev.ctrl.configure(dev.slot, dev.speed, &[ep], None) {
+    if !dev.bus.configure(dev.dev, &[ep], None) {
         return None;
     }
     let (handler, name): (Arc<dyn PipeHandler>, &'static str) = match layout {
@@ -416,7 +419,12 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
             (Arc::new(Pointer { layout: l }), name)
         }
     };
-    dev.ctrl.open_pipe(dev.slot, &ep, handler).then_some(name)
+    dev.bus.open_pipe(dev.dev, &ep, handler).then_some(name)
+}
+
+/// Xbox controllers (vendor protocols): see the game controller driver.
+pub fn attach_xbox(_dev: &UsbDevice, _iface: &Interface) -> Option<&'static str> {
+    None
 }
 
 #[cfg(feature = "ktest")]

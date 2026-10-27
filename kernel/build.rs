@@ -108,10 +108,11 @@ fn compile_all(cc: &str, linux: &Path, out: &Path, files: &[PathBuf]) -> Vec<Pat
                 let result = Command::new(cc).args(&flags).arg("-c").arg(src).arg("-o").arg(&objects[i]).output();
                 match result {
                     Ok(o) if o.status.success() => {}
-                    Ok(o) => failures
-                        .lock()
-                        .unwrap()
-                        .push(format!("{}:\n{}", src.display(), String::from_utf8_lossy(&o.stderr))),
+                    Ok(o) => failures.lock().unwrap().push(format!(
+                        "{}:\n{}",
+                        src.display(),
+                        String::from_utf8_lossy(&o.stderr)
+                    )),
                     Err(e) => failures.lock().unwrap().push(format!("{}: {e}", src.display())),
                 }
             });

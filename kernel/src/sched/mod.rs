@@ -617,6 +617,44 @@ pub fn unpark() {
     PARKED.store(0, Ordering::Release);
 }
 
+/// Prints where every task that is not running stopped: its name, state and
+/// the return addresses on its stack (resolve them with `addr2line -e` on the
+/// kernel ELF). For the self-tests' panic report; it never waits for a lock.
+pub fn dump_stacks() {
+    let Some(guard) = SCHED.try_lock() else {
+        crate::kprintln!("(scheduler busy: no task stacks)");
+        return;
+    };
+    let Some(s) = guard.as_ref() else { return };
+    for (&id, t) in &s.tasks {
+        if t.idle || t.running_on.is_some() {
+            continue;
+        }
+        let Some(stack) = t._stack.as_ref() else { continue };
+        let (lo, hi) = (stack.as_ptr() as u64, stack.as_ptr() as u64 + stack.len() as u64);
+        let read = |a: u64| -> Option<u64> { (a >= lo && a + 8 <= hi).then(|| unsafe { (a as *const u64).read() }) };
+        // aurora_context_switch pushed rbp, rbx, r12–r15 below its return address.
+        let mut frames = alloc::vec::Vec::new();
+        if let Some(ret) = read(t.rsp + 48) {
+            frames.push(ret);
+        }
+        let mut rbp = read(t.rsp + 40).unwrap_or(0);
+        while frames.len() < 20 {
+            let (Some(next), Some(ret)) = (read(rbp), read(rbp + 8)) else { break };
+            frames.push(ret);
+            if next <= rbp {
+                break;
+            }
+            rbp = next;
+        }
+        crate::kprint!("task {} '{}' {:?}:", id, t.name, t.state);
+        for f in frames {
+            crate::kprint!(" {:#x}", f);
+        }
+        crate::kprintln!();
+    }
+}
+
 pub struct TaskInfo {
     pub id: TaskId,
     pub name: String,

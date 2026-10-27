@@ -27,6 +27,21 @@ impl<T> IrqMutex<T> {
         interrupts::disable();
         IrqMutexGuard { guard: Some(self.inner.lock()), reenable }
     }
+
+    /// The lock if it is free right now (the panic handler, which must not wait).
+    pub fn try_lock(&self) -> Option<IrqMutexGuard<'_, T>> {
+        let reenable = interrupts::are_enabled();
+        interrupts::disable();
+        match self.inner.try_lock() {
+            Some(g) => Some(IrqMutexGuard { guard: Some(g), reenable }),
+            None => {
+                if reenable {
+                    interrupts::enable();
+                }
+                None
+            }
+        }
+    }
 }
 
 impl<T> Deref for IrqMutexGuard<'_, T> {

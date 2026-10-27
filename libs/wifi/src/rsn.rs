@@ -76,7 +76,12 @@ impl Rsn {
         if b.len() < 2 || u16::from_le_bytes([b[0], b[1]]) != 1 {
             return None;
         }
-        let mut rsn = Rsn { group: CIPHER_CCMP, pairwise: alloc::vec![CIPHER_CCMP], akm: alloc::vec![AKM_8021X], capabilities: 0 };
+        let mut rsn = Rsn {
+            group: CIPHER_CCMP,
+            pairwise: alloc::vec![CIPHER_CCMP],
+            akm: alloc::vec![AKM_8021X],
+            capabilities: 0,
+        };
         if b.len() < 6 {
             return Some(rsn);
         }

@@ -76,12 +76,8 @@ pub fn probe_gpus() -> Vec<*mut c_void> {
         };
         let msix = d.enable_msi("virtio-gpu", interrupt, 0).is_some();
         t.no_config_interrupt();
-        let dev: &'static Device = Box::leak(Box::new(Device {
-            t,
-            msix,
-            polling: AtomicBool::new(!msix),
-            queues: IrqMutex::new(Vec::new()),
-        }));
+        let dev: &'static Device =
+            Box::leak(Box::new(Device { t, msix, polling: AtomicBool::new(!msix), queues: IrqMutex::new(Vec::new()) }));
         DEVICES.lock().push(dev);
 
         let (mut start, mut len) = ([0u64; 6], [0u64; 6]);

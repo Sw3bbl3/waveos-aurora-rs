@@ -6,8 +6,7 @@
 //! whole-disk "superfloppy") are mounted at `/Volumes/<label>` and unmounted
 //! when it is unplugged.
 
-use super::xhci::{Controller, CC_STALL};
-use super::{Endpoint, Interface, Setup, UsbDevice};
+use super::{Bus, Endpoint, Interface, Setup, UsbDevice, STALL};
 use crate::drivers::block::{self, check_io, BlockDevice, BlockResult, Dma};
 use crate::sync::Mutex;
 use alloc::boxed::Box;
@@ -40,11 +39,13 @@ struct Io {
     tag: u32,
     wrapper: Dma,
     data: Dma,
+    /// Where sense data goes, so a failed write can be retried with its data intact.
+    scratch: Dma,
 }
 
 pub struct UsbDisk {
-    ctrl: &'static Controller,
-    slot: u8,
+    bus: &'static Bus,
+    dev: u8,
     iface: u8,
     bulk_in: Endpoint,
     bulk_out: Endpoint,
@@ -72,22 +73,32 @@ impl UsbDisk {
         w.write::<u8>(12, if inbound { 0x80 } else { 0 });
         w.write::<u8>(14, cdb.len() as u8);
         w.bytes_mut()[15..15 + cdb.len()].copy_from_slice(cdb);
-        self.ctrl.bulk(self.slot, &self.bulk_out, w.phys, 31, 2000).map_err(|_| EIO)?;
+        if let Err(code) = self.bus.transfer(self.dev, &self.bulk_out, w.phys, 31, 2000) {
+            log!("usb", "{}: sending SCSI {:#04x} failed ({})", self.model, cdb[0], code);
+            return Err(EIO);
+        }
         let mut moved = 0;
         if len > 0 {
             let ep = if inbound { &self.bulk_in } else { &self.bulk_out };
-            match self.ctrl.bulk(self.slot, ep, io.data.phys, len, 10_000) {
+            match self.bus.transfer(self.dev, ep, io.data.phys, len, 10_000) {
                 Ok(n) => moved = n,
                 // A stalled data phase still ends with a status wrapper.
-                Err(CC_STALL) => {}
-                Err(_) => {
+                Err(STALL) => {}
+                Err(code) => {
+                    log!("usb", "{}: data phase of SCSI {:#04x} failed ({})", self.model, cdb[0], code);
                     self.reset_recovery();
                     return Err(EIO);
                 }
             }
         }
         let csw = w.phys + 64;
-        let n = self.ctrl.bulk(self.slot, &self.bulk_in, csw, 13, 2000).map_err(|_| EIO)?;
+        let n = match self.bus.transfer(self.dev, &self.bulk_in, csw, 13, 2000) {
+            Ok(n) => n,
+            Err(code) => {
+                log!("usb", "{}: status of SCSI {:#04x} failed ({})", self.model, cdb[0], code);
+                return Err(EIO);
+            }
+        };
         let status = w.read::<u8>(64 + 12);
         if n < 13 || w.read::<u32>(64) != CSW_SIGNATURE || w.read::<u32>(64 + 4) != io.tag || status == 2 {
             self.reset_recovery();
@@ -101,18 +112,21 @@ impl UsbDisk {
 
     /// Bulk-Only Mass Storage Reset, then clear both endpoints' halt.
     fn reset_recovery(&self) {
-        let _ = self.ctrl.control(self.slot, Setup::class_interface(0xFF, 0, self.iface, 0, false), None);
+        let _ = self.bus.control(self.dev, Setup::class_interface(0xFF, 0, self.iface, 0, false), None);
         for ep in [self.bulk_in, self.bulk_out] {
             let clear = Setup { request_type: 0x02, request: 1, value: 0, index: ep.address as u16, length: 0 };
-            let _ = self.ctrl.control(self.slot, clear, None);
+            let _ = self.bus.control(self.dev, clear, None);
         }
     }
 
     fn sense(&self, io: &mut Io) -> (u8, u8) {
-        match self.command(io, &[REQUEST_SENSE, 0, 0, 0, 18, 0], 18, true) {
+        core::mem::swap(&mut io.data, &mut io.scratch);
+        let r = match self.command(io, &[REQUEST_SENSE, 0, 0, 0, 18, 0], 18, true) {
             Ok(_) => (io.data.read::<u8>(2) & 0xF, io.data.read::<u8>(12)),
             Err(_) => (0xFF, 0),
-        }
+        };
+        core::mem::swap(&mut io.data, &mut io.scratch);
+        r
     }
 
     fn rw(&self, write: bool, lba: u64, blocks: u32, io: &mut Io) -> Result<(), isize> {
@@ -243,17 +257,20 @@ fn mount_volumes(disk: &Arc<dyn BlockDevice>, fallback: &str) -> Vec<String> {
 pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
     let bulk_in = *iface.endpoints.iter().find(|e| e.kind == 2 && e.is_in())?;
     let bulk_out = *iface.endpoints.iter().find(|e| e.kind == 2 && !e.is_in())?;
-    if !dev.ctrl.configure(dev.slot, dev.speed, &[bulk_in, bulk_out], None) {
+    if !dev.bus.configure(dev.dev, &[bulk_in, bulk_out], None) {
         return None;
     }
-    let (Some(wrapper), Some(data)) = (Dma::new(4096), Dma::new(MAX_TRANSFER)) else { return None };
+    let (Some(wrapper), Some(data), Some(scratch)) = (dev.bus.dma(4096), dev.bus.dma(MAX_TRANSFER), dev.bus.dma(4096))
+    else {
+        return None;
+    };
     let mut disk = UsbDisk {
-        ctrl: dev.ctrl,
-        slot: dev.slot,
+        bus: dev.bus,
+        dev: dev.dev,
         iface: iface.number,
         bulk_in,
         bulk_out,
-        io: Mutex::new(Io { tag: 0, wrapper, data }),
+        io: Mutex::new(Io { tag: 0, wrapper, data, scratch }),
         index: COUNT.fetch_add(1, Ordering::Relaxed),
         block_size: 512,
         blocks: 0,
@@ -305,15 +322,15 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
     let registered = block::register_counted(disk.clone());
     let fallback = if disk.model.is_empty() { String::from("USB Drive") } else { disk.model.clone() };
     let volumes = mount_volumes(&registered, &fallback);
-    if dev.ctrl.announce() {
+    if dev.bus.announce() {
         for v in &volumes {
             crate::gui::notify::system("Disk connected", v.trim_start_matches("/Volumes/"));
         }
     }
     // When unplugged: fail further I/O, unmount, forget the device.
     let gone_disk = disk.clone();
-    dev.ctrl.on_detach(
-        dev.slot,
+    dev.bus.on_detach(
+        dev.dev,
         Box::new(move || {
             gone_disk.gone.store(true, Ordering::Release);
             for v in &volumes {
