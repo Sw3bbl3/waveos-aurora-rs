@@ -55,7 +55,7 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - **ACPI:** the `acpi` crate's AML interpreter on its own task (a failure there only turns ACPI off): the power button, batteries, the power adapter, the lid, and sleep states.
 - **Sleep:** S3 suspend to RAM and resume, with every driver brought back and the other CPUs restarted.
 - **Tools:** `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play` and `volume`; a boot log on the EFI partition; [HARDWARE.md](HARDWARE.md) for testing on real machines.
-- **Deferred:** tickless idle with TSC-deadline timers; I²C touchpads; USB keyboard LEDs; Modern Standby (S0ix); a native GPU driver; per-CPU NVMe queues.
+- **Deferred:** tickless idle with TSC-deadline timers; I²C touchpads; Modern Standby (S0ix); a native GPU driver; per-CPU NVMe queues. (USB keyboard LEDs and the older USB controllers arrived in 0.9.)
 
 ## ✅ M6: Networking and the web
 
@@ -83,7 +83,7 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 Candidates, in no fixed order:
 
 - Tickless idle with TSC-deadline timers; per-CPU NVMe queues.
-- I²C-HID touchpads; USB keyboard LEDs.
+- I²C-HID touchpads (laptops' built-in ones); Bluetooth input.
 - More Linux graphics drivers on the compatibility layer in `kernel/linux` (virtio-gpu runs since 0.9): TTM, the DRM GPU scheduler and firmware loading for amdgpu and i915/xe, then a Linux-compatible interface for Mesa (3D). The Linux driver should also restore the display after sleep.
 - Wi-Fi on real hardware: firmware loading and Intel's command protocol for the iwlwifi adapters WaveOS already recognizes (the station, WPA2 and CCMP are done); WPA3 (SAE).
 - More of the web platform (WebP, SVG, CORS); a user-space window server.
