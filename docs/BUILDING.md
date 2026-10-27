@@ -23,7 +23,9 @@ cargo xtask run --fresh-disk        # start over with a new disk (erases files s
 cargo xtask run --debug             # unoptimised kernel (slower, better backtraces)
 cargo xtask run --headless          # no window; serial log on stdout (and no sound)
 cargo xtask run --smp 1             # number of CPUs (default 4)
-cargo xtask run --battery           # add a test laptop battery, power adapter and lid (ACPI)
+cargo xtask run --battery           # add a laptop battery (73 %, discharging), power adapter and lid (ACPI)
+cargo xtask run --battery=host      # …that mirrors this computer's own battery, live (Linux, macOS, Windows hosts)
+cargo xtask run --battery=20,charging  # …at a fixed level, charging or discharging
 cargo xtask run --usb-stick         # plug in a 64 MiB FAT32 USB stick (target/usb-stick.img)
 cargo xtask run --no-sound          # no host audio (sound goes nowhere)
 cargo xtask run --headless --audio-wav target/playback.wav # record native guest audio

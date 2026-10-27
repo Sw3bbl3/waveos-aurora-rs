@@ -119,6 +119,11 @@ impl acpi::Handler for KernelHandler {
         pci_write(address, offset, 4, value)
     }
 
+    /// Firmware's `Store (x, Debug)` output, into the kernel log.
+    fn handle_debug(&self, object: &acpi::aml::object::Object) {
+        log!("acpi", "AML debug: {}", object);
+    }
+
     fn nanos_since_boot(&self) -> u64 {
         crate::time::now_ns()
     }

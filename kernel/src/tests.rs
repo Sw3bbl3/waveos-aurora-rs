@@ -680,8 +680,10 @@ fn acpi_runtime() {
     let ready = wait_for(|| crate::acpi::power_info().flags & ACPI != 0, 5000);
     assert!(ready, "the ACPI runtime did not come up");
     assert!(crate::acpi::sleep_type(5).is_some(), "no \\_S5 from AML");
-    // xtask adds a test SSDT: battery 35 040 of 48 000 mWh, discharging at 9.5 W,
-    // adapter unplugged, lid open.
+    // xtask adds a test SSDT (assets/acpi/test-battery.asl): battery 35 040 of
+    // 48 000 mWh, discharging at 9.5 W, adapter unplugged, lid open. Its _BST
+    // stores through Index and reads PCI configuration space at an offset, so
+    // 73 % also proves those work in the AML interpreter.
     let p = crate::acpi::power_info();
     assert!(p.flags & BATTERY != 0, "the test battery was not found");
     assert_eq!(p.percent, 73);

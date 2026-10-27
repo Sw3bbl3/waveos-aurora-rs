@@ -1,11 +1,12 @@
 # Third-party components
 
-WaveOS's native media integration uses these vendored decoder components:
+WaveOS uses these vendored components:
 
 | Component | Version | License | Local changes |
 |---|---|---|---|
 | rusty_h264-decoder | 0.16.0 | [BSD-2-Clause](vendor/rusty_h264-decoder/LICENSE) | [no_std imports and formatting](vendor/rusty_h264-decoder/WAVEOS-PATCHES.md) |
 | rusty_aac | 1.1.0 | [Apache-2.0](vendor/rusty_aac/LICENSE) | [decoder-only no_std port and formatting](vendor/rusty_aac/WAVEOS-PATCHES.md) |
+| acpi (AML interpreter) | 6.1.1 | [MIT](vendor/acpi/LICENCE-MIT) or [Apache-2.0](vendor/acpi/LICENCE-APACHE) | [stores through references, PCI configuration offsets](vendor/acpi/WAVEOS-PATCHES.md) |
 
 The interface typefaces ship in `/System/Fonts` next to their licenses:
 

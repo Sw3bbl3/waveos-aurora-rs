@@ -14,7 +14,7 @@
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
-mod aml;
+mod battery;
 mod display;
 mod help;
 mod image;
@@ -116,7 +116,13 @@ fn main() {
                 } else {
                     host_audio()
                 },
-                battery: flag("--battery"),
+                battery: false,
+                host_battery: args.iter().find(|a| a.starts_with("--battery")).map(|a| {
+                    battery::parse(a).unwrap_or_else(|e| {
+                        eprintln!("{e}");
+                        exit(2)
+                    })
+                }),
                 net,
                 netdev_extra: String::new(),
                 usb_stick: flag("--usb-stick").then(|| {
@@ -634,6 +640,8 @@ struct RunOpts<'a> {
     audio: String,
     /// Add a test SSDT with a laptop battery, power adapter and lid.
     battery: bool,
+    /// A battery that mirrors the host's (or fixed values), through shared memory.
+    host_battery: Option<battery::Source>,
     /// A raw disk image to attach as a USB stick.
     usb_stick: Option<PathBuf>,
     /// Network card: virtio, e1000, e1000e or none (QEMU user networking).
@@ -689,9 +697,19 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         cmd.arg("-drive").arg(format!("id=stick,if=none,format=raw,file={}", stick.display()));
         cmd.args(["-device", "usb-storage,bus=xhci.0,port=2,drive=stick"]);
     }
+    if let Some(source) = opts.host_battery {
+        let page = battery::start(source, root().join("target/battery-page"));
+        cmd.arg("-object").arg(format!(
+            "memory-backend-file,id=batpage,share=on,mem-path={},size={}",
+            page.display(),
+            battery::PAGE_SIZE
+        ));
+        cmd.arg("-device").arg(format!("ivshmem-plain,memdev=batpage,bus=pcie.0,addr={}", battery::PCI_SLOT));
+        cmd.arg("-acpitable").arg(format!("file={}", root().join("assets/acpi/host-battery.aml").display()));
+    }
     if opts.battery {
         let ssdt = root().join("target/battery-ssdt.aml");
-        fs::write(&ssdt, aml::battery_ssdt()).expect("write battery SSDT");
+        fs::write(&ssdt, include_bytes!("../../assets/acpi/test-battery.aml")).expect("write battery SSDT");
         cmd.arg("-acpitable").arg(format!("file={}", ssdt.display()));
     }
     // A network card on QEMU's user networking (NAT; the host is 10.0.2.2).
@@ -911,6 +929,7 @@ fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, fwd_port: u16) ->
         net,
         netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
         battery: true,
+        host_battery: None,
         usb_stick: Some({
             let stick = root().join("target/test-usb-stick.img");
             image::create_usb_stick(&stick).expect("USB stick image");
