@@ -26,6 +26,7 @@ mod monitor;
 mod package;
 mod sounds;
 mod tar;
+mod usbredir;
 
 use std::env;
 use std::fs;
@@ -146,6 +147,7 @@ fn main() {
                 netdev_extra: String::new(),
                 gpu,
                 usb,
+                virtual_hid: Vec::new(),
                 usb_stick: flag("--usb-stick").then(|| {
                     let stick = root().join("target/usb-stick.img");
                     image::create_usb_stick(&stick).expect("USB stick image");
@@ -673,6 +675,9 @@ struct RunOpts<'a> {
     gpu: &'a str,
     /// USB controller: xhci, ehci (with UHCI companions), ehci-ohci (with an OHCI one), ohci or uhci.
     usb: &'a str,
+    /// Virtual USB devices (keyboard with media keys, touchpad, game
+    /// controllers) served over usb-redir, behind the hub.
+    virtual_hid: Vec<(usbredir::Kind, PathBuf)>,
 }
 
 /// The host's own sound output, for interactive runs.
@@ -759,6 +764,7 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     cmd.arg("-device").arg(format!("usb-hub,bus={bus},port={hub}"));
     cmd.arg("-device").arg(format!("usb-tablet,bus={bus},port={tablet}"));
     cmd.arg("-device").arg(format!("usb-kbd,bus={bus},port={hub}.1"));
+    cmd.args(usbredir::qemu_args(&opts.virtual_hid, bus, hub));
     if let Some(stick) = &opts.usb_stick {
         cmd.arg("-drive").arg(format!("id=stick,if=none,format=raw,file={}", stick.display()));
         cmd.arg("-device").arg(format!("usb-storage,bus={bus},port={stick_port},drive=stick"));
@@ -1004,6 +1010,7 @@ fn run_tests_once(
         netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
         gpu,
         usb,
+        virtual_hid: usbredir::ALL.iter().map(|&k| (k, usbredir::start(k, &root().join("target")))).collect(),
         battery: true,
         host_battery: None,
         usb_stick: Some({

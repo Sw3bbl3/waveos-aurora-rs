@@ -23,14 +23,20 @@ struct MouseState {
     packet: [u8; 4],
     idx: usize,
     size: usize,
+    /// IntelliMouse Explorer: five buttons.
+    explorer: bool,
     x: i32,
     y: i32,
     buttons: u8,
+    /// Side buttons held (bit 0 back, bit 1 forward).
+    side: u8,
+    /// Sub-pixel motion left over after the speed setting.
+    remainder: (i32, i32),
 }
 
 impl MouseState {
     const fn new() -> Self {
-        Self { packet: [0; 4], idx: 0, size: 3, x: 0, y: 0, buttons: 0 }
+        Self { packet: [0; 4], idx: 0, size: 3, explorer: false, x: 0, y: 0, buttons: 0, side: 0, remainder: (0, 0) }
     }
 }
 
@@ -102,32 +108,51 @@ pub fn init() {
     write_data(0xF4);
     let _ = read_data();
 
-    // Mouse: defaults, try IntelliMouse (scroll wheel), enable streaming.
+    // Mouse: defaults, then the "knocks" (sample-rate sequences) that turn
+    // on IntelliMouse (wheel) and IntelliMouse Explorer (wheel and buttons
+    // 4–5), then streaming.
     let mut size = 3;
-    if mouse_cmd(0xF6) {
-        for rate in [200u8, 100, 80] {
+    let mut explorer = false;
+    let knock = |rates: [u8; 3]| {
+        for rate in rates {
             mouse_cmd(0xF3);
             mouse_cmd(rate);
         }
-        if mouse_cmd(0xF2) && read_data() == Some(3) {
-            size = 4;
+        if mouse_cmd(0xF2) {
+            read_data()
+        } else {
+            None
         }
+    };
+    if mouse_cmd(0xF6) {
+        if knock([200, 100, 80]) == Some(3) {
+            size = 4;
+            explorer = knock([200, 200, 80]) == Some(4);
+        }
+        mouse_cmd(0xF3);
+        mouse_cmd(100);
         mouse_cmd(0xF4);
     }
     flush();
     {
         let mut m = MOUSE.lock();
         m.size = size;
+        m.explorer = explorer;
         m.x = input::SCREEN_W.load(Ordering::Relaxed) / 2;
         m.y = input::SCREEN_H.load(Ordering::Relaxed) / 2;
     }
 
     let vm = vmmouse::init();
     VMMOUSE.store(vm, Ordering::Relaxed);
+    input::add_light_sink(set_lights);
     log!(
         "ps2",
         "keyboard ready; mouse {}{}",
-        if size == 4 { "with scroll wheel" } else { "3-button" },
+        match (size, explorer) {
+            (4, true) => "with scroll wheel and side buttons",
+            (4, false) => "with scroll wheel",
+            _ => "3-button",
+        },
         if vm { ", VMware absolute pointer enabled" } else { "" }
     );
 }
@@ -143,11 +168,13 @@ pub fn mouse_irq() {
     let byte = unsafe { Port::<u8>::new(DATA).read() };
     if VMMOUSE.load(Ordering::Relaxed) {
         while let Some(p) = vmmouse::poll() {
-            let w = input::SCREEN_W.load(Ordering::Relaxed);
-            let h = input::SCREEN_H.load(Ordering::Relaxed);
+            let (w, h) = input::screen_size();
             let x = (p.x as i64 * w as i64 / 0xFFFF) as i32;
             let y = (p.y as i64 * h as i64 / 0xFFFF) as i32;
-            input::push(InputEvent::Pointer { x, y, buttons: p.buttons, wheel: p.wheel });
+            input::push(InputEvent::Pointer { x, y, buttons: p.buttons });
+            if p.wheel != 0 {
+                input::push(InputEvent::Scroll { dx: 0, dy: p.wheel as i32 * input::NOTCH });
+            }
         }
         return;
     }
@@ -169,13 +196,46 @@ pub fn mouse_irq() {
     }
     let dx = b1 as i32 - (((b0 as i32) << 4) & 0x100);
     let dy = b2 as i32 - (((b0 as i32) << 3) & 0x100);
-    let w = input::SCREEN_W.load(Ordering::Relaxed);
-    let h = input::SCREEN_H.load(Ordering::Relaxed);
+    let (dx, dy) = input::scale_motion(dx, -dy, &mut m.remainder);
+    let (w, h) = input::screen_size();
     m.x = (m.x + dx).clamp(0, w - 1);
-    m.y = (m.y - dy).clamp(0, h - 1);
+    m.y = (m.y + dy).clamp(0, h - 1);
     m.buttons = b0 & 0x07;
-    let wheel = if m.size == 4 { ((b3 << 4) as i8) >> 4 } else { 0 };
-    input::push(InputEvent::Pointer { x: m.x, y: m.y, buttons: m.buttons, wheel });
+    // IntelliMouse: a wheel (positive down) in the fourth byte; the
+    // Explorer protocol also has buttons 4 and 5 (back, forward) there.
+    let (wheel, side) = match m.size {
+        4 if m.explorer => ((((b3 & 0x0F) << 4) as i8 >> 4) as i32, b3 >> 4 & 0x3),
+        4 => (b3 as i8 as i32, 0),
+        _ => (0, 0),
+    };
+    let changed = side ^ m.side;
+    m.side = side;
+    let (x, y, buttons) = (m.x, m.y, m.buttons);
+    drop(m);
+    input::push(InputEvent::Pointer { x, y, buttons });
+    if wheel != 0 {
+        input::push(InputEvent::Scroll { dx: 0, dy: wheel * input::NOTCH });
+    }
+    for (bit, code) in [(1u8, input::KeyCode::Back), (2, input::KeyCode::Forward)] {
+        if changed & bit != 0 {
+            input::push(InputEvent::Key(input::KeyEvent {
+                code,
+                ch: None,
+                pressed: side & bit != 0,
+                mods: input::modifiers(),
+            }));
+        }
+    }
+}
+
+/// Sets the keyboard's lights (only Caps Lock is used).
+fn set_lights(caps: bool) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        write_data(0xED);
+        let _ = read_data(); // ACK
+        write_data((caps as u8) << 2);
+        let _ = read_data();
+    });
 }
 
 /// Sets the keyboard's auto-repeat: `delay` 0–3 (250–1000 ms), `rate` 0 (30/s) – 31 (2/s).

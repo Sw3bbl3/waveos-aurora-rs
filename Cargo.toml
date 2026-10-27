@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 exclude = ["vendor/rusty_h264-decoder", "vendor/rusty_aac", "vendor/acpi"]
-members = ["libs/help", "libs/gina", "xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/aurorafs", "libs/fat32", "libs/image", "libs/wav", "libs/web", "libs/tls", "libs/surf", "libs/script", "libs/media", "libs/mutate", "libs/wifi"]
+members = ["libs/help", "libs/gina", "xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/aurorafs", "libs/fat32", "libs/image", "libs/wav", "libs/web", "libs/tls", "libs/surf", "libs/script", "libs/media", "libs/mutate", "libs/wifi", "libs/hid"]
 default-members = ["libs/gina", "xtask"]
 
 [workspace.package]

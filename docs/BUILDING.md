@@ -37,7 +37,7 @@ cargo xtask run --gpu virtio        # virtio-vga display, driven by the ported L
 cargo xtask run --wifi-sim          # simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
 cargo xtask test [--disk virtio] [--smp 1] [--gpu virtio]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
 cargo xtask lint                    # Clippy on every crate, for its own target; warnings are errors
-cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-wifi -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
+cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-wifi -p aurora-hid -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
 AURORA_MUTATIONS=100 cargo test -p aurorafs --release   # robustness tests, 100x longer than CI runs them
 cargo xtask image                   # target/waveos-aurora-usb.img for USB boot
 cargo xtask iso                     # target/waveos-aurora.iso for UEFI virtual machines

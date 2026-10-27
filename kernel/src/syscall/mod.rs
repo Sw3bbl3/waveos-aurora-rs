@@ -354,6 +354,32 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             crate::drivers::wifi::disconnect();
             Ok(0)
         }
+        nr::GAMEPADS => {
+            let list = crate::drivers::gamepad::list();
+            let max = (a[1] as usize).min(16);
+            let size = core::mem::size_of::<aurora_abi::GamepadInfo>();
+            let mut out = user::slice_mut(a[0], (max * size) as u64)?;
+            let n = list.len().min(max);
+            for (i, p) in list.iter().take(n).enumerate() {
+                let bytes = unsafe { core::slice::from_raw_parts(p as *const _ as *const u8, size) };
+                out[i * size..(i + 1) * size].copy_from_slice(bytes);
+            }
+            out.commit(n * size)?;
+            Ok(list.len() as u64)
+        }
+        nr::GAMEPAD_STATE => {
+            let st = crate::drivers::gamepad::state(a[0] as u32).ok_or(ENODEV)?;
+            let size = core::mem::size_of::<aurora_abi::GamepadState>();
+            let mut out = user::slice_mut(a[1], size as u64)?;
+            out.copy_from_slice(unsafe { core::slice::from_raw_parts(&st as *const _ as *const u8, size) });
+            out.commit(size)?;
+            Ok(0)
+        }
+        nr::GAMEPAD_RUMBLE => {
+            let level = |v: u64| v.min(255) as u8;
+            crate::drivers::gamepad::rumble(a[0] as u32, level(a[1]), level(a[2]), a[3])?;
+            Ok(0)
+        }
         nr::NET_INFO6 => {
             let list = crate::net::interfaces6();
             let max = (a[1] as usize).min(16);

@@ -574,7 +574,7 @@ impl Bus {
 
     pub fn open_pipe(&self, dev: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool {
         self.pipes.lock().push((dev, handler.clone()));
-        TICK_WAKE.wake_all();
+        kick_ticks();
         self.hcd.open_pipe(dev, ep, handler)
     }
 
@@ -703,6 +703,7 @@ impl Bus {
 // ------------------------------------------------------------------- ticks
 
 static TICK_WAKE: WaitQueue = WaitQueue::new();
+static TICK_KICKED: AtomicBool = AtomicBool::new(false);
 static TICKS_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn start_ticks() {
@@ -711,7 +712,8 @@ fn start_ticks() {
     }
 }
 
-/// Periodic work of every interrupt pipe (key repeat), across all buses.
+/// Periodic work of every interrupt pipe (key repeat, touchpad taps and
+/// gliding) and rumble timeouts, across all buses.
 fn tick_task() {
     loop {
         let now = crate::time::uptime_ms();
@@ -723,12 +725,18 @@ fn tick_task() {
                 next = next.min(ms.max(1));
             }
         }
-        TICK_WAKE.wait(next, || false);
+        // Game controllers' rumble ends when its time is up.
+        if let Some(ms) = crate::drivers::gamepad::tick(now) {
+            next = next.min(ms.max(1));
+        }
+        TICK_WAKE.wait(next, || TICK_KICKED.load(Ordering::Acquire));
+        TICK_KICKED.store(false, Ordering::Release);
     }
 }
 
 /// Wakes the tick task early (a key went down and wants repeating).
 pub fn kick_ticks() {
+    TICK_KICKED.store(true, Ordering::Release);
     TICK_WAKE.wake_all();
 }
 

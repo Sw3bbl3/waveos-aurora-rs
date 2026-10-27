@@ -43,6 +43,13 @@ pub enum KeyCode {
     PlayPause,
     NextTrack,
     PrevTrack,
+    /// Mouse side buttons and browser keys.
+    Back,
+    Forward,
+    BrightnessDown,
+    BrightnessUp,
+    Sleep,
+    Power,
     Unknown,
 }
 

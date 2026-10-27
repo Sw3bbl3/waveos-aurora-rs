@@ -31,6 +31,8 @@ fn default(key: &str) -> Option<&'static str> {
         pref::KEYBOARD => "us",
         pref::REPEAT_DELAY => "1",
         pref::REPEAT_RATE => "8",
+        pref::TAP_TO_CLICK | pref::NATURAL_SCROLLING => "1",
+        pref::TRACKING_SPEED | pref::POINTER_SPEED => "5",
         pref::VOLUME => "70",
         _ => return None,
     })
@@ -59,13 +61,21 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
     match key {
         pref::GLASS if !value.parse::<u8>().is_ok_and(|v| v <= 100) => return Err(EINVAL),
         pref::DOCK_SIZE if !value.parse::<u8>().is_ok_and(|v| (32..=64).contains(&v)) => return Err(EINVAL),
-        pref::REDUCE_TRANSPARENCY | pref::REDUCE_MOTION | pref::HIGH_CONTRAST | pref::DOCK_AUTOHIDE
+        pref::REDUCE_TRANSPARENCY
+        | pref::REDUCE_MOTION
+        | pref::HIGH_CONTRAST
+        | pref::DOCK_AUTOHIDE
+        | pref::TAP_TO_CLICK
+        | pref::NATURAL_SCROLLING
             if value != "0" && value != "1" =>
         {
             return Err(EINVAL)
         }
         pref::KEYBOARD if !keymap::LAYOUTS.iter().any(|l| l.id == value) => return Err(EINVAL),
         pref::ACCENT if value.parse::<u8>().is_err() => return Err(EINVAL),
+        pref::TRACKING_SPEED | pref::POINTER_SPEED if !value.parse::<u8>().is_ok_and(|v| (1..=10).contains(&v)) => {
+            return Err(EINVAL)
+        }
         _ => {}
     }
     settings::try_set(key, value)?;
@@ -98,6 +108,15 @@ pub fn apply_system(key: &str) {
             let volume = get(pref::VOLUME).and_then(|v| v.parse().ok()).unwrap_or(70u32);
             audio::set_volume(volume.min(100), get_bool(pref::MUTED));
         }
+        pref::POINTER_SPEED | pref::TRACKING_SPEED | pref::TAP_TO_CLICK | pref::NATURAL_SCROLLING => {
+            let speed = |k| get(k).and_then(|v| v.parse().ok()).unwrap_or(5u8);
+            crate::drivers::input::set_pointer_settings(
+                speed(pref::POINTER_SPEED),
+                speed(pref::TRACKING_SPEED),
+                get_bool(pref::TAP_TO_CLICK),
+                get_bool(pref::NATURAL_SCROLLING),
+            );
+        }
         _ => {}
     }
 }
@@ -111,7 +130,7 @@ pub fn set_volume(volume: u32, muted: bool) {
 }
 
 pub fn apply_all_system() {
-    for k in [pref::KEYBOARD, pref::REPEAT_DELAY, pref::VOLUME] {
+    for k in [pref::KEYBOARD, pref::REPEAT_DELAY, pref::VOLUME, pref::POINTER_SPEED] {
         apply_system(k);
     }
 }
