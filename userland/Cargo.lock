@@ -137,9 +137,9 @@ name = "app-paint"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
  "libm",
+ "waveui",
 ]
 
 [[package]]

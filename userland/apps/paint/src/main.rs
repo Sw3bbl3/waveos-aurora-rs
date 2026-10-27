@@ -14,24 +14,20 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use aurora_image::Image;
-use aurorakit::canvas::{blend, rgb, with_alpha, Canvas};
-use aurorakit::geom::Rect;
-use aurorakit::text::TextField;
-use aurorakit::theme;
-use aurorakit::widgets::{self, button, ButtonStyle};
-use aurorakit::{App, Env, KeyCode, KeyEvent};
+use aurora_image::Image as Picture;
 use corekit::fs;
+use waveui::lumen::canvas::{blend, rgb, with_alpha, Canvas as Surface};
+use waveui::lumen::geom::Rect;
+use waveui::lumen::theme;
+use waveui::prelude::*;
 
 use libm::{ceilf, fabsf, sqrtf};
 
-const TOOLBAR_H: i32 = 56;
-const STATUS_H: i32 = 26;
 const UNDO: usize = 12;
 const WHITE: u32 = 0xFFFF_FFFF;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Tool {
+pub enum Tool {
     Brush,
     Eraser,
     Line,
@@ -68,22 +64,6 @@ const PALETTE: [u32; 14] = [
     rgb(0xA2, 0x84, 0x5E),
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Hit {
-    Tool(usize),
-    Size,
-    FillShapes,
-    Swatch(usize),
-    Current,
-    Undo,
-    Redo,
-    Save,
-    HueBar,
-    SvSquare,
-    SheetSave,
-    SheetCancel,
-}
-
 struct Stroke {
     /// The image before this operation (also the undo step).
     before: Vec<u32>,
@@ -96,7 +76,7 @@ struct Stroke {
 }
 
 pub struct Paint {
-    img: Image,
+    img: Picture,
     path: Option<String>,
     dirty: bool,
     tool: Tool,
@@ -108,13 +88,40 @@ pub struct Paint {
     undo: Vec<Vec<u32>>,
     redo: Vec<Vec<u32>>,
     stroke: Option<Stroke>,
-    hover: Option<Hit>,
     picker: Option<(f32, f32, f32)>,
-    sheet: Option<TextField>,
+    /// The Save sheet's file name, while it is open.
+    sheet: Option<String>,
+    /// The pointer over the picture area (relative to it).
     cursor: Option<(i32, i32)>,
-    status: Option<(String, u64)>,
-    area: Rect,
-    sliding: Option<Hit>,
+    status: Option<String>,
+    /// The size of the picture area.
+    view: (i32, i32),
+}
+
+#[derive(Clone)]
+pub enum Msg {
+    Tool(usize),
+    Size(f32),
+    FillShapes(bool),
+    Swatch(usize),
+    TogglePicker,
+    Hue(i32, i32),
+    Shade(i32, i32),
+    Undo,
+    Redo,
+    Save,
+    SheetName(String),
+    SheetSave,
+    SheetCancel,
+    Begin(i32, i32),
+    Move(i32, i32),
+    End,
+    Cursor(Option<(i32, i32)>),
+    Zoom(i32),
+    ZoomTo(Option<i32>),
+    Resize(i32, i32),
+    Open(String),
+    ClearStatus,
 }
 
 fn rgb_to_hsv(c: u32) -> (f32, f32, f32) {
@@ -155,7 +162,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> u32 {
 impl Paint {
     fn new(path: Option<String>) -> Self {
         let mut p = Paint {
-            img: Image::new(1200, 800, WHITE),
+            img: Picture::new(1200, 800, WHITE),
             path: None,
             dirty: false,
             tool: Tool::Brush,
@@ -166,13 +173,11 @@ impl Paint {
             undo: Vec::new(),
             redo: Vec::new(),
             stroke: None,
-            hover: None,
             picker: None,
             sheet: None,
             cursor: None,
             status: None,
-            area: Rect::new(0, 0, 1000, 700),
-            sliding: None,
+            view: (1000, 600),
         };
         if let Some(path) = path {
             p.open(&path);
@@ -199,7 +204,7 @@ impl Paint {
     }
 
     fn flash(&mut self, msg: String) {
-        self.status = Some((msg, corekit::time::uptime_ms()));
+        self.status = Some(msg);
     }
 
     fn name(&self) -> String {
@@ -221,11 +226,7 @@ impl Paint {
     fn save(&mut self) {
         match self.path.clone() {
             Some(p) if p.to_lowercase().ends_with(".png") => self.save_to(p),
-            _ => {
-                let mut f = TextField::new("Untitled.png", "Name");
-                f.edit.select(0, 8);
-                self.sheet = Some(f);
-            }
+            _ => self.sheet = Some(String::from("Untitled.png")),
         }
     }
 
@@ -255,96 +256,27 @@ impl Paint {
 
     // ------------------------------------------------------------ layout
 
-    fn view(area: Rect) -> Rect {
-        Rect::new(area.x, area.y + TOOLBAR_H, area.w, area.h - TOOLBAR_H - STATUS_H)
-    }
-
-    fn zoom_pct(&self, area: Rect) -> i32 {
+    fn zoom_pct(&self) -> i32 {
         self.zoom.unwrap_or_else(|| {
-            let v = Self::view(area).inset(20);
+            let v = Rect::new(0, 0, self.view.0, self.view.1).inset(20);
             (v.w * 100 / self.img.width as i32).min(v.h * 100 / self.img.height as i32).clamp(5, 100)
         })
     }
 
-    fn image_rect(&self, area: Rect) -> Rect {
-        let z = self.zoom_pct(area);
+    /// Where the picture sits in the picture area.
+    fn image_rect(&self) -> Rect {
+        let z = self.zoom_pct();
         let (w, h) = (self.img.width as i32 * z / 100, self.img.height as i32 * z / 100);
-        let v = Self::view(area);
-        Rect::new(v.x + (v.w - w) / 2, v.y + (v.h - h) / 2, w, h)
+        Rect::new((self.view.0 - w) / 2, (self.view.1 - h) / 2, w, h)
     }
 
-    /// Image coordinates (fractional) of a point in the window.
+    /// Image coordinates (fractional) of a point in the picture area.
     fn to_image(&self, x: i32, y: i32) -> (f32, f32) {
-        let r = self.image_rect(self.area);
+        let r = self.image_rect();
         (
             (x - r.x) as f32 * self.img.width as f32 / r.w.max(1) as f32,
             (y - r.y) as f32 * self.img.height as f32 / r.h.max(1) as f32,
         )
-    }
-
-    fn hits(&self, area: Rect) -> Vec<(Hit, Rect)> {
-        let mut v = Vec::new();
-        let y = area.y + 11;
-        let mut x = area.x + 12;
-        for i in 0..TOOLS.len() {
-            v.push((Hit::Tool(i), Rect::new(x, y, 34, 34)));
-            x += 38;
-        }
-        x += 14;
-        v.push((Hit::Size, Rect::new(x, y + 7, 110, 20)));
-        x += 150;
-        v.push((Hit::FillShapes, Rect::new(x, y + 5, 40, 24)));
-        x += 58;
-        v.push((Hit::Current, Rect::new(x, y + 1, 32, 32)));
-        x += 42;
-        for i in 0..PALETTE.len() {
-            let (col, row) = (i as i32 % 7, i as i32 / 7);
-            v.push((Hit::Swatch(i), Rect::new(x + col * 18, y + row * 18, 15, 15)));
-        }
-        let r = area.right();
-        v.push((Hit::Save, Rect::new(r - 84, y + 2, 72, 30)));
-        v.push((Hit::Redo, Rect::new(r - 126, y + 2, 34, 30)));
-        v.push((Hit::Undo, Rect::new(r - 164, y + 2, 34, 30)));
-        if self.picker.is_some() {
-            let p = Self::picker_rect(area);
-            v.push((Hit::SvSquare, Rect::new(p.x + 12, p.y + 12, p.w - 24, 140)));
-            v.push((Hit::HueBar, Rect::new(p.x + 12, p.y + 162, p.w - 24, 16)));
-        }
-        if self.sheet.is_some() {
-            let s = Self::sheet_rect(area);
-            v.push((Hit::SheetSave, Rect::new(s.right() - 104, s.bottom() - 46, 88, 30)));
-            v.push((Hit::SheetCancel, Rect::new(s.right() - 200, s.bottom() - 46, 88, 30)));
-        }
-        v
-    }
-
-    fn picker_rect(area: Rect) -> Rect {
-        let cur = Rect::new(area.x + 12 + 7 * 38 + 14 + 150 + 58, area.y + 12, 32, 32);
-        Rect::new(cur.x - 40, area.y + TOOLBAR_H + 4, 220, 190)
-    }
-
-    fn sheet_rect(area: Rect) -> Rect {
-        Rect::new(area.x + (area.w - 380) / 2, area.y + TOOLBAR_H + 20, 380, 150)
-    }
-
-    fn hit_at(&self, x: i32, y: i32) -> Option<Hit> {
-        // Overlays first.
-        let hits = self.hits(self.area);
-        if self.sheet.is_some() {
-            return hits
-                .into_iter()
-                .filter(|(h, _)| matches!(h, Hit::SheetSave | Hit::SheetCancel))
-                .find(|(_, r)| r.contains(x, y))
-                .map(|(h, _)| h);
-        }
-        if self.picker.is_some() {
-            if let Some((h, _)) =
-                hits.iter().find(|(h, r)| matches!(h, Hit::HueBar | Hit::SvSquare) && r.contains(x, y))
-            {
-                return Some(*h);
-            }
-        }
-        hits.into_iter().find(|(_, r)| r.contains(x, y)).map(|(h, _)| h)
     }
 
     // ----------------------------------------------------------- painting
@@ -408,7 +340,7 @@ impl Paint {
         let bbox = Rect::new(sx.min(ex) - pad, sy.min(ey) - pad, (ex - sx).abs() + 2 * pad, (ey - sy).abs() + 2 * pad);
         s.dirty = Some(bbox);
         let (tool, color, size, fill) = (self.tool, self.color, self.size, self.fill_shapes);
-        let mut cv = Canvas::new(&mut self.img.pixels, w, h);
+        let mut cv = Surface::new(&mut self.img.pixels, w, h);
         cv.clip = bbox.intersect(&Rect::new(0, 0, w, h));
         match tool {
             Tool::Line => cv.line(sx, sy, ex, ey, size.max(1), color),
@@ -526,9 +458,10 @@ impl Paint {
         }
     }
 
+
     // ------------------------------------------------------------ drawing
 
-    fn draw_tool_icon(cv: &mut Canvas, tool: Tool, r: Rect, c: u32) {
+    fn draw_tool_icon(cv: &mut Surface, tool: Tool, r: Rect, c: u32) {
         let (cx, cy) = r.center();
         match tool {
             Tool::Brush => {
@@ -542,8 +475,8 @@ impl Paint {
             Tool::Line => cv.line(cx - 8, cy + 7, cx + 8, cy - 7, 2, c),
             Tool::Rect => cv.stroke_round_rect(Rect::new(cx - 8, cy - 6, 16, 12), 1, c),
             Tool::Ellipse => {
-                cv.fill_circle(cx, cy, 8, c);
-                cv.fill_circle(cx, cy, 6, theme::current().titlebar);
+                cv.stroke_round_rect(Rect::new(cx - 8, cy - 7, 16, 14), 7, c);
+                cv.stroke_round_rect(Rect::new(cx - 7, cy - 6, 14, 12), 6, c);
             }
             Tool::Fill => {
                 cv.fill_round_rect(Rect::new(cx - 7, cy - 5, 11, 11), 2, c);
@@ -556,122 +489,146 @@ impl Paint {
         }
     }
 
-    fn draw_toolbar(&mut self, cv: &mut Canvas, area: Rect) {
-        let t = theme::current();
-        let bar = Rect::new(area.x, area.y, area.w, TOOLBAR_H);
-        cv.fill_rect(bar, t.titlebar);
-        cv.fill_rect(Rect::new(area.x, bar.bottom() - 1, area.w, 1), t.separator);
-        for (h, r) in self.hits(area) {
-            let hovered = self.hover == Some(h);
-            match h {
-                Hit::Tool(i) => {
-                    let active = TOOLS[i].0 == self.tool;
-                    if active {
-                        cv.fill_round_rect(r, 8, with_alpha(theme::accent(), 0x30));
-                    } else if hovered {
-                        cv.fill_round_rect(r, 8, t.hover);
-                    }
-                    Self::draw_tool_icon(cv, TOOLS[i].0, r, if active { theme::accent() } else { t.text });
-                }
-                Hit::Size => {
-                    widgets::slider(cv, r, (self.size - 1) * 1000 / 63, hovered);
-                    cv.text(r.right() + 12, r.y + 15, &format!("{} px", self.size), theme::ui(12), t.text_secondary);
-                }
-                Hit::FillShapes => {
-                    widgets::toggle(cv, r, self.fill_shapes);
-                    cv.text(r.x - 2, r.bottom() + 12, "Fill", theme::ui(10), t.text_secondary);
-                }
-                Hit::Current => {
-                    cv.fill_round_rect(r, 8, self.color);
-                    cv.stroke_round_rect(r, 8, t.control_border);
-                }
-                Hit::Swatch(i) => {
-                    cv.fill_round_rect(r, 4, PALETTE[i]);
-                    cv.stroke_round_rect(
-                        r,
-                        4,
-                        if PALETTE[i] == self.color { theme::accent() } else { t.control_border },
-                    );
-                }
-                Hit::Undo | Hit::Redo => {
-                    let enabled = if h == Hit::Undo { !self.undo.is_empty() } else { !self.redo.is_empty() };
-                    if hovered && enabled {
-                        cv.fill_round_rect(r, 7, t.hover);
-                    }
-                    let c = if enabled { t.text } else { with_alpha(t.text_secondary, 0x70) };
-                    curved_arrow(cv, r.center(), h == Hit::Undo, c);
-                }
-                Hit::Save => button(cv, r, "Save", ButtonStyle::Primary, hovered),
-                _ => {}
-            }
-        }
-    }
-
-    fn draw_picker(&self, cv: &mut Canvas, area: Rect) {
-        let Some((hue, s, v)) = self.picker else { return };
-        let t = theme::current();
-        let p = Self::picker_rect(area);
-        cv.shadow(p, 12, 18, 6, t.shadow);
-        cv.fill_round_rect(p, 12, t.window_bg);
-        cv.stroke_round_rect(p, 12, t.window_border);
-        let sq = Rect::new(p.x + 12, p.y + 12, p.w - 24, 140);
-        for y in sq.y..sq.bottom() {
-            for x in sq.x..sq.right() {
-                let ss = (x - sq.x) as f32 / (sq.w - 1) as f32;
-                let vv = 1.0 - (y - sq.y) as f32 / (sq.h - 1) as f32;
-                if cv.clip.contains(x, y) {
-                    cv.buf[(y * cv.width + x) as usize] = hsv_to_rgb(hue, ss, vv);
+    fn paint_picture(&self, cv: &mut Surface, view: Rect, dark: bool) {
+        cv.fill_rect(view, if dark { 0xFF1A_1A20 } else { 0xFFDD_DDE3 });
+        let r = self.image_rect().offset(view.x, view.y);
+        cv.shadow(r, 2, 16, 4, theme::current().shadow / 2);
+        if r.w as u32 >= self.img.width {
+            // Nearest neighbour at 100% and above: crisp pixels.
+            let clip = cv.clip.intersect(&r);
+            let (iw, ih) = (self.img.width as i32, self.img.height as i32);
+            for y in clip.y..clip.bottom() {
+                let iy = ((y - r.y) * ih / r.h).min(ih - 1);
+                for x in clip.x..clip.right() {
+                    let ix = ((x - r.x) * iw / r.w).min(iw - 1);
+                    cv.buf[(y * cv.width + x) as usize] = self.img.pixels[(iy * iw + ix) as usize];
                 }
             }
+        } else {
+            cv.draw_image(&self.img.pixels, self.img.width, self.img.height, r, 255);
         }
-        let (mx, my) = (sq.x + (s * (sq.w - 1) as f32) as i32, sq.y + ((1.0 - v) * (sq.h - 1) as f32) as i32);
-        cv.fill_circle(mx, my, 6, 0xFFFF_FFFF);
-        cv.fill_circle(mx, my, 4, hsv_to_rgb(hue, s, v));
-        let bar = Rect::new(p.x + 12, p.y + 162, p.w - 24, 16);
-        for x in bar.x..bar.right() {
-            let hh = (x - bar.x) as f32 * 360.0 / bar.w as f32;
-            cv.fill_rect(Rect::new(x, bar.y, 1, bar.h), hsv_to_rgb(hh, 1.0, 1.0));
+        // Brush outline under the pointer.
+        if let (Some((x, y)), true) = (self.cursor, matches!(self.tool, Tool::Brush | Tool::Eraser)) {
+            let rad = (self.size * r.w / self.img.width as i32 / 2).max(2);
+            let (x, y) = (view.x + x, view.y + y);
+            cv.fill_circle(x, y, rad + 1, 0x60FF_FFFF);
+            cv.fill_circle(x, y, rad, with_alpha(if self.tool == Tool::Eraser { WHITE } else { self.color }, 0x90));
         }
-        let hx = bar.x + (hue / 360.0 * bar.w as f32) as i32;
-        cv.fill_round_rect(Rect::new(hx - 3, bar.y - 2, 6, bar.h + 4), 3, 0xFFFF_FFFF);
-        cv.stroke_round_rect(Rect::new(hx - 3, bar.y - 2, 6, bar.h + 4), 3, 0x60000000);
     }
 
-    fn pick_at(&mut self, h: Hit, x: i32, y: i32) {
-        let Some((hue, s, v)) = self.picker else { return };
-        let Some(r) = self.hits(self.area).into_iter().find(|(k, _)| *k == h).map(|(_, r)| r) else { return };
-        let (nh, ns, nv) = match h {
-            Hit::HueBar => (((x - r.x) as f32 / r.w as f32 * 360.0).clamp(0.0, 359.9), s, v),
-            _ => (
-                hue,
-                ((x - r.x) as f32 / (r.w - 1) as f32).clamp(0.0, 1.0),
-                (1.0 - (y - r.y) as f32 / (r.h - 1) as f32).clamp(0.0, 1.0),
-            ),
-        };
-        self.picker = Some((nh, ns, nv));
-        self.color = hsv_to_rgb(nh, ns, nv);
-        self.sliding = Some(h);
-    }
-}
-
-/// ↶ / ↷: a half circle with an arrowhead at its start.
-fn curved_arrow(cv: &mut Canvas, (cx, cy): (i32, i32), left: bool, c: u32) {
-    let d = if left { 1 } else { -1 };
-    // Upper half circle, radius 6, from the far side over the top to the arrow side.
-    let pts: Vec<(i32, i32)> = (0..=12)
-        .map(|k| {
-            let a = k as f32 * core::f32::consts::PI / 12.0;
-            let (x, y) = (libm::cosf(a), libm::sinf(a));
-            (cx + d * (x * 6.0) as i32, cy + 3 - (y * 6.0) as i32)
+    fn picker_view(&self) -> Option<View<'_, Msg>> {
+        let (hue, s, v) = self.picker?;
+        let square = Canvas::new(move |cv, sq| {
+            for y in sq.y..sq.bottom() {
+                for x in sq.x..sq.right() {
+                    let ss = (x - sq.x) as f32 / (sq.w - 1) as f32;
+                    let vv = 1.0 - (y - sq.y) as f32 / (sq.h - 1) as f32;
+                    if cv.clip.contains(x, y) {
+                        cv.buf[(y * cv.width + x) as usize] = hsv_to_rgb(hue, ss, vv);
+                    }
+                }
+            }
+            let (mx, my) = (sq.x + (s * (sq.w - 1) as f32) as i32, sq.y + ((1.0 - v) * (sq.h - 1) as f32) as i32);
+            cv.fill_circle(mx, my, 6, 0xFFFF_FFFF);
+            cv.fill_circle(mx, my, 4, hsv_to_rgb(hue, s, v));
         })
-        .collect();
-    cv.polyline(&pts, 2, c);
-    let (ex, ey) = *pts.last().unwrap();
-    cv.line(ex, ey + 1, ex - 3 * d, ey - 3, 2, c);
-    cv.line(ex, ey + 1, ex + 3 * d, ey - 3, 2, c);
+        .on_input(|e| match e {
+            CanvasEvent::Press { x, y, .. } | CanvasEvent::Drag { x, y } => Some(Msg::Shade(x, y)),
+            _ => None,
+        })
+        .size(196, 140)
+        .corner_radius(8)
+        .clipped();
+        let bar = Canvas::new(move |cv, bar| {
+            for x in bar.x..bar.right() {
+                let hh = (x - bar.x) as f32 * 360.0 / bar.w as f32;
+                cv.fill_rect(Rect::new(x, bar.y, 1, bar.h), hsv_to_rgb(hh, 1.0, 1.0));
+            }
+            let hx = bar.x + (hue / 360.0 * bar.w as f32) as i32;
+            cv.fill_round_rect(Rect::new(hx - 3, bar.y - 2, 6, bar.h + 4), 3, 0xFFFF_FFFF);
+            cv.stroke_round_rect(Rect::new(hx - 3, bar.y - 2, 6, bar.h + 4), 3, 0x6000_0000);
+        })
+        .on_input(|e| match e {
+            CanvasEvent::Press { x, y, .. } | CanvasEvent::Drag { x, y } => Some(Msg::Hue(x, y)),
+            _ => None,
+        })
+        .size(196, 20);
+        Some(
+            VStack::new()
+                .push(square)
+                .push(bar)
+                .spacing(10)
+                .padding(12)
+                .background_rounded(Color::Background, 12)
+                .border(Color::Separator, 12)
+                .shadow(),
+        )
+    }
+
+    fn toolbar(&self) -> View<'_, Msg> {
+        let accent = theme::accent();
+        let mut tools = HStack::new().spacing(4);
+        for (i, (tool, tip)) in TOOLS.iter().enumerate() {
+            let (tool, active) = (*tool, *tool == self.tool);
+            let icon = Canvas::new(move |cv, r| {
+                let c = if active { accent } else { theme::current().text };
+                Self::draw_tool_icon(cv, tool, r, c)
+            })
+            .size(20, 20);
+            let mut b = Button::with(icon).action(Msg::Tool(i)).button_style(ButtonStyle::Toolbar).help(*tip);
+            if active {
+                b = b.background_rounded(Color::Custom(with_alpha(accent, 0x30)), 8);
+            }
+            tools = tools.push(b);
+        }
+        let color = self.color;
+        let current = Canvas::new(move |cv, r| {
+            cv.fill_round_rect(r, 8, color);
+            cv.stroke_round_rect(r, 8, theme::current().control_border);
+        })
+        .size(30, 30)
+        .on_tap(Msg::TogglePicker)
+        .help("More colours");
+        let mut swatches = Grid::new(15).spacing(3).width(7 * 18);
+        for (i, c) in PALETTE.iter().enumerate() {
+            let (c, on) = (*c, *c == self.color);
+            swatches = swatches.push(
+                Canvas::new(move |cv, r| {
+                    cv.fill_round_rect(r, 4, c);
+                    cv.stroke_round_rect(r, 4, if on { theme::accent() } else { theme::current().control_border });
+                })
+                .size(15, 15)
+                .on_tap(Msg::Swatch(i)),
+            );
+        }
+        toolbar(vec![
+            tools,
+            Divider::new().height(28),
+            Slider::new(self.size as f32, 1.0..=64.0).step(1.0).on_change(Msg::Size).width(120).help("Brush size"),
+            Text::new(format!("{} px", self.size)).style(TextStyle::Callout).foreground(Color::SecondaryLabel).width(44),
+            Toggle::checkbox("Fill shapes", self.fill_shapes).on_change(Msg::FillShapes),
+            Divider::new().height(28),
+            current,
+            swatches,
+            Spacer::new(),
+            Button::symbol(Symbol::Undo).action(Msg::Undo).disabled(self.undo.is_empty()).help("Undo (Ctrl+Z)"),
+            Button::symbol(Symbol::Redo).action(Msg::Redo).disabled(self.redo.is_empty()).help("Redo (Ctrl+Shift+Z)"),
+            Button::new("Save").action(Msg::Save).button_style(ButtonStyle::Prominent).shortcut(Shortcut::ctrl('s')),
+        ])
+    }
+
+    fn pick(&mut self, hue: Option<f32>, sv: Option<(f32, f32)>) {
+        let Some((h, s, v)) = self.picker else { return };
+        let h = hue.unwrap_or(h);
+        let (s, v) = sv.unwrap_or((s, v));
+        self.picker = Some((h, s, v));
+        self.color = hsv_to_rgb(h, s, v);
+    }
 }
 
 impl App for Paint {
+    type Message = Msg;
+
     fn title(&self) -> String {
         format!("{}{} — Paint", self.name(), if self.dirty { " •" } else { "" })
     }
@@ -680,104 +637,34 @@ impl App for Paint {
         (1040, 700)
     }
 
-    fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
-        self.area = area;
-        let t = theme::current();
-        let view = Self::view(area);
-        cv.fill_rect(view, if t.dark { 0xFF1A_1A20 } else { 0xFFDD_DDE3 });
-        let r = self.image_rect(area);
-        cv.shadow(r, 2, 16, 4, t.shadow / 2);
-        cv.with_clip(view, |cv| {
-            if r.w as u32 >= self.img.width {
-                // Nearest neighbour at 100% and above: crisp pixels.
-                let clip = cv.clip.intersect(&r);
-                let (iw, ih) = (self.img.width as i32, self.img.height as i32);
-                for y in clip.y..clip.bottom() {
-                    let iy = ((y - r.y) * ih / r.h).min(ih - 1);
-                    for x in clip.x..clip.right() {
-                        let ix = ((x - r.x) * iw / r.w).min(iw - 1);
-                        cv.buf[(y * cv.width + x) as usize] = self.img.pixels[(iy * iw + ix) as usize];
-                    }
-                }
-            } else {
-                cv.draw_image(&self.img.pixels, self.img.width, self.img.height, r, 255);
-            }
-            // Brush outline under the pointer.
-            if let (Some((x, y)), true) = (self.cursor, matches!(self.tool, Tool::Brush | Tool::Eraser)) {
-                let rad = (self.size * r.w / self.img.width as i32 / 2).max(2);
-                cv.fill_circle(x, y, rad + 1, 0x60FF_FFFF);
-                cv.fill_circle(x, y, rad, with_alpha(if self.tool == Tool::Eraser { WHITE } else { self.color }, 0x90));
-            }
-        });
-        self.draw_toolbar(cv, area);
-        // Status bar.
-        let sb = Rect::new(area.x, area.bottom() - STATUS_H, area.w, STATUS_H);
-        cv.fill_rect(sb, t.titlebar);
-        cv.fill_rect(Rect::new(sb.x, sb.y, sb.w, 1), t.separator);
-        let pos = self
-            .cursor
-            .map(|(x, y)| self.to_image(x, y))
-            .filter(|p| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < self.img.width as f32 && p.1 < self.img.height as f32);
-        let mut info = format!("{} × {} px   ·   {}%", self.img.width, self.img.height, self.zoom_pct(area));
-        if let Some(p) = pos {
-            info.push_str(&format!("   ·   {}, {}", p.0 as i32, p.1 as i32));
-        }
-        cv.text(sb.x + 14, sb.y + 18, &info, theme::ui(12), t.text_secondary);
-        let tip = TOOLS.iter().find(|(k, _)| *k == self.tool).map(|(_, s)| *s).unwrap_or("");
-        let f = theme::ui(12);
-        let msg = match &self.status {
-            Some((m, at)) if env.now_ms < at + 3000 => m.clone(),
-            _ => String::from(tip),
-        };
-        cv.text(sb.right() - 14 - f.width(&msg), sb.y + 18, &msg, f, t.text_secondary);
-        self.draw_picker(cv, area);
-        if let Some(field) = &mut self.sheet {
-            cv.fill_rect(area, with_alpha(0x000000, 0x30));
-            let s = Self::sheet_rect(area);
-            cv.shadow(s, 12, 20, 6, t.shadow);
-            cv.fill_round_rect(s, 12, t.window_bg);
-            cv.stroke_round_rect(s, 12, t.window_border);
-            cv.text(s.x + 18, s.y + 30, "Save to Pictures as", theme::ui_bold(15), t.text);
-            field.draw(cv, Rect::new(s.x + 18, s.y + 44, s.w - 36, 34), env.focused);
-        }
-        if self.sheet.is_some() {
-            for (h, r) in self.hits(area) {
-                match h {
-                    Hit::SheetSave => button(cv, r, "Save", ButtonStyle::Primary, self.hover == Some(h)),
-                    Hit::SheetCancel => button(cv, r, "Cancel", ButtonStyle::Secondary, self.hover == Some(h)),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    fn click(&mut self, x: i32, y: i32, area: Rect, env: &mut Env) -> bool {
-        if let Some(f) = &mut self.sheet {
-            if f.click(x, y, env.mods.shift, env.now_ms) {
-                return true;
-            }
-        }
-        match self.hit_at(x, y) {
-            Some(Hit::Tool(i)) => self.tool = TOOLS[i].0,
-            Some(Hit::Size) => {
-                self.sliding = Some(Hit::Size);
-                self.drag(x, y, area, env);
-            }
-            Some(Hit::FillShapes) => self.fill_shapes = !self.fill_shapes,
-            Some(Hit::Swatch(i)) => {
+    fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
+        match msg {
+            Msg::Tool(i) => self.tool = TOOLS[i].0,
+            Msg::Size(v) => self.size = (v as i32).clamp(1, 64),
+            Msg::FillShapes(on) => self.fill_shapes = on,
+            Msg::Swatch(i) => {
                 self.color = PALETTE[i];
                 self.picker = None;
             }
-            Some(Hit::Current) => {
+            Msg::TogglePicker => {
                 self.picker = if self.picker.is_some() { None } else { Some(rgb_to_hsv(self.color)) };
             }
-            Some(Hit::Undo) => self.undo(),
-            Some(Hit::Redo) => self.redo(),
-            Some(Hit::Save) => self.save(),
-            Some(h @ (Hit::HueBar | Hit::SvSquare)) => self.pick_at(h, x, y),
-            Some(Hit::SheetSave) => {
-                if let Some(f) = self.sheet.take() {
-                    let mut name = String::from(f.text().trim());
+            Msg::Hue(x, _) => self.pick(Some((x as f32 / 196.0 * 360.0).clamp(0.0, 359.9)), None),
+            Msg::Shade(x, y) => {
+                self.pick(None, Some(((x as f32 / 195.0).clamp(0.0, 1.0), (1.0 - y as f32 / 139.0).clamp(0.0, 1.0))))
+            }
+            Msg::Undo => self.undo(),
+            Msg::Redo => self.redo(),
+            Msg::Save => {
+                self.save();
+                if self.sheet.is_some() {
+                    cx.focus("save-name");
+                }
+            }
+            Msg::SheetName(n) => self.sheet = Some(n),
+            Msg::SheetSave => {
+                if let Some(name) = self.sheet.take() {
+                    let mut name = String::from(name.trim());
                     if name.is_empty() {
                         name = String::from("Untitled.png");
                     }
@@ -788,134 +675,148 @@ impl App for Paint {
                     self.save_to(fs::join("/Pictures", &name));
                 }
             }
-            Some(Hit::SheetCancel) => self.sheet = None,
-            None => {
-                if self.sheet.is_some() {
-                    return false;
-                }
-                if self.picker.take().is_some() {
-                    return true;
-                }
-                if Self::view(area).contains(x, y) {
+            Msg::SheetCancel => self.sheet = None,
+            Msg::Begin(x, y) => {
+                if self.picker.take().is_none() {
                     self.begin(x, y);
                 }
             }
-        }
-        true
-    }
-
-    fn drag(&mut self, x: i32, y: i32, _area: Rect, _env: &mut Env) -> bool {
-        self.cursor = Some((x, y));
-        match self.sliding {
-            Some(Hit::Size) => {
-                if let Some(r) = self.hits(self.area).into_iter().find(|(h, _)| *h == Hit::Size).map(|(_, r)| r) {
-                    self.size = 1 + widgets::slider_value(r, x) * 63 / 1000;
-                }
-                return true;
-            }
-            Some(h @ (Hit::HueBar | Hit::SvSquare)) => {
-                self.pick_at(h, x, y);
-                return true;
-            }
-            _ => {}
-        }
-        if let Some(sheet) = &mut self.sheet {
-            return sheet.drag(x);
-        }
-        if self.stroke.is_none() {
-            return false;
-        }
-        let p = self.to_image(x, y);
-        match self.tool {
-            Tool::Brush | Tool::Eraser => self.stroke_to(p),
-            Tool::Line | Tool::Rect | Tool::Ellipse => self.shape_preview(p),
-            _ => {}
-        }
-        true
-    }
-
-    fn release(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
-        self.sliding = None;
-        if let Some(f) = &mut self.sheet {
-            f.release();
-        }
-        self.stroke.take().is_some()
-    }
-
-    fn hover(&mut self, x: i32, y: i32, area: Rect) -> bool {
-        let h = if x < 0 { None } else { self.hit_at(x, y) };
-        let c = (x >= 0 && Self::view(area).contains(x, y)).then_some((x, y));
-        let changed = h != self.hover || c != self.cursor;
-        self.hover = h;
-        self.cursor = c;
-        changed
-    }
-
-    fn scroll(&mut self, delta: i32, area: Rect) -> bool {
-        let z = self.zoom_pct(area);
-        let next = if delta < 0 { z * 5 / 4 + 1 } else { z * 4 / 5 };
-        self.zoom = Some(next.clamp(5, 800));
-        true
-    }
-
-    fn drop(&mut self, _x: i32, _y: i32, kind: u32, _area: Rect, _env: &mut Env) -> bool {
-        if let Some(corekit::dnd::Dropped::Files(paths)) = corekit::dnd::dropped(kind) {
-            if let Some(p) = paths.iter().find(|p| aurora_image::is_image_name(p)) {
-                let p = p.clone();
-                self.open(&p);
-                return true;
-            }
-        }
-        false
-    }
-
-    fn key(&mut self, ev: &KeyEvent, env: &mut Env) -> bool {
-        if !ev.pressed {
-            return false;
-        }
-        if let Some(f) = &mut self.sheet {
-            match ev.code {
-                KeyCode::Enter => {
-                    let r =
-                        self.hits(self.area).into_iter().find(|(h, _)| *h == Hit::SheetSave).map(|(_, r)| r).unwrap();
-                    let (cx, cy) = r.center();
-                    let area = self.area;
-                    return self.click(cx, cy, area, env);
-                }
-                KeyCode::Escape => self.sheet = None,
-                _ => {
-                    f.key(ev, env.now_ms);
+            Msg::Move(x, y) => {
+                self.cursor = Some((x, y));
+                if self.stroke.is_some() {
+                    let p = self.to_image(x, y);
+                    match self.tool {
+                        Tool::Brush | Tool::Eraser => self.stroke_to(p),
+                        Tool::Line | Tool::Rect | Tool::Ellipse => self.shape_preview(p),
+                        _ => {}
+                    }
                 }
             }
-            return true;
+            Msg::End => self.stroke = None,
+            Msg::Cursor(c) => self.cursor = c,
+            Msg::Zoom(d) => {
+                let z = self.zoom_pct();
+                let next = if d < 0 { z * 5 / 4 + 1 } else { z * 4 / 5 };
+                self.zoom = Some(next.clamp(5, 800));
+            }
+            Msg::ZoomTo(z) => self.zoom = z,
+            Msg::Resize(w, h) => self.view = (w, h),
+            Msg::Open(p) => self.open(&p),
+            Msg::ClearStatus => self.status = None,
         }
+        if self.status.is_some() {
+            cx.cancel(|m| matches!(m, Msg::ClearStatus));
+            cx.after(3000, Msg::ClearStatus);
+        }
+    }
+
+    fn key(&self, ev: &KeyEvent) -> Option<Msg> {
         let ctrl = ev.mods.ctrl || ev.mods.super_key;
+        let tool = |t: Tool| TOOLS.iter().position(|x| x.0 == t).map(Msg::Tool);
         match (ctrl, ev.ch.map(|c| c.to_ascii_lowercase())) {
-            (true, Some('z')) if ev.mods.shift => self.redo(),
-            (true, Some('z')) => self.undo(),
-            (true, Some('y')) => self.redo(),
-            (true, Some('s')) => self.save(),
-            (true, Some('0')) => self.zoom = None,
-            (true, Some('1')) => self.zoom = Some(100),
-            (false, Some('b')) => self.tool = Tool::Brush,
-            (false, Some('e')) => self.tool = Tool::Eraser,
-            (false, Some('l')) => self.tool = Tool::Line,
-            (false, Some('r')) => self.tool = Tool::Rect,
-            (false, Some('o')) => self.tool = Tool::Ellipse,
-            (false, Some('f')) => self.tool = Tool::Fill,
-            (false, Some('i')) => self.tool = Tool::Picker,
-            (false, Some('[')) => self.size = (self.size - 1).max(1),
-            (false, Some(']')) => self.size = (self.size + 1).min(64),
-            _ => return false,
+            (true, Some('z')) if ev.mods.shift => Some(Msg::Redo),
+            (true, Some('z')) => Some(Msg::Undo),
+            (true, Some('y')) => Some(Msg::Redo),
+            (true, Some('0')) => Some(Msg::ZoomTo(None)),
+            (true, Some('1')) => Some(Msg::ZoomTo(Some(100))),
+            (false, Some('b')) => tool(Tool::Brush),
+            (false, Some('e')) => tool(Tool::Eraser),
+            (false, Some('l')) => tool(Tool::Line),
+            (false, Some('r')) => tool(Tool::Rect),
+            (false, Some('o')) => tool(Tool::Ellipse),
+            (false, Some('f')) => tool(Tool::Fill),
+            (false, Some('i')) => tool(Tool::Picker),
+            (false, Some('[')) => Some(Msg::Size((self.size - 1) as f32)),
+            (false, Some(']')) => Some(Msg::Size((self.size + 1) as f32)),
+            _ => None,
         }
-        true
     }
 
-    fn tick(&mut self, env: &mut Env) -> bool {
-        if let Some(f) = &mut self.sheet {
-            return f.tick(env.now_ms, env.focused);
+    fn sheet(&self, _env: &Env) -> Option<View<'_, Msg>> {
+        let name = self.sheet.as_ref()?;
+        Some(
+            VStack::new()
+                .push(Text::new("Save to Pictures as").style(TextStyle::Title2))
+                .push(
+                    TextField::new("Name", name.clone())
+                        .on_change(Msg::SheetName)
+                        .on_submit(Msg::SheetSave)
+                        .id("save-name")
+                        .focused(),
+                )
+                .push(
+                    HStack::new()
+                        .push(Spacer::new())
+                        .push(Button::new("Cancel").action(Msg::SheetCancel).shortcut(Shortcut::cancel()).min_width(84))
+                        .push(
+                            Button::new("Save")
+                                .action(Msg::SheetSave)
+                                .button_style(ButtonStyle::Prominent)
+                                .shortcut(Shortcut::default_action())
+                                .min_width(84),
+                        )
+                        .spacing(8),
+                )
+                .spacing(14)
+                .alignment(Align::Stretch)
+                .width(360),
+        )
+    }
+
+    fn view(&self, env: &Env) -> View<'_, Msg> {
+        let dark = env.dark;
+        let picture = Canvas::new(move |cv, r| self.paint_picture(cv, r, dark))
+            .on_input(|e| match e {
+                CanvasEvent::Press { x, y, button: 1, .. } => Some(Msg::Begin(x, y)),
+                CanvasEvent::Drag { x, y } => Some(Msg::Move(x, y)),
+                CanvasEvent::Release { .. } => Some(Msg::End),
+                CanvasEvent::Hover { x, y } => Some(Msg::Cursor(Some((x, y)))),
+                CanvasEvent::Leave => Some(Msg::Cursor(None)),
+                CanvasEvent::Scroll { dy, .. } if dy != 0 => Some(Msg::Zoom(dy)),
+                CanvasEvent::Resize { w, h } => Some(Msg::Resize(w, h)),
+                _ => None,
+            })
+            .on_drop(|d| match d.items {
+                corekit::dnd::Dropped::Files(paths) => {
+                    paths.into_iter().find(|p| aurora_image::is_image_name(p)).map(Msg::Open)
+                }
+                _ => None,
+            })
+            .fill();
+        let pos = self
+            .cursor
+            .map(|(x, y)| self.to_image(x, y))
+            .filter(|p| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < self.img.width as f32 && p.1 < self.img.height as f32);
+        let mut info = format!("{} × {} px   ·   {}%", self.img.width, self.img.height, self.zoom_pct());
+        if let Some(p) = pos {
+            info.push_str(&format!("   ·   {}, {}", p.0 as i32, p.1 as i32));
         }
-        matches!(&self.status, Some((_, at)) if env.now_ms >= at + 3000 && env.now_ms < at + 3200)
+        let tip = TOOLS.iter().find(|(k, _)| *k == self.tool).map(|(_, s)| *s).unwrap_or("");
+        let status = HStack::new()
+            .push(Text::new(info).style(TextStyle::Footnote).foreground(Color::SecondaryLabel).grow(1))
+            .push(
+                Text::new(self.status.clone().unwrap_or_else(|| String::from(tip)))
+                    .style(TextStyle::Footnote)
+                    .foreground(Color::SecondaryLabel),
+            )
+            .padding_xy(14, 0)
+            .height(26)
+            .fill_width();
+        let overlay = self.picker_view().map(|p| {
+            VStack::new()
+                .push(HStack::new().push(p).padding_insets(Insets { top: 4, leading: 370, ..Default::default() }))
+                .push(Spacer::new())
+                .alignment(Align::Start)
+                .fill()
+        });
+        VStack::new()
+            .push(self.toolbar())
+            .push(Divider::new())
+            .push(ZStack::with(vec![picture]).push_if(overlay).fill())
+            .push(Divider::new())
+            .push(status)
+            .spacing(0)
+            .fill()
     }
 }
 
@@ -923,5 +824,5 @@ corekit::entry!(main);
 
 fn main(args: corekit::Args) -> i32 {
     let path = args.get(1).map(|p| fs::resolve(&fs::cwd(), p));
-    aurorakit::run(Paint::new(path))
+    waveui::run(Paint::new(path))
 }
