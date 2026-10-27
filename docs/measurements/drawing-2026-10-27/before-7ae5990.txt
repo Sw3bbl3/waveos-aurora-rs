@@ -1,0 +1,10 @@
+login blur: full 28.89 ms, coarse 28.89 ms (not part of a frame)
+wallpaper blit                    0.289 ms
+3 window shadows                  2.262 ms
+3 window blits (rounded)          0.395 ms
+3 window borders                  0.190 ms
+6 glass panels (cached)           0.670 ms
+40 lines of text                  0.368 ms
+10 icons (vector)                 0.040 ms
+full-screen round rect fill       1.781 ms
+frame (sum)                       5.995 ms
