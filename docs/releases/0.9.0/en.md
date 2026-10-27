@@ -5,7 +5,7 @@ Not yet published.
 WaveOS draws faster, shows your battery, runs its first graphics driver from Linux, and has Wi-Fi in Settings. This update includes every change listed for 0.8.0.
 
 ## Faster
-- The desktop's drawing takes less than half the time it did: window shadows, translucent fills, borders and glass are all quicker, and the login screen's background blur is about six times faster. [Measurements](../../measurements/drawing-2026-10-27/README.md)
+- The desktop's drawing takes less than half the time it did: window shadows, translucent fills, borders and glass are all quicker, and the login screen's background blur is about six times faster (measured on the host CPU; the data is in `docs/measurements/drawing-2026-10-27` in the source code).
 - The window server draws with SSE2 in its own task, sends only the parts of the screen that changed when you drag a window, and maps the screen write-combining, so frames reach the display in bursts.
 - The blinking caret on the login screen no longer repaints the whole screen.
 - Pictures (JPEG) decode faster, with identical results.
@@ -36,4 +36,4 @@ WaveOS draws faster, shows your battery, runs its first graphics driver from Lin
 No real Wi-Fi adapter works yet: the Intel driver stops before starting the radio, and none of it has run on real hardware. The Linux graphics driver works in virtual machines (virtio); drivers for AMD, Intel and NVIDIA graphics, and 3D acceleration, are not there yet. In this update's test machine the firmware did not wake from sleep, so the sleep test was skipped; it was skipped the same way on 0.8.0's code.
 
 ## Evidence
-`cargo xtask lint`, the host tests in [Building and testing](../../BUILDING.md) (now including the Wi-Fi library's tests against the IEEE 802.11 test vectors and an independent implementation), and the kernel self-tests on both boots (37 tests, including the Linux compatibility layer's self-test and a WPA2 connection with DHCP on the simulated network) were run on the change, as was `cargo xtask test --gpu virtio`. The screenshots in `docs/screenshots/0.9` come from QEMU at 1280 × 800.
+`cargo xtask lint`, the host tests in [Building and testing](../../handbook/0.7/en/developer-build.md) (now including the Wi-Fi library's tests against the IEEE 802.11 test vectors and an independent implementation), and the kernel self-tests on both boots (37 tests, including the Linux compatibility layer's self-test and a WPA2 connection with DHCP on the simulated network) were run on the change, as was `cargo xtask test --gpu virtio`. The screenshots in `docs/screenshots/0.9` come from QEMU at 1280 × 800.
