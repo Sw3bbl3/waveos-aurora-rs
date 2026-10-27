@@ -14,6 +14,7 @@ mod acpi;
 mod arch;
 mod fs;
 mod gui;
+mod linux;
 mod mm;
 mod net;
 mod power;
@@ -49,6 +50,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     arch::idt::init();
     arch::syscall::init();
     arch::fpu::init();
+    arch::pat::init();
     log!("boot", "GDT, TSS and IDT loaded");
 
     telemetry::stage("memory", "Memory: frames, heap, page tables");
@@ -90,11 +92,14 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     telemetry::stage("storage", "PCI, disk drivers and filesystems");
     drivers::pci::init(ecam);
     drivers::display::init(boot_info);
+    telemetry::stage("gpu", "GPU drivers");
+    linux::init();
     drivers::block::init();
     fs::mount_disks();
     telemetry::stage("network", "Network cards and the TCP/IP stack");
     net::init();
     drivers::net::init();
+    drivers::wifi::init();
     telemetry::stage("usb", "USB controllers and devices");
     drivers::usb::init();
     if !fs::root_persistent() {

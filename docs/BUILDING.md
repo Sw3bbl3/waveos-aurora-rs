@@ -7,6 +7,7 @@ For the versioned 0.7 user and developer guides, see the [bilingual handbook](ha
 | Tool | macOS | Debian / Ubuntu |
 |---|---|---|
 | Rust | [rustup](https://rustup.rs), with the exact Rust/LLVM baseline in `tools/toolchain-baseline.toml` | same |
+| clang (for the Linux GPU drivers in `kernel/linux`; without it the kernel builds without them) | Xcode command-line tools, or `brew install llvm` | `sudo apt install clang` |
 | QEMU + OVMF | `brew install qemu` (bundles `edk2-x86_64-code.fd`) | `sudo apt install qemu-system-x86 ovmf` |
 | xorriso (ISO only) | `brew install xorriso` | `sudo apt install xorriso` |
 
@@ -23,16 +24,20 @@ cargo xtask run --fresh-disk        # start over with a new disk (erases files s
 cargo xtask run --debug             # unoptimised kernel (slower, better backtraces)
 cargo xtask run --headless          # no window; serial log on stdout (and no sound)
 cargo xtask run --smp 1             # number of CPUs (default 4)
-cargo xtask run --battery           # add a test laptop battery, power adapter and lid (ACPI)
+cargo xtask run --battery           # add a laptop battery (73 %, discharging), power adapter and lid (ACPI)
+cargo xtask run --battery=host      # …that mirrors this computer's own battery, live (Linux, macOS, Windows hosts)
+cargo xtask run --battery=20,charging  # …at a fixed level, charging or discharging
 cargo xtask run --usb-stick         # plug in a 64 MiB FAT32 USB stick (target/usb-stick.img)
 cargo xtask run --no-sound          # no host audio (sound goes nowhere)
 cargo xtask run --headless --audio-wav target/playback.wav # record native guest audio
 cargo xtask run --no-keyboard-capture # macOS: opt out of full keyboard capture
 cargo xtask run --developer         # separate 8 GiB developer disk, 4 GiB RAM
 cargo xtask run --net none          # disable networking for offline validation
-cargo xtask test [--disk virtio] [--smp 1]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
+cargo xtask run --gpu virtio        # virtio-vga display, driven by the ported Linux DRM virtio-gpu driver
+cargo xtask run --wifi-sim          # simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
+cargo xtask test [--disk virtio] [--smp 1] [--gpu virtio]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
 cargo xtask lint                    # Clippy on every crate, for its own target; warnings are errors
-cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
+cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-wifi -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
 AURORA_MUTATIONS=100 cargo test -p aurorafs --release   # robustness tests, 100x longer than CI runs them
 cargo xtask image                   # target/waveos-aurora-usb.img for USB boot
 cargo xtask iso                     # target/waveos-aurora.iso for UEFI virtual machines

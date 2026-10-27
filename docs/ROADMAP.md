@@ -84,7 +84,8 @@ Candidates, in no fixed order:
 
 - Tickless idle with TSC-deadline timers; per-CPU NVMe queues.
 - I²C-HID touchpads; USB keyboard LEDs.
-- A native GPU driver (virtio-gpu first), so the display survives sleep.
+- More Linux graphics drivers on the compatibility layer in `kernel/linux` (virtio-gpu runs since 0.9): TTM, the DRM GPU scheduler and firmware loading for amdgpu and i915/xe, then a Linux-compatible interface for Mesa (3D). The Linux driver should also restore the display after sleep.
+- Wi-Fi on real hardware: firmware loading and Intel's command protocol for the iwlwifi adapters WaveOS already recognizes (the station, WPA2 and CCMP are done); WPA3 (SAE).
 - More of the web platform (WebP, SVG, CORS); a user-space window server.
 
 ## 0.8: Pulsar, JavaScript

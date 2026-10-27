@@ -48,14 +48,89 @@ pub fn blend(dst: u32, src: u32, a: u32) -> u32 {
 }
 
 /// Linear interpolation between two colors, t in 0..=256.
+#[inline]
 pub fn mix(a: u32, b: u32, t: i32) -> u32 {
+    // Two channels per multiply: each 16-bit lane holds one channel's
+    // weighted sum (at most 255 × 256), so lanes never carry into each other.
     let t = t.clamp(0, 256) as u32;
-    let ch = |s: u32| {
-        let x = (a >> s) & 0xFF;
-        let y = (b >> s) & 0xFF;
-        ((x * (256 - t) + y * t) >> 8) << s
-    };
-    ch(24) | ch(16) | ch(8) | ch(0)
+    let u = 256 - t;
+    let rb = (((a & 0x00FF_00FF) * u + (b & 0x00FF_00FF) * t) >> 8) & 0x00FF_00FF;
+    let ag = ((a >> 8) & 0x00FF_00FF) * u + ((b >> 8) & 0x00FF_00FF) * t;
+    rb | (ag & 0xFF00_FF00)
+}
+
+/// Blends the solid colour `c` (0xRRGGBB) at opacity `a` over every pixel
+/// of `row`. Same result as [`blend`] per pixel, with the source terms
+/// computed once for the row.
+#[inline]
+pub fn blend_row(row: &mut [u32], c: u32, a: u32) {
+    if a == 0 {
+        return;
+    }
+    if a >= 255 {
+        row.fill(c | 0xFF00_0000);
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if row.len() >= 8 && crate::simd::enabled() {
+        let mut i = 0;
+        loop {
+            // SAFETY: `enabled` said SSE2 may be used here.
+            i += unsafe { crate::simd::blend_row(&mut row[i..], c, a) };
+            if row.len() - i < 4 {
+                break;
+            }
+            // The group it stopped at has transparency: blend it exactly.
+            for p in &mut row[i..i + 4] {
+                *p = blend(*p, c, a);
+            }
+            i += 4;
+        }
+        for p in &mut row[i..] {
+            *p = blend(*p, c, a);
+        }
+        return;
+    }
+    let inv = 255 - a;
+    let rb = (c & 0x00FF_00FF) * a + 0x0080_0080;
+    let g = (c & 0x0000_FF00) * a + 0x0000_8000;
+    for p in row {
+        let d = *p;
+        *p = if d >> 24 == 255 {
+            0xFF00_0000
+                | (((d & 0x00FF_00FF) * inv + rb) >> 8 & 0x00FF_00FF)
+                | (((d & 0x0000_FF00) * inv + g) >> 8 & 0x0000_FF00)
+        } else {
+            blend(d, c, a)
+        };
+    }
+}
+
+/// Blends black at a per-pixel opacity (`shade[i]`, 0..=255) over `row`.
+#[inline]
+pub fn shade_row(row: &mut [u32], shade: &[u32]) {
+    let mut i = 0;
+    #[cfg(target_arch = "x86_64")]
+    if row.len() >= 8 && crate::simd::enabled() {
+        loop {
+            // SAFETY: `enabled` said SSE2 may be used here; `shade` matches `row`.
+            i += unsafe { crate::simd::shade_row(&mut row[i..], &shade[i..]) };
+            if row.len() - i < 4 {
+                break;
+            }
+            for k in i..i + 4 {
+                if shade[k] > 0 {
+                    row[k] = blend(row[k], 0, shade[k]);
+                }
+            }
+            i += 4;
+        }
+    }
+    for k in i..row.len() {
+        if shade[k] > 0 {
+            row[k] = blend(row[k], 0, shade[k]);
+        }
+    }
 }
 
 pub struct Canvas<'a> {
@@ -126,9 +201,7 @@ impl<'a> Canvas<'a> {
             if a == 255 {
                 row.fill(c);
             } else {
-                for p in row {
-                    *p = blend(*p, c, a);
-                }
+                blend_row(row, c, a);
             }
         }
     }
@@ -145,7 +218,29 @@ impl<'a> Canvas<'a> {
     }
 
     pub fn fill_round_rect(&mut self, r: Rect, radius: i32, c: u32) {
-        self.fill_round_rect_with(r, radius, |_, _| c);
+        let radius = radius.min(r.w / 2).min(r.h / 2);
+        let area = r.intersect(&self.clip);
+        if area.is_empty() {
+            return;
+        }
+        let a = alpha(c);
+        // Rows clear of the corners are one solid span; corner rows blend
+        // their anti-aliased ends pixel by pixel and the middle as a span.
+        let inner_l = (r.x + radius).clamp(area.x, area.right());
+        let inner_r = (r.right() - radius).clamp(inner_l, area.right());
+        for y in area.y..area.bottom() {
+            let base = (y * self.width) as usize;
+            if y >= r.y + radius && y < r.bottom() - radius {
+                blend_row(&mut self.buf[base + area.x as usize..base + area.right() as usize], c, a);
+                continue;
+            }
+            for x in (area.x..inner_l).chain(inner_r..area.right()) {
+                self.put(x, y, c, (a * round_rect_coverage(&r, radius, x, y)) >> 8);
+            }
+            if inner_l < inner_r {
+                blend_row(&mut self.buf[base + inner_l as usize..base + inner_r as usize], c, a);
+            }
+        }
     }
 
     /// Vertical gradient inside a rounded rectangle.
@@ -178,6 +273,41 @@ impl<'a> Canvas<'a> {
 
     /// A 1px anti-aliased outline of a rounded rectangle.
     pub fn stroke_round_rect(&mut self, r: Rect, radius: i32, c: u32) {
+        if radius < 0 || 2 * radius > r.w || 2 * radius > r.h {
+            return self.stroke_round_rect_slow(r, radius, c);
+        }
+        let inner = r.inset(1);
+        let area = r.intersect(&self.clip);
+        let base = alpha(c);
+        let ri = (radius - 1).max(0);
+        // Only the corner columns need coverage: between them the top and
+        // bottom rows are solid and every other row is empty inside.
+        let corner_l = (r.x + radius).clamp(area.x, area.right());
+        let corner_r = (r.right() - radius).clamp(corner_l, area.right());
+        for y in area.y..area.bottom() {
+            let edge_row = y == r.y || y == r.bottom() - 1;
+            let in_band = y < r.y + radius || y >= r.bottom() - radius;
+            if !edge_row && !in_band {
+                self.put_clipped(r.x, y, c, base);
+                self.put_clipped(r.right() - 1, y, c, base);
+                continue;
+            }
+            for x in (area.x..corner_l).chain(corner_r..area.right()) {
+                let outer = round_rect_coverage(&r, radius, x, y);
+                let inn = if inner.contains(x, y) { round_rect_coverage(&inner, ri, x, y) } else { 0 };
+                let cov = outer.saturating_sub(inn);
+                if cov > 0 {
+                    self.put(x, y, c, (base * cov) >> 8);
+                }
+            }
+            if edge_row {
+                let row = (y * self.width) as usize;
+                blend_row(&mut self.buf[row + corner_l as usize..row + corner_r as usize], c, base);
+            }
+        }
+    }
+
+    fn stroke_round_rect_slow(&mut self, r: Rect, radius: i32, c: u32) {
         let inner = r.inset(1);
         let area = r.intersect(&self.clip);
         let base = alpha(c);
@@ -215,7 +345,15 @@ impl<'a> Canvas<'a> {
     }
 
     /// A soft drop shadow around `r` (drawn outside the shape only).
+    ///
+    /// The shade only depends on how far a pixel lies past the rounded
+    /// rectangle's straight sides (`u`, `v`, in whole pixels from where the
+    /// corner arcs begin), so it is tabulated once per call: a profile for
+    /// the edges and a small table for the corners, instead of a square root
+    /// per pixel. The interior, which the window covers, is skipped by spans.
     pub fn shadow(&mut self, r: Rect, radius: i32, blur: i32, offset_y: i32, strength: u32) {
+        // Blending treats any opacity from 255 up as solid.
+        let strength = strength.min(255);
         let s = r.offset(0, offset_y);
         let bounds = Rect::new(s.x - blur, s.y - blur, s.w + 2 * blur, s.h + 2 * blur);
         let area = bounds.intersect(&self.clip);
@@ -235,32 +373,73 @@ impl<'a> Canvas<'a> {
             (strength * t * t) >> 16
         };
         let rad = radius.max(1);
+        // Past the straight part by u pixels: qx = u * 256 + 128 (and the same for v).
+        let n = (rad + blur + 1).max(1) as usize;
+        let edge: alloc::vec::Vec<u32> = (0..n).map(|u| falloff((u as i64 * 256 + 128) - rad as i64 * 256)).collect();
+        let mut corner = alloc::vec![0u32; n * n];
+        for v in 0..n {
+            let oy = v as i64 * 256 + 128;
+            for u in 0..n {
+                let ox = u as i64 * 256 + 128;
+                corner[v * n + u] = falloff(crate::math::isqrt((ox * ox + oy * oy) as u64) as i64 - rad as i64 * 256);
+            }
+        }
+        // Columns (rows) mirror about the centre line x = cx (y = cy).
+        let (cx, cy) = (s.x + s.w / 2, s.y + s.h / 2);
+        let (ex, ey) = (s.w / 2 - rad, s.h / 2 - rad);
+        let past = |p: i32, c: i32, e: i32| -> i32 { (if p >= c { p - c } else { c - 1 - p }) - e };
         // The interior of the window itself is painted on top; skip it.
         let hole = r.inset(radius / 2 + 1);
+        let mut shade = alloc::vec::Vec::with_capacity(area.w as usize);
         for y in area.y..area.bottom() {
+            let v = past(y, cy, ey);
             let row_hole = y >= hole.y && y < hole.bottom();
-            for x in area.x..area.right() {
-                if row_hole && x >= hole.x && x < hole.right() {
+            let (skip_l, skip_r) = if row_hole {
+                let l = hole.x.clamp(area.x, area.right());
+                (l, hole.right().clamp(l, area.right()))
+            } else {
+                (area.x, area.x)
+            };
+            let base = (y * self.width) as usize;
+            // Along the straight middle (u < 0) a row's shade is constant.
+            let mid = if v >= 0 { edge.get(v as usize).copied().unwrap_or(0) } else { strength };
+            let (mid_l, mid_r) = (cx - ex, cx + ex);
+            for (x0, x1) in [(area.x, skip_l), (skip_r, area.right())] {
+                if x0 >= x1 {
                     continue;
                 }
-                // Signed distance to the rounded rectangle s.
-                let px = x * 256 + 128;
-                let py = y * 256 + 128;
-                let qx = (px - (s.x + s.w / 2) * 256).abs() - (s.w / 2 - rad) * 256;
-                let qy = (py - (s.y + s.h / 2) * 256).abs() - (s.h / 2 - rad) * 256;
-                let ox = qx.max(0) as i64;
-                let oy = qy.max(0) as i64;
-                let outside = if ox == 0 {
-                    oy
-                } else if oy == 0 {
-                    ox
+                let spans = if mid_l < mid_r {
+                    let (a, b) = (mid_l.clamp(x0, x1), mid_r.clamp(x0, x1));
+                    [(x0, a, false), (a, b, true), (b, x1, false)]
                 } else {
-                    isqrt((ox * ox + oy * oy) as u64) as i64
+                    [(x0, x1, false), (x1, x1, false), (x1, x1, false)]
                 };
-                let d = outside + (qx.max(qy).min(0)) as i64 - rad as i64 * 256;
-                let a = falloff(d);
-                if a > 0 {
-                    self.put(x, y, 0, a);
+                for (s0, s1, middle) in spans {
+                    if s0 >= s1 {
+                        continue;
+                    }
+                    let row = &mut self.buf[base + s0 as usize..base + s1 as usize];
+                    if middle {
+                        blend_row(row, 0, mid);
+                        continue;
+                    }
+                    shade.clear();
+                    shade.extend((s0..s1).map(|x| {
+                        let u = past(x, cx, ex);
+                        match (u >= 0, v >= 0) {
+                            (true, true) => {
+                                if u as usize >= n || v as usize >= n {
+                                    0
+                                } else {
+                                    corner[v as usize * n + u as usize]
+                                }
+                            }
+                            (true, false) => edge.get(u as usize).copied().unwrap_or(0),
+                            (false, true) => edge.get(v as usize).copied().unwrap_or(0),
+                            (false, false) => strength,
+                        }
+                    }));
+                    shade_row(row, &shade);
                 }
             }
         }
@@ -302,6 +481,29 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Copies opaque pixels covering `part` (row stride `part.w`) into the
+    /// canvas, inside `shape` with its corners rounded at `radius`.
+    pub fn blit_part_rounded(&mut self, src: &[u32], part: Rect, shape: Rect, radius: i32) {
+        let radius = radius.min(shape.w / 2).min(shape.h / 2);
+        let area = part.intersect(&shape).intersect(&self.clip);
+        for y in area.y..area.bottom() {
+            let s0 = ((y - part.y) * part.w + (area.x - part.x)) as usize;
+            let d0 = (y * self.width + area.x) as usize;
+            if y >= shape.y + radius && y < shape.bottom() - radius {
+                self.buf[d0..d0 + area.w as usize].copy_from_slice(&src[s0..s0 + area.w as usize]);
+                continue;
+            }
+            for x in area.x..area.right() {
+                let c = src[s0 + (x - area.x) as usize];
+                let mut a = alpha(c);
+                if x < shape.x + radius || x >= shape.right() - radius {
+                    a = (a * round_rect_coverage(&shape, radius, x, y)) >> 8;
+                }
+                self.put(x, y, c, a);
+            }
+        }
+    }
+
     /// Like [`blit`](Self::blit) for a surface with transparency (glass regions).
     pub fn blit_alpha(&mut self, src: &[u32], sw: u32, sh: u32, dst: Rect, radius: i32) {
         let img = Rect::new(dst.x, dst.y, (sw as i32).min(dst.w), (sh as i32).min(dst.h));
@@ -326,6 +528,21 @@ impl<'a> Canvas<'a> {
         let step_x = (sw << 16) / dst.w as i64;
         let step_y = (sh << 16) / dst.h as i64;
         let exact = dst.w as u32 == src_w && dst.h as u32 == src_h;
+        if exact {
+            // 1:1: blend each row straight from the source.
+            for y in vis.y..vis.bottom() {
+                let s0 = ((y - dst.y) as u32 * src_w + (vis.x - dst.x) as u32) as usize;
+                let d0 = (y * self.width + vis.x) as usize;
+                let n = vis.w as usize;
+                for (d, &p) in self.buf[d0..d0 + n].iter_mut().zip(&src[s0..s0 + n]) {
+                    let pa = (p >> 24) * opacity / 255;
+                    if pa != 0 {
+                        *d = blend(*d, p, pa);
+                    }
+                }
+            }
+            return;
+        }
         let texel = |x: i64, y: i64| -> u32 { src[(y.clamp(0, sh - 1) * sw + x.clamp(0, sw - 1)) as usize] };
         for y in vis.y..vis.bottom() {
             let fy = (y - dst.y) as i64 * step_y + step_y / 2 - 32768;
@@ -636,5 +853,121 @@ mod damage_tests {
         b[11] = 9;
         assert_eq!(changed_bounds(&a, &b, 8, 10, 12, false), Some(Rect::new(2, 3, 4, 4)));
         assert_eq!(changed_bounds(&[], &b, 8, 10, 12, true), Some(Rect::new(0, 0, 8, 10)));
+    }
+
+    /// The per-pixel shadow before it was tabulated: the reference.
+    fn shadow_reference(cv: &mut Canvas, r: Rect, radius: i32, blur: i32, offset_y: i32, strength: u32) {
+        let s = r.offset(0, offset_y);
+        let bounds = Rect::new(s.x - blur, s.y - blur, s.w + 2 * blur, s.h + 2 * blur);
+        let area = bounds.intersect(&cv.clip);
+        let blur256 = (blur * 256) as i64;
+        let falloff = |d256: i64| -> u32 {
+            if d256 <= 0 {
+                return strength;
+            }
+            if d256 >= blur256 {
+                return 0;
+            }
+            let t = ((blur256 - d256) * 256 / blur256) as u32;
+            (strength * t * t) >> 16
+        };
+        let rad = radius.max(1);
+        let hole = r.inset(radius / 2 + 1);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                if hole.contains(x, y) {
+                    continue;
+                }
+                let px = x * 256 + 128;
+                let py = y * 256 + 128;
+                let qx = (px - (s.x + s.w / 2) * 256).abs() - (s.w / 2 - rad) * 256;
+                let qy = (py - (s.y + s.h / 2) * 256).abs() - (s.h / 2 - rad) * 256;
+                let (ox, oy) = (qx.max(0) as i64, qy.max(0) as i64);
+                let outside = if ox == 0 {
+                    oy
+                } else if oy == 0 {
+                    ox
+                } else {
+                    isqrt((ox * ox + oy * oy) as u64) as i64
+                };
+                let d = outside + (qx.max(qy).min(0)) as i64 - rad as i64 * 256;
+                let a = falloff(d);
+                if a > 0 {
+                    cv.put(x, y, 0, a);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fast_shadows_and_fills_match_the_reference() {
+        let (w, h) = (96, 80);
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |n: i32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as i32
+        };
+        for case in 0..400 {
+            let r = Rect::new(next(90) - 20, next(70) - 20, next(80) + 1, next(70) + 1);
+            let clip = Rect::new(next(60), next(50), next(96) + 1, next(80) + 1);
+            let radius = next(30);
+            let start: alloc::vec::Vec<u32> = (0..w * h)
+                .map(|i| if case % 3 == 0 { 0x8040_2010 + i as u32 } else { 0xFF10_2030 + i as u32 * 77 })
+                .collect();
+            let (mut a, mut b) = (start.clone(), start.clone());
+            {
+                let (mut ca, mut cb) = (Canvas::new(&mut a, w, h), Canvas::new(&mut b, w, h));
+                ca.clip = clip.intersect(&Rect::new(0, 0, w, h));
+                cb.clip = ca.clip;
+                let (blur, off, strength) = (next(40) + 1, next(16), next(255) as u32 + 1);
+                ca.shadow(r, radius, blur, off, strength);
+                shadow_reference(&mut cb, r, radius, blur, off, strength);
+                let c = (next(256) as u32) << 24 | 0x0033_99CC;
+                ca.fill_round_rect(r, radius, c);
+                cb.fill_round_rect_with(r, radius, |_, _| c);
+                ca.fill_rect(r, c);
+                let ar = alpha(c);
+                let area = r.intersect(&cb.clip);
+                for y in area.y..area.bottom() {
+                    for x in area.x..area.right() {
+                        if ar == 255 {
+                            cb.buf[(y * w + x) as usize] = c;
+                        } else {
+                            cb.put(x, y, c, ar);
+                        }
+                    }
+                }
+            }
+            assert!(a == b, "case {case}: {r:?} radius {radius} clip {clip:?}");
+        }
+    }
+
+    #[test]
+    fn fast_strokes_match_the_reference() {
+        let (w, h) = (90, 70);
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |n: i32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as i32
+        };
+        for case in 0..400 {
+            let r = Rect::new(next(80) - 10, next(60) - 10, next(80) + 1, next(60) + 1);
+            let clip = Rect::new(next(50), next(40), next(90) + 1, next(70) + 1).intersect(&Rect::new(0, 0, w, h));
+            let radius = next(40);
+            let c = (next(256) as u32) << 24 | 0x00AA_5522;
+            let start: alloc::vec::Vec<u32> =
+                (0..w * h).map(|i| 0xFF00_0000 | (i as u32).wrapping_mul(2654435761)).collect();
+            let (mut a, mut b) = (start.clone(), start);
+            let (mut ca, mut cb) = (Canvas::new(&mut a, w, h), Canvas::new(&mut b, w, h));
+            ca.clip = clip;
+            cb.clip = clip;
+            ca.stroke_round_rect(r, radius, c);
+            cb.stroke_round_rect_slow(r, radius, c);
+            assert!(a == b, "case {case}: {r:?} radius {radius} clip {clip:?}");
+        }
     }
 }

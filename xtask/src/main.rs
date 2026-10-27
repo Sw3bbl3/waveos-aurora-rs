@@ -8,13 +8,15 @@
 //!       --smp N                           number of CPUs (default 4)
 //!       --memory-mib N                    guest RAM in MiB (default 4096)
 //!       --audio-wav PATH                  record guest audio to a WAV file
+//!       --gpu std|virtio                  display adapter (default std; virtio runs the ported Linux driver)
+//!       --wifi-sim                        simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
 //!       --headless --no-build --debug --gdb --int
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
-mod aml;
+mod battery;
 mod display;
 mod help;
 mod image;
@@ -63,6 +65,11 @@ fn main() {
         eprintln!("--net must be virtio, e1000, e1000e or none");
         exit(2);
     }
+    let gpu = args.iter().position(|a| a == "--gpu").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("std");
+    if !["std", "virtio"].contains(&gpu) {
+        eprintln!("--gpu must be std or virtio");
+        exit(2);
+    }
 
     match args.first().map(String::as_str) {
         Some("docs") => {
@@ -97,6 +104,8 @@ fn main() {
             if !flag("--no-refresh") {
                 prepare_disk(&esp, &img, flag("--fresh-disk"), size);
             }
+            // Simulated Wi-Fi networks (the kernel's software radio).
+            image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" }).expect("write boot.conf");
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
             let opts = RunOpts {
                 memory_mib: number("--memory-mib", 4096, 256, 32768),
@@ -116,9 +125,16 @@ fn main() {
                 } else {
                     host_audio()
                 },
-                battery: flag("--battery"),
+                battery: false,
+                host_battery: args.iter().find(|a| a.starts_with("--battery")).map(|a| {
+                    battery::parse(a).unwrap_or_else(|e| {
+                        eprintln!("{e}");
+                        exit(2)
+                    })
+                }),
                 net,
                 netdev_extra: String::new(),
+                gpu,
                 usb_stick: flag("--usb-stick").then(|| {
                     let stick = root().join("target/usb-stick.img");
                     image::create_usb_stick(&stick).expect("USB stick image");
@@ -172,7 +188,7 @@ fn main() {
             }
             println!("wrote {}", out.display());
         }
-        Some("test") => test(profile, disk, smp, net),
+        Some("test") => test(profile, disk, smp, net, gpu),
         Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
@@ -634,12 +650,16 @@ struct RunOpts<'a> {
     audio: String,
     /// Add a test SSDT with a laptop battery, power adapter and lid.
     battery: bool,
+    /// A battery that mirrors the host's (or fixed values), through shared memory.
+    host_battery: Option<battery::Source>,
     /// A raw disk image to attach as a USB stick.
     usb_stick: Option<PathBuf>,
     /// Network card: virtio, e1000, e1000e or none (QEMU user networking).
     net: &'a str,
     /// Extra user-networking options, e.g. host port forwards.
     netdev_extra: String,
+    /// Display adapter: std (Bochs VGA) or virtio (virtio-vga, driven by the ported Linux driver).
+    gpu: &'a str,
 }
 
 /// The host's own sound output, for interactive runs.
@@ -656,7 +676,12 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let _ = fs::remove_file(&qmp);
 
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-cpu", "max", "-vga", "std"]);
+    cmd.args(["-machine", "q35", "-cpu", "max"]);
+    if opts.gpu == "virtio" {
+        cmd.args(["-vga", "none", "-device", "virtio-vga"]);
+    } else {
+        cmd.args(["-vga", "std"]);
+    }
     // Software emulation on non-x86 hosts: one translation thread per CPU and
     // a large translation cache. AURORA_ACCEL overrides it
     // (e.g. "tcg,thread=single").
@@ -689,9 +714,19 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         cmd.arg("-drive").arg(format!("id=stick,if=none,format=raw,file={}", stick.display()));
         cmd.args(["-device", "usb-storage,bus=xhci.0,port=2,drive=stick"]);
     }
+    if let Some(source) = opts.host_battery {
+        let page = battery::start(source, root().join("target/battery-page"));
+        cmd.arg("-object").arg(format!(
+            "memory-backend-file,id=batpage,share=on,mem-path={},size={}",
+            page.display(),
+            battery::PAGE_SIZE
+        ));
+        cmd.arg("-device").arg(format!("ivshmem-plain,memdev=batpage,bus=pcie.0,addr={}", battery::PCI_SLOT));
+        cmd.arg("-acpitable").arg(format!("file={}", root().join("assets/acpi/host-battery.aml").display()));
+    }
     if opts.battery {
         let ssdt = root().join("target/battery-ssdt.aml");
-        fs::write(&ssdt, aml::battery_ssdt()).expect("write battery SSDT");
+        fs::write(&ssdt, include_bytes!("../../assets/acpi/test-battery.aml")).expect("write battery SSDT");
         cmd.arg("-acpitable").arg(format!("file={}", ssdt.display()));
     }
     // A network card on QEMU's user networking (NAT; the host is 10.0.2.2).
@@ -811,10 +846,10 @@ fn inbound_check(port: u16) {
     });
 }
 
-fn test(profile: Profile, disk: &str, smp: u32, net: &str) {
+fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str) {
     let esp = build(profile, true);
     let img = root().join("target/test-disk.img");
-    println!("running kernel tests with the disk on {disk}, network {net}");
+    println!("running kernel tests with the disk on {disk}, network {net}, display {gpu}");
     let http_port = start_test_http_server();
     let fwd_port = free_port();
     // AURORA_TEST_SLEEP=off skips the sleep test (firmware that can't resume).
@@ -831,7 +866,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str) {
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let output = match run_tests_once(&img, disk, smp, net, fwd_port) {
+            let output = match run_tests_once(&img, disk, smp, net, gpu, fwd_port) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
                     // The firmware never handed back control: some OVMF builds
@@ -893,7 +928,7 @@ fn recorded_peak(path: &Path) -> i32 {
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
 /// as an error if the tests failed or timed out.
-fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, fwd_port: u16) -> Result<String, String> {
+fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, gpu: &str, fwd_port: u16) -> Result<String, String> {
     use std::io::{BufRead, BufReader};
     let audio = root().join("target/test-audio.wav");
     let _ = fs::remove_file(&audio);
@@ -910,7 +945,9 @@ fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, fwd_port: u16) ->
         audio: format!("wav:{}", audio.display()),
         net,
         netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
+        gpu,
         battery: true,
+        host_battery: None,
         usb_stick: Some({
             let stick = root().join("target/test-usb-stick.img");
             image::create_usb_stick(&stick).expect("USB stick image");

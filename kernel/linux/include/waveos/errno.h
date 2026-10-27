@@ -1,0 +1,80 @@
+/* SPDX-License-Identifier: MIT */
+/* WaveOS LinuxKPI: error numbers, with the values Linux drivers expect. */
+#ifndef _WAVEOS_ERRNO_H
+#define _WAVEOS_ERRNO_H
+
+#define EPERM 1
+#define ENOENT 2
+#define ESRCH 3
+#define EINTR 4
+#define EIO 5
+#define ENXIO 6
+#define E2BIG 7
+#define ENOEXEC 8
+#define EBADF 9
+#define ECHILD 10
+#define EAGAIN 11
+#define EWOULDBLOCK EAGAIN
+#define ENOMEM 12
+#define EACCES 13
+#define EFAULT 14
+#define EBUSY 16
+#define EEXIST 17
+#define EXDEV 18
+#define ENODEV 19
+#define ENOTDIR 20
+#define EISDIR 21
+#define EINVAL 22
+#define ENFILE 23
+#define EMFILE 24
+#define ENOTTY 25
+#define EFBIG 27
+#define ENOSPC 28
+#define ESPIPE 29
+#define EROFS 30
+#define EPIPE 32
+#define EDOM 33
+#define ERANGE 34
+#define EDEADLK 35
+#define ENAMETOOLONG 36
+#define ENOLCK 37
+#define ENOSYS 38
+#define ENOTEMPTY 39
+#define ELOOP 40
+#define ENOMSG 42
+#define EIDRM 43
+#define ENODATA 61
+#define ETIME 62
+#define ENOSR 63
+#define ENOLINK 67
+#define EPROTO 71
+#define EBADMSG 74
+#define EOVERFLOW 75
+#define EILSEQ 84
+#define EUSERS 87
+#define ENOTSOCK 88
+#define EMSGSIZE 90
+#define EPROTONOSUPPORT 93
+#define EOPNOTSUPP 95
+#define ENOTSUPP 524
+#define EADDRINUSE 98
+#define ENETDOWN 100
+#define ENOBUFS 105
+#define ETIMEDOUT 110
+#define ECONNREFUSED 111
+#define EALREADY 114
+#define EINPROGRESS 115
+#define ESTALE 116
+#define EDQUOT 122
+#define ECANCELED 125
+#define ENOKEY 126
+#define EKEYREJECTED 129
+#define EOWNERDEAD 130
+#define ERFKILL 132
+#define EHWPOISON 133
+#define ERESTARTSYS 512
+#define ERESTARTNOINTR 513
+#define ENOIOCTLCMD 515
+#define EPROBE_DEFER 517
+
+#endif

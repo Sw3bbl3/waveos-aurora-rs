@@ -538,11 +538,38 @@ impl Desktop {
         }
 
         // Network state, bottom right.
-        let label = if crate::net::online() { "Wired" } else { "Offline" };
-        let f = theme::ui_bold(12);
-        let chip = Rect::new(w - 34 - f.width(label) - 24, h - 72, f.width(label) + 24, 30);
+        let (chip, label) = self.network_chip();
         cv.frosted(chip, 15, t.glass_tint);
-        cv.text(chip.x + 12, chip.y + 20, label, f, t.text_on_glass);
+        cv.text(chip.x + 12, chip.y + 20, label, theme::ui_bold(12), t.text_on_glass);
+    }
+
+    fn network_chip(&self) -> (Rect, &'static str) {
+        let label = if crate::net::online() { "Wired" } else { "Offline" };
+        let lw = theme::ui_bold(12).width(label);
+        (Rect::new(self.w - 34 - lw - 24, self.h - 72, lw + 24, 30), label)
+    }
+
+    /// Shore's glass (for partial repaints, which must take in all of it).
+    pub(super) fn shore_materials(&self) -> Vec<Rect> {
+        let Some(s) = &self.shore else { return Vec::new() };
+        if s.mode == Mode::Setup {
+            return alloc::vec![self.setup_card()];
+        }
+        let mut v: Vec<Rect> = self
+            .shore_layout()
+            .into_iter()
+            .filter(|(h, _)| matches!(h, Hit::Field(0) | Hit::Sleep | Hit::Restart | Hit::ShutDown))
+            .map(|(_, r)| r)
+            .collect();
+        v.push(self.network_chip().0);
+        v
+    }
+
+    /// Where the blinking caret is: the only thing a blink repaints.
+    pub(super) fn caret_area(&self) -> Option<Rect> {
+        let s = self.shore.as_ref()?;
+        let focus = if s.mode == Mode::Setup { s.focus } else { 0 };
+        self.shore_layout().into_iter().find(|(h, _)| *h == Hit::Field(focus)).map(|(_, r)| r)
     }
 
     fn paint_setup(&mut self, cv: &mut Canvas) {

@@ -242,6 +242,7 @@ extern "sysv64" fn ap_entry(cpu: u64) -> ! {
     super::idt::init();
     super::syscall::init();
     super::fpu::init();
+    super::pat::init();
     super::apic::init_ap();
     percpu::init(cpu);
     crate::sched::init_ap(cpu);

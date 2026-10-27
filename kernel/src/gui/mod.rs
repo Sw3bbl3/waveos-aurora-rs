@@ -68,7 +68,16 @@ pub fn screen_size() -> (i32, i32) {
 }
 
 pub fn start() {
-    sched::spawn("lumen-server", run);
+    // The compositor keeps its own SIMD registers, so drawing can use SSE2.
+    lumen::simd::set_gate(simd_allowed);
+    sched::spawn_simd("lumen-server", run);
+}
+
+/// SSE2 drawing is safe only in a kernel task that owns saved SIMD state,
+/// and never inside an interrupt handler (which runs with interrupts off).
+fn simd_allowed() -> bool {
+    crate::arch::percpu::this().simd.load(core::sync::atomic::Ordering::Relaxed)
+        && x86_64::instructions::interrupts::are_enabled()
 }
 
 /// A network interface got (or lost) its address.
@@ -110,12 +119,50 @@ pub fn power_changed(old: Option<aurora_abi::PowerInfo>, new: aurora_abi::PowerI
     }
 }
 
+/// The framebuffer, mapped write-combining when the CPU allows (so copies
+/// to it go out in bursts) and through the physical window otherwise.
+///
+/// When a ported GPU driver runs the display (`linux::display`), its
+/// framebuffer — ordinary memory the driver copies to the GPU on flush —
+/// takes the firmware framebuffer's place.
 fn front_buffer(fb: &Framebuffer) -> &'static mut [u32] {
-    unsafe { core::slice::from_raw_parts_mut(phys_to_virt(fb.phys_addr) as *mut u32, (fb.stride * fb.height) as usize) }
+    #[cfg(linuxkpi)]
+    if let Some(d) = crate::linux::display() {
+        return unsafe { core::slice::from_raw_parts_mut(d.pixels, (d.pitch / 4 * d.height) as usize) };
+    }
+    // (physical address, length in pixels, virtual address) of the last mapping.
+    static MAPPED: spin::Mutex<(u64, usize, u64)> = spin::Mutex::new((0, 0, 0));
+    let len = (fb.stride * fb.height) as usize;
+    let mut mapped = MAPPED.lock();
+    if mapped.0 != fb.phys_addr || mapped.1 < len {
+        let virt = match crate::mm::vmm::kmap_wc(fb.phys_addr, len as u64 * 4) {
+            Some(v) => {
+                log!("gui", "framebuffer mapped write-combining at {:#x}", v);
+                v
+            }
+            None => phys_to_virt(fb.phys_addr),
+        };
+        *mapped = (fb.phys_addr, len, virt);
+    }
+    unsafe { core::slice::from_raw_parts_mut(mapped.2 as *mut u32, len) }
 }
 
 /// Copies `r` from the back buffer to the framebuffer.
 fn flush(front: &mut [u32], back: &[u32], fb: &Framebuffer, r: Rect) {
+    #[cfg(linuxkpi)]
+    if let Some(d) = crate::linux::display() {
+        // XRGB8888 in memory is the back buffer's own layout.
+        let r = r.intersect(&Rect::new(0, 0, fb.width.min(d.width) as i32, fb.height.min(d.height) as i32));
+        let (w, stride) = (fb.width as usize, (d.pitch / 4) as usize);
+        for y in r.y as usize..r.bottom() as usize {
+            front[y * stride + r.x as usize..y * stride + r.right() as usize]
+                .copy_from_slice(&back[y * w + r.x as usize..y * w + r.right() as usize]);
+        }
+        if r.w > 0 && r.h > 0 {
+            crate::linux::display_flush(r.x, r.y, r.w, r.h);
+        }
+        return;
+    }
     let w = fb.width as usize;
     let stride = fb.stride as usize;
     for y in r.y as usize..r.bottom() as usize {
@@ -130,6 +177,8 @@ fn flush(front: &mut [u32], back: &[u32], fb: &Framebuffer, r: Rect) {
             }
         }
     }
+    // Drain the write-combining buffers so the frame reaches the screen now.
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }
 
 fn run() {
@@ -150,7 +199,10 @@ fn run() {
     let mut front = front_buffer(&fb);
     let mut ready = false;
     let mut next_tick = 0;
+    // Full-screen frames (count, total ns, max ns) and partial updates (count,
+    // total ns), logged every 10 seconds.
     let mut frame_stats = (0u64, 0u64, 0u64, time::uptime_ms());
+    let mut partial_stats = (0u64, 0u64);
     loop {
         let now = time::uptime_ms();
         desktop.set_now(now);
@@ -195,7 +247,7 @@ fn run() {
         let batch_pixels: i64 = damage.iter().map(|r| r.area()).sum();
         let batch_full = damage.iter().any(|r| r.area() == i64::from(w) * i64::from(h));
         for r in damage {
-            let started = time::uptime_ms();
+            let started = time::now_ns();
             crate::telemetry::PIXELS.fetch_add(r.area() as u64, core::sync::atomic::Ordering::Relaxed);
             let mut cv = Canvas::new(&mut back, w, h);
             materials.begin_frame();
@@ -203,11 +255,14 @@ fn run() {
             cv.clip = r;
             desktop.paint(&mut cv);
             flush(front, &back, &fb, r);
+            let elapsed = time::now_ns() - started;
             if r.area() == i64::from(w) * i64::from(h) {
-                let elapsed = time::uptime_ms() - started;
                 frame_stats.0 += 1;
                 frame_stats.1 += elapsed;
                 frame_stats.2 = frame_stats.2.max(elapsed);
+            } else if scene_changed {
+                partial_stats.0 += 1;
+                partial_stats.1 += elapsed;
             }
         }
         desktop.finish_frame();
@@ -228,17 +283,20 @@ fn run() {
                 h
             );
         }
-        if frame_stats.0 > 0 && time::uptime_ms() - frame_stats.3 >= 10000 {
+        if (frame_stats.0 > 0 || partial_stats.0 > 0) && time::uptime_ms() - frame_stats.3 >= 10000 {
             log!(
                 "lumen",
-                "{} scene frames, mean {} ms, max {} ms at {}x{}",
+                "{} scene frames, mean {} us, max {} us; {} partial updates, mean {} us; at {}x{}",
                 frame_stats.0,
-                frame_stats.1 / frame_stats.0,
-                frame_stats.2,
+                frame_stats.1 / frame_stats.0.max(1) / 1000,
+                frame_stats.2 / 1000,
+                partial_stats.0,
+                partial_stats.1 / partial_stats.0.max(1) / 1000,
                 w,
                 h
             );
             frame_stats = (0, 0, 0, time::uptime_ms());
+            partial_stats = (0, 0);
         }
         if core::mem::take(&mut desktop.screenshot) {
             take_screenshot(&back, w as u32, h as u32);
@@ -361,7 +419,10 @@ impl<const N: usize> Write for StackText<N> {
 pub fn panic_screen(details: &str) {
     // Never block here: the panic may have hit while the lock was held.
     let Some(fb) = FB.try_lock().and_then(|g| *g) else { return };
-    let front = front_buffer(&fb);
+    // Through the physical window: mapping anew could allocate or wait on a lock.
+    let front = unsafe {
+        core::slice::from_raw_parts_mut(phys_to_virt(fb.phys_addr) as *mut u32, (fb.stride * fb.height) as usize)
+    };
     let mut cv = Canvas::new(front, fb.stride as i32, fb.height as i32);
     cv.clip = Rect::new(0, 0, fb.width as i32, fb.height as i32);
     let (w, h) = (fb.width as i32, fb.height as i32);

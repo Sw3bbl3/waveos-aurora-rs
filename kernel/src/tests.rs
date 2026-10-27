@@ -18,6 +18,8 @@ const TESTS: &[Test] = &[
     ("heap", heap),
     ("isqrt", sqrt),
     ("account_password_hash", crate::gui::account::self_test),
+    ("write-combining mappings", crate::arch::pat::self_test),
+    ("LinuxKPI: runtime, DRM and the GPU display", linux_kpi),
     ("rect math", rects),
     ("keyboard decoder", keyboard),
     ("ramfs + vfs", ramfs),
@@ -37,6 +39,7 @@ const TESTS: &[Test] = &[
     ("USB: hub, keyboard, tablet, storage", usb),
     ("TCP: retransmission ACK bounds", crate::net::tcp::retransmission_ack_test),
     ("network: DHCP, ICMP, UDP, TCP", network),
+    ("Wi-Fi: scan, WPA2 join, DHCP over CCMP (simulated network)", wifi),
     ("sleep (S3) and wake", sleep_and_wake),
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
@@ -94,6 +97,66 @@ fn heap() {
     drop(boxes);
     let big = alloc::vec![0u32; 1280 * 800];
     assert_eq!(big.len(), 1_024_000);
+}
+
+/// Waits up to `ms` for `done`.
+fn eventually(ms: u64, done: impl Fn() -> bool) -> bool {
+    let end = time::uptime_ms() + ms;
+    while time::uptime_ms() < end {
+        if done() {
+            return true;
+        }
+        sched::sleep_ms(20);
+    }
+    done()
+}
+
+/// Wi-Fi end to end, on the simulated radio: the station, the wifi task,
+/// the wlan0 interface and DHCP through WPA2/CCMP.
+fn wifi() {
+    use crate::drivers::wifi::{self, sim};
+    use aurora_abi::wifi::*;
+    if !wifi::present() {
+        sim::start();
+    }
+    let listed = |name: &[u8]| wifi::networks().iter().any(|n| &n.ssid[..n.ssid_len as usize] == name);
+    assert!(eventually(3000, || listed(b"Harbor Cafe") && listed(b"Lighthouse Guest")), "networks not found");
+    let state = || wifi::status().map_or(u32::MAX, |s| s.state);
+
+    wifi::connect(b"Harbor Cafe", "definitely wrong").unwrap();
+    assert!(eventually(8000, || state() == FAILED), "a wrong password must fail");
+
+    wifi::connect(b"Harbor Cafe", sim::PASSWORD).unwrap();
+    assert!(eventually(5000, || state() == CONNECTED), "did not connect: state {}", state());
+    let wlan_ip = || {
+        crate::net::interfaces()
+            .into_iter()
+            .find(|i| i.name.starts_with(b"wlan"))
+            .map(|i| i.ip)
+    };
+    assert!(eventually(10_000, || wlan_ip() == Some(sim::CLIENT_IP)), "no DHCP address: {:?}", wlan_ip());
+    crate::kprint!("(wlan0 {:?} over WPA2) ", sim::CLIENT_IP);
+    wifi::disconnect();
+    assert!(eventually(2000, || state() == IDLE));
+}
+
+/// The C self-test of the Linux compatibility layer, and — when the machine
+/// has a virtio GPU — that the ported driver brought its display up.
+fn linux_kpi() {
+    #[cfg(linuxkpi)]
+    {
+        extern "C" {
+            fn waveos_lkpi_selftest() -> i32;
+        }
+        let line = unsafe { waveos_lkpi_selftest() };
+        assert_eq!(line, 0, "LinuxKPI self-test failed at waveos_selftest.c line {line}");
+        let gpu = crate::drivers::pci::devices().iter().any(|d| d.vendor == 0x1AF4 && d.device == 0x1050);
+        if gpu {
+            let d = crate::linux::display().expect("virtio-gpu present but no display");
+            assert!(d.width >= 640 && d.height >= 480 && d.pitch >= d.width * 4);
+            crate::kprint!("(GPU display {}x{}) ", d.width, d.height);
+        }
+    }
 }
 
 fn sqrt() {
@@ -679,8 +742,10 @@ fn acpi_runtime() {
     let ready = wait_for(|| crate::acpi::power_info().flags & ACPI != 0, 5000);
     assert!(ready, "the ACPI runtime did not come up");
     assert!(crate::acpi::sleep_type(5).is_some(), "no \\_S5 from AML");
-    // xtask adds a test SSDT: battery 35 040 of 48 000 mWh, discharging at 9.5 W,
-    // adapter unplugged, lid open.
+    // xtask adds a test SSDT (assets/acpi/test-battery.asl): battery 35 040 of
+    // 48 000 mWh, discharging at 9.5 W, adapter unplugged, lid open. Its _BST
+    // stores through Index and reads PCI configuration space at an offset, so
+    // 73 % also proves those work in the AML interpreter.
     let p = crate::acpi::power_info();
     assert!(p.flags & BATTERY != 0, "the test battery was not found");
     assert_eq!(p.percent, 73);

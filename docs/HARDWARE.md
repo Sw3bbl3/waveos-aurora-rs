@@ -65,7 +65,7 @@ Work through the list and note what happens. The boot log (below) records the de
 
 ## Known limits
 
-- **Graphics.** There is no native GPU driver: WaveOS draws into the framebuffer the firmware set up (GOP). The resolution changes only at boot. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes.
+- **Graphics.** On real hardware there is no native GPU driver yet: WaveOS draws into the framebuffer the firmware set up (GOP). In virtual machines with a virtio display, Linux's virtio-gpu driver (run through WaveOS's compatibility layer) drives it. The resolution changes only at boot. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes.
 - **Storage.** AHCI, NVMe and virtio disks work, but Intel RST / RAID mode does not. USB storage must be FAT32 (exFAT and NTFS aren't supported).
 - **Input.**
   - Touchpads that connect over I²C (common on laptops since about 2016) aren't supported yet. Many of them also have a PS/2 fallback, which works.
@@ -74,7 +74,7 @@ Work through the list and note what happens. The boot log (below) records the de
   - xHCI (USB 3) controllers only. Older EHCI/OHCI-only machines rely on the firmware's legacy PS/2 emulation for the keyboard and mouse.
   - No isochronous devices, such as USB audio or webcams.
 - **Sound.** Intel HD Audio output only, with no microphone and no HDMI audio.
-- **Networking.** Wired Ethernet only, on Intel e1000/e1000e adapters (82540EM, 82545/82546, 82574L and similar) or virtio-net in virtual machines. Realtek and newer Intel (I219, I225) chips, and Wi-Fi, aren't supported yet. IPv4 only, with the address from DHCP.
+- **Networking.** Wired Ethernet only, on Intel e1000/e1000e adapters (82540EM, 82545/82546, 82574L and similar) or virtio-net in virtual machines. Realtek and newer Intel (I219, I225) chips aren't supported yet. Wi-Fi: Intel adapters from the Wireless 7265 to the Wi-Fi 6E AX211 are recognized, but WaveOS can't start their radio yet, so no real Wi-Fi works. IPv4 only, with the address from DHCP.
 - **Sleep** is S3 (suspend to RAM). Many machines since about 2019 support only "Modern Standby" (S0ix), which WaveOS doesn't implement. On those, Sleep isn't offered.
 
 ## Compatibility

@@ -100,31 +100,31 @@ impl MaterialCache {
             let key = (rect, visible, (tint & 0xffffff) | opacity << 24, dark);
             if changed || layer.render_key != Some(key) {
                 layer.rendered.resize((visible.w * visible.h) as usize, 0);
+                let at = |x: usize, y: i32| layer.blurred[(y.min(h - 1) * w) as usize + x.min(w as usize - 1)];
+                // A soft sheen fading down the top of the material gives it depth
+                // without obscuring content (over at most 40 px, never a hard edge).
+                let band = (rect.h / 4).clamp(1, 40);
+                let sheen = if dark { 10 } else { 24 };
+                let mut column = alloc::vec![0u32; w as usize + 1];
                 for y in visible.y..visible.bottom() {
-                    for x in visible.x..visible.right() {
+                    // Interpolate the blurred grid down to this row once, then across it.
+                    let fy = ((y - bounds.y) * (256 / step)).max(0);
+                    let iy = (fy / 256).min(h - 1);
+                    for (ix, c) in column.iter_mut().enumerate() {
+                        *c = mix(at(ix, iy), at(ix, iy + 1), fy % 256);
+                    }
+                    let shine = ((band - (y - rect.y)).max(0) * 256 / band) as u32 * sheen / 256;
+                    let out = &mut layer.rendered[((y - visible.y) * visible.w) as usize..][..visible.w as usize];
+                    for (x, o) in (visible.x..visible.right()).zip(out) {
                         let fx = ((x - bounds.x) * (256 / step)).max(0);
-                        let fy = ((y - bounds.y) * (256 / step)).max(0);
-                        let (ix, iy) = ((fx / 256).min(w - 1), (fy / 256).min(h - 1));
-                        let at = |x: i32, y: i32| layer.blurred[(y.min(h - 1) * w + x.min(w - 1)) as usize];
-                        let p = mix(
-                            mix(at(ix, iy), at(ix + 1, iy), fx % 256),
-                            mix(at(ix, iy + 1), at(ix + 1, iy + 1), fx % 256),
-                            fy % 256,
-                        );
-                        let base = blend(p, tint, opacity);
-                        // A soft sheen fading down the top of the material gives it depth
-                        // without obscuring content (over at most 40 px, never a hard edge).
-                        let band = (rect.h / 4).clamp(1, 40);
-                        let shine = ((band - (y - rect.y)).max(0) * 256 / band) as u32;
-                        layer.rendered[((y - visible.y) * visible.w + x - visible.x) as usize] =
-                            blend(base, 0xffffffff, shine * if dark { 10 } else { 24 } / 256);
+                        let ix = ((fx / 256).min(w - 1)) as usize;
+                        let base = blend(mix(column[ix], column[ix + 1], fx % 256), tint, opacity);
+                        *o = if shine == 0 { base } else { blend(base, 0xffffffff, shine) };
                     }
                 }
                 layer.render_key = Some(key);
             }
-            cv.fill_round_rect_with(rect, radius, |x, y| {
-                layer.rendered[((y - visible.y) * visible.w + x - visible.x) as usize]
-            });
+            cv.blit_part_rounded(&layer.rendered, visible, rect, radius);
         }
         cv.stroke_round_rect(
             rect,

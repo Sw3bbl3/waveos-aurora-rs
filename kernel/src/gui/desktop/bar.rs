@@ -94,11 +94,14 @@ pub(super) fn battery() -> Option<PowerInfo> {
     (i.flags & power::BATTERY != 0).then_some(i)
 }
 
-/// (has a network card, connected with an address)
-fn network() -> (bool, Option<[u8; 4]>) {
+/// (has a network card, connected with an address, that address is over Wi-Fi)
+fn network() -> (bool, Option<[u8; 4]>, bool) {
     use aurora_abi::net::IF_LOOPBACK;
     let cards: Vec<_> = crate::net::interfaces().into_iter().filter(|i| i.flags & IF_LOOPBACK == 0).collect();
-    (!cards.is_empty(), cards.iter().find(|i| i.ip != [0; 4]).map(|i| i.ip))
+    // A Wi-Fi connection the user chose shows first, like on a laptop.
+    let wlan = |i: &&aurora_abi::NetInterface| i.name.starts_with(b"wlan");
+    let up = cards.iter().filter(|i| i.ip != [0; 4]).max_by_key(|i| wlan(i));
+    (!cards.is_empty(), up.map(|i| i.ip), up.is_some_and(|i| i.name.starts_with(b"wlan")))
 }
 
 fn volume() -> (u32, bool) {
@@ -199,13 +202,21 @@ pub(super) fn paint_ring(cv: &mut Canvas, cx: i32, cy: i32, size: i32, color: u3
             cv.line(x + u / 2, y, x - u / 2, y + u, 1, OK);
         }
     }
-    // Centre: a wired network (WaveOS has no Wi-Fi driver yet), or a red slash when offline.
-    let (card, address) = network();
+    // Centre: Wi-Fi or a wired network, with a red slash when offline.
+    let (card, address, wifi) = network();
     let px = |v: i32| v * unit / 16; // design units to pixels
     let (x0, y0) = (cx / 16 - px(11), cy / 16 - px(11));
     let at = |ux: i32, uy: i32| (x0 + px(ux), y0 + px(uy));
     let stroke = if size >= 30 { 2 } else { 1 };
-    if card {
+    if wifi {
+        // Three arcs over a dot, opening upwards.
+        let base = (cx / 16, at(0, 15).1);
+        cv.fill_circle(base.0, base.1, (px(3) / 2).max(1), color);
+        for k in 1..=3 {
+            let r = px(3 * k) * 16;
+            cv.stroke_arc(base.0 * 16, base.1 * 16, r, 16 * stroke + 8, 640, 256, color);
+        }
+    } else if card {
         let c = if address.is_some() { color } else { with_alpha(color, 0x70) };
         let (a, b) = (at(9, 7), at(13, 10));
         cv.stroke_round_rect(Rect::new(a.0, a.1, (b.0 - a.0).max(3), (b.1 - a.1).max(2)), 1, c);
@@ -266,7 +277,7 @@ impl Desktop {
 
     /// (bubble, chip, seek, ring, ring size, percent text, date/time text)
     #[allow(clippy::type_complexity)]
-    fn right_bubble(&self) -> (Rect, Option<Rect>, Rect, Rect, i32, Option<Rect>, Option<Rect>) {
+    pub(super) fn right_bubble(&self) -> (Rect, Option<Rect>, Rect, Rect, i32, Option<Rect>, Option<Rect>) {
         let crest_on = crest_on();
         let percent = (prefs::get_bool(pref::BATTERY_LEVEL) && battery().is_some()).then(|| {
             let f = theme::ui_bold(13);
@@ -905,10 +916,13 @@ impl Desktop {
             cv.text(r.x + 58, r.y + 28, title, theme::ui_bold(13), t.text);
             cv.text_clipped(r.x + 58, r.y + 45, sub, theme::ui(12), t.text_secondary, r.w - 66);
         };
-        let (card_present, address) = network();
+        let (card_present, address, wifi) = network();
         let net_sub = match (card_present, address) {
             (false, _) => String::from("No network card"),
             (true, None) => String::from("Not connected"),
+            (true, Some(_)) if wifi => {
+                format!("Wi-Fi · {}", crate::drivers::wifi::connected_network().unwrap_or_default())
+            }
             (true, Some(a)) => format!("Wired · {}.{}.{}.{}", a[0], a[1], a[2], a[3]),
         };
         let hov = |h: CurrentHit| c.hover == Some(h);

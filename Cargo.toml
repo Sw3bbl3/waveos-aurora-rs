@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-exclude = ["vendor/rusty_h264-decoder", "vendor/rusty_aac"]
-members = ["libs/help", "libs/gina", "xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/aurorafs", "libs/fat32", "libs/image", "libs/wav", "libs/web", "libs/tls", "libs/surf", "libs/script", "libs/media", "libs/mutate"]
+exclude = ["vendor/rusty_h264-decoder", "vendor/rusty_aac", "vendor/acpi"]
+members = ["libs/help", "libs/gina", "xtask", "bootloader", "kernel", "libs/bootinfo", "libs/gfx", "libs/elf", "libs/abi", "libs/aurorafs", "libs/fat32", "libs/image", "libs/wav", "libs/web", "libs/tls", "libs/surf", "libs/script", "libs/media", "libs/mutate", "libs/wifi"]
 default-members = ["libs/gina", "xtask"]
 
 [workspace.package]
@@ -23,3 +23,7 @@ codegen-units = 1
 [profile.test262]
 inherits = "release"
 panic = "unwind"
+
+# The ACPI crate with WaveOS fixes (see vendor/acpi/WAVEOS-PATCHES.md).
+[patch.crates-io]
+acpi = { path = "vendor/acpi" }

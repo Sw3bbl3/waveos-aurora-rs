@@ -270,7 +270,7 @@ impl Desktop {
         let wp = custom
             .or_else(|| wallpaper::file(index, theme::current().dark).and_then(|f| picture_wallpaper(f, w, h)))
             .unwrap_or_else(|| wallpaper::generate(index, w, h));
-        let blurred = wallpaper::blur(&wp, w, h, 18);
+        let blurred = wallpaper::blur_coarse(&wp, w, h, 18);
         (wp, blurred)
     }
 
@@ -1249,9 +1249,12 @@ impl Desktop {
                 self.damage_all();
             }
         }
-        // The caret on Shore.
+        // The caret on Shore blinks: repaint just its field.
         if self.shore.is_some() {
-            self.damage_all();
+            match self.caret_area() {
+                Some(r) => self.damage(r),
+                None => self.damage_all(),
+            }
         }
         let ids: Vec<u32> = self.windows.iter().filter(|w| !w.minimized).map(|w| w.id).collect();
         for id in ids {
@@ -1307,8 +1310,15 @@ impl Desktop {
         }
         let mut rects: Vec<Rect> = core::mem::take(&mut self.damage);
         if self.scene_dirty {
-            if rects.len() > 12 {
-                return alloc::vec![self.screen()];
+            // Damage touching glass grows to take in the whole (padded) glass.
+            windowing::grow_damage(&mut rects, &self.material_rects(), 40);
+            let screen = self.screen();
+            for r in rects.iter_mut() {
+                *r = r.intersect(&screen);
+            }
+            let area: i64 = rects.iter().map(|r| r.area()).sum();
+            if rects.len() > 12 || area * 10 > screen.area() * 7 {
+                return alloc::vec![screen];
             }
             return rects;
         }
@@ -1343,33 +1353,39 @@ impl Desktop {
     pub fn finish_frame(&mut self) {
         self.scene_dirty = false;
     }
+    /// Whether damage may be repainted piecemeal (`take_damage` grows it
+    /// around glass). A dragged window damages exactly its old and new
+    /// bounds, so drags qualify; overlays and animations repaint everything.
     fn partial_safe(&self) -> bool {
-        if self.scene.len() != (self.w * self.h) as usize
-            || self.drag.is_some()
+        !(self.scene.len() != (self.w * self.h) as usize
             || self.animating()
             || self.launcher.is_some() && self.shoal_backdrop.is_none()
             || self.menu.is_some()
             || self.center.is_some()
             || self.spotlight.is_some()
             || self.current.is_some()
-            || self.shore.is_some()
+            || self.shore_moving()
             || self.crest_moving()
             || self.harbor_moving()
             || self.harbor.peek.is_some()
             || self.dnd.is_some()
             || self.power.is_some()
-            || self.switcher.is_some()
-        {
-            return false;
-        }
-        let mut materials = alloc::vec![Rect::new(0, 0, self.w, MENUBAR_H), self.crest_area(), self.dock_rect()];
+            || self.switcher.is_some())
+    }
+
+    /// Every glass surface on screen (they sample what lies beneath them).
+    fn material_rects(&self) -> Vec<Rect> {
+        // The bar's glass is its bubbles, not the whole strip.
+        let mut materials =
+            alloc::vec![self.left_bubble().0, self.right_bubble().0, self.crest_area(), self.dock_rect()];
+        materials.extend(self.shore_materials());
         for w in &self.windows {
             if w.minimized {
                 continue;
             }
             materials.extend(w.app.materials().into_iter().map(|r| r.offset(w.content().x, w.content().y)));
         }
-        windowing::safe_damage(&self.damage, &materials, 40)
+        materials
     }
 
     pub fn paint(&mut self, cv: &mut Canvas) {
@@ -1451,7 +1467,15 @@ fn paint_window(cv: &mut Canvas, w: &mut Window, focused: bool, env: &Env, shado
         cv.shadow(r, WINDOW_RADIUS, SHADOW_BLUR, if focused { SHADOW_OFFSET } else { 6 }, strength);
     }
     let regions = w.app.materials();
-    if regions.is_empty() || !shadow {
+    if regions.is_empty() && w.app.covers_window() {
+        // The app paints the inside; only the anti-aliased corners blend
+        // over the window colour.
+        for band in
+            [Rect::new(r.x, r.y, r.w, WINDOW_RADIUS), Rect::new(r.x, r.bottom() - WINDOW_RADIUS, r.w, WINDOW_RADIUS)]
+        {
+            cv.with_clip(band, |cv| cv.fill_round_rect(r, WINDOW_RADIUS, t.window_bg));
+        }
+    } else if regions.is_empty() || !shadow {
         cv.fill_round_rect(r, WINDOW_RADIUS, t.window_bg);
     } else {
         for region in regions {

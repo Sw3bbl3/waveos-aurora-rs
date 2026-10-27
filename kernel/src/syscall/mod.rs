@@ -320,6 +320,40 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             out.commit(n * size)?;
             Ok(list.len() as u64)
         }
+        nr::WIFI_STATUS => {
+            let st = crate::drivers::wifi::status().ok_or(ENODEV)?;
+            let size = core::mem::size_of::<aurora_abi::WifiStatus>();
+            let mut out = user::slice_mut(a[0], size as u64)?;
+            out.copy_from_slice(unsafe { core::slice::from_raw_parts(&st as *const _ as *const u8, size) });
+            out.commit(size)?;
+            Ok(0)
+        }
+        nr::WIFI_NETWORKS => {
+            let list = crate::drivers::wifi::networks();
+            let max = (a[1] as usize).min(64);
+            let size = core::mem::size_of::<aurora_abi::WifiNetwork>();
+            let mut out = user::slice_mut(a[0], (max * size) as u64)?;
+            let n = list.len().min(max);
+            for (i, w) in list.iter().take(n).enumerate() {
+                let bytes = unsafe { core::slice::from_raw_parts(w as *const _ as *const u8, size) };
+                out[i * size..(i + 1) * size].copy_from_slice(bytes);
+            }
+            out.commit(n * size)?;
+            Ok(list.len() as u64)
+        }
+        nr::WIFI_CONNECT => {
+            if a[1] == 0 || a[1] > 32 || a[3] > 63 {
+                return Err(EINVAL);
+            }
+            let ssid = user::slice(a[0], a[1])?;
+            let password = if a[3] == 0 { String::new() } else { user::str(a[2], a[3])? };
+            crate::drivers::wifi::connect(&ssid, &password)?;
+            Ok(0)
+        }
+        nr::WIFI_DISCONNECT => {
+            crate::drivers::wifi::disconnect();
+            Ok(0)
+        }
         nr::NET_INFO6 => {
             let list = crate::net::interfaces6();
             let max = (a[1] as usize).min(16);

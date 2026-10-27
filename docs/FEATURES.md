@@ -19,7 +19,8 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - **Libraries:** the `corekit` runtime, and the **AuroraKit** UI toolkit.
 - **Lumen Server window server**, in the kernel like Windows NT's:
   - apps draw into shared-memory surfaces that Lumen Server composites
-  - rendering is damage-tracked, with anti-aliased shapes, soft shadows and frosted glass
+  - rendering is damage-tracked, with anti-aliased shapes, soft shadows and frosted glass, drawn with SSE2 in the window server's own task
+- **Linux graphics drivers**: a compatibility layer written for WaveOS (memory, locks, work queues, ID maps, DMA fences, virtio) runs Linux 6.12's DRM display core and its **virtio-gpu** driver unmodified; an in-kernel DRM client sets the mode and Lumen Server draws through it (`cargo xtask run --gpu virtio`). Only permissively licensed Linux code is included; WaveOS replaces the GPL-only parts. See [kernel/linux](../kernel/linux/README.md).
 - **Boot and Shore:** a boot screen with the WayV logo, start-up progress and the version, in the Light or Dark appearance; first-start setup of the one account (its password is salted and hashed with PBKDF2-HMAC-SHA256), then login, Lock Screen (Super L) and optional automatic login.
 - **The living-water desktop:**
   - a top bar of glass bubbles: the WayV menu and the app on the left; **Crest** in the middle with the time (the date on pointing, activities such as volume and new notifications), which can be turned off; **Seek** and the status ring on the right, opening **Current** (network, Calm, appearance, lock, sound, battery)
@@ -35,6 +36,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - **DNS** asking for A and AAAA together, with a cache that honours TTLs; Happy Eyeballs connections that prefer IPv6 where it's routed; an **HTTP/1.1** client with keep-alive, chunked and gzip responses
   - **TLS 1.3** (and 1.2 for older servers) with our own handshake, record layer and X.509 certificate checks against Mozilla's root CAs. Cryptographic primitives come from RustCrypto.
   - the network in **Current**, **Settings → Network**, and network graphs in Pulse
+  - **Wi-Fi**: open and WPA2-Personal networks, with our own supplicant (4-way and group key handshakes) and CCMP encryption, a Wi-Fi section in Settings → Network and wlanN interfaces. Intel adapters (7265 to AX211) are recognized but their radio can't be started yet; simulated networks for testing (`cargo xtask run --wifi-sim`)
 - **Nebula**, the web browser, on our own engine:
   - an HTML parser, and CSS with selectors, the cascade, custom properties, `calc()`, media queries and generated content
   - layout: blocks, inline text with line breaking, lists, tables, flexbox and grid rows, floats, form controls
@@ -72,7 +74,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
 |---|---|
 | `cargo xtask build` | Builds the bootloader, kernel and user space into `target/esp/` |
 | `cargo xtask run --monitor` | Same as `run`, plus the live System Explorer in your browser |
-| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB, network). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--net virtio\|e1000\|e1000e\|none` the network card, `--smp N` the CPUs, `--battery` adds a laptop battery, `--usb-stick` plugs in a USB stick, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
+| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB, network). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--net virtio\|e1000\|e1000e\|none` the network card, `--smp N` the CPUs, `--battery` adds a laptop battery (`--battery=host` mirrors this computer's, `--battery=20,charging` fixes one), `--usb-stick` plugs in a USB stick, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
 | `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller, `--net` the network card, `--smp 1` for one CPU |
 | `cargo xtask image` | Creates `target/waveos-aurora-usb.img` (ESP plus AuroraFS), ready to `dd` onto a USB stick |
 | `cargo xtask lint` | Clippy on the host libraries, kernel, bootloader and user space, each for its own target, with warnings as errors |

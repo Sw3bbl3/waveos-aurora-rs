@@ -219,32 +219,87 @@ pub fn blur(src: &[u32], w: i32, h: i32, radius: i32) -> Vec<u32> {
     a
 }
 
+/// A wide blur computed at quarter resolution: box-average down, blur
+/// there with a quarter of the radius, and scale back up bilinearly. For
+/// radii of a dozen pixels or more it looks the same as [`blur`] at about a
+/// sixteenth of the work.
+pub fn blur_coarse(src: &[u32], w: i32, h: i32, radius: i32) -> Vec<u32> {
+    const F: i32 = 4;
+    let (sw, sh) = ((w + F - 1) / F, (h + F - 1) / F);
+    let mut small = vec![0u32; (sw * sh) as usize];
+    for sy in 0..sh {
+        for sx in 0..sw {
+            let (mut rb, mut g, mut n) = (0u32, 0u32, 0u32);
+            for y in sy * F..(sy * F + F).min(h) {
+                for x in sx * F..(sx * F + F).min(w) {
+                    let c = src[(y * w + x) as usize];
+                    rb += c & 0x00FF_00FF;
+                    g += (c >> 8) & 0xFF;
+                    n += 1;
+                }
+            }
+            small[(sy * sw + sx) as usize] = 0xFF00_0000 | ((rb >> 16) / n) << 16 | (g / n) << 8 | ((rb & 0xFFFF) / n);
+        }
+    }
+    let small = blur(&small, sw, sh, (radius / F).max(1));
+    let mut out = vec![0u32; (w * h) as usize];
+    let mut column = vec![0u32; sw as usize];
+    for y in 0..h {
+        // Sample centres: output pixel y sits at (y + 0.5) / F - 0.5 in the small image.
+        let fy = ((y * 2 + 1) * 128 / F - 128).max(0);
+        let (y0, ty) = ((fy / 256).min(sh - 1), fy % 256);
+        let y1 = (y0 + 1).min(sh - 1);
+        for (x, c) in column.iter_mut().enumerate() {
+            *c = crate::canvas::mix(small[(y0 * sw) as usize + x], small[(y1 * sw) as usize + x], ty);
+        }
+        for x in 0..w {
+            let fx = ((x * 2 + 1) * 128 / F - 128).max(0);
+            let (x0, tx) = ((fx / 256).min(sw - 1), fx % 256);
+            let x1 = (x0 + 1).min(sw - 1);
+            out[(y * w + x) as usize] = crate::canvas::mix(column[x0 as usize], column[x1 as usize], tx) | 0xFF00_0000;
+        }
+    }
+    out
+}
+
 pub(crate) fn box_pass(src: &[u32], dst: &mut [u32], w: i32, h: i32, r: i32, horizontal: bool) {
-    let (lines, len) = if horizontal { (h, w) } else { (w, h) };
+    if horizontal {
+        box_lines::<true>(src, dst, w, h, r);
+    } else {
+        box_lines::<false>(src, dst, w, h, r);
+    }
+}
+
+/// One running-sum box pass along rows (`H`) or columns. Red and blue share
+/// one accumulator (16-bit lanes never carry: each sum is at most 255 × n),
+/// and the division by n is an exact multiply by its reciprocal.
+fn box_lines<const H: bool>(src: &[u32], dst: &mut [u32], w: i32, h: i32, r: i32) {
+    let (lines, len) = if H { (h, w) } else { (w, h) };
     let idx = |line: i32, i: i32| -> usize {
         let i = i.clamp(0, len - 1);
-        if horizontal {
+        if H {
             (line * w + i) as usize
         } else {
             (i * w + line) as usize
         }
     };
-    let n = (2 * r + 1) as u32;
+    let n = (2 * r + 1) as u64;
+    // floor(x / n) == (x * m) >> 32 for every x <= 255 * n (n far below 2^24).
+    let m = (1u64 << 32) / n + 1;
+    let div = |x: u32| ((x as u64 * m) >> 32) as u32;
     for line in 0..lines {
-        let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
+        let (mut rb, mut g) = (0u32, 0u32);
         for i in -r..=r {
             let c = src[idx(line, i)];
-            sr += (c >> 16) & 0xFF;
-            sg += (c >> 8) & 0xFF;
-            sb += c & 0xFF;
+            rb += c & 0x00FF_00FF;
+            g += (c >> 8) & 0xFF;
         }
         for i in 0..len {
-            dst[idx(line, i)] = 0xFF00_0000 | (sr / n) << 16 | (sg / n) << 8 | (sb / n);
+            dst[idx(line, i)] = 0xFF00_0000 | div(rb >> 16) << 16 | div(g) << 8 | div(rb & 0xFFFF);
             let out = src[idx(line, i - r)];
             let inn = src[idx(line, i + r + 1)];
-            sr = sr + ((inn >> 16) & 0xFF) - ((out >> 16) & 0xFF);
-            sg = sg + ((inn >> 8) & 0xFF) - ((out >> 8) & 0xFF);
-            sb = sb + (inn & 0xFF) - (out & 0xFF);
+            rb = rb + (inn & 0x00FF_00FF) - (out & 0x00FF_00FF);
+            g = g + ((inn >> 8) & 0xFF) - ((out >> 8) & 0xFF);
         }
     }
 }

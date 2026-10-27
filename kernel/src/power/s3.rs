@@ -84,6 +84,7 @@ extern "sysv64" fn resume_entry(_arg: u64) -> ! {
     idt::init();
     syscall::init();
     fpu::init();
+    crate::arch::pat::init();
     percpu::init(0);
     unsafe { aurora_s3_restore(&raw const CONTEXT) }
 }

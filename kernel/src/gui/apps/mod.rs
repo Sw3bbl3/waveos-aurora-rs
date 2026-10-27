@@ -268,6 +268,11 @@ pub trait App {
     fn materials(&self) -> Vec<Rect> {
         Vec::new()
     }
+    /// Paints every pixel of its window opaquely when it has no glass
+    /// regions, so the window colour beneath only shows at the corners.
+    fn covers_window(&self) -> bool {
+        false
+    }
     fn kind(&self) -> AppKind;
     fn title(&self) -> String {
         String::from(info(self.kind()).name)

@@ -151,7 +151,17 @@ pub mod nr {
     /// `audio_control(fd, op) -> value` — pause, resume, flush or read the
     /// number of stereo frames consumed by this stream's mixer.
     pub const AUDIO_CONTROL: usize = 71;
-    pub const COUNT: usize = 72;
+    /// `wifi_status(*mut WifiStatus)` — `-ENODEV` without Wi-Fi hardware.
+    pub const WIFI_STATUS: usize = 72;
+    /// `wifi_networks(*mut WifiNetwork, max) -> count` — networks heard
+    /// recently, by name; also starts a new scan.
+    pub const WIFI_NETWORKS: usize = 73;
+    /// `wifi_connect(ssid, ssid_len, password, password_len)` — starts joining
+    /// (progress shows in `wifi_status`); password_len 0 for open networks.
+    pub const WIFI_CONNECT: usize = 74;
+    /// `wifi_disconnect()`
+    pub const WIFI_DISCONNECT: usize = 75;
+    pub const COUNT: usize = 76;
 }
 
 #[repr(C)]
@@ -244,6 +254,56 @@ pub struct NetInterface6 {
     pub dns: [[u8; 16]; 2],
     pub dns_count: u32,
     pub _pad: u32,
+}
+
+/// Wi-Fi.
+pub mod wifi {
+    /// [`super::WifiStatus::state`].
+    pub const IDLE: u32 = 0;
+    pub const CONNECTING: u32 = 1;
+    pub const CONNECTED: u32 = 2;
+    /// The last attempt failed; `message` says why.
+    pub const FAILED: u32 = 3;
+    /// The hardware was found but cannot be used yet (`message` says why).
+    pub const UNAVAILABLE: u32 = 4;
+
+    /// [`super::WifiNetwork::security`].
+    pub const OPEN: u32 = 0;
+    pub const WPA2: u32 = 1;
+    pub const WPA2_WPA3: u32 = 2;
+    /// Protection WaveOS can't join (WEP, WPA1, WPA3-only, enterprise).
+    pub const UNSUPPORTED: u32 = 3;
+}
+
+/// The Wi-Fi adapter's state, as `wifi_status` reports it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct WifiStatus {
+    pub state: u32,
+    pub ssid_len: u32,
+    pub ssid: [u8; 32],
+    pub message_len: u32,
+    pub driver_len: u32,
+    pub message: [u8; 96],
+    pub driver: [u8; 48],
+}
+
+impl Default for WifiStatus {
+    fn default() -> Self {
+        WifiStatus { state: 0, ssid_len: 0, ssid: [0; 32], message_len: 0, driver_len: 0, message: [0; 96], driver: [0; 48] }
+    }
+}
+
+/// A network `wifi_networks` lists.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WifiNetwork {
+    pub ssid: [u8; 32],
+    pub ssid_len: u32,
+    pub security: u32,
+    pub channel: u32,
+    /// Received signal in dBm, 0 if the radio doesn't say.
+    pub signal: i32,
 }
 
 /// A network interface as `net_info` reports it.

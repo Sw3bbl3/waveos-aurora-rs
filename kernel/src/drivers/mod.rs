@@ -13,6 +13,7 @@ pub mod ps2;
 pub mod rtc;
 pub mod usb;
 pub mod virtio;
+pub mod wifi;
 pub mod vmmouse;
 
 /// After sleep every controller was reset: bring each driver's hardware back.
