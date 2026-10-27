@@ -398,12 +398,10 @@ fn measure_node<M>(v: &View<'_, M>, pw: i32, ph: i32, inh: Inherit, lay: &mut La
             let cw = sub(pw, 2 * inset);
             let mut w = 0;
             let mut h = 0;
-            let mut n = 0;
-            for c in children.iter().filter(|c| !c.mods.hidden) {
+            for (n, c) in children.iter().filter(|c| !c.mods.hidden).enumerate() {
                 let (a, b) = measure(c, cw, INF, inh, lay);
                 w = w.max(a);
                 h += b + if *separators && n > 0 { 1 } else { 0 };
-                n += 1;
             }
             let vpad = if *separators { 4 } else { 0 };
             (bounded(pw, w + 2 * inset), h + 2 * vpad)

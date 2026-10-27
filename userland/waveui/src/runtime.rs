@@ -1022,10 +1022,12 @@ impl<A: App> Host<A> {
                         }
                     }
                 }
-                HitKind::Canvas if !(ctrl && self.shortcut_hit(ev).is_some()) && !(ev.code == KeyCode::Tab && ctrl) => {
-                    if self.canvas_event(h, CanvasEvent::Key(*ev)) {
-                        return true;
-                    }
+                HitKind::Canvas
+                    if !(ctrl && self.shortcut_hit(ev).is_some())
+                        && !(ev.code == KeyCode::Tab && ctrl)
+                        && self.canvas_event(h, CanvasEvent::Key(*ev)) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
@@ -1580,11 +1582,15 @@ impl<A: App> aurorakit::App for Host<A> {
                         }
                     }
                 };
-                self.rt.scroll.get_mut(&key).map(|st| st.by(d as f32, smooth, now));
+                if let Some(st) = self.rt.scroll.get_mut(&key) {
+                    st.by(d as f32, smooth, now);
+                }
                 true
             }
             ScrollKind::List => {
-                self.rt.scroll.get_mut(&key).map(|st| st.by(px_y as f32, smooth, now));
+                if let Some(st) = self.rt.scroll.get_mut(&key) {
+                    st.by(px_y as f32, smooth, now);
+                }
                 true
             }
             ScrollKind::Editor => {
