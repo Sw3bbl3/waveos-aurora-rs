@@ -14,14 +14,15 @@ pub struct ClientApp {
     kind: AppKind,
     resizable: bool,
     initial: (i32, i32),
-    /// Content size last reported to the client (to detect resizes).
-    reported: (i32, i32),
+    /// Content size (points) and scale last reported to the client (to
+    /// detect resizes).
+    reported: (i32, i32, i32),
 }
 
 impl ClientApp {
     pub fn new(id: u32, kind: AppKind) -> Option<ClientApp> {
         let (_, _, resizable, initial) = server::info(id)?;
-        Some(ClientApp { id, kind, resizable, initial, reported: initial })
+        Some(ClientApp { id, kind, resizable, initial, reported: (initial.0, initial.1, crate::gui::scale()) })
     }
 
     fn pointer(&self, kind: u32, x: i32, y: i32, area: Rect, clicks: u32) {
@@ -55,9 +56,13 @@ impl App for ClientApp {
         self.resizable
     }
     fn draw(&mut self, cv: &mut Canvas, area: Rect, _env: &Env) {
-        if (area.w, area.h) != self.reported {
-            self.reported = (area.w, area.h);
-            server::push_event(self.id, Event { kind: event::RESIZE, x: area.w, y: area.h, ..Default::default() });
+        // A new size, or a new scale: the client draws its surface again.
+        if (area.w, area.h, cv.scale) != self.reported {
+            self.reported = (area.w, area.h, cv.scale);
+            server::push_event(
+                self.id,
+                Event { kind: event::RESIZE, x: area.w, y: area.h, a: cv.scale as u32, ..Default::default() },
+            );
         }
         let bg = theme::current().window_bg;
         let glass = !self.materials().is_empty();
@@ -67,7 +72,8 @@ impl App for ClientApp {
             } else {
                 cv.blit(px, w, h, area, WINDOW_RADIUS);
             }
-            (w as i32, h as i32)
+            // The part covered, in points.
+            (w as i32 / cv.scale, h as i32 / cv.scale)
         });
         // Until the client catches up with a resize, fill the uncovered part.
         let (w, h) = drawn.unwrap_or((0, 0));

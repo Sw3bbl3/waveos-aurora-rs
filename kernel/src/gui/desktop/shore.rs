@@ -427,10 +427,10 @@ impl Desktop {
         let (w, h) = (self.w, self.h);
         // A gentle shade at the bottom keeps the text readable on any picture.
         let shade = if t.dark { 0xFF04_0716 } else { 0xFFFF_FFFF };
-        for y in (h * 2 / 5).max(cv.clip.y)..h.min(cv.clip.bottom()) {
-            let a = (y - h * 2 / 5) * if t.dark { 120 } else { 70 } / (h * 3 / 5).max(1);
-            let row = Rect::new(cv.clip.x, y, cv.clip.w, 1);
-            for x in row.x..row.right() {
+        let (k, clip) = (cv.scale, cv.pclip());
+        for y in (h * 2 / 5 * k).max(clip.y)..(h * k).min(clip.bottom()) {
+            let a = (y / k - h * 2 / 5) * if t.dark { 120 } else { 70 } / (h * 3 / 5).max(1);
+            for x in clip.x..clip.right() {
                 let i = (y * cv.width + x) as usize;
                 cv.buf[i] = mix(cv.buf[i], shade, a);
             }
@@ -521,7 +521,7 @@ impl Desktop {
             match hit {
                 Hit::Sleep => {
                     cv.fill_circle(cx, cy, 8, ink);
-                    cv.fill_circle(cx + 4, cy - 3, 7, mix(cv.buf[(r.y * cv.width + r.x + 3) as usize], 0, 0));
+                    cv.fill_circle(cx + 4, cy - 3, 7, cv.pixel(r.x + 3, r.y));
                 }
                 Hit::Restart => {
                     cv.stroke_arc(cx * 16, cy * 16, 7 * 16, 30, 128 + 64, 832, ink);
@@ -529,7 +529,7 @@ impl Desktop {
                     cv.line(cx + 2, cy - 4, cx + 7, cy - 4, 2, ink);
                 }
                 _ => {
-                    let bg = cv.buf[(r.y * cv.width + r.x + 4) as usize];
+                    let bg = cv.pixel(r.x + 4, r.y);
                     icons::power(cv, cx, cy, 16, ink, bg);
                 }
             }

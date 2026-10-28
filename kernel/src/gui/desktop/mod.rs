@@ -173,6 +173,8 @@ pub struct Desktop {
     super_alone: bool,
     /// A resolution change for the compositor to carry out.
     pub resolution_request: Option<(u32, u32)>,
+    /// The display scale preference changed.
+    pub rescale_request: bool,
     /// The resolution to go back to if a new one isn't confirmed.
     previous_resolution: Option<(u32, u32)>,
     /// Ask "Keep this resolution?" after the next resize.
@@ -183,7 +185,8 @@ pub struct Desktop {
     current: Option<bar::Current>,
     bar_hover: Option<bar::BarHit>,
     /// The WayV mark for the left bubble (decoded on first use).
-    mark: Option<Option<aurora_image::Image>>,
+    /// The WayV mark for the bar, and the scale it was made for.
+    mark: Option<(i32, Option<aurora_image::Image>)>,
     /// Whether the power adapter was connected at the last check.
     last_ac: Option<bool>,
     /// The computer's account (None until first-boot setup).
@@ -239,6 +242,7 @@ impl Desktop {
             spotlight: None,
             super_alone: false,
             resolution_request: None,
+            rescale_request: false,
             previous_resolution: None,
             confirm_resolution: false,
             crest: bar::Crest::default(),
@@ -261,7 +265,10 @@ impl Desktop {
     /// The wallpaper for the current appearance: the user's picture (whose
     /// colours become the accent), the built-in day or night picture, or —
     /// when no picture can be read — the procedural rendering.
+    /// Both are in device pixels, for a `w`×`h`-point screen.
     fn make_wallpaper(w: i32, h: i32) -> (Vec<u32>, Vec<u32>) {
+        let k = super::scale();
+        let (w, h) = (w * k, h * k);
         let index = theme::wallpaper();
         let custom = (index == wallpaper::CUSTOM)
             .then(|| super::settings::get("wallpaper_image"))
@@ -273,7 +280,7 @@ impl Desktop {
         let wp = custom
             .or_else(|| wallpaper::file(index, theme::current().dark).and_then(|f| picture_wallpaper(f, w, h)))
             .unwrap_or_else(|| wallpaper::generate(index, w, h));
-        let blurred = wallpaper::blur_coarse(&wp, w, h, 18);
+        let blurred = wallpaper::blur_coarse(&wp, w, h, 18 * k);
         (wp, blurred)
     }
 
@@ -570,7 +577,10 @@ impl Desktop {
                     if let Some(prev) = self.previous_resolution.take() {
                         if revert {
                             self.resolution_request = Some(prev);
-                        } else if let Err(e) = super::prefs::set_boot_resolution(self.w as u32, self.h as u32) {
+                        } else if let Err(e) = {
+                            let (pw, ph) = super::screen_pixels();
+                            super::prefs::set_boot_resolution(pw as u32, ph as u32)
+                        } {
                             // Kept for this session; the next start uses the firmware's choice.
                             log!("gui", "could not save the resolution: {}", aurora_abi::err::name(e));
                         }
@@ -590,6 +600,8 @@ impl Desktop {
     fn pref_changed(&mut self, key: &str) {
         use aurora_abi::pref;
         match key {
+            // Draw again at the new scale (same resolution).
+            pref::DISPLAY_SCALE => self.rescale_request = true,
             pref::GLASS
             | pref::REDUCE_TRANSPARENCY
             | pref::REDUCE_MOTION
@@ -785,8 +797,9 @@ impl Desktop {
                 // Follow the screen's new preferred size, without asking.
                 Command::DisplayChanged => self.resolution_request = Some((0, 0)),
                 Command::SetResolution(w, h) => {
-                    if (w as i32, h as i32) != (self.w, self.h) {
-                        self.previous_resolution.get_or_insert((self.w as u32, self.h as u32));
+                    let (pw, ph) = super::screen_pixels();
+                    if (w as i32, h as i32) != (pw, ph) {
+                        self.previous_resolution.get_or_insert((pw as u32, ph as u32));
                         self.resolution_request = Some((w, h));
                         self.confirm_resolution = true;
                     }
@@ -1381,7 +1394,8 @@ impl Desktop {
     /// around glass). A dragged window damages exactly its old and new
     /// bounds, so drags qualify; overlays and animations repaint everything.
     fn partial_safe(&self) -> bool {
-        !(self.scene.len() != (self.w * self.h) as usize
+        let k = super::scale();
+        !(self.scene.len() != (self.w * k * self.h * k) as usize
             || self.animating()
             || self.launcher.is_some() && self.shoal_backdrop.is_none()
             || self.menu.is_some()
@@ -1430,12 +1444,7 @@ impl Desktop {
             if let Some(p) = self.power {
                 self.paint_power_overlay(cv, p);
             }
-            self.scene.resize(cv.buf.len(), 0);
-            for y in cv.clip.y..cv.clip.bottom() {
-                let start = (y * cv.width + cv.clip.x) as usize;
-                let end = start + cv.clip.w as usize;
-                self.scene[start..end].copy_from_slice(&cv.buf[start..end]);
-            }
+            self.save_scene(cv);
             cursor::draw(cv, self.cursor.0, self.cursor.1);
             return;
         }
@@ -1464,13 +1473,20 @@ impl Desktop {
         if let Some(p) = self.power {
             self.paint_power_overlay(cv, p);
         }
+        self.save_scene(cv);
+        cursor::draw(cv, self.cursor.0, self.cursor.1);
+    }
+
+    /// Keeps the composed scene (without the pointer) under the clip, to
+    /// redraw the pointer alone over it.
+    fn save_scene(&mut self, cv: &Canvas) {
         self.scene.resize(cv.buf.len(), 0);
-        for y in cv.clip.y..cv.clip.bottom() {
-            let start = (y * cv.width + cv.clip.x) as usize;
-            let end = start + cv.clip.w as usize;
+        let clip = cv.pclip();
+        for y in clip.y..clip.bottom() {
+            let start = (y * cv.width + clip.x) as usize;
+            let end = start + clip.w as usize;
             self.scene[start..end].copy_from_slice(&cv.buf[start..end]);
         }
-        cursor::draw(cv, self.cursor.0, self.cursor.1);
     }
 
     fn paint_power_overlay(&self, cv: &mut Canvas, p: PowerAction) {

@@ -133,13 +133,25 @@ pub fn shade_row(row: &mut [u32], shade: &[u32]) {
     }
 }
 
+/// A pixel buffer to draw into.
+///
+/// Drawing is in points: on a HiDPI screen (`scale` 2) a point is 2×2 device
+/// pixels, and shapes, text and images are drawn at the full device
+/// resolution. `buf`, `width` and `height` are in device pixels; `clip` and
+/// every drawing call's coordinates are in points.
 pub struct Canvas<'a> {
     pub materials: Option<&'a mut crate::material::MaterialCache>,
     pub buf: &'a mut [u32],
+    /// Width of `buf` in device pixels (the row stride).
     pub width: i32,
     #[allow(dead_code)]
     pub height: i32,
+    /// Where drawing lands, in points.
     pub clip: Rect,
+    /// Device pixels per point.
+    pub scale: i32,
+    /// A clip in device pixels that overrides `clip` (internal, see `with_pclip`).
+    px_clip: Option<Rect>,
 }
 
 /// Anti-aliased coverage (0..=256) of pixel (x, y) for a rounded rectangle.
@@ -171,7 +183,7 @@ fn round_rect_coverage(r: &Rect, radius: i32, x: i32, y: i32) -> u32 {
 
 impl<'a> Canvas<'a> {
     pub fn new(buf: &'a mut [u32], width: i32, height: i32) -> Self {
-        Self { buf, width, height, clip: Rect::new(0, 0, width, height), materials: None }
+        Self { buf, width, height, clip: Rect::new(0, 0, width, height), materials: None, scale: 1, px_clip: None }
     }
 
     /// Runs `f` with the clip narrowed to `r`, restoring it afterwards.
@@ -184,14 +196,204 @@ impl<'a> Canvas<'a> {
         self.clip = saved;
     }
 
+    /// Draws at `scale` device pixels per point.
+    pub fn with_scale(mut self, scale: i32) -> Self {
+        self.scale = scale.max(1);
+        self.clip = Rect::new(0, 0, self.width / self.scale, self.height / self.scale);
+        self
+    }
+
+    /// The canvas size in points.
+    pub fn size(&self) -> (i32, i32) {
+        (self.width / self.scale, self.height / self.scale)
+    }
+
+    /// `r` (in points) in device pixels.
+    #[inline]
+    pub fn to_px(&self, r: Rect) -> Rect {
+        let s = self.scale;
+        if s == 1 {
+            r
+        } else {
+            Rect::new(r.x * s, r.y * s, r.w * s, r.h * s)
+        }
+    }
+
+    /// The colour already drawn at point (x, y) (its top-left device pixel).
+    pub fn pixel(&self, x: i32, y: i32) -> u32 {
+        self.buf[(y * self.scale * self.width + x * self.scale) as usize]
+    }
+
+    /// The clip in device pixels.
+    #[inline]
+    pub fn pclip(&self) -> Rect {
+        match self.px_clip {
+            Some(r) => r,
+            None => self.to_px(self.clip),
+        }
+    }
+
+    /// Runs `f` with the device-pixel clip narrowed to `r`.
+    fn with_pclip(&mut self, r: Rect, f: impl FnOnce(&mut Self)) {
+        let saved = self.px_clip;
+        let clip = self.pclip().intersect(&r);
+        if !clip.is_empty() {
+            self.px_clip = Some(clip);
+            f(self);
+        }
+        self.px_clip = saved;
+    }
+
+    // ------------------------------------------------- drawing, in points
+
+    pub fn fill_rect(&mut self, r: Rect, c: u32) {
+        self.fill_rect_px(self.to_px(r), c)
+    }
+
+    /// Fills `r` with a colour (and alpha) computed per point.
+    pub fn fill_rect_with(&mut self, r: Rect, color: impl Fn(i32, i32) -> u32) {
+        let s = self.scale;
+        self.fill_rect_with_px(self.to_px(r), |x, y| color(x.div_euclid(s), y.div_euclid(s)))
+    }
+
+    pub fn fill_round_rect(&mut self, r: Rect, radius: i32, c: u32) {
+        self.fill_round_rect_px(self.to_px(r), radius * self.scale, c)
+    }
+
+    pub fn fill_round_rect_with(&mut self, r: Rect, radius: i32, color: impl Fn(i32, i32) -> u32) {
+        let s = self.scale;
+        self.fill_round_rect_with_px(self.to_px(r), radius * s, |x, y| color(x.div_euclid(s), y.div_euclid(s)))
+    }
+
+    /// An anti-aliased outline of a rounded rectangle, one point wide.
+    pub fn stroke_round_rect(&mut self, r: Rect, radius: i32, c: u32) {
+        let (s, px) = (self.scale, self.to_px(r));
+        for i in 0..s {
+            self.stroke_round_rect_px(px.inset(i), (radius * s - i).max(0), c);
+        }
+    }
+
+    /// A soft drop shadow around `r` (drawn outside the shape only).
+    pub fn shadow(&mut self, r: Rect, radius: i32, blur: i32, offset_y: i32, strength: u32) {
+        let s = self.scale;
+        self.shadow_px(self.to_px(r), radius * s, blur * s, offset_y * s, strength)
+    }
+
+    /// Copies pixels from a full-screen source buffer (same dimensions as the
+    /// canvas, in device pixels) within `r`.
+    pub fn blit_same(&mut self, src: &[u32], r: Rect) {
+        self.blit_same_px(src, self.to_px(r))
+    }
+
+    /// Copies an opaque `src_w`×`src_h` image (device pixels, row stride =
+    /// `src_w`) 1:1 to `dst`'s top-left corner, clipped to `dst` and the
+    /// canvas clip. With `radius > 0` all four corners of `dst` are rounded
+    /// (anti-aliased) — window contents.
+    pub fn blit(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, radius: i32) {
+        self.blit_px(src, src_w, src_h, self.to_px(dst), radius * self.scale)
+    }
+
+    /// Copies opaque pixels covering `part` (row stride `part.w`, in device
+    /// pixels) into the canvas, inside `shape` with its corners rounded.
+    pub fn blit_part_rounded(&mut self, src: &[u32], part: Rect, shape: Rect, radius: i32) {
+        self.blit_part_rounded_px(src, self.to_px(part), self.to_px(shape), radius * self.scale)
+    }
+
+    /// Like [`blit`](Self::blit) for a surface with transparency (glass regions).
+    pub fn blit_alpha(&mut self, src: &[u32], sw: u32, sh: u32, dst: Rect, radius: i32) {
+        self.blit_alpha_px(src, sw, sh, self.to_px(dst), radius * self.scale)
+    }
+
+    /// Draws a `src_w`×`src_h` image with straight alpha scaled into `dst`
+    /// (bilinear filtering, premultiplied so transparent edges don't fringe),
+    /// at `opacity` 0..=255. For large reductions, draw a thumbnail instead.
+    pub fn draw_image(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, opacity: u32) {
+        self.draw_image_px(src, src_w, src_h, self.to_px(dst), opacity)
+    }
+
+    /// Copies opaque pixels at (x, y), a pixel per point, clipped (video frames).
+    pub fn blit_opaque(&mut self, src: &[u32], src_w: u32, src_h: u32, x: i32, y: i32) {
+        let s = self.scale;
+        if s == 1 {
+            return self.blit_opaque_px(src, src_w, src_h, x, y);
+        }
+        let dst = self.to_px(Rect::new(x, y, src_w as i32, src_h as i32));
+        let vis = dst.intersect(&self.pclip());
+        if vis.is_empty() || src.len() < (src_w * src_h) as usize {
+            return;
+        }
+        for row in vis.y..vis.bottom() {
+            let s0 = ((row - dst.y) / s) as usize * src_w as usize;
+            let d0 = (row * self.width) as usize;
+            for col in vis.x..vis.right() {
+                self.buf[d0 + col as usize] = src[s0 + ((col - dst.x) / s) as usize];
+            }
+        }
+    }
+
+    /// The grey checkerboard shown behind transparent images.
+    pub fn checkerboard(&mut self, r: Rect, cell: i32, light: u32, dark: u32) {
+        self.checkerboard_px(self.to_px(r), cell * self.scale, light, dark)
+    }
+
+    /// The font that draws `font` at this canvas's scale.
+    fn device_font(&self, font: Font) -> Font {
+        if self.scale == 1 {
+            font
+        } else {
+            crate::font::get(font.face, font.size.saturating_mul(self.scale as u16))
+        }
+    }
+
+    /// Draws `s` with its baseline at `y`. Returns the advance in points.
+    pub fn text(&mut self, x: i32, y: i32, s: &str, font: Font, c: u32) -> i32 {
+        let k = self.scale;
+        let f = self.device_font(font);
+        (self.text_px(x * k, y * k, s, f, c) + k / 2) / k
+    }
+
+    /// Draws `s` slanted about 12° (a synthesized italic). Returns the advance in points.
+    pub fn text_slanted(&mut self, x: i32, y: i32, s: &str, font: Font, c: u32) -> i32 {
+        let k = self.scale;
+        let f = self.device_font(font);
+        (self.text_slanted_px(x * k, y * k, s, f, c) + k / 2) / k
+    }
+
+    /// Anti-aliased thick polyline, blended once per pixel (no darkened joints).
+    pub fn polyline(&mut self, pts: &[(i32, i32)], width: i32, c: u32) {
+        let s = self.scale;
+        if s == 1 {
+            return self.polyline_px(pts, width, c);
+        }
+        let pts: alloc::vec::Vec<(i32, i32)> = pts.iter().map(|&(x, y)| (x * s, y * s)).collect();
+        self.polyline_px(&pts, width * s, c)
+    }
+
+    /// Anti-aliased arc with round caps. Centre and radius are in 1/16 point
+    /// so small rings sit exactly; angles use 1024 units per turn (0 at 3
+    /// o'clock, growing clockwise) and the arc runs from `start` for `sweep`.
+    #[allow(clippy::too_many_arguments)] // a circle, a pen and an angle range
+    pub fn stroke_arc(&mut self, cx: i32, cy: i32, r: i32, width: i32, start: i32, sweep: i32, c: u32) {
+        let s = self.scale;
+        self.stroke_arc_px(cx * s, cy * s, r * s, width * s, start, sweep, c)
+    }
+
+    /// Anti-aliased thick line segment (round caps).
+    pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, width: i32, c: u32) {
+        let s = self.scale;
+        self.line_px(x0 * s, y0 * s, x1 * s, y1 * s, width * s, c)
+    }
+
+    // ---------------------------------------- drawing, in device pixels
+
     #[inline]
     fn put(&mut self, x: i32, y: i32, c: u32, a: u32) {
         let i = (y * self.width + x) as usize;
         self.buf[i] = blend(self.buf[i], c, a);
     }
 
-    pub fn fill_rect(&mut self, r: Rect, c: u32) {
-        let r = r.intersect(&self.clip);
+    fn fill_rect_px(&mut self, r: Rect, c: u32) {
+        let r = r.intersect(&self.pclip());
         if r.is_empty() {
             return;
         }
@@ -207,8 +409,8 @@ impl<'a> Canvas<'a> {
     }
 
     /// Fills `r` with a colour (and alpha) computed per pixel.
-    pub fn fill_rect_with(&mut self, r: Rect, color: impl Fn(i32, i32) -> u32) {
-        let area = r.intersect(&self.clip);
+    fn fill_rect_with_px(&mut self, r: Rect, color: impl Fn(i32, i32) -> u32) {
+        let area = r.intersect(&self.pclip());
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {
                 let c = color(x, y);
@@ -217,9 +419,9 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    pub fn fill_round_rect(&mut self, r: Rect, radius: i32, c: u32) {
+    fn fill_round_rect_px(&mut self, r: Rect, radius: i32, c: u32) {
         let radius = radius.min(r.w / 2).min(r.h / 2);
-        let area = r.intersect(&self.clip);
+        let area = r.intersect(&self.pclip());
         if area.is_empty() {
             return;
         }
@@ -255,9 +457,9 @@ impl<'a> Canvas<'a> {
         self.fill_round_rect_with(r, radius, |x, y| mix(from, to, ((x - r.x) + (y - r.y)) * 256 / span));
     }
 
-    pub fn fill_round_rect_with(&mut self, r: Rect, radius: i32, color: impl Fn(i32, i32) -> u32) {
+    fn fill_round_rect_with_px(&mut self, r: Rect, radius: i32, color: impl Fn(i32, i32) -> u32) {
         let radius = radius.min(r.w / 2).min(r.h / 2);
-        let area = r.intersect(&self.clip);
+        let area = r.intersect(&self.pclip());
         for y in area.y..area.bottom() {
             let in_band = y < r.y + radius || y >= r.bottom() - radius;
             for x in area.x..area.right() {
@@ -272,12 +474,12 @@ impl<'a> Canvas<'a> {
     }
 
     /// A 1px anti-aliased outline of a rounded rectangle.
-    pub fn stroke_round_rect(&mut self, r: Rect, radius: i32, c: u32) {
+    fn stroke_round_rect_px(&mut self, r: Rect, radius: i32, c: u32) {
         if radius < 0 || 2 * radius > r.w || 2 * radius > r.h {
             return self.stroke_round_rect_slow(r, radius, c);
         }
         let inner = r.inset(1);
-        let area = r.intersect(&self.clip);
+        let area = r.intersect(&self.pclip());
         let base = alpha(c);
         let ri = (radius - 1).max(0);
         // Only the corner columns need coverage: between them the top and
@@ -309,7 +511,7 @@ impl<'a> Canvas<'a> {
 
     fn stroke_round_rect_slow(&mut self, r: Rect, radius: i32, c: u32) {
         let inner = r.inset(1);
-        let area = r.intersect(&self.clip);
+        let area = r.intersect(&self.pclip());
         let base = alpha(c);
         let ri = (radius - 1).max(0);
         for y in area.y..area.bottom() {
@@ -333,7 +535,7 @@ impl<'a> Canvas<'a> {
     }
 
     fn put_clipped(&mut self, x: i32, y: i32, c: u32, a: u32) {
-        if self.clip.contains(x, y) {
+        if self.pclip().contains(x, y) {
             self.put(x, y, c, a);
         }
     }
@@ -351,12 +553,12 @@ impl<'a> Canvas<'a> {
     /// corner arcs begin), so it is tabulated once per call: a profile for
     /// the edges and a small table for the corners, instead of a square root
     /// per pixel. The interior, which the window covers, is skipped by spans.
-    pub fn shadow(&mut self, r: Rect, radius: i32, blur: i32, offset_y: i32, strength: u32) {
+    fn shadow_px(&mut self, r: Rect, radius: i32, blur: i32, offset_y: i32, strength: u32) {
         // Blending treats any opacity from 255 up as solid.
         let strength = strength.min(255);
         let s = r.offset(0, offset_y);
         let bounds = Rect::new(s.x - blur, s.y - blur, s.w + 2 * blur, s.h + 2 * blur);
-        let area = bounds.intersect(&self.clip);
+        let area = bounds.intersect(&self.pclip());
         if area.is_empty() {
             return;
         }
@@ -446,8 +648,8 @@ impl<'a> Canvas<'a> {
     }
 
     /// Copies pixels from a full-screen source buffer (same dimensions) within `r`.
-    pub fn blit_same(&mut self, src: &[u32], r: Rect) {
-        let r = r.intersect(&self.clip);
+    fn blit_same_px(&mut self, src: &[u32], r: Rect) {
+        let r = r.intersect(&self.pclip());
         for y in r.y..r.bottom() {
             let a = (y * self.width + r.x) as usize;
             let b = (y * self.width + r.right()) as usize;
@@ -458,11 +660,11 @@ impl<'a> Canvas<'a> {
     /// Copies an opaque `src_w`×`src_h` image (row stride = `src_w`) to `dst`'s
     /// top-left corner, clipped to `dst` and the canvas clip. With `radius > 0`
     /// all four corners of `dst` are rounded (anti-aliased) — window contents.
-    pub fn blit(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, radius: i32) {
+    fn blit_px(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, radius: i32) {
         let img = Rect::new(dst.x, dst.y, (src_w as i32).min(dst.w), (src_h as i32).min(dst.h));
         let radius = radius.min(dst.w / 2).min(dst.h / 2).max(0);
         let straight = Rect::new(img.x, dst.y + radius, img.w, dst.h - 2 * radius);
-        let area = img.intersect(&straight).intersect(&self.clip);
+        let area = img.intersect(&straight).intersect(&self.pclip());
         for y in area.y..area.bottom() {
             let s0 = ((y - dst.y) as u32 * src_w + (area.x - dst.x) as u32) as usize;
             let d0 = (y * self.width + area.x) as usize;
@@ -472,8 +674,8 @@ impl<'a> Canvas<'a> {
         if radius > 0 {
             for band in [Rect::new(dst.x, dst.y, dst.w, radius), Rect::new(dst.x, dst.bottom() - radius, dst.w, radius)]
             {
-                self.with_clip(band.intersect(&img), |cv| {
-                    cv.fill_round_rect_with(dst, radius, |x, y| {
+                self.with_pclip(band.intersect(&img), |cv| {
+                    cv.fill_round_rect_with_px(dst, radius, |x, y| {
                         0xFF00_0000 | src[((y - dst.y) as u32 * src_w + (x - dst.x) as u32) as usize]
                     })
                 });
@@ -483,9 +685,9 @@ impl<'a> Canvas<'a> {
 
     /// Copies opaque pixels covering `part` (row stride `part.w`) into the
     /// canvas, inside `shape` with its corners rounded at `radius`.
-    pub fn blit_part_rounded(&mut self, src: &[u32], part: Rect, shape: Rect, radius: i32) {
+    pub(crate) fn blit_part_rounded_px(&mut self, src: &[u32], part: Rect, shape: Rect, radius: i32) {
         let radius = radius.min(shape.w / 2).min(shape.h / 2);
-        let area = part.intersect(&shape).intersect(&self.clip);
+        let area = part.intersect(&shape).intersect(&self.pclip());
         for y in area.y..area.bottom() {
             let s0 = ((y - part.y) * part.w + (area.x - part.x)) as usize;
             let d0 = (y * self.width + area.x) as usize;
@@ -505,21 +707,21 @@ impl<'a> Canvas<'a> {
     }
 
     /// Like [`blit`](Self::blit) for a surface with transparency (glass regions).
-    pub fn blit_alpha(&mut self, src: &[u32], sw: u32, sh: u32, dst: Rect, radius: i32) {
+    fn blit_alpha_px(&mut self, src: &[u32], sw: u32, sh: u32, dst: Rect, radius: i32) {
         let img = Rect::new(dst.x, dst.y, (sw as i32).min(dst.w), (sh as i32).min(dst.h));
-        self.with_clip(img.intersect(&self.clip), |cv| {
-            cv.fill_round_rect_with(dst, radius, |x, y| src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize])
+        self.with_pclip(img, |cv| {
+            cv.fill_round_rect_with_px(dst, radius, |x, y| src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize])
         });
     }
 
     /// Draws a `src_w`×`src_h` image with straight alpha scaled into `dst`
     /// (bilinear filtering, premultiplied so transparent edges don't fringe),
     /// at `opacity` 0..=255. For large reductions, draw a thumbnail instead.
-    pub fn draw_image(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, opacity: u32) {
+    fn draw_image_px(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, opacity: u32) {
         if dst.w <= 0 || dst.h <= 0 || src_w == 0 || src_h == 0 {
             return;
         }
-        let vis = dst.intersect(&self.clip);
+        let vis = dst.intersect(&self.pclip());
         if vis.is_empty() {
             return;
         }
@@ -577,8 +779,8 @@ impl<'a> Canvas<'a> {
     }
 
     /// Copies opaque pixels 1:1 at (x, y), clipped (video frames).
-    pub fn blit_opaque(&mut self, src: &[u32], src_w: u32, src_h: u32, x: i32, y: i32) {
-        let vis = Rect::new(x, y, src_w as i32, src_h as i32).intersect(&self.clip);
+    fn blit_opaque_px(&mut self, src: &[u32], src_w: u32, src_h: u32, x: i32, y: i32) {
+        let vis = Rect::new(x, y, src_w as i32, src_h as i32).intersect(&self.pclip());
         if vis.is_empty() || src.len() < (src_w * src_h) as usize {
             return;
         }
@@ -590,8 +792,8 @@ impl<'a> Canvas<'a> {
     }
 
     /// The grey checkerboard shown behind transparent images.
-    pub fn checkerboard(&mut self, r: Rect, cell: i32, light: u32, dark: u32) {
-        let vis = r.intersect(&self.clip);
+    fn checkerboard_px(&mut self, r: Rect, cell: i32, light: u32, dark: u32) {
+        let vis = r.intersect(&self.pclip());
         for y in vis.y..vis.bottom() {
             for x in vis.x..vis.right() {
                 let odd = ((x - r.x) / cell + (y - r.y) / cell) & 1 == 1;
@@ -615,9 +817,9 @@ impl<'a> Canvas<'a> {
     }
 
     /// Draws `s` with its baseline at `y`. Returns the advance in pixels.
-    pub fn text(&mut self, x: i32, y: i32, s: &str, font: Font, c: u32) -> i32 {
+    fn text_px(&mut self, x: i32, y: i32, s: &str, font: Font, c: u32) -> i32 {
         let base_a = alpha(c);
-        let clip = self.clip;
+        let clip = self.pclip();
         let adv = font.layout(s, |g| {
             let gr = Rect::new(x + g.x, y + g.y, g.w as i32, g.h as i32);
             let vis = gr.intersect(&clip);
@@ -635,9 +837,9 @@ impl<'a> Canvas<'a> {
     }
 
     /// Draws `s` slanted about 12° (a synthesized italic). Returns the advance in pixels.
-    pub fn text_slanted(&mut self, x: i32, y: i32, s: &str, font: Font, c: u32) -> i32 {
+    fn text_slanted_px(&mut self, x: i32, y: i32, s: &str, font: Font, c: u32) -> i32 {
         let base_a = alpha(c);
-        let clip = self.clip;
+        let clip = self.pclip();
         let adv = font.layout(s, |g| {
             for row in 0..g.h as i32 {
                 let py = y + g.y + row;
@@ -689,7 +891,7 @@ impl<'a> Canvas<'a> {
     }
 
     /// Anti-aliased thick polyline, blended once per pixel (no darkened joints).
-    pub fn polyline(&mut self, pts: &[(i32, i32)], width: i32, c: u32) {
+    fn polyline_px(&mut self, pts: &[(i32, i32)], width: i32, c: u32) {
         if pts.len() < 2 {
             return;
         }
@@ -701,7 +903,7 @@ impl<'a> Canvas<'a> {
             x1 = x1.max(x);
             y1 = y1.max(y);
         }
-        let area = Rect::new(x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad).intersect(&self.clip);
+        let area = Rect::new(x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad).intersect(&self.pclip());
         let hw = (width * 8) as i64; // half width, 1/16 px
         let base = alpha(c);
         for y in area.y..area.bottom() {
@@ -740,14 +942,14 @@ impl<'a> Canvas<'a> {
     /// small rings sit exactly; angles use 1024 units per turn (0 at 3
     /// o'clock, growing clockwise) and the arc runs from `start` for `sweep`.
     #[allow(clippy::too_many_arguments)] // a circle, a pen and an angle range
-    pub fn stroke_arc(&mut self, cx: i32, cy: i32, r: i32, width: i32, start: i32, sweep: i32, c: u32) {
+    fn stroke_arc_px(&mut self, cx: i32, cy: i32, r: i32, width: i32, start: i32, sweep: i32, c: u32) {
         if sweep <= 0 || r <= 0 {
             return;
         }
         let hw = width as i64 / 2;
         let reach = (r + width) / 16 + 2;
         let bounds = Rect::new(cx / 16 - reach, cy / 16 - reach, 2 * reach + 1, 2 * reach + 1);
-        let area = bounds.intersect(&self.clip);
+        let area = bounds.intersect(&self.pclip());
         let full = sweep >= 1024;
         let end = start + sweep;
         let point =
@@ -787,14 +989,14 @@ impl<'a> Canvas<'a> {
     }
 
     /// Anti-aliased thick line segment (round caps).
-    pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, width: i32, c: u32) {
+    fn line_px(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, width: i32, c: u32) {
         // Work in 1/16 px.
         let (ax, ay, bx, by) = (x0 * 16, y0 * 16, x1 * 16, y1 * 16);
         let hw = width * 8; // half width in 1/16 px
         let pad = width / 2 + 2;
         let bounds =
             Rect::new(x0.min(x1) - pad, y0.min(y1) - pad, (x0 - x1).abs() + 2 * pad, (y0 - y1).abs() + 2 * pad);
-        let area = bounds.intersect(&self.clip);
+        let area = bounds.intersect(&self.pclip());
         let (dx, dy) = ((bx - ax) as i64, (by - ay) as i64);
         let len2 = (dx * dx + dy * dy).max(1);
         let base = alpha(c);
@@ -969,5 +1171,45 @@ mod damage_tests {
             cb.stroke_round_rect_slow(r, radius, c);
             assert!(a == b, "case {case}: {r:?} radius {radius} clip {clip:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+
+    #[test]
+    fn points_cover_scale_squared_device_pixels() {
+        let mut buf = alloc::vec![0u32; 8 * 6];
+        let mut cv = Canvas::new(&mut buf, 8, 6).with_scale(2);
+        assert_eq!(cv.size(), (4, 3));
+        assert_eq!(cv.clip, Rect::new(0, 0, 4, 3));
+        cv.fill_rect(Rect::new(1, 1, 2, 1), 0xFF00_00FF);
+        assert_eq!(cv.pixel(1, 1), 0xFF00_00FF);
+        let filled: alloc::vec::Vec<usize> = (0..48).filter(|&i| buf[i] != 0).collect();
+        // Columns 2..6 of rows 2..4.
+        assert_eq!(filled, [18, 19, 20, 21, 26, 27, 28, 29]);
+    }
+
+    #[test]
+    fn the_clip_is_in_points() {
+        let mut buf = alloc::vec![0u32; 8 * 8];
+        let mut cv = Canvas::new(&mut buf, 8, 8).with_scale(2);
+        cv.clip = Rect::new(0, 0, 1, 1);
+        cv.fill_rect(Rect::new(0, 0, 4, 4), 0xFFFF_FFFF);
+        assert_eq!(buf.iter().filter(|&&p| p != 0).count(), 4);
+    }
+
+    #[test]
+    fn text_is_drawn_at_device_size_and_advances_in_points() {
+        let data = include_bytes!("../../../assets/fonts/Manrope-Medium.ttf");
+        crate::font::install(crate::font::Face::Regular, data);
+        let f = crate::font::get(crate::font::Face::Regular, 12);
+        let mut one = alloc::vec![0u32; 200 * 40];
+        let a1 = Canvas::new(&mut one, 200, 40).text(0, 20, "Wave", f, 0xFFFF_FFFF);
+        let mut two = alloc::vec![0u32; 400 * 80];
+        let a2 = Canvas::new(&mut two, 400, 80).with_scale(2).text(0, 20, "Wave", f, 0xFFFF_FFFF);
+        assert!((a1 - a2).abs() <= 2, "{a1} vs {a2}");
+        assert!(two.iter().any(|&p| p != 0));
     }
 }

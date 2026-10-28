@@ -134,19 +134,22 @@ pub fn wrap(text: &str, font: Font, max_w: i32) -> Vec<(usize, usize)> {
         *pos += l.len() + 1;
         Some((s, l))
     }) {
+        // Widths in 1/64 px, as text is measured and drawn (whole-pixel
+        // advances would add up short, and a line that "fits" would not).
+        let max64 = max_w * 64;
         let mut ls = i;
         let mut w = 0;
         let mut last_space: Option<usize> = None;
         let mut idx = i;
         for ch in line.chars() {
-            let a = font.advance(ch);
-            if w + a > max_w && idx > ls {
+            let a = font.width64(&text[idx..idx + ch.len_utf8()]);
+            if w + a > max64 && idx > ls {
                 let brk = match last_space {
                     Some(sp) if sp > ls => sp + 1,
                     _ => idx,
                 };
                 lines.push((ls, brk));
-                w = font.width(&text[brk..idx]);
+                w = font.width64(&text[brk..idx]);
                 ls = brk;
                 last_space = None;
             }

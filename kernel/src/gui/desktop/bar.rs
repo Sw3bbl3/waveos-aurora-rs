@@ -590,22 +590,21 @@ impl Desktop {
                     cv.fill_round_rect(r, 12, if open { with_alpha(ink, 0x2A) } else { t.hover });
                 }
             }
-            if self.mark.is_none() {
-                self.mark = Some(
+            // Made for the current scale (the picture is in device pixels).
+            let k = cv.scale as u32;
+            if self.mark.as_ref().is_none_or(|(made, _)| *made != cv.scale) {
+                self.mark = Some((
+                    cv.scale,
                     crate::fs::read_all("/System/Brand/wayv-mark.png")
                         .ok()
                         .and_then(|d| aurora_image::decode(&d).ok())
-                        .map(|img| img.thumbnail(40, 15)),
-                );
+                        .map(|img| img.thumbnail(40 * k, 15 * k)),
+                ));
             }
-            match self.mark.as_ref().and_then(|m| m.as_ref()) {
+            match self.mark.as_ref().and_then(|(_, m)| m.as_ref()) {
                 Some(img) => {
-                    let r = Rect::new(
-                        mark.x + (mark.w - img.width as i32) / 2,
-                        mark.y + (mark.h - img.height as i32) / 2,
-                        img.width as i32,
-                        img.height as i32,
-                    );
+                    let (iw, ih) = (img.width as i32 / cv.scale, img.height as i32 / cv.scale);
+                    let r = Rect::new(mark.x + (mark.w - iw) / 2, mark.y + (mark.h - ih) / 2, iw, ih);
                     cv.draw_image(&img.pixels, img.width, img.height, r, 255);
                 }
                 None => icons::wave(cv, Rect::new(mark.x + 6, mark.y + 9, 22, 12), 2, 2, ink),
@@ -1035,7 +1034,7 @@ impl Desktop {
             match h {
                 CurrentHit::LockButton => padlock(cv, cx, cy + 1, t.text),
                 CurrentHit::Power => {
-                    let bg = cv.buf[(r.y * cv.width + r.x + 4) as usize];
+                    let bg = cv.pixel(r.x + 4, r.y);
                     icons::power(cv, cx, cy, 14, t.text, bg);
                 }
                 _ => cv.text_centered(r, "Settings…", theme::ui_bold(12), t.text),

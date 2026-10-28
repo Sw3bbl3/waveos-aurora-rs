@@ -339,7 +339,7 @@ impl Desktop {
                     // A crescent: Calm.
                     let (cx, cy) = dot.center();
                     let ink = if on { 0xFFFF_FFFF } else { t.text };
-                    let bg = cv.buf[(cy * cv.width + cx) as usize];
+                    let bg = cv.pixel(cx, cy);
                     cv.fill_circle(cx, cy, 8, ink);
                     cv.fill_circle(cx + 4, cy - 3, 7, bg);
                     cv.text(r.x + 52, r.y + 22, "Calm", theme::ui_bold(13), t.text);

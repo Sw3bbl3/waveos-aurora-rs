@@ -210,7 +210,7 @@ fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             Ok(0)
         }
         nr::DISPLAY_MODES => {
-            let (w, h) = crate::gui::screen_size();
+            let (w, h) = crate::gui::screen_pixels();
             let modes = crate::drivers::display::modes((w as u32, h as u32), crate::gui::prefs::boot_resolution());
             let max = (a[1] as usize).min(64);
             let size = core::mem::size_of::<aurora_abi::DisplayMode>();

@@ -235,7 +235,10 @@ impl Desktop {
             let title = self.index_of(id).map(|i| self.windows[i].app.title()).unwrap_or_default();
             if let Some((px, w, h)) = self.snapshot(id) {
                 let img = aurora_image::Image { width: w, height: h, pixels: px };
-                thumbs.push((id, title, img.thumbnail(THUMB_W as u32, THUMB_H as u32)));
+                thumbs.push((id, title, {
+                    let k = crate::gui::scale() as u32;
+                    img.thumbnail(THUMB_W as u32 * k, THUMB_H as u32 * k)
+                }));
             }
         }
         self.harbor.peek = Some(Peek { item: index, thumbs, hover: None });
@@ -480,17 +483,10 @@ impl Desktop {
         let f = theme::ui(12);
         cv.text(p.right() - 14 - f.width(&count), p.y + 22, &count, f, t.text_secondary);
         for (i, (r, (_, title, img))) in self.peek_thumb_rects().into_iter().zip(&peek.thumbs).enumerate() {
-            let pic = Rect::new(
-                r.x + (r.w - img.width as i32) / 2,
-                r.y + (r.h - 18 - img.height as i32) / 2,
-                img.width as i32,
-                img.height as i32,
-            );
-            cv.with_clip(pic.intersect(&cv.clip), |cv| {
-                cv.fill_round_rect_with(pic, 8, |x, y| {
-                    img.pixels[((y - pic.y) as u32 * img.width + (x - pic.x) as u32) as usize] | 0xFF00_0000
-                })
-            });
+            // The thumbnail is in device pixels.
+            let (iw, ih) = (img.width as i32 / cv.scale, img.height as i32 / cv.scale);
+            let pic = Rect::new(r.x + (r.w - iw) / 2, r.y + (r.h - 18 - ih) / 2, iw, ih);
+            cv.blit(&img.pixels, img.width, img.height, pic, 8);
             if peek.hover == Some(i) {
                 cv.stroke_round_rect(pic.inset(-2), 10, theme::accent());
                 cv.stroke_round_rect(pic.inset(-3), 11, theme::accent());

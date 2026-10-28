@@ -37,18 +37,26 @@ impl MaterialCache {
         self.next = 0;
     }
 
+    /// Paints glass over `rect` (in points), sampling what is already drawn.
     pub fn paint(&mut self, cv: &mut Canvas, rect: Rect, radius: i32, tint: u32) {
-        let visible = rect.intersect(&cv.clip);
+        if rect.intersect(&cv.clip).is_empty() {
+            return;
+        }
+        // The backdrop is sampled and blurred in device pixels.
+        let points = rect;
+        let s = cv.scale;
+        let (rect, radius_px) = (cv.to_px(rect), radius * s);
+        let visible = rect.intersect(&cv.pclip());
         if visible.is_empty() {
             return;
         }
         let dark = theme::current().dark;
         if theme::reduce_transparency() || theme::high_contrast() {
-            cv.fill_round_rect(rect, radius, tint | 0xff000000);
+            cv.fill_round_rect(points, radius, tint | 0xff000000);
         } else {
             // Moving surfaces use a coarser sample grid; release restores full
             // quality. Four samples per cell avoid scanning every source pixel.
-            let step = if self.moving { 8 } else { 4 };
+            let step = if self.moving { 8 } else { 4 } * s;
             let blur_radius = if self.moving { 2 } else { 3 };
             let padding = step * (blur_radius * 2 + 1);
             let bounds = visible.inset(-padding).intersect(&Rect::new(0, 0, cv.width, cv.height));
@@ -103,7 +111,7 @@ impl MaterialCache {
                 let at = |x: usize, y: i32| layer.blurred[(y.min(h - 1) * w) as usize + x.min(w as usize - 1)];
                 // A soft sheen fading down the top of the material gives it depth
                 // without obscuring content (over at most 40 px, never a hard edge).
-                let band = (rect.h / 4).clamp(1, 40);
+                let band = (rect.h / 4).clamp(1, 40 * s);
                 let sheen = if dark { 10 } else { 24 };
                 let mut column = alloc::vec![0u32; w as usize + 1];
                 for y in visible.y..visible.bottom() {
@@ -124,8 +132,9 @@ impl MaterialCache {
                 }
                 layer.render_key = Some(key);
             }
-            cv.blit_part_rounded(&layer.rendered, visible, rect, radius);
+            cv.blit_part_rounded_px(&layer.rendered, visible, rect, radius_px);
         }
+        let rect = points;
         cv.stroke_round_rect(
             rect,
             radius,

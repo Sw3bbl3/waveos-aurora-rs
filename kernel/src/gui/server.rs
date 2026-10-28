@@ -19,17 +19,25 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 const MAX_EVENTS: usize = 256;
 
+/// A window's pixels, shared with its process. `width` and `height` are in
+/// device pixels: `scale` times the window's size in points.
 struct Surface {
     frames: Vec<u64>,
     kva: u64,
     user_va: u64,
     width: u32,
     height: u32,
+    scale: u32,
 }
 
 impl Surface {
     fn pages(&self) -> u64 {
         self.frames.len() as u64
+    }
+
+    /// The size in points.
+    fn points(&self) -> (i32, i32) {
+        ((self.width / self.scale) as i32, (self.height / self.scale) as i32)
     }
 }
 
@@ -132,7 +140,10 @@ pub fn pending() -> bool {
 
 // ------------------------------------------------------------ surfaces
 
+/// A surface for a `width`×`height`-point window at the screen's scale.
 fn alloc_surface(pid: u32, width: u32, height: u32) -> Result<Surface, isize> {
+    let scale = super::scale().max(1) as u32;
+    let (width, height) = (width * scale, height * scale);
     let bytes = width as u64 * height as u64 * 4;
     let pages = bytes.div_ceil(PAGE_SIZE);
     let mut frames = Vec::with_capacity(pages as usize);
@@ -157,7 +168,7 @@ fn alloc_surface(pid: u32, width: u32, height: u32) -> Result<Surface, isize> {
     let aspace = guard.as_mut().ok_or(ESRCH)?;
     let user_va = aspace.reserve(pages).ok_or(ENOMEM)?;
     aspace.map_shared(user_va, &frames, Prot::ReadWrite)?;
-    Ok(Surface { frames, kva, user_va, width, height })
+    Ok(Surface { frames, kva, user_va, width, height, scale })
 }
 
 /// Releases a surface. `unmap_user` is false when the process's address space
@@ -178,8 +189,9 @@ fn free_surface(s: Surface, pid: u32, unmap_user: bool) {
 
 // ------------------------------------------------------- compositor side
 
-/// Runs `f` with the window's pixels (row stride = width). Holds the client
-/// lock, so the surface cannot be freed underneath the compositor.
+/// Runs `f` with the window's pixels (row stride = width; both in device
+/// pixels). Holds the client lock, so the surface cannot be freed underneath
+/// the compositor.
 pub fn with_surface<R>(id: u32, f: impl FnOnce(&[u32], u32, u32) -> R) -> Option<R> {
     let clients = CLIENTS.lock();
     let c = clients.get(&id)?;
@@ -327,12 +339,13 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             for data in bytes.as_chunks::<16>().0 {
                 let n = |at: usize| i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
                 let r = Rect::new(n(0), n(4), n(8), n(12));
+                let (pw, ph) = c.surface.points();
                 if r.x < 0
                     || r.y < 0
                     || r.w <= 0
                     || r.h <= 0
-                    || r.x as i64 + r.w as i64 > c.surface.width as i64
-                    || r.y as i64 + r.h as i64 > c.surface.height as i64
+                    || r.x as i64 + r.w as i64 > pw as i64
+                    || r.y as i64 + r.h as i64 > ph as i64
                 {
                     return Err(EINVAL);
                 }
@@ -343,7 +356,8 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             }
             if regions != c.materials {
                 c.materials = regions;
-                send(Command::Present(id, Rect::new(0, 0, c.surface.width as i32, c.surface.height as i32)));
+                let (pw, ph) = c.surface.points();
+                send(Command::Present(id, Rect::new(0, 0, pw, ph)));
             }
             Ok(0)
         }
@@ -353,7 +367,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             let info = {
                 let clients = CLIENTS.lock();
                 let s = &clients.get(&id).ok_or(EBADF)?.surface;
-                SurfaceInfo { addr: s.user_va, width: s.width, height: s.height, stride: s.width, _pad: 0 }
+                SurfaceInfo { addr: s.user_va, width: s.width, height: s.height, stride: s.width, scale: s.scale }
             };
             put(a[1], &info).map(|_| 0)
         }
@@ -374,8 +388,11 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
         nr::WIN_PRESENT => {
             let id = a[0] as u32;
             owned(id, pid)?;
-            let r = Rect::new(a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i32);
-            send(Command::Present(id, r));
+            // Device pixels in, points out (rounded outwards).
+            let k = CLIENTS.lock().get(&id).map_or(1, |c| c.surface.scale as i32);
+            let (x0, y0) = (a[1] as i32 / k, a[2] as i32 / k);
+            let (x1, y1) = ((a[1] as i32 + a[3] as i32 + k - 1) / k, (a[2] as i32 + a[4] as i32 + k - 1) / k);
+            send(Command::Present(id, Rect::new(x0, y0, x1 - x0, y1 - y0)));
             Ok(0)
         }
         nr::WIN_SET_TITLE => {

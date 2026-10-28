@@ -22,7 +22,7 @@ pub fn resume() {
     block::ahci::resume();
     block::nvme::resume();
     block::virtio::resume();
-    let (w, h) = crate::gui::screen_size();
+    let (w, h) = crate::gui::screen_pixels();
     display::resume(w as u32, h as u32);
     ps2::init();
     audio::resume();

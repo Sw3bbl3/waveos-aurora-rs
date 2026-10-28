@@ -80,6 +80,7 @@ pub enum Msg {
     Wallpaper(u8),
     CustomWallpaper,
     Mode(usize),
+    Scale(usize),
     Layout(&'static str),
     Try(String),
     Toggle(&'static str, bool),
@@ -525,6 +526,20 @@ impl Settings {
         });
         let mut sections = vec![footer(sub)];
         sections.extend(summary);
+        let scale = prefs::get_int(pref::DISPLAY_SCALE, 0).clamp(0, 2) as usize;
+        sections.push(Section::titled(
+            "Scale",
+            card(vec![row(
+                "Draw text and controls at",
+                Picker::new(["Automatic", "1×", "2×"], scale)
+                    .on_change(Msg::Scale)
+                    .picker_style(PickerStyle::Segmented),
+            )])
+            .id("display/scale"),
+        ));
+        sections.push(footer(
+            "Automatic uses 2× on screens of 2560 × 1440 and up, so text stays the same size and becomes sharper.",
+        ));
         sections.push(Section::titled("Resolution", card(rows.collect()).id("display/resolution")));
         page("Display", sections)
     }
@@ -1199,6 +1214,11 @@ impl App for Settings {
             Msg::CustomWallpaper => {
                 if let Some(p) = prefs::get("wallpaper_image") {
                     cx.request(Request::SetWallpaperImage(p));
+                }
+            }
+            Msg::Scale(i) => {
+                if let Err(e) = prefs::set(pref::DISPLAY_SCALE, &format!("{i}")) {
+                    self.flash(cx, format!("Couldn't change the scale: {e}"));
                 }
             }
             Msg::Mode(i) => {

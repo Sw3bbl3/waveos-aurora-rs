@@ -225,7 +225,7 @@ impl Desktop {
             _ => Icon::Document,
         };
         // Draw the icon at ~75% opacity by blending a copy of the area.
-        let area = icon_r.intersect(&cv.clip);
+        let area = cv.to_px(icon_r).intersect(&cv.pclip());
         let mut saved: Vec<u32> = Vec::with_capacity((area.w * area.h).max(0) as usize);
         for yy in area.y..area.bottom() {
             let row = (yy * cv.width) as usize;
