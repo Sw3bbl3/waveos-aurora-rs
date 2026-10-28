@@ -3,3 +3,9 @@ xtask = "run --quiet --package xtask --"
 
 [target.x86_64-unknown-none]
 rustflags = ["-C", "code-model=kernel", "-C", "relocation-model=static", "-C", "force-frame-pointers=yes", "--cfg", "aes_force_soft"]
+
+# Linux programs (linux-programs/) link with the toolchain's own lld, so
+# they build on any host (a Mac's `cc` can't link Linux executables).
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "linker-flavor=ld.lld", "-C", "link-self-contained=yes"]
