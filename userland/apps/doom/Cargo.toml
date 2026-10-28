@@ -1,0 +1,15 @@
+[package]
+name = "app-doom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "app-doom"
+path = "src/main.rs"
+
+[dependencies]
+aurora-zip.workspace = true
+corekit.workspace = true
+nebula-web.workspace = true
+waveui.workspace = true

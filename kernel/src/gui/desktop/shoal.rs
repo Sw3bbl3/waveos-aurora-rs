@@ -24,14 +24,16 @@ enum Group {
     All,
     Work,
     Create,
+    Play,
     System,
     Installed,
 }
 
-const GROUPS: [(Group, &str); 5] = [
+const GROUPS: [(Group, &str); 6] = [
     (Group::All, "All"),
     (Group::Work, "Work"),
     (Group::Create, "Create"),
+    (Group::Play, "Play"),
     (Group::System, "System"),
     (Group::Installed, "Installed"),
 ];
@@ -41,6 +43,7 @@ fn group_of(kind: Option<AppKind>) -> Group {
         None => Group::Installed,
         Some(AppKind::Files | AppKind::Notes | AppKind::Calculator | AppKind::Clock | AppKind::Nebula) => Group::Work,
         Some(AppKind::Studio | AppKind::Paint | AppKind::Preview) => Group::Create,
+        Some(AppKind::Doom) => Group::Play,
         Some(_) => Group::System,
     }
 }

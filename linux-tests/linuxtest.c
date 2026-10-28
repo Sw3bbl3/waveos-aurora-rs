@@ -16,6 +16,7 @@
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
+#include <waveos.h>
 
 static int failures;
 
@@ -146,6 +147,15 @@ static void machine(void) {
     printf("PASS machine (%s %s)\n", u.sysname, u.release);
 }
 
+// WaveOS's own calls: allowed ones work, the rest (here: exit) are refused.
+static void wave(void) {
+    CHECK(wave_call(WAVE_TIME_MS, 0, 0, 0, 0, 0) > 0, "WaveOS uptime call");
+    CHECK(wave_call(0, 3, 0, 0, 0, 0) == -ENOSYS, "WaveOS exit is not reachable");
+    struct wave_event e;
+    CHECK(wave_next_event(&e, 0) == 0, "no events without a window");
+    printf("PASS WaveOS calls\n");
+}
+
 int main(int argc, char **argv) {
     start(argc, argv);
     files();
@@ -153,6 +163,7 @@ int main(int argc, char **argv) {
     threads();
     clocks();
     machine();
+    wave();
     if (failures) {
         printf("linux-test: %d failures\n", failures);
         return 1;

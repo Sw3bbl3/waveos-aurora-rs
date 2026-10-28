@@ -11,6 +11,11 @@
 //!
 //! Calls not implemented yet return `ENOSYS`, and each is logged once, which
 //! is how the next ones to add are found.
+//!
+//! Linux has no windows of its own, so a Linux program reaches WaveOS's
+//! windows, events, sound and clipboard through call numbers from
+//! [`WAVE_BASE`] up: `WAVE_BASE + n` is WaveOS's call `n`, with WaveOS's
+//! arguments (`libs/linux/include/waveos.h` describes them for C).
 
 pub mod exec;
 pub mod fs;
@@ -177,6 +182,32 @@ mod nr {
     pub const FACCESSAT2: u64 = 439;
 }
 
+/// Linux programs make WaveOS call `n` as `WAVE_BASE + n` ("WA" in ASCII).
+pub const WAVE_BASE: u64 = 0x5741_0000;
+
+/// The WaveOS calls Linux programs may make: windows, events, sound,
+/// the clipboard and notifications.
+fn wave_call(n: u64, a: [u64; 6]) -> Result<u64, isize> {
+    use aurora_abi::nr as w;
+    match n as usize {
+        w::WIN_CREATE
+        | w::WIN_SURFACE
+        | w::WIN_PRESENT
+        | w::WIN_SET_TITLE
+        | w::WIN_CLOSE
+        | w::WIN_RESIZE
+        | w::NEXT_EVENT
+        | w::AUDIO_OPEN
+        | w::AUDIO_CONTROL
+        | w::CLIPBOARD_SET
+        | w::CLIPBOARD_GET
+        | w::NOTIFY
+        | w::PREF_GET
+        | w::TIME_MS => crate::syscall::handle(n as usize, a),
+        _ => Err(ENOSYS),
+    }
+}
+
 /// The uid and gid every Linux program runs as.
 pub const UID: u64 = 1000;
 
@@ -302,6 +333,7 @@ pub fn dispatch(f: &mut SyscallFrame) -> Result<u64, isize> {
         nr::TIME => misc::time(a[0]),
         nr::NANOSLEEP => misc::nanosleep(a[0], a[1], false, 0),
         nr::CLOCK_NANOSLEEP => misc::nanosleep(a[2], a[3], a[1] & 1 != 0, a[0]),
+        n if (WAVE_BASE..WAVE_BASE + 0x1000).contains(&n) => wave_call(n - WAVE_BASE, a),
         n => {
             unimplemented(n);
             Err(ENOSYS)

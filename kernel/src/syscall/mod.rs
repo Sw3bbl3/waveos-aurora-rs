@@ -28,7 +28,7 @@ pub extern "sysv64" fn dispatch(f: &mut SyscallFrame) {
     proc::check_killed();
 }
 
-fn handle(nr: usize, a: [u64; 6]) -> SysResult {
+pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
     match nr {
         nr::EXIT => proc::exit_current(a[0] as i32 as i64),
         nr::YIELD => {

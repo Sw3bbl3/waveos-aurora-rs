@@ -15,6 +15,14 @@ Programs downloaded at build time (pinned by SHA-256) and shipped as separate pr
 |---|---|---|---|
 | BusyBox (Debian's `busybox-static`) | 1.35.0 | GPL-2.0; Debian's copyright file is in `/System/Licenses/busybox.txt`, the source is in Debian's archive | `/System/Linux/bin/busybox`, run as a Linux program |
 
+Built from source in this repository and shipped as a separate program:
+
+| Program | Version | License | Where |
+|---|---|---|---|
+| doomgeneric (Doom engine, from Chocolate Doom and id Software's Doom source) | commit `e257a09` | [GPL-2.0](third_party/doomgeneric/COPYING), also in `/System/Licenses/doomgeneric.txt`; the source, with the WaveOS backend, is in [third_party/doomgeneric](third_party/doomgeneric/README.md) | `/System/Games/Doom/doom`, run as a Linux program |
+
+The Doom app downloads Freedoom 0.13.0 (BSD-3-Clause) only when you ask it to; its license is saved next to the game data as `Freedoom License.txt`.
+
 The interface typefaces ship in `/System/Fonts` next to their licenses:
 
 | Font | License | Local changes |

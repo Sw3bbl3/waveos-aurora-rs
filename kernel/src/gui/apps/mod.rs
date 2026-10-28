@@ -44,6 +44,7 @@ pub enum AppKind {
     Other,
     Installer,
     Studio,
+    Doom,
 }
 
 pub struct AppInfo {
@@ -58,6 +59,8 @@ pub struct AppInfo {
     pub path: &'static str,
     /// Only one window of this app may exist (opening it again focuses it).
     pub single: bool,
+    /// Other programs that belong to the app: their windows show its name and icon.
+    pub also: &'static [&'static str],
 }
 
 pub static CATALOG: &[AppInfo] = &[
@@ -69,6 +72,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Learn.elf",
         single: true,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Studio,
@@ -78,6 +82,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Studio.elf",
         single: false,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Installer,
@@ -87,6 +92,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Installer.elf",
         single: false,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Files,
@@ -96,6 +102,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Files.elf",
         single: true,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Nebula,
@@ -105,6 +112,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Nebula.elf",
         single: false,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Terminal,
@@ -114,6 +122,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Terminal.elf",
         single: false,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Notes,
@@ -123,6 +132,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Notes.elf",
         single: false,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Calculator,
@@ -132,6 +142,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Calculator.elf",
         single: true,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Settings,
@@ -141,6 +152,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Settings.elf",
         single: true,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Preview,
@@ -150,6 +162,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Preview.elf",
         single: false,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Paint,
@@ -159,6 +172,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Paint.elf",
         single: false,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Clock,
@@ -168,6 +182,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Clock.elf",
         single: true,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Activity,
@@ -177,6 +192,18 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Activity.elf",
         single: true,
+        also: &[],
+    },
+    AppInfo {
+        kind: AppKind::Doom,
+        name: "Doom",
+        icon: Icon::Doom,
+        pinned: false,
+        listed: true,
+        path: "/System/Apps/Doom.elf",
+        single: true,
+        // The game itself, which the app starts.
+        also: &["/System/Games/Doom/doom"],
     },
     AppInfo {
         kind: AppKind::Welcome,
@@ -186,6 +213,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Welcome.elf",
         single: true,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::About,
@@ -195,6 +223,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/About.elf",
         single: true,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Power,
@@ -204,6 +233,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: false,
         path: "",
         single: true,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Crash,
@@ -213,6 +243,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: false,
         path: "",
         single: false,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::DisplayConfirm,
@@ -222,6 +253,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: false,
         path: "",
         single: true,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Other,
@@ -231,6 +263,7 @@ pub static CATALOG: &[AppInfo] = &[
         listed: false,
         path: "",
         single: false,
+        also: &[],
     },
 ];
 
@@ -239,7 +272,7 @@ pub fn info(kind: AppKind) -> &'static AppInfo {
 }
 
 pub fn by_path(path: &str) -> Option<&'static AppInfo> {
-    CATALOG.iter().find(|a| !a.path.is_empty() && a.path == path)
+    CATALOG.iter().find(|a| !a.path.is_empty() && (a.path == path || a.also.contains(&path)))
 }
 
 /// Things an app can ask the desktop to do.

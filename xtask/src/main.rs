@@ -203,8 +203,19 @@ fn main() {
                 fs::remove_dir_all(&staging).expect("remove old ISO staging directory");
             }
             fs::create_dir_all(staging.join("EFI/BOOT")).expect("create ISO staging directory");
+            // The boot image holds 32 MiB at most, so the system image goes in
+            // compressed (the bootloader inflates it).
+            let iso_esp = target.join("iso-esp");
+            let _ = fs::remove_dir_all(&iso_esp);
+            copy_tree(&esp, &iso_esp).expect("copy the ESP");
+            let tar = iso_esp.join("aurora/system.tar");
+            if let Ok(data) = fs::read(&tar) {
+                let packed = miniz_oxide::deflate::compress_to_vec_zlib(&data, 9);
+                fs::write(iso_esp.join("aurora/system.tar.zlib"), packed).expect("write system.tar.zlib");
+                fs::remove_file(&tar).expect("remove system.tar");
+            }
             let boot_image = staging.join("EFI/BOOT/efiboot.img");
-            image::create_efi_boot_image(&esp, &boot_image).expect("create EFI boot image");
+            image::create_efi_boot_image(&iso_esp, &boot_image).expect("create EFI boot image");
             let out = target.join("waveos-aurora.iso");
             let status = Command::new("xorriso")
                 .args(["-as", "mkisofs", "-iso-level", "3", "-R", "-J", "-V", "WAVEOS_AURORA"])
@@ -415,6 +426,20 @@ fn verify_toolchain() {
     }
 }
 
+/// Copies the folder `from` to `to`.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), to.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 /// A user program to place in the system image: (path inside /System, ELF file).
 type Program = (String, PathBuf);
 
@@ -502,6 +527,8 @@ fn system_image(programs: &[Program], out: &Path) {
     for dir in ["Linux", "Linux/bin", "Linux/etc", "Linux/lib", "Linux/usr", "Linux/usr/bin", "Linux/usr/lib"] {
         t.dir(dir);
     }
+    t.dir("Games");
+    t.dir("Games/Doom");
     t.dir("Fonts");
     let fonts = root().join("assets/fonts");
     let mut font_files: Vec<_> = fs::read_dir(&fonts).unwrap().map(|e| e.unwrap().path()).collect();

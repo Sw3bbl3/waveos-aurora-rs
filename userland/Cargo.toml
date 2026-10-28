@@ -19,6 +19,7 @@ aurora-abi = { path = "../libs/abi" }
 lumen = { path = "../libs/gfx" }
 aurora-image = { path = "../libs/image" }
 aurora-wav = { path = "../libs/wav" }
+aurora-zip = { path = "../libs/zip" }
 nebula-web = { path = "../libs/web" }
 nebula-secure = { path = "../libs/tls" }
 nebula-media = { path = "../libs/media" }

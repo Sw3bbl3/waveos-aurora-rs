@@ -3,7 +3,10 @@
 //! - the C programs in `linux-tests/`, built static with musl (`musl-gcc`,
 //!   from Debian's `musl-tools`);
 //! - BusyBox, from Debian's `busybox-static` package (GPL-2.0, a separate
-//!   program; its copyright file goes along).
+//!   program; its copyright file goes along);
+//! - Doom: doomgeneric (`third_party/doomgeneric`, GPL-2.0, a separate
+//!   program) with its WaveOS backend, built static with musl into
+//!   `/System/Games/Doom`.
 //!
 //! Downloads are pinned by SHA-256 and cached in `target/downloads`.
 
@@ -78,18 +81,77 @@ fn busybox() -> Vec<Program> {
 /// self-test is skipped.
 pub fn programs() -> Vec<Program> {
     let mut all = busybox();
+    if Command::new("musl-gcc").arg("--version").output().is_err() {
+        eprintln!("warning: musl-gcc not found (install musl-tools): Linux programs are left out of the image");
+        return all;
+    }
     all.extend(test_programs());
+    all.extend(doom());
     all
+}
+
+/// The newest modification time among `files`.
+fn newest(files: &[PathBuf]) -> Option<std::time::SystemTime> {
+    files.iter().filter_map(|f| fs::metadata(f).and_then(|m| m.modified()).ok()).max()
+}
+
+/// True when `exe` was built after every one of `sources` last changed.
+fn fresh(exe: &PathBuf, sources: &[PathBuf]) -> bool {
+    let built = fs::metadata(exe).and_then(|e| e.modified()).ok();
+    matches!((built, newest(sources)), (Some(b), Some(s)) if s <= b)
+}
+
+fn files_in(dir: &PathBuf, ext: &[&str]) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| ext.iter().any(|e| x == *e)))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// Doom for `/System/Games/Doom`, and its license.
+fn doom() -> Vec<Program> {
+    let top = root().join("third_party/doomgeneric");
+    let (src, port, header) = (top.join("src"), top.join("waveos"), root().join("libs/linux/include"));
+    let exe = root().join("target/linux/doom");
+    let sources: Vec<PathBuf> = files_in(&src, &["c"]).into_iter().chain(files_in(&port, &["c"])).collect();
+    let inputs: Vec<PathBuf> = sources
+        .iter()
+        .cloned()
+        .chain(files_in(&src, &["h"]))
+        .chain(files_in(&port, &["h"]))
+        .chain(files_in(&header, &["h"]))
+        .collect();
+    if !fresh(&exe, &inputs) {
+        let status = Command::new("musl-gcc")
+            .args(["-static", "-no-pie", "-O2", "-pthread", "-s", "-w"])
+            .args(["-DNORMALUNIX", "-DLINUX", "-D_DEFAULT_SOURCE", "-DFEATURE_SOUND"])
+            .arg("-I")
+            .arg(&header)
+            .arg("-I")
+            .arg(&port)
+            .arg("-I")
+            .arg(&src)
+            .arg("-o")
+            .arg(&exe)
+            .args(&sources)
+            .arg("-lm")
+            .status()
+            .expect("run musl-gcc");
+        assert!(status.success(), "could not build Doom");
+    }
+    vec![(String::from("Games/Doom/doom"), exe), (String::from("Licenses/doomgeneric.txt"), top.join("COPYING"))]
 }
 
 fn test_programs() -> Vec<Program> {
     let src = root().join("linux-tests");
     let out = root().join("target/linux");
     fs::create_dir_all(&out).unwrap();
-    if Command::new("musl-gcc").arg("--version").output().is_err() {
-        eprintln!("warning: musl-gcc not found (install musl-tools): Linux programs are left out of the image");
-        return Vec::new();
-    }
     let mut sources: Vec<PathBuf> = fs::read_dir(&src)
         .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "c")).collect())
         .unwrap_or_default();
@@ -98,12 +160,11 @@ fn test_programs() -> Vec<Program> {
     for c in sources {
         let name = c.file_stem().unwrap().to_string_lossy().into_owned();
         let exe = out.join(&name);
-        let fresh = fs::metadata(&exe)
-            .and_then(|e| e.modified())
-            .is_ok_and(|built| fs::metadata(&c).and_then(|s| s.modified()).is_ok_and(|changed| changed <= built));
-        if !fresh {
+        if !fresh(&exe, &[c.clone(), root().join("libs/linux/include/waveos.h")]) {
             let status = Command::new("musl-gcc")
-                .args(["-static", "-no-pie", "-O2", "-pthread", "-Wall", "-o"])
+                .args(["-static", "-no-pie", "-O2", "-pthread", "-Wall", "-I"])
+                .arg(root().join("libs/linux/include"))
+                .arg("-o")
                 .arg(&exe)
                 .arg(&c)
                 .status()
