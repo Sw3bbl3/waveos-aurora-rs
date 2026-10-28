@@ -251,6 +251,16 @@ static void shared_memory(void) {
     munmap(m, 3 * 4096);
     close(fd);
 
+    // Wayland clients size their buffers with posix_fallocate.
+    fd = memfd_create("grown", MFD_CLOEXEC);
+    CHECK(fd >= 0 && posix_fallocate(fd, 0, 2 * 4096) == 0, "posix_fallocate grows a memfd");
+    m = mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(m != MAP_FAILED, "mmap the grown memfd");
+    m[4096 + 7] = 'x';
+    CHECK(pread(fd, buf, 1, 4096 + 7) == 1 && buf[0] == 'x', "the grown memfd is writable");
+    munmap(m, 2 * 4096);
+    close(fd);
+
     int *shared = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     CHECK(shared != MAP_FAILED, "shared anonymous memory");
     *shared = 1;

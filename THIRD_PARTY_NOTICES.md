@@ -8,6 +8,7 @@ WaveOS uses these vendored components:
 | rusty_aac | 1.1.0 | [Apache-2.0](vendor/rusty_aac/LICENSE) | [decoder-only no_std port and formatting](vendor/rusty_aac/WAVEOS-PATCHES.md) |
 | Linux DRM core, virtio-gpu driver, HDMI helpers and DRM/virtio protocol headers | 6.12 | MIT, HPND or BSD-3-Clause, per file (each keeps its notice); see [kernel/linux](kernel/linux/README.md) | Compiled against WaveOS's own MIT LinuxKPI; GPL-only Linux parts are replaced, not used |
 | acpi (AML interpreter) | 6.1.1 | [MIT](vendor/acpi/LICENCE-MIT) or [Apache-2.0](vendor/acpi/LICENCE-APACHE) | [stores through references, PCI configuration offsets](vendor/acpi/WAVEOS-PATCHES.md) |
+| Wayland protocol descriptions (`wayland.xml`, `xdg-shell.xml`, `xdg-decoration-unstable-v1.xml`, `viewporter.xml`) | wayland 1.21, wayland-protocols 1.31 | MIT, notices inside each file in [linux-programs/wl-bridge/protocols](linux-programs/wl-bridge/protocols) | None; `tools/wayland_protocol.py` generates `wl-bridge`'s `protocol.rs` from them |
 
 Programs downloaded at build time (pinned by SHA-256) and shipped as separate programs in the system image:
 

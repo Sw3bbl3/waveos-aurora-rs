@@ -6,7 +6,9 @@
 //!   program; its copyright file goes along);
 //! - Doom: doomgeneric (`third_party/doomgeneric`, GPL-2.0, a separate
 //!   program) with its WaveOS backend, built static with musl into
-//!   `/System/Games/Doom`.
+//!   `/System/Games/Doom`;
+//! - the Rust programs in `linux-programs/` (the Wayland bridge), built for
+//!   `x86_64-unknown-linux-musl`.
 //!
 //! Downloads are pinned by SHA-256 and cached in `target/downloads`.
 
@@ -97,6 +99,7 @@ pub fn links(programs: &[Program]) -> String {
 /// self-test is skipped.
 pub fn programs() -> Vec<Program> {
     let mut all = busybox();
+    all.extend(rust_programs());
     if Command::new("musl-gcc").arg("--version").output().is_err() {
         eprintln!("warning: musl-gcc not found (install musl-tools): Linux programs are left out of the image");
         return all;
@@ -104,6 +107,36 @@ pub fn programs() -> Vec<Program> {
     all.extend(test_programs());
     all.extend(doom());
     all
+}
+
+/// Target of the Rust programs in `linux-programs/`.
+const RUST_TARGET: &str = "x86_64-unknown-linux-musl";
+/// Those programs, and where they go in `/System`.
+const RUST_PROGRAMS: &[(&str, &str)] = &[("wl-bridge", "Linux/bin/wl-bridge")];
+
+/// Sets up `cmd` to run cargo `subcommand` over Rust Linux program `name`.
+pub fn rust_cargo(cmd: &mut Command, subcommand: &str, name: &str) {
+    cmd.current_dir(root().join("linux-programs").join(name))
+        .args([subcommand, "--release", "--target", RUST_TARGET, "--target-dir"])
+        .arg(root().join("target/linux-programs"))
+        .env_remove("RUSTFLAGS");
+}
+
+pub fn rust_program_names() -> impl Iterator<Item = &'static str> {
+    RUST_PROGRAMS.iter().map(|(n, _)| *n)
+}
+
+fn rust_programs() -> Vec<Program> {
+    let mut out = Vec::new();
+    for (name, dest) in RUST_PROGRAMS {
+        let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+        rust_cargo(&mut cmd, "build", name);
+        let status = cmd.status().expect("run cargo");
+        assert!(status.success(), "could not build {name} (rustup target add {RUST_TARGET})");
+        let exe = root().join("target/linux-programs").join(RUST_TARGET).join("release").join(name);
+        out.push((String::from(*dest), exe));
+    }
+    out
 }
 
 /// The newest modification time among `files`.

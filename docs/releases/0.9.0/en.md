@@ -51,6 +51,7 @@ WaveOS draws faster, shows your battery, runs its first graphics driver from Lin
 - Dynamically linked programs run too: Debian's own `bash`, coreutils and Python 3 start as they do on Debian, with their libraries. `cargo xtask linux-root` fetches Debian packages (checked against the archive's checksums) and `cargo xtask run --linux-root` puts them on the disk; Firefox ESR 140 already loads and reports its version.
 - Linux programs reach the network: TCP and UDP sockets over WaveOS's network stack, name lookups, and local sockets that pass descriptors along. Debian's Python fetches web pages.
 - Linux programs can open WaveOS windows, read the keyboard and mouse, and play sound, through the calls in `waveos.h`.
+- **Wayland programs** show their windows on WaveOS: `wl-bridge`, a small Wayland compositor that comes with WaveOS, turns each window of a GTK (or Qt, SDL…) program into a WaveOS window, with its menus, the mouse, the keyboard and the clipboard. Debian's `gtk3-demo` runs in it. Linux programs also share memory now (`memfd`, `/dev/shm`, `MAP_SHARED`).
 - The installation disc (`cargo xtask iso`) carries the system compressed again, so it builds and boots now that the system is larger.
 
 ![Doom (Freedoom: Phase 2) in a WaveOS window](../../screenshots/0.9/doom.png)

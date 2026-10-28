@@ -76,6 +76,7 @@ pub fn default_env(user: &str) -> Vec<String> {
         String::from("TERM=dumb"),
         String::from("LANG=C.UTF-8"),
         String::from("XDG_RUNTIME_DIR=/run"),
+        String::from("WAYLAND_DISPLAY=wayland-0"),
     ]
 }
 

@@ -224,4 +224,19 @@ fn configure(root: &Path, links: &mut BTreeMap<String, String>) {
     fs::create_dir_all(&etc).unwrap();
     fs::write(etc.join("ld.so.conf"), "/usr/local/lib\n/lib/x86_64-linux-gnu\n/usr/lib/x86_64-linux-gnu\n").unwrap();
     fs::write(etc.join("machine-id"), "5761766553797374656d4c696e757830\n").unwrap();
+    // Data package triggers generate, with the host's tools (the files are
+    // the same on every machine): the MIME database (GTK finds image
+    // loaders through it) and the compiled GSettings schemas.
+    for (tool, dir) in
+        [("update-mime-database", "usr/share/mime"), ("glib-compile-schemas", "usr/share/glib-2.0/schemas")]
+    {
+        let dir = root.join(dir);
+        if !dir.exists() {
+            continue;
+        }
+        match std::process::Command::new(tool).arg(&dir).status() {
+            Ok(s) if s.success() => {}
+            _ => eprintln!("warning: {tool} failed or is missing (install shared-mime-info and libglib2.0-bin): GTK programs may not work"),
+        }
+    }
 }

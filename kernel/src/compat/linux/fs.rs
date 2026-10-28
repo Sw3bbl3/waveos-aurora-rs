@@ -1063,6 +1063,8 @@ pub fn fcntl(p: &Process, fd: u64, cmd: u64, arg: u64) -> Result<u64, isize> {
         }
         // Locks, pipe sizes: accepted.
         5..=7 | 1031 | 1032 => Ok(0),
+        // Seals on memory files: accepted, none reported.
+        1033 | 1034 if shm_of(p, fd).is_some() => Ok(0),
         _ => Err(EINVAL),
     }
 }
@@ -1408,6 +1410,32 @@ pub fn ftruncate(p: &Process, fd: u64, len: u64) -> Result<u64, isize> {
     match &*p.fd(fd as usize)? {
         Handle::File(f) => f.lock().truncate(len).map(|_| 0),
         _ => Err(EINVAL),
+    }
+}
+
+/// `fallocate`: makes room for `len` bytes at `off` (the file grows unless
+/// `FALLOC_FL_KEEP_SIZE`); other modes (punching holes) aren't supported.
+pub fn fallocate(p: &Process, fd: u64, mode: u64, off: u64, len: u64) -> Result<u64, isize> {
+    const KEEP_SIZE: u64 = 1;
+    let end = off.checked_add(len).ok_or(EFBIG)?;
+    if mode & !KEEP_SIZE != 0 {
+        return Err(EOPNOTSUPP);
+    }
+    if let Some(shm) = shm_of(p, fd) {
+        if mode == 0 && end > shm.size() {
+            shm.resize(end)?;
+        }
+        return Ok(0);
+    }
+    match &*p.fd(fd as usize)? {
+        Handle::File(f) => {
+            let mut f = f.lock();
+            if mode == 0 && end > f.size()? {
+                f.truncate(end)?;
+            }
+            Ok(0)
+        }
+        _ => Err(ENODEV),
     }
 }
 

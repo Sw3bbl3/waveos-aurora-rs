@@ -412,6 +412,11 @@ fn lint() {
     let mut user = Command::new(&cargo);
     userland_cargo(&mut user, "clippy", Profile::Release);
     run(user.args(deny));
+    for name in linux::rust_program_names() {
+        let mut cmd = Command::new(&cargo);
+        linux::rust_cargo(&mut cmd, "clippy", name);
+        run(cmd.arg("--all-targets").args(deny));
+    }
 }
 
 /// Builds both halves and lays out an EFI System Partition directory.

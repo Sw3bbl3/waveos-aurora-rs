@@ -466,6 +466,10 @@ impl OpenFile {
         Ok(self.pos)
     }
 
+    pub fn size(&self) -> FsResult<u64> {
+        Ok(self.fs.metadata(self.ino)?.size)
+    }
+
     pub fn truncate(&mut self, size: u64) -> FsResult<()> {
         if !self.writable {
             return Err(EBADF);

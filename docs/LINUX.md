@@ -14,8 +14,8 @@ This is being built in steps. What works today:
 | M2 | Linux programs open WaveOS windows and play sound; Doom | Done |
 | M3 | Dynamically linked programs (glibc), Debian packages | Done |
 | M4 | Sockets (TCP, UDP, local) | Done |
-| M5 | Shared memory and a Wayland bridge, for GTK programs | Next |
-| M6 | Firefox ESR | Planned |
+| M5 | Shared memory and a Wayland bridge, for GTK programs | Done |
+| M6 | Firefox ESR | Next |
 
 ## The shell
 
@@ -46,7 +46,10 @@ They come from a fixed snapshot of the Debian archive, and every download
 is checked: the archive's `Release` file against a SHA-256 pinned in
 `xtask/src/debian.rs`, the package list against `Release`, and each package
 against the list. Symbolic links are recorded in `.links`; maintainer
-scripts don't run.
+scripts don't run. What their triggers would generate for GTK programs (the
+MIME database and compiled GSettings schemas) is made with the build
+machine's `update-mime-database` and `glib-compile-schemas`
+(`shared-mime-info` and `libglib2.0-bin` on Debian and Ubuntu).
 
 `cargo xtask run --linux-root` makes a fresh disk with that root as
 `/Linux`. The system folders are layered: what the disk has (`/Linux/usr`,
@@ -59,7 +62,8 @@ In the shell, `bash`, `python3` and `firefox-esr --version` run as on Debian.
 - **Start-up:** `argc`, `argv`, the environment and the auxiliary vector
   (`AT_PHDR`, `AT_ENTRY`, `AT_RANDOM`, `AT_EXECFN`, `AT_HWCAP`…) on an 8 MiB
   stack. The environment has `PATH`, `HOME=/home/<you>`, `USER`, `SHELL`,
-  `TERM`, `LANG=C.UTF-8` and `XDG_RUNTIME_DIR`.
+  `TERM`, `LANG=C.UTF-8`, `XDG_RUNTIME_DIR=/run` and
+  `WAYLAND_DISPLAY=wayland-0`.
 - **Files:** a Linux-shaped tree. `/bin`, `/usr`, `/lib`, `/etc`, `/opt`
   and `/sbin` are the read-only `/System/Linux`; `/home`, `/tmp`, `/var`,
   `/root`, `/run`, `/srv`, `/mnt` and `/media` are the writable `/Linux`.
@@ -72,6 +76,10 @@ In the shell, `bash`, `python3` and `firefox-esr --version` run as on Debian.
 - **Memory:** `brk`, `mmap` (anonymous and private file mappings, hints,
   `MAP_FIXED`), `mprotect`, `mremap`, `munmap` and `madvise`. `PROT_NONE`
   reservations take no memory until made accessible.
+- **Shared memory:** `memfd_create`, `shm_open` (`/dev/shm`) and
+  `MAP_SHARED` mappings of them, or anonymous ones: every process mapping
+  the object sees the same memory, across `fork` and when the descriptor is
+  passed over a local socket. `ftruncate` and `fallocate` size them.
 - **Threads:** `clone` for threads with thread-local storage (`arch_prctl`),
   `futex`, and the child-tid handshake `pthread_join` uses.
 - **Processes:** `fork` copies the program's memory; `vfork` and
@@ -127,6 +135,31 @@ while (wave_next_event(&e, 16) == 1) { /* keys, pointer, resize, close */ }
 Only these WaveOS calls are open to Linux programs: windows, events, sound
 (`wave_audio_open`, then `write` 48 kHz stereo 16-bit samples), the
 clipboard, notifications, reading preferences, and the uptime clock.
+
+## Wayland programs (GTK and others)
+
+Programs that draw with GTK, Qt, SDL or their own Wayland code show their
+windows through `wl-bridge`, a Wayland compositor in `/System/Linux/bin`
+([`linux-programs/wl-bridge`](../linux-programs/wl-bridge), Rust, built for
+`x86_64-unknown-linux-musl`). Start it once, then the programs:
+
+```sh
+wl-bridge &
+gtk3-demo
+```
+
+Each top-level window becomes a WaveOS window. The bridge copies every
+frame the program commits (shared-memory buffers, `wl_shm`) into the
+window, with its sub-surfaces and pop-up menus, and sends WaveOS's pointer,
+scroll and key events back as Wayland events (a US keymap, built by the
+program's xkbcommon from the system's XKB data). WaveOS draws the window
+frame and resizes windows; the program is told the new size and draws
+again. Copying in a program offers the text to WaveOS's clipboard, and
+WaveOS's clipboard is what programs paste.
+
+What isn't there yet: pop-up menus stay inside their window, drag and drop
+between programs, GPU buffers (`linux-dmabuf`: programs draw in software),
+input methods, and touch.
 
 ## Doom
 

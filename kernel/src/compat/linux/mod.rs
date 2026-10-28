@@ -306,7 +306,7 @@ mod nr {
 pub const WAVE_BASE: u64 = 0x5741_0000;
 
 /// The WaveOS calls Linux programs may make: windows, events, sound,
-/// the clipboard and notifications.
+/// the clipboard, notifications, preferences and the screen's size.
 fn wave_call(n: u64, a: [u64; 6]) -> Result<u64, isize> {
     use aurora_abi::nr as w;
     match n as usize {
@@ -323,6 +323,7 @@ fn wave_call(n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::CLIPBOARD_GET
         | w::NOTIFY
         | w::PREF_GET
+        | w::DISPLAY_MODES
         | w::TIME_MS => crate::syscall::handle(n as usize, a),
         _ => Err(ENOSYS),
     }
@@ -401,7 +402,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::FTRUNCATE => fs::ftruncate(&p, a[0], a[1]),
         nr::STATFS => fs::statfs(a[1]),
         nr::FSTATFS => fs::statfs(a[1]),
-        nr::FSYNC | nr::FDATASYNC | nr::FLOCK | nr::FADVISE64 | nr::FALLOCATE | nr::READAHEAD => {
+        nr::FALLOCATE => fs::fallocate(&p, a[0], a[1], a[2], a[3]),
+        nr::FSYNC | nr::FDATASYNC | nr::FLOCK | nr::FADVISE64 | nr::READAHEAD => {
             p.fd(a[0] as usize)?;
             Ok(0)
         }
