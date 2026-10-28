@@ -16,7 +16,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
 - **Real user space.** Every app is its own **ring-3 process** with its own address space:
   - **Crash isolation:** an app that crashes gets a "quit unexpectedly" report, and everything else keeps running.
   - **System calls:** about 55 of them, covering processes, threads, files, pipes, windows, events, the clipboard, drag and drop, notifications, preferences, sound and power. Every pointer is validated.
-  - **Libraries:** the `corekit` runtime, and the **AuroraKit** UI toolkit.
+  - **Libraries:** the `corekit` runtime, the **AuroraKit** windowing toolkit, and **WaveUI**, the declarative interface framework every app is written with. Together with Studio, the `wavesdk` command and GINA packages they make up the **WaveSDK**.
 - **Lumen Server window server**, in the kernel like Windows NT's:
   - apps draw into shared-memory surfaces that Lumen Server composites
   - rendering is damage-tracked, with anti-aliased shapes, soft shadows and frosted glass, drawn with SSE2 in the window server's own task
@@ -127,7 +127,7 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
              ├─ fs/       VFS, block cache, AuroraFS (/), FAT32 (/Boot), TarFS (/System), RamFS
              └─ gui/      Lumen Server window server, desktop shell, clipboard, drag and drop, notifications, Spotlight
                   ↕ syscalls, shared-memory surfaces
- User space (userland/)     corekit runtime · AuroraKit toolkit · apps · /System/Bin tools
+ User space (userland/)     corekit runtime · AuroraKit · WaveUI · apps · /System/Bin tools
    libs/web · libs/tls · libs/surf   HTTP, TLS 1.3/1.2 and the Nebula engine (no_std, tested on the host)
 ```
 

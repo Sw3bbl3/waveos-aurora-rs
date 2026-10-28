@@ -50,7 +50,7 @@ cargo xtask iso --no-build          # package an existing target/esp without reb
 
 The virtual machine has 4 CPUs, Intel HD Audio (played through your Mac's speakers with Core Audio), a USB 3 controller with a tablet and, behind a hub, a keyboard, and S3 sleep enabled. On macOS, interactive launches request Cocoa full keyboard capture, forward Command, and disable Option/Command swapping. QEMU needs Accessibility permission; event-tap failures are reported on stderr. Click in the VM to capture and press **Control+Option+G** to release. Use `--no-keyboard-capture` to opt out. To wake WaveOS from sleep, press a key, or run `tools/qmp.py qmp:system_wakeup`.
 
-See [Constellation development](CONSTELLATION.md) for GINA packaging, native CLI commands, Studio, the compiler-port gap, developer disk sizing, and compatibility details.
+The WaveSDK developer site is [docs/developer/index.html](developer/index.html). See [WaveSDK development](WAVESDK.md) for GINA packaging, native CLI commands, Studio, the compiler-port gap, developer disk sizing, and compatibility details.
 
 `cargo xtask test` also attaches a USB stick, the test battery, and records the sound output to `target/test-audio.wav`. Its sleep test puts the VM to sleep and wakes it over QMP. Some OVMF builds (Ubuntu's, for one) fault while resuming, before WaveOS gets control: the harness notices and runs the suite again with `sleep=off`. Set `AURORA_TEST_SLEEP=off` to skip it from the start.
 

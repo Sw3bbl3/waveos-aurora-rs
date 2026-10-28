@@ -2,7 +2,13 @@
 
 Not yet published.
 
-WaveOS draws faster, shows your battery, runs its first graphics driver from Linux, has Wi-Fi in Settings, works with every kind of USB controller, and understands touchpads and game controllers. This update includes every change listed for 0.8.0.
+WaveOS draws faster, shows your battery, runs its first graphics driver from Linux, has Wi-Fi in Settings, works with every kind of USB controller, understands touchpads and game controllers, and every app is rebuilt on WaveUI, the new interface framework of the WaveSDK. This update includes every change listed for 0.8.0.
+
+## Every app, rebuilt
+- All fifteen apps that come with WaveOS are rewritten on **WaveUI**, a new declarative interface framework. They share one look and one set of controls: the same buttons, switches, lists, sidebars, toolbars, menus, alerts and sheets everywhere, in light and dark appearance and in your accent colour.
+- Every control works from the keyboard: Tab moves between them, Space and Return press them, and the focused control scrolls into view.
+- Scrolling is smooth everywhere, menus and sheets animate in (or don't, with Reduce Motion), and toolbar buttons explain themselves when you hover over them.
+- Learn's handbook has a new look: each guide sits on a rounded page with a clearer title, rounded code samples and highlighted notes, in light and dark.
 
 ## Faster
 - The desktop's drawing takes less than half the time it did: window shadows, translucent fills, borders and glass are all quicker, and the login screen's background blur is about six times faster (measured on the host CPU; the data is in `docs/measurements/drawing-2026-10-27` in the source code).
@@ -38,8 +44,12 @@ WaveOS draws faster, shows your battery, runs its first graphics driver from Lin
 - **Touchpads** (USB): tap to click, tap with two fingers for a secondary click, tap then touch again to drag, press with two fingers for a secondary click, and scroll with two fingers — smoothly, with the content gliding on after a quick flick. Scrolling follows your fingers, as on a touch screen.
 - **Game controllers:** Xbox 360, Xbox One and Series, PlayStation (DualShock 4 and DualSense), Switch Pro and other USB controllers work, all with the same button layout for games, and rumble on the controllers that have it.
 - PS/2 mice with side buttons work too.
+- **Settings** has new **Trackpad**, **Mouse** and **Game Controllers** panes: tap to click, natural scrolling, tracking and pointer speed, and each connected controller with a live view of its buttons and a vibration test.
 
 ## For developers
+- **The WaveSDK** is the new name of the Constellation SDK. The `wavesdk` command replaces `constellation`, which still works; packages made for SDK 0.6 to 0.8 still install, and new ones say SDK 0.9.
+- **WaveUI**, in the WaveSDK, is how WaveOS apps are now written: describe the interface from your app's state, and WaveUI does layout, drawing, input, focus, scrolling, menus, sheets and animation. New projects in Studio and `wavesdk new` start as WaveUI apps, and the WaveUI Gallery example shows every view.
+- Learn has three new guides for developers: [WaveUI](../../handbook/0.7/en/developer-waveui.md), [WaveSDK](../../handbook/0.7/en/developer-wavesdk.md) and the [Design guidelines](../../handbook/0.7/en/developer-design.md).
 - `cargo xtask run --gpu virtio` boots with a virtio display driven by the Linux driver; `cargo xtask test --gpu virtio` also checks that the display came up.
 - `cargo xtask run --wifi-sim` adds the simulated Wi-Fi networks.
 - `cargo xtask run --usb ehci` (also `ehci-ohci`, `ohci`, `uhci`) picks the USB controller the virtual machine has.
@@ -50,4 +60,4 @@ WaveOS draws faster, shows your battery, runs its first graphics driver from Lin
 Laptops' built-in touchpads mostly connect over I²C, which WaveOS doesn't drive yet; many also work as a plain PS/2 pointer, without gestures. Bluetooth keyboards, mice and controllers aren't supported. The new USB controllers (EHCI, OHCI, UHCI) have been tested in virtual machines only. No real Wi-Fi adapter works yet: the Intel driver stops before starting the radio, and none of it has run on real hardware. The Linux graphics driver works in virtual machines (virtio); drivers for AMD, Intel and NVIDIA graphics, and 3D acceleration, are not there yet. In this update's test machine the firmware did not wake from sleep, so the sleep test was skipped; it was skipped the same way on 0.8.0's code.
 
 ## Evidence
-`cargo xtask lint`, the host tests in [Building and testing](../../handbook/0.7/en/developer-build.md) (now including the Wi-Fi library's tests against the IEEE 802.11 test vectors and an independent implementation), and the kernel self-tests on both boots (37 tests, including the Linux compatibility layer's self-test and a WPA2 connection with DHCP on the simulated network) were run on the change, as was `cargo xtask test --gpu virtio`. The USB and input tests ran on each USB controller (`--usb xhci`, `ehci`, `ehci-ohci`, `ohci`, `uhci`), with virtual devices plugged in over USB redirection: a keyboard with media keys, a Precision Touchpad, a DualShock 4 and an Xbox 360 controller; the input library has its own tests against those devices' descriptors. The screenshots in `docs/screenshots/0.9` come from QEMU at 1280 × 800.
+`cargo xtask lint`, the host tests in [Building and testing](../../handbook/0.7/en/developer-build.md) (now including the Wi-Fi library's tests against the IEEE 802.11 test vectors and an independent implementation), and the kernel self-tests on both boots (38 tests, including the Linux compatibility layer's self-test and a WPA2 connection with DHCP on the simulated network) were run on the change, as was `cargo xtask test --gpu virtio`. The USB and input tests ran on each USB controller (`--usb xhci`, `ehci`, `ehci-ohci`, `ohci`, `uhci`), with virtual devices plugged in over USB redirection: a keyboard with media keys, a Precision Touchpad, a DualShock 4 and an Xbox 360 controller; the input library has its own tests against those devices' descriptors. The screenshots in `docs/screenshots/0.9` come from QEMU at 1280 × 800.

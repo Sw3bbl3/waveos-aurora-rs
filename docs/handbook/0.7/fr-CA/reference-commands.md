@@ -11,7 +11,7 @@ Les programmes se trouvent dans /System/Bin. Exécutez `help` dans Terminal pour
 | Périphériques | lspci, lsusb, battery |
 | Réseau | ifconfig, nslookup, ping, fetch |
 | Son | play, volume |
-| Applications | constellation, gina-check, gina-demo |
+| Applications | wavesdk, constellation, gina-check, gina-demo |
 
 ## S’exercer prudemment
 1. Créez un dossier temporaire avec `mkdir /Documents/practice`.

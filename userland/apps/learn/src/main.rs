@@ -193,12 +193,18 @@ impl Learn {
             );
         };
         let t = theme::current();
-        let html = String::from_utf8_lossy(&bytes)
-            .replace("font-size:16px", &format!("font-size:{}px", self.size))
-            .replace("font-size:30px", &format!("font-size:{}px", self.size * 30 / 16))
-            .replace("font-size:23px", &format!("font-size:{}px", self.size * 23 / 16))
-            .replace("#202331", &format!("#{:06x}", t.text & 0xffffff))
+        let hex = |c: u32| format!("#{:06x}", c & 0xffffff);
+        // The handbook's style tokens (xtask/src/help.rs) for this reader's
+        // text size and appearance.
+        let html = scale_font_sizes(&String::from_utf8_lossy(&bytes), self.size)
+            .replace("#f6f7fb", &hex(t.window_bg_alt))
+            .replace("#ffffff", &hex(t.window_bg))
+            .replace("#202331", &hex(t.text))
+            .replace("#6b7084", &hex(t.text_secondary))
+            .replace("#e3e6ee", if t.dark { "#2c3448" } else { "#e3e6ee" })
             .replace("#edf0f6", if t.dark { "#252c3b" } else { "#edf0f6" })
+            .replace("#eeedfb", if t.dark { "#27264a" } else { "#eeedfb" })
+            .replace("#d9d6f6", if t.dark { "#3b3870" } else { "#d9d6f6" })
             .replace("#5550c8", if t.dark { "#b7a8ff" } else { "#5550c8" });
         let page = Page::parse(&html);
         let mut missing_image = false;
@@ -297,6 +303,7 @@ impl Learn {
         let doc = self.doc.borrow();
         let Some(layout) = &doc.layout else { return };
         let (ox, oy) = (v.x, v.y - self.scroll);
+        cv.fill_rect(v, theme::current().window_bg_alt);
         cv.with_clip(v, |cv| {
             for item in &layout.items {
                 let rect = |r: &nebula_engine::Rect| Rect::new(ox + r.x, oy + r.y, r.w, r.h);
@@ -578,6 +585,27 @@ impl App for Learn {
     }
 }
 corekit::entry!(main);
+/// Scales every `font-size:Npx` in a handbook page from the 16 px it was
+/// written for to the reader's text size.
+fn scale_font_sizes(html: &str, size: i32) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find("font-size:") {
+        let (head, tail) = rest.split_at(i + "font-size:".len());
+        out.push_str(head);
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        match (tail[..digits].parse::<i32>(), tail[digits..].starts_with("px")) {
+            (Ok(n), true) => {
+                out.push_str(&format!("{}", n * size / 16));
+                rest = &tail[digits..];
+            }
+            _ => rest = tail,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn main(args: corekit::Args) -> i32 {
     if args.get(1).is_some_and(|s| s == "--check-library") {
         waveui::load_fonts();
