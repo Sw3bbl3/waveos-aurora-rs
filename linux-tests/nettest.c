@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -213,6 +214,71 @@ static void udp(void) {
     printf("PASS UDP and name lookup\n");
 }
 
+static void shared_memory(void) {
+    int fd = memfd_create("nettest", MFD_CLOEXEC);
+    CHECK(fd >= 0, "memfd_create");
+    CHECK(ftruncate(fd, 3 * 4096) == 0, "ftruncate");
+    char *m = mmap(NULL, 3 * 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(m != MAP_FAILED, "mmap MAP_SHARED");
+    strcpy(m + 4096, "parent");
+    pid_t pid = fork();
+    if (pid == 0) {
+        _exit(strcmp(m + 4096, "parent") == 0 && (strcpy(m + 8192, "child"), 1) ? 0 : 1);
+    }
+    int st;
+    waitpid(pid, &st, 0);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0 && strcmp(m + 8192, "child") == 0, "both processes see the same memory");
+    char buf[8] = {0};
+    CHECK(pread(fd, buf, 5, 8192) == 5 && strcmp(buf, "child") == 0, "read through the descriptor");
+
+    // The memory travels to another process over a socket, as Wayland buffers do.
+    int sv[2];
+    socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    pid = fork();
+    if (pid == 0) {
+        char msg[8];
+        int got = recv_fd(sv[1], msg, sizeof msg - 1);
+        char *c = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, got, 0);
+        if (c == MAP_FAILED) _exit(2);
+        strcpy(c, "drawn by the client");
+        _exit(0);
+    }
+    send_fd(sv[0], fd, "buf");
+    waitpid(pid, &st, 0);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0 && strcmp(m, "drawn by the client") == 0, "a passed memfd maps to the same pages");
+    close(sv[0]);
+    close(sv[1]);
+    munmap(m, 3 * 4096);
+    close(fd);
+
+    int *shared = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    CHECK(shared != MAP_FAILED, "shared anonymous memory");
+    *shared = 1;
+    pid = fork();
+    if (pid == 0) {
+        *shared = 42;
+        _exit(0);
+    }
+    waitpid(pid, NULL, 0);
+    CHECK(*shared == 42, "shared across fork");
+
+    int s1 = shm_open("/nettest-shm", O_CREAT | O_RDWR | O_EXCL, 0600);
+    CHECK(s1 >= 0 && ftruncate(s1, 4096) == 0, "shm_open");
+    int *a = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, s1, 0);
+    int s2 = shm_open("/nettest-shm", O_RDWR, 0);
+    int *b = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, s2, 0);
+    *a = 7;
+    CHECK(*b == 7, "two opens of one /dev/shm object");
+    CHECK(shm_unlink("/nettest-shm") == 0 && shm_open("/nettest-shm", O_RDWR, 0) < 0, "shm_unlink");
+
+    char *g = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    strcpy(g + 4096, "moved");
+    char *h = mremap(g, 8192, 64 << 20, MREMAP_MAYMOVE);
+    CHECK(h != MAP_FAILED && strcmp(h + 4096, "moved") == 0, "mremap keeps the contents");
+    h[(64 << 20) - 1] = 1;
+    printf("PASS shared memory\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     mkdir("/tmp", 0755);
@@ -220,6 +286,7 @@ int main(void) {
     named();
     tcp();
     udp();
+    shared_memory();
     if (failures) {
         printf("net-test: %d failures\n", failures);
         return 1;

@@ -25,6 +25,7 @@ mod misc;
 mod mm;
 mod net;
 mod process;
+mod shm;
 pub mod signal;
 pub mod unix;
 
@@ -292,6 +293,7 @@ mod nr {
     pub const PRLIMIT64: u64 = 302;
     pub const RENAMEAT2: u64 = 316;
     pub const GETRANDOM: u64 = 318;
+    pub const MEMFD_CREATE: u64 = 319;
     pub const STATX: u64 = 332;
     pub const EXECVEAT: u64 = 322;
     pub const RSEQ: u64 = 334;
@@ -434,6 +436,7 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::GETPEERNAME => net::getpeername(&p, a[0], a[1], a[2]),
         nr::SETSOCKOPT => net::setsockopt(&p, a[0], a[1], a[2], a[3], a[4]),
         nr::GETSOCKOPT => net::getsockopt(&p, a[0], a[1], a[2], a[3], a[4]),
+        nr::MEMFD_CREATE => fs::memfd_create(&p, a[0], a[1]),
         nr::EVENTFD => events::eventfd(&p, a[0], 0),
         nr::EVENTFD2 => events::eventfd(&p, a[0], a[1]),
         nr::TIMERFD_CREATE => events::timerfd_create(&p, a[0], a[1]),

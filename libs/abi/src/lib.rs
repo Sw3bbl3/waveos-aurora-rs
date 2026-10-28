@@ -504,6 +504,7 @@ pub mod err {
     pub const EINVAL: isize = 22;
     pub const EMFILE: isize = 24;
     pub const ENOTTY: isize = 25;
+    pub const EFBIG: isize = 27;
     pub const ENOSPC: isize = 28;
     pub const ESPIPE: isize = 29;
     pub const EROFS: isize = 30;
@@ -555,6 +556,7 @@ pub mod err {
             EINVAL => "invalid argument",
             EMFILE => "too many open files",
             ENOTTY => "not a terminal",
+            EFBIG => "file too large",
             ENOSPC => "no space left on device",
             ESPIPE => "illegal seek",
             EROFS => "read-only file system",

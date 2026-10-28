@@ -119,6 +119,8 @@ pub enum Special {
     Epoll(Arc<super::events::Epoll>),
     /// A local (`AF_UNIX`) socket.
     Unix(Arc<super::unix::Socket>),
+    /// Shared memory (`memfd_create`, `/dev/shm`), and where reads are.
+    Shm { file: Arc<super::shm::ShmFile>, pos: u64 },
 }
 
 impl Special {
@@ -128,6 +130,11 @@ impl Special {
             Special::Timer(t) => t.read(out),
             Special::Epoll(_) => Err(EINVAL),
             Special::Unix(u) => u.recv(out, false, false).map(|r| r.len),
+            Special::Shm { file, pos } => {
+                let n = file.read_at(*pos, out);
+                *pos += n as u64;
+                Ok(n)
+            }
             Special::Dir { .. } => Err(EISDIR),
             Special::Mem { data, pos } => {
                 let n = out.len().min(data.len().saturating_sub(*pos));
@@ -154,6 +161,11 @@ impl Special {
             Special::Event(e) => e.write(data),
             Special::Timer(_) | Special::Epoll(_) => Err(EINVAL),
             Special::Unix(u) => u.send(data, Vec::new(), None, false),
+            Special::Shm { file, pos } => {
+                let n = file.write_at(*pos, data)?;
+                *pos += n as u64;
+                Ok(n)
+            }
             _ => Ok(data.len()),
         }
     }
@@ -169,6 +181,7 @@ impl Special {
             // Anonymous inodes on Linux.
             Special::Event(_) | Special::Timer(_) | Special::Epoll(_) => (0o600, 0),
             Special::Unix(_) => (S_IFSOCK | 0o777, 0),
+            Special::Shm { .. } => (S_IFREG | 0o600, 0),
         }
     }
 }
@@ -515,6 +528,10 @@ pub fn open_guest(p: &Process, guest: &str, flags: u64) -> Result<Arc<Handle>, i
     if let Some(n) = std_alias {
         return p.fd(n);
     }
+    if let Some(name) = guest.strip_prefix("/dev/shm/") {
+        let file = super::shm::open(name, flags & O_CREAT != 0, flags & O_EXCL != 0, flags & O_TRUNC != 0)?;
+        return Ok(special(Special::Shm { file, pos: 0 }));
+    }
     if let Some(v) = virtual_file(p, guest) {
         return v.map(special);
     }
@@ -587,11 +604,39 @@ pub fn lseek(p: &Process, fd: u64, offset: i64, whence: u64) -> Result<u64, isiz
                 *pos = new as usize;
                 Ok(new as u64)
             }
+            Special::Shm { file, pos } => {
+                let base = match whence {
+                    0 => 0,
+                    1 => *pos as i64,
+                    2 => file.size() as i64,
+                    _ => return Err(EINVAL),
+                };
+                let new = base.checked_add(offset).filter(|&n| n >= 0).ok_or(EINVAL)?;
+                *pos = new as u64;
+                Ok(new as u64)
+            }
             Special::Dir { .. } => Err(EINVAL),
             _ => Ok(0),
         },
         _ => Err(ESPIPE),
     }
+}
+
+/// The shared memory object behind descriptor `fd`, if it is one.
+pub fn shm_of(p: &Process, fd: u64) -> Option<Arc<super::shm::ShmFile>> {
+    match &*p.fd(fd as usize).ok()? {
+        Handle::Special(s) => match &*s.lock() {
+            Special::Shm { file, .. } => Some(file.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `memfd_create`.
+pub fn memfd_create(p: &Process, _name: u64, flags: u64) -> Result<u64, isize> {
+    let file = super::shm::ShmFile::new(0)?;
+    install(p, special(Special::Shm { file, pos: 0 }), flags & 1 != 0)
 }
 
 fn at_offset(
@@ -614,6 +659,12 @@ fn at_offset(
 }
 
 pub fn pread(p: &Process, fd: u64, ptr: u64, len: u64, offset: u64) -> Result<u64, isize> {
+    if let Some(shm) = shm_of(p, fd) {
+        let mut buf = user::slice_mut(ptr, len)?;
+        let n = shm.read_at(offset, &mut buf);
+        buf.commit(n)?;
+        return Ok(n as u64);
+    }
     let mut buf = user::slice_mut(ptr, len)?;
     let n = at_offset(p, fd, offset, |f| f.read(&mut buf))?;
     buf.commit(n as usize)?;
@@ -621,6 +672,10 @@ pub fn pread(p: &Process, fd: u64, ptr: u64, len: u64, offset: u64) -> Result<u6
 }
 
 pub fn pwrite(p: &Process, fd: u64, ptr: u64, len: u64, offset: u64) -> Result<u64, isize> {
+    if let Some(shm) = shm_of(p, fd) {
+        let data = user::slice(ptr, len)?;
+        return shm.write_at(offset, &data).map(|n| n as u64);
+    }
     let buf = user::slice(ptr, len)?;
     at_offset(p, fd, offset, |f| f.write(&buf))
 }
@@ -728,7 +783,7 @@ fn plain_entries(host: &str) -> Vec<(String, u8)> {
         "/dev" => &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true)],
         "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false)],
         "/proc/self" => &[("exe", false), ("maps", false), ("cmdline", false), ("comm", false), ("stat", false)],
-        "/dev/shm" => &[],
+        "/dev/shm" => return super::shm::names().into_iter().map(|n| (n, DT_REG)).collect(),
         _ => {
             let mut v: Vec<(String, u8)> = fs::readdir(host)
                 .unwrap_or_default()
@@ -789,6 +844,10 @@ fn info_for_path(p: &Process, guest: &str, follow_link: bool) -> Result<Info, is
         }
         return info_for_path(p, &follow(guest)?, false);
     }
+    if let Some(shm) = guest.strip_prefix("/dev/shm/").filter(|n| !n.is_empty()) {
+        let f = super::shm::lookup(shm).ok_or(ENOENT)?;
+        return Ok(Info { mode: S_IFREG | 0o600, size: f.size(), ino: fnv(guest), rdev: 0, mtime: 0, ctime: 0 });
+    }
     if let Some(v) = virtual_file(p, guest) {
         let s = v?;
         let (mode, rdev) = s.mode();
@@ -823,7 +882,11 @@ fn info_for_handle(h: &Handle) -> Result<Info, isize> {
                 return Ok(Info { mode: S_IFDIR | 0o755, size: 0, ino: fnv(host), rdev: 0, mtime: 0, ctime: 0 });
             }
             let (mode, rdev) = s.mode();
-            let size = if let Special::Mem { data, .. } = &*s { data.len() as u64 } else { 0 };
+            let size = match &*s {
+                Special::Mem { data, .. } => data.len() as u64,
+                Special::Shm { file, .. } => file.size(),
+                _ => 0,
+            };
             Info { mode, size, ino: h as *const Handle as u64 >> 4, rdev, mtime: 0, ctime: 0 }
         }
         Handle::PipeRead { pipe, .. } => fifo(Arc::as_ptr(pipe) as u64 >> 4),
@@ -1267,6 +1330,9 @@ pub fn mkdirat(p: &Process, dirfd: u64, ptr: u64) -> Result<u64, isize> {
 
 pub fn unlinkat(p: &Process, dirfd: u64, ptr: u64, flags: u64) -> Result<u64, isize> {
     let guest = path_arg(p, dirfd, ptr)?;
+    if let Some(name) = guest.strip_prefix("/dev/shm/") {
+        return super::shm::unlink(name).map(|_| 0);
+    }
     if super::links::target(&guest).is_some() {
         return super::links::remove(&guest).map(|_| 0);
     }
@@ -1336,6 +1402,9 @@ pub fn truncate(p: &Process, ptr: u64, len: u64) -> Result<u64, isize> {
 }
 
 pub fn ftruncate(p: &Process, fd: u64, len: u64) -> Result<u64, isize> {
+    if let Some(shm) = shm_of(p, fd) {
+        return shm.resize(len).map(|_| 0);
+    }
     match &*p.fd(fd as usize)? {
         Handle::File(f) => f.lock().truncate(len).map(|_| 0),
         _ => Err(EINVAL),

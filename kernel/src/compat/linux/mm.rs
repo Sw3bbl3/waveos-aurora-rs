@@ -80,8 +80,48 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
         return Err(EINVAL);
     }
     let n = pages(len);
+    // Shared memory: the same frames in every process that maps it.
+    let shared = if flags & MAP_SHARED != 0 {
+        if flags & MAP_ANONYMOUS != 0 {
+            Some(super::shm::ShmFile::new(n * PAGE_SIZE)?)
+        } else {
+            super::fs::shm_of(p, fd as u64)
+        }
+    } else {
+        None
+    };
+    if let Some(shm) = shared {
+        let frames = shm.frames(offset / PAGE_SIZE, n);
+        let mut guard = p.mem();
+        let aspace = guard.as_mut().ok_or(ESRCH)?;
+        let va = if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 {
+            if !addr.is_multiple_of(PAGE_SIZE) || !user_range(addr, n * PAGE_SIZE) {
+                return Err(EINVAL);
+            }
+            if flags & MAP_FIXED_NOREPLACE != 0 && !aspace.is_free(addr, n) {
+                return Err(EEXIST);
+            }
+            aspace.unmap(addr, n);
+            addr
+        } else {
+            place(aspace, addr & !(PAGE_SIZE - 1), n)?
+        };
+        // Pages past the object's end stay unmapped (Linux: SIGBUS there).
+        aspace.map_shared(va, &frames, prot(prot_bits).unwrap_or(Prot::ReadOnly))?;
+        if prot(prot_bits).is_none() {
+            aspace.protect(va, frames.len() as u64, None)?;
+        }
+        update_resident(p, aspace);
+        return Ok(va);
+    }
     // A file's contents are read now, before taking the address-space lock.
-    let file_data = if flags & MAP_ANONYMOUS == 0 {
+    let file_data = if let (true, Some(shm)) = (flags & MAP_ANONYMOUS == 0, super::fs::shm_of(p, fd as u64)) {
+        // A private copy of shared memory.
+        let mut data = alloc::vec![0u8; len as usize];
+        let got = shm.read_at(offset, &mut data);
+        data.truncate(got);
+        Some(data)
+    } else if flags & MAP_ANONYMOUS == 0 {
         let h = p.fd(fd as usize)?;
         let Handle::File(f) = &*h else { return Err(ENODEV) };
         let f = f.lock();
@@ -90,7 +130,7 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
         let mut data = alloc::vec![0u8; want];
         let got = if want > 0 { f.fs.read(f.ino, offset, &mut data)? } else { 0 };
         data.truncate(got);
-        let _ = flags & MAP_SHARED; // shared file mappings are private copies for now
+        // (Shared mappings of disk files are private copies for now.)
         Some(data)
     } else {
         None
@@ -198,16 +238,11 @@ pub fn mremap(p: &Process, addr: u64, old_len: u64, new_len: u64, flags: u64) ->
     if flags & MREMAP_MAYMOVE == 0 {
         return Err(ENOMEM);
     }
+    // Move: the pages themselves go to the new place (no copying), and the
+    // rest is new memory.
     let to = place(aspace, 0, new_n)?;
-    aspace.map_anon(to, new_n, Prot::ReadWrite)?;
-    let mut page = alloc::vec![0u8; PAGE_SIZE as usize];
-    for i in 0..old_n {
-        // Pages never touched (PROT_NONE) stay zero.
-        if aspace.read_bytes(addr + i * PAGE_SIZE, &mut page).is_ok() {
-            aspace.write_bytes(to + i * PAGE_SIZE, &page)?;
-        }
-    }
-    aspace.unmap(addr, old_n);
+    aspace.move_pages(addr, to, old_n)?;
+    aspace.map_anon(to + old_n * PAGE_SIZE, new_n - old_n, Prot::ReadWrite)?;
     update_resident(p, aspace);
     Ok(to)
 }
