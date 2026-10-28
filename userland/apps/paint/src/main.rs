@@ -47,22 +47,23 @@ const TOOLS: [(Tool, &str); 7] = [
     (Tool::Picker, "Colour picker (I)"),
 ];
 
-const PALETTE: [u32; 14] = [
-    rgb(0x1D, 0x1D, 0x24),
-    rgb(0x8E, 0x8E, 0x93),
+const PALETTE: [u32; 12] = [
+    rgb(0x0E, 0x15, 0x30),
     WHITE,
-    rgb(0xFF, 0x3B, 0x30),
-    rgb(0xFF, 0x95, 0x00),
-    rgb(0xFF, 0xCC, 0x00),
-    rgb(0x34, 0xC7, 0x59),
-    rgb(0x00, 0xC7, 0xBE),
-    rgb(0x30, 0xB0, 0xC7),
-    rgb(0x00, 0x7A, 0xFF),
-    rgb(0x58, 0x56, 0xD6),
-    rgb(0xAF, 0x52, 0xDE),
-    rgb(0xFF, 0x2D, 0x55),
-    rgb(0xA2, 0x84, 0x5E),
+    rgb(0xFF, 0x6B, 0x6B),
+    rgb(0xFF, 0xAA, 0x3B),
+    rgb(0xFF, 0xD8, 0x3B),
+    rgb(0x34, 0xD3, 0x99),
+    rgb(0x2D, 0xE0, 0xC4),
+    rgb(0x4D, 0xA3, 0xFF),
+    rgb(0x25, 0x63, 0xEB),
+    rgb(0xA8, 0x55, 0xF7),
+    rgb(0xF4, 0x72, 0xB6),
+    rgb(0xD9, 0x48, 0x2B),
 ];
+
+/// The colour panel's inner width (the hue bar and shade square).
+const PANEL_W: i32 = 196;
 
 struct Stroke {
     /// The image before this operation (also the undo step).
@@ -489,9 +490,26 @@ impl Paint {
     }
 
     fn paint_picture(&self, cv: &mut Surface, view: Rect, dark: bool) {
-        cv.fill_rect(view, if dark { 0xFF1A_1A20 } else { 0xFFDD_DDE3 });
+        let t = theme::current();
+        cv.fill_rect(view, if dark { 0xFF1A_1E2D } else { 0xFFEE_F1F8 });
+        // A dotted mat around the picture.
+        let dot = with_alpha(t.text_secondary, 0x40);
+        let clip = cv.clip.intersect(&view);
+        let mut y = view.y + 12;
+        while y < clip.bottom() {
+            let mut x = view.x + 12;
+            if y >= clip.y {
+                while x < clip.right() {
+                    if x >= clip.x {
+                        cv.fill_rect(Rect::new(x, y, 1, 1), dot);
+                    }
+                    x += 16;
+                }
+            }
+            y += 16;
+        }
         let r = self.image_rect().offset(view.x, view.y);
-        cv.shadow(r, 2, 16, 4, theme::current().shadow / 2);
+        cv.shadow(r, 4, 24, 8, t.shadow);
         if r.w as u32 >= self.img.width {
             // Nearest neighbour at 100% and above: crisp pixels.
             let clip = cv.clip.intersect(&r);
@@ -515,8 +533,43 @@ impl Paint {
         }
     }
 
-    fn picker_view(&self) -> Option<View<'_, Msg>> {
-        let (hue, s, v) = self.picker?;
+    fn colour_panel(&self) -> View<'_, Msg> {
+        let (hue, s, v) = self.picker.unwrap_or_else(|| rgb_to_hsv(self.color));
+        let mut swatches = Grid::new(26).spacing(9).width(PANEL_W);
+        for (i, c) in PALETTE.iter().enumerate() {
+            let (c, on) = (*c, *c == self.color);
+            swatches = swatches.push(
+                Canvas::new(move |cv, r| {
+                    let (x, y) = r.center();
+                    if on {
+                        cv.fill_circle(x, y, 13, theme::current().text);
+                        cv.fill_circle(x, y, 11, theme::current().window_bg);
+                    }
+                    cv.fill_circle(x, y, if on { 9 } else { 12 }, c);
+                    if c == PALETTE[0] || c == WHITE {
+                        cv.stroke_round_rect(Rect::new(x - 12, y - 12, 24, 24), 12, theme::current().separator);
+                    }
+                })
+                .size(26, 26)
+                .on_tap(Msg::Swatch(i)),
+            );
+        }
+        let bar = Canvas::new(move |cv, bar| {
+            for x in bar.x..bar.right() {
+                let hh = (x - bar.x) as f32 * 360.0 / bar.w as f32;
+                cv.fill_rect(Rect::new(x, bar.y, 1, bar.h), hsv_to_rgb(hh, 0.75, 1.0));
+            }
+            let hx = bar.x + (hue / 360.0 * bar.w as f32) as i32;
+            cv.fill_round_rect(Rect::new(hx - 3, bar.y + 3, 6, bar.h - 6), 3, 0xFFFF_FFFF);
+            cv.stroke_round_rect(Rect::new(hx - 3, bar.y + 3, 6, bar.h - 6), 3, 0x6000_0000);
+        })
+        .on_input(|e| match e {
+            CanvasEvent::Press { x, y, .. } | CanvasEvent::Drag { x, y } => Some(Msg::Hue(x, y)),
+            _ => None,
+        })
+        .size(PANEL_W, 34)
+        .corner_radius(10)
+        .clipped();
         let square = Canvas::new(move |cv, sq| {
             for y in sq.y..sq.bottom() {
                 for x in sq.x..sq.right() {
@@ -528,93 +581,90 @@ impl Paint {
                 }
             }
             let (mx, my) = (sq.x + (s * (sq.w - 1) as f32) as i32, sq.y + ((1.0 - v) * (sq.h - 1) as f32) as i32);
-            cv.fill_circle(mx, my, 6, 0xFFFF_FFFF);
-            cv.fill_circle(mx, my, 4, hsv_to_rgb(hue, s, v));
+            cv.fill_circle(mx, my, 7, 0xFFFF_FFFF);
+            cv.fill_circle(mx, my, 5, hsv_to_rgb(hue, s, v));
         })
         .on_input(|e| match e {
             CanvasEvent::Press { x, y, .. } | CanvasEvent::Drag { x, y } => Some(Msg::Shade(x, y)),
             _ => None,
         })
-        .size(196, 140)
-        .corner_radius(8)
+        .size(PANEL_W, 140)
+        .corner_radius(10)
         .clipped();
-        let bar = Canvas::new(move |cv, bar| {
-            for x in bar.x..bar.right() {
-                let hh = (x - bar.x) as f32 * 360.0 / bar.w as f32;
-                cv.fill_rect(Rect::new(x, bar.y, 1, bar.h), hsv_to_rgb(hh, 1.0, 1.0));
-            }
-            let hx = bar.x + (hue / 360.0 * bar.w as f32) as i32;
-            cv.fill_round_rect(Rect::new(hx - 3, bar.y - 2, 6, bar.h + 4), 3, 0xFFFF_FFFF);
-            cv.stroke_round_rect(Rect::new(hx - 3, bar.y - 2, 6, bar.h + 4), 3, 0x6000_0000);
-        })
-        .on_input(|e| match e {
-            CanvasEvent::Press { x, y, .. } | CanvasEvent::Drag { x, y } => Some(Msg::Hue(x, y)),
-            _ => None,
-        })
-        .size(196, 20);
-        Some(
-            VStack::new()
-                .push(square)
-                .push(bar)
-                .spacing(10)
-                .padding(12)
-                .background_rounded(Color::Background, 12)
-                .border(Color::Separator, 12)
-                .shadow(),
-        )
+        let color = self.color;
+        let current = HStack::new()
+            .push(
+                Canvas::new(move |cv, r| {
+                    cv.fill_round_rect(r, 10, color);
+                    cv.stroke_round_rect(r, 10, theme::current().separator);
+                })
+                .size(44, 30),
+            )
+            .push(
+                Text::new(format!("#{:06X}", color & 0xFF_FFFF))
+                    .style(TextStyle::Monospaced)
+                    .foreground(Color::SecondaryLabel),
+            )
+            .spacing(10);
+        VStack::new()
+            .push(Text::label("Colour"))
+            .push(swatches)
+            .push(bar)
+            .push(square)
+            .push(current)
+            .push(Text::label("Shapes").padding_insets(Insets { top: 10, leading: 0, bottom: 0, trailing: 0 }))
+            .push(Toggle::checkbox("Fill shapes", self.fill_shapes).on_change(Msg::FillShapes))
+            .push(Spacer::new())
+            .spacing(12)
+            .alignment(Align::Start)
+            .padding_insets(Insets { top: 18, leading: 16, bottom: 16, trailing: 16 })
+            .fill_height()
     }
 
-    fn toolbar(&self) -> View<'_, Msg> {
+    /// The tools, down the left edge.
+    fn rail(&self) -> View<'_, Msg> {
         let accent = theme::accent();
-        let mut tools = HStack::new().spacing(4);
+        let mut tools = VStack::new().spacing(6);
         for (i, (tool, tip)) in TOOLS.iter().enumerate() {
             let (tool, active) = (*tool, *tool == self.tool);
             let icon = Canvas::new(move |cv, r| {
-                let c = if active { accent } else { theme::current().text };
+                let c = if active { 0xFFFF_FFFF } else { theme::current().text_secondary };
                 Self::draw_tool_icon(cv, tool, r, c)
             })
             .size(20, 20);
-            let mut b = Button::with(icon).action(Msg::Tool(i)).button_style(ButtonStyle::Toolbar).help(*tip);
+            let mut b = Button::with(icon)
+                .action(Msg::Tool(i))
+                .button_style(ButtonStyle::Toolbar)
+                .corner_radius(12)
+                .size(40, 40)
+                .help(*tip);
             if active {
-                b = b.background_rounded(Color::Custom(with_alpha(accent, 0x30)), 8);
+                b = b.background_rounded(Color::Custom(accent), 12);
             }
             tools = tools.push(b);
         }
-        let color = self.color;
-        let current = Canvas::new(move |cv, r| {
-            cv.fill_round_rect(r, 8, color);
-            cv.stroke_round_rect(r, 8, theme::current().control_border);
-        })
-        .size(30, 30)
-        .on_tap(Msg::TogglePicker)
-        .help("More colours");
-        let mut swatches = Grid::new(15).spacing(3).width(7 * 18);
-        for (i, c) in PALETTE.iter().enumerate() {
-            let (c, on) = (*c, *c == self.color);
-            swatches = swatches.push(
-                Canvas::new(move |cv, r| {
-                    cv.fill_round_rect(r, 4, c);
-                    cv.stroke_round_rect(r, 4, if on { theme::accent() } else { theme::current().control_border });
-                })
-                .size(15, 15)
-                .on_tap(Msg::Swatch(i)),
-            );
-        }
+        tools.padding_insets(Insets { top: 12, leading: 12, bottom: 12, trailing: 12 }).fill_height()
+    }
+
+    fn toolbar(&self) -> View<'_, Msg> {
+        let info = match &self.status {
+            Some(s) => s.clone(),
+            None => format!("{} × {} · {}%", self.img.width, self.img.height, self.zoom_pct()),
+        };
         toolbar(vec![
-            tools,
-            Divider::new().height(28),
-            Slider::new(self.size as f32, 1.0..=64.0).step(1.0).on_change(Msg::Size).width(120).help("Brush size"),
-            Text::new(format!("{} px", self.size))
-                .style(TextStyle::Callout)
-                .foreground(Color::SecondaryLabel)
-                .width(44),
-            Toggle::checkbox("Fill shapes", self.fill_shapes).on_change(Msg::FillShapes),
-            Divider::new().height(28),
-            current,
-            swatches,
+            Text::new(self.name().trim_end_matches(".png").to_string())
+                .style(TextStyle::Sized(15, waveui::style::Weight::Bold)),
+            Text::new(info).style(TextStyle::Sized(12, waveui::style::Weight::Bold)).foreground(Color::TertiaryLabel),
             Spacer::new(),
             Button::symbol(Symbol::Undo).action(Msg::Undo).disabled(self.undo.is_empty()).help("Undo (Ctrl+Z)"),
             Button::symbol(Symbol::Redo).action(Msg::Redo).disabled(self.redo.is_empty()).help("Redo (Ctrl+Shift+Z)"),
+            Text::new("Size").style(TextStyle::Callout).foreground(Color::SecondaryLabel),
+            Slider::new(self.size as f32, 1.0..=64.0)
+                .step(1.0)
+                .on_change(Msg::Size)
+                .width(120)
+                .help("Brush size ([ and ])"),
+            Text::new(format!("{}", self.size)).style(TextStyle::Sized(12, waveui::style::Weight::Bold)).width(22),
             Button::new("Save").action(Msg::Save).button_style(ButtonStyle::Prominent).shortcut(Shortcut::ctrl('s')),
         ])
     }
@@ -636,7 +686,7 @@ impl App for Paint {
     }
 
     fn size(&self) -> (i32, i32) {
-        (1040, 700)
+        (1220, 728)
     }
 
     fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
@@ -646,14 +696,24 @@ impl App for Paint {
             Msg::FillShapes(on) => self.fill_shapes = on,
             Msg::Swatch(i) => {
                 self.color = PALETTE[i];
-                self.picker = None;
+                self.picker = Some(rgb_to_hsv(self.color));
             }
             Msg::TogglePicker => {
                 self.picker = if self.picker.is_some() { None } else { Some(rgb_to_hsv(self.color)) };
             }
-            Msg::Hue(x, _) => self.pick(Some((x as f32 / 196.0 * 360.0).clamp(0.0, 359.9)), None),
+            Msg::Hue(x, _) => {
+                let (_, s, v) = self.picker.unwrap_or_else(|| rgb_to_hsv(self.color));
+                // A grey has no hue to keep: picking one gives it colour.
+                let (s, v) = if s < 0.05 || v < 0.05 { (0.75, 1.0) } else { (s, v) };
+                self.picker = Some((0.0, s, v));
+                self.pick(Some((x as f32 / PANEL_W as f32 * 360.0).clamp(0.0, 359.9)), None)
+            }
             Msg::Shade(x, y) => {
-                self.pick(None, Some(((x as f32 / 195.0).clamp(0.0, 1.0), (1.0 - y as f32 / 139.0).clamp(0.0, 1.0))))
+                if self.picker.is_none() {
+                    self.picker = Some(rgb_to_hsv(self.color));
+                }
+                let w = (PANEL_W - 1) as f32;
+                self.pick(None, Some(((x as f32 / w).clamp(0.0, 1.0), (1.0 - y as f32 / 139.0).clamp(0.0, 1.0))))
             }
             Msg::Undo => self.undo(),
             Msg::Redo => self.redo(),
@@ -678,11 +738,7 @@ impl App for Paint {
                 }
             }
             Msg::SheetCancel => self.sheet = None,
-            Msg::Begin(x, y) => {
-                if self.picker.take().is_none() {
-                    self.begin(x, y);
-                }
-            }
+            Msg::Begin(x, y) => self.begin(x, y),
             Msg::Move(x, y) => {
                 self.cursor = Some((x, y));
                 if self.stroke.is_some() {
@@ -785,38 +841,12 @@ impl App for Paint {
                 _ => None,
             })
             .fill();
-        let pos = self
-            .cursor
-            .map(|(x, y)| self.to_image(x, y))
-            .filter(|p| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < self.img.width as f32 && p.1 < self.img.height as f32);
-        let mut info = format!("{} × {} px   ·   {}%", self.img.width, self.img.height, self.zoom_pct());
-        if let Some(p) = pos {
-            info.push_str(&format!("   ·   {}, {}", p.0 as i32, p.1 as i32));
-        }
-        let tip = TOOLS.iter().find(|(k, _)| *k == self.tool).map(|(_, s)| *s).unwrap_or("");
-        let status = HStack::new()
-            .push(Text::new(info).style(TextStyle::Footnote).foreground(Color::SecondaryLabel).grow(1))
-            .push(
-                Text::new(self.status.clone().unwrap_or_else(|| String::from(tip)))
-                    .style(TextStyle::Footnote)
-                    .foreground(Color::SecondaryLabel),
-            )
-            .padding_xy(14, 0)
-            .height(26)
-            .fill_width();
-        let overlay = self.picker_view().map(|p| {
-            VStack::new()
-                .push(HStack::new().push(p).padding_insets(Insets { top: 4, leading: 370, ..Default::default() }))
-                .push(Spacer::new())
-                .alignment(Align::Start)
-                .fill()
-        });
-        VStack::new()
-            .push(self.toolbar())
+        HStack::new()
+            .push(self.rail())
             .push(Divider::new())
-            .push(ZStack::with(vec![picture]).push_if(overlay).fill())
+            .push(VStack::new().push(self.toolbar()).push(picture).spacing(0).grow(1).fill_height())
             .push(Divider::new())
-            .push(status)
+            .push(self.colour_panel().width(PANEL_W + 32))
             .spacing(0)
             .fill()
     }

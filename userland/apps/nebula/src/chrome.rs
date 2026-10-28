@@ -428,7 +428,18 @@ impl App for Browser {
     }
 
     fn poll(&mut self, cx: &mut Context<Msg>) -> bool {
-        let dirty = self.tick_all(cx.now());
+        let mut dirty = self.tick_all(cx.now());
+        // Start pages wear the desktop's colours: remake them when those change.
+        let look = (waveui::lumen::theme::current().dark, waveui::lumen::theme::accent());
+        if look != self.home_theme {
+            self.home_theme = look;
+            for tab in &mut self.tabs {
+                if tab.url.as_ref().is_some_and(|u| u.scheme == "about" && u.path == "home") {
+                    tab.reload();
+                    dirty = true;
+                }
+            }
+        }
         // Pages lay out at the size they are shown.
         let tab = &mut self.tabs[self.active];
         let (w, h) = (tab.view.w, tab.view.h);

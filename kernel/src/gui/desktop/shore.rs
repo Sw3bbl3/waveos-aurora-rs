@@ -159,10 +159,12 @@ impl Desktop {
 
     fn unlock(&mut self) {
         let first_boot = self.shore.as_ref().is_some_and(|s| s.mode == Mode::Setup);
+        // Welcome asked to be shown again at the next sign-in.
+        let again = self.shore.as_ref().is_some_and(|s| s.mode == Mode::Login) && prefs::get_bool("welcome_again");
         self.shore = None;
         self.crest_retarget();
         self.damage_all();
-        if first_boot {
+        if first_boot || again {
             self.open(apps::AppKind::Welcome);
         }
     }

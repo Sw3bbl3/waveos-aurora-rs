@@ -10,6 +10,23 @@ WaveOS dessine plus vite, affiche votre batterie, exécute son premier pilote gr
 - Le défilement est fluide partout, les menus et les feuilles apparaissent en douceur (ou non, avec Réduire les animations), et les boutons des barres d’outils s’expliquent au survol.
 - Le guide de Learn a une nouvelle allure : chaque article repose sur une page arrondie, avec un titre plus clair, des exemples de code arrondis et des notes en évidence, en apparence claire et sombre.
 
+## Des écrans plus grands et plus nets
+- Avec un affichage virtio, WaveOS propose tous les modes que l’écran annonce, jusqu’à 5120 × 2160, et **Réglages → Affichage** passe de l’un à l’autre aussitôt. Quand vous redimensionnez la fenêtre de la machine virtuelle, le bureau suit.
+- Sur les écrans de 2560 × 1440 et plus, tout est dessiné avec deux fois plus de détail (HiDPI) : le texte et les commandes gardent leur taille et deviennent plus nets. **Réglages → Affichage → Échelle** propose Automatique, 1× ou 2×, appliqués immédiatement.
+- `cargo xtask run --resolution 2560x1440` démarre la machine virtuelle à la taille voulue.
+
+## Les applications, au nouveau design
+- Toutes les applications suivent maintenant le design Eau vive : une seule échelle de texte, des boutons en pilule, des cartes arrondies, une sélection teintée, et Manrope Light pour les grands chiffres.
+- **Notes** devient une bibliothèque : vos notes, les plus récentes d’abord, dans une barre latérale où chercher. Les notes s’enregistrent pendant la frappe, prennent leur nom de fichier de leur titre, et les listes de tâches se cochent d’un clic. Ce sont des fichiers texte dans Documents → Notes.
+- **Terminal** a des onglets (Ctrl+T) et une invite en couleurs qui suit le mode clair ou sombre.
+- **Calculatrice** affiche les séparateurs de milliers, entoure l’opération qui attend son second nombre et garde un ruban des résultats (Ctrl+T).
+- **Horloge** a un anneau de minuterie qui brille pendant le décompte, et l’heure du monde à côté de chaque onglet.
+- **Nebula** a une barre d’adresse centrée qui affiche le site et la page, des onglets colorés et une page de démarrage aux couleurs du bureau.
+- **Pulse** s’ouvre sur une vue d’ensemble : quatre jauges en direct (processeur, mémoire, disque, réseau) au-dessus des processus, que l’on peut chercher.
+- **Paint** range ses outils sur le côté, avec un panneau de couleurs au sélecteur toujours ouvert. **Lens** montre les images bord à bord, avec une barre d’outils flottante et une bande des autres images du dossier.
+- **Learn** s’ouvre sur six courtes leçons qui retiennent où vous en êtes. **Studio** a une arborescence de fichiers, des onglets pour les fichiers ouverts, des numéros de ligne, et les problèmes de compilation à part de la sortie.
+- **Bienvenue** permet de choisir un fond d’écran et le mode clair ou sombre, et peut revenir à la prochaine ouverture de session. **À propos** et **Installateur** suivent les nouvelles mises en page.
+
 ## Plus rapide
 - Le dessin du bureau prend moins de la moitié du temps qu’avant : les ombres des fenêtres, les remplissages translucides, les bordures et le verre sont tous plus rapides, et le flou d’arrière-plan de l’écran de connexion est environ six fois plus rapide (mesuré sur le processeur hôte; les données se trouvent dans `docs/measurements/drawing-2026-10-27` du code source).
 - Le serveur de fenêtres dessine avec SSE2 dans sa propre tâche, n’envoie que les parties de l’écran qui ont changé quand vous déplacez une fenêtre, et accède à l’écran en mode « write-combining », pour que les images arrivent à l’affichage par rafales.

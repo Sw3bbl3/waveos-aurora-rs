@@ -839,6 +839,8 @@ struct Browser {
     notice_until: u64,
     /// The address pill shows a field being typed into (not host and path).
     address_open: bool,
+    /// The appearance and accent the start pages were made in.
+    home_theme: (bool, u32),
 }
 
 impl Browser {
@@ -854,6 +856,7 @@ impl Browser {
             next_id: 1,
             notice_until: 0,
             address_open: false,
+            home_theme: (theme::current().dark, theme::accent()),
         }
     }
 
@@ -2628,7 +2631,7 @@ button { font-size: 14px; font-weight: bold; padding: 11px 22px; border-radius: 
 .tools { display: flex; gap: 10px; margin-top: 18px }
 .tools a { color: var(--ink); font-size: 13px; text-decoration: none; padding: 9px 16px; background: var(--card); border: 1px solid var(--line); border-radius: 18px }
 .foot { color: var(--muted); font-size: 12px; margin: 26px 0 0; line-height: 1.8 }
-@media (max-width: 760px) { .grid { grid-template-columns: repeat(2, 1fr) } .hero { padding: 32px 26px } h1 { font-size: 34px } }
+@media (max-width: 640px) { .grid { grid-template-columns: repeat(2, 1fr) } .hero { padding: 32px 26px } h1 { font-size: 34px } }
 </style></head><body><main>
 <div class="hero"><p class="eyebrow">NEBULA · WAVEOS AURORA</p>
 <h1>A little space to explore.</h1><p class="tag">Search, discover, and keep your favourite pages close.</p>

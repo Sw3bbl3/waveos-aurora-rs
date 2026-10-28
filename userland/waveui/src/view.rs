@@ -382,6 +382,8 @@ pub(crate) enum Node<'a, M> {
         rust: bool,
         /// `- [ ] ` lines drawn as checkboxes (`.checklists()`).
         tasks: bool,
+        /// Line numbers in a gutter (`.line_numbers()`).
+        gutter: bool,
     },
     Progress {
         value: Option<f32>,
@@ -987,6 +989,7 @@ impl TextEditor {
             rust: false,
             spacing: 0,
             tasks: false,
+            gutter: false,
         })
     }
     pub fn monospaced<'a, M>(value: impl Into<String>) -> View<'a, M> {
@@ -1013,6 +1016,14 @@ impl<'a, M> View<'a, M> {
     pub fn checklists(mut self) -> Self {
         if let Node::TextEditor { tasks, .. } = &mut self.node {
             *tasks = true;
+        }
+        self
+    }
+
+    /// For text editors: line numbers on the left, the caret's line lit (code).
+    pub fn line_numbers(mut self) -> Self {
+        if let Node::TextEditor { gutter, .. } = &mut self.node {
+            *gutter = true;
         }
         self
     }

@@ -13,7 +13,7 @@ use crate::font::Font;
 use crate::geom::Rect;
 use crate::theme;
 use crate::{KeyCode, KeyEvent};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 const UNDO_LIMIT: usize = 200;
@@ -446,6 +446,8 @@ pub struct TextView {
     /// Draws lines starting `- [ ] ` / `- [x] ` as checkboxes that toggle
     /// when clicked (checklists in notes).
     pub tasks: bool,
+    /// Line numbers in a gutter on the left, and the caret's line lit (code).
+    pub gutter: bool,
     layout: Vec<(usize, usize)>,
     layout_key: (u64, i32, Font),
     rect: Rect,
@@ -475,6 +477,7 @@ impl TextView {
             current_highlight: None,
             placeholder: String::new(),
             tasks: false,
+            gutter: false,
             layout: Vec::new(),
             layout_key: (u64::MAX, 0, font),
             rect: Rect::new(0, 0, 0, 0),
@@ -628,7 +631,12 @@ impl TextView {
         }
     }
 
-    pub fn draw(&mut self, cv: &mut Canvas, r: Rect, focused: bool) {
+    pub fn draw(&mut self, cv: &mut Canvas, full: Rect, focused: bool) {
+        // Code keeps its line numbers in a gutter left of the text.
+        let digits =
+            if self.gutter { (self.edit.text().matches('\n').count() + 1).to_string().len().max(2) as i32 } else { 0 };
+        let gutter = if self.gutter { self.font.advance('0') * digits + 28 } else { 0 };
+        let r = Rect::new(full.x + gutter, full.y, full.w - gutter, full.h);
         self.rect = r;
         self.relayout(r.w);
         if self.follow {
@@ -643,6 +651,31 @@ impl TextView {
         let sel = self.edit.selection();
         let first = (self.scroll / self.line_h).max(0) as usize;
         let count = (r.h / self.line_h + 2) as usize;
+        if self.gutter {
+            let caret = self.edit.caret();
+            let text = self.edit.text();
+            let caret_line = text[..caret].matches('\n').count();
+            let mut number = text[..self.layout.get(first).map_or(0, |l| l.0)].matches('\n').count();
+            cv.with_clip(full, |cv| {
+                for (i, &(s, _)) in self.layout.iter().enumerate().skip(first).take(count) {
+                    let y = r.y + i as i32 * self.line_h - self.scroll;
+                    let head = s == 0 || text.as_bytes()[s - 1] == b'\n';
+                    if head && i != first {
+                        number += 1;
+                    }
+                    let current = number == caret_line;
+                    if current && sel.is_none() {
+                        cv.fill_rect(Rect::new(full.x, y, full.w, self.line_h), with_alpha(theme::accent(), 0x16));
+                    }
+                    if head {
+                        let label = (number + 1).to_string();
+                        let x = full.x + gutter - 16 - f.width(&label);
+                        let c = if current { t.text } else { with_alpha(t.text_secondary, 0x90) };
+                        cv.text(x, y + baseline, &label, f, c);
+                    }
+                }
+            });
+        }
         cv.with_clip(r, |cv| {
             if self.edit.text().is_empty() && !self.placeholder.is_empty() {
                 cv.text(r.x, r.y + baseline, &self.placeholder, f, t.text_secondary);
@@ -719,9 +752,16 @@ impl TextView {
                                 escape = c == '\\' && !escape;
                             }
                             (end, 0xffc99870)
+                        } else if tail.as_bytes()[0].is_ascii_digit() {
+                            let len = tail
+                                .bytes()
+                                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'.')
+                                .count();
+                            (len, 0xff8bd49c)
                         } else if tail.as_bytes()[0].is_ascii_alphabetic() || tail.starts_with('_') {
                             let len = tail.bytes().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').count();
                             let word = &tail[..len];
+                            let next = tail[len..].bytes().next();
                             let color = if [
                                 "fn", "let", "mut", "pub", "impl", "struct", "enum", "use", "mod", "match", "if",
                                 "else", "return", "for", "while", "self", "Self", "const", "trait", "async", "await",
@@ -730,6 +770,12 @@ impl TextView {
                             .contains(&word)
                             {
                                 0xffb98af2
+                            } else if matches!(next, Some(b'(' | b'!')) {
+                                // Calls and macros.
+                                0xff7aa2f7
+                            } else if word.as_bytes()[0].is_ascii_uppercase() {
+                                // Types and variants.
+                                0xfff0b45f
                             } else {
                                 t.text
                             };
