@@ -21,6 +21,8 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - apps draw into shared-memory surfaces that Lumen Server composites
   - rendering is damage-tracked, with anti-aliased shapes, soft shadows and frosted glass, drawn with SSE2 in the window server's own task
 - **Linux graphics drivers**: a compatibility layer written for WaveOS (memory, locks, work queues, ID maps, DMA fences, virtio) runs Linux 6.12's DRM display core and its **virtio-gpu** driver unmodified; an in-kernel DRM client sets the mode and Lumen Server draws through it (`cargo xtask run --gpu virtio`). Only permissively licensed Linux code is included; WaveOS replaces the GPL-only parts. See [kernel/linux](../kernel/linux/README.md).
+- **Linux programs:** static Linux x86-64 programs run as they are, with Linux's system calls, a Linux-shaped file tree with symbolic links, `/proc` and `/dev`, threads, `fork`/`exec`/`wait`, signals with handlers, `poll`, `select` and `epoll`. BusyBox is included (its shell runs interactively in Terminal), and Linux programs can open WaveOS windows and play sound. Dynamically linked Debian programs, sockets and shared memory work, and `wl-bridge` shows Wayland (GTK) programs in WaveOS windows. **Firefox ESR** (Debian's, unchanged) opens from Shoal and browses the web. See [LINUX.md](LINUX.md).
+- **Doom:** the Doom app starts doomgeneric (a Linux program) with your WAD files from Documents → Doom, or downloads Freedoom for you.
 - **Boot and Shore:** a boot screen with the WayV logo, start-up progress and the version, in the Light or Dark appearance; first-start setup of the one account (its password is salted and hashed with PBKDF2-HMAC-SHA256), then login, Lock Screen (Super L) and optional automatic login.
 - **The living-water desktop:**
   - a top bar of glass bubbles: the WayV menu and the app on the left; **Crest** in the middle with the time (the date on pointing, activities such as volume and new notifications), which can be turned off; **Seek** and the status ring on the right, opening **Current** (network, Calm, appearance, lock, sound, battery)
@@ -29,7 +31,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - **Shoal** (all apps, full screen, with search and groups), **Seek** (apps, files, settings and sums), **Drift** (calendar, Calm and notifications) and **Glide** (Alt+Tab with window pictures)
   - Manrope throughout, light and dark everywhere, broadcast live to every app, and an accent colour that can follow the wallpaper
   - the Tide, Aurora and Dunes wallpapers, each with a day and a night picture
-- **Apps:** Nebula, Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About This Computer, Welcome, Learn, Studio and Installer.
+- **Apps:** Nebula, Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About This Computer, Welcome, Learn, Studio, Installer and Doom.
 - **Networking**, all our own:
   - **drivers** for virtio-net and Intel e1000/e1000e, interrupt-driven where MSI allows
   - an **IPv4 and IPv6 stack** in the kernel: ARP and neighbor discovery, ICMP and ICMPv6, UDP and **TCP** over both (retransmission timers, fast retransmit, congestion control, window scaling), **DHCP** and IPv6 **autoconfiguration** (SLAAC, RDNSS), and BSD-like sockets for programs

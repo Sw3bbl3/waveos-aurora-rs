@@ -12,6 +12,7 @@ extern crate alloc;
 mod drivers;
 mod acpi;
 mod arch;
+mod compat;
 mod fs;
 mod gui;
 mod linux;

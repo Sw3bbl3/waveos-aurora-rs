@@ -83,12 +83,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-doom"
+version = "0.8.0"
+dependencies = [
+ "aurora-zip",
+ "corekit",
+ "nebula-web",
+ "waveui",
+]
+
+[[package]]
 name = "app-files"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
  "corekit",
  "waveui",
+]
+
+[[package]]
+name = "app-firefox"
+version = "0.8.0"
+dependencies = [
+ "corekit",
 ]
 
 [[package]]
@@ -212,6 +229,13 @@ dependencies = [
 [[package]]
 name = "aurora-wav"
 version = "0.8.0"
+
+[[package]]
+name = "aurora-zip"
+version = "0.8.0"
+dependencies = [
+ "miniz_oxide",
+]
 
 [[package]]
 name = "aurorakit"

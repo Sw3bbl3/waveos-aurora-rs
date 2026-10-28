@@ -15,15 +15,20 @@
 //!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
 //!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
 //!       --headless --no-build --debug --gdb --int
+//!       --linux-root                      put target/linux-root (Debian packages) on a fresh disk as /Linux
+//!   cargo xtask linux-root [PKG...]     fetch Debian packages (default: Firefox ESR, bash, coreutils,
+//!                                         Python) and their dependencies into target/linux-root
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
+mod debian;
 mod display;
 mod help;
 mod image;
+mod linux;
 mod monitor;
 mod package;
 mod sounds;
@@ -114,7 +119,14 @@ fn main() {
                 });
             let size = number("--disk-size-mib", if developer { 8192 } else { 256 }, 128, 65536) * 1024 * 1024;
             if !flag("--no-refresh") {
-                prepare_disk(&esp, &img, flag("--fresh-disk"), size);
+                if flag("--linux-root") {
+                    let linux = linux_root();
+                    let size = size.max(dir_size(&linux) + 512 * 1024 * 1024);
+                    image::create_with(&esp, &root().join("assets/home"), Some(&linux), &img, size)
+                        .expect("image creation failed");
+                } else {
+                    prepare_disk(&esp, &img, flag("--fresh-disk"), size);
+                }
             }
             // Simulated Wi-Fi networks (the kernel's software radio).
             image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
@@ -187,6 +199,11 @@ fn main() {
             mon.finish();
             exit(status.code().unwrap_or(1));
         }
+        Some("linux-root") => {
+            let pkgs: Vec<String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).cloned().collect();
+            let dir = debian::build(&pkgs_or_default(pkgs));
+            println!("wrote {} ({} MiB)", dir.display(), dir_size(&dir) >> 20);
+        }
         Some("image") => {
             let esp = build(profile, false);
             let out = root().join("target/waveos-aurora-usb.img");
@@ -202,8 +219,19 @@ fn main() {
                 fs::remove_dir_all(&staging).expect("remove old ISO staging directory");
             }
             fs::create_dir_all(staging.join("EFI/BOOT")).expect("create ISO staging directory");
+            // The boot image holds 32 MiB at most, so the system image goes in
+            // compressed (the bootloader inflates it).
+            let iso_esp = target.join("iso-esp");
+            let _ = fs::remove_dir_all(&iso_esp);
+            copy_tree(&esp, &iso_esp).expect("copy the ESP");
+            let tar = iso_esp.join("aurora/system.tar");
+            if let Ok(data) = fs::read(&tar) {
+                let packed = miniz_oxide::deflate::compress_to_vec_zlib(&data, 9);
+                fs::write(iso_esp.join("aurora/system.tar.zlib"), packed).expect("write system.tar.zlib");
+                fs::remove_file(&tar).expect("remove system.tar");
+            }
             let boot_image = staging.join("EFI/BOOT/efiboot.img");
-            image::create_efi_boot_image(&esp, &boot_image).expect("create EFI boot image");
+            image::create_efi_boot_image(&iso_esp, &boot_image).expect("create EFI boot image");
             let out = target.join("waveos-aurora.iso");
             let status = Command::new("xorriso")
                 .args(["-as", "mkisofs", "-iso-level", "3", "-R", "-J", "-V", "WAVEOS_AURORA"])
@@ -285,6 +313,39 @@ fn root() -> PathBuf {
 
 const DISK_SIZE: u64 = 256 * 1024 * 1024;
 
+fn pkgs_or_default(pkgs: Vec<String>) -> Vec<String> {
+    if pkgs.is_empty() {
+        debian::DEFAULT_PACKAGES.iter().map(|s| s.to_string()).collect()
+    } else {
+        pkgs
+    }
+}
+
+/// `target/linux-root`, built with the default packages if it isn't there yet.
+fn linux_root() -> PathBuf {
+    let dir = root().join("target/linux-root");
+    if dir.join(".links").exists() {
+        dir
+    } else {
+        debian::build(&pkgs_or_default(Vec::new()))
+    }
+}
+
+/// Bytes of the files under `dir`.
+fn dir_size(dir: &Path) -> u64 {
+    fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| match e.metadata() {
+                    Ok(m) if m.is_dir() => dir_size(&e.path()),
+                    Ok(m) => m.len(),
+                    Err(_) => 0,
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 /// Creates the persistent disk if needed; otherwise refreshes only its ESP so
 /// files saved on the AuroraFS volume survive rebuilds.
 fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64) {
@@ -351,6 +412,11 @@ fn lint() {
     let mut user = Command::new(&cargo);
     userland_cargo(&mut user, "clippy", Profile::Release);
     run(user.args(deny));
+    for name in linux::rust_program_names() {
+        let mut cmd = Command::new(&cargo);
+        linux::rust_cargo(&mut cmd, "clippy", name);
+        run(cmd.arg("--all-targets").args(deny));
+    }
 }
 
 /// Builds both halves and lays out an EFI System Partition directory.
@@ -385,7 +451,8 @@ fn build(profile: Profile, test: bool) -> PathBuf {
             .expect("llvm-objcopy (install llvm-tools-preview)");
         assert!(status.success(), "could not strip packaged kernel debug information");
     }
-    let programs = build_userland(profile);
+    let mut programs = build_userland(profile);
+    programs.extend(linux::programs());
     system_image(&programs, &esp.join("aurora/system.tar"));
     esp
 }
@@ -411,6 +478,20 @@ fn verify_toolchain() {
             exit(1);
         }
     }
+}
+
+/// Copies the folder `from` to `to`.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        } else {
+            fs::copy(entry.path(), to.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 /// A user program to place in the system image: (path inside /System, ELF file).
@@ -496,6 +577,22 @@ fn system_image(programs: &[Program], out: &Path) {
     );
     t.dir("Apps");
     t.dir("Bin");
+    // The read-only half of the Linux tree (see kernel/src/compat/linux).
+    for dir in [
+        "Linux",
+        "Linux/bin",
+        "Linux/etc",
+        "Linux/lib",
+        "Linux/sbin",
+        "Linux/usr",
+        "Linux/usr/bin",
+        "Linux/usr/lib",
+        "Linux/usr/sbin",
+    ] {
+        t.dir(dir);
+    }
+    t.dir("Games");
+    t.dir("Games/Doom");
     t.dir("Fonts");
     let fonts = root().join("assets/fonts");
     let mut font_files: Vec<_> = fs::read_dir(&fonts).unwrap().map(|e| e.unwrap().path()).collect();
@@ -542,6 +639,7 @@ fn system_image(programs: &[Program], out: &Path) {
         let name = f.file_name().unwrap().to_string_lossy().into_owned();
         t.file(&format!("Library/Nebula/{name}"), &fs::read(&f).unwrap());
     }
+    t.file("Linux/.links", linux::links(programs).as_bytes());
     for (dest, src) in programs {
         t.file(dest, &fs::read(src).unwrap());
     }

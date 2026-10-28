@@ -743,7 +743,7 @@ impl Desktop {
                 Command::Created(id) => {
                     let kind = server::info(id)
                         .and_then(|(pid, ..)| crate::proc::get(pid))
-                        .and_then(|p| apps::by_path(&p.path))
+                        .and_then(|p| apps::by_path(&p.path()))
                         .map(|a| a.kind)
                         .unwrap_or(AppKind::Other);
                     self.launching.retain(|(k, _)| *k != kind);

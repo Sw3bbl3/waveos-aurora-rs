@@ -66,6 +66,54 @@ fn user_name() -> String {
     first.chars().filter(|c| c.is_alphanumeric()).collect::<String>()
 }
 const BIN: &str = "/System/Bin";
+/// Where commands are looked for: WaveOS's own, then Linux programs.
+const PATH: [&str; 4] = [BIN, "/System/Linux/bin", "/System/Linux/usr/bin", "/Linux/usr/local/bin"];
+
+/// Tabs as spaces to the next multiple of eight columns.
+fn expand_tabs(line: &str) -> String {
+    if !line.contains('\t') {
+        return line.to_string();
+    }
+    let mut out = String::new();
+    for c in line.chars() {
+        if c == '\t' {
+            let n = 8 - out.chars().count() % 8;
+            out.extend(core::iter::repeat_n(' ', n));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The program a command name runs (WaveOS's own first), and an argument
+/// to put before the others: Linux commands that are links to BusyBox run
+/// as `busybox NAME …`.
+fn find_program(name: &str) -> (String, Option<String>) {
+    if let Some(p) = PATH.iter().map(|dir| format!("{dir}/{name}")).find(|p| fs::exists(p)) {
+        return (p, None);
+    }
+    if let Some(target) = linux_link(name) {
+        let host = format!("/System/Linux{target}");
+        if target.rsplit('/').next() == Some("busybox") {
+            return (host, Some(String::from(name)));
+        }
+        return (host, None);
+    }
+    (format!("{BIN}/{name}"), None)
+}
+
+/// Where the Linux command `name` (a link in the system's Linux tree) leads.
+fn linux_link(name: &str) -> Option<String> {
+    let text = fs::read_to_string("/System/Linux/.links").ok()?;
+    ["/bin/", "/usr/bin/", "/sbin/", "/usr/sbin/"].iter().find_map(|dir| {
+        let path = format!("{dir}{name}");
+        text.lines().find_map(|l| {
+            let (from, to) = l.split_once('\t')?;
+            (from == path && to.starts_with('/')).then(|| String::from(to))
+        })
+    })
+}
 
 /// A running pipeline.
 struct Job {
@@ -73,6 +121,8 @@ struct Job {
     /// Read end of the pipe carrying the last stage's output.
     output: u64,
     partial: String,
+    /// Ctrl+C presses so far: the first interrupts (SIGINT), the next ends the job.
+    interrupts: u32,
     /// Write end of the first stage's stdin (closed by Ctrl+D).
     stdin: Option<u64>,
 }
@@ -180,7 +230,7 @@ impl Session {
 
     fn out(&mut self, s: &str, color: u32) {
         for line in s.split('\n') {
-            self.lines.push((line.to_string(), color));
+            self.lines.push((expand_tabs(line.trim_end_matches('\r')), color));
         }
         if self.lines.len() > 2000 {
             self.lines.drain(..self.lines.len() - 2000);
@@ -254,7 +304,8 @@ impl Session {
                 "Built-in:\n  cd DIR · clear · history · theme light|dark · exit\n\nPrograms in /System/Bin (each runs as \
                  its own process):\n  files: ls cat echo mkdir rm mv cp touch grep wc df sync\n  system: ps kill uname \
                  uptime date mem cpuinfo lspci lsusb dmesg battery neofetch\n  sound: play volume\n  network: ping \
-                 ifconfig nslookup fetch (http and https)\n\nAlso: open APP|FILE · shutdown · reboot\nPipelines and \
+                 ifconfig nslookup fetch (http and https)\n\nLinux programs in /System/Linux/bin run too: \
+                 busybox ls, busybox vi, busybox awk…\n\nAlso: open APP|FILE · shutdown · reboot\nPipelines and \
                  redirection: ls | grep txt, echo hi > note.txt, cmd >> log\nLists: a && b (b if a worked), a || b (b \
                  if a failed), a; b\nCtrl+C stops the running program, Ctrl+L clears the screen.",
                 FG,
@@ -328,15 +379,15 @@ impl Session {
         let mut prev_read: Option<u64> = Some(in_r);
         let n = stages.len();
         for (i, argv) in stages.iter().enumerate() {
-            let program =
-                if argv[0].contains('/') { fs::resolve(&fs::cwd(), &argv[0]) } else { format!("{BIN}/{}", argv[0]) };
+            let (program, applet) =
+                if argv[0].contains('/') { (fs::resolve(&fs::cwd(), &argv[0]), None) } else { find_program(&argv[0]) };
             let (stdout, next_read) = if i + 1 < n {
                 let [r, w] = process::pipe(false).map_err(|e| format!("aurora-sh: pipe: {e}"))?;
                 (w, Some(r))
             } else {
                 (redirect.as_ref().map(|f| f.fd()).unwrap_or(out_w), None)
             };
-            let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+            let args: Vec<&str> = applet.iter().chain(argv[1..].iter()).map(String::as_str).collect();
             let res =
                 process::spawn(&program, &args, Stdio { stdin: prev_read, stdout: Some(stdout), stderr: Some(out_w) });
             // The children hold their own references now.
@@ -368,7 +419,7 @@ impl Session {
             process::close(out_r);
             process::close(in_w);
         } else {
-            self.job = Some(Job { pids, output: out_r, partial: String::new(), stdin: Some(in_w) });
+            self.job = Some(Job { pids, output: out_r, partial: String::new(), interrupts: 0, stdin: Some(in_w) });
         }
         Ok(())
     }
@@ -418,10 +469,11 @@ impl Session {
                 match code {
                     Ok(0) => {}
                     Ok(-11) => self.out("[program crashed]", RED),
-                    Ok(-9) => {
+                    Ok(-9) | Ok(-2) => {
                         self.out("^C", DIM);
                         self.queue.clear();
                     }
+                    Ok(code) if code < 0 => self.out(&format!("[ended by signal {}]", -code), DIM),
                     Ok(code) if self.queue.is_empty() => self.out(&format!("[exit code {code}]"), DIM),
                     _ => {}
                 }
@@ -552,9 +604,12 @@ impl Session {
             return true;
         }
         if ev.mods.ctrl && matches!(ev.ch, Some('c') | Some('C')) {
-            if let Some(job) = &self.job {
+            if let Some(job) = &mut self.job {
+                // Like a terminal: SIGINT to each stage's process group (a
+                // shell and the programs it runs); a second Ctrl+C ends them.
+                job.interrupts += 1;
                 for pid in &job.pids {
-                    let _ = process::kill(*pid);
+                    let _ = if job.interrupts == 1 { process::signal(-(*pid as i64), 2) } else { process::kill(*pid) };
                 }
             } else {
                 let line = format!("{}{}^C", self.prompt(), self.input);
@@ -793,6 +848,8 @@ impl Session {
             KeyCode::Enter => {
                 let line = core::mem::take(&mut self.input);
                 let echo = format!("{}{}", core::mem::take(&mut job.partial), line);
+                // The program took the interrupt and carries on (a shell).
+                job.interrupts = 0;
                 if let Some(w) = job.stdin {
                     let _ = corekit::io::write_fd(w, format!("{line}\n").as_bytes());
                 }

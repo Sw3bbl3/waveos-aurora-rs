@@ -39,6 +39,17 @@ pub mod web;
 pub use aurora_abi as abi;
 pub use rt::Args;
 
+// Marks the program as built for WaveOS (the kernel runs files without it
+// as Linux programs). "R" keeps the note when unused sections are dropped.
+core::arch::global_asm!(
+    ".pushsection .waveos_note, \"aR\", @note",
+    ".balign 4",
+    ".long 7, 0, 1",
+    ".asciz \"WaveOS\"",
+    ".balign 4",
+    ".popsection",
+);
+
 /// An error returned by a system call.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Error(pub isize);

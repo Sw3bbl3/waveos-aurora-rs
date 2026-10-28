@@ -19,11 +19,11 @@ fn key(addr: u64) -> Result<Key, isize> {
         return Err(EINVAL);
     }
     let p = super::current().ok_or(EPERM)?;
-    let ok = p.aspace.lock().as_ref().is_some_and(|a| a.check(addr, 4, true));
+    let ok = p.mem().as_ref().is_some_and(|a| a.check(addr, 4, true));
     if !ok {
         return Err(EFAULT);
     }
-    Ok((p.cr3, addr))
+    Ok((p.cr3(), addr))
 }
 
 fn queued(k: Key, task: TaskId) -> bool {

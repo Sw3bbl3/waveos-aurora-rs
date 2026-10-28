@@ -19,6 +19,7 @@ icons = {
  "installer": ("#38bdf8", "#0369c9", f'<path d="M70 98l58-26 58 26v56l-58 26-58-26z" {SW}/><path d="M128 102v48M108 132l20 20 20-20" {SW}/>'),
  "welcome": ("#7e95ff", "#b84bff", f'<path d="M58 132c18-26 38-26 54 0s36 26 54 0 30-22 40-8" {SW}/><path d="M168 66v24M156 78h24" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round"/>'),
  "shoal": ("#6f6cff", "#4b2bd6", '<g fill="#fff">' + "".join(f'<circle cx="{x}" cy="{y}" r="15"/>' for x, y in [(84,82),(128,82),(172,82),(106,120),(150,120),(84,158),(128,158),(172,158)]) + "</g>"),
+ "doom": ("#d0342c", "#3a0a0c", f'<circle cx="128" cy="118" r="50" {SW}/><path d="M128 50v30M128 156v30M60 118h30M166 118h30" {SW}/><circle cx="128" cy="118" r="10" fill="#ffb02e"/>'),
  "trash": ("#59607a", "#2c3142", f'<path d="M80 92h96l-8 84a12 12 0 0 1-12 11h-56a12 12 0 0 1-12-11z" {SW}/><path d="M66 92h124M108 92V76h40v16" {SW}/>'),
 }
 for name, (top, bottom, sym) in icons.items():

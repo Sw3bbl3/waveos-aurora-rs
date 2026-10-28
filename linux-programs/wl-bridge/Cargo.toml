@@ -1,0 +1,19 @@
+[package]
+name = "wl-bridge"
+version = "0.8.0"
+edition = "2021"
+license = "MIT"
+description = "A Wayland compositor for Linux programs on WaveOS: each window becomes a WaveOS window"
+
+[[bin]]
+name = "wl-bridge"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace]

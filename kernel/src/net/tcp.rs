@@ -499,6 +499,11 @@ pub fn listen(s: &mut Stack, port: u16, backlog: usize) -> Result<ConnId, isize>
     Ok(s.tcp.insert(c))
 }
 
+/// A listener has a connection waiting.
+pub fn acceptable(s: &Stack, listener: ConnId) -> bool {
+    s.tcp.conns.get(&listener).is_some_and(|c| !c.accept_queue.is_empty())
+}
+
 /// The next fully established connection on a listener.
 pub fn accept(s: &mut Stack, listener: ConnId) -> Option<ConnId> {
     s.tcp.conns.get_mut(&listener)?.accept_queue.pop_front()

@@ -37,6 +37,10 @@ pub enum Icon {
     Studio,
     /// The package installer.
     Installer,
+    /// The Doom game launcher.
+    Doom,
+    /// Firefox ESR, a Linux program: a plain globe (not Mozilla's logo).
+    Firefox,
 }
 
 impl Icon {
@@ -60,7 +64,8 @@ impl Icon {
             Icon::Trash | Icon::TrashFull => "trash",
             Icon::Studio => "studio",
             Icon::Installer => "installer",
-            Icon::Folder | Icon::Document | Icon::Picture => return None,
+            Icon::Doom => "doom",
+            Icon::Folder | Icon::Document | Icon::Picture | Icon::Firefox => return None,
         })
     }
 }
@@ -285,6 +290,32 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
             cv.line(cx, cy - u(10), cx, cy + u(6), u(3).max(2), 0xFFFF_FFFF);
             cv.line(cx - u(7), cy, cx, cy + u(7), u(3).max(2), 0xFFFF_FFFF);
             cv.line(cx + u(7), cy, cx, cy + u(7), u(3).max(2), 0xFFFF_FFFF);
+        }
+        Icon::Doom => {
+            cv.fill_round_rect_vgradient(r, rad, rgb(0xD0, 0x34, 0x2C), rgb(0x3A, 0x0A, 0x0C));
+            let (cx, cy) = r.center();
+            let t = u(3).max(2);
+            cv.fill_circle(cx, cy, u(10) + t / 2, 0xFFFF_FFFF);
+            cv.fill_circle(cx, cy, u(10) - t / 2, rgb(0x85, 0x1F, 0x1C));
+            cv.line(cx, cy - u(16), cx, cy - u(8), t, 0xFFFF_FFFF);
+            cv.line(cx, cy + u(8), cx, cy + u(16), t, 0xFFFF_FFFF);
+            cv.line(cx - u(16), cy, cx - u(8), cy, t, 0xFFFF_FFFF);
+            cv.line(cx + u(8), cy, cx + u(16), cy, t, 0xFFFF_FFFF);
+            cv.fill_circle(cx, cy, u(2).max(2), rgb(0xFF, 0xB0, 0x2E));
+        }
+        Icon::Firefox => {
+            cv.fill_round_rect_vgradient(r, rad, rgb(0xFF, 0x9A, 0x3C), rgb(0x8A, 0x2B, 0xC9));
+            let (cx, cy) = r.center();
+            let t = u(2).max(2);
+            let rr = u(13);
+            cv.fill_circle(cx, cy, rr + t / 2, 0xFFFF_FFFF);
+            cv.fill_circle(cx, cy, rr - t / 2, rgb(0x2A, 0x4F, 0xC8));
+            cv.line(cx - rr, cy, cx + rr, cy, t, 0xFFFF_FFFF);
+            cv.line(cx, cy - rr, cx, cy + rr, t, 0xFFFF_FFFF);
+            for dy in [-u(7), u(7)] {
+                let half = rr * 4 / 5;
+                cv.line(cx - half, cy + dy, cx + half, cy + dy, (t / 2).max(1), 0xC0FF_FFFF);
+            }
         }
         Icon::Document => {
             let page = Rect::new(r.x + u(8), r.y + u(3), s - u(16), s - u(6));

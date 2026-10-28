@@ -168,7 +168,11 @@ pub mod nr {
     /// `gamepad_rumble(id, strong, weak, duration_ms)` — motors 0–255;
     /// `-ENOSYS` for controllers without them.
     pub const GAMEPAD_RUMBLE: usize = 78;
-    pub const COUNT: usize = 79;
+    /// `signal(target, sig)` — sends Linux signal `sig` to process `target`,
+    /// or to process group `-target`. WaveOS programs end on the usual
+    /// ending signals (INT, TERM, HUP, QUIT, KILL) and ignore the rest.
+    pub const SIGNAL: usize = 79;
+    pub const COUNT: usize = 80;
 }
 
 #[repr(C)]
@@ -484,10 +488,14 @@ pub mod err {
     pub const ESRCH: isize = 3;
     pub const EINTR: isize = 4;
     pub const EIO: isize = 5;
+    pub const ENXIO: isize = 6;
+    pub const E2BIG: isize = 7;
+    pub const ENOEXEC: isize = 8;
     pub const EBADF: isize = 9;
     pub const ECHILD: isize = 10;
     pub const EAGAIN: isize = 11;
     pub const ENOMEM: isize = 12;
+    pub const EACCES: isize = 13;
     pub const EFAULT: isize = 14;
     pub const EEXIST: isize = 17;
     pub const ENODEV: isize = 19;
@@ -495,20 +503,33 @@ pub mod err {
     pub const EISDIR: isize = 21;
     pub const EINVAL: isize = 22;
     pub const EMFILE: isize = 24;
+    pub const ENOTTY: isize = 25;
+    pub const EFBIG: isize = 27;
     pub const ENOSPC: isize = 28;
     pub const ESPIPE: isize = 29;
     pub const EROFS: isize = 30;
     pub const EPIPE: isize = 32;
+    pub const ERANGE: isize = 34;
     pub const ENAMETOOLONG: isize = 36;
     pub const ENOSYS: isize = 38;
     pub const ENOTEMPTY: isize = 39;
+    pub const ELOOP: isize = 40;
+    pub const ELIBBAD: isize = 80;
+    pub const ENOTSOCK: isize = 88;
+    pub const EDESTADDRREQ: isize = 89;
     pub const EMSGSIZE: isize = 90;
+    pub const EPROTOTYPE: isize = 91;
+    pub const ENOPROTOOPT: isize = 92;
+    pub const EOPNOTSUPP: isize = 95;
+    pub const EAFNOSUPPORT: isize = 97;
     pub const EADDRINUSE: isize = 98;
     pub const ENETUNREACH: isize = 101;
     pub const ECONNRESET: isize = 104;
     pub const EISCONN: isize = 106;
     pub const ENOTCONN: isize = 107;
     pub const ETIMEDOUT: isize = 110;
+    pub const EALREADY: isize = 114;
+    pub const EINPROGRESS: isize = 115;
     pub const ECONNREFUSED: isize = 111;
     pub const EHOSTUNREACH: isize = 113;
 
@@ -519,10 +540,14 @@ pub mod err {
             ESRCH => "no such process",
             EINTR => "interrupted",
             EIO => "input/output error",
+            ENXIO => "no such device or address",
+            E2BIG => "argument list too long",
+            ENOEXEC => "not a program",
             EBADF => "bad file descriptor",
             ECHILD => "no child process",
             EAGAIN => "try again",
             ENOMEM => "out of memory",
+            EACCES => "permission denied",
             EFAULT => "bad address",
             EEXIST => "already exists",
             ENODEV => "no such device",
@@ -530,15 +555,28 @@ pub mod err {
             EISDIR => "is a directory",
             EINVAL => "invalid argument",
             EMFILE => "too many open files",
+            ENOTTY => "not a terminal",
+            EFBIG => "file too large",
             ENOSPC => "no space left on device",
             ESPIPE => "illegal seek",
             EROFS => "read-only file system",
             EPIPE => "broken pipe",
+            ERANGE => "result out of range",
             ENAMETOOLONG => "name too long",
             ENOSYS => "not implemented",
             ENOTEMPTY => "directory not empty",
+            ELOOP => "too many levels of symbolic links",
+            ELIBBAD => "the program's loader is damaged",
             ETIMEDOUT => "timed out",
             EMSGSIZE => "message too long",
+            ENOTSOCK => "not a socket",
+            EDESTADDRREQ => "destination address required",
+            EPROTOTYPE => "wrong type of socket",
+            ENOPROTOOPT => "no such socket option",
+            EOPNOTSUPP => "not supported",
+            EAFNOSUPPORT => "address family not supported",
+            EALREADY => "already in progress",
+            EINPROGRESS => "in progress",
             EADDRINUSE => "address already in use",
             ENETUNREACH => "network unreachable",
             ECONNRESET => "connection reset",

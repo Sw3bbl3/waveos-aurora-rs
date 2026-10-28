@@ -16,8 +16,18 @@ use x86_64::structures::gdt::SegmentSelector;
 use x86_64::{PrivilegeLevel, VirtAddr};
 
 /// Register state saved on entry; the dispatcher writes the result into `rax`.
+/// It holds every general register (`rcx` and `r11` carry `rip` and
+/// `rflags`), so a new Linux thread, a forked child or a signal handler can
+/// start from a copy of it.
 #[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct SyscallFrame {
+    pub rbx: u64,
+    pub rbp: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
     pub rax: u64,
     pub rdi: u64,
     pub rsi: u64,
@@ -47,10 +57,22 @@ global_asm!(
     "push rsi",
     "push rdi",
     "push rax",
+    "push r15",
+    "push r14",
+    "push r13",
+    "push r12",
+    "push rbp",
+    "push rbx",
     "mov rdi, rsp",
     "sti",
     "call {dispatch}",
     "cli",
+    "pop rbx",
+    "pop rbp",
+    "pop r12",
+    "pop r13",
+    "pop r14",
+    "pop r15",
     "pop rax",
     "pop rdi",
     "pop rsi",
@@ -88,6 +110,32 @@ global_asm!(
     "xor r14d, r14d",
     "xor r15d, r15d",
     "iretq",
+    "",
+    // Enters ring 3 with every register from a `SyscallFrame` at rdi.
+    ".global aurora_enter_user_frame",
+    "aurora_enter_user_frame:",
+    "cli",
+    "push {user_ss}",
+    "push qword ptr [rdi + 120]",
+    "push qword ptr [rdi + 112]",
+    "push {user_cs}",
+    "push qword ptr [rdi + 104]",
+    "mov rbx, [rdi]",
+    "mov rbp, [rdi + 8]",
+    "mov r12, [rdi + 16]",
+    "mov r13, [rdi + 24]",
+    "mov r14, [rdi + 32]",
+    "mov r15, [rdi + 40]",
+    "mov rax, [rdi + 48]",
+    "mov rsi, [rdi + 64]",
+    "mov rdx, [rdi + 72]",
+    "mov r10, [rdi + 80]",
+    "mov r8, [rdi + 88]",
+    "mov r9, [rdi + 96]",
+    "xor ecx, ecx",
+    "xor r11d, r11d",
+    "mov rdi, [rdi + 56]",
+    "iretq",
     dispatch = sym crate::syscall::dispatch,
     user_ss = const super::gdt::USER_SS as u64,
     user_cs = const super::gdt::USER_CS as u64,
@@ -96,6 +144,7 @@ global_asm!(
 extern "sysv64" {
     fn aurora_syscall_entry();
     fn aurora_enter_user(entry: u64, stack: u64, arg: u64) -> !;
+    fn aurora_enter_user_frame(frame: *const SyscallFrame) -> !;
 }
 
 /// Enables `syscall` on the calling CPU (every CPU runs this).
@@ -124,4 +173,18 @@ pub fn set_kernel_stack(top: u64) {
 /// Drops to ring 3 at `entry` with stack `stack` and `rdi = arg`. Never returns.
 pub fn enter_user(entry: u64, stack: u64, arg: u64) -> ! {
     unsafe { aurora_enter_user(entry, stack, arg) }
+}
+
+/// User-mode flags a program may set: the arithmetic flags, direction and
+/// trap; interrupts are always on and IOPL stays 0.
+pub fn user_rflags(rflags: u64) -> u64 {
+    (rflags & 0xDD5) | 0x202
+}
+
+/// Drops to ring 3 with every register taken from `frame` (a new thread or a
+/// forked child). The frame is copied first, so it may live anywhere.
+pub fn enter_user_frame(frame: &SyscallFrame) -> ! {
+    let mut f = *frame;
+    f.rflags = user_rflags(f.rflags);
+    unsafe { aurora_enter_user_frame(&f) }
 }

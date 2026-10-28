@@ -28,6 +28,7 @@ impl Pipe {
         for t in inner.waiting.iter_mut().filter_map(|t| t.take()) {
             sched::wake(t);
         }
+        super::readiness::notify();
     }
 
     pub fn read(&self, out: &mut [u8], nonblocking: bool) -> Result<usize, isize> {
@@ -65,9 +66,6 @@ impl Pipe {
                 if g.readers == 0 {
                     return if done > 0 { Ok(done) } else { Err(EPIPE) };
                 }
-                if super::interrupted() {
-                    return Err(EPIPE);
-                }
                 let room = CAPACITY - g.buf.len();
                 if room > 0 {
                     let n = room.min(data.len() - done);
@@ -75,6 +73,10 @@ impl Pipe {
                     done += n;
                     Self::wake_all(&mut g);
                     continue;
+                }
+                // Full: waiting is cut short by a kill or a signal.
+                if super::interrupted() {
+                    return if done > 0 { Ok(done) } else { Err(EINTR) };
                 }
                 g.waiting[1] = Some(sched::current_id());
             }
@@ -84,6 +86,23 @@ impl Pipe {
             });
         }
         Ok(done)
+    }
+
+    /// Bytes waiting to be read.
+    pub fn available(&self) -> usize {
+        self.inner.lock().buf.len()
+    }
+
+    /// A read would not block: there is data, or no writer is left.
+    pub fn readable(&self) -> bool {
+        let g = self.inner.lock();
+        !g.buf.is_empty() || g.writers == 0
+    }
+
+    /// A write would not block: there is room, or no reader is left (EPIPE).
+    pub fn writable(&self) -> bool {
+        let g = self.inner.lock();
+        g.buf.len() < CAPACITY || g.readers == 0
     }
 
     pub fn close_reader(&self) {

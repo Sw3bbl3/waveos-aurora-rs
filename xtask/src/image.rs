@@ -45,12 +45,18 @@ fn layout(size: u64) -> Layout {
 /// Creates a fresh image: GPT, FAT32 ESP with `esp`'s contents, and a AuroraFS
 /// home volume seeded from `home` (a directory tree).
 pub fn create(esp: &Path, home: &Path, out: &Path, size: u64) -> io::Result<()> {
+    create_with(esp, home, None, out, size)
+}
+
+/// Like [`create`], with a Linux system root (`cargo xtask linux-root`)
+/// put on the home volume as `/Linux`.
+pub fn create_with(esp: &Path, home: &Path, linux: Option<&Path>, out: &Path, size: u64) -> io::Result<()> {
     let l = layout(size);
     let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(out)?;
     file.set_len(size)?;
     write_gpt(&mut file, &l)?;
     format_esp(&mut file, ESP_START, ESP_SECTORS, esp)?;
-    mkfs_home(&mut file, l.home_start, l.home_end - l.home_start + 1, home)?;
+    mkfs_home(&mut file, l.home_start, l.home_end - l.home_start + 1, home, linux)?;
     Ok(())
 }
 
@@ -237,13 +243,17 @@ fn now() -> u64 {
     (unix as i64 + offset).max(946_684_800) as u64 - 946_684_800
 }
 
-fn mkfs_home(file: &mut File, start: u64, sectors: u64, home: &Path) -> io::Result<()> {
+fn mkfs_home(file: &mut File, start: u64, sectors: u64, home: &Path, linux: Option<&Path>) -> io::Result<()> {
     let bytes = sectors * SECTOR;
     let region = Region { file, start: start * SECTOR, len: bytes, pos: 0 };
     let disk = WaveDisk { region, blocks: bytes / 4096 };
     let err = |e: aurorafs::Error| io::Error::other(format!("AuroraFS: {e:?}"));
     let mut vol = aurorafs::Volume::format(disk, "Aurora HD", pseudo_guid(3), now).map_err(err)?;
     seed(&mut vol, home, "").map_err(err)?;
+    if let Some(dir) = linux {
+        vol.mkdir_all("/Linux").map_err(err)?;
+        seed(&mut vol, dir, "/Linux").map_err(err)?;
+    }
     vol.commit().map_err(err)?;
     vol.fsck().map_err(io::Error::other)?;
     Ok(())
@@ -255,7 +265,8 @@ fn seed<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, src: &Path, prefix: &s
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
+        // Hidden files stay out, except the Linux tree's table of links.
+        if name.starts_with('.') && name != ".links" {
             continue;
         }
         let path = format!("{prefix}/{name}");

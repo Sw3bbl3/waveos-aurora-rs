@@ -30,6 +30,54 @@ pub const KVA_SIZE: u64 = 64 << 30;
 
 static KERNEL_PML4: AtomicU64 = AtomicU64::new(0);
 
+// ------------------------------------------------------- shared memory
+
+/// Frames of shared memory objects (Linux `memfd`, `/dev/shm`, shared
+/// anonymous mappings), with how many holders each has: the object, and
+/// every page table entry mapping it. The last one to let go frees it.
+/// (Other shared frames, such as window surfaces, aren't counted here:
+/// their owners free them.)
+static SHM_REFS: IrqMutex<alloc::collections::BTreeMap<u64, u32>> = IrqMutex::new(alloc::collections::BTreeMap::new());
+
+/// A zeroed frame for a shared memory object, held once (by the object).
+pub fn shm_alloc() -> Option<u64> {
+    let f = zeroed_frame()?;
+    SHM_REFS.lock().insert(f, 1);
+    Some(f)
+}
+
+/// Another holder for a counted frame (no effect on others).
+fn shm_retain(frame: u64) -> bool {
+    match SHM_REFS.lock().get_mut(&frame) {
+        Some(n) => {
+            *n += 1;
+            true
+        }
+        None => false,
+    }
+}
+
+/// A holder lets go of a counted frame; the last one frees it.
+pub fn shm_release(frame: u64) {
+    let last = {
+        let mut refs = SHM_REFS.lock();
+        match refs.get_mut(&frame) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                false
+            }
+            Some(_) => {
+                refs.remove(&frame);
+                true
+            }
+            None => false,
+        }
+    };
+    if last {
+        frame::free(frame);
+    }
+}
+
 pub fn kernel_pml4() -> u64 {
     KERNEL_PML4.load(Ordering::Relaxed)
 }
@@ -258,6 +306,8 @@ pub enum Prot {
     ReadOnly,
     ReadWrite,
     ReadExec,
+    /// Writable code (just-in-time compilers in Linux programs).
+    ReadWriteExec,
 }
 
 pub struct AddressSpace {
@@ -288,6 +338,7 @@ impl AddressSpace {
                 Prot::ReadOnly => NO_EXECUTE,
                 Prot::ReadWrite => WRITABLE | NO_EXECUTE,
                 Prot::ReadExec => 0,
+                Prot::ReadWriteExec => WRITABLE,
             }
     }
 
@@ -310,7 +361,7 @@ impl AddressSpace {
             let e = walk(self.pml4, page, true, true).ok_or(ENOMEM)?;
             if *e & PRESENT != 0 {
                 let mut f = *e | Self::flags(prot) & (WRITABLE | USER);
-                if prot == Prot::ReadExec {
+                if matches!(prot, Prot::ReadExec | Prot::ReadWriteExec) {
                     f &= !NO_EXECUTE;
                 }
                 *e = f;
@@ -323,14 +374,79 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Gives `[va, va + pages*4K)` the protection `prot` (Linux `mprotect`):
+    /// present pages change their permissions, missing ones are mapped
+    /// zeroed, and `None` (no access) unmaps the range.
+    pub fn protect(&mut self, va: u64, pages: u64, prot: Option<Prot>) -> Result<(), isize> {
+        use aurora_abi::err::*;
+        if !va.is_multiple_of(PAGE_SIZE) || va.checked_add(pages * PAGE_SIZE).is_none_or(|e| e > layout::USER_END) {
+            return Err(EINVAL);
+        }
+        let Some(prot) = prot else {
+            self.unmap(va, pages);
+            return Ok(());
+        };
+        for i in 0..pages {
+            let page = va + i * PAGE_SIZE;
+            let e = walk(self.pml4, page, true, true).ok_or(ENOMEM)?;
+            if *e & PRESENT != 0 {
+                *e = (*e & (ADDR | SHARED)) | Self::flags(prot);
+            } else {
+                *e = zeroed_frame().ok_or(ENOMEM)? | Self::flags(prot);
+                self.resident += PAGE_SIZE;
+            }
+            self.invalidate(page);
+        }
+        // Permissions shrank too: every CPU running this process must see it.
+        shootdown(va, pages, Some(self.pml4));
+        Ok(())
+    }
+
+    /// True if no page of `[va, va + pages*4K)` is mapped.
+    pub fn is_free(&self, va: u64, pages: u64) -> bool {
+        (0..pages).all(|i| self.user_page(va + i * PAGE_SIZE).is_none())
+    }
+
     /// Maps externally owned frames (shared memory) at `va`.
     pub fn map_shared(&mut self, va: u64, frames: &[u64], prot: Prot) -> Result<(), isize> {
         for (i, &f) in frames.iter().enumerate() {
             let page = va + i as u64 * PAGE_SIZE;
             let e = walk(self.pml4, page, true, true).ok_or(aurora_abi::err::ENOMEM)?;
+            if *e & PRESENT != 0 {
+                Self::drop_entry(*e, &mut self.resident);
+            }
+            shm_retain(f);
             *e = f | Self::flags(prot) | SHARED;
             self.invalidate(page);
         }
+        Ok(())
+    }
+
+    /// Lets go of what a present entry maps (a private frame, or a hold on a shared one).
+    fn drop_entry(e: u64, resident: &mut u64) {
+        if e & SHARED == 0 {
+            frame::free(e & ADDR);
+            *resident = resident.saturating_sub(PAGE_SIZE);
+        } else {
+            shm_release(e & ADDR);
+        }
+    }
+
+    /// Moves `pages` mapped at `from` to `to` (Linux `mremap`), without
+    /// copying: the page table entries move. `to` must be free.
+    pub fn move_pages(&mut self, from: u64, to: u64, pages: u64) -> Result<(), isize> {
+        for i in 0..pages {
+            let (src, dst) = (from + i * PAGE_SIZE, to + i * PAGE_SIZE);
+            let entry = match walk(self.pml4, src, false, true) {
+                Some(e) if *e & PRESENT != 0 => core::mem::replace(e, 0),
+                _ => continue,
+            };
+            let d = walk(self.pml4, dst, true, true).ok_or(aurora_abi::err::ENOMEM)?;
+            *d = entry;
+            self.invalidate(src);
+            self.invalidate(dst);
+        }
+        shootdown(from, pages, Some(self.pml4));
         Ok(())
     }
 
@@ -342,9 +458,9 @@ impl AddressSpace {
             if let Some(e) = walk(self.pml4, page, false, true) {
                 if *e & PRESENT != 0 {
                     if *e & SHARED == 0 {
-                        freed.push(*e & ADDR);
                         self.resident = self.resident.saturating_sub(PAGE_SIZE);
                     }
+                    freed.push(*e);
                     *e = 0;
                     self.invalidate(page);
                 }
@@ -353,9 +469,62 @@ impl AddressSpace {
         // Other threads of this process may run on other CPUs: they must
         // forget the pages before the frames can be reused.
         shootdown(va, pages, Some(self.pml4));
-        for f in freed {
-            frame::free(f);
+        for e in freed {
+            if e & SHARED == 0 {
+                frame::free(e & ADDR);
+            } else {
+                shm_release(e & ADDR);
+            }
         }
+    }
+
+    /// A copy of this address space (Linux `fork`): every private page is
+    /// duplicated; shared mappings (window surfaces) are left out.
+    pub fn fork_copy(&self) -> Option<AddressSpace> {
+        let mut child = AddressSpace::new()?;
+        child.mmap_next = self.mmap_next;
+        let mut resident = 0;
+        let ok = Self::copy_level(self.pml4, child.pml4, 3, &mut resident);
+        child.resident = resident;
+        // On failure, dropping the partial copy frees what it holds.
+        ok.then_some(child)
+    }
+
+    fn copy_level(src: u64, dst: u64, level: u32, resident: &mut u64) -> bool {
+        let limit = if level == 3 { 256 } else { 512 };
+        for i in 0..limit {
+            let e = table(src)[i];
+            if e & PRESENT == 0 {
+                continue;
+            }
+            if level == 0 {
+                if e & SHARED != 0 {
+                    // Shared memory stays shared with the child; other
+                    // shared frames (window surfaces) stay with the parent.
+                    if shm_retain(e & ADDR) {
+                        table(dst)[i] = e;
+                    }
+                    continue;
+                }
+                let Some(f) = frame::alloc() else { return false };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        phys_to_virt(e & ADDR) as *const u8,
+                        phys_to_virt(f) as *mut u8,
+                        PAGE_SIZE as usize,
+                    );
+                }
+                table(dst)[i] = f | (e & !ADDR);
+                *resident += PAGE_SIZE;
+            } else {
+                let Some(t) = zeroed_frame() else { return false };
+                table(dst)[i] = t | (e & !ADDR);
+                if !Self::copy_level(e & ADDR, t, level - 1, resident) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Reserves `pages` of address space in the mmap region (with a guard page after).
@@ -367,6 +536,34 @@ impl AddressSpace {
         }
         self.mmap_next = end;
         Some(va)
+    }
+
+    /// The user mappings, lowest first, as (start, end, writable, executable),
+    /// neighbouring pages with the same permissions merged.
+    pub fn regions(&self) -> Vec<(u64, u64, bool, bool)> {
+        let mut out: Vec<(u64, u64, bool, bool)> = Vec::new();
+        let next = |e: u64| (e & PRESENT != 0 && e & HUGE == 0).then(|| table(e & ADDR));
+        for (i4, &e4) in table(self.pml4)[..256].iter().enumerate() {
+            let Some(l3) = next(e4) else { continue };
+            for (i3, &e3) in l3.iter().enumerate() {
+                let Some(l2) = next(e3) else { continue };
+                for (i2, &e2) in l2.iter().enumerate() {
+                    let Some(l1) = next(e2) else { continue };
+                    for (i1, &e) in l1.iter().enumerate() {
+                        if e & (PRESENT | USER) != (PRESENT | USER) {
+                            continue;
+                        }
+                        let va = (i4 as u64) << 39 | (i3 as u64) << 30 | (i2 as u64) << 21 | (i1 as u64) << 12;
+                        let (w, x) = (e & WRITABLE != 0, e & NO_EXECUTE == 0);
+                        match out.last_mut() {
+                            Some(last) if last.1 == va && (last.2, last.3) == (w, x) => last.1 += PAGE_SIZE,
+                            _ => out.push((va, va + PAGE_SIZE, w, x)),
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Physical address and writability of the page containing `va`, if it is user-accessible.
@@ -428,6 +625,8 @@ impl AddressSpace {
             if level == 0 {
                 if *e & SHARED == 0 {
                     frame::free(*e & ADDR);
+                } else {
+                    shm_release(*e & ADDR);
                 }
             } else {
                 Self::free_level(*e & ADDR, level - 1, false);

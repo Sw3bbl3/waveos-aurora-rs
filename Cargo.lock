@@ -159,6 +159,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-zip"
+version = "0.8.0"
+dependencies = [
+ "miniz_oxide 0.8.9",
+]
+
+[[package]]
 name = "aurorafs"
 version = "0.8.0"
 dependencies = [
@@ -578,6 +585,7 @@ dependencies = [
  "aurora-elf",
  "bootinfo",
  "log",
+ "miniz_oxide 0.8.9",
  "uefi",
 ]
 
@@ -1990,8 +1998,10 @@ dependencies = [
  "aurorafs",
  "fatfs",
  "gina",
+ "miniz_oxide 0.8.9",
  "pulldown-cmark",
  "serde_json",
+ "sha2",
  "webpki-roots",
 ]
 

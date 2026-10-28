@@ -76,7 +76,16 @@ fn main() -> Status {
     drop(kernel_file);
 
     // --- System image (initrd) ----------------------------------------------------
-    let (initrd_phys, initrd_len) = match read_file(cstr16!("\\aurora\\system.tar")) {
+    // Optical discs carry it compressed (their boot image holds 32 MiB at most).
+    let system = read_file(cstr16!("\\aurora\\system.tar")).or_else(|| {
+        let packed = read_file(cstr16!("\\aurora\\system.tar.zlib"))?;
+        let data = miniz_oxide::inflate::decompress_to_vec_zlib(&packed);
+        if data.is_err() {
+            log::warn!("\\aurora\\system.tar.zlib is damaged");
+        }
+        data.ok()
+    });
+    let (initrd_phys, initrd_len) = match system {
         Some(data) => {
             let phys = alloc_pages(data.len().div_ceil(PAGE as usize).max(1));
             unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), phys as *mut u8, data.len()) };
