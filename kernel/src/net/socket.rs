@@ -339,6 +339,48 @@ impl Socket {
         }
     }
 
+    /// Whether a read and a write would go ahead now, and whether the
+    /// connection has ended (for `poll` and `epoll`).
+    pub fn readiness(&self) -> (bool, bool, bool) {
+        let i = self.inner.lock();
+        let (tcp, port, icmp, listening, peer) = (i.tcp, i.port, i.icmp_id, i.listening, i.peer);
+        drop(i);
+        with(|s| match (self.kind, tcp) {
+            (Kind::Tcp, Some(id)) if listening => (tcp::acceptable(s, id), false, false),
+            (Kind::Tcp, Some(id)) => {
+                let ended = tcp::state(s, id).is_none_or(|(st, _, _, err)| err.is_some() || st == tcp::State::Closed);
+                (tcp::read_ready(s, id), tcp::write_ready(s, id), ended)
+            }
+            (Kind::Tcp, None) => (false, false, true),
+            (Kind::Udp, _) => {
+                let rd = port.and_then(|p| s.udp.ports.get(&p)).is_some_and(|q| !q.queue.is_empty());
+                (rd, port.is_some() || peer.is_some(), false)
+            }
+            (Kind::Icmp, _) => {
+                let rd = icmp.is_some_and(|id| {
+                    if self.v6 {
+                        s.icmp6.get(&id).is_some_and(|q| !q.is_empty())
+                    } else {
+                        s.icmp.get(&id).is_some_and(|q| !q.is_empty())
+                    }
+                });
+                (rd, true, false)
+            }
+        })
+    }
+
+    /// A connection's pending error, if any (`SO_ERROR`).
+    pub fn error(&self) -> Option<isize> {
+        let id = self.inner.lock().tcp?;
+        with(|s| tcp::state(s, id).and_then(|t| t.3))
+    }
+
+    /// True while a TCP connection is being set up.
+    pub fn connecting(&self) -> bool {
+        let Some(id) = self.inner.lock().tcp else { return false };
+        with(|s| tcp::state(s, id).is_some_and(|t| matches!(t.0, tcp::State::SynSent | tcp::State::SynReceived)))
+    }
+
     /// (local, remote, state) for `sock_info`.
     pub fn info(&self) -> (Peer, Peer, u64) {
         use aurora_abi::net::*;

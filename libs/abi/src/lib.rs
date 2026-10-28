@@ -514,13 +514,21 @@ pub mod err {
     pub const ENOTEMPTY: isize = 39;
     pub const ELOOP: isize = 40;
     pub const ELIBBAD: isize = 80;
+    pub const ENOTSOCK: isize = 88;
+    pub const EDESTADDRREQ: isize = 89;
     pub const EMSGSIZE: isize = 90;
+    pub const EPROTOTYPE: isize = 91;
+    pub const ENOPROTOOPT: isize = 92;
+    pub const EOPNOTSUPP: isize = 95;
+    pub const EAFNOSUPPORT: isize = 97;
     pub const EADDRINUSE: isize = 98;
     pub const ENETUNREACH: isize = 101;
     pub const ECONNRESET: isize = 104;
     pub const EISCONN: isize = 106;
     pub const ENOTCONN: isize = 107;
     pub const ETIMEDOUT: isize = 110;
+    pub const EALREADY: isize = 114;
+    pub const EINPROGRESS: isize = 115;
     pub const ECONNREFUSED: isize = 111;
     pub const EHOSTUNREACH: isize = 113;
 
@@ -559,6 +567,14 @@ pub mod err {
             ELIBBAD => "the program's loader is damaged",
             ETIMEDOUT => "timed out",
             EMSGSIZE => "message too long",
+            ENOTSOCK => "not a socket",
+            EDESTADDRREQ => "destination address required",
+            EPROTOTYPE => "wrong type of socket",
+            ENOPROTOOPT => "no such socket option",
+            EOPNOTSUPP => "not supported",
+            EAFNOSUPPORT => "address family not supported",
+            EALREADY => "already in progress",
+            EINPROGRESS => "in progress",
             EADDRINUSE => "address already in use",
             ENETUNREACH => "network unreachable",
             ECONNRESET => "connection reset",

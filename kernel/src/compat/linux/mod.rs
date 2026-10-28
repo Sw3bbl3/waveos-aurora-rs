@@ -23,8 +23,10 @@ pub mod fs;
 mod links;
 mod misc;
 mod mm;
+mod net;
 mod process;
 pub mod signal;
+pub mod unix;
 
 use crate::arch::syscall::SyscallFrame;
 use crate::proc;
@@ -42,7 +44,11 @@ pub struct Linux {
     pub clear_tid: Mutex<BTreeMap<u64, u64>>,
     /// Descriptors closed by `exec` (one bit per descriptor; only open ones are set).
     pub cloexec: Mutex<[u64; 16]>,
+    /// Descriptors in non-blocking mode (`O_NONBLOCK`), the same way.
+    nonblock: Mutex<[u64; 16]>,
     pub signals: signal::Signals,
+    /// Log every system call (`WAVEOS_STRACE=1` in the environment).
+    pub trace: core::sync::atomic::AtomicBool,
 }
 
 impl Linux {
@@ -51,7 +57,9 @@ impl Linux {
             mm: Mutex::new(mm::Memory::new(brk)),
             clear_tid: Mutex::new(BTreeMap::new()),
             cloexec: Mutex::new([0; 16]),
+            nonblock: Mutex::new([0; 16]),
             signals: signal::Signals::new(),
+            trace: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -61,12 +69,15 @@ impl Linux {
             mm: Mutex::new(self.mm.lock().clone()),
             clear_tid: Mutex::new(BTreeMap::new()),
             cloexec: Mutex::new(*self.cloexec.lock()),
+            nonblock: Mutex::new(*self.nonblock.lock()),
             signals: self.signals.for_child(),
+            trace: core::sync::atomic::AtomicBool::new(self.trace.load(core::sync::atomic::Ordering::Relaxed)),
         }
     }
 
     /// A new program (`exec`) with its heap at `brk`.
-    pub fn exec_reset(&self, brk: u64) {
+    pub fn exec_reset(&self, brk: u64, env: &[alloc::string::String]) {
+        self.trace.store(tracing(env), core::sync::atomic::Ordering::Relaxed);
         *self.mm.lock() = mm::Memory::new(brk);
         self.clear_tid.lock().clear();
         self.signals.exec_reset();
@@ -82,6 +93,21 @@ impl Linux {
                 bits[fd / 64] &= !(1 << (fd % 64));
             }
         }
+    }
+
+    pub fn set_nonblock(&self, fd: usize, on: bool) {
+        if fd < 1024 {
+            let mut bits = self.nonblock.lock();
+            if on {
+                bits[fd / 64] |= 1 << (fd % 64);
+            } else {
+                bits[fd / 64] &= !(1 << (fd % 64));
+            }
+        }
+    }
+
+    pub fn nonblock(&self, fd: usize) -> bool {
+        fd < 1024 && self.nonblock.lock()[fd / 64] & (1 << (fd % 64)) != 0
     }
 
     pub fn cloexec(&self, fd: usize) -> bool {
@@ -137,6 +163,21 @@ mod nr {
     pub const PAUSE: u64 = 34;
     pub const NANOSLEEP: u64 = 35;
     pub const GETPID: u64 = 39;
+    pub const SOCKET: u64 = 41;
+    pub const CONNECT: u64 = 42;
+    pub const ACCEPT: u64 = 43;
+    pub const SENDTO: u64 = 44;
+    pub const RECVFROM: u64 = 45;
+    pub const SENDMSG: u64 = 46;
+    pub const RECVMSG: u64 = 47;
+    pub const SHUTDOWN: u64 = 48;
+    pub const BIND: u64 = 49;
+    pub const LISTEN: u64 = 50;
+    pub const GETSOCKNAME: u64 = 51;
+    pub const GETPEERNAME: u64 = 52;
+    pub const SOCKETPAIR: u64 = 53;
+    pub const SETSOCKOPT: u64 = 54;
+    pub const GETSOCKOPT: u64 = 55;
     pub const CLONE: u64 = 56;
     pub const FORK: u64 = 57;
     pub const VFORK: u64 = 58;
@@ -236,6 +277,9 @@ mod nr {
     pub const SET_ROBUST_LIST: u64 = 273;
     pub const UTIMENSAT: u64 = 280;
     pub const EPOLL_PWAIT: u64 = 281;
+    pub const ACCEPT4: u64 = 288;
+    pub const RECVMMSG: u64 = 299;
+    pub const SENDMMSG: u64 = 307;
     pub const TIMERFD_CREATE: u64 = 283;
     pub const EVENTFD: u64 = 284;
     pub const TIMERFD_SETTIME: u64 = 286;
@@ -282,14 +326,34 @@ fn wave_call(n: u64, a: [u64; 6]) -> Result<u64, isize> {
     }
 }
 
+/// True if the environment asks for system calls to be logged.
+pub fn tracing(env: &[alloc::string::String]) -> bool {
+    env.iter().any(|e| e == "WAVEOS_STRACE=1")
+}
+
 /// The uid and gid every Linux program runs as.
 pub const UID: u64 = 1000;
 
 /// Entry for a Linux process's system call (from `syscall::dispatch`).
 pub fn dispatch(f: &mut SyscallFrame) -> Result<u64, isize> {
+    let p = proc::current().ok_or(EPERM)?;
+    if !p.linux.as_ref().is_some_and(|l| l.trace.load(core::sync::atomic::Ordering::Relaxed)) {
+        return call(f, &p);
+    }
+    let (nr, a) = (f.rax, [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
+    let r = call(f, &p);
+    let tid = misc::tid(&p);
+    match r {
+        Ok(v) => log!("strace", "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}) = {:#x}", a[0], a[1], a[2], a[3], v),
+        Err(e) => log!("strace", "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}) = -{}", a[0], a[1], a[2], a[3], e.abs()),
+    }
+    r
+}
+
+fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
     const SIGCHLD: u64 = signal::SIGCHLD as u64;
     let a = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
-    let p = proc::current().ok_or(EPERM)?;
+    let p = p.clone();
     match f.rax {
         nr::READ => fs::read(&p, a[0], a[1], a[2]),
         nr::WRITE => fs::write(&p, a[0], a[1], a[2]),
@@ -352,6 +416,24 @@ pub fn dispatch(f: &mut SyscallFrame) -> Result<u64, isize> {
         nr::SELECT => fs::select(&p, a[0], [a[1], a[2], a[3]], fs::Timeout::Timeval(a[4]), 0),
         nr::PSELECT6 => fs::select(&p, a[0], [a[1], a[2], a[3]], fs::Timeout::Timespec(a[4]), a[5]),
 
+        nr::SOCKET => net::socket(&p, a[0], a[1], a[2]),
+        nr::SOCKETPAIR => net::socketpair(&p, a[0], a[1], a[2], a[3]),
+        nr::BIND => net::bind(&p, a[0], a[1], a[2]),
+        nr::LISTEN => net::listen(&p, a[0], a[1]),
+        nr::CONNECT => net::connect(&p, a[0], a[1], a[2]),
+        nr::ACCEPT => net::accept(&p, a[0], a[1], a[2], 0),
+        nr::ACCEPT4 => net::accept(&p, a[0], a[1], a[2], a[3]),
+        nr::SENDTO => net::sendto(&p, a[0], a[1], a[2], a[3], a[4], a[5]),
+        nr::RECVFROM => net::recvfrom(&p, a[0], a[1], a[2], a[3], a[4], a[5]),
+        nr::SENDMSG => net::sendmsg(&p, a[0], a[1], a[2]),
+        nr::RECVMSG => net::recvmsg(&p, a[0], a[1], a[2]),
+        nr::SHUTDOWN => net::shutdown(&p, a[0], a[1]),
+        nr::SENDMMSG => net::sendmmsg(&p, a[0], a[1], a[2], a[3]),
+        nr::RECVMMSG => net::recvmmsg(&p, a[0], a[1], a[2], a[3]),
+        nr::GETSOCKNAME => net::getsockname(&p, a[0], a[1], a[2]),
+        nr::GETPEERNAME => net::getpeername(&p, a[0], a[1], a[2]),
+        nr::SETSOCKOPT => net::setsockopt(&p, a[0], a[1], a[2], a[3], a[4]),
+        nr::GETSOCKOPT => net::getsockopt(&p, a[0], a[1], a[2], a[3], a[4]),
         nr::EVENTFD => events::eventfd(&p, a[0], 0),
         nr::EVENTFD2 => events::eventfd(&p, a[0], a[1]),
         nr::TIMERFD_CREATE => events::timerfd_create(&p, a[0], a[1]),

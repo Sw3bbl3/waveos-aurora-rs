@@ -164,7 +164,7 @@ fn exec_guest(
     // From here on the old program is gone.
     proc::exec_single_thread(p)?;
     let l = p.linux.as_ref().ok_or(EINVAL)?;
-    l.exec_reset(start.brk);
+    l.exec_reset(start.brk, &envp);
     close_on_exec(p, l);
     proc::exec_replace(p, aspace, &host);
     sched::set_fs_base(0);

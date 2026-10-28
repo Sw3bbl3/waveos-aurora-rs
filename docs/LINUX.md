@@ -13,8 +13,8 @@ This is being built in steps. What works today:
 | M1 | `fork`, `exec`, `wait`, signals, `poll`/`epoll`: an interactive shell | Done |
 | M2 | Linux programs open WaveOS windows and play sound; Doom | Done |
 | M3 | Dynamically linked programs (glibc), Debian packages | Done |
-| M4 | Sockets (TCP, UDP, local) | Next |
-| M5 | Shared memory and a Wayland bridge, for GTK programs | Planned |
+| M4 | Sockets (TCP, UDP, local) | Done |
+| M5 | Shared memory and a Wayland bridge, for GTK programs | Next |
 | M6 | Firefox ESR | Planned |
 
 ## The shell
@@ -90,6 +90,13 @@ In the shell, `bash`, `python3` and `firefox-esr --version` run as on Debian.
 - **Waiting:** `poll`, `ppoll`, `select`, `pselect6`, `epoll`, `eventfd` and
   `timerfd` (all level-triggered), woken as soon as a pipe, event, timer or
   the network changes.
+- **Sockets:** TCP and UDP over IPv4 and IPv6 on WaveOS's own network
+  stack (blocking and non-blocking, `poll`/`epoll` readiness, `SO_ERROR`
+  after a non-blocking `connect`, timeouts), so name lookups through
+  `/etc/resolv.conf` and HTTP work. Local sockets (`AF_UNIX`): stream,
+  datagram and sequenced-packet, named by a path or in the abstract
+  namespace, `socketpair`, `SO_PEERCRED`, and descriptors passed with
+  `SCM_RIGHTS`. `sendmmsg`/`recvmmsg` and `FIONREAD` too.
 - **Symbolic links:** the read-only tree's links come with the system image
   (`/bin/sh` and every other BusyBox command are links to `/bin/busybox`,
   where Debian puts them); `symlink` makes new ones in the writable tree.
@@ -155,4 +162,9 @@ Two self-tests run inside WaveOS as part of `cargo xtask test`:
 `/dev`, the WaveOS calls) and `linux-tests/proctest.c` (fork, exec, wait,
 scripts and the shell, `posix_spawn` and `vfork`, signals and handlers,
 interrupted calls, `poll`, `select`, `epoll`, `eventfd`, `timerfd`,
-close-on-exec and symbolic links).
+close-on-exec and symbolic links), and `linux-tests/nettest.c` (local
+sockets with descriptor passing, TCP and UDP over loopback, name lookup).
+
+To see what a Linux program asks of the kernel, put `WAVEOS_STRACE=1` in
+its environment: every system call it makes, with its arguments and
+result, goes to the system log.

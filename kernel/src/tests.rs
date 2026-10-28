@@ -48,6 +48,7 @@ const TESTS: &[Test] = &[
     ("Learn: both offline libraries", learn_library),
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
+    ("Linux programs: local and network sockets (nettest)", linux_sockets),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
     ("AuroraFS on RAM disk (kernel adapter)", wavefs_ramdisk),
@@ -341,6 +342,11 @@ fn linux_programs() {
 /// BusyBox shell, posix_spawn and vfork, handlers, poll, select, links.
 fn linux_processes() {
     run_linux_test("proctest", "proc-test passed");
+}
+
+/// A third checks sockets: local ones with descriptor passing, TCP and UDP.
+fn linux_sockets() {
+    run_linux_test("nettest", "net-test passed");
 }
 
 fn run_linux_test(name: &str, passed: &str) {

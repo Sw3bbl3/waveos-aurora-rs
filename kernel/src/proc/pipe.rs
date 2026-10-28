@@ -88,6 +88,11 @@ impl Pipe {
         Ok(done)
     }
 
+    /// Bytes waiting to be read.
+    pub fn available(&self) -> usize {
+        self.inner.lock().buf.len()
+    }
+
     /// A read would not block: there is data, or no writer is left.
     pub fn readable(&self) -> bool {
         let g = self.inner.lock();

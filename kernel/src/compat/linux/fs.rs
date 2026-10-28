@@ -117,6 +117,8 @@ pub enum Special {
     Event(Arc<super::events::EventFd>),
     Timer(Arc<super::events::TimerFd>),
     Epoll(Arc<super::events::Epoll>),
+    /// A local (`AF_UNIX`) socket.
+    Unix(Arc<super::unix::Socket>),
 }
 
 impl Special {
@@ -125,6 +127,7 @@ impl Special {
             Special::Event(e) => e.read(out),
             Special::Timer(t) => t.read(out),
             Special::Epoll(_) => Err(EINVAL),
+            Special::Unix(u) => u.recv(out, false, false).map(|r| r.len),
             Special::Dir { .. } => Err(EISDIR),
             Special::Mem { data, pos } => {
                 let n = out.len().min(data.len().saturating_sub(*pos));
@@ -150,6 +153,7 @@ impl Special {
             Special::Mem { .. } => Err(EACCES),
             Special::Event(e) => e.write(data),
             Special::Timer(_) | Special::Epoll(_) => Err(EINVAL),
+            Special::Unix(u) => u.send(data, Vec::new(), None, false),
             _ => Ok(data.len()),
         }
     }
@@ -164,6 +168,7 @@ impl Special {
             Special::Random => (S_IFCHR | 0o666, makedev(1, 9)),
             // Anonymous inodes on Linux.
             Special::Event(_) | Special::Timer(_) | Special::Epoll(_) => (0o600, 0),
+            Special::Unix(_) => (S_IFSOCK | 0o777, 0),
         }
     }
 }
@@ -341,6 +346,17 @@ fn resolv_conf() -> String {
 pub fn read(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
     // Event and timer reads may block: not while holding the descriptor's lock.
     if let Handle::Special(s) = &*p.fd(fd as usize)? {
+        let unix = match &*s.lock() {
+            Special::Unix(u) => Some(u.clone()),
+            _ => None,
+        };
+        if let Some(u) = unix {
+            let nb = p.linux.as_ref().is_some_and(|l| l.nonblock(fd as usize));
+            let mut out = user::slice_mut(ptr, len)?;
+            let r = u.recv(&mut out, false, nb)?;
+            out.commit(r.len)?;
+            return Ok(r.len as u64);
+        }
         let blocking = match &*s.lock() {
             Special::Event(e) => Some((Some(e.clone()), None)),
             Special::Timer(t) => Some((None, Some(t.clone()))),
@@ -357,6 +373,13 @@ pub fn read(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
             return Ok(n as u64);
         }
     }
+    if nonblocking(p, fd) {
+        if let Handle::PipeRead { pipe, .. } = &*p.fd(fd as usize)? {
+            if !pipe.readable() {
+                return Err(EAGAIN);
+            }
+        }
+    }
     match crate::syscall::read(fd as usize, ptr, len) {
         // A blocking read cut short by a signal.
         Err(EAGAIN) if crate::proc::interrupted() && !nonblocking(p, fd) => Err(EINTR),
@@ -366,13 +389,31 @@ pub fn read(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
 
 pub fn write(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
     if let Handle::Special(s) = &*p.fd(fd as usize)? {
-        let event = match &*s.lock() {
-            Special::Event(e) => Some(e.clone()),
-            _ => None,
+        let (event, unix) = match &*s.lock() {
+            Special::Event(e) => (Some(e.clone()), None),
+            Special::Unix(u) => (None, Some(u.clone())),
+            _ => (None, None),
         };
         if let Some(e) = event {
             let data = user::slice(ptr, len)?;
             return e.write(&data).map(|n| n as u64);
+        }
+        if let Some(u) = unix {
+            let data = user::slice(ptr, len)?;
+            let nb = p.linux.as_ref().is_some_and(|l| l.nonblock(fd as usize));
+            let r = u.send(&data, Vec::new(), None, nb).map(|n| n as u64);
+            if r == Err(EPIPE) {
+                let info = super::signal::Info { pid: p.pid, ..Default::default() };
+                super::signal::send(p, super::signal::SIGPIPE, info, Some(crate::sched::current_id()));
+            }
+            return r;
+        }
+    }
+    if p.linux.as_ref().is_some_and(|l| l.nonblock(fd as usize)) {
+        if let Handle::PipeWrite(pipe) = &*p.fd(fd as usize)? {
+            if !pipe.writable() {
+                return Err(EAGAIN);
+            }
         }
     }
     let r = crate::syscall::write(fd as usize, ptr, len);
@@ -385,7 +426,8 @@ pub fn write(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
 }
 
 fn nonblocking(p: &Process, fd: u64) -> bool {
-    p.fd(fd as usize).is_ok_and(|h| matches!(&*h, Handle::PipeRead { nonblocking: true, .. }))
+    p.linux.as_ref().is_some_and(|l| l.nonblock(fd as usize))
+        || p.fd(fd as usize).is_ok_and(|h| matches!(&*h, Handle::PipeRead { nonblocking: true, .. }))
 }
 
 /// Whether descriptor `fd` could be read and written without blocking, and
@@ -397,17 +439,25 @@ pub fn readiness_of(p: &Process, fd: usize, depth: u32) -> Option<(bool, bool, b
         Handle::PipeRead { pipe, .. } => (pipe.readable(), false, false),
         Handle::PipeWrite(pipe) => (false, pipe.writable(), false),
         Handle::Special(s) => {
+            enum Inner {
+                Ready(bool, bool),
+                Epoll(Arc<super::events::Epoll>),
+                Unix(Arc<super::unix::Socket>),
+            }
             let inner = match &*s.lock() {
-                Special::Event(e) => Ok((e.readable(), e.writable())),
-                Special::Timer(t) => Ok((t.readable(), false)),
-                Special::Epoll(e) => Err(e.clone()),
-                _ => Ok((true, true)),
+                Special::Event(e) => Inner::Ready(e.readable(), e.writable()),
+                Special::Timer(t) => Inner::Ready(t.readable(), false),
+                Special::Epoll(e) => Inner::Epoll(e.clone()),
+                Special::Unix(u) => Inner::Unix(u.clone()),
+                _ => Inner::Ready(true, true),
             };
             match inner {
-                Ok((rd, wr)) => (rd, wr, false),
-                Err(ep) => (ep.readable(p, depth), false, false),
+                Inner::Ready(rd, wr) => (rd, wr, false),
+                Inner::Epoll(ep) => (ep.readable(p, depth), false, false),
+                Inner::Unix(u) => u.readiness(),
             }
         }
+        Handle::Socket(sock) => sock.readiness(),
         _ => (true, true, false),
     })
 }
@@ -443,8 +493,14 @@ fn install(p: &Process, h: Arc<Handle>, cloexec: bool) -> Result<u64, isize> {
     let fd = p.install_fd(h)?;
     if let Some(l) = &p.linux {
         l.set_cloexec(fd, cloexec);
+        l.set_nonblock(fd, false);
     }
     Ok(fd as u64)
+}
+
+/// [`install`] for other modules (sockets, received descriptors).
+pub fn install_handle(p: &Process, h: Arc<Handle>, cloexec: bool) -> Result<u64, isize> {
+    install(p, h, cloexec)
 }
 
 /// Opens a Linux path as a handle.
@@ -505,6 +561,7 @@ pub fn close(p: &Process, fd: u64) -> Result<u64, isize> {
     };
     if let Some(l) = &p.linux {
         l.set_cloexec(fd as usize, false);
+        l.set_nonblock(fd as usize, false);
     }
     // The handle goes after the lock (a pipe end wakes its peer).
     drop(old);
@@ -866,8 +923,24 @@ pub fn ioctl(p: &Process, fd: u64, request: u64, arg: u64) -> Result<u64, isize>
         0x5401 | 0x5413 | 0x540F | 0x5410 | 0x5402..=0x5404 => Err(ENOTTY),
         // FIONBIO, FIOCLEX, FIONCLEX.
         0x5421 | 0x5451 | 0x5450 => Ok(0),
-        // FIONREAD: nothing waiting, as far as anyone can tell.
-        0x541B => user::put(arg, &0i32).map(|_| 0),
+        // FIONREAD: bytes waiting to be read (the next datagram's, for those).
+        0x541B => {
+            let n = match &*p.fd(fd as usize)? {
+                Handle::PipeRead { pipe, .. } => pipe.available() as u64,
+                Handle::Socket(s) => s.option(aurora_abi::net::OPT_READABLE, 0)?,
+                Handle::Special(s) => match &*s.lock() {
+                    Special::Unix(u) => u.available() as u64,
+                    Special::Mem { data, pos } => data.len().saturating_sub(*pos) as u64,
+                    _ => 0,
+                },
+                Handle::File(f) => {
+                    let f = f.lock();
+                    f.fs.metadata(f.ino).map(|m| m.size.saturating_sub(f.pos)).unwrap_or(0)
+                }
+                _ => 0,
+            };
+            user::put(arg, &(n.min(i32::MAX as u64) as i32)).map(|_| 0)
+        }
         _ => Err(ENOTTY),
     }
 }
@@ -913,9 +986,20 @@ pub fn fcntl(p: &Process, fd: u64, cmd: u64, arg: u64) -> Result<u64, isize> {
             Handle::PipeWrite(_) | Handle::Log => O_WRONLY,
             Handle::Socket(_) | Handle::Special(_) => O_RDWR,
             _ => 0,
-        }),
-        // F_SETFL, locks, pipe sizes: accepted.
-        4..=7 | 1031 | 1032 => Ok(0),
+        } | if p.linux.as_ref().is_some_and(|l| l.nonblock(fd as usize)) { O_NONBLOCK } else { 0 }),
+        // F_SETFL: non-blocking or not (the rest of the flags stay as they are).
+        4 => {
+            let on = arg & O_NONBLOCK != 0;
+            if let Some(l) = &p.linux {
+                l.set_nonblock(fd as usize, on);
+            }
+            if let Handle::Socket(s) = &*h {
+                s.option(aurora_abi::net::OPT_NONBLOCK, on as u64)?;
+            }
+            Ok(0)
+        }
+        // Locks, pipe sizes: accepted.
+        5..=7 | 1031 | 1032 => Ok(0),
         _ => Err(EINVAL),
     }
 }
@@ -960,6 +1044,10 @@ pub fn pipe2(p: &Process, ptr: u64, flags: u64) -> Result<u64, isize> {
             return Err(e);
         }
     };
+    if let Some(l) = &p.linux {
+        l.set_nonblock(rfd as usize, flags & O_NONBLOCK != 0);
+        l.set_nonblock(wfd as usize, flags & O_NONBLOCK != 0);
+    }
     user::put(ptr, &[rfd as i32, wfd as i32]).map(|_| 0)
 }
 
