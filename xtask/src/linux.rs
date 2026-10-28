@@ -100,6 +100,7 @@ pub fn links(programs: &[Program]) -> String {
 pub fn programs() -> Vec<Program> {
     let mut all = busybox();
     all.extend(rust_programs());
+    all.push((String::from("Linux/bin/firefox"), root().join("linux-programs/firefox.sh")));
     if Command::new("musl-gcc").arg("--version").output().is_err() {
         eprintln!("warning: musl-gcc not found (install musl-tools): Linux programs are left out of the image");
         return all;

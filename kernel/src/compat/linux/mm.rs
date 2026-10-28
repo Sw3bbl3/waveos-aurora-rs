@@ -9,8 +9,10 @@
 use crate::mm::vmm::{AddressSpace, Prot};
 use crate::mm::PAGE_SIZE;
 use crate::proc::{Handle, Process};
+use alloc::string::String;
 use aurora_abi::err::*;
 use aurora_abi::layout;
+use core::fmt::Write;
 use core::sync::atomic::Ordering;
 
 const PROT_WRITE: u64 = 2;
@@ -37,6 +39,35 @@ impl Memory {
     pub fn new(brk: u64) -> Memory {
         Memory { brk_start: brk, brk }
     }
+
+    /// The heap's range.
+    pub fn heap(&self) -> (u64, u64) {
+        (self.brk_start, self.brk)
+    }
+}
+
+/// `/proc/self/maps`: the program's mappings (glibc finds the main
+/// thread's stack here).
+pub fn maps(p: &Process) -> String {
+    let heap = p.linux.as_ref().map_or((0, 0), |l| l.mm.lock().heap());
+    let regions = p.mem().as_ref().map(|a| a.regions()).unwrap_or_default();
+    let mut out = String::new();
+    for (start, end, w, x) in regions {
+        let name = if end == layout::STACK_TOP {
+            "[stack]"
+        } else if start < heap.1 && end > heap.0 {
+            "[heap]"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "{start:08x}-{end:08x} r{}{}p 00000000 00:00 0 {name}",
+            if w { 'w' } else { '-' },
+            if x { 'x' } else { '-' }
+        );
+    }
+    out
 }
 
 /// A Linux protection as a page protection (`None`: no access).

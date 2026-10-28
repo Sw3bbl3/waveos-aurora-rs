@@ -120,7 +120,10 @@ pub enum Special {
     /// A local (`AF_UNIX`) socket.
     Unix(Arc<super::unix::Socket>),
     /// Shared memory (`memfd_create`, `/dev/shm`), and where reads are.
-    Shm { file: Arc<super::shm::ShmFile>, pos: u64 },
+    Shm {
+        file: Arc<super::shm::ShmFile>,
+        pos: u64,
+    },
 }
 
 impl Special {
@@ -271,7 +274,7 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/dev/tty" | "/dev/console" => return Some(Err(ENXIO)),
         "/proc/cpuinfo" => mem(cpuinfo()),
         "/proc/meminfo" => mem(meminfo()),
-        "/proc/self/maps" => mem(String::new()),
+        "/proc/self/maps" => mem(super::mm::maps(p)),
         "/proc/self/cmdline" => mem(format!("{}\0", p.name())),
         "/proc/self/comm" | "/proc/self/task/self/comm" => mem(format!("{}\n", p.name())),
         "/proc/self/stat" => mem(format!(

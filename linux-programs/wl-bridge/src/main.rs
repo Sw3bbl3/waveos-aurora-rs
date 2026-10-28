@@ -11,6 +11,10 @@
 //!
 //! Buffers are shared memory (`wl_shm`); the bridge copies each committed
 //! buffer and releases it straight away.
+//!
+//! `wl-bridge --background` returns once the bridge is listening (and at
+//! once if one already is), leaving it running: launchers start it that way
+//! before a program.
 
 mod keys;
 mod protocol;
@@ -90,6 +94,19 @@ enum Role {
     Sub(Id),
 }
 
+/// A `wl_region`: rectangles added and taken away, in order.
+type Region = Vec<(bool, (i32, i32, i32, i32))>;
+
+fn region_contains(r: &Region, x: i32, y: i32) -> bool {
+    let mut inside = false;
+    for &(add, (rx, ry, rw, rh)) in r {
+        if x >= rx && y >= ry && x < rx.saturating_add(rw) && y < ry.saturating_add(rh) {
+            inside = add;
+        }
+    }
+    inside
+}
+
 #[derive(Default)]
 struct Pending {
     /// `Some(None)`: the buffer was detached.
@@ -97,6 +114,8 @@ struct Pending {
     offset: (i32, i32),
     scale: Option<i32>,
     frames: Vec<Id>,
+    /// `Some(None)`: input everywhere again.
+    input: Option<Option<Region>>,
 }
 
 struct Surface {
@@ -118,6 +137,8 @@ struct Surface {
     /// Position in the parent (sub-surfaces), applied on commit.
     pos: (i32, i32),
     pending_pos: Option<(i32, i32)>,
+    /// Where the surface takes pointer input (`None`: everywhere).
+    input: Option<Region>,
 }
 
 impl Surface {
@@ -136,6 +157,7 @@ impl Surface {
             children: Vec::new(),
             pos: (0, 0),
             pending_pos: None,
+            input: None,
         }
     }
 
@@ -172,6 +194,8 @@ struct Toplevel {
     window: Option<u32>,
     /// The size last asked for in a configure.
     asked: Option<(i32, i32)>,
+    /// The size it last drew.
+    drawn: (i32, i32),
 }
 
 struct Popup {
@@ -272,6 +296,7 @@ struct Client {
     subsurfaces: HashMap<Id, Id>,
     viewports: HashMap<Id, Id>,
     data_sources: HashMap<Id, Vec<String>>,
+    regions: HashMap<Id, Region>,
     next_server_id: u32,
     dead: bool,
 }
@@ -298,6 +323,7 @@ impl Client {
             subsurfaces: HashMap::new(),
             viewports: HashMap::new(),
             data_sources: HashMap::new(),
+            regions: HashMap::new(),
             next_server_id: SERVER_IDS,
             dead: false,
         }
@@ -439,6 +465,13 @@ fn main() {
     let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| String::from("/run"));
     let name = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| String::from("wayland-0"));
     let path = format!("{dir}/{name}");
+    let background = std::env::args().any(|a| a == "--background");
+    if sys::answers(&path) {
+        if !background {
+            eprintln!("wl-bridge: a compositor is already running on {path}");
+        }
+        std::process::exit(if background { 0 } else { 1 });
+    }
     let listener = match sys::listen_unix(&path) {
         Ok(fd) => fd,
         Err(e) => {
@@ -449,6 +482,9 @@ fn main() {
     let mut keymap = keys::KEYMAP.as_bytes().to_vec();
     keymap.push(0);
     let keymap = (sys::memfd_with(&keymap), keymap.len());
+    if background {
+        sys::detach();
+    }
 
     // WaveOS events arrive on their own thread, which wakes the main loop.
     let (wake_r, wake_w) = sys::pipe().expect("pipe");
@@ -690,8 +726,15 @@ impl Server {
             (wl_compositor::NAME, wl_compositor::req::CREATE_REGION) => {
                 self.new_object(cid, a[0].uint(), wl_region::NAME, 1)
             }
-            (wl_region::NAME, wl_region::req::DESTROY) => self.destroyed(cid, obj),
-            (wl_region::NAME, _) => {}
+            (wl_region::NAME, wl_region::req::DESTROY) => {
+                self.clients.get_mut(&cid).unwrap().regions.remove(&obj);
+                self.destroyed(cid, obj);
+            }
+            (wl_region::NAME, op) => {
+                let rect = (a[0].int(), a[1].int(), a[2].int(), a[3].int());
+                let add = op == wl_region::req::ADD;
+                self.clients.get_mut(&cid).unwrap().regions.entry(obj).or_default().push((add, rect));
+            }
 
             (wl_shm::NAME, wl_shm::req::CREATE_POOL) => {
                 let (id, fd, size) = (a[0].uint(), a[1].fd(), a[2].int().max(0) as usize);
@@ -1057,6 +1100,12 @@ impl Server {
                     s.pending.frames.push(cb);
                 }
             }
+            wl_surface::req::SET_INPUT_REGION => {
+                let region = (a[0].uint() != 0).then(|| c.regions.get(&a[0].uint()).cloned().unwrap_or_default());
+                if let Some(s) = c.surfaces.get_mut(&sid) {
+                    s.pending.input = Some(region);
+                }
+            }
             wl_surface::req::SET_BUFFER_SCALE => {
                 if let Some(s) = c.surfaces.get_mut(&sid) {
                     s.pending.scale = Some(a[0].int().clamp(1, 4));
@@ -1079,6 +1128,9 @@ impl Server {
         let p = std::mem::take(&mut s.pending);
         if let Some(scale) = p.scale {
             s.scale = scale;
+        }
+        if let Some(input) = p.input {
+            s.input = input;
         }
         if let Some(pos) = s.pending_pos.take() {
             s.pos = pos;
@@ -1159,7 +1211,8 @@ impl Server {
                 if let Some(x) = c.xdg.get_mut(&xid) {
                     x.role = XdgRole::Toplevel(id);
                 }
-                c.toplevels.insert(id, Toplevel { xdg: xid, title: String::new(), window: None, asked: None });
+                c.toplevels
+                    .insert(id, Toplevel { xdg: xid, title: String::new(), window: None, asked: None, drawn: (0, 0) });
                 self.new_object(cid, id, xdg_toplevel::NAME, version);
             }
             xdg_surface::req::GET_POPUP => {
@@ -1335,14 +1388,14 @@ impl Server {
     }
 
     /// After a commit: a program that drew another size than its window's
-    /// is asked for the window's size again (once).
+    /// (on its own, or late) is asked for the window's size again, once for
+    /// each new size it draws.
     fn check_size(&mut self, cid: ClientId, top: Id) {
         let size = self.content_size(cid, top);
-        let Some(wid) = self.clients[&cid].toplevels.get(&top).and_then(|t| t.window) else { return };
-        let Some(w) = self.windows.get(&wid) else { return };
-        let want = w.size;
-        let asked = self.clients[&cid].toplevels.get(&top).and_then(|t| t.asked);
-        if size != want && asked != Some(want) {
+        let Some(t) = self.clients.get_mut(&cid).and_then(|c| c.toplevels.get_mut(&top)) else { return };
+        let drawn = std::mem::replace(&mut t.drawn, size);
+        let Some(want) = t.window.and_then(|w| self.windows.get(&w)).map(|w| w.size) else { return };
+        if size != want && size != drawn {
             self.configure_toplevel(cid, top, want);
         }
     }
@@ -1850,7 +1903,8 @@ fn hit_tree(c: &Client, sid: Id, x: i32, y: i32) -> Option<(Id, i32, i32)> {
         }
     }
     let (w, h) = s.size();
-    (s.has_content && x >= 0 && y >= 0 && x < w && y < h).then_some((sid, x, y))
+    let accepts = s.input.as_ref().is_none_or(|r| region_contains(r, x, y));
+    (s.has_content && accepts && x >= 0 && y >= 0 && x < w && y < h).then_some((sid, x, y))
 }
 
 fn blit(t: &mut Target, s: &Surface, x: i32, y: i32) {

@@ -15,7 +15,7 @@ This is being built in steps. What works today:
 | M3 | Dynamically linked programs (glibc), Debian packages | Done |
 | M4 | Sockets (TCP, UDP, local) | Done |
 | M5 | Shared memory and a Wayland bridge, for GTK programs | Done |
-| M6 | Firefox ESR | Next |
+| M6 | Firefox ESR | Done |
 
 ## The shell
 
@@ -41,7 +41,8 @@ the kernel loads next to them; it then loads the libraries itself.
 
 `cargo xtask linux-root [PKG…]` fetches Debian 12 packages and everything
 they depend on into `target/linux-root` (by default Firefox ESR, bash,
-coreutils, Python 3 and the DejaVu fonts: about 140 packages, 440 MiB).
+coreutils, Python 3, the DejaVu fonts and glibc's locale data: about 140
+packages, 440 MiB).
 They come from a fixed snapshot of the Debian archive, and every download
 is checked: the archive's `Release` file against a SHA-256 pinned in
 `xtask/src/debian.rs`, the package list against `Release`, and each package
@@ -55,7 +56,7 @@ machine's `update-mime-database` and `glib-compile-schemas`
 `/Linux`. The system folders are layered: what the disk has (`/Linux/usr`,
 `/Linux/lib`, …) comes first, then the system image (`/System/Linux`), so a
 Debian program takes the place of the BusyBox command of the same name.
-In the shell, `bash`, `python3` and `firefox-esr --version` run as on Debian.
+In the shell, `bash`, `python3` and the rest run as on Debian.
 
 ## What a Linux program sees
 
@@ -111,6 +112,8 @@ In the shell, `bash`, `python3` and `firefox-esr --version` run as on Debian.
 - **Everything else:** calls that aren't there yet return `ENOSYS`, and the
   first use of each is written to the system log (`linux: … system call N
   is not supported yet`).
+- **`/proc/self/maps`** lists the program's memory (glibc finds the main
+  thread's stack there).
 
 ## WaveOS windows and sound from Linux programs
 
@@ -160,6 +163,24 @@ WaveOS's clipboard is what programs paste.
 What isn't there yet: pop-up menus stay inside their window, drag and drop
 between programs, GPU buffers (`linux-dmabuf`: programs draw in software),
 input methods, and touch.
+
+## Firefox ESR
+
+With the Linux packages on the disk (`cargo xtask run --linux-root`),
+**Firefox ESR** is in Shoal and Seek (in Terminal: `firefox`). It runs
+Debian's Firefox ESR 140, unchanged, through `/System/Linux/bin/firefox`:
+that script starts `wl-bridge --background` (which returns once the bridge
+is listening, or at once if it already is) and then Firefox with Wayland
+on. Firefox runs in several processes as usual (content, sockets, media),
+loads and renders pages over HTTP and HTTPS with its own root
+certificates, and takes the keyboard, mouse, scrolling and clipboard.
+Without the packages, the app says how to get them.
+
+Firefox's sandboxes rely on Linux features WaveOS doesn't have yet
+(seccomp filters, namespaces), so the launcher turns them off and Firefox
+shows a notice that some security features offer less protection. It
+draws in software. Starting takes a while in QEMU without hardware
+acceleration (libxul is read in full when it loads).
 
 ## Doom
 

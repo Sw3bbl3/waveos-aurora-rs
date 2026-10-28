@@ -140,6 +140,19 @@ static void machine(void) {
     char exe[256] = {0};
     CHECK(readlink("/proc/self/exe", exe, sizeof exe - 1) > 0 && strstr(exe, "linuxtest"), "/proc/self/exe");
     CHECK(sysconf(_SC_NPROCESSORS_ONLN) >= 1, "processor count");
+    // glibc finds the main thread's stack in /proc/self/maps.
+    static char maps[65536];
+    fd = open("/proc/self/maps", O_RDONLY);
+    ssize_t mn = fd >= 0 ? read(fd, maps, sizeof maps - 1) : -1;
+    close(fd);
+    int local;
+    unsigned long lo = 0, hi = 0, here = (unsigned long)&local;
+    char *stack = mn > 0 ? strstr(maps, "[stack]") : NULL;
+    if (stack) {
+        while (stack > maps && stack[-1] != '\n') stack--;
+        sscanf(stack, "%lx-%lx", &lo, &hi);
+    }
+    CHECK(lo <= here && here < hi && strstr(stack, "rw-p"), "/proc/self/maps shows the stack");
     int fds[2];
     CHECK(pipe(fds) == 0 && write(fds[1], "hi", 2) == 2, "pipe");
     char got[2];

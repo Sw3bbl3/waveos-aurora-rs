@@ -41,7 +41,9 @@ const GROUPS: [(Group, &str); 6] = [
 fn group_of(kind: Option<AppKind>) -> Group {
     match kind {
         None => Group::Installed,
-        Some(AppKind::Files | AppKind::Notes | AppKind::Calculator | AppKind::Clock | AppKind::Nebula) => Group::Work,
+        Some(
+            AppKind::Files | AppKind::Notes | AppKind::Calculator | AppKind::Clock | AppKind::Nebula | AppKind::Firefox,
+        ) => Group::Work,
         Some(AppKind::Studio | AppKind::Paint | AppKind::Preview) => Group::Create,
         Some(AppKind::Doom) => Group::Play,
         Some(_) => Group::System,

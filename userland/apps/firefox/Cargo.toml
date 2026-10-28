@@ -1,0 +1,12 @@
+[package]
+name = "app-firefox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "app-firefox"
+path = "src/main.rs"
+
+[dependencies]
+corekit.workspace = true

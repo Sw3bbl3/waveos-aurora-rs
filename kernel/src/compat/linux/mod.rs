@@ -238,6 +238,8 @@ mod nr {
     pub const GETPRIORITY: u64 = 140;
     pub const SETPRIORITY: u64 = 141;
     pub const SCHED_GETPARAM: u64 = 143;
+    pub const SCHED_GET_PRIORITY_MAX: u64 = 146;
+    pub const SCHED_GET_PRIORITY_MIN: u64 = 147;
     pub const SCHED_GETSCHEDULER: u64 = 145;
     pub const PRCTL: u64 = 157;
     pub const ARCH_PRCTL: u64 = 158;
@@ -511,6 +513,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         }
         nr::SCHED_GETAFFINITY => misc::sched_getaffinity(a[1], a[2]),
         nr::SCHED_SETAFFINITY | nr::SCHED_GETPARAM | nr::SCHED_GETSCHEDULER | nr::SETPRIORITY => Ok(0),
+        // One priority for every policy (as SCHED_OTHER has on Linux).
+        nr::SCHED_GET_PRIORITY_MAX | nr::SCHED_GET_PRIORITY_MIN => Ok(0),
         nr::GETPRIORITY => Ok(20),
         nr::RT_SIGACTION => signal::sigaction(&p, a[0], a[1], a[2]),
         nr::RT_SIGPROCMASK => signal::sigprocmask(&p, a[0], a[1], a[2]),

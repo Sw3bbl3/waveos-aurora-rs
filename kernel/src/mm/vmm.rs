@@ -538,6 +538,34 @@ impl AddressSpace {
         Some(va)
     }
 
+    /// The user mappings, lowest first, as (start, end, writable, executable),
+    /// neighbouring pages with the same permissions merged.
+    pub fn regions(&self) -> Vec<(u64, u64, bool, bool)> {
+        let mut out: Vec<(u64, u64, bool, bool)> = Vec::new();
+        let next = |e: u64| (e & PRESENT != 0 && e & HUGE == 0).then(|| table(e & ADDR));
+        for (i4, &e4) in table(self.pml4)[..256].iter().enumerate() {
+            let Some(l3) = next(e4) else { continue };
+            for (i3, &e3) in l3.iter().enumerate() {
+                let Some(l2) = next(e3) else { continue };
+                for (i2, &e2) in l2.iter().enumerate() {
+                    let Some(l1) = next(e2) else { continue };
+                    for (i1, &e) in l1.iter().enumerate() {
+                        if e & (PRESENT | USER) != (PRESENT | USER) {
+                            continue;
+                        }
+                        let va = (i4 as u64) << 39 | (i3 as u64) << 30 | (i2 as u64) << 21 | (i1 as u64) << 12;
+                        let (w, x) = (e & WRITABLE != 0, e & NO_EXECUTE == 0);
+                        match out.last_mut() {
+                            Some(last) if last.1 == va && (last.2, last.3) == (w, x) => last.1 += PAGE_SIZE,
+                            _ => out.push((va, va + PAGE_SIZE, w, x)),
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Physical address and writability of the page containing `va`, if it is user-accessible.
     fn user_page(&self, va: u64) -> Option<(u64, bool)> {
         if va >= layout::USER_END {

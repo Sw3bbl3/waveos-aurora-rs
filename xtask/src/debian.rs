@@ -23,7 +23,7 @@ const RELEASE_SHA256: &str = "abcf5882746e0f68171f41adbb4ac01b74b49d62d203379bef
 const INDEX: &str = "main/binary-amd64/Packages.gz";
 
 /// What `cargo xtask linux-root` installs without arguments.
-pub const DEFAULT_PACKAGES: &[&str] = &["bash", "coreutils", "python3", "firefox-esr", "fonts-dejavu-core"];
+pub const DEFAULT_PACKAGES: &[&str] = &["bash", "coreutils", "python3", "firefox-esr", "fonts-dejavu-core", "libc-bin"];
 
 /// Packages never installed: they only matter to a running Debian system
 /// (package management, init, the system bus).

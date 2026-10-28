@@ -102,6 +102,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-firefox"
+version = "0.8.0"
+dependencies = [
+ "corekit",
+]
+
+[[package]]
 name = "app-installer"
 version = "0.8.0"
 dependencies = [

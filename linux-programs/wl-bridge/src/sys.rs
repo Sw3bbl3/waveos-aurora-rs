@@ -21,6 +21,9 @@ pub fn call(n: i64, a: [i64; 6]) -> i64 {
 }
 
 const SOCKET: i64 = 41;
+const CONNECT: i64 = 42;
+const FORK: i64 = 57;
+const SETSID: i64 = 112;
 const ACCEPT4: i64 = 288;
 const SENDMSG: i64 = 46;
 const RECVMSG: i64 = 47;
@@ -67,6 +70,32 @@ pub fn listen_unix(path: &str) -> Result<Fd, i64> {
         return Err(r);
     }
     Ok(fd as Fd)
+}
+
+/// True if something answers on the local socket at `path`.
+pub fn answers(path: &str) -> bool {
+    let fd = call(SOCKET, [AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, 0, 0, 0]);
+    if fd < 0 {
+        return false;
+    }
+    let mut addr = [0u8; 110];
+    addr[0] = AF_UNIX as u8;
+    addr[2..2 + path.len()].copy_from_slice(path.as_bytes());
+    let ok = call(CONNECT, [fd, addr.as_ptr() as i64, (2 + path.len() + 1) as i64, 0, 0, 0]) == 0;
+    close(fd as Fd);
+    ok
+}
+
+/// Carries on in a new process of its own (a new session); the caller's
+/// process ends.
+pub fn detach() {
+    match call(FORK, [0; 6]) {
+        0 => {
+            call(SETSID, [0; 6]);
+        }
+        n if n > 0 => std::process::exit(0),
+        _ => {}
+    }
 }
 
 pub fn accept(fd: Fd) -> Option<Fd> {

@@ -45,6 +45,7 @@ pub enum AppKind {
     Installer,
     Studio,
     Doom,
+    Firefox,
 }
 
 pub struct AppInfo {
@@ -204,6 +205,16 @@ pub static CATALOG: &[AppInfo] = &[
         single: true,
         // The game itself, which the app starts.
         also: &["/System/Games/Doom/doom"],
+    },
+    AppInfo {
+        kind: AppKind::Firefox,
+        name: "Firefox ESR",
+        icon: Icon::Firefox,
+        pinned: false,
+        listed: true,
+        path: "/System/Apps/Firefox.elf",
+        single: false,
+        also: &[],
     },
     AppInfo {
         kind: AppKind::Welcome,
