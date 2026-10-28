@@ -12,31 +12,28 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use corekit::abi::{ProcInfo, SysStats, PROC_EXITED, PROC_RUNNING, PROC_SLEEPING};
 use corekit::process;
-use waveui::lumen::canvas::{with_alpha, Canvas as Surface};
+use waveui::lumen::canvas::with_alpha;
 use waveui::lumen::geom::Rect;
 use waveui::lumen::theme;
 use waveui::prelude::*;
 
-const GRAPH_H: i32 = 150;
-const ROW_H: i32 = 26;
+const ROW_H: i32 = 37;
 const HISTORY: usize = 90;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Tab {
-    Cpu,
-    Memory,
-    Disk,
-    Network,
+    Overview,
+    Processes,
     System,
 }
 
-const TABS: [(Tab, &str); 5] = [
-    (Tab::Cpu, "CPU"),
-    (Tab::Memory, "Memory"),
-    (Tab::Disk, "Disk"),
-    (Tab::Network, "Network"),
-    (Tab::System, "System"),
-];
+const TABS: [(Tab, &str); 3] = [(Tab::Overview, "Overview"), (Tab::Processes, "Processes"), (Tab::System, "System")];
+
+// The four gauges' colours: processor, memory, disk, network.
+const TEAL: u32 = 0xFF2D_D4BF;
+const PURPLE: u32 = 0xFFA8_55F7;
+const AMBER: u32 = 0xFFF5_9E0B;
+const GREEN: u32 = 0xFF34_D399;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Col {
@@ -71,6 +68,10 @@ pub struct Activity {
     net_prev: Option<(u64, u64)>,
     rates: (u64, u64, u64, u64), // interrupts/s, syscalls/s, switches/s, frames/s
     sort: (Col, bool),
+    /// Seek: only processes whose name holds this.
+    query: String,
+    /// Indices into `rows` of the processes shown.
+    shown: Vec<usize>,
     selected: Option<u32>,
     confirm_quit: Option<(u32, String)>,
     last_sample: u64,
@@ -79,6 +80,7 @@ pub struct Activity {
 #[derive(Clone)]
 pub enum Msg {
     Tab(usize),
+    Seek(String),
     Sort(Col),
     Select(usize),
     Quit,
@@ -95,7 +97,7 @@ fn push<T>(q: &mut VecDeque<T>, v: T) {
 
 fn human_bytes(n: u64) -> String {
     if n >= 1 << 30 {
-        format!("{:.2} GB", n as f64 / (1u64 << 30) as f64)
+        format!("{:.1} GB", n as f64 / (1u64 << 30) as f64)
     } else if n >= 1 << 20 {
         format!("{:.1} MB", n as f64 / (1u64 << 20) as f64)
     } else if n >= 1 << 10 {
@@ -117,7 +119,7 @@ fn human_time(ms: u64) -> String {
 impl Activity {
     fn new() -> Self {
         let mut a = Activity {
-            tab: Tab::Cpu,
+            tab: Tab::Overview,
             rows: Vec::new(),
             prev_cpu: BTreeMap::new(),
             prev: None,
@@ -132,6 +134,8 @@ impl Activity {
             net_prev: None,
             rates: (0, 0, 0, 0),
             sort: (Col::Cpu, false),
+            query: String::new(),
+            shown: Vec::new(),
             selected: None,
             confirm_quit: None,
             last_sample: 0,
@@ -216,37 +220,22 @@ impl Activity {
                 o.reverse()
             }
         });
+        self.refilter();
     }
 
-    // ------------------------------------------------------------ drawing
+    fn refilter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.shown =
+            (0..self.rows.len()).filter(|&i| q.is_empty() || self.name(i).to_lowercase().contains(&q)).collect();
+    }
 
-    fn graph(cv: &mut Surface, r: Rect, series: &[&VecDeque<u64>], max: u64, colors: &[u32]) {
-        let t = theme::current();
-        cv.fill_round_rect(r, 10, t.window_bg_alt);
-        for k in 1..4 {
-            cv.fill_rect(Rect::new(r.x + 10, r.y + r.h * k / 4, r.w - 20, 1), t.separator);
-        }
-        let inner = r.inset(8);
-        for (si, data) in series.iter().enumerate() {
-            let n = data.len();
-            if n < 2 {
-                continue;
-            }
-            let x_of = |i: usize| inner.x + inner.w * (HISTORY - n + i) as i32 / (HISTORY - 1) as i32;
-            let y_of = |v: u64| inner.bottom() - (v.min(max) as i64 * inner.h as i64 / max.max(1) as i64) as i32;
-            // Filled area under the line.
-            let c = colors[si % colors.len()];
-            for i in 0..n - 1 {
-                let (x0, x1) = (x_of(i), x_of(i + 1));
-                for x in x0..x1 {
-                    let v = data[i] as i64
-                        + (data[i + 1] as i64 - data[i] as i64) * (x - x0) as i64 / (x1 - x0).max(1) as i64;
-                    let y = y_of(v as u64);
-                    cv.fill_rect(Rect::new(x, y, 1, inner.bottom() - y), with_alpha(c, 0x30));
-                }
-            }
-            let pts: Vec<(i32, i32)> = data.iter().enumerate().map(|(i, &v)| (x_of(i), y_of(v))).collect();
-            cv.polyline(&pts, 2, c);
+    /// The name a person knows a process by.
+    fn name(&self, i: usize) -> String {
+        let info = &self.rows[i].info;
+        match (info.user, info.name()) {
+            (0, n) => format!("{n} (kernel)"),
+            (_, "Activity") => String::from("Pulse"),
+            (_, n) => String::from(n),
         }
     }
 }
@@ -256,126 +245,212 @@ fn row_id(r: &Row) -> u32 {
     r.info.pid | (r.info.user << 31)
 }
 
+/// Table columns: what, heading, width (0 takes what's left).
 const COLUMNS: [(Col, &str, i32); 6] = [
     (Col::Name, "Process", 0),
-    (Col::Cpu, "% CPU", 80),
-    (Col::Time, "CPU Time", 100),
-    (Col::Threads, "Threads", 70),
-    (Col::Memory, "Memory", 90),
-    (Col::Pid, "PID", 60),
+    (Col::Cpu, "CPU", 110),
+    (Col::Time, "CPU Time", 120),
+    (Col::Memory, "Memory", 130),
+    (Col::Threads, "Threads", 110),
+    (Col::Pid, "PID", 90),
 ];
 
-/// A statistic beside a graph: label above, value below.
-fn stat<'a>(label: &str, value: String, color: Option<u32>) -> View<'a, Msg> {
-    let text = VStack::new()
-        .push(Text::new(label).style(TextStyle::Callout).foreground(Color::SecondaryLabel))
-        .push(Text::new(value).style(TextStyle::Sized(15, waveui::style::Weight::Bold)))
-        .spacing(2)
-        .alignment(Align::Start);
-    match color {
-        Some(c) => HStack::new()
-            .push(
-                Canvas::new(move |cv, r| {
-                    let (x, y) = r.center();
-                    cv.fill_circle(x, y, 4, c);
-                })
-                .size(10, 10),
-            )
-            .push(text)
-            .spacing(6)
-            .alignment(Align::Start),
-        None => text.padding_insets(Insets { leading: 16, ..Default::default() }),
-    }
+/// A smooth area graph of `data` (0..=max), newest on the right.
+fn sparkline<'a>(data: VecDeque<u64>, max: u64, color: u32) -> View<'a, Msg> {
+    Canvas::new(move |cv, r| {
+        let n = data.len();
+        if n < 2 {
+            cv.fill_rect(Rect::new(r.x, r.bottom() - 1, r.w, 1), with_alpha(color, 0x60));
+            return;
+        }
+        let x_of = |i: usize| r.x + r.w * (HISTORY - n + i) as i32 / (HISTORY - 1) as i32;
+        let top = r.y + 4;
+        let y_of = |v: u64| r.bottom() - (v.min(max) as i64 * (r.bottom() - top) as i64 / max.max(1) as i64) as i32;
+        for i in 0..n - 1 {
+            let (x0, x1) = (x_of(i), x_of(i + 1));
+            for x in x0..x1 {
+                let v =
+                    data[i] as i64 + (data[i + 1] as i64 - data[i] as i64) * (x - x0) as i64 / (x1 - x0).max(1) as i64;
+                let y = y_of(v as u64);
+                cv.fill_rect(Rect::new(x, y, 1, r.bottom() - y), with_alpha(color, 0x48));
+            }
+        }
+        let pts: Vec<(i32, i32)> = data.iter().enumerate().map(|(i, &v)| (x_of(i), y_of(v))).collect();
+        cv.polyline(&pts, 2, color);
+    })
+    .height(56)
+    .fill_width()
 }
 
-fn graph_view<'a>(series: Vec<VecDeque<u64>>, max: u64, colors: Vec<u32>, label: Option<String>) -> View<'a, Msg> {
+/// One gauge: a name and a detail, the reading, and its recent past.
+fn gauge<'a>(name: &str, detail: String, value: String, graph: View<'a, Msg>) -> View<'a, Msg> {
+    VStack::new()
+        .push(
+            HStack::new()
+                .push(
+                    Text::new(name)
+                        .style(TextStyle::Sized(12, waveui::style::Weight::Bold))
+                        .foreground(Color::SecondaryLabel),
+                )
+                .push(Spacer::new())
+                .push(
+                    Text::new(detail)
+                        .style(TextStyle::Sized(11, waveui::style::Weight::Bold))
+                        .foreground(Color::TertiaryLabel),
+                )
+                .fill_width(),
+        )
+        .push(Text::new(value).style(TextStyle::Sized(24, waveui::style::Weight::Display)))
+        .push(Spacer::new())
+        .push(graph)
+        .spacing(4)
+        .alignment(Align::Stretch)
+        .padding_insets(Insets { top: 16, leading: 16, bottom: 10, trailing: 16 })
+        .height(150)
+        .background_rounded(Color::Fill, 16)
+        .border(Color::Separator, 16)
+        .grow(1)
+}
+
+/// A small square with the first letter, standing in for an icon.
+fn badge<'a>(name: &str, kernel: bool) -> View<'a, Msg> {
+    let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+    let hue = name.bytes().fold(7u32, |h, b| h.wrapping_mul(31) ^ b as u32);
+    let colors = [TEAL, PURPLE, AMBER, GREEN, 0xFF60_A5FA, 0xFFF4_72B6];
+    let c = if kernel { 0xFF6B_7284 } else { colors[hue as usize % colors.len()] };
     Canvas::new(move |cv, r| {
-        let refs: Vec<&VecDeque<u64>> = series.iter().collect();
-        Activity::graph(cv, r, &refs, max, &colors);
-        if let Some(l) = &label {
-            cv.text(r.x + 10, r.y + 18, l, theme::ui(11), theme::current().text_secondary);
-        }
+        let b = Rect::new(r.x, r.y + (r.h - 20) / 2, 20, 20);
+        cv.fill_round_rect(b, 6, c);
+        let f = theme::ui_bold(11);
+        cv.text_centered(b, &letter, f, 0xFFFF_FFFF);
     })
-    .fill()
+    .size(20, 22)
 }
 
 impl Activity {
-    fn graphs<'a>(&self, graph: View<'a, Msg>, stats: Vec<View<'a, Msg>>, height: i32) -> View<'a, Msg> {
+    fn gauges(&self) -> View<'_, Msg> {
+        let s = self.stats;
+        let deque = |q: &VecDeque<u32>| q.iter().map(|&v| v as u64).collect::<VecDeque<u64>>();
+        let cpu = self.cpu_hist.back().copied().unwrap_or(0);
+        let rd = self.read_hist.back().copied().unwrap_or(0);
+        let wr = self.write_hist.back().copied().unwrap_or(0);
+        let disk: VecDeque<u64> = self.read_hist.iter().zip(self.write_hist.iter()).map(|(a, b)| a + b).collect();
+        let disk_max = disk.iter().copied().max().unwrap_or(0).max(256 * 1024);
+        let rx = self.rx_hist.back().copied().unwrap_or(0);
+        let tx = self.tx_hist.back().copied().unwrap_or(0);
+        let net: VecDeque<u64> = self.rx_hist.iter().zip(self.tx_hist.iter()).map(|(a, b)| a + b).collect();
+        let net_max = net.iter().copied().max().unwrap_or(0).max(64 * 1024);
+        let adapters =
+            corekit::net::interfaces().iter().filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0).count();
+        let pressure = if s.mem_used * 10 > s.mem_total * 9 { "under pressure" } else { "no pressure" };
         HStack::new()
-            .push(graph.grow(1))
-            .push(VStack::with(stats).spacing(14).alignment(Align::Start).width(176))
-            .spacing(24)
-            .alignment(Align::Start)
-            .height(height)
+            .push(gauge(
+                "Processor",
+                format!("{} core{}", s.cpus.max(1), if s.cpus == 1 { "" } else { "s" }),
+                format!("{}%", (cpu + 5) / 10),
+                sparkline(deque(&self.cpu_hist), 1000, TEAL),
+            ))
+            .push(gauge(
+                "Memory",
+                format!("of {} · {pressure}", human_bytes(s.mem_total)),
+                human_bytes(s.mem_used),
+                sparkline(deque(&self.mem_hist), 1000, PURPLE),
+            ))
+            .push(gauge(
+                "Disk",
+                format!("read {} · write {}", human_bytes(rd), human_bytes(wr)),
+                format!("{}/s", human_bytes(rd + wr)),
+                sparkline(disk, disk_max, AMBER),
+            ))
+            .push(gauge(
+                "Network",
+                format!("{adapters} adapter{}", if adapters == 1 { "" } else { "s" }),
+                format!("{}/s", human_bytes(rx + tx)),
+                sparkline(net, net_max, GREEN),
+            ))
+            .spacing(12)
             .fill_width()
     }
 
-    fn table(&self) -> View<'_, Msg> {
+    /// The processes, in a rounded card. `all` adds CPU time and PID.
+    fn table(&self, all: bool) -> View<'_, Msg> {
+        let cols: Vec<(Col, &str, i32)> =
+            COLUMNS.iter().copied().filter(|(c, ..)| all || !matches!(c, Col::Time | Col::Pid)).collect();
+        fn cell(t: View<'_, Msg>, c: Col, w: i32) -> View<'_, Msg> {
+            let t = t.text_align(if c == Col::Name { Align::Start } else { Align::End });
+            if w == 0 {
+                t.grow(1)
+            } else {
+                t.width(w)
+            }
+        }
         let header = HStack::with(
-            COLUMNS
-                .iter()
+            cols.iter()
                 .map(|&(c, label, w)| {
-                    let mut t = Text::new(label)
-                        .style(if self.sort.0 == c { TextStyle::Headline } else { TextStyle::Subheadline })
-                        .foreground(Color::SecondaryLabel)
-                        .text_align(if c == Col::Name { Align::Start } else { Align::End })
-                        .padding_xy(12, 0)
-                        .fill_height()
-                        .on_tap(Msg::Sort(c))
-                        .corner_radius(6);
-                    t = if w == 0 { t.grow(1) } else { t.width(w) };
-                    t
+                    let arrow = if self.sort.0 == c {
+                        if self.sort.1 {
+                            " ↑"
+                        } else {
+                            " ↓"
+                        }
+                    } else {
+                        ""
+                    };
+                    cell(Text::label(format!("{label}{arrow}")), c, w).fill_height().on_tap(Msg::Sort(c))
                 })
                 .collect(),
         )
         .spacing(0)
-        .height(28)
+        .padding_xy(16, 0)
+        .height(36)
         .fill_width();
-        let rows = &self.rows;
-        let list = List::new(rows.len(), ROW_H, move |i| {
-            let row = &rows[i];
+        let shown = self.shown.clone();
+        let list = List::new(shown.len(), ROW_H, move |k| {
+            let i = shown[k];
+            let row = &self.rows[i];
             let info = &row.info;
-            let t = theme::current();
-            // A dot for the state, then the name (kernel tasks in secondary text).
-            let dot = match info.state {
-                PROC_RUNNING => 0xFF30_D158,
-                PROC_SLEEPING => with_alpha(t.text_secondary, 0x80),
-                _ => 0xFFFF_9F0A,
-            };
-            let name = match (info.user, info.name()) {
-                (0, n) => format!("{n} (kernel)"),
-                (_, "Activity") => String::from("Pulse"),
-                (_, n) => String::from(n),
-            };
-            let values = [
-                format!("{}.{}", row.cpu_pct / 10, row.cpu_pct % 10),
-                human_time(info.cpu_ms),
-                format!("{}", info.threads),
-                if info.user == 0 { String::from("—") } else { human_bytes(info.mem_kib * 1024) },
-                // Kernel tasks have task ids, not process ids.
-                if info.user == 0 { String::from("—") } else { format!("{}", info.pid) },
-            ];
-            let mut line = HStack::new()
-                .push(
-                    Canvas::new(move |cv, r| {
-                        let (x, y) = r.center();
-                        cv.fill_circle(x, y, 3, dot);
-                    })
-                    .size(20, 20),
-                )
-                .push(
-                    Text::new(name)
-                        .foreground(if info.user == 0 { Color::SecondaryLabel } else { Color::Label })
-                        .grow(1),
-                )
-                .spacing(4)
-                .padding_insets(Insets { leading: 6, ..Default::default() });
-            for (k, v) in values.into_iter().enumerate() {
-                line = line.push(Text::new(v).text_align(Align::End).padding_xy(12, 0).width(COLUMNS[k + 1].2));
+            let kernel = info.user == 0;
+            let name = self.name(i);
+            let mut line = HStack::new().spacing(0).padding_xy(16, 0);
+            for &(c, _, w) in &cols {
+                let v = match c {
+                    Col::Name => {
+                        line = line.push(
+                            HStack::new()
+                                .push(badge(&name, kernel))
+                                .push(Text::new(name.clone()).foreground(if kernel {
+                                    Color::SecondaryLabel
+                                } else {
+                                    Color::Label
+                                }))
+                                .spacing(10)
+                                .grow(1),
+                        );
+                        continue;
+                    }
+                    Col::Cpu => format!("{}.{}%", row.cpu_pct / 10, row.cpu_pct % 10),
+                    Col::Time => human_time(info.cpu_ms),
+                    Col::Threads => format!("{}", info.threads),
+                    Col::Memory if kernel => String::from("—"),
+                    Col::Memory => human_bytes(info.mem_kib * 1024),
+                    // Kernel tasks have task ids, not process ids.
+                    Col::Pid if kernel => String::from("—"),
+                    Col::Pid => format!("{}", info.pid),
+                };
+                line = line.push(cell(Text::new(v).style(TextStyle::Sized(13, waveui::style::Weight::Bold)), c, w));
             }
-            line.spacing(0).fill()
+            let dot = match info.state {
+                PROC_RUNNING => Some(0xFF30_D158u32),
+                PROC_SLEEPING => None,
+                _ => Some(0xFFFF_9F0A),
+            };
+            let line = line.fill();
+            match dot {
+                Some(c) if all => line.overlay_draw(move |cv, r| cv.fill_circle(r.x + 7, r.y + r.h / 2, 3, c)),
+                _ => line,
+            }
         })
-        .selection(self.selected.and_then(|id| self.rows.iter().position(|r| row_id(r) == id)))
+        .selection(self.selected.and_then(|id| self.shown.iter().position(|&i| row_id(&self.rows[i]) == id)))
         .on_select(Msg::Select)
         .id("processes");
         VStack::new()
@@ -383,188 +458,63 @@ impl Activity {
             .push(Divider::new())
             .push(list)
             .spacing(0)
-            .background_rounded(Color::GroupedBackground, 10)
+            .background_rounded(Color::Fill, 16)
+            .border(Color::Separator, 16)
             .clipped()
             .fill()
     }
 
-    fn content(&self) -> View<'_, Msg> {
+    fn system(&self) -> View<'_, Msg> {
         let s = self.stats;
-        let blue = 0xFF0A_84FF;
-        let green = 0xFF30_B050;
-        let orange = 0xFFFF_9F0A;
-        let deque = |q: &VecDeque<u32>| q.iter().map(|&v| v as u64).collect::<VecDeque<u64>>();
-        match self.tab {
-            Tab::Cpu => {
-                let graph = if self.core_hist.len() > 1 {
-                    // One small history graph per core, side by side.
-                    HStack::with(
-                        self.core_hist
-                            .iter()
-                            .enumerate()
-                            .map(|(i, core)| {
-                                graph_view(vec![deque(core)], 1000, vec![theme::accent()], Some(format!("CPU {i}")))
-                                    .grow(1)
-                            })
-                            .collect(),
-                    )
-                    .spacing(8)
-                    .fill()
-                } else {
-                    graph_view(vec![deque(&self.cpu_hist)], 1000, vec![theme::accent()], None)
-                };
-                let now = self.cpu_hist.back().copied().unwrap_or(0);
-                VStack::new()
-                    .push(self.graphs(
-                        graph,
-                        vec![
-                            stat("CPU load", format!("{}.{}%", now / 10, now % 10), Some(theme::accent())),
-                            stat("Idle", format!("{}.{}%", (1000 - now) / 10, (1000 - now) % 10), None),
-                            stat("Tasks", format!("{} in {} processes", s.tasks, s.processes), None),
-                        ],
-                        GRAPH_H,
-                    ))
-                    .push(self.table())
-                    .spacing(16)
-                    .fill()
-            }
-            Tab::Memory => {
-                let heap = format!("{} of {}", human_bytes(s.heap_used), human_bytes(s.heap_size));
-                VStack::new()
-                    .push(self.graphs(
-                        graph_view(vec![deque(&self.mem_hist)], 1000, vec![green], None),
-                        vec![
-                            stat("Used", human_bytes(s.mem_used), Some(green)),
-                            stat("Physical memory", human_bytes(s.mem_total), None),
-                            stat("Kernel heap", heap, None),
-                        ],
-                        GRAPH_H,
-                    ))
-                    .push(self.table())
-                    .spacing(16)
-                    .fill()
-            }
-            Tab::Disk => {
-                let max =
-                    self.read_hist.iter().chain(self.write_hist.iter()).copied().max().unwrap_or(0).max(64 * 1024);
-                let rd = self.read_hist.back().copied().unwrap_or(0);
-                let wr = self.write_hist.back().copied().unwrap_or(0);
-                let info = process::sys_info();
-                let used = info.disk_total.saturating_sub(info.disk_free);
-                let rows = [
-                    ("Reads", format!("{} ({})", s.disk_reads, human_bytes(s.disk_read_bytes))),
-                    ("Writes", format!("{} ({})", s.disk_writes, human_bytes(s.disk_write_bytes))),
-                    ("Startup disk", process::fixed_str(&info.root, info.root_len)),
-                ];
-                VStack::new()
-                    .push(self.graphs(
-                        graph_view(
-                            vec![self.read_hist.clone(), self.write_hist.clone()],
-                            max,
-                            vec![blue, orange],
-                            None,
-                        ),
-                        vec![
-                            stat("Reading", format!("{}/s", human_bytes(rd)), Some(blue)),
-                            stat("Writing", format!("{}/s", human_bytes(wr)), Some(orange)),
-                            stat("Scale", format!("{}/s", human_bytes(max)), None),
-                        ],
-                        GRAPH_H + 60,
-                    ))
-                    .push(
-                        Section::new().extend(
-                            rows.into_iter()
-                                .map(|(k, v)| row(k, Text::new(v).foreground(Color::SecondaryLabel)).height(34)),
-                        ),
-                    )
-                    .push(
-                        VStack::new()
-                            .push(ProgressView::new(Some(used as f32 / info.disk_total.max(1) as f32)))
-                            .push(
-                                Text::new(format!("{} used of {}", human_bytes(used), human_bytes(info.disk_total)))
-                                    .style(TextStyle::Callout)
-                                    .foreground(Color::SecondaryLabel),
-                            )
-                            .spacing(8)
-                            .alignment(Align::Stretch),
-                    )
-                    .push(Spacer::new())
-                    .spacing(16)
-                    .alignment(Align::Stretch)
-                    .fill()
-            }
-            Tab::Network => {
-                let (purple, teal) = (0xFFBF_5AF2, 0xFF30_B0C7);
-                let max = self.rx_hist.iter().chain(self.tx_hist.iter()).copied().max().unwrap_or(0).max(16 * 1024);
-                let rx = self.rx_hist.back().copied().unwrap_or(0);
-                let tx = self.tx_hist.back().copied().unwrap_or(0);
-                let cols = [("Interface", 120), ("Driver", 120), ("Address", 140), ("Received", 0), ("Sent", 0)];
-                let cell = |text: String, w: i32, head: bool| {
-                    let t = Text::new(text)
-                        .style(if head { TextStyle::Headline } else { TextStyle::Body })
-                        .foreground(if head { Color::SecondaryLabel } else { Color::Label });
-                    if w == 0 {
-                        t.grow(1)
-                    } else {
-                        t.width(w)
-                    }
-                };
-                let mut table = Section::new().push(
-                    HStack::with(cols.iter().map(|&(h, w)| cell(h.into(), w, true)).collect()).height(32).fill_width(),
-                );
-                for i in corekit::net::interfaces().iter() {
-                    let ip = if i.ip == [0; 4] { String::from("—") } else { corekit::net::ip_string(i.ip) };
-                    let vals = [
-                        String::from(corekit::net::name_of(i)),
-                        String::from(corekit::net::driver_of(i)),
-                        ip,
-                        format!("{} ({} pkts)", human_bytes(i.rx_bytes), i.rx_packets),
-                        format!("{} ({} pkts)", human_bytes(i.tx_bytes), i.tx_packets),
-                    ];
-                    table = table.push(
-                        HStack::with(vals.into_iter().zip(cols).map(|(v, (_, w))| cell(v, w, false)).collect())
-                            .height(32)
-                            .fill_width(),
-                    );
-                }
-                VStack::new()
-                    .push(self.graphs(
-                        graph_view(vec![self.rx_hist.clone(), self.tx_hist.clone()], max, vec![purple, teal], None),
-                        vec![
-                            stat("Receiving", format!("{}/s", human_bytes(rx)), Some(purple)),
-                            stat("Sending", format!("{}/s", human_bytes(tx)), Some(teal)),
-                            stat("Scale", format!("{}/s", human_bytes(max)), None),
-                        ],
-                        GRAPH_H + 60,
-                    ))
-                    .push(table)
-                    .push(Spacer::new())
-                    .spacing(16)
-                    .alignment(Align::Stretch)
-                    .fill()
-            }
-            Tab::System => {
-                let up = s.uptime_ms / 1000;
-                let rows = [
-                    ("Uptime", format!("{}h {:02}m {:02}s", up / 3600, up / 60 % 60, up % 60)),
-                    ("Processors", format!("{}", s.cpus)),
-                    ("Processes", format!("{}", s.processes)),
-                    ("Tasks (threads)", format!("{}", s.tasks)),
-                    ("Windows", format!("{}", s.windows)),
-                    ("Interrupts", format!("{} /s", self.rates.0)),
-                    ("System calls", format!("{} /s", self.rates.1)),
-                    ("Context switches", format!("{} /s", self.rates.2)),
-                    ("Frames drawn", format!("{} /s", self.rates.3)),
-                ];
-                VStack::new()
-                    .push(Section::new().extend(
-                        rows.into_iter().map(|(k, v)| row(k, Text::new(v).style(TextStyle::Headline)).height(36)),
-                    ))
-                    .push(Spacer::new())
-                    .alignment(Align::Stretch)
-                    .fill()
-            }
+        let up = s.uptime_ms / 1000;
+        let info = process::sys_info();
+        let used = info.disk_total.saturating_sub(info.disk_free);
+        let counters = [
+            ("Uptime", format!("{}h {:02}m {:02}s", up / 3600, up / 60 % 60, up % 60)),
+            ("Processors", format!("{}", s.cpus)),
+            ("Processes", format!("{} ({} tasks)", s.processes, s.tasks)),
+            ("Windows", format!("{}", s.windows)),
+            ("Interrupts", format!("{} /s", self.rates.0)),
+            ("System calls", format!("{} /s", self.rates.1)),
+            ("Context switches", format!("{} /s", self.rates.2)),
+            ("Frames drawn", format!("{} /s", self.rates.3)),
+            ("Kernel heap", format!("{} of {}", human_bytes(s.heap_used), human_bytes(s.heap_size))),
+        ];
+        let disk = [
+            ("Startup disk", process::fixed_str(&info.root, info.root_len)),
+            ("Used", format!("{} of {}", human_bytes(used), human_bytes(info.disk_total))),
+            ("Reads", format!("{} ({})", s.disk_reads, human_bytes(s.disk_read_bytes))),
+            ("Writes", format!("{} ({})", s.disk_writes, human_bytes(s.disk_write_bytes))),
+        ];
+        let mut net = Section::new();
+        for i in corekit::net::interfaces().iter() {
+            let ip = if i.ip == [0; 4] { String::from("no address") } else { corekit::net::ip_string(i.ip) };
+            net = net.push(row_detail(
+                format!("{} · {}", corekit::net::name_of(i), corekit::net::driver_of(i)),
+                ip,
+                Text::new(format!("↓ {}  ↑ {}", human_bytes(i.rx_bytes), human_bytes(i.tx_bytes)))
+                    .foreground(Color::SecondaryLabel),
+            ));
         }
+        let card = |rows: &[(&str, String)]| {
+            Section::new()
+                .extend(rows.iter().map(|(k, v)| row(*k, Text::new(v.clone()).foreground(Color::SecondaryLabel))))
+        };
+        ScrollView::new(
+            HStack::new()
+                .push(Section::titled("Counters", card(&counters)).grow(1))
+                .push(
+                    VStack::new()
+                        .push(Section::titled("Disk", card(&disk)))
+                        .push(Section::titled("Network", net))
+                        .spacing(18)
+                        .alignment(Align::Stretch)
+                        .grow(1),
+                )
+                .spacing(16)
+                .alignment(Align::Start)
+                .fill_width(),
+        )
     }
 }
 
@@ -576,23 +526,21 @@ impl App for Activity {
     }
 
     fn size(&self) -> (i32, i32) {
-        (860, 600)
+        (1140, 720)
     }
 
     fn update(&mut self, msg: Msg, _cx: &mut Context<Msg>) {
         match msg {
-            Msg::Tab(i) => {
-                self.tab = TABS[i].0;
-                if self.tab == Tab::Memory && self.sort.0 == Col::Cpu {
-                    self.sort = (Col::Memory, false);
-                    self.sort_rows();
-                }
+            Msg::Tab(i) => self.tab = TABS[i].0,
+            Msg::Seek(q) => {
+                self.query = q;
+                self.refilter();
             }
             Msg::Sort(c) => {
                 self.sort = if self.sort.0 == c { (c, !self.sort.1) } else { (c, c == Col::Name || c == Col::Pid) };
                 self.sort_rows();
             }
-            Msg::Select(i) => self.selected = self.rows.get(i).map(row_id),
+            Msg::Select(k) => self.selected = self.shown.get(k).map(|&i| row_id(&self.rows[i])),
             Msg::Quit => {
                 if let Some(id) = self.selected.filter(|id| id >> 31 == 1) {
                     let pid = id & 0x7FFF_FFFF;
@@ -635,26 +583,31 @@ impl App for Activity {
 
     fn view(&self, _env: &Env) -> View<'_, Msg> {
         let sel = TABS.iter().position(|(k, _)| *k == self.tab).unwrap_or(0);
-        let can_quit = self.selected.is_some_and(|id| id >> 31 == 1) && matches!(self.tab, Tab::Cpu | Tab::Memory);
-        let bar = toolbar(vec![
-            Spacer::new(),
-            Picker::new(TABS.iter().map(|t| t.1), sel).on_change(Msg::Tab).width(450),
-            Spacer::new(),
-        ]);
-        let quit = Button::new("Quit Process")
-            .action(Msg::Quit)
-            .disabled(!can_quit)
-            .help("Quit the selected process")
-            .shortcut(Shortcut::key(Key::Delete));
-        VStack::new()
-            .push(
-                ZStack::with(vec![bar, HStack::new().push(Spacer::new()).push(quit).padding_xy(14, 0).fill()])
-                    .height(size::TOOLBAR),
-            )
-            .push(Divider::new())
-            .push(self.content().padding(16))
-            .spacing(0)
-            .fill()
+        let can_quit = self.selected.is_some_and(|id| id >> 31 == 1) && self.tab != Tab::System;
+        let mut bar = vec![Picker::new(TABS.iter().map(|t| t.1), sel).on_change(Msg::Tab).width(300), Spacer::new()];
+        if self.tab != Tab::System {
+            bar.push(
+                TextField::search("Seek processes", self.query.clone())
+                    .on_change(Msg::Seek)
+                    .shortcut(Shortcut::ctrl('f'))
+                    .id("seek")
+                    .width(200),
+            );
+            bar.push(
+                Button::new("Quit process")
+                    .action(Msg::Quit)
+                    .control_size(ControlSize::Small)
+                    .disabled(!can_quit)
+                    .help("Quit the selected process")
+                    .shortcut(Shortcut::key(Key::Delete)),
+            );
+        }
+        let content = match self.tab {
+            Tab::Overview => VStack::new().push(self.gauges()).push(self.table(false)).spacing(16).fill(),
+            Tab::Processes => self.table(true),
+            Tab::System => self.system(),
+        };
+        VStack::new().push(toolbar(bar)).push(content.padding(16)).spacing(0).fill()
     }
 }
 

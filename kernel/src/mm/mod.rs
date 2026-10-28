@@ -20,6 +20,7 @@ pub fn init(boot_info: &'static BootInfo) {
     heap::init();
     paging::init(boot_info);
     vmm::init();
+    heap::enable_large();
 }
 
 pub struct MemStats {

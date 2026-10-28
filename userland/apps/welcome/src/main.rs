@@ -1,36 +1,139 @@
-//! Welcome — first-run introduction.
+//! Welcome — the first sign-in: pick a wallpaper and an appearance, and a
+//! few things to try.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
-use waveui::lumen::canvas::{mix, rgb};
-use waveui::lumen::icons::{self, Icon};
-use waveui::lumen::theme;
+use alloc::rc::Rc;
+use core::cell::RefCell;
+use waveui::lumen::icons::Icon;
+use waveui::lumen::{theme, wallpaper};
 use waveui::prelude::*;
+use waveui::Request;
 
-pub struct Welcome;
+/// Where the wallpapers' small pictures are drawn from: decoded once per
+/// wallpaper and appearance.
+type Thumbs = RefCell<[[Option<Rc<Pixmap>>; 2]; 3]>;
+
+pub struct Welcome {
+    thumbs: Thumbs,
+}
 
 #[derive(Clone)]
 pub enum Msg {
-    GetStarted,
-    About,
+    Wallpaper(u8),
+    Appearance(usize),
+    Learn,
+    Later,
+    Start,
 }
 
-const TIPS: [(Icon, &str, &str); 3] = [
-    (Icon::Launcher, "Open apps from Shoal", "Click the grid at the left of Harbor, or press the Super key."),
-    (
-        Icon::Files,
-        "Windows feel familiar",
-        "Drag the title bar to move, double-click it to zoom, drag a corner to resize.",
-    ),
-    (
-        Icon::Terminal,
-        "Explore under the hood",
-        "Every app is its own process. Open Terminal and try ps, neofetch or ls.",
-    ),
+/// The things to try: a symbol, a title and a line.
+const TIPS: [(Symbol, &str, &str); 3] = [
+    (Symbol::Clock, "Meet Crest", "It shows the time and rises when something happens."),
+    (Symbol::Grid, "Pin your apps", "Drag from Shoal into the first bay of Harbor."),
+    (Symbol::Document, "Learn in short dips", "Six lessons, a few minutes each."),
 ];
+
+/// The colour of each wallpaper's chip.
+const DOTS: [Color; 3] = [Color::Blue, Color::Teal, Color::Orange];
+
+impl Welcome {
+    fn thumb(&self, i: u8, dark: bool) -> Option<Rc<Pixmap>> {
+        let mut thumbs = self.thumbs.borrow_mut();
+        let slot = &mut thumbs[i as usize][dark as usize];
+        if slot.is_none() {
+            let path = wallpaper::file(i, dark)?.replace("/System/Wallpapers/", "/System/Wallpapers/Thumbnails/");
+            let img = corekit::fs::read(&path).ok().and_then(|d| aurora_image::decode(&d).ok())?;
+            *slot = Some(Rc::new(Pixmap { width: img.width, height: img.height, pixels: img.pixels }));
+        }
+        slot.clone()
+    }
+
+    fn wallpaper_card(&self, i: u8, dark: bool) -> View<'_, Msg> {
+        let on = theme::wallpaper() == i;
+        let thumb = self.thumb(i, dark);
+        let picture = Canvas::new(move |cv, r| {
+            match &thumb {
+                // Cover the card, cropping what overflows.
+                Some(p) => {
+                    let (sw, sh) = (p.width as i32, p.height as i32);
+                    let k = (r.w * 1000 / sw.max(1)).max(r.h * 1000 / sh.max(1));
+                    let (w, h) = (sw * k / 1000, sh * k / 1000);
+                    let dst = waveui::lumen::geom::Rect::new(r.x + (r.w - w) / 2, r.y + (r.h - h) / 2, w, h);
+                    cv.draw_image_rounded(&p.pixels, p.width, p.height, dst, r, 14);
+                }
+                None => {
+                    let px = wallpaper::generate(i, r.w, r.h);
+                    cv.draw_image_rounded(&px, r.w as u32, r.h as u32, r, r, 14);
+                }
+            }
+            if on {
+                cv.stroke_round_rect(r, 14, theme::accent());
+                cv.stroke_round_rect(r.inset(1), 13, theme::accent());
+            }
+        })
+        .height(128)
+        .fill_width();
+        let chip = HStack::new()
+            .push(
+                Canvas::new(move |cv, r| {
+                    let (x, y) = r.center();
+                    cv.fill_circle(x, y, 4, DOTS[i as usize].argb());
+                })
+                .size(10, 10),
+            )
+            .push(
+                Text::new(wallpaper::NAMES[i as usize])
+                    .style(TextStyle::Sized(12, waveui::style::Weight::Bold))
+                    .foreground(Color::Custom(0xFFFF_FFFF)),
+            )
+            .spacing(6)
+            .padding_xy(9, 4)
+            .background_rounded(Color::Custom(0xB00B_0E18), 11);
+        ZStack::with(vec![
+            picture,
+            VStack::new()
+                .push(Spacer::new())
+                .push(HStack::new().push(chip).push(Spacer::new()).fill_width())
+                .padding(12)
+                .fill(),
+        ])
+        .height(128)
+        .on_tap(Msg::Wallpaper(i))
+        .grow(1)
+    }
+
+    fn tip<'a>(symbol: Symbol, title: &str, body: &str) -> View<'a, Msg> {
+        HStack::new()
+            .push(
+                Image::symbol(symbol)
+                    .symbol_size(18)
+                    .foreground(Color::AccentText)
+                    .size(40, 40)
+                    .background_rounded(Color::Custom(waveui::lumen::canvas::with_alpha(theme::accent(), 0x2E)), 12),
+            )
+            .push(
+                VStack::new()
+                    .push(Text::new(title).style(TextStyle::Sized(14, waveui::style::Weight::Bold)))
+                    .push(
+                        Text::paragraph(body)
+                            .style(TextStyle::Sized(12, waveui::style::Weight::Regular))
+                            .foreground(Color::SecondaryLabel),
+                    )
+                    .spacing(2)
+                    .alignment(Align::Start)
+                    .grow(1),
+            )
+            .spacing(14)
+            .padding(16)
+            .background_rounded(Color::Fill, 14)
+            .border(Color::Separator, 14)
+            .grow(1)
+    }
+}
 
 impl App for Welcome {
     type Message = Msg;
@@ -39,7 +142,7 @@ impl App for Welcome {
         "Welcome to WaveOS Aurora".into()
     }
     fn size(&self) -> (i32, i32) {
-        (640, 440)
+        (980, 660)
     }
     fn resizable(&self) -> bool {
         false
@@ -47,71 +150,82 @@ impl App for Welcome {
 
     fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
         match msg {
-            Msg::GetStarted => {
-                cx.open_app("Learn");
+            Msg::Wallpaper(i) => cx.request(Request::SetWallpaper(i)),
+            Msg::Appearance(i) => cx.request(Request::SetDark(i == 1)),
+            Msg::Learn => cx.open_app("Learn"),
+            Msg::Later => {
+                corekit::prefs::set_bool("welcome_again", true);
                 cx.close();
             }
-            Msg::About => cx.open_app("About"),
+            Msg::Start => {
+                corekit::prefs::set_bool("welcome_again", false);
+                cx.close();
+            }
         }
     }
 
-    fn view(&self, _env: &Env) -> View<'_, Msg> {
-        // The hero banner, in the aurora gradient.
-        let hero = Canvas::new(|cv, hero| {
-            cv.fill_round_rect_with(hero, 14, |x, y| {
-                let tx = (x - hero.x) * 256 / hero.w.max(1);
-                let ty = (y - hero.y) * 256 / hero.h.max(1);
-                let a = mix(rgb(0x5B, 0x3F, 0xE0), rgb(0x16, 0xB8, 0xA6), tx);
-                mix(a, rgb(0x0B, 0x12, 0x33), ty / 2)
-            });
-            let r = |x, y, w, h| waveui::lumen::geom::Rect::new(hero.right() - x, hero.y + y, w, h);
-            icons::wave(cv, r(190, 30, 160, 70), 2, 5, 0x50FF_FFFF);
-            icons::wave(cv, r(170, 52, 130, 50), 2, 3, 0x38FF_FFFF);
-            cv.text(hero.x + 28, hero.y + 62, "Welcome to WaveOS Aurora", theme::ui_bold(28), 0xFFFF_FFFF);
-            cv.text(
-                hero.x + 28,
-                hero.y + 96,
-                "A brand-new operating system, built from scratch.",
-                theme::ui(16),
-                0xDDFF_FFFF,
-            );
-        })
-        .height(132)
+    fn view(&self, env: &Env) -> View<'_, Msg> {
+        let heading = |s: &'static str| Text::new(s).style(TextStyle::Sized(15, waveui::style::Weight::Bold));
+        let walls = HStack::with((0..3u8).map(|i| self.wallpaper_card(i, env.dark)).collect()).spacing(20).fill_width();
+        let tips = HStack::with(
+            TIPS.iter()
+                .enumerate()
+                .map(|(i, &(s, t, b))| {
+                    let card = Self::tip(s, t, b);
+                    if i == 2 {
+                        card.on_tap(Msg::Learn)
+                    } else {
+                        card
+                    }
+                })
+                .collect(),
+        )
+        .spacing(14)
+        .alignment(Align::Stretch)
         .fill_width();
-        let tips = TIPS.iter().map(|&(icon, title, body)| {
-            HStack::new()
-                .push(Image::app_icon(icon, 40))
-                .push(
-                    VStack::new()
-                        .push(Text::new(title).style(TextStyle::Headline))
-                        .push(Text::new(body).foreground(Color::SecondaryLabel))
-                        .spacing(3)
-                        .alignment(Align::Start)
-                        .grow(1),
-                )
-                .spacing(16)
-                .fill_width()
-        });
         VStack::new()
-            .push(hero)
-            .push(VStack::with(tips.collect()).spacing(18).padding_xy(16, 6))
+            .push(Image::app_icon(Icon::Aurora, 56))
+            .push(
+                VStack::new()
+                    .push(
+                        Text::new("Welcome to WaveOS Aurora")
+                            .style(TextStyle::Sized(34, waveui::style::Weight::Display)),
+                    )
+                    .push(
+                        Text::new("Three quick choices and you're in the water.")
+                            .style(TextStyle::Sized(15, waveui::style::Weight::Regular)),
+                    )
+                    .spacing(8)
+                    .padding_insets(Insets { top: 6, leading: 0, bottom: 18, trailing: 0 }),
+            )
+            .push(
+                HStack::new()
+                    .push(heading("1 · Pick a wallpaper. The colours follow it.").grow(1))
+                    .push(Picker::new(["Light", "Dark"], env.dark as usize).on_change(Msg::Appearance).width(170))
+                    .fill_width(),
+            )
+            .push(walls)
+            .push(heading("2 · Then try these").padding_insets(Insets { top: 10, leading: 0, bottom: 0, trailing: 0 }))
+            .push(tips)
             .push(Spacer::new())
             .push(
                 HStack::new()
                     .push(Spacer::new())
-                    .push(Button::new("About This Computer").action(Msg::About).min_width(148))
+                    .push(Button::new("Show this again later").action(Msg::Later).button_style(ButtonStyle::Plain))
                     .push(
-                        Button::new("Get Started")
-                            .action(Msg::GetStarted)
+                        Button::new("Start")
+                            .action(Msg::Start)
                             .button_style(ButtonStyle::Prominent)
+                            .control_size(ControlSize::Large)
                             .shortcut(Shortcut::default_action())
-                            .min_width(148),
+                            .min_width(90),
                     )
-                    .spacing(14),
+                    .spacing(22)
+                    .fill_width(),
             )
-            .spacing(18)
+            .spacing(14)
             .alignment(Align::Stretch)
-            .padding_insets(Insets { top: 8, leading: 20, bottom: 22, trailing: 24 })
+            .padding_insets(Insets { top: 30, leading: 30, bottom: 28, trailing: 30 })
             .fill()
     }
 }
@@ -119,5 +233,5 @@ impl App for Welcome {
 corekit::entry!(main);
 
 fn main(_: corekit::Args) -> i32 {
-    waveui::run(Welcome)
+    waveui::run(Welcome { thumbs: RefCell::new(Default::default()) })
 }

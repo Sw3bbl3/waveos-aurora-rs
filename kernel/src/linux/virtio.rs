@@ -32,6 +32,7 @@ extern "C" {
     fn waveos_virtio_probe(vdev: *mut c_void, drv: *const c_void) -> c_int;
     fn waveos_virtio_drvdata(vdev: *mut c_void) -> *mut c_void;
     fn waveos_virtio_vq_interrupt(vq: *mut c_void);
+    fn waveos_virtio_config_interrupt(vdev: *mut c_void, drv: *const c_void);
 }
 
 struct Ring {
@@ -49,6 +50,10 @@ struct Queue {
 
 struct Device {
     t: Transport,
+    /// The Linux `struct virtio_device`, once created.
+    vdev: core::sync::atomic::AtomicUsize,
+    /// The configuration generation last seen (it changes with the config).
+    generation: core::sync::atomic::AtomicU8,
     msix: bool,
     /// Some queue did not take the interrupt vector: poll.
     polling: AtomicBool,
@@ -75,9 +80,20 @@ pub fn probe_gpus() -> Vec<*mut c_void> {
             continue;
         };
         let msix = d.enable_msi("virtio-gpu", interrupt, 0).is_some();
-        t.no_config_interrupt();
-        let dev: &'static Device =
-            Box::leak(Box::new(Device { t, msix, polling: AtomicBool::new(!msix), queues: IrqMutex::new(Vec::new()) }));
+        // Configuration changes (a new display size) share the queues' vector.
+        if msix {
+            t.config_interrupt(0);
+        } else {
+            t.no_config_interrupt();
+        }
+        let dev: &'static Device = Box::leak(Box::new(Device {
+            t,
+            msix,
+            vdev: core::sync::atomic::AtomicUsize::new(0),
+            generation: core::sync::atomic::AtomicU8::new(0),
+            polling: AtomicBool::new(!msix),
+            queues: IrqMutex::new(Vec::new()),
+        }));
         DEVICES.lock().push(dev);
 
         let (mut start, mut len) = ([0u64; 6], [0u64; 6]);
@@ -103,6 +119,8 @@ pub fn probe_gpus() -> Vec<*mut c_void> {
             log!("virtio-gpu", "the Linux driver did not take the device ({ret})");
             continue;
         }
+        dev.generation.store(dev.t.config_generation(), Ordering::Relaxed);
+        dev.vdev.store(vdev as usize, Ordering::Release);
         log!("virtio-gpu", "Linux virtio-gpu driver bound{}", if msix { ", interrupts via MSI-X" } else { "" });
         out.push(unsafe { waveos_virtio_drvdata(vdev) });
     }
@@ -118,7 +136,13 @@ pub fn needs_polling() -> bool {
 /// used buffers waiting (no locks held during the calls).
 pub fn poll() {
     let mut ready: Vec<usize> = Vec::new();
+    let mut changed: Vec<usize> = Vec::new();
     for dev in DEVICES.lock().iter() {
+        let vdev = dev.vdev.load(Ordering::Acquire);
+        let generation = dev.t.config_generation();
+        if vdev != 0 && dev.generation.swap(generation, Ordering::Relaxed) != generation {
+            changed.push(vdev);
+        }
         for q in dev.queues.lock().iter() {
             if q.ring.lock().q.has_used() {
                 ready.push(q.linux);
@@ -127,6 +151,10 @@ pub fn poll() {
     }
     for vq in ready {
         unsafe { waveos_virtio_vq_interrupt(vq as *mut c_void) };
+    }
+    let drv = unsafe { waveos_virtio_driver_virtio_gpu_driver };
+    for vdev in changed {
+        unsafe { waveos_virtio_config_interrupt(vdev as *mut c_void, drv) };
     }
 }
 

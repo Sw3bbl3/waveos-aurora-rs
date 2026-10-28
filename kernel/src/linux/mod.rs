@@ -31,6 +31,19 @@ mod imp {
         fn waveos_lkpi_run_pending() -> u64;
         fn waveos_drm_display_open(dev: *mut c_void, max_w: u32, max_h: u32, info: *mut DisplayInfo) -> *mut c_void;
         fn waveos_drm_display_flush(display: *mut c_void, x: c_int, y: c_int, w: c_int, h: c_int) -> c_int;
+        fn waveos_drm_display_modes(display: *mut c_void, out: *mut Mode, max: c_int) -> c_int;
+        fn waveos_drm_display_set_mode(display: *mut c_void, w: u32, h: u32, info: *mut DisplayInfo) -> c_int;
+    }
+
+    /// `struct waveos_mode` in kernel/linux/drm/waveos_display.c: a size the
+    /// screen can show.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default, Debug)]
+    pub struct Mode {
+        pub width: u32,
+        pub height: u32,
+        pub refresh: u32,
+        pub preferred: u32,
     }
 
     /// `struct waveos_display_info` in kernel/linux/drm/waveos_display.c.
@@ -222,6 +235,11 @@ mod imp {
 
     static DISPLAY: Display = Display { handle: AtomicPtr::new(core::ptr::null_mut()), info: IrqMutex::new(None) };
 
+    /// Serializes probing and mode changes (they block on the GPU).
+    static MODESET: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
+    /// The preferred size the last probe reported.
+    static PREFERRED: IrqMutex<(u32, u32)> = IrqMutex::new((0, 0));
+
     /// Starts the worker, initializes DRM and probes the GPUs the ported
     /// drivers support. Call after PCI enumeration, with the scheduler running.
     pub fn init() {
@@ -241,6 +259,16 @@ mod imp {
             }
             DISPLAY.handle.store(handle, Ordering::Release);
             *DISPLAY.info.lock() = Some(info);
+            let modes = display_modes();
+            let largest = modes.iter().map(|m| (m.width, m.height)).max_by_key(|&(w, h)| w as u64 * h as u64);
+            log!(
+                "linux",
+                "display {}x{}; {} modes, up to {:?}",
+                info.width,
+                info.height,
+                modes.len(),
+                largest.unwrap_or_default()
+            );
             break;
         }
     }
@@ -248,6 +276,54 @@ mod imp {
     /// The display a ported GPU driver runs, if there is one.
     pub fn display() -> Option<DisplayInfo> {
         *DISPLAY.info.lock()
+    }
+
+    /// The sizes the screen can show (probing the connectors again).
+    pub fn display_modes() -> alloc::vec::Vec<Mode> {
+        let handle = DISPLAY.handle.load(Ordering::Acquire);
+        if handle.is_null() {
+            return alloc::vec::Vec::new();
+        }
+        let _guard = MODESET.lock();
+        let mut out = alloc::vec![Mode::default(); 64];
+        let n = unsafe { waveos_drm_display_modes(handle, out.as_mut_ptr(), out.len() as c_int) };
+        out.truncate(n.max(0) as usize);
+        if let Some(p) = out.iter().find(|m| m.preferred != 0) {
+            *PREFERRED.lock() = (p.width, p.height);
+        }
+        out
+    }
+
+    /// After a hotplug event: the preferred size, if it is not the one the
+    /// last probe reported (the host window was resized, say).
+    pub fn display_preferred_changed() -> Option<(u32, u32)> {
+        let before = *PREFERRED.lock();
+        display_modes();
+        let now = *PREFERRED.lock();
+        (now != before && now != (0, 0)).then_some(now)
+    }
+
+    /// Switches the screen to `w`×`h`; the old pixels are gone afterwards.
+    pub fn display_set_mode(w: u32, h: u32) -> Option<DisplayInfo> {
+        let handle = DISPLAY.handle.load(Ordering::Acquire);
+        if handle.is_null() {
+            return None;
+        }
+        let _guard = MODESET.lock();
+        let mut info = DisplayInfo { pixels: core::ptr::null_mut(), width: 0, height: 0, pitch: 0 };
+        let ret = unsafe { waveos_drm_display_set_mode(handle, w, h, &mut info) };
+        if ret != 0 {
+            log!("linux", "could not show {}x{} ({})", w, h, ret);
+            return None;
+        }
+        *DISPLAY.info.lock() = Some(info);
+        Some(info)
+    }
+
+    /// DRM's hotplug event: the screen's modes may have changed.
+    #[no_mangle]
+    extern "C" fn waveos_display_hotplug() {
+        crate::gui::display_changed();
     }
 
     /// Shows the pixels in the rectangle (after drawing into `display().pixels`).

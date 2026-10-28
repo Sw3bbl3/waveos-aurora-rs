@@ -1,8 +1,10 @@
-//! Notes — a text editor.
+//! Notes — a library of notes.
 //!
-//! Selection with mouse and keyboard, the clipboard, undo/redo, find with
-//! highlighted matches, adjustable font and size, word count, Save As, and a
-//! reminder about unsaved changes when closing.
+//! Notes live as text files in /Documents/Notes; the first line of each is
+//! its title. The sidebar lists them newest first and seeks through them;
+//! the editor saves as you type, renames the file after the title, and
+//! draws `- [ ] ` lines as checkboxes. A file opened from Files is edited in
+//! place and shown at the top of the list.
 
 #![no_std]
 #![no_main]
@@ -10,17 +12,44 @@
 extern crate alloc;
 
 use corekit::fs;
+use corekit::process::desktop;
 use waveui::prelude::*;
 use waveui::style::Weight;
 
+const LIBRARY: &str = "/Documents/Notes";
 const SIZES: [u16; 7] = [12, 13, 14, 15, 17, 20, 24];
-const FOLDERS: [&str; 4] = ["/Documents", "/Desktop", "/Downloads", "/Pictures"];
+const TITLE: &str = "title";
 const TEXT: &str = "text";
 const FIND: &str = "find";
+const BULLET: &str = "• ";
+const TASK: &str = waveui::text::TASK_OPEN;
+/// Saves this long after the last keystroke.
+const AUTOSAVE_MS: u64 = 800;
 
-enum Sheet {
-    SaveAs { name: String, folder: usize, then_close: bool },
-    ConfirmClose,
+const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// A note in the sidebar.
+struct Entry {
+    path: String,
+    title: String,
+    preview: String,
+    /// Title and body in lower case, for seeking.
+    haystack: String,
+    mtime: u64,
 }
 
 struct Find {
@@ -30,86 +59,247 @@ struct Find {
 }
 
 pub struct Notes {
-    text: String,
-    /// Bumped on every edit; compared with `saved_rev` for "Edited".
+    library: Vec<Entry>,
+    /// A file opened from elsewhere (not in the library).
+    outside: Option<Entry>,
+    /// The note being edited; `None` for a new note not saved yet.
+    path: Option<String>,
+    title: String,
+    body: String,
+    mtime: u64,
+    /// Bumped on every edit; compared with `saved_rev`.
     rev: u64,
     saved_rev: u64,
-    path: Option<String>,
-    mono: bool,
-    size: usize,
+    query: String,
     find: Option<Find>,
-    sheet: Option<Sheet>,
-    status: Option<String>,
+    size: usize,
     caret: (usize, usize),
+    status: Option<String>,
 }
 
 #[derive(Clone)]
 pub enum Msg {
+    Open(String),
+    New,
+    Title(String),
     Edit(String),
     Caret((usize, usize)),
+    FocusBody,
+    Autosave,
     Save,
-    SaveAs,
-    Font(usize),
+    Seek(String),
+    Wrap(&'static str),
+    Lines(&'static str),
+    Share,
+    Trash(String),
     Smaller,
     Larger,
     ToggleFind,
     Query(String),
     FindStep(i32),
     CloseFind,
-    SheetName(String),
-    SheetFolder(usize),
-    SelectStem(usize),
-    SheetConfirm,
-    SheetCancel,
-    Discard,
     NewWindow,
     ClearStatus,
 }
 
+/// Seconds since 2000-01-01, local time (as file times are kept).
+fn now_secs() -> u64 {
+    let d = corekit::time::now();
+    let days = days_since_2000(d.year as i64, d.month as i64, d.day as i64);
+    (days.max(0) as u64) * 86400 + d.hour as u64 * 3600 + d.minute as u64 * 60 + d.second as u64
+}
+
+fn days_since_2000(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468 - 10957
+}
+
+/// "Today", "Yesterday" or "Oct 22".
+fn short_date(secs: u64) -> String {
+    let today = now_secs() / 86400;
+    let day = secs / 86400;
+    if day == today {
+        String::from("Today")
+    } else if day + 1 == today {
+        String::from("Yesterday")
+    } else {
+        let d = corekit::time::from_seconds(secs);
+        format!("{} {}", corekit::time::MONTHS[(d.month.clamp(1, 12) - 1) as usize], d.day)
+    }
+}
+
+/// "Monday 26 October 2026".
+fn long_date(secs: u64) -> String {
+    let d = corekit::time::from_seconds(secs);
+    format!("{} {} {} {}", WEEKDAYS[d.weekday as usize % 7], d.day, MONTHS[(d.month.clamp(1, 12) - 1) as usize], d.year)
+}
+
+fn clock(secs: u64) -> String {
+    let d = corekit::time::from_seconds(secs);
+    format!("{}:{:02}", d.hour, d.minute)
+}
+
+/// The first line with words in it, without list or checkbox marks.
+fn preview_of(body: &str) -> String {
+    let line = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = line.trim_start_matches(BULLET).trim_start_matches(TASK);
+    let line = line.strip_prefix("- [x] ").or_else(|| line.strip_prefix("- [X] ")).unwrap_or(line);
+    let mut s: String = line.chars().take(80).collect();
+    if s.is_empty() {
+        s.push_str("No more text");
+    }
+    s
+}
+
+/// Splits a library file into its title (the first line) and body.
+fn split(text: &str) -> (String, String) {
+    match text.split_once('\n') {
+        Some((t, b)) => (String::from(t.trim_end_matches('\r')), String::from(b)),
+        None => (String::from(text), String::new()),
+    }
+}
+
+fn entry(path: String, mtime: u64, outside: bool) -> Entry {
+    let text = fs::read(&path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    let (title, body) = if outside { (String::from(fs::file_name(&path)), text) } else { split(&text) };
+    let title = if title.trim().is_empty() { String::from("New Note") } else { title };
+    let mut haystack = title.to_lowercase();
+    haystack.push('\n');
+    haystack.push_str(&body.chars().take(4000).collect::<String>().to_lowercase());
+    Entry { path, preview: preview_of(&body), title, haystack, mtime }
+}
+
+/// A file name from a title: no slashes, not too long.
+fn file_stem(title: &str) -> String {
+    let s: String =
+        title.trim().chars().map(|c| if c == '/' || c == '\\' || c.is_control() { '-' } else { c }).take(60).collect();
+    let s = String::from(s.trim().trim_start_matches('.'));
+    if s.is_empty() {
+        String::from("Untitled")
+    } else {
+        s
+    }
+}
+
 impl Notes {
     pub fn new(path: Option<String>) -> Self {
-        let text = path
-            .as_deref()
-            .and_then(|p| fs::read(p).ok())
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .unwrap_or_default();
-        Self {
-            text,
+        if !fs::is_dir(LIBRARY) {
+            if !fs::is_dir("/Documents") {
+                let _ = fs::mkdir("/Documents");
+            }
+            let _ = fs::mkdir(LIBRARY);
+        }
+        let mut n = Self {
+            library: Vec::new(),
+            outside: None,
+            path: None,
+            title: String::new(),
+            body: String::new(),
+            mtime: now_secs(),
             rev: 0,
             saved_rev: 0,
-            path,
-            mono: false,
-            size: 3,
+            query: String::new(),
             find: None,
-            sheet: None,
-            status: None,
+            size: 3,
             caret: (1, 1),
+            status: None,
+        };
+        n.reload();
+        if let Some(p) = path.filter(|p| fs::exists(p)) {
+            if !n.in_library(&p) {
+                let mtime = fs::stat(&p).map(|s| s.mtime).unwrap_or(0);
+                n.outside = Some(entry(p.clone(), mtime, true));
+            }
+            n.load(&p);
+        } else if let Some(first) = n.library.first().map(|e| e.path.clone()) {
+            n.load(&first);
         }
+        n
+    }
+
+    fn in_library(&self, path: &str) -> bool {
+        fs::parent(path) == LIBRARY
+    }
+
+    fn is_outside(&self) -> bool {
+        self.path.as_deref().is_some_and(|p| !self.in_library(p))
     }
 
     fn dirty(&self) -> bool {
         self.rev != self.saved_rev
     }
 
-    fn name(&self) -> String {
-        match &self.path {
-            Some(p) => String::from(fs::file_name(p)),
-            None => String::from("Untitled"),
+    fn reload(&mut self) {
+        self.library = fs::read_dir(LIBRARY)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| !e.is_dir && !e.name.starts_with('.'))
+            .filter(|e| e.name.ends_with(".txt") || e.name.ends_with(".md") || !e.name.contains('.'))
+            .map(|e| entry(fs::join(LIBRARY, &e.name), e.mtime, false))
+            .collect();
+        self.library.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.title.cmp(&b.title)));
+    }
+
+    fn load(&mut self, path: &str) {
+        let text = fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        if self.in_library(path) {
+            (self.title, self.body) = split(&text);
+        } else {
+            self.title = String::from(fs::file_name(path));
+            self.body = text;
         }
+        self.mtime = fs::stat(path).map(|s| s.mtime).unwrap_or_else(|_| now_secs());
+        self.path = Some(String::from(path));
+        self.rev = 0;
+        self.saved_rev = 0;
+        self.find = None;
     }
 
     fn flash(&mut self, cx: &mut Context<Msg>, s: String) {
         self.status = Some(s);
         cx.cancel(|m| matches!(m, Msg::ClearStatus));
-        cx.after(4000, Msg::ClearStatus);
+        cx.after(3000, Msg::ClearStatus);
     }
 
-    fn write_to(&mut self, cx: &mut Context<Msg>, path: String) -> bool {
-        match fs::write(&path, self.text.as_bytes()) {
+    /// Writes the note if it changed. A library note is renamed after its
+    /// title when that name is free.
+    fn save(&mut self, cx: &mut Context<Msg>) -> bool {
+        cx.cancel(|m| matches!(m, Msg::Autosave));
+        if !self.dirty() {
+            return true;
+        }
+        let outside = self.is_outside();
+        if self.path.is_none() && self.title.trim().is_empty() && self.body.trim().is_empty() {
+            self.saved_rev = self.rev;
+            return true;
+        }
+        let content = if outside { self.body.clone() } else { format!("{}\n{}", self.title, self.body) };
+        let stem = file_stem(&self.title);
+        let target = match &self.path {
+            Some(p) if outside => p.clone(),
+            Some(p) => {
+                let wanted = fs::join(LIBRARY, &format!("{stem}.txt"));
+                if *p != wanted && !fs::exists(&wanted) && fs::rename(p, &wanted).is_ok() {
+                    wanted
+                } else {
+                    p.clone()
+                }
+            }
+            None => fs::unique_name(LIBRARY, &stem, ".txt"),
+        };
+        match fs::write(&target, content.as_bytes()) {
             Ok(()) => {
-                self.flash(cx, format!("Saved to {path}"));
-                self.path = Some(path);
+                self.path = Some(target.clone());
                 self.saved_rev = self.rev;
+                self.mtime = fs::stat(&target).map(|s| s.mtime).unwrap_or_else(|_| now_secs());
+                if outside {
+                    self.outside = Some(entry(target, self.mtime, true));
+                } else {
+                    self.reload();
+                }
                 true
             }
             Err(e) => {
@@ -119,33 +309,74 @@ impl Notes {
         }
     }
 
-    fn save(&mut self, cx: &mut Context<Msg>) {
-        match self.path.clone() {
-            Some(p) => {
-                self.write_to(cx, p);
-            }
-            None => self.open_save_as(cx, false),
+    fn edited(&mut self, cx: &mut Context<Msg>) {
+        self.rev += 1;
+        cx.cancel(|m| matches!(m, Msg::Autosave));
+        cx.after(AUTOSAVE_MS, Msg::Autosave);
+    }
+
+    /// Wraps the selection in `mark` (`**` bold, `_` italic).
+    fn wrap(&mut self, cx: &mut Context<Msg>, mark: &str) {
+        let now = cx.now();
+        let Some(e) = cx.editor(TEXT) else { return };
+        let (a, b) = e.edit.selection().unwrap_or((e.edit.caret(), e.edit.caret()));
+        let inner = String::from(&e.edit.text()[a..b]);
+        e.edit.select(a, b);
+        e.edit.insert(&format!("{mark}{inner}{mark}"), now);
+        if inner.is_empty() {
+            e.edit.set_caret(a + mark.len(), false);
+        } else {
+            e.edit.select(a + mark.len(), b + mark.len());
         }
+        self.body = String::from(e.edit.text());
+        cx.focus(TEXT);
+        self.edited(cx);
     }
 
-    fn open_save_as(&mut self, cx: &mut Context<Msg>, then_close: bool) {
-        let base = String::from(self.path.as_deref().map(fs::file_name).unwrap_or("Untitled.txt"));
-        let folder = self.path.as_deref().and_then(|p| FOLDERS.iter().position(|f| fs::parent(p) == *f)).unwrap_or(0);
-        self.sheet = Some(Sheet::SaveAs { name: base.clone(), folder, then_close });
-        // Select the name without its extension, like other systems do, once the field shows.
-        cx.focus("save-name");
-        let stem = base.rfind('.').filter(|&i| i > 0).unwrap_or(base.len());
-        cx.after(40, Msg::SelectStem(stem));
+    /// Turns the selected lines into a list (`• `) or a checklist (`- [ ] `),
+    /// or back into plain lines when they all already are.
+    fn toggle_lines(&mut self, cx: &mut Context<Msg>, mark: &'static str) {
+        let now = cx.now();
+        let Some(e) = cx.editor(TEXT) else { return };
+        let (a, b) = e.edit.selection().unwrap_or((e.edit.caret(), e.edit.caret()));
+        let text = e.edit.text();
+        let start = text[..a].rfind('\n').map_or(0, |i| i + 1);
+        let end = text[b..].find('\n').map_or(text.len(), |i| b + i);
+        let marks = [BULLET, TASK, "- [x] ", "- [X] "];
+        let strip = |l: &str| -> String {
+            let m = marks.iter().find(|m| l.starts_with(**m)).map_or(0, |m| m.len());
+            String::from(&l[m..])
+        };
+        let lines: Vec<&str> = text[start..end].split('\n').collect();
+        let all = lines.iter().all(|l| {
+            if mark == TASK {
+                l.starts_with(TASK) || l.starts_with("- [x] ") || l.starts_with("- [X] ")
+            } else {
+                l.starts_with(mark)
+            }
+        });
+        let out: Vec<String> =
+            lines.iter().map(|l| if all { strip(l) } else { format!("{mark}{}", strip(l)) }).collect();
+        let out = out.join("\n");
+        e.edit.select(start, end);
+        e.edit.insert(&out, now);
+        self.body = String::from(e.edit.text());
+        cx.focus(TEXT);
+        self.edited(cx);
     }
 
-    /// Recomputes the matches of the find query.
+    /// What starts the line the caret is on.
+    fn caret_line(&self) -> &str {
+        self.body.split('\n').nth(self.caret.0.saturating_sub(1)).unwrap_or("")
+    }
+
     fn refresh_find(&mut self, caret: usize) {
         let Some(f) = &mut self.find else { return };
         f.matches.clear();
         let q = f.query.to_lowercase();
         if !q.is_empty() {
-            let hay = self.text.to_lowercase();
-            if hay.len() == self.text.len() {
+            let hay = self.body.to_lowercase();
+            if hay.len() == self.body.len() {
                 let mut from = 0;
                 while let Some(i) = hay[from..].find(&q) {
                     let a = from + i;
@@ -174,37 +405,224 @@ impl Notes {
         }
     }
 
-    fn confirm_sheet(&mut self, cx: &mut Context<Msg>) {
-        match self.sheet.take() {
-            Some(Sheet::SaveAs { name, folder, then_close }) => {
-                let mut n = String::from(name.trim());
-                if n.is_empty() {
-                    n = String::from("Untitled.txt");
-                }
-                if !n.contains('.') {
-                    n.push_str(".txt");
-                }
-                let path = fs::join(FOLDERS[folder.min(FOLDERS.len() - 1)], &n);
-                if self.write_to(cx, path) && then_close {
-                    cx.close();
-                }
-            }
-            Some(Sheet::ConfirmClose) => {
-                if self.path.is_some() {
-                    self.save(cx);
-                    if !self.dirty() {
-                        cx.close();
-                    }
-                } else {
-                    self.open_save_as(cx, true);
-                }
-            }
-            None => {}
-        }
+    fn row<'a>(&self, e: &'a Entry, selected: bool) -> View<'a, Msg> {
+        VStack::new()
+            .push(Text::new(e.title.clone()).style(TextStyle::Sized(14, Weight::Bold)).foreground(Color::Label))
+            .push(
+                Text::new(format!("{} · {}", short_date(e.mtime), e.preview))
+                    .style(TextStyle::Sized(12, Weight::Bold))
+                    .foreground(Color::TertiaryLabel),
+            )
+            .spacing(3)
+            .alignment(Align::Start)
+            .padding_xy(14, 12)
+            .fill_width()
+            .corner_radius(14)
+            .selected(selected)
+            .on_tap(Msg::Open(e.path.clone()))
+            .context_menu(vec![
+                MenuItem::new("Open in New Window", Msg::NewWindow),
+                MenuItem::new("Move to Trash", Msg::Trash(e.path.clone())),
+            ])
     }
 
-    fn font_style(&self) -> TextStyle {
-        TextStyle::Sized(SIZES[self.size], if self.mono { Weight::Mono } else { Weight::Regular })
+    fn sidebar(&self) -> View<'_, Msg> {
+        let q = self.query.to_lowercase();
+        let mut list = VStack::new().spacing(2).alignment(Align::Stretch);
+        if self.path.is_none() {
+            list = list.push(
+                VStack::new()
+                    .push(
+                        Text::new(if self.title.trim().is_empty() { "New Note" } else { self.title.as_str() })
+                            .style(TextStyle::Sized(14, Weight::Bold))
+                            .foreground(Color::Label),
+                    )
+                    .push(
+                        Text::new(format!("Today · {}", preview_of(&self.body)))
+                            .style(TextStyle::Sized(12, Weight::Bold))
+                            .foreground(Color::TertiaryLabel),
+                    )
+                    .spacing(3)
+                    .alignment(Align::Start)
+                    .padding_xy(14, 12)
+                    .fill_width()
+                    .corner_radius(14)
+                    .selected(true),
+            );
+        }
+        let shown = self.outside.iter().chain(self.library.iter()).filter(|e| q.is_empty() || e.haystack.contains(&q));
+        let mut any = false;
+        for e in shown {
+            any = true;
+            list = list.push(self.row(e, self.path.as_deref() == Some(e.path.as_str())));
+        }
+        if !any && self.path.is_some() {
+            list = list.push(
+                Text::centered(if q.is_empty() { "No notes yet" } else { "No notes match" })
+                    .style(TextStyle::Callout)
+                    .foreground(Color::SecondaryLabel)
+                    .padding_xy(12, 24)
+                    .fill_width(),
+            );
+        }
+        VStack::new()
+            .push(
+                HStack::new()
+                    .push(
+                        TextField::search("Seek in Notes", self.query.clone())
+                            .on_change(Msg::Seek)
+                            .shortcut(Shortcut::ctrl_shift('f'))
+                            .id("seek")
+                            .grow(1),
+                    )
+                    .push(
+                        Button::symbol(Symbol::Pencil)
+                            .action(Msg::New)
+                            .shortcut(Shortcut::ctrl('n'))
+                            .background_rounded(Color::Fill, 15)
+                            .corner_radius(15)
+                            .size(30, 30)
+                            .help("New Note (Ctrl+N)"),
+                    )
+                    .spacing(8)
+                    .padding_insets(Insets { top: 12, leading: 12, bottom: 10, trailing: 12 })
+                    .fill_width(),
+            )
+            .push(ScrollView::new(list.padding_insets(Insets { top: 0, leading: 10, bottom: 12, trailing: 10 })))
+            .spacing(0)
+            .fill()
+    }
+
+    fn toolbar<'a>(&'a self) -> View<'a, Msg> {
+        let line = self.caret_line();
+        let in_list = line.starts_with(BULLET);
+        let in_tasks = line.starts_with(TASK) || line.starts_with("- [x] ") || line.starts_with("- [X] ");
+        let tool = |v: View<'a, Msg>, on: bool| -> View<'a, Msg> {
+            let b = v.size(30, 30).corner_radius(15);
+            if on {
+                b.background_rounded(Color::SecondaryFill, 15)
+            } else {
+                b
+            }
+        };
+        let bold =
+            Button::with(Text::new("B").style(TextStyle::Sized(14, Weight::Bold))).button_style(ButtonStyle::Toolbar);
+        // An italic I, slanted by hand.
+        let italic = Button::with(
+            Canvas::new(|s, r| {
+                let f = TextStyle::Sized(15, Weight::Regular).font();
+                let y = r.y + (r.h + f.ascent as i32 + f.descent as i32) / 2;
+                s.text_slanted(r.x + (r.w - f.width("I")) / 2, y, "I", f, waveui::lumen::theme::current().text);
+            })
+            .size(14, 20),
+        )
+        .button_style(ButtonStyle::Toolbar);
+        let status = match &self.status {
+            Some(s) => s.clone(),
+            None if self.path.is_none() && !self.dirty() => String::new(),
+            None => format!("Edited {}", clock(self.mtime)),
+        };
+        toolbar(vec![
+            tool(bold.action(Msg::Wrap("**")).shortcut(Shortcut::ctrl('b')).help("Bold (Ctrl+B)"), false),
+            tool(italic.action(Msg::Wrap("_")).shortcut(Shortcut::ctrl('i')).help("Italic (Ctrl+I)"), false),
+            tool(Button::symbol(Symbol::List).action(Msg::Lines(BULLET)).help("Bulleted List"), in_list),
+            tool(
+                Button::symbol(Symbol::Check)
+                    .action(Msg::Lines(TASK))
+                    .shortcut(Shortcut::ctrl_shift('l'))
+                    .help("Checklist (Ctrl+Shift+L)"),
+                in_tasks,
+            ),
+            tool(
+                Button::symbol(Symbol::Search)
+                    .action(Msg::ToggleFind)
+                    .shortcut(Shortcut::ctrl('f'))
+                    .help("Find (Ctrl+F)"),
+                self.find.is_some(),
+            ),
+            Spacer::new(),
+            Text::new(status).style(TextStyle::Caption).foreground(Color::TertiaryLabel),
+            tool(Button::symbol(Symbol::Share).action(Msg::Share).help("Copy Note"), false),
+        ])
+    }
+
+    fn find_bar(&self) -> Option<View<'_, Msg>> {
+        let f = self.find.as_ref()?;
+        let count = if f.query.is_empty() {
+            String::new()
+        } else if f.matches.is_empty() {
+            String::from("Not found")
+        } else {
+            format!("{} of {}", f.current + 1, f.matches.len())
+        };
+        Some(
+            VStack::new()
+                .push(
+                    HStack::new()
+                        .push(
+                            TextField::search("Find", f.query.clone())
+                                .on_change(Msg::Query)
+                                .on_submit(Msg::FindStep(1))
+                                .id(FIND)
+                                .grow(1),
+                        )
+                        .push(Text::new(count).style(TextStyle::Callout).foreground(Color::SecondaryLabel))
+                        .push(Button::symbol(Symbol::ChevronUp).action(Msg::FindStep(-1)).help("Previous match"))
+                        .push(Button::symbol(Symbol::ChevronDown).action(Msg::FindStep(1)).help("Next match"))
+                        .push(Button::new("Done").action(Msg::CloseFind).shortcut(Shortcut::cancel()))
+                        .spacing(8)
+                        .padding_xy(18, 8)
+                        .fill_width(),
+                )
+                .push(Divider::new())
+                .spacing(0),
+        )
+    }
+
+    fn page(&self) -> View<'_, Msg> {
+        let (highlights, current) = match &self.find {
+            Some(f) => (f.matches.clone(), (!f.matches.is_empty()).then_some(f.current)),
+            None => (Vec::new(), None),
+        };
+        let title = if self.is_outside() {
+            Text::new(self.title.clone()).style(TextStyle::Sized(32, Weight::Display))
+        } else {
+            TextField::new("Title", self.title.clone())
+                .plain()
+                .style(TextStyle::Sized(32, Weight::Display))
+                .on_change(Msg::Title)
+                .on_submit(Msg::FocusBody)
+                .id(TITLE)
+        };
+        let column = VStack::new()
+            .push(
+                Text::new(long_date(self.mtime))
+                    .style(TextStyle::Sized(12, Weight::Bold))
+                    .foreground(Color::TertiaryLabel),
+            )
+            .push(title.fill_width())
+            .push(
+                TextEditor::new(self.body.clone())
+                    .on_change(Msg::Edit)
+                    .on_caret(Msg::Caret)
+                    .highlights(highlights, current)
+                    .checklists()
+                    .placeholder("Start writing…")
+                    .style(TextStyle::Sized(SIZES[self.size], Weight::Regular))
+                    .line_spacing(SIZES[self.size] as i32 / 2)
+                    .id(TEXT)
+                    .fill()
+                    .grow(1),
+            )
+            .spacing(10)
+            .alignment(Align::Stretch)
+            .fill()
+            .max_width(720);
+        HStack::new()
+            .push(column)
+            .push(Spacer::new())
+            .padding_insets(Insets { top: 34, leading: 56, bottom: 12, trailing: 40 })
+            .fill()
     }
 }
 
@@ -212,29 +630,90 @@ impl App for Notes {
     type Message = Msg;
 
     fn title(&self) -> String {
-        format!("{} — {}", self.name(), if self.dirty() { "Edited" } else { "Notes" })
+        if self.title.trim().is_empty() {
+            String::from("Notes")
+        } else {
+            format!("{} — Notes", self.title)
+        }
     }
 
     fn size(&self) -> (i32, i32) {
-        (640, 480)
+        (1140, 728)
     }
 
     fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
         match msg {
+            Msg::Open(p) => {
+                if self.path.as_deref() != Some(p.as_str()) && self.save(cx) {
+                    self.load(&p);
+                }
+            }
+            Msg::New => {
+                if self.save(cx) {
+                    self.path = None;
+                    self.title.clear();
+                    self.body.clear();
+                    self.mtime = now_secs();
+                    self.rev = 0;
+                    self.saved_rev = 0;
+                    self.find = None;
+                    self.query.clear();
+                    cx.focus(TITLE);
+                }
+            }
+            Msg::Title(t) => {
+                self.title = t.replace('\n', " ");
+                self.edited(cx);
+            }
             Msg::Edit(t) => {
-                self.text = t;
-                self.rev += 1;
+                self.body = t;
+                self.edited(cx);
                 let caret = cx.editor(TEXT).map(|e| e.edit.caret()).unwrap_or(0);
                 self.refresh_find(caret);
             }
             Msg::Caret(at) => self.caret = at,
-            Msg::Save => self.save(cx),
-            Msg::SaveAs => self.open_save_as(cx, false),
-            Msg::Font(i) => self.mono = i == 1,
+            Msg::FocusBody => {
+                cx.focus(TEXT);
+                if let Some(e) = cx.editor(TEXT) {
+                    e.edit.set_caret(0, false);
+                }
+            }
+            Msg::Autosave | Msg::Save => {
+                self.save(cx);
+            }
+            Msg::Seek(q) => self.query = q,
+            Msg::Wrap(mark) => self.wrap(cx, mark),
+            Msg::Lines(mark) => self.toggle_lines(cx, mark),
+            Msg::Share => {
+                let text = if self.is_outside() { self.body.clone() } else { format!("{}\n{}", self.title, self.body) };
+                cx.copy(&text);
+                self.flash(cx, String::from("Copied"));
+            }
+            Msg::Trash(p) => {
+                if self.path.as_deref() == Some(p.as_str()) {
+                    // Nothing left to save: the note is going away.
+                    self.saved_rev = self.rev;
+                    cx.cancel(|m| matches!(m, Msg::Autosave));
+                }
+                match desktop::trash(&p) {
+                    Ok(()) => {
+                        if self.outside.as_ref().is_some_and(|e| e.path == p) {
+                            self.outside = None;
+                        }
+                        self.reload();
+                        if self.path.as_deref() == Some(p.as_str()) {
+                            match self.library.first().map(|e| e.path.clone()) {
+                                Some(next) => self.load(&next),
+                                None => cx.send(Msg::New),
+                            }
+                        }
+                    }
+                    Err(e) => self.flash(cx, format!("Couldn't move to Trash: {e}")),
+                }
+            }
             Msg::Smaller => self.size = self.size.saturating_sub(1),
             Msg::Larger => self.size = (self.size + 1).min(SIZES.len() - 1),
             Msg::ToggleFind => {
-                // Seed the query with the selection, then type into the find field.
                 let selected = cx.editor(TEXT).map(|e| String::from(e.edit.selected_text())).unwrap_or_default();
                 let caret = cx.editor(TEXT).map(|e| e.edit.caret()).unwrap_or(0);
                 let seed = if !selected.is_empty() && !selected.contains('\n') { Some(selected) } else { None };
@@ -263,24 +742,6 @@ impl App for Notes {
                 self.find = None;
                 cx.focus(TEXT);
             }
-            Msg::SheetName(n) => {
-                if let Some(Sheet::SaveAs { name, .. }) = &mut self.sheet {
-                    *name = n;
-                }
-            }
-            Msg::SelectStem(stem) => {
-                if let Some(f) = cx.field("save-name") {
-                    f.edit.select(0, stem.min(f.text().len()));
-                }
-            }
-            Msg::SheetFolder(i) => {
-                if let Some(Sheet::SaveAs { folder, .. }) = &mut self.sheet {
-                    *folder = i;
-                }
-            }
-            Msg::SheetConfirm => self.confirm_sheet(cx),
-            Msg::SheetCancel => self.sheet = None,
-            Msg::Discard => cx.close(),
             Msg::NewWindow => cx.open_app("Notes"),
             Msg::ClearStatus => self.status = None,
         }
@@ -291,8 +752,7 @@ impl App for Notes {
             return None;
         }
         match ev.ch.map(|c| c.to_ascii_lowercase()) {
-            Some('s') if ev.mods.shift => Some(Msg::SaveAs),
-            Some('n') => Some(Msg::NewWindow),
+            Some('s') => Some(Msg::Save),
             Some('=' | '+') => Some(Msg::Larger),
             Some('-') => Some(Msg::Smaller),
             Some('g') if ev.mods.shift => Some(Msg::FindStep(-1)),
@@ -301,150 +761,21 @@ impl App for Notes {
         }
     }
 
-    fn close_requested(&mut self, _cx: &mut Context<Msg>) -> bool {
-        if self.dirty() {
-            self.sheet = Some(Sheet::ConfirmClose);
-            return false;
-        }
-        true
+    fn close_requested(&mut self, cx: &mut Context<Msg>) -> bool {
+        self.save(cx)
     }
 
     fn started(&mut self, cx: &mut Context<Msg>) {
-        cx.focus(TEXT);
-    }
-
-    fn sheet(&self, _env: &Env) -> Option<View<'_, Msg>> {
-        Some(match self.sheet.as_ref()? {
-            Sheet::SaveAs { name, folder, .. } => VStack::new()
-                .push(Text::new("Save As").style(TextStyle::Title2))
-                .push(
-                    TextField::new("Name", name.clone())
-                        .on_change(Msg::SheetName)
-                        .on_submit(Msg::SheetConfirm)
-                        .id("save-name"),
-                )
-                .push(row(
-                    "Where",
-                    Picker::new(FOLDERS.iter().map(|f| f.trim_start_matches('/')), *folder)
-                        .on_change(Msg::SheetFolder)
-                        .picker_style(PickerStyle::Menu)
-                        .width(160),
-                ))
-                .push(
-                    HStack::new()
-                        .push(Spacer::new())
-                        .push(Button::new("Cancel").action(Msg::SheetCancel).shortcut(Shortcut::cancel()).min_width(84))
-                        .push(
-                            Button::new("Save")
-                                .action(Msg::SheetConfirm)
-                                .button_style(ButtonStyle::Prominent)
-                                .shortcut(Shortcut::default_action())
-                                .min_width(84),
-                        )
-                        .spacing(8),
-                )
-                .spacing(14)
-                .alignment(Align::Stretch)
-                .width(380),
-            Sheet::ConfirmClose => Alert::new(
-                format!("Save changes to “{}”?", self.name()),
-                "Your changes will be lost if you don't save them.",
-            )
-            .button("Don't Save", Msg::Discard, AlertRole::Destructive)
-            .button("Cancel", Msg::SheetCancel, AlertRole::Cancel)
-            .button("Save", Msg::SheetConfirm, AlertRole::Default)
-            .view(),
-        })
+        if self.path.is_none() {
+            cx.focus(TITLE);
+        } else {
+            cx.focus(TEXT);
+        }
     }
 
     fn view(&self, _env: &Env) -> View<'_, Msg> {
-        let label = match &self.status {
-            Some(s) => s.clone(),
-            None => self.path.clone().unwrap_or_else(|| String::from("Not saved yet")),
-        };
-        let bar = toolbar(vec![
-            Text::new(label).foreground(Color::SecondaryLabel).grow(1),
-            Picker::new(["Sans", "Mono"], self.mono as usize).on_change(Msg::Font).width(120).help("Typeface"),
-            Button::with(Text::new("A").style(TextStyle::Sized(11, Weight::Bold)))
-                .action(Msg::Smaller)
-                .button_style(ButtonStyle::Toolbar)
-                .shortcut(Shortcut::ctrl('-'))
-                .help("Smaller text"),
-            Button::with(Text::new("A").style(TextStyle::Sized(17, Weight::Bold)))
-                .action(Msg::Larger)
-                .button_style(ButtonStyle::Toolbar)
-                .help("Larger text"),
-            Button::symbol(Symbol::Search).action(Msg::ToggleFind).shortcut(Shortcut::ctrl('f')).help("Find (Ctrl+F)"),
-            Button::new("Save").action(Msg::Save).button_style(ButtonStyle::Prominent).shortcut(Shortcut::ctrl('s')),
-        ]);
-        let find = self.find.as_ref().map(|f| {
-            let count = if f.query.is_empty() {
-                String::new()
-            } else if f.matches.is_empty() {
-                String::from("Not found")
-            } else {
-                format!("{} of {}", f.current + 1, f.matches.len())
-            };
-            VStack::new()
-                .push(
-                    HStack::new()
-                        .push(
-                            TextField::search("Find", f.query.clone())
-                                .on_change(Msg::Query)
-                                .on_submit(Msg::FindStep(1))
-                                .id(FIND)
-                                .grow(1),
-                        )
-                        .push(Text::new(count).style(TextStyle::Callout).foreground(Color::SecondaryLabel))
-                        .push(Button::symbol(Symbol::ChevronUp).action(Msg::FindStep(-1)).help("Previous match"))
-                        .push(Button::symbol(Symbol::ChevronDown).action(Msg::FindStep(1)).help("Next match"))
-                        .push(Button::new("Done").action(Msg::CloseFind).shortcut(Shortcut::cancel()))
-                        .spacing(8)
-                        .padding_xy(16, 7)
-                        .fill_width(),
-                )
-                .push(Divider::new())
-                .spacing(0)
-        });
-        let (highlights, current) = match &self.find {
-            Some(f) => (f.matches.clone(), (!f.matches.is_empty()).then_some(f.current)),
-            None => (Vec::new(), None),
-        };
-        let editor = TextEditor::new(self.text.clone())
-            .on_change(Msg::Edit)
-            .on_caret(Msg::Caret)
-            .highlights(highlights, current)
-            .placeholder("Start typing…")
-            .style(self.font_style())
-            .id(TEXT)
-            .padding_insets(Insets { top: 12, leading: 20, bottom: 8, trailing: 12 });
-        let words = self.text.split_whitespace().count();
-        let chars = self.text.chars().count();
-        let (line, col) = self.caret;
-        let info = format!(
-            "Line {line}, Column {col}   ·   {words} word{}   ·   {chars} character{}",
-            if words == 1 { "" } else { "s" },
-            if chars == 1 { "" } else { "s" }
-        );
-        let status = HStack::new()
-            .push(Text::new(info).style(TextStyle::Footnote).foreground(Color::SecondaryLabel).grow(1))
-            .push(
-                Text::new(if self.dirty() { "Edited" } else { "Saved" })
-                    .style(TextStyle::Footnote)
-                    .foreground(Color::SecondaryLabel),
-            )
-            .padding_xy(16, 0)
-            .height(26)
-            .fill_width();
-        VStack::new()
-            .push(bar)
-            .push(Divider::new())
-            .push_if(find)
-            .push(editor)
-            .push(Divider::new())
-            .push(status)
-            .spacing(0)
-            .fill()
+        let detail = VStack::new().push(self.toolbar()).push_if(self.find_bar()).push(self.page()).spacing(0).fill();
+        SplitView::new(self.sidebar(), detail).sidebar_width(290)
     }
 }
 

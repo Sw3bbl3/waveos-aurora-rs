@@ -93,6 +93,12 @@ pub enum Symbol {
     Calendar,
     Timer,
     Stopwatch,
+    /// A picture: a frame with hills.
+    Photo,
+    /// A disk.
+    Drive,
+    /// A terminal window: a prompt in a frame.
+    Terminal,
 }
 
 /// A keyboard shortcut (Ctrl stands in for ⌘).
@@ -151,8 +157,10 @@ pub enum ButtonStyle {
     Bordered,
     /// The main action: accent-filled.
     Prominent,
-    /// Destructive: red.
+    /// Destructive: a red tint with red text.
     Destructive,
+    /// A secondary action in the accent: an accent tint with accent text.
+    Tinted,
     /// Just the label, accent-coloured (links, toolbar actions).
     Plain,
     /// A borderless icon or label that shows a fill on hover (toolbars).
@@ -358,16 +366,24 @@ pub(crate) enum Node<'a, M> {
         action: Option<Handler<String, M>>,
         submit: Option<M>,
         search: bool,
+        /// No box: the text alone (`.plain()`).
+        plain: bool,
     },
     TextEditor {
         value: String,
         mono: bool,
+        /// Extra pixels between lines (`.line_spacing()`).
+        spacing: i32,
         action: Option<Handler<String, M>>,
         caret: Option<Handler<(usize, usize), M>>,
         highlights: Vec<(usize, usize)>,
         current: Option<usize>,
         placeholder: String,
         rust: bool,
+        /// `- [ ] ` lines drawn as checkboxes (`.checklists()`).
+        tasks: bool,
+        /// Line numbers in a gutter (`.line_numbers()`).
+        gutter: bool,
     },
     Progress {
         value: Option<f32>,
@@ -725,6 +741,11 @@ impl Text {
     pub fn paragraph<'a, M>(s: impl Into<String>) -> View<'a, M> {
         View::of(Node::Text { text: s.into(), lines: None, align: Align::Start })
     }
+    /// The small capitals over a group ("PLACES"): uppercase, bold, faint.
+    pub fn label<'a, M>(s: impl Into<String>) -> View<'a, M> {
+        let s: String = s.into();
+        Text::new(s.to_uppercase()).style(TextStyle::Label).foreground(Color::TertiaryLabel)
+    }
     /// A paragraph aligned in the centre.
     pub fn centered<'a, M>(s: impl Into<String>) -> View<'a, M> {
         View::of(Node::Text { text: s.into(), lines: None, align: Align::Center })
@@ -931,6 +952,7 @@ impl TextField {
             action: None,
             submit: None,
             search: false,
+            plain: false,
         })
     }
     /// For passwords: shows dots.
@@ -965,6 +987,9 @@ impl TextEditor {
             current: None,
             placeholder: String::new(),
             rust: false,
+            spacing: 0,
+            tasks: false,
+            gutter: false,
         })
     }
     pub fn monospaced<'a, M>(value: impl Into<String>) -> View<'a, M> {
@@ -977,6 +1002,40 @@ impl TextEditor {
 }
 
 impl<'a, M> View<'a, M> {
+    /// For text fields: no box, just the text in the inherited style (a
+    /// title typed in place).
+    pub fn plain(mut self) -> Self {
+        if let Node::TextField { plain, .. } = &mut self.node {
+            *plain = true;
+        }
+        self
+    }
+
+    /// For text editors: draws lines starting `- [ ] ` or `- [x] ` as
+    /// checkboxes that tick when clicked.
+    pub fn checklists(mut self) -> Self {
+        if let Node::TextEditor { tasks, .. } = &mut self.node {
+            *tasks = true;
+        }
+        self
+    }
+
+    /// For text editors: line numbers on the left, the caret's line lit (code).
+    pub fn line_numbers(mut self) -> Self {
+        if let Node::TextEditor { gutter, .. } = &mut self.node {
+            *gutter = true;
+        }
+        self
+    }
+
+    /// For text editors: opens the lines up by `px` (prose).
+    pub fn line_spacing(mut self, px: i32) -> Self {
+        if let Node::TextEditor { spacing, .. } = &mut self.node {
+            *spacing = px;
+        }
+        self
+    }
+
     /// For text editors: told the caret's line and column (1-based) when it moves.
     pub fn on_caret(mut self, f: impl Fn((usize, usize)) -> M + 'static) -> Self {
         if let Node::TextEditor { caret, .. } = &mut self.node {
@@ -1253,14 +1312,14 @@ impl Section {
     /// A card of rows, with hairlines between them.
     #[allow(clippy::new_ret_no_self)]
     pub fn new<'a, M>() -> View<'a, M> {
-        View::of(Node::Card { children: Vec::new(), separators: true, inset: 14 })
+        View::of(Node::Card { children: Vec::new(), separators: true, inset: 16 })
     }
     /// A titled section: the title above the card.
     pub fn titled<'a, M>(title: impl Into<String>, card: View<'a, M>) -> View<'a, M> {
         VStack::new()
-            .push(Text::new(title).style(TextStyle::Headline).foreground(Color::SecondaryLabel).padding_xy(6, 0))
+            .push(Text::label(title).padding_xy(4, 0))
             .push(card.fill_width())
-            .spacing(6)
+            .spacing(8)
             .alignment(Align::Start)
     }
     /// A plain card without separators.
@@ -1319,18 +1378,23 @@ impl<'a, M> View<'a, M> {
 /// An item of a sidebar: a symbol and a title, highlighted when selected.
 pub fn sidebar_item<'a, M>(symbol: Symbol, title: impl Into<String>, selected: bool) -> View<'a, M> {
     HStack::new()
-        .push(Image::symbol(symbol).foreground(Color::Accent))
-        .push(Text::new(title).grow(1))
+        .push(Image::symbol(symbol).symbol_size(17))
+        .push(Text::new(title).style(TextStyle::Sized(14, crate::style::Weight::Bold)).grow(1))
         .spacing(10)
         .padding_xy(10, 0)
         .height(crate::style::size::SIDEBAR_ROW)
         .fill_width()
+        .corner_radius(crate::style::radius::ITEM)
         .selected(selected)
 }
 
-/// A bar of tools at the top of a window's content.
+/// A bar of tools at the top of a window's content, over a hairline.
 pub fn toolbar<'a, M>(items: Vec<View<'a, M>>) -> View<'a, M> {
-    HStack::with(items).spacing(6).padding_xy(12, 0).height(crate::style::size::TOOLBAR).fill_width()
+    VStack::new()
+        .push(HStack::with(items).spacing(12).padding_xy(18, 0).height(crate::style::size::TOOLBAR - 1).fill_width())
+        .push(Divider::new())
+        .spacing(0)
+        .fill_width()
 }
 
 /// Draws anything, and hears the pointer and keys if asked (paintings,

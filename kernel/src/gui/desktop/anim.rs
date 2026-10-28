@@ -70,7 +70,8 @@ fn halo(r: Rect) -> Rect {
 }
 
 impl Desktop {
-    /// Renders window `id` (chrome and content, no shadow) into a buffer.
+    /// Renders window `id` (chrome and content, no shadow) into a buffer, in
+    /// device pixels.
     pub(super) fn snapshot(&mut self, id: u32) -> Option<(Vec<u32>, u32, u32)> {
         let i = self.index_of(id)?;
         let focused = self.focused_id() == Some(id);
@@ -78,14 +79,15 @@ impl Desktop {
         let w = &mut self.windows[i];
         let saved = w.rect;
         let (rw, rh) = (saved.w.max(1), saved.h.max(1));
-        let mut buf = alloc::vec![0u32; (rw * rh) as usize];
+        let k = crate::gui::scale();
+        let mut buf = alloc::vec![0u32; (rw * k * rh * k) as usize];
         w.rect = Rect::new(0, 0, rw, rh);
         {
-            let mut cv = Canvas::new(&mut buf, rw, rh);
+            let mut cv = Canvas::new(&mut buf, rw * k, rh * k).with_scale(k);
             paint_window(&mut cv, w, focused, &env, false);
         }
         w.rect = saved;
-        Some((buf, rw as u32, rh as u32))
+        Some((buf, (rw * k) as u32, (rh * k) as u32))
     }
 
     fn add_ghost(&mut self, kind: Kind, id: u32, from: Rect, to: Rect, alpha: (i32, i32), duration: u64) {

@@ -64,6 +64,133 @@ pub enum Msg {
     Scroll(i32),
     Click(i32, i32),
     Page(i32),
+    Tab(usize),
+    Lesson(usize),
+}
+
+/// A lesson: a guide, with a picture on its card.
+struct Lesson {
+    id: &'static str,
+    title: (&'static str, &'static str),
+    blurb: (&'static str, &'static str),
+    /// Card colours (top-left, bottom-right) and what's drawn on them.
+    from: u32,
+    to: u32,
+    art: Art,
+    minutes: u32,
+}
+
+#[derive(Clone, Copy)]
+enum Art {
+    Crest,
+    Windows,
+    Seek,
+    Bays,
+    Code,
+    Keys,
+}
+
+const LESSONS: [Lesson; 6] = [
+    Lesson {
+        id: "start-welcome",
+        title: ("Welcome aboard", "Bienvenue à bord"),
+        blurb: ("What WaveOS is, and where to begin", "Ce qu’est WaveOS, et par où commencer"),
+        from: 0xFF25_63EB,
+        to: 0xFF67_E8F9,
+        art: Art::Crest,
+        minutes: 3,
+    },
+    Lesson {
+        id: "desktop-windows",
+        title: ("Moor your windows", "Amarrez vos fenêtres"),
+        blurb: ("Windows, Harbor and layouts", "Fenêtres, Harbor et dispositions"),
+        from: 0xFF0F_766E,
+        to: 0xFF2D_E0C4,
+        art: Art::Windows,
+        minutes: 4,
+    },
+    Lesson {
+        id: "desktop-search",
+        title: ("Seek anything", "Cherchez tout"),
+        blurb: ("Super + Space, then type", "Super + Espace, puis tapez"),
+        from: 0xFF7C_3AED,
+        to: 0xFFF4_72B6,
+        art: Art::Seek,
+        minutes: 2,
+    },
+    Lesson {
+        id: "apps-files",
+        title: ("Keep things in Files", "Rangez dans Fichiers"),
+        blurb: ("Places, search and the Trash", "Emplacements, recherche et corbeille"),
+        from: 0xFFC2_410C,
+        to: 0xFFFD_BA74,
+        art: Art::Bays,
+        minutes: 3,
+    },
+    Lesson {
+        id: "developer-waveui",
+        title: ("Your first Rust app", "Votre première app Rust"),
+        blurb: ("Build an interface with WaveUI", "Une interface avec WaveUI"),
+        from: 0xFF1E_1B4B,
+        to: 0xFF4F_46E5,
+        art: Art::Code,
+        minutes: 6,
+    },
+    Lesson {
+        id: "reference-commands",
+        title: ("Commands that flow", "Des commandes fluides"),
+        blurb: ("The Terminal commands worth knowing", "Les commandes du Terminal à connaître"),
+        from: 0xFF64_748B,
+        to: 0xFF1E_293B,
+        art: Art::Keys,
+        minutes: 3,
+    },
+];
+
+/// A lesson's card picture.
+fn paint_art(cv: &mut Surface, r: Rect, art: Art) {
+    let white = |a: u32| (a << 24) | 0xFF_FFFF;
+    let (cx, cy) = r.center();
+    match art {
+        Art::Crest => {
+            let pill = Rect::new(cx - 60, cy - 16, 120, 32);
+            cv.glow(pill, 16, 18, 0xFF0B_1B3B, 120);
+            cv.fill_round_rect(pill, 16, 0xFF0B_2447);
+            cv.stroke_round_rect(pill, 16, 0x80FF_B020);
+            let f = font::get(Face::Bold, 13);
+            cv.text_centered(pill, "4:58", f, 0xFFFF_B020);
+        }
+        Art::Windows => {
+            cv.fill_round_rect(Rect::new(cx - 135, cy - 34, 132, 68), 8, white(0xE8));
+            cv.fill_round_rect(Rect::new(cx + 3, cy - 34, 132, 68), 8, white(0x90));
+        }
+        Art::Seek => {
+            cv.fill_round_rect(Rect::new(cx - 135, cy - 16, 270, 32), 16, white(0xE8));
+        }
+        Art::Bays => {
+            cv.fill_round_rect(Rect::new(cx - 76, cy, 80, 28), 12, white(0xC0));
+            cv.fill_round_rect(Rect::new(cx + 10, cy, 36, 28), 12, white(0x99));
+            cv.fill_round_rect(Rect::new(cx + 52, cy, 50, 28), 12, white(0xB0));
+        }
+        Art::Code => {
+            let f = font::get(Face::Mono, 12);
+            let (x, y) = (r.x + 22, r.y + 42);
+            cv.text(x, y, "fn main() {", f, 0xFFB7_F7E4);
+            cv.text(x + 14, y + 20, "wave::hello();", f, 0xFFE0_E7FF);
+            cv.text(x, y + 40, "}", f, 0xFFB7_F7E4);
+        }
+        Art::Keys => {
+            let f = font::get(Face::Bold, 12);
+            let mut x = cx - 66;
+            for k in ["ls", "cd", "help"] {
+                let w = f.width(k) + 16;
+                let key = Rect::new(x, cy - 12, w, 24);
+                cv.fill_round_rect(key, 6, white(0xEE));
+                cv.text_centered(key, k, f, 0xFF1E_293B);
+                x += w + 8;
+            }
+        }
+    }
 }
 
 /// The open guide: parsed, its pictures, and laid out for the view.
@@ -92,6 +219,10 @@ pub struct Learn {
     view: (i32, i32),
     error: Option<String>,
     started: u64,
+    /// 0: the lessons; 1: the guides.
+    tab: usize,
+    /// How far each lesson has been read, in percent.
+    progress: BTreeMap<String, u32>,
 }
 
 const CATEGORIES: [&str; 8] = ["all", "start", "desktop", "apps", "system", "developer", "reference", "release"];
@@ -132,6 +263,15 @@ impl Learn {
             view: (720, 500),
             error,
             started,
+            tab: 0,
+            progress: corekit::prefs::get("learn_progress")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|e| {
+                    let (id, pct) = e.split_once(':')?;
+                    Some((String::from(id), pct.parse().ok()?))
+                })
+                .collect(),
         };
         s.refresh_results();
         s.open_id("start-welcome", true);
@@ -291,6 +431,156 @@ impl Learn {
         }
     }
 
+    /// Notes how far into a lesson the reader has come.
+    fn track(&mut self) {
+        let Some(i) = self.current else { return };
+        let id = self.catalog[i].id.clone();
+        if !LESSONS.iter().any(|l| l.id == id) {
+            return;
+        }
+        let total = self.max_scroll() + self.view.1;
+        let pct = ((self.scroll + self.view.1) as i64 * 100 / total.max(1) as i64).clamp(0, 100) as u32;
+        let pct = if pct >= 95 { 100 } else { pct };
+        let old = self.progress.get(&id).copied().unwrap_or(0);
+        if pct > old {
+            self.progress.insert(id, pct);
+            if pct == 100 || pct >= old + 10 {
+                let saved: Vec<String> = self.progress.iter().map(|(k, v)| format!("{k}:{v}")).collect();
+                let _ = corekit::prefs::set("learn_progress", &saved.join(","));
+            }
+        }
+    }
+
+    fn lessons(&self) -> View<'_, Msg> {
+        let fr = self.locale == "fr-CA";
+        let pick = |p: (&'static str, &'static str)| if fr { p.1 } else { p.0 };
+        let name = corekit::prefs::get("account_name").unwrap_or_default();
+        let first = String::from(name.split_whitespace().next().unwrap_or(""));
+        let done = LESSONS.iter().filter(|l| self.progress.get(l.id).copied().unwrap_or(0) >= 100).count();
+        let left: u32 = LESSONS
+            .iter()
+            .map(|l| l.minutes * (100 - self.progress.get(l.id).copied().unwrap_or(0).min(100)) / 100)
+            .sum();
+        let frac = done as i32 * 1024 / LESSONS.len() as i32;
+        let ring = Canvas::new(move |cv, r| {
+            let (cx, cy) = r.center();
+            let t = theme::current();
+            cv.stroke_arc(
+                cx * 16,
+                cy * 16,
+                20 * 16,
+                5 * 16,
+                0,
+                1024,
+                waveui::lumen::canvas::with_alpha(t.text_secondary, 0x40),
+            );
+            cv.stroke_arc(cx * 16, cy * 16, 20 * 16, 5 * 16, 768, frac, theme::accent());
+        })
+        .size(50, 50);
+        let header = HStack::new()
+            .push(
+                VStack::new()
+                    .push(
+                        Text::new(if first.is_empty() {
+                            String::from(self.tr("Welcome", "Bienvenue"))
+                        } else {
+                            format!("{}, {first}", self.tr("Welcome back", "Bon retour"))
+                        })
+                        .style(TextStyle::Sized(12, waveui::style::Weight::Bold))
+                        .foreground(Color::AccentText),
+                    )
+                    .push(
+                        Text::new(self.tr("Learn WaveOS in short dips", "Apprenez WaveOS par petites plongées"))
+                            .style(TextStyle::Sized(30, waveui::style::Weight::Display)),
+                    )
+                    .spacing(2)
+                    .alignment(Align::Start)
+                    .grow(1),
+            )
+            .push(ring)
+            .push(
+                VStack::new()
+                    .push(
+                        Text::new(format!("{done} {} {}", self.tr("of", "sur"), LESSONS.len()))
+                            .style(TextStyle::Sized(15, waveui::style::Weight::Bold)),
+                    )
+                    .push(
+                        Text::new(if left == 0 {
+                            String::from(self.tr("all done", "tout est fait"))
+                        } else {
+                            format!("{} {left} min {}", self.tr("about", "environ"), self.tr("left", "restantes"))
+                        })
+                        .style(TextStyle::Sized(12, waveui::style::Weight::Bold))
+                        .foreground(Color::TertiaryLabel),
+                    )
+                    .spacing(0)
+                    .alignment(Align::Start),
+            )
+            .spacing(10)
+            .fill_width();
+        let mut grid = Grid::new(300).spacing(16);
+        for (i, l) in LESSONS.iter().enumerate() {
+            let pct = self.progress.get(l.id).copied().unwrap_or(0).min(100);
+            let (from, to, art) = (l.from, l.to, l.art);
+            let status = match pct {
+                100 => String::from(self.tr("Done", "Terminé")),
+                0 => String::from(self.tr("Not started", "Pas commencé")),
+                p => format!("{p}% {}", self.tr("done", "fait")),
+            };
+            grid = grid.push(
+                VStack::new()
+                    .push(
+                        Canvas::new(move |cv, r| {
+                            // Rounded at the top only: the gradient runs on below the cut.
+                            cv.with_clip(r, |cv| {
+                                cv.fill_round_rect_dgradient(Rect::new(r.x, r.y, r.w, r.h + 16), 16, from, to);
+                                paint_art(cv, r, art);
+                            });
+                        })
+                        .height(120)
+                        .fill_width(),
+                    )
+                    .push(
+                        VStack::new()
+                            .push(Text::new(pick(l.title)).style(TextStyle::Sized(15, waveui::style::Weight::Bold)))
+                            .push(
+                                Text::new(pick(l.blurb))
+                                    .style(TextStyle::Sized(12, waveui::style::Weight::Regular))
+                                    .foreground(Color::SecondaryLabel),
+                            )
+                            .push(ProgressView::new(Some(pct as f32 / 100.0)).height(4).padding_insets(Insets {
+                                top: 10,
+                                leading: 0,
+                                bottom: 6,
+                                trailing: 0,
+                            }))
+                            .push(
+                                Text::new(status)
+                                    .style(TextStyle::Sized(12, waveui::style::Weight::Bold))
+                                    .foreground(Color::SecondaryLabel),
+                            )
+                            .spacing(2)
+                            .alignment(Align::Stretch)
+                            .padding_insets(Insets { top: 14, leading: 16, bottom: 14, trailing: 16 }),
+                    )
+                    .spacing(0)
+                    .alignment(Align::Stretch)
+                    .background_rounded(Color::Fill, 16)
+                    .border(Color::Separator, 16)
+                    .on_tap(Msg::Lesson(i)),
+            );
+        }
+        ScrollView::new(
+            VStack::new()
+                .push(header)
+                .push(grid)
+                .spacing(18)
+                .alignment(Align::Stretch)
+                .padding_insets(Insets { top: 26, leading: 28, bottom: 28, trailing: 28 })
+                .fill_width(),
+        )
+    }
+
     fn home(&mut self) {
         self.category = 0;
         self.query.clear();
@@ -377,13 +667,6 @@ impl Learn {
             .id("guides")
         };
         VStack::new()
-            .push(
-                TextField::search(self.tr("Search", "Rechercher"), self.query.clone())
-                    .on_change(Msg::Query)
-                    .on_submit(Msg::OpenFirst)
-                    .shortcut(Shortcut::ctrl('f'))
-                    .id("search"),
-            )
             .push(categories)
             .push(list.grow(1))
             .spacing(10)
@@ -401,7 +684,7 @@ impl App for Learn {
     }
 
     fn size(&self) -> (i32, i32) {
-        (1020, 620)
+        (1140, 728)
     }
 
     fn update(&mut self, msg: Msg, _cx: &mut Context<Msg>) {
@@ -446,7 +729,14 @@ impl App for Learn {
             }
             Msg::Query(q) => {
                 self.query = q;
+                self.tab = 1;
                 self.refresh_results();
+            }
+            Msg::Tab(t) => self.tab = t,
+            Msg::Lesson(i) => {
+                self.tab = 1;
+                self.open_id(LESSONS[i].id, true);
+                self.track();
             }
             Msg::OpenFirst => {
                 if let Some(&i) = self.results.first() {
@@ -468,10 +758,12 @@ impl App for Learn {
             Msg::Resize(w, h) => {
                 self.view = (w, h);
                 self.scroll = self.scroll.clamp(0, self.max_scroll());
+                self.track();
             }
             Msg::Scroll(dy) => {
                 let t = corekit::time::uptime_ms();
                 self.scroll = (self.scroll + dy).clamp(0, self.max_scroll());
+                self.track();
                 corekit::println!("learn-perf scroll-update {} ms", corekit::time::uptime_ms() - t);
             }
             Msg::Page(d) => {
@@ -481,6 +773,7 @@ impl App for Learn {
                     i32::MAX => self.max_scroll(),
                     d => (self.scroll + d * page).clamp(0, self.max_scroll()),
                 };
+                self.track();
             }
             Msg::Click(x, y) => {
                 self.ensure_layout();
@@ -580,8 +873,25 @@ impl App for Learn {
         .style(TextStyle::Caption)
         .foreground(Color::SecondaryLabel)
         .padding_xy(20, 6);
-        let detail = VStack::new().push(bar).push(Divider::new()).push(reading).push(footer).spacing(0).fill();
-        SplitView::new(self.sidebar(), detail).sidebar_width(250)
+        let top = toolbar(vec![
+            Picker::new([self.tr("Lessons", "Leçons"), self.tr("Guides", "Guides")], self.tab)
+                .on_change(Msg::Tab)
+                .width(220),
+            Spacer::new(),
+            TextField::search(self.tr("Seek a guide", "Chercher un guide"), self.query.clone())
+                .on_change(Msg::Query)
+                .on_submit(Msg::OpenFirst)
+                .shortcut(Shortcut::ctrl('f'))
+                .id("search")
+                .width(220),
+        ]);
+        let content = if self.tab == 0 {
+            self.lessons()
+        } else {
+            let detail = VStack::new().push(bar).push(reading).push(footer).spacing(0).fill();
+            SplitView::new(self.sidebar(), detail).sidebar_width(250)
+        };
+        VStack::new().push(top).push(content).spacing(0).fill()
     }
 }
 corekit::entry!(main);
@@ -641,6 +951,7 @@ fn main(args: corekit::Args) -> i32 {
     let mut learn = Learn::new();
     if let Some(id) = args.get(1) {
         learn.open_id(id, false);
+        learn.tab = 1;
     }
     waveui::run(learn)
 }

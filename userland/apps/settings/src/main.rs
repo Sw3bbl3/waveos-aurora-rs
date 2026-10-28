@@ -80,6 +80,7 @@ pub enum Msg {
     Wallpaper(u8),
     CustomWallpaper,
     Mode(usize),
+    Scale(usize),
     Layout(&'static str),
     Try(String),
     Toggle(&'static str, bool),
@@ -253,7 +254,7 @@ fn page<'a>(title: &str, sections: Vec<View<'a, Msg>>) -> View<'a, Msg> {
         .extend(sections)
         .spacing(18)
         .alignment(Align::Start)
-        .padding_insets(Insets { top: 22, leading: 28, bottom: 28, trailing: 28 })
+        .padding_insets(Insets { top: 26, leading: 34, bottom: 30, trailing: 34 })
         .fill_width()
 }
 
@@ -307,7 +308,7 @@ fn pref_slider<'a>(
 /// The small coloured tile of a pane, with its glyph.
 fn pane_tile<'a>(pane: Pane, color: u32) -> View<'a, Msg> {
     Canvas::new(move |cv, r| {
-        cv.fill_round_rect(r, 6, color);
+        cv.fill_round_rect(r, 7, color);
         pane_glyph(cv, pane, r, color);
     })
     .size(22, 22)
@@ -318,32 +319,46 @@ impl Settings {
         let items = PANES.iter().map(|&(pane, label, _, color)| {
             HStack::new()
                 .push(pane_tile(pane, color))
-                .push(Text::new(label).grow(1))
+                .push(Text::new(label).style(TextStyle::Sized(14, waveui::style::Weight::Bold)).grow(1))
                 .spacing(10)
-                .padding_xy(8, 0)
+                .padding_xy(10, 0)
                 .height(size::SIDEBAR_ROW)
                 .fill_width()
+                .corner_radius(radius::ITEM)
                 .selected(self.query.trim().is_empty() && pane == self.pane)
                 .on_tap(Msg::Pane(pane))
         });
-        VStack::new()
-            .push(Text::new("Settings").style(TextStyle::Title2).padding_insets(Insets {
-                top: 18,
-                leading: 10,
-                bottom: 0,
-                trailing: 0,
-            }))
+        // The system itself heads the list: its mark, name and version.
+        let info = corekit::process::sys_info();
+        let version = corekit::process::fixed_str(&info.version, info.version_len);
+        let header = HStack::new()
+            .push(Image::app_icon(Icon::Aurora, 40))
             .push(
-                TextField::search("Search", self.query.clone())
+                VStack::new()
+                    .push(Text::new("WaveOS Aurora").style(TextStyle::Sized(14, waveui::style::Weight::Bold)))
+                    .push(
+                        Text::new(format!("Version {version}"))
+                            .style(TextStyle::Caption)
+                            .foreground(Color::TertiaryLabel),
+                    )
+                    .spacing(1)
+                    .alignment(Align::Start),
+            )
+            .spacing(10)
+            .padding_insets(Insets { top: 8, leading: 8, bottom: 2, trailing: 8 });
+        VStack::new()
+            .push(header)
+            .push(
+                TextField::search("Seek in Settings", self.query.clone())
                     .on_change(Msg::Search)
                     .on_submit(Msg::SearchOpen)
                     .shortcut(Shortcut::ctrl('f'))
                     .id("search"),
             )
-            .push(ScrollView::new(VStack::with(items.collect()).spacing(2).fill_width()))
+            .push(ScrollView::new(VStack::with(items.collect()).spacing(1).fill_width()))
             .spacing(10)
             .alignment(Align::Stretch)
-            .padding_insets(Insets { top: 0, leading: 10, bottom: 10, trailing: 10 })
+            .padding_insets(Insets { top: 14, leading: 10, bottom: 10, trailing: 10 })
             .fill()
     }
 
@@ -485,22 +500,34 @@ impl Settings {
 
     fn display_pane(&self) -> View<'_, Msg> {
         let live = self.modes.iter().any(|m| m.flags & display::LIVE != 0);
-        let sub = if live {
+        let follows = self.modes.iter().any(|m| m.flags & display::FOLLOWS_WINDOW != 0);
+        let sub = if follows {
+            "Changes apply right away. In a virtual machine, WaveOS also follows the window: make it larger or full screen for more room."
+        } else if live {
             "Changes apply right away; you'll be asked to keep them."
         } else {
             "This display is set up by the firmware: changes apply when you restart."
         };
-        let rows = self.modes.iter().take(12).enumerate().map(|(i, m)| {
+        let current = self.modes.iter().find(|m| m.flags & display::CURRENT != 0);
+        let summary = current.map(|m| {
+            card(vec![row_detail(
+                "Showing",
+                format!("{} × {} pixels", m.width, m.height),
+                Text::new(aspect(m.width, m.height)).foreground(Color::SecondaryLabel),
+            )])
+        });
+        // Largest first, as the screen's own list is.
+        let rows = self.modes.iter().enumerate().rev().map(|(i, m)| {
             let mut tags = Vec::new();
             let current = m.flags & display::CURRENT != 0;
+            if m.flags & display::PREFERRED != 0 {
+                tags.push("Recommended");
+            }
             if current {
                 tags.push("In use");
             }
             if m.flags & display::AT_BOOT != 0 && !current {
                 tags.push("After restart");
-            }
-            if (m.width, m.height) == (1280, 800) {
-                tags.push("Designed for");
             }
             HStack::new()
                 .push(Text::new(format!("{} × {}", m.width, m.height)).grow(1))
@@ -511,7 +538,24 @@ impl Settings {
                 .fill_width()
                 .on_tap(Msg::Mode(i))
         });
-        page("Display", vec![footer(sub), Section::titled("Resolution", card(rows.collect()).id("display/resolution"))])
+        let mut sections = vec![footer(sub)];
+        sections.extend(summary);
+        let scale = prefs::get_int(pref::DISPLAY_SCALE, 0).clamp(0, 2) as usize;
+        sections.push(Section::titled(
+            "Scale",
+            card(vec![row(
+                "Draw text and controls at",
+                Picker::new(["Automatic", "1×", "2×"], scale)
+                    .on_change(Msg::Scale)
+                    .picker_style(PickerStyle::Segmented),
+            )])
+            .id("display/scale"),
+        ));
+        sections.push(footer(
+            "Automatic uses 2× on screens of 2560 × 1440 and up, so text stays the same size and becomes sharper.",
+        ));
+        sections.push(Section::titled("Resolution", card(rows.collect()).id("display/resolution")));
+        page("Display", sections)
     }
 
     fn keyboard(&self) -> View<'_, Msg> {
@@ -1092,6 +1136,23 @@ fn status_dot<'a>(c: Color) -> View<'a, Msg> {
     .size(16, 16)
 }
 
+/// "16:10", "16:9", … for a resolution.
+fn aspect(w: u32, h: u32) -> String {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 {
+            a
+        } else {
+            gcd(b, a % b)
+        }
+    }
+    let g = gcd(w, h).max(1);
+    match (w / g, h / g) {
+        (8, 5) => "16:10".into(),
+        (683, 384) | (85, 48) => "16:9".into(),
+        (a, b) => format!("{a}:{b}"),
+    }
+}
+
 fn radio<'a>(on: bool) -> View<'a, Msg> {
     Canvas::new(move |cv, r| {
         let t = theme::current();
@@ -1122,7 +1183,7 @@ impl App for Settings {
     }
 
     fn size(&self) -> (i32, i32) {
-        (880, 620)
+        (1140, 728)
     }
 
     fn started(&mut self, cx: &mut Context<Msg>) {
@@ -1167,6 +1228,11 @@ impl App for Settings {
             Msg::CustomWallpaper => {
                 if let Some(p) = prefs::get("wallpaper_image") {
                     cx.request(Request::SetWallpaperImage(p));
+                }
+            }
+            Msg::Scale(i) => {
+                if let Err(e) = prefs::set(pref::DISPLAY_SCALE, &format!("{i}")) {
+                    self.flash(cx, format!("Couldn't change the scale: {e}"));
                 }
             }
             Msg::Mode(i) => {
@@ -1342,7 +1408,7 @@ impl App for Settings {
                 .padding(20)
                 .fill()
         });
-        SplitView::new(self.sidebar(), ZStack::with(vec![detail]).push_if(note).fill()).sidebar_width(220)
+        SplitView::new(self.sidebar(), ZStack::with(vec![detail]).push_if(note).fill()).sidebar_width(250)
     }
 }
 

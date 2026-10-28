@@ -25,8 +25,8 @@ const NO_EXECUTE: u64 = 1 << 63;
 const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// Kernel virtual area for window surfaces and other dynamic kernel mappings.
-const KVA_BASE: u64 = 0xFFFF_C000_0000_0000;
-const KVA_SIZE: u64 = 64 << 30;
+pub const KVA_BASE: u64 = 0xFFFF_C000_0000_0000;
+pub const KVA_SIZE: u64 = 64 << 30;
 
 static KERNEL_PML4: AtomicU64 = AtomicU64::new(0);
 

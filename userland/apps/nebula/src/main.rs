@@ -398,8 +398,8 @@ fn escape(s: &str) -> String {
 /// Loads a document and its stylesheets (on a worker thread).
 fn load(url: Url, job: &LoadJob) -> Result<(Loaded, Option<Pending>), String> {
     if url.scheme == "about" {
-        let html = if url.path == "home" { HOME_PAGE } else { "<html><body></body></html>" };
-        let page = Page::parse(html);
+        let html = if url.path == "home" { home_page() } else { String::from("<html><body></body></html>") };
+        let page = Page::parse(&html);
         return Ok((
             Loaded { timing: Timing::default(), page, url, images: Vec::new(), scripts: Vec::new(), pending: false },
             None,
@@ -837,6 +837,10 @@ struct Browser {
     next_id: u64,
     /// Until when (uptime ms) the tab strip says all eight tabs are open.
     notice_until: u64,
+    /// The address pill shows a field being typed into (not host and path).
+    address_open: bool,
+    /// The appearance and accent the start pages were made in.
+    home_theme: (bool, u32),
 }
 
 impl Browser {
@@ -851,6 +855,8 @@ impl Browser {
             storage,
             next_id: 1,
             notice_until: 0,
+            address_open: false,
+            home_theme: (theme::current().dark, theme::accent()),
         }
     }
 
@@ -2589,30 +2595,48 @@ fn form_encode(s: &str) -> String {
     out
 }
 
+/// The start page, in the colours of the desktop.
+fn home_page() -> String {
+    let t = theme::current();
+    let hex = |c: u32| format!("#{:06x}", c & 0xFF_FFFF);
+    let (bg, card, line, hero) = if t.dark {
+        ("#141724", "#1d2131", "#2a2f42", "#0c0f1a")
+    } else {
+        ("#fbfcff", "#ffffff", "#e3e7f2", "#eef1fb")
+    };
+    let vars = format!(
+        ":root {{ --ink: {}; --muted: {}; --accent: {}; --bg: {bg}; --card: {card}; --line: {line}; --hero: {hero} }}",
+        hex(t.text),
+        hex(t.text_secondary),
+        hex(theme::accent())
+    );
+    HOME_PAGE.replacen(":root {}", &vars, 1)
+}
+
 const HOME_PAGE: &str = r#"<!doctype html><html><head><title>Start Page</title><style>
-:root { --ink: #202842; --muted: #69748b; --accent: #5756db }
-body { margin: 0; font-family: sans-serif; background: #f4f5fb; color: var(--ink) }
-main { max-width: 900px; margin: 0 auto; padding: 36px 28px }
-.eyebrow { color: var(--accent); font-size: 12px; font-weight: bold; margin: 0 0 14px }
-h1 { font-size: 44px; margin: 0 0 10px; color: var(--ink) }
-.tag { color: var(--muted); font-size: 16px; margin: 0 0 26px }
-form { display: flex; gap: 10px; margin-bottom: 32px }
-input[type=search] { flex-grow: 1; width: 550px; max-width: 100%; box-sizing: border-box; font-size: 16px; padding: 14px 18px; border: 1px solid #d9ddec; border-radius: 12px; background: #fff }
-button { font-size: 15px; padding: 14px 24px; border-radius: 12px; border: 0; background: var(--accent); color: #fff }
-h2 { font-size: 13px; color: var(--muted); margin: 0 0 14px }
-.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px }
-.card { display: block; padding: 20px; background: #fff; border-radius: 12px; border: 1px solid #e0e4f0; text-decoration: none; color: var(--ink) }
-.card b { display: block; font-size: 16px; margin-bottom: 8px }
+:root {}
+body { margin: 0; font-family: sans-serif; background: var(--bg); color: var(--ink) }
+main { max-width: 1100px; margin: 0 auto; padding: 14px 22px 30px }
+.hero { background: var(--hero); border-radius: 18px; padding: 52px 48px 56px; margin-bottom: 18px }
+.eyebrow { color: var(--accent); font-size: 12px; font-weight: bold; margin: 0 0 16px }
+h1 { font-size: 46px; margin: 0 0 12px; color: var(--ink) }
+.tag { color: var(--ink); font-size: 16px; margin: 0 0 26px; line-height: 1.5 }
+form { display: flex; gap: 10px; max-width: 640px }
+input[type=search] { flex-grow: 1; width: 480px; max-width: 100%; box-sizing: border-box; font-size: 15px; padding: 11px 20px; border: 1px solid var(--line); border-radius: 22px; background: var(--card); color: var(--ink) }
+button { font-size: 14px; font-weight: bold; padding: 11px 22px; border-radius: 22px; border: 0; background: var(--accent); color: #fff }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px }
+.card { display: block; padding: 18px 16px; background: var(--card); border-radius: 16px; border: 1px solid var(--line); text-decoration: none; color: var(--ink) }
+.card b { display: block; font-size: 22px; margin-bottom: 8px; color: var(--accent) }
 .card span { color: var(--muted); font-size: 13px }
-.tools { display: flex; gap: 12px; margin-top: 20px }
-.tools a { color: var(--accent); font-size: 13px; text-decoration: none; padding: 10px 14px; border: 1px solid #d9ddec; border-radius: 8px }
-.foot { color: var(--muted); font-size: 12px; margin: 28px 0 0; line-height: 1.8 }
-@media (max-width: 700px) { .grid { grid-template-columns: repeat(2, 1fr) } main { padding: 24px 18px } h1 { font-size: 34px } }
+.tools { display: flex; gap: 10px; margin-top: 18px }
+.tools a { color: var(--ink); font-size: 13px; text-decoration: none; padding: 9px 16px; background: var(--card); border: 1px solid var(--line); border-radius: 18px }
+.foot { color: var(--muted); font-size: 12px; margin: 26px 0 0; line-height: 1.8 }
+@media (max-width: 640px) { .grid { grid-template-columns: repeat(2, 1fr) } .hero { padding: 32px 26px } h1 { font-size: 34px } }
 </style></head><body><main>
-<p class="eyebrow">NEBULA / WAVEOS AURORA</p>
-<h1>A little space to explore.</h1><p class="tag">Search, discover, and keep your favorite pages close.</p>
-<form action="https://html.duckduckgo.com/html/" method="get"><input type="search" name="q" placeholder="Search the web or use the address bar"><button type="submit">Search</button></form>
-<h2>YOUR NEXT STOP</h2><div class="grid">
+<div class="hero"><p class="eyebrow">NEBULA · WAVEOS AURORA</p>
+<h1>A little space to explore.</h1><p class="tag">Search, discover, and keep your favourite pages close.</p>
+<form action="https://html.duckduckgo.com/html/" method="get"><input type="search" name="q" placeholder="Search the web or use the address bar"><button type="submit">Search</button></form></div>
+<div class="grid">
 <a class="card" href="https://en.wikipedia.org/wiki/Main_Page"><b>Wikipedia</b><span>A world of knowledge</span></a>
 <a class="card" href="https://news.ycombinator.com/"><b>Hacker News</b><span>Ideas worth discussing</span></a>
 <a class="card" href="https://text.npr.org/"><b>NPR</b><span>The news, simply</span></a>
@@ -2620,7 +2644,7 @@ h2 { font-size: 13px; color: var(--muted); margin: 0 0 14px }
 <a class="card" href="https://www.rust-lang.org/"><b>Rust</b><span>Build something new</span></a>
 <a class="card" href="https://github.com/Sw3bbl3/waveos-aurora-rs"><b>WaveOS Aurora</b><span>Explore your operating system</span></a>
 </div><div class="tools"><a href="file:///System/Library/Nebula/pulsar-demo.html">Pulsar playground</a><a href="file:///System/Library/Nebula/css-demo.html">Layout gallery</a><a href="file:///System/Library/Nebula/canvas-demo.html">Canvas gallery</a><a href="file:///System/Library/Nebula/browser-apis.html">Browser checks</a></div>
-<p class="foot">Ctrl+T New tab &nbsp; / &nbsp; Ctrl+Tab Switch tabs &nbsp; / &nbsp; Ctrl+Shift+T Reopen a closed page<br>Ctrl-click a link to open it behind. Background tabs keep loading, with their timers slowed to once a second.</p>
+<p class="foot">Ctrl+T New tab &nbsp; · &nbsp; Ctrl+Tab Switch tabs &nbsp; · &nbsp; Ctrl+Shift+T Reopen a closed page<br>Ctrl-click a link to open it behind. Background tabs keep loading, with their timers slowed to once a second.</p>
 </main></body></html>"#;
 
 fn main(args: corekit::Args) -> i32 {

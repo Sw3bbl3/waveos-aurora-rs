@@ -20,10 +20,12 @@ pub enum Face {
     Mono,
     /// Display text (the Shore clock, large titles): Manrope ExtraBold.
     Bold,
+    /// Large numerals (Calculator, Clock): Manrope Light.
+    Light,
 }
 
 impl Face {
-    const ALL: [Face; 4] = [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono];
+    const ALL: [Face; 5] = [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono, Face::Light];
 
     fn index(self) -> usize {
         self as usize
@@ -36,6 +38,7 @@ impl Face {
             Face::SemiBold => "/System/Fonts/Manrope-Bold.ttf",
             Face::Mono => "/System/Fonts/JetBrainsMono-Regular.ttf",
             Face::Bold => "/System/Fonts/Manrope-ExtraBold.ttf",
+            Face::Light => "/System/Fonts/Manrope-Light.ttf",
         }
     }
 }
@@ -90,7 +93,8 @@ struct Installed {
     ascii: [u16; 128],
 }
 
-static FACES: [spin::Once<Installed>; 4] = [spin::Once::new(), spin::Once::new(), spin::Once::new(), spin::Once::new()];
+static FACES: [spin::Once<Installed>; 5] =
+    [spin::Once::new(), spin::Once::new(), spin::Once::new(), spin::Once::new(), spin::Once::new()];
 
 /// Makes a TrueType face available. Returns false if the data isn't a usable font.
 pub fn install(face: Face, data: &'static [u8]) -> bool {

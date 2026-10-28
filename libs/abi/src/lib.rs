@@ -704,11 +704,13 @@ pub struct SysStats {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SurfaceInfo {
     pub addr: u64,
+    /// Size in device pixels: the window's size in points times `scale`.
     pub width: u32,
     pub height: u32,
     /// Pixels per row.
     pub stride: u32,
-    pub _pad: u32,
+    /// Device pixels per point (2 on a HiDPI screen; 0 from older kernels means 1).
+    pub scale: u32,
 }
 
 /// Clipboard content kinds.
@@ -745,6 +747,9 @@ pub mod pref {
     pub const TRACKING_SPEED: &str = "tracking_speed";
     /// Mouse pointer speed, 1–10 (default 5: one pixel per count).
     pub const POINTER_SPEED: &str = "pointer_speed";
+    /// Device pixels per point: "0" automatic (2 on screens of 2560×1440 and
+    /// up), "1" or "2".
+    pub const DISPLAY_SCALE: &str = "display_scale";
     pub const CLOCK_24H: &str = "clock24";
     pub const CLOCK_SECONDS: &str = "clock_seconds";
     pub const CLOCK_DATE: &str = "clock_date";
@@ -778,6 +783,10 @@ pub mod display {
     pub const LIVE: u32 = 2;
     /// Chosen for the next start (in `\aurora\boot.conf`).
     pub const AT_BOOT: u32 = 4;
+    /// The screen's own preferred size (a virtual machine's window size).
+    pub const PREFERRED: u32 = 8;
+    /// The screen follows its preferred size (a virtual machine's window).
+    pub const FOLLOWS_WINDOW: u32 = 16;
 }
 
 /// Drag images for `drag_start`.

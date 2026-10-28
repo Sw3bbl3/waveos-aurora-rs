@@ -8,6 +8,8 @@ use waveui::{KeyCode, KeyEvent};
 mod checks;
 
 const SIDEBAR_W: i32 = 200;
+/// The information panel beside the content.
+const INFO_W: i32 = 270;
 
 /// What the transfer panel shows, to notice when it changes.
 type ProgressSnapshot = (u64, usize, usize, bool, bool, bool, u64, String);
@@ -245,17 +247,18 @@ impl Files {
 
     // ------------------------------------------------------------ views
 
-    fn place_row<'a>(&self, label: &str, path: &str, icon: Icon, volume: bool) -> View<'a, Msg> {
+    fn place_row<'a>(&self, label: &str, path: &str, symbol: Symbol, volume: bool) -> View<'a, Msg> {
         let tab = &self.tabs[self.active];
         let target = String::from(path);
         let drop_target = target.clone();
         let mut row = HStack::new()
-            .push(Image::app_icon(icon, 18))
-            .push(Text::new(label).grow(1))
-            .spacing(8)
-            .padding_xy(8, 0)
-            .height(28)
+            .push(Image::symbol(symbol).symbol_size(17))
+            .push(Text::new(label).style(TextStyle::Sized(14, waveui::style::Weight::Bold)).grow(1))
+            .spacing(10)
+            .padding_xy(10, 0)
+            .height(size::SIDEBAR_ROW)
             .fill_width()
+            .corner_radius(radius::ITEM)
             .selected(!tab.searching() && tab.cwd == path)
             .on_tap(Msg::Go(target.clone()));
         if volume {
@@ -272,36 +275,28 @@ impl Files {
 
     fn sidebar(&self) -> View<'_, Msg> {
         let tab = &self.tabs[self.active];
-        let heading = |s: &str| {
-            Text::new(s).style(TextStyle::Caption).foreground(Color::SecondaryLabel).padding_insets(Insets {
-                top: 10,
-                leading: 10,
-                bottom: 2,
-                trailing: 0,
-            })
-        };
-        let mut v = VStack::new().push(heading("Favorites")).spacing(2).alignment(Align::Stretch);
+        let heading = |s: &str| Text::label(s).padding_insets(Insets { top: 10, leading: 10, bottom: 4, trailing: 0 });
+        let mut v = VStack::new().push(heading("Places")).spacing(2).alignment(Align::Stretch);
         for p in &FAVORITES {
-            v = v.push(self.place_row(p.label, p.path, p.icon, false));
+            v = v.push(self.place_row(p.label, p.path, p.symbol, false));
         }
         v = v.push(heading("Locations"));
         for p in &LOCATIONS[..LOCATIONS.len() - 1] {
-            v = v.push(self.place_row(p.label, p.path, p.icon, false));
+            v = v.push(self.place_row(p.label, p.path, p.symbol, false));
         }
         for (name, path) in &tab.volumes {
-            v = v.push(self.place_row(name, path, Icon::Files, true));
+            v = v.push(self.place_row(name, path, Symbol::Drive, true));
         }
         let trash = &LOCATIONS[LOCATIONS.len() - 1];
-        v = v.push(self.place_row(trash.label, trash.path, trash.icon, false));
-        ScrollView::new(v.padding_insets(Insets { top: 8, leading: 8, bottom: 8, trailing: 8 }).fill_width())
+        v = v.push(self.place_row(trash.label, trash.path, trash.symbol, false));
+        ScrollView::new(v.padding_insets(Insets { top: 10, leading: 10, bottom: 10, trailing: 10 }).fill_width())
     }
 
     fn toolbar(&self) -> View<'_, Msg> {
         let tab = &self.tabs[self.active];
         let mut bar = vec![
-            Button::symbol(Symbol::ChevronLeft).action(Msg::Back).disabled(!tab.can_go_back()).help("Back"),
-            Button::symbol(Symbol::ChevronRight).action(Msg::Forward).disabled(!tab.can_go_forward()).help("Forward"),
-            Text::new(tab.title()).style(TextStyle::Headline).padding_xy(6, 0),
+            Button::symbol(Symbol::ChevronLeft).action(Msg::Back).disabled(!tab.can_go_back()).help("Back (Alt+Left)"),
+            Text::new(tab.title()).style(TextStyle::Headline),
             Spacer::new(),
         ];
         if tab.in_trash() {
@@ -309,31 +304,17 @@ impl Files {
                 Button::new("Empty Trash…")
                     .action(Msg::Action(Action::EmptyTrash))
                     .button_style(ButtonStyle::Destructive)
+                    .control_size(ControlSize::Small)
                     .disabled(tab.items.is_empty()),
-            );
-        } else if tab.writable_here() {
-            bar.push(
-                Button::symbol(Symbol::Plus)
-                    .action(Msg::Action(Action::NewFolder))
-                    .shortcut(Shortcut::ctrl_shift('n'))
-                    .help("New Folder (Ctrl+Shift+N)"),
             );
         }
         bar.push(
-            Button::with(Image::symbol(Symbol::Folder))
-                .action(Msg::NewTab)
-                .button_style(ButtonStyle::Toolbar)
-                .shortcut(Shortcut::ctrl('t'))
-                .help("New Tab (Ctrl+T)"),
-        );
-        bar.push(
-            Picker::new(["Icons", "List"], (tab.view == ViewMode::List) as usize)
+            Picker::new(["Grid", "List"], (tab.view == ViewMode::List) as usize)
                 .on_change(Msg::ViewMode)
-                .width(130)
-                .help("View as icons or as a list"),
+                .help("View as a grid or as a list"),
         );
         bar.push(
-            TextField::search("Search", tab.query.clone())
+            TextField::search(format!("Seek in {}", tab.title()), tab.query.clone())
                 .on_change(Msg::Query)
                 .shortcut(Shortcut::ctrl('f'))
                 .id(("search", self.active))
@@ -374,20 +355,18 @@ impl Files {
         Some(bar.padding_xy(6, 4).background(Color::GroupedBackground).fill_width())
     }
 
-    /// One item in the icon view.
-    fn tile(&self, i: usize) -> View<'_, Msg> {
+    /// One card of the grid: the picture (or the item's icon) and its name.
+    fn tile(&self, i: usize, width: i32) -> View<'_, Msg> {
         let tab = &self.tabs[self.active];
         let item = &tab.items[i];
         let selected = tab.selection.contains(&i);
         let thumb = tab.thumbs.get(&item.path).and_then(|t| t.as_ref());
         let picture: View<'_, Msg> = match thumb {
-            Some(img) => Canvas::new(move |cv: &mut Surface, r: Rect| {
-                let (w, h) = aurora_image::fit(img.width, img.height, r.w as u32, r.h as u32);
-                let dst = Rect::new(r.x + (r.w - w as i32) / 2, r.y + (r.h - h as i32) / 2, w as i32, h as i32);
-                cv.draw_image(&img.pixels, img.width, img.height, dst, 255);
-            })
-            .size(64, 56),
-            None => Image::app_icon(icon_of(item), 56).padding_xy(4, 0),
+            Some(img) => Canvas::new(move |cv: &mut Surface, r: Rect| cover(cv, img, r, 12)).height(104).fill_width(),
+            None => ZStack::with(vec![Image::app_icon(icon_of(item), 56)])
+                .height(104)
+                .fill_width()
+                .background_rounded(Color::Fill, 12),
         };
         let name: View<'_, Msg> = match &tab.rename {
             Some((r, text)) if *r == i => TextField::new("Name", text.clone())
@@ -395,17 +374,19 @@ impl Files {
                 .on_submit(Msg::RenameCommit)
                 .focused()
                 .id(("rename", i))
-                .width(TILE_W - 12),
-            _ => Text::centered(item.name.clone()).lines(2).style(TextStyle::Callout).width(TILE_W - 16),
+                .fill_width(),
+            _ => Text::new(item.name.clone()).style(TextStyle::Sized(13, waveui::style::Weight::Bold)),
         };
-        let tile = VStack::new()
+        let card = VStack::new()
             .push(picture)
-            .push(name.padding_xy(4, 2).corner_radius(5).selected(selected))
-            .spacing(4)
-            .padding_insets(Insets { top: 6, leading: 4, bottom: 4, trailing: 4 })
-            .size(TILE_W - 8, TILE_H - 8)
-            .corner_radius(10);
-        self.item_modifiers(tile.background_rounded(if selected { Color::Fill } else { Color::Clear }, 10), i)
+            .push(name.padding_xy(2, 0))
+            .spacing(7)
+            .alignment(Align::Stretch)
+            .padding(6)
+            .size(width, TILE_H - 8)
+            .corner_radius(16)
+            .selected(selected);
+        self.item_modifiers(card, i)
     }
 
     /// Clicks, menus, dragging and dropping for item `i`.
@@ -482,8 +463,10 @@ impl Files {
 
     fn content(&self, env: &Env) -> View<'_, Msg> {
         let tab = &self.tabs[self.active];
-        let width = env.size.0 - SIDEBAR_W - 1 - 24;
-        let cols = (width / TILE_W).max(1);
+        // Cards fill the width: as many columns as fit at TILE_W.
+        let width = env.size.0 - SIDEBAR_W - 1 - self.info_width(env) - 32;
+        let cols = ((width + 8) / (TILE_W + 8)).max(1);
+        let tile_w = (width - 8 * (cols - 1)) / cols;
         let chrome = size::TOOLBAR + 28 + if self.tabs.len() > 1 { 38 } else { 0 } + self.panel_height();
         self.viewport.set((cols, env.size.1 - chrome - if tab.view == ViewMode::List { 30 } else { 0 }));
         let cwd = tab.cwd.clone();
@@ -518,10 +501,10 @@ impl Files {
                     let rows = n.div_ceil(cols as usize);
                     List::new(rows, TILE_H, move |r| {
                         let from = r * cols as usize;
-                        HStack::with((from..(from + cols as usize).min(n)).map(|i| self.tile(i)).collect())
+                        HStack::with((from..(from + cols as usize).min(n)).map(|i| self.tile(i, tile_w)).collect())
                             .spacing(8)
                             .alignment(Align::Start)
-                            .padding_insets(Insets { top: 4, leading: 16, bottom: 0, trailing: 0 })
+                            .padding_insets(Insets { top: 8, leading: 16, bottom: 0, trailing: 0 })
                             .fill()
                     })
                     .id(("content", self.active, true))
@@ -599,17 +582,105 @@ impl Files {
         let n = tab.items.len();
         let mut info = format!("{n} item{}", if n == 1 { "" } else { "s" });
         if !tab.selection.is_empty() {
-            info.push_str(&format!(", {} selected", tab.selection.len()));
+            info.push_str(&format!(" · {} selected", tab.selection.len()));
         }
         if tab.searching() && !tab.search_done() {
             info.push_str(" · searching…");
         }
+        let free = corekit::process::sys_info().disk_free;
+        let right = match &tab.status {
+            Some((s, _)) => s.clone(),
+            None if free > 0 => format!("{} free", human_size(free)),
+            None => String::new(),
+        };
         HStack::new()
-            .push(Text::new(info).style(TextStyle::Footnote).foreground(Color::SecondaryLabel).grow(1))
-            .push_if(tab.status.as_ref().map(|(s, _)| Text::new(s.clone()).style(TextStyle::Footnote)))
-            .padding_xy(14, 0)
-            .height(28)
+            .push(Text::new(info).style(TextStyle::Caption).foreground(Color::TertiaryLabel).grow(1))
+            .push(Text::new(right).style(TextStyle::Caption).foreground(Color::TertiaryLabel))
+            .padding_xy(18, 0)
+            .height(34)
             .fill_width()
+    }
+
+    /// The information panel's width (none in narrow windows).
+    fn info_width(&self, env: &Env) -> i32 {
+        if env.size.0 >= 960 {
+            INFO_W + 1
+        } else {
+            0
+        }
+    }
+
+    /// The selected item (or the folder): a picture, its name and kind,
+    /// what is known about it, and a way to open it.
+    fn info_panel(&self) -> View<'_, Msg> {
+        let tab = &self.tabs[self.active];
+        let one = (tab.selection.len() == 1).then(|| *tab.selection.iter().next().unwrap());
+        let item = one.and_then(|i| tab.items.get(i));
+        let preview: View<'_, Msg> = match item.and_then(|it| tab.thumbs.get(&it.path)).and_then(|t| t.as_ref()) {
+            Some(img) => Canvas::new(move |cv: &mut Surface, r: Rect| cover(cv, img, r, 14)).height(170).fill_width(),
+            None => {
+                let icon = item.map(icon_of).unwrap_or(Icon::Folder);
+                ZStack::with(vec![Image::app_icon(icon, 72)])
+                    .height(170)
+                    .fill_width()
+                    .background_rounded(Color::Fill, 14)
+            }
+        };
+        let kv = |k: &str, v: String| {
+            HStack::new()
+                .push(Text::new(k).style(TextStyle::Callout).foreground(Color::SecondaryLabel).grow(1))
+                .push(Text::new(v).style(TextStyle::Callout))
+                .padding_xy(0, 7)
+                .fill_width()
+        };
+        let folder = tab.title();
+        let (name, kind, facts): (String, String, Vec<View<'_, Msg>>) = match item {
+            Some(it) => (
+                it.name.clone(),
+                if it.is_dir {
+                    String::from(kind_of(it))
+                } else {
+                    format!("{} · {}", kind_of(it), human_size(it.size))
+                },
+                vec![kv("Modified", human_date(it.mtime)), kv("Where", folder.clone())],
+            ),
+            None if tab.selection.len() > 1 => {
+                (format!("{} items", tab.selection.len()), String::from("Selected"), vec![kv("Where", folder.clone())])
+            }
+            None => (folder.clone(), String::from("Folder"), vec![kv("Items", format!("{}", tab.items.len()))]),
+        };
+        let open: Option<View<'_, Msg>> = item.map(|it| {
+            let label = if it.is_dir {
+                String::from("Open")
+            } else if is_image(&it.name) {
+                String::from("Open in Lens")
+            } else {
+                String::from("Open")
+            };
+            HStack::new()
+                .push(Button::new(label).action(Msg::Action(Action::Open)).button_style(ButtonStyle::Prominent).grow(1))
+                .push(Button::symbol(Symbol::Copy).action(Msg::Action(Action::Copy)).help("Copy (Ctrl+C)"))
+                .spacing(8)
+                .fill_width()
+        });
+        VStack::new()
+            .push(preview)
+            .push(
+                VStack::new()
+                    .push(Text::new(name).style(TextStyle::Headline))
+                    .push(Text::new(kind).style(TextStyle::Caption).foreground(Color::TertiaryLabel))
+                    .spacing(2)
+                    .alignment(Align::Start),
+            )
+            .push(Divider::new())
+            .extend(facts)
+            .push(Spacer::new())
+            .push_if(open)
+            .spacing(10)
+            .alignment(Align::Stretch)
+            .padding(18)
+            .width(INFO_W)
+            .fill_height()
     }
 
     fn panel_height(&self) -> i32 {
@@ -719,7 +790,7 @@ impl App for Files {
     }
 
     fn size(&self) -> (i32, i32) {
-        (900, 600)
+        (1140, 728)
     }
 
     fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
@@ -836,6 +907,8 @@ impl App for Files {
                 (Some('v'), _) => Msg::Action(Action::Paste),
                 (Some('d'), _) => Msg::Action(Action::Duplicate),
                 (Some('o'), _) => Msg::Action(Action::Open),
+                (Some('t'), false) => Msg::NewTab,
+                (Some('n'), true) if tab.writable_here() => Msg::Action(Action::NewFolder),
                 (Some('1' | '!'), true) => Msg::ViewMode(0),
                 (Some('2' | '@'), true) => Msg::ViewMode(1),
                 _ if ev.code == KeyCode::Backspace => Msg::Action(Action::Trash),
@@ -976,14 +1049,23 @@ impl App for Files {
     }
 
     fn view(&self, env: &Env) -> View<'_, Msg> {
-        let detail = VStack::new()
+        let main = VStack::new()
             .push(self.toolbar())
-            .push(Divider::new())
             .push(self.content(env))
             .push(Divider::new())
             .push(self.status_bar())
             .spacing(0)
             .fill();
+        let detail = if self.info_width(env) > 0 {
+            HStack::new()
+                .push(main)
+                .push(View::empty().width(1).fill_height().background(Color::Separator))
+                .push(self.info_panel())
+                .spacing(0)
+                .fill()
+        } else {
+            main
+        };
         VStack::new()
             .push_if(self.tab_bar())
             .push(SplitView::new(self.sidebar(), detail).sidebar_width(SIDEBAR_W))
@@ -991,4 +1073,20 @@ impl App for Files {
             .spacing(0)
             .fill()
     }
+}
+
+/// Draws `img` to cover `r` (cropping the overflow), with rounded corners.
+fn cover(cv: &mut Surface, img: &Picture, r: Rect, radius: i32) {
+    let (iw, ih) = (img.width as i64, img.height as i64);
+    if iw == 0 || ih == 0 {
+        return;
+    }
+    // Scale so the picture covers the box, centred.
+    let (w, h) = if iw * r.h as i64 > ih * r.w as i64 {
+        (iw * r.h as i64 / ih, r.h as i64)
+    } else {
+        (r.w as i64, ih * r.w as i64 / iw)
+    };
+    let dst = Rect::new(r.x + (r.w - w as i32) / 2, r.y + (r.h - h as i32) / 2, w as i32, h as i32);
+    cv.draw_image_rounded(&img.pixels, img.width, img.height, dst, r, radius);
 }

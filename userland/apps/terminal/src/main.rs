@@ -27,14 +27,44 @@ use waveui::lumen::theme;
 use waveui::prelude::*;
 use waveui::Request;
 
-const BG: u32 = rgb(0x14, 0x16, 0x1D);
-const FG: u32 = rgb(0xD8, 0xDE, 0xE9);
-const DIM: u32 = rgb(0x7D, 0x86, 0x9A);
-const GREEN: u32 = rgb(0x7E, 0xE7, 0x87);
-const VIOLET: u32 = rgb(0xA7, 0x8B, 0xFA);
-const RED: u32 = rgb(0xFF, 0x7B, 0x72);
-const LINE_H: i32 = 19;
-const PAD: i32 = 12;
+// Lines keep a role, not a colour, so they follow the appearance.
+const FG: u32 = 0;
+const DIM: u32 = 1;
+const GREEN: u32 = 2;
+const VIOLET: u32 = 3;
+const RED: u32 = 4;
+/// A command as typed after its prompt: `alex@aurora /Documents ❯ ls`.
+const ECHO: u32 = 5;
+const BLUE: u32 = 6;
+const LINE_H: i32 = 21;
+const PAD: i32 = 20;
+/// Ends the prompt.
+const MARK: &str = "❯ ";
+
+/// The colour of a role in the current appearance.
+fn ink(role: u32) -> u32 {
+    let dark = theme::current().dark;
+    match (role, dark) {
+        (DIM, true) => rgb(0x7D, 0x86, 0x9A),
+        (DIM, false) => rgb(0x6B, 0x72, 0x84),
+        (GREEN, true) => rgb(0x34, 0xD3, 0x99),
+        (GREEN, false) => rgb(0x0F, 0x8A, 0x5F),
+        (VIOLET, true) => rgb(0xA7, 0x8B, 0xFA),
+        (VIOLET, false) => rgb(0x7C, 0x3A, 0xED),
+        (RED, true) => rgb(0xFF, 0x7B, 0x72),
+        (RED, false) => rgb(0xD1, 0x24, 0x2F),
+        (BLUE, true) => rgb(0x7A, 0xA2, 0xF7),
+        (BLUE, false) => rgb(0x1D, 0x4E, 0xD8),
+        _ => theme::current().text,
+    }
+}
+
+/// The short name of the account ("alex" for Alex Rivera).
+fn user_name() -> String {
+    let full = corekit::prefs::get("account_name").unwrap_or_default();
+    let first = full.split_whitespace().next().unwrap_or("user").to_lowercase();
+    first.chars().filter(|c| c.is_alphanumeric()).collect::<String>()
+}
 const BIN: &str = "/System/Bin";
 
 /// A running pipeline.
@@ -47,7 +77,13 @@ struct Job {
     stdin: Option<u64>,
 }
 
-pub struct Terminal {
+/// One shell, in a tab.
+pub struct Session {
+    /// The working directory (the process has one; each tab keeps its own).
+    cwd: String,
+    user: String,
+    /// The program a running job started with (the tab's name meanwhile).
+    running: String,
     lines: Vec<(String, u32)>,
     input: String,
     history: Vec<String>,
@@ -112,9 +148,12 @@ fn command_list(line: &str) -> VecDeque<(Then, String)> {
     out
 }
 
-impl Terminal {
+impl Session {
     fn new() -> Self {
         let mut t = Self {
+            cwd: fs::cwd(),
+            user: user_name(),
+            running: String::new(),
             lines: Vec::new(),
             input: String::new(),
             history: Vec::new(),
@@ -128,8 +167,13 @@ impl Terminal {
             list_pending: false,
         };
         let info = process::sys_info();
-        t.out(&format!("WaveOS Aurora {} — aurora-sh", process::fixed_str(&info.version, info.version_len)), VIOLET);
-        t.out("Type `help` to see what you can do.", DIM);
+        t.out(
+            &format!(
+                "WaveOS Aurora {} · aurora-sh · type `help` to see what you can do",
+                process::fixed_str(&info.version, info.version_len)
+            ),
+            DIM,
+        );
         t.out("", FG);
         t
     }
@@ -148,7 +192,7 @@ impl Terminal {
             // A program's unfinished line (like a `> ` prompt) leads the input.
             return job.partial.clone();
         }
-        format!("aurora:{}$ ", fs::cwd())
+        format!("{}@aurora {} {MARK}", self.user, fs::cwd())
     }
 
     fn run(&mut self, cmdline: &str, env: &mut Vec<Request>) {
@@ -172,7 +216,19 @@ impl Terminal {
         }
     }
 
+    /// What the tab shows: the running program, or the folder.
+    fn label(&self) -> String {
+        if self.job.is_some() && !self.running.is_empty() {
+            return self.running.clone();
+        }
+        match fs::file_name(&self.cwd) {
+            "" => String::from("/"),
+            name => String::from(name),
+        }
+    }
+
     fn run_one(&mut self, cmdline: &str, env: &mut Vec<Request>) {
+        self.running = String::from(cmdline.split_whitespace().next().unwrap_or(""));
         let stages: Vec<Vec<String>> = cmdline.split('|').map(tokenize).collect();
         if stages.iter().any(|s| s.is_empty()) {
             if stages.len() > 1 {
@@ -426,12 +482,14 @@ fn tokenize(line: &str) -> Vec<String> {
 pub enum Msg {
     Key(KeyEvent),
     Scroll(i32),
+    Tab(usize),
+    NewTab,
+    CloseTab(usize),
 }
 
-impl Terminal {
+impl Session {
     fn draw(&self, cv: &mut Surface, area: Rect, active: bool) {
-        cv.fill_rect(area, BG);
-        let f = theme::mono(14);
+        let f = theme::mono(13);
         let cw = f.advance('M').max(1);
         let cols = ((area.w - 2 * PAD) / cw).max(10) as usize;
         let rows = ((area.h - 2 * PAD) / LINE_H).max(1) as usize;
@@ -440,7 +498,8 @@ impl Terminal {
         let mut screen: Vec<(String, u32)> = Vec::new();
         let prompt = self.prompt();
         let input_line = format!("{}{}", prompt, self.input);
-        let all = self.lines.iter().map(|(s, c)| (s.as_str(), *c)).chain(core::iter::once((input_line.as_str(), FG)));
+        let live = if self.job.is_some() { FG } else { ECHO };
+        let all = self.lines.iter().map(|(s, c)| (s.as_str(), *c)).chain(core::iter::once((input_line.as_str(), live)));
         for (s, c) in all {
             let chars: Vec<char> = s.chars().collect();
             if chars.is_empty() {
@@ -456,12 +515,20 @@ impl Terminal {
         let end = screen.len() - back as usize;
         let start = end.saturating_sub(rows);
         for (i, (s, c)) in screen[start..end].iter().enumerate() {
-            let y = area.y + PAD + i as i32 * LINE_H + 14;
-            if start + i + 1 == screen.len() && !prompt.is_empty() && s.starts_with("aurora:") && back == 0 {
-                let pw = cv.text(area.x + PAD, y, &prompt, f, GREEN);
-                cv.text(area.x + PAD + pw, y, s.get(prompt.len()..).unwrap_or(""), f, *c);
-            } else {
-                cv.text(area.x + PAD, y, s, f, *c);
+            let y = area.y + PAD + i as i32 * LINE_H + 15;
+            let x = area.x + PAD;
+            match s.find(MARK).filter(|_| *c == ECHO) {
+                Some(m) => {
+                    // user@aurora in blue, the folder dim, the mark violet.
+                    let user = s[..m].find(' ').unwrap_or(0);
+                    let mut x = x + cv.text(x, y, &s[..user], f, ink(BLUE));
+                    x += cv.text(x, y, &s[user..m], f, ink(DIM));
+                    x += cv.text(x, y, MARK, f, ink(VIOLET));
+                    cv.text(x, y, &s[m + MARK.len()..], f, ink(FG));
+                }
+                None => {
+                    cv.text(x, y, s, f, ink(*c));
+                }
             }
         }
         if active && self.caret_on && back == 0 {
@@ -469,7 +536,7 @@ impl Terminal {
             let row = (end - start - 1) as i32;
             let col = (total % cols) as i32;
             let row = if total % cols == 0 && total > 0 { row + 1 } else { row };
-            cv.fill_rect(Rect::new(area.x + PAD + col * cw, area.y + PAD + row * LINE_H + 2, cw, 16), 0xC07E_E787);
+            cv.fill_rect(Rect::new(area.x + PAD + col * cw, area.y + PAD + row * LINE_H + 2, cw, 17), theme::accent());
         }
     }
 
@@ -491,7 +558,7 @@ impl Terminal {
                 }
             } else {
                 let line = format!("{}{}^C", self.prompt(), self.input);
-                self.out(&line, FG);
+                self.out(&line, ECHO);
                 self.input.clear();
             }
             return true;
@@ -503,7 +570,7 @@ impl Terminal {
             KeyCode::Enter => {
                 let cmd = core::mem::take(&mut self.input);
                 let echo = format!("{}{}", self.prompt(), cmd);
-                self.out(&echo, FG);
+                self.out(&echo, ECHO);
                 if !cmd.trim().is_empty() {
                     self.history.push(cmd.clone());
                 }
@@ -531,47 +598,160 @@ impl Terminal {
     }
 }
 
+/// The window: a row of tabs, each a shell.
+pub struct Terminal {
+    tabs: Vec<Session>,
+    active: usize,
+}
+
+impl Terminal {
+    fn new() -> Self {
+        Self { tabs: vec![Session::new()], active: 0 }
+    }
+
+    /// Runs `f` on tab `i` inside its own working directory.
+    fn with_tab<R>(&mut self, i: usize, f: impl FnOnce(&mut Session) -> R) -> R {
+        let s = &mut self.tabs[i];
+        let _ = fs::chdir(&s.cwd);
+        let r = f(s);
+        s.cwd = fs::cwd();
+        r
+    }
+
+    fn requests(&mut self, i: usize, requests: Vec<Request>, cx: &mut Context<Msg>) {
+        for r in requests {
+            match r {
+                // `exit` closes its tab; the window goes with the last one.
+                Request::Close if self.tabs.len() > 1 => self.close_tab(i),
+                r => cx.request(r),
+            }
+        }
+    }
+
+    fn close_tab(&mut self, i: usize) {
+        if i >= self.tabs.len() {
+            return;
+        }
+        if let Some(job) = &self.tabs[i].job {
+            for pid in &job.pids {
+                let _ = process::kill(*pid);
+            }
+        }
+        self.tabs.remove(i);
+        if self.active > i || self.active >= self.tabs.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        let _ = fs::chdir(&self.tabs[self.active].cwd);
+    }
+
+    fn tab_bar(&self) -> View<'_, Msg> {
+        let mut bar = HStack::new().spacing(4);
+        for (i, t) in self.tabs.iter().enumerate() {
+            let on = i == self.active;
+            let tab = HStack::new()
+                .push(Image::symbol(Symbol::Terminal).symbol_size(14))
+                .push(Text::new(t.label()).style(TextStyle::Sized(13, waveui::style::Weight::Bold)))
+                .spacing(8)
+                .padding_xy(12, 0)
+                .height(30)
+                .foreground(if on { Color::Label } else { Color::SecondaryLabel })
+                .on_tap(Msg::Tab(i))
+                .context_menu(vec![MenuItem::new("New Tab", Msg::NewTab), MenuItem::new("Close Tab", Msg::CloseTab(i))])
+                .help(t.cwd.clone());
+            bar = bar.push(if on { tab.background_rounded(Color::Fill, 15) } else { tab });
+        }
+        bar = bar.push(
+            Button::symbol(Symbol::Plus)
+                .action(Msg::NewTab)
+                .shortcut(Shortcut::ctrl('t'))
+                .foreground(Color::SecondaryLabel)
+                .help("New Tab (Ctrl+T)"),
+        );
+        VStack::new().push(bar.padding_xy(12, 0).height(48).fill_width()).push(Divider::new()).spacing(0).fill_width()
+    }
+}
+
 impl App for Terminal {
     type Message = Msg;
 
     fn title(&self) -> String {
-        format!("Terminal — {}", fs::cwd())
+        format!("Terminal — {}", self.tabs[self.active].cwd)
     }
     fn size(&self) -> (i32, i32) {
-        (680, 420)
+        (1000, 680)
     }
 
     fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
-        let mut requests = Vec::new();
+        let now = cx.now();
         match msg {
             Msg::Key(ev) => {
-                self.key(&ev, cx.now(), &mut requests);
+                if ev.pressed && ev.mods.ctrl && ev.code == KeyCode::Tab && self.tabs.len() > 1 {
+                    let n = self.tabs.len();
+                    self.active = if ev.mods.shift { (self.active + n - 1) % n } else { (self.active + 1) % n };
+                    let _ = fs::chdir(&self.tabs[self.active].cwd);
+                    return;
+                }
+                if ev.pressed && ev.mods.ctrl && ev.mods.shift && matches!(ev.ch, Some('w' | 'W')) {
+                    cx.send(Msg::CloseTab(self.active));
+                    return;
+                }
+                let i = self.active;
+                let mut requests = Vec::new();
+                self.with_tab(i, |s| s.key(&ev, now, &mut requests));
+                self.requests(i, requests, cx);
             }
-            Msg::Scroll(lines) => self.scroll_back.set((self.scroll_back.get() - lines).max(0)),
-        }
-        for r in requests {
-            cx.request(r);
+            Msg::Scroll(lines) => {
+                let s = &self.tabs[self.active];
+                s.scroll_back.set((s.scroll_back.get() - lines).max(0));
+            }
+            Msg::Tab(i) => {
+                self.active = i.min(self.tabs.len() - 1);
+                let _ = fs::chdir(&self.tabs[self.active].cwd);
+                cx.focus("terminal");
+            }
+            Msg::NewTab => {
+                let _ = fs::chdir(&self.tabs[self.active].cwd);
+                self.tabs.push(Session::new());
+                self.active = self.tabs.len() - 1;
+                cx.focus("terminal");
+            }
+            Msg::CloseTab(i) => {
+                if self.tabs.len() > 1 {
+                    self.close_tab(i);
+                } else {
+                    cx.close();
+                }
+            }
         }
     }
 
     fn poll_interval(&self) -> Option<u64> {
-        Some(if self.job.is_some() { 20 } else { 100 })
+        Some(if self.tabs.iter().any(|t| t.job.is_some()) { 20 } else { 100 })
     }
 
     fn poll(&mut self, cx: &mut Context<Msg>) -> bool {
-        let mut changed = self.poll_job();
-        if core::mem::take(&mut self.list_pending) {
-            let mut requests = Vec::new();
-            self.run_queue(&mut requests);
-            for r in requests {
-                cx.request(r);
+        let mut changed = false;
+        for i in 0..self.tabs.len() {
+            if self.tabs[i].job.is_none() && !self.tabs[i].list_pending {
+                continue;
             }
-            changed = true;
+            let mut requests = Vec::new();
+            changed |= self.with_tab(i, |s| {
+                let mut changed = s.poll_job();
+                if core::mem::take(&mut s.list_pending) {
+                    s.run_queue(&mut requests);
+                    changed = true;
+                }
+                changed
+            });
+            self.requests(i, requests, cx);
         }
+        let _ = fs::chdir(&self.tabs[self.active].cwd);
         let now = cx.now();
-        if now - self.last_blink >= 530 {
-            self.caret_on = !self.caret_on;
-            self.last_blink = now;
+        let s = &mut self.tabs[self.active];
+        if now - s.last_blink >= 530 {
+            s.caret_on = !s.caret_on;
+            s.last_blink = now;
             changed = true;
         }
         changed
@@ -579,20 +759,27 @@ impl App for Terminal {
 
     fn view(&self, env: &Env) -> View<'_, Msg> {
         let active = env.active;
-        Canvas::new(move |cv, r| self.draw(cv, r, active))
-            .on_input(|e| match e {
-                CanvasEvent::Key(k) => Some(Msg::Key(k)),
-                CanvasEvent::Scroll { dy, .. } if dy != 0 => Some(Msg::Scroll(dy / 16)),
-                _ => None,
-            })
-            .focusable()
-            .focused()
-            .id("terminal")
+        let s = &self.tabs[self.active];
+        VStack::new()
+            .push(self.tab_bar())
+            .push(
+                Canvas::new(move |cv, r| s.draw(cv, r, active))
+                    .on_input(|e| match e {
+                        CanvasEvent::Key(k) => Some(Msg::Key(k)),
+                        CanvasEvent::Scroll { dy, .. } if dy != 0 => Some(Msg::Scroll(dy / 16)),
+                        _ => None,
+                    })
+                    .focusable()
+                    .focused()
+                    .id("terminal")
+                    .fill(),
+            )
+            .spacing(0)
             .fill()
     }
 }
 
-impl Terminal {
+impl Session {
     /// A key while a program runs: line editing, then the line goes to its stdin.
     fn job_key(&mut self, ev: &KeyEvent) -> bool {
         let Some(job) = self.job.as_mut() else { return false };
@@ -643,7 +830,7 @@ impl Terminal {
         } else if matches.len() > 1 {
             let names: Vec<&str> = matches.iter().map(|e| e.name.as_str()).collect();
             let line = format!("{}{}", self.prompt(), self.input);
-            self.out(&line, FG);
+            self.out(&line, ECHO);
             self.out(&names.join("  "), DIM);
         }
     }

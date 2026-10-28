@@ -73,6 +73,7 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         }
         pref::KEYBOARD if !keymap::LAYOUTS.iter().any(|l| l.id == value) => return Err(EINVAL),
         pref::ACCENT if value.parse::<u8>().is_err() => return Err(EINVAL),
+        pref::DISPLAY_SCALE if !matches!(value, "0" | "1" | "2") => return Err(EINVAL),
         pref::TRACKING_SPEED | pref::POINTER_SPEED if !value.parse::<u8>().is_ok_and(|v| (1..=10).contains(&v)) => {
             return Err(EINVAL)
         }

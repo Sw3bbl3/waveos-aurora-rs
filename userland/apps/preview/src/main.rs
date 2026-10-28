@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use aurora_image::Image as Picture;
 use core::cell::RefCell;
 use corekit::fs;
@@ -36,6 +37,11 @@ struct Preview {
     status: Option<String>,
     /// The size of the picture area.
     view: (i32, i32),
+    /// The name card (top left) and the filmstrip (bottom), shown or not.
+    show_info: bool,
+    show_strip: bool,
+    /// Small copies of the pictures beside this one, by path.
+    thumbs: RefCell<BTreeMap<String, Option<Picture>>>,
 }
 
 #[derive(Clone)]
@@ -52,6 +58,10 @@ enum Msg {
     Release,
     ToggleActual,
     ClearStatus,
+    Open(String),
+    ToggleInfo,
+    ToggleStrip,
+    Share,
 }
 
 impl Preview {
@@ -66,6 +76,9 @@ impl Preview {
             reduced: RefCell::new(None),
             status: None,
             view: (640, 414),
+            show_info: true,
+            show_strip: true,
+            thumbs: RefCell::new(BTreeMap::new()),
         };
         if let Some(path) = path {
             p.load(path);
@@ -195,6 +208,55 @@ impl Preview {
         }
     }
 
+    /// A small copy of `path` for the filmstrip (made once).
+    fn thumb(&self, path: &str) -> Option<Picture> {
+        let mut thumbs = self.thumbs.borrow_mut();
+        thumbs
+            .entry(String::from(path))
+            .or_insert_with(|| {
+                let data = fs::read(path).ok()?;
+                let img = aurora_image::decode(&data).ok()?;
+                Some(img.thumbnail(144, 104))
+            })
+            .clone()
+    }
+
+    fn filmstrip(&self) -> Option<View<'_, Msg>> {
+        let list = self.siblings();
+        let cur = self.path.as_ref().and_then(|p| list.iter().position(|s| s == p))?;
+        if list.len() < 2 {
+            return None;
+        }
+        let from = cur.saturating_sub(3).min(list.len().saturating_sub(7));
+        let mut strip = HStack::new().spacing(8);
+        for path in list.iter().skip(from).take(7) {
+            let on = Some(path) == self.path.as_ref();
+            let t = self.thumb(path);
+            strip = strip.push(
+                Canvas::new(move |cv, r| {
+                    let inner = r.inset(3);
+                    match &t {
+                        Some(t) => {
+                            let (w, h) = aurora_image::fit(t.width, t.height, inner.w as u32, inner.h as u32);
+                            let (w, h) = (w as i32, h as i32);
+                            let dst = Rect::new(inner.x + (inner.w - w) / 2, inner.y + (inner.h - h) / 2, w, h);
+                            cv.draw_image_rounded(&t.pixels, t.width, t.height, dst, dst, 7);
+                        }
+                        None => cv.fill_round_rect(inner, 7, 0x30FF_FFFF),
+                    }
+                    if on {
+                        cv.stroke_round_rect(r, 10, waveui::lumen::theme::accent());
+                        cv.stroke_round_rect(r.inset(1), 9, waveui::lumen::theme::accent());
+                    }
+                })
+                .size(80, 58)
+                .on_tap(Msg::Open(path.clone()))
+                .help(String::from(fs::file_name(path))),
+            );
+        }
+        Some(strip.padding(6).background_rounded(Color::Custom(panel()), 14).border(Color::Separator, 14))
+    }
+
     fn placeholder<'a>(title: &str, detail: &str) -> View<'a, Msg> {
         VStack::new()
             .push(Image::app_icon(Icon::Preview, 64))
@@ -219,10 +281,14 @@ impl App for Preview {
         match &self.image {
             Some(img) => {
                 let (w, h) = aurora_image::fit(img.width, img.height, 960, 600);
-                ((w as i32).max(560), h as i32 + size::TOOLBAR)
+                ((w as i32).max(640), (h as i32).max(460))
             }
             None => (640, 460),
         }
+    }
+
+    fn resizable(&self) -> bool {
+        true
     }
 
     fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
@@ -259,6 +325,16 @@ impl App for Preview {
             }
             Msg::Release => self.drag_from = None,
             Msg::ClearStatus => self.status = None,
+            Msg::Open(p) => self.load(p),
+            Msg::ToggleInfo => self.show_info = !self.show_info,
+            Msg::ToggleStrip => self.show_strip = !self.show_strip,
+            Msg::Share => {
+                if let Some(p) = &self.path {
+                    cx.copy(p);
+                    self.status = Some(String::from("Path copied"));
+                    cx.after(2000, Msg::ClearStatus);
+                }
+            }
         }
     }
 
@@ -277,25 +353,7 @@ impl App for Preview {
 
     fn view(&self, env: &Env) -> View<'_, Msg> {
         let has = self.image.is_some();
-        let info = self.image.as_ref().map(|img| format!("{} × {}", img.width, img.height)).unwrap_or_default();
-        let zoom = if has { format!("{}%", self.effective_zoom()) } else { String::from("—") };
-        let bar = toolbar(vec![
-            Button::symbol(Symbol::ChevronLeft).action(Msg::Step(-1)).help("Previous picture"),
-            Button::symbol(Symbol::ChevronRight).action(Msg::Step(1)).help("Next picture"),
-            Text::new(info).foreground(Color::SecondaryLabel).padding_xy(6, 0),
-            Spacer::new(),
-            Button::symbol(Symbol::Minus).action(Msg::Zoom(-1)).disabled(!has).help("Zoom out"),
-            Text::centered(zoom).foreground(Color::SecondaryLabel).width(56),
-            Button::symbol(Symbol::Plus).action(Msg::Zoom(1)).disabled(!has).help("Zoom in"),
-            Button::new("Fit").action(Msg::Fit).disabled(!has).button_style(if self.zoom.is_none() && has {
-                ButtonStyle::Prominent
-            } else {
-                ButtonStyle::Bordered
-            }),
-            Button::symbol(Symbol::Refresh).action(Msg::Rotate).disabled(!has).help("Rotate"),
-            Button::new("Set as Wallpaper").action(Msg::Wallpaper).disabled(!has),
-        ]);
-        let backdrop = if env.dark { 0xFF18_181E } else { 0xFFE9_E9EE };
+        let backdrop = if env.dark { 0xFF00_0000 } else { 0xFFF4_F5FA };
         let content = match (&self.image, &self.error) {
             (Some(_), _) => Canvas::new(move |cv, r| {
                 cv.fill_rect(r, backdrop);
@@ -315,25 +373,111 @@ impl App for Preview {
             (None, None) => Self::placeholder("No picture open", "Double-click a picture in Files to open it here.")
                 .background(Color::Custom(backdrop)),
         };
-        let status = self.status.as_ref().map(|s| {
+        // The name card.
+        let card = (self.show_info && self.path.is_some()).then(|| {
+            let path = self.path.as_deref().unwrap_or("");
+            let list = self.siblings();
+            let mut detail = Vec::new();
+            if let Some(i) = list.iter().position(|p| p == path) {
+                detail.push(format!("{} of {}", i + 1, list.len()));
+            }
+            if let Some(img) = &self.image {
+                detail.push(format!("{} × {}", img.width, img.height));
+            }
+            if let Ok(st) = fs::stat(path) {
+                detail.push(human_size(st.size));
+            }
+            if has && self.zoom.is_some() {
+                detail.push(format!("{}%", self.effective_zoom()));
+            }
             VStack::new()
-                .push(Spacer::new())
                 .push(
-                    Text::new(s.clone())
-                        .style(TextStyle::Headline)
-                        .foreground(Color::Custom(0xFFFF_FFFF))
-                        .padding_xy(16, 8)
-                        .background_rounded(Color::Custom(0xE025_2530), 17),
+                    VStack::new()
+                        .push(
+                            Text::new(String::from(fs::file_name(path)))
+                                .style(TextStyle::Sized(15, waveui::style::Weight::Bold)),
+                        )
+                        .push(
+                            Text::new(detail.join(" · "))
+                                .style(TextStyle::Sized(11, waveui::style::Weight::Bold))
+                                .foreground(Color::SecondaryLabel),
+                        )
+                        .spacing(2)
+                        .alignment(Align::Start)
+                        .padding_xy(14, 10)
+                        .background_rounded(Color::Custom(panel()), 12)
+                        .border(Color::Separator, 12),
                 )
-                .padding(18)
+                .push(Spacer::new())
+                .alignment(Align::Start)
+                .padding(22)
                 .fill()
         });
-        VStack::new()
-            .push(bar)
-            .push(Divider::new())
-            .push(ZStack::with(vec![content]).push_if(status).fill())
-            .spacing(0)
-            .fill()
+        let tool = |sym: Symbol, m: Msg, tip: &str| Button::symbol(sym).action(m).disabled(!has).help(tip.to_string());
+        let sep = || Divider::new().height(20);
+        let bar = HStack::new()
+            .push(Button::symbol(Symbol::ChevronLeft).action(Msg::Step(-1)).help("Previous picture (←)"))
+            .push(Button::symbol(Symbol::ChevronRight).action(Msg::Step(1)).help("Next picture (→)"))
+            .push(sep())
+            .push(tool(Symbol::Search, Msg::Zoom(1), "Zoom in (+)"))
+            .push(
+                Button::new(if self.zoom.is_none() { "Fit" } else { "1:1" })
+                    .action(if self.zoom.is_none() { Msg::Actual } else { Msg::Fit })
+                    .button_style(ButtonStyle::Toolbar)
+                    .disabled(!has)
+                    .help("Fit the window, or actual size (0, 1)"),
+            )
+            .push(tool(Symbol::Refresh, Msg::Rotate, "Rotate (R)"))
+            .push(tool(Symbol::Photo, Msg::Wallpaper, "Set as Wallpaper"))
+            .push(
+                Button::symbol(Symbol::Info)
+                    .action(Msg::ToggleInfo)
+                    .background_rounded(if self.show_info { Color::SecondaryFill } else { Color::Clear }, 15)
+                    .help("Show the name"),
+            )
+            .push(sep())
+            .push(tool(Symbol::Share, Msg::Share, "Copy Path"))
+            .push(
+                Button::symbol(Symbol::Grid)
+                    .action(Msg::ToggleStrip)
+                    .background_rounded(if self.show_strip { Color::SecondaryFill } else { Color::Clear }, 15)
+                    .help("Show the other pictures here"),
+            )
+            .spacing(6)
+            .padding_xy(10, 6)
+            .background_rounded(Color::Custom(panel()), 22)
+            .border(Color::Separator, 22);
+        let strip = if self.show_strip { self.filmstrip() } else { None };
+        let mut bottom = VStack::new().push(Spacer::new());
+        if let Some(s) = &self.status {
+            bottom = bottom.push(
+                Text::new(s.clone())
+                    .style(TextStyle::Headline)
+                    .padding_xy(16, 8)
+                    .background_rounded(Color::Custom(panel()), 17),
+            );
+        }
+        let bottom = bottom.push(bar).push_if(strip).spacing(14).padding(22).fill();
+        ZStack::with(vec![content]).push_if(card).push(bottom).fill()
+    }
+}
+
+/// The floating panels' glass.
+fn panel() -> u32 {
+    if waveui::lumen::theme::current().dark {
+        0xF00B_0E18
+    } else {
+        0xF0FF_FFFF
+    }
+}
+
+fn human_size(n: u64) -> String {
+    if n >= 1 << 20 {
+        format!("{:.1} MB", n as f64 / (1u64 << 20) as f64)
+    } else if n >= 1 << 10 {
+        format!("{} KB", n / 1024)
+    } else {
+        format!("{n} B")
     }
 }
 

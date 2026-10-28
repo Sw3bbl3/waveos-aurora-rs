@@ -9,6 +9,8 @@
 //!       --memory-mib N                    guest RAM in MiB (default 4096)
 //!       --audio-wav PATH                  record guest audio to a WAV file
 //!       --gpu std|virtio                  display adapter (default std; virtio runs the ported Linux driver)
+//!       --resolution WxH                  virtio's starting screen size (default 1920x1080; WaveOS then
+//!                                         follows the QEMU window when you resize it)
 //!       --wifi-sim                        simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
 //!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
 //!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
@@ -146,6 +148,21 @@ fn main() {
                 net,
                 netdev_extra: String::new(),
                 gpu,
+                resolution: Some(
+                    args.iter()
+                        .position(|a| a == "--resolution")
+                        .and_then(|i| args.get(i + 1))
+                        .map(|r| {
+                            r.split_once('x')
+                                .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+                                .filter(|&(w, h): &(u32, u32)| (640..=8192).contains(&w) && (480..=8192).contains(&h))
+                                .unwrap_or_else(|| {
+                                    eprintln!("--resolution must be WIDTHxHEIGHT, e.g. 2560x1600");
+                                    exit(2)
+                                })
+                        })
+                        .unwrap_or((1920, 1080)),
+                ),
                 usb,
                 virtual_hid: Vec::new(),
                 usb_stick: flag("--usb-stick").then(|| {
@@ -679,6 +696,8 @@ struct RunOpts<'a> {
     netdev_extra: String,
     /// Display adapter: std (Bochs VGA) or virtio (virtio-vga, driven by the ported Linux driver).
     gpu: &'a str,
+    /// virtio-vga's starting (preferred) screen size; QEMU's own default when `None`.
+    resolution: Option<(u32, u32)>,
     /// USB controller: xhci, ehci (with UHCI companions), ehci-ohci (with an OHCI one), ohci or uhci.
     usb: &'a str,
     /// Virtual USB devices (keyboard with media keys, touchpad, game
@@ -702,9 +721,14 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let mut cmd = Command::new("qemu-system-x86_64");
     cmd.args(["-machine", "q35", "-cpu", "max"]);
     if opts.gpu == "virtio" {
-        cmd.args(["-vga", "none", "-device", "virtio-vga"]);
+        let device = match opts.resolution {
+            Some((w, h)) => format!("virtio-vga,edid=on,xres={w},yres={h}"),
+            None => String::from("virtio-vga,edid=on"),
+        };
+        cmd.args(["-vga", "none", "-device", &device]);
     } else {
-        cmd.args(["-vga", "std"]);
+        // 64 MiB of video memory: room for 4K modes.
+        cmd.args(["-vga", "std", "-global", "VGA.vgamem_mb=64"]);
     }
     // Software emulation on non-x86 hosts: one translation thread per CPU and
     // a large translation cache. AURORA_ACCEL overrides it
@@ -1015,6 +1039,7 @@ fn run_tests_once(
         net,
         netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
         gpu,
+        resolution: None,
         usb,
         virtual_hid: usbredir::ALL.iter().map(|&k| (k, usbredir::start(k, &root().join("target")))).collect(),
         battery: true,

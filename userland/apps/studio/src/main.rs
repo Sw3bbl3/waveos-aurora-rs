@@ -4,6 +4,7 @@
 #![no_main]
 extern crate alloc;
 
+use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 use corekit::{apps, fs, process, sync::Mutex, thread};
@@ -63,6 +64,9 @@ pub enum Msg {
     Apply,
     Remove,
     Move(i32),
+    CloseTab(String),
+    Panel(usize),
+    ToggleDir(String),
 }
 
 pub struct Studio {
@@ -80,6 +84,12 @@ pub struct Studio {
     job: Arc<Mutex<Job>>,
     cancel: Arc<AtomicBool>,
     log: String,
+    /// Files open in tabs, in the order they were opened.
+    open: Vec<String>,
+    /// Folders folded shut in the explorer.
+    folded: BTreeSet<String>,
+    /// The bottom panel: 0 output, 1 problems.
+    panel: usize,
 }
 
 impl Studio {
@@ -99,6 +109,9 @@ impl Studio {
             job: Arc::new(Mutex::new(Job::default())),
             cancel: Arc::new(AtomicBool::new(false)),
             log: String::new(),
+            open: Vec::new(),
+            folded: BTreeSet::new(),
+            panel: 0,
         };
         if path.is_some() {
             s.open_project();
@@ -114,6 +127,7 @@ impl Studio {
         match sdk::manifest(&self.project) {
             Ok(_) => {
                 self.files.clear();
+                self.open.clear();
                 let root = self.project.clone();
                 self.scan(&root, "");
                 self.mode = Mode::Code;
@@ -151,6 +165,9 @@ impl Studio {
                 Ok(text) => {
                     self.text = text.clone();
                     self.saved = text;
+                    if !self.open.contains(&file) {
+                        self.open.push(file.clone());
+                    }
                     self.file = Some(file);
                 }
                 Err(e) => self.status = format!("Cannot open file: {e}"),
@@ -310,35 +327,229 @@ impl Studio {
     // ------------------------------------------------------------ views
 
     fn sidebar(&self) -> View<'_, Msg> {
-        let files = &self.files;
-        let list: View<'_, Msg> = if files.is_empty() {
-            Text::paragraph("Open a project to see its files.")
-                .foreground(Color::SecondaryLabel)
-                .padding(10)
-                .align(Align::Start)
+        let menu = vec![
+            MenuItem::new("New Project", Msg::New),
+            MenuItem::new("Open Project", Msg::Open),
+            MenuItem::new("Save", Msg::Save).shortcut(Shortcut::ctrl('s')).enabled(self.dirty()),
+            MenuItem::Separator,
+            MenuItem::new("Build", Msg::Run(Operation::Build)).shortcut(Shortcut::ctrl('b')),
+            MenuItem::new("Export .gina Package", Msg::Run(Operation::Export)),
+            MenuItem::new("Install Built App", Msg::Run(Operation::Install)),
+        ];
+        let mut tree = VStack::new().spacing(1).alignment(Align::Stretch);
+        if self.files.is_empty() {
+            tree = tree.push(
+                Text::paragraph("Choose a folder above, then open or create a project.")
+                    .style(TextStyle::Callout)
+                    .foreground(Color::SecondaryLabel)
+                    .padding_xy(10, 6),
+            );
         } else {
-            List::new(files.len(), 30, move |i| {
-                let f = &files[i];
-                let symbol = if f.ends_with(".rs") { Symbol::Document } else { Symbol::Text };
-                label(symbol, f.clone()).padding_xy(12, 0).fill()
-            })
-            .selection(self.file.as_ref().and_then(|f| files.iter().position(|x| x == f)))
-            .on_select(Msg::File)
-            .id("files")
-        };
+            let row = |depth: usize, symbol: Symbol, name: String, selected: bool| {
+                HStack::new()
+                    .push(Spacer::new().width(depth as i32 * 14))
+                    .push(Image::symbol(symbol).symbol_size(14).foreground(if selected {
+                        Color::AccentText
+                    } else {
+                        Color::SecondaryLabel
+                    }))
+                    .push(Text::new(name).style(TextStyle::Sized(13, waveui::style::Weight::Bold)))
+                    .spacing(8)
+                    .padding_xy(10, 0)
+                    .height(28)
+                    .fill_width()
+                    .corner_radius(8)
+                    .selected(selected)
+            };
+            let root = String::from(fs::file_name(&self.project));
+            tree = tree.push(row(0, Symbol::Folder, root, false));
+            // Folders first, as they come, then the files in them.
+            let mut shown: BTreeSet<String> = BTreeSet::new();
+            let mut order: Vec<usize> = (0..self.files.len()).collect();
+            order.sort_by_key(|&i| {
+                let f = &self.files[i];
+                (f.matches('/').count() == 0, f.clone())
+            });
+            for i in order {
+                let f = &self.files[i];
+                let parts: Vec<&str> = f.split('/').collect();
+                let mut hidden = false;
+                for d in 0..parts.len() - 1 {
+                    let dir = parts[..=d].join("/");
+                    if hidden {
+                        break;
+                    }
+                    if shown.insert(dir.clone()) {
+                        tree = tree.push(
+                            row(d + 1, Symbol::Folder, String::from(parts[d]), false)
+                                .on_tap(Msg::ToggleDir(dir.clone())),
+                        );
+                    }
+                    hidden = self.folded.contains(&dir);
+                }
+                if !hidden {
+                    let on = self.file.as_deref() == Some(f.as_str());
+                    tree = tree.push(
+                        row(parts.len(), Symbol::Document, String::from(parts[parts.len() - 1]), on)
+                            .on_tap(Msg::File(i)),
+                    );
+                }
+            }
+        }
         VStack::new()
-            .push(Text::new("PROJECT").style(TextStyle::Caption).foreground(Color::SecondaryLabel).padding_xy(12, 0))
-            .push(list.grow(1))
+            .push(
+                HStack::new()
+                    .push(Text::label("Explorer").grow(1))
+                    .push(Button::symbol(Symbol::More).menu(menu).help("Project"))
+                    .padding_insets(Insets { top: 0, leading: 10, bottom: 0, trailing: 0 })
+                    .fill_width(),
+            )
+            .push(
+                TextField::new("Project folder", self.project.clone())
+                    .on_change(Msg::Project)
+                    .on_submit(Msg::Open)
+                    .help("Press Return to open the project in this folder"),
+            )
+            .push(ScrollView::new(tree.fill_width()).grow(1))
             .spacing(8)
             .alignment(Align::Stretch)
-            .padding_insets(Insets { top: 14, leading: 6, bottom: 8, trailing: 6 })
+            .padding_insets(Insets { top: 14, leading: 8, bottom: 8, trailing: 8 })
             .fill()
+    }
+
+    /// The open files, as tabs, with the run controls on the right.
+    fn tab_bar(&self) -> View<'_, Msg> {
+        let running = self.job.lock().running;
+        let mode = match self.mode {
+            Mode::Code => 0,
+            Mode::Design => 1,
+            Mode::Guide => 2,
+        };
+        let mut tabs = HStack::new().spacing(0);
+        for name in &self.open {
+            let on = self.mode != Mode::Guide && self.file.as_ref() == Some(name);
+            let index = self.files.iter().position(|f| f == name).unwrap_or(0);
+            let mut tab = HStack::new()
+                .push(Image::symbol(Symbol::Document).symbol_size(13).foreground(Color::SecondaryLabel))
+                .push(
+                    Text::new(String::from(fs::file_name(name)))
+                        .style(TextStyle::Sized(13, waveui::style::Weight::Bold))
+                        .foreground(if on { Color::Label } else { Color::SecondaryLabel }),
+                )
+                .spacing(8)
+                .padding_xy(16, 0)
+                .fill_height()
+                .on_tap(Msg::File(index))
+                .context_menu(vec![MenuItem::new("Close Tab", Msg::CloseTab(name.clone()))])
+                .help(name.clone());
+            if on {
+                tab = tab
+                    .push(
+                        Button::symbol(Symbol::Close)
+                            .action(Msg::CloseTab(name.clone()))
+                            .control_size(ControlSize::Small)
+                            .size(20, 20)
+                            .help("Close Tab"),
+                    )
+                    .background(Color::Fill)
+                    .overlay_draw(|cv, r| {
+                        cv.fill_rect(waveui::lumen::geom::Rect::new(r.x, r.y, r.w, 2), waveui::lumen::theme::accent())
+                    });
+            }
+            tabs = tabs.push(tab).push(Divider::new());
+        }
+        let run = if running {
+            Button::with(label(Symbol::Stop, "Stop")).action(Msg::Stop).button_style(ButtonStyle::Destructive)
+        } else {
+            Button::with(label(Symbol::Play, "Build & Run"))
+                .action(Msg::Run(Operation::BuildRun))
+                .button_style(ButtonStyle::Prominent)
+                .shortcut(Shortcut::ctrl('r'))
+        };
+        VStack::new()
+            .push(
+                HStack::new()
+                    .push(tabs)
+                    .push(Spacer::new())
+                    .push(Picker::new(["Code", "Design", "Guide"], mode).on_change(Msg::Mode).width(210))
+                    .push(run.control_size(ControlSize::Small))
+                    .spacing(10)
+                    .padding_insets(Insets { top: 0, leading: 0, bottom: 0, trailing: 12 })
+                    .height(40)
+                    .fill_width(),
+            )
+            .push(Divider::new())
+            .spacing(0)
+            .fill_width()
+    }
+
+    /// Build output, or just its errors and warnings.
+    fn panel(&self) -> View<'_, Msg> {
+        let running = self.job.lock().running;
+        let problems: Vec<&str> = self
+            .log
+            .lines()
+            .filter(|l| {
+                let l = l.trim_start().to_ascii_lowercase();
+                l.starts_with("error") || l.starts_with("warning")
+            })
+            .collect();
+        let tab = |i: usize, name: String| {
+            Text::new(name)
+                .style(TextStyle::Sized(12, waveui::style::Weight::Bold))
+                .foreground(if self.panel == i { Color::Label } else { Color::TertiaryLabel })
+                .on_tap(Msg::Panel(i))
+        };
+        let body = if self.panel == 1 {
+            if problems.is_empty() {
+                String::from("No problems found in the last build.")
+            } else {
+                problems.join("\n")
+            }
+        } else if self.log.is_empty() {
+            String::from("Build output appears here.")
+        } else {
+            self.log.clone()
+        };
+        let faint = self.log.is_empty() || (self.panel == 1 && problems.is_empty());
+        VStack::new()
+            .push(
+                HStack::new()
+                    .push(tab(0, String::from("Output")))
+                    .push(tab(
+                        1,
+                        if problems.is_empty() {
+                            String::from("Problems")
+                        } else {
+                            format!("Problems ({})", problems.len())
+                        },
+                    ))
+                    .push(Spacer::new())
+                    .push_if(running.then(ProgressView::spinner))
+                    .spacing(16)
+                    .padding_xy(16, 0)
+                    .height(32)
+                    .fill_width(),
+            )
+            .push(
+                ScrollView::new(
+                    Text::paragraph(body)
+                        .style(TextStyle::Sized(12, waveui::style::Weight::Mono))
+                        .foreground(if faint { Color::SecondaryLabel } else { Color::Label })
+                        .padding_xy(16, 2)
+                        .fill_width(),
+                )
+                .stick_to_end()
+                .id(("panel", self.panel)),
+            )
+            .spacing(0)
+            .height(170)
     }
 
     fn guide(&self) -> View<'_, Msg> {
         let missing = sdk::doctor();
         let steps = [
-            "Choose a project folder, then New or Open.",
+            "Choose a project folder, then New or Open Project from the ⋯ menu.",
             "Edit Rust source, or use Design for the interface.",
             "Build & Run installs and launches the real app.",
             "Export a .gina package to share your app.",
@@ -466,12 +677,14 @@ impl Studio {
             .on_change(Msg::Edit)
             .on_caret(Msg::Caret)
             .placeholder("Choose a file in the project.")
-            .style(TextStyle::Sized(14, waveui::style::Weight::Mono))
+            .style(TextStyle::Sized(13, waveui::style::Weight::Mono))
+            .line_spacing(4)
+            .line_numbers()
             .id(CODE);
         if rust {
             editor = editor.rust_syntax();
         }
-        editor.padding_insets(Insets { top: 12, leading: 16, bottom: 8, trailing: 8 }).fill()
+        editor.padding_insets(Insets { top: 12, leading: 0, bottom: 8, trailing: 8 }).fill()
     }
 }
 
@@ -519,6 +732,9 @@ impl App for Studio {
             Msg::Run(op) => self.perform(op),
             Msg::Stop => self.stop(),
             Msg::File(i) => {
+                if self.mode == Mode::Guide {
+                    self.mode = Mode::Code;
+                }
                 if self.files.get(i) == self.file.as_ref() {
                     return;
                 }
@@ -582,6 +798,28 @@ impl App for Studio {
                     });
                 }
             }
+            Msg::CloseTab(name) => {
+                if self.file.as_ref() == Some(&name) && self.dirty() && !self.save() {
+                    return;
+                }
+                self.open.retain(|f| *f != name);
+                if self.file.as_ref() == Some(&name) {
+                    match self.open.last().and_then(|f| self.files.iter().position(|x| x == f)) {
+                        Some(i) => self.load(i),
+                        None => {
+                            self.file = None;
+                            self.text.clear();
+                            self.saved.clear();
+                        }
+                    }
+                }
+            }
+            Msg::Panel(i) => self.panel = i,
+            Msg::ToggleDir(d) => {
+                if !self.folded.remove(&d) {
+                    self.folded.insert(d);
+                }
+            }
             Msg::Move(d) => {
                 if let Some(i) = self.selected {
                     let n = self.text.lines().count();
@@ -592,6 +830,17 @@ impl App for Studio {
                     }
                 }
             }
+        }
+    }
+
+    fn key(&self, ev: &KeyEvent) -> Option<Msg> {
+        if !(ev.mods.ctrl || ev.mods.super_key) {
+            return None;
+        }
+        match ev.ch.map(|c| c.to_ascii_lowercase()) {
+            Some('s') => Some(Msg::Save),
+            Some('b') => Some(Msg::Run(Operation::Build)),
+            _ => None,
         }
     }
 
@@ -630,100 +879,47 @@ impl App for Studio {
 
     fn view(&self, _env: &Env) -> View<'_, Msg> {
         let running = self.job.lock().running;
-        let mode = match self.mode {
-            Mode::Code => 0,
-            Mode::Design => 1,
-            Mode::Guide => 2,
-        };
-        let bar = toolbar(vec![
-            TextField::new("Project folder", self.project.clone())
-                .on_change(Msg::Project)
-                .on_submit(Msg::Open)
-                .width(300),
-            Button::new("New").action(Msg::New),
-            Button::new("Open").action(Msg::Open),
-            Button::new("Save").action(Msg::Save).disabled(!self.dirty()).shortcut(Shortcut::ctrl('s')),
-            Spacer::new(),
-            Picker::new(["Code", "Design", "Guide"], mode).on_change(Msg::Mode).width(230),
-            Spacer::new(),
-            Button::with(label(Symbol::Share, "Share"))
-                .button_style(ButtonStyle::Toolbar)
-                .menu(vec![
-                    MenuItem::new("Export .gina Package", Msg::Run(Operation::Export)),
-                    MenuItem::new("Install Built App", Msg::Run(Operation::Install)),
-                ])
-                .disabled(running),
-            Button::new("Build").action(Msg::Run(Operation::Build)).disabled(running).shortcut(Shortcut::ctrl('b')),
-            if running {
-                Button::with(label(Symbol::Stop, "Stop")).action(Msg::Stop).button_style(ButtonStyle::Destructive)
-            } else {
-                Button::with(label(Symbol::Play, "Build & Run"))
-                    .action(Msg::Run(Operation::BuildRun))
-                    .button_style(ButtonStyle::Prominent)
-                    .shortcut(Shortcut::ctrl('r'))
-            },
-        ]);
         let content = match self.mode {
             Mode::Code => self.code_view(),
             Mode::Design => self.design_view(),
             Mode::Guide => self.guide(),
         };
-        let output = VStack::new()
-            .push(
-                HStack::new()
-                    .push(Text::new("OUTPUT").style(TextStyle::Caption).foreground(Color::SecondaryLabel).grow(1))
-                    .push_if(running.then(ProgressView::spinner))
-                    .padding_xy(16, 0)
-                    .height(28)
-                    .fill_width(),
-            )
-            .push(
-                ScrollView::new(
-                    Text::paragraph(if self.log.is_empty() {
-                        String::from("Build output appears here.")
-                    } else {
-                        self.log.clone()
-                    })
-                    .style(TextStyle::Sized(12, waveui::style::Weight::Mono))
-                    .foreground(if self.log.is_empty() { Color::SecondaryLabel } else { Color::Label })
-                    .padding_xy(16, 4)
-                    .fill_width(),
-                )
-                .stick_to_end()
-                .id("output"),
-            )
-            .spacing(0)
-            .height(170)
-            .background(Color::GroupedBackground);
+        let language = match self.file.as_deref() {
+            Some(f) if f.ends_with(".rs") => "Rust",
+            Some(f) if f.ends_with(".toml") => "TOML",
+            Some(f) if f.ends_with(".ui") => "Layout",
+            Some(f) if f.ends_with(".md") => "Markdown",
+            Some(_) => "Text",
+            None => "",
+        };
+        let caption = |s: String| {
+            Text::new(s).style(TextStyle::Sized(12, waveui::style::Weight::Bold)).foreground(Color::SecondaryLabel)
+        };
         let status = HStack::new()
-            .push(
-                Text::new(if running { String::from("Working…") } else { self.status.clone() })
-                    .style(TextStyle::Footnote)
-                    .foreground(Color::SecondaryLabel)
-                    .grow(1),
+            .push(Image::symbol(Symbol::Folder).symbol_size(12).foreground(Color::SecondaryLabel))
+            .push(caption(String::from(fs::file_name(&self.project))))
+            .push(caption(String::from(language)))
+            .push(Spacer::new())
+            .push(caption(if running { String::from("Working…") } else { self.status.clone() }))
+            .push_if(
+                (self.mode == Mode::Code && self.file.is_some())
+                    .then(|| caption(format!("Ln {}, Col {}", self.caret.0, self.caret.1))),
             )
-            .push_if((self.mode == Mode::Code && self.file.is_some()).then(|| {
-                Text::new(format!("Line {}, Column {}", self.caret.0, self.caret.1))
-                    .style(TextStyle::Footnote)
-                    .foreground(Color::SecondaryLabel)
-            }))
+            .push_if(self.file.is_some().then(|| caption(String::from("UTF-8"))))
+            .spacing(14)
             .padding_xy(16, 0)
-            .height(26)
+            .height(28)
             .fill_width();
         let detail = VStack::new()
+            .push(self.tab_bar())
             .push(content)
             .push(Divider::new())
-            .push(output)
+            .push(self.panel())
             .push(Divider::new())
             .push(status)
             .spacing(0)
             .fill();
-        VStack::new()
-            .push(bar)
-            .push(Divider::new())
-            .push(SplitView::new(self.sidebar(), detail).sidebar_width(220))
-            .spacing(0)
-            .fill()
+        SplitView::new(self.sidebar(), detail).sidebar_width(230)
     }
 }
 

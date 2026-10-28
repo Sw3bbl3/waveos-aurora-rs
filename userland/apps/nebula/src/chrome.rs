@@ -30,6 +30,9 @@ pub enum Msg {
     Leave,
     Scroll(i32),
     Resize(i32, i32),
+    OpenAddress,
+    Share,
+    Downloads,
 }
 
 fn address_id(tab: u64) -> (&'static str, u64) {
@@ -48,67 +51,73 @@ fn browser_key(k: &KeyEvent) -> bool {
         || k.code == KeyCode::F5
 }
 
+/// A page's little colour square: the same colour for the same site.
+fn site_color(host: &str) -> Color {
+    const COLORS: [Color; 7] =
+        [Color::Purple, Color::Red, Color::Orange, Color::Teal, Color::Blue, Color::Pink, Color::Green];
+    if host.is_empty() {
+        return Color::Accent;
+    }
+    let h = host.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
+    COLORS[h as usize % COLORS.len()]
+}
+
 impl Browser {
     fn tab_strip(&self) -> View<'_, Msg> {
         let mut strip = HStack::new().spacing(4);
         for (i, tab) in self.tabs.iter().enumerate() {
             let active = i == self.active;
-            let dot = if tab.loading() {
-                Color::Accent
-            } else if active {
-                Color::Teal
-            } else {
-                Color::TertiaryLabel
-            };
-            strip = strip.push(
-                HStack::new()
-                    .push(
-                        Canvas::new(move |cv, r| {
-                            let (x, y) = r.center();
-                            cv.fill_circle(x, y, 3, dot.argb());
-                        })
-                        .size(10, 10),
-                    )
-                    .push(
-                        Text::new(tab.title())
-                            .style(TextStyle::Callout)
-                            .foreground(if active { Color::Label } else { Color::SecondaryLabel })
-                            .grow(1),
-                    )
+            let color = site_color(tab.url.as_ref().map_or("", |u| u.host.as_str())).argb();
+            let loading = tab.loading();
+            let mut pill = HStack::new()
+                .push(
+                    Canvas::new(move |cv, r| {
+                        let (x, y) = r.center();
+                        let sq = waveui::lumen::geom::Rect::new(x - 7, y - 7, 14, 14);
+                        if loading {
+                            cv.stroke_round_rect(sq, 4, color);
+                        } else {
+                            cv.fill_round_rect(sq, 4, color);
+                        }
+                    })
+                    .size(16, 16),
+                )
+                .push(
+                    Text::new(tab.title())
+                        .style(TextStyle::Sized(13, waveui::style::Weight::Bold))
+                        .foreground(if active { Color::Label } else { Color::SecondaryLabel }),
+                )
+                .spacing(8)
+                .padding_insets(Insets { top: 0, leading: 12, bottom: 0, trailing: if active { 4 } else { 12 } })
+                .height(30)
+                .on_tap(Msg::Select(i))
+                .context_menu(vec![MenuItem::new("New Tab", Msg::NewTab), MenuItem::new("Close Tab", Msg::Close(i))])
+                .max_width(240);
+            if active {
+                pill = pill
                     .push(
                         Button::symbol(Symbol::Close)
                             .action(Msg::Close(i))
                             .control_size(ControlSize::Small)
-                            .help("Close Tab"),
+                            .size(22, 22)
+                            .help("Close Tab (Ctrl+W)"),
                     )
-                    .spacing(6)
-                    .padding_insets(Insets { top: 0, leading: 10, bottom: 0, trailing: 2 })
-                    .height(30)
-                    .background_rounded(if active { Color::ControlBackground } else { Color::Clear }, 8)
-                    .on_tap(Msg::Select(i))
-                    .max_width(210)
-                    .grow(1),
-            );
+                    .background_rounded(Color::Fill, 15);
+            }
+            strip = strip.push(pill);
         }
-        let count = if self.notice() {
-            Text::new("Eight tabs are already open").style(TextStyle::Callout)
-        } else {
-            Text::new(format!("{} / {} tabs", self.tabs.len(), MAX_TABS))
-                .style(TextStyle::Callout)
+        let mut bar = HStack::new().push(strip).push(
+            Button::symbol(Symbol::Plus)
+                .action(Msg::NewTab)
+                .disabled(self.tabs.len() >= MAX_TABS)
                 .foreground(Color::SecondaryLabel)
-        };
-        HStack::new()
-            .push(strip.grow(1))
-            .push(
-                Button::symbol(Symbol::Plus)
-                    .action(Msg::NewTab)
-                    .disabled(self.tabs.len() >= MAX_TABS)
-                    .help("New Tab (Ctrl+T)"),
-            )
-            .push(count)
-            .spacing(8)
-            .padding_xy(8, 4)
-            .fill_width()
+                .help("New Tab (Ctrl+T)"),
+        );
+        bar = bar.push(Spacer::new());
+        if self.notice() {
+            bar = bar.push(Text::new("Eight tabs are already open").style(TextStyle::Callout));
+        }
+        bar.spacing(6).padding_insets(Insets { top: 8, leading: 12, bottom: 0, trailing: 12 }).height(46).fill_width()
     }
 
     fn toolbar(&self) -> View<'_, Msg> {
@@ -120,6 +129,7 @@ impl Browser {
             MenuItem::new("Reopen Closed Tab", Msg::Reopen)
                 .enabled(!self.closed.is_empty())
                 .shortcut(Shortcut::ctrl_shift('t')),
+            MenuItem::new("Start Page", Msg::Home),
             MenuItem::Separator,
             MenuItem::new("Find on Page…", Msg::Find).shortcut(Shortcut::ctrl('f')),
             MenuItem::Separator,
@@ -127,6 +137,45 @@ impl Browser {
             MenuItem::new("Zoom Out", Msg::Zoom(-1)).shortcut(Shortcut::ctrl('-')),
             MenuItem::new(format!("Actual Size ({}%)", tab.zoom), Msg::ZoomReset).shortcut(Shortcut::ctrl('0')),
         ];
+        let lock = Image::symbol(if secure { Symbol::Lock } else { Symbol::Globe })
+            .symbol_size(13)
+            .foreground(if secure { Color::Green } else { Color::TertiaryLabel });
+        // At rest the pill reads "host  /path"; clicked, it's a field.
+        let at_rest = tab.url.as_ref().filter(|_| !(self.address_open || tab.editing || address.is_empty()));
+        let pill = if let Some(url) = at_rest {
+            let path = if url.path == "/" { String::new() } else { url.path.clone() };
+            let host =
+                if url.host.is_empty() { url.scheme.clone() } else { url.host.trim_start_matches("www.").into() };
+            HStack::new()
+                .push(lock)
+                .push(Text::new(host).style(TextStyle::Sized(13, waveui::style::Weight::Bold)))
+                .push(
+                    Text::new(path)
+                        .style(TextStyle::Sized(13, waveui::style::Weight::Regular))
+                        .foreground(Color::TertiaryLabel)
+                        .grow(1),
+                )
+                .spacing(8)
+                .on_tap(Msg::OpenAddress)
+        } else {
+            HStack::new()
+                .push(lock)
+                .push(
+                    TextField::new("Search or enter an address", address)
+                        .plain()
+                        .on_change(Msg::Address)
+                        .on_submit(Msg::Go)
+                        .id(address_id(tab.id))
+                        .grow(1),
+                )
+                .spacing(8)
+        };
+        let pill = pill
+            .padding_xy(14, 0)
+            .height(34)
+            .background_rounded(Color::Fill, 17)
+            .border(Color::Separator, 17)
+            .width(560);
         toolbar(vec![
             Button::symbol(Symbol::ChevronLeft).action(Msg::Back).disabled(tab.pos == 0).help("Back (Alt+←)"),
             Button::symbol(Symbol::ChevronRight)
@@ -138,24 +187,11 @@ impl Browser {
             } else {
                 Button::symbol(Symbol::Refresh).action(Msg::Reload).help("Reload (Ctrl+R)")
             },
-            Button::symbol(Symbol::Home).action(Msg::Home).help("Start Page"),
-            HStack::new()
-                .push(
-                    Image::symbol(if secure { Symbol::Lock } else { Symbol::Globe })
-                        .symbol_size(14)
-                        .foreground(Color::SecondaryLabel),
-                )
-                .push(
-                    TextField::new("Search or enter an address", address)
-                        .on_change(Msg::Address)
-                        .on_submit(Msg::Go)
-                        .shortcut(Shortcut::ctrl('l'))
-                        .id(address_id(tab.id))
-                        .grow(1),
-                )
-                .spacing(8)
-                .padding_insets(Insets { leading: 8, ..Default::default() })
-                .grow(1),
+            Spacer::new(),
+            pill,
+            Spacer::new(),
+            Button::symbol(Symbol::Share).action(Msg::Share).disabled(tab.url.is_none()).help("Copy Address"),
+            Button::symbol(Symbol::Download).action(Msg::Downloads).help("Downloads"),
             Button::symbol(Symbol::More).menu(menu).help("More"),
         ])
     }
@@ -229,7 +265,10 @@ impl App for Browser {
         let mods = cx.mods();
         let had_find = self.tabs[self.active].find.is_some();
         match msg {
-            Msg::Select(i) => self.select(i),
+            Msg::Select(i) => {
+                self.address_open = false;
+                self.select(i);
+            }
             Msg::Close(i) => self.close_tab(i),
             Msg::NewTab => {
                 if self.open(HOME, false) {
@@ -254,12 +293,27 @@ impl App for Browser {
                 }
             }
             Msg::Home => self.tabs[self.active].go(HOME, true),
+            Msg::OpenAddress => {
+                self.address_open = true;
+                let id = address_id(self.tabs[self.active].id);
+                cx.focus(&id);
+                if let Some(f) = cx.field(&id) {
+                    f.edit.select_all();
+                }
+            }
+            Msg::Share => {
+                if let Some(u) = &self.tabs[self.active].url {
+                    cx.copy(&u.to_string());
+                }
+            }
+            Msg::Downloads => cx.open_file("/Downloads"),
             Msg::Address(text) => {
                 let tab = &mut self.tabs[self.active];
                 tab.editing = true;
                 tab.address.set_text(&text);
             }
             Msg::Go => {
+                self.address_open = false;
                 let tab = &mut self.tabs[self.active];
                 let t = String::from(tab.address.text());
                 tab.go(&t, true);
@@ -301,7 +355,7 @@ impl App for Browser {
                         Some('t') => cx.send(Msg::NewTab),
                         Some(c @ '1'..='8') => self.select((c as u8 - b'1') as usize),
                         Some('9') => self.select(tabs - 1),
-                        Some('l') => cx.focus(&address_id(self.tabs[self.active].id)),
+                        Some('l') => cx.send(Msg::OpenAddress),
                         _ => {
                             self.tabs[self.active].key(&ev, now);
                         }
@@ -312,6 +366,7 @@ impl App for Browser {
                     tab.key(&ev, now);
                     // Escape in the address field puts the page's address back.
                     if editing && !tab.editing {
+                        self.address_open = false;
                         cx.focus(&("page", tab.id));
                     }
                 }
@@ -320,6 +375,7 @@ impl App for Browser {
                 self.tabs[self.active].key(&ev, now);
             }
             Msg::Press(x, y) => {
+                self.address_open = false;
                 let ctrl = mods.ctrl || mods.super_key;
                 let tab = &self.tabs[self.active];
                 let target = ctrl
@@ -372,7 +428,18 @@ impl App for Browser {
     }
 
     fn poll(&mut self, cx: &mut Context<Msg>) -> bool {
-        let dirty = self.tick_all(cx.now());
+        let mut dirty = self.tick_all(cx.now());
+        // Start pages wear the desktop's colours: remake them when those change.
+        let look = (waveui::lumen::theme::current().dark, waveui::lumen::theme::accent());
+        if look != self.home_theme {
+            self.home_theme = look;
+            for tab in &mut self.tabs {
+                if tab.url.as_ref().is_some_and(|u| u.scheme == "about" && u.path == "home") {
+                    tab.reload();
+                    dirty = true;
+                }
+            }
+        }
         // Pages lay out at the size they are shown.
         let tab = &mut self.tabs[self.active];
         let (w, h) = (tab.view.w, tab.view.h);
@@ -399,7 +466,6 @@ impl App for Browser {
             .push(self.tab_strip())
             .push(self.toolbar())
             .push_if(progress)
-            .push(Divider::new())
             .push_if(self.find_bar().map(|f| VStack::new().push(f).push(Divider::new()).spacing(0)))
             .push(self.page())
             .spacing(0)

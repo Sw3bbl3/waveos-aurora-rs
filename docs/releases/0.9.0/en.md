@@ -10,6 +10,23 @@ WaveOS draws faster, shows your battery, runs its first graphics driver from Lin
 - Scrolling is smooth everywhere, menus and sheets animate in (or don't, with Reduce Motion), and toolbar buttons explain themselves when you hover over them.
 - Learn's handbook has a new look: each guide sits on a rounded page with a clearer title, rounded code samples and highlighted notes, in light and dark.
 
+## Bigger, sharper screens
+- With a virtio display, WaveOS offers every mode the screen reports, up to 5120 × 2160, and **Settings → Display** switches between them at once. When you resize the virtual machine's window, the desktop follows it.
+- On screens of 2560 × 1440 and up, everything is drawn at twice the detail (HiDPI): text and controls stay the same size and become sharper. **Settings → Display → Scale** chooses Automatic, 1× or 2×, and changes take effect immediately.
+- `cargo xtask run --resolution 2560x1440` starts the virtual machine at a chosen size.
+
+## The apps, in the new design
+- Every app now follows the Living Water design: one type scale, pill-shaped buttons, rounded cards, tinted selection, and Manrope Light for big numbers.
+- **Notes** is a library: your notes, newest first, in a sidebar you can search. Notes save as you type, take their file name from their title, and checklists tick when you click them. They are plain text files in Documents → Notes.
+- **Terminal** has tabs (Ctrl+T), and a coloured prompt that follows light and dark.
+- **Calculator** shows thousands separators, rings the operation waiting for its second number, and keeps a tape of results (Ctrl+T).
+- **Clock** has a timer ring that glows while it runs, and the world's times beside every tab.
+- **Nebula** has a centred address bar that reads site and page, coloured tabs, and a start page in the desktop's colours.
+- **Pulse** opens on an overview: four live gauges (processor, memory, disk, network) above the processes, which you can search.
+- **Paint** has its tools down the side and a colour panel with a picker that is always open. **Lens** shows pictures edge to edge, with a floating toolbar and a strip of the other pictures in the folder.
+- **Learn** opens on six short lessons that remember how far you read. **Studio** has a file tree, tabs for open files, line numbers, and build problems listed apart from the output.
+- **Welcome** lets you pick a wallpaper and light or dark, and can show itself again at your next sign-in. **About** and **Installer** follow the new layouts.
+
 ## Faster
 - The desktop's drawing takes less than half the time it did: window shadows, translucent fills, borders and glass are all quicker, and the login screen's background blur is about six times faster (measured on the host CPU; the data is in `docs/measurements/drawing-2026-10-27` in the source code).
 - The window server draws with SSE2 in its own task, sends only the parts of the screen that changed when you drag a window, and maps the screen write-combining, so frames reach the display in bursts.

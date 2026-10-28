@@ -40,7 +40,10 @@ impl Desktop {
             .filter_map(|&id| {
                 let (px, w, h) = self.snapshot(id)?;
                 let img = aurora_image::Image { width: w, height: h, pixels: px };
-                Some((id, img.thumbnail((CARD_W - 20) as u32, THUMB_H as u32)))
+                Some((id, {
+                    let k = crate::gui::scale() as u32;
+                    img.thumbnail((CARD_W - 20) as u32 * k, THUMB_H as u32 * k)
+                }))
             })
             .collect();
         self.switcher = Some(Switcher::new(ids, reverse));
@@ -140,16 +143,11 @@ impl Desktop {
             let well = Rect::new(card.x + 10, card.y + 10, card.w - 20, THUMB_H);
             match self.glide.iter().find(|(id, _)| *id == w.id) {
                 Some((_, img)) => {
-                    let pic = Rect::new(
-                        well.x + (well.w - img.width as i32) / 2,
-                        well.y + (well.h - img.height as i32) / 2,
-                        img.width as i32,
-                        img.height as i32,
-                    );
+                    // The thumbnail is in device pixels.
+                    let (iw, ih) = (img.width as i32 / cv.scale, img.height as i32 / cv.scale);
+                    let pic = Rect::new(well.x + (well.w - iw) / 2, well.y + (well.h - ih) / 2, iw, ih);
                     cv.shadow(pic, 8, 10, 3, t.shadow / 3);
-                    cv.fill_round_rect_with(pic, 8, |x, y| {
-                        img.pixels[((y - pic.y) as u32 * img.width + (x - pic.x) as u32) as usize] | 0xFF00_0000
-                    });
+                    cv.blit(&img.pixels, img.width, img.height, pic, 8);
                     if w.minimized {
                         cv.fill_round_rect(pic, 8, with_alpha(t.window_bg, 0x80));
                     }

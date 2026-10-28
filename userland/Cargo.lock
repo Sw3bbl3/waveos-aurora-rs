@@ -181,6 +181,7 @@ dependencies = [
 name = "app-welcome"
 version = "0.8.0"
 dependencies = [
+ "aurora-image",
  "corekit",
  "waveui",
 ]

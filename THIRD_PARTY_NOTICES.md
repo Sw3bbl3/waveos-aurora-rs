@@ -13,7 +13,7 @@ The interface typefaces ship in `/System/Fonts` next to their licenses:
 
 | Font | License | Local changes |
 |---|---|---|
-| Manrope (Medium, Bold, ExtraBold) | [SIL OFL 1.1](assets/fonts/LICENSE-Manrope.txt) | Static instances cut from the variable font, overlaps removed |
+| Manrope (Light, Medium, Bold, ExtraBold) | [SIL OFL 1.1](assets/fonts/LICENSE-Manrope.txt) | Static instances cut from the variable font, overlaps removed |
 | JetBrains Mono | [SIL OFL 1.1](assets/fonts/LICENSE-JetBrainsMono.txt) | None |
 
 The bootable system includes the decoder license texts under `/System/Licenses`. Cargo manifests and lockfiles identify registry dependencies, including `rusty_h264-common` 0.16.0 and the `regress` regular-expression engine. Their upstream copyright and licensing remain applicable.

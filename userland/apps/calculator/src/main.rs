@@ -5,7 +5,6 @@
 
 extern crate alloc;
 
-use waveui::lumen::canvas::rgb;
 use waveui::prelude::*;
 use waveui::style::Weight;
 
@@ -17,6 +16,9 @@ pub struct Calculator {
     acc: Option<f64>,
     op: Option<char>,
     fresh: bool,
+    /// Finished sums, oldest first: ("128 × 3", "384").
+    tape: Vec<(String, String)>,
+    show_tape: bool,
 }
 
 #[derive(Clone)]
@@ -24,11 +26,14 @@ pub enum Msg {
     Key(&'static str),
     Digit(char),
     Backspace,
+    Copy,
+    ToggleTape,
+    ClearTape,
 }
 
 impl Calculator {
     fn new() -> Self {
-        Self { display: "0".into(), acc: None, op: None, fresh: true }
+        Self { display: "0".into(), acc: None, op: None, fresh: true, tape: Vec::new(), show_tape: false }
     }
 
     fn value(&self) -> f64 {
@@ -49,6 +54,12 @@ impl Calculator {
     fn apply(&mut self) {
         if let (Some(a), Some(op)) = (self.acc, self.op) {
             let b = self.value();
+            let expr = format!(
+                "{} {} {}",
+                self.hint().unwrap_or_default().trim_end_matches(&[' ', '+', '−', '×', '÷'][..]),
+                symbol(op),
+                grouped(&self.display)
+            );
             let r = match op {
                 '+' => a + b,
                 '-' => a - b,
@@ -63,6 +74,10 @@ impl Calculator {
                 _ => b,
             };
             self.show(r);
+            self.tape.push((expr, grouped(&self.display)));
+            if self.tape.len() > 50 {
+                self.tape.remove(0);
+            }
         }
         self.acc = None;
         self.op = None;
@@ -70,7 +85,15 @@ impl Calculator {
 
     fn press(&mut self, key: &str) {
         match key {
-            "C" => *self = Self::new(),
+            "C" => {
+                if self.fresh || self.display == "0" {
+                    // AC: everything.
+                    self.acc = None;
+                    self.op = None;
+                }
+                self.display = "0".into();
+                self.fresh = true;
+            }
             "±" => {
                 let v = -self.value();
                 self.show(v);
@@ -123,14 +146,47 @@ impl Calculator {
         let (a, op) = (self.acc?, self.op?);
         let mut tmp = Calculator::new();
         tmp.show(a);
-        let sym = match op {
-            '+' => "+",
-            '-' => "−",
-            '*' => "×",
-            _ => "÷",
-        };
-        Some(format!("{} {}", tmp.display, sym))
+        Some(format!("{} {}", grouped(&tmp.display), symbol(op)))
     }
+
+    /// AC clears everything; C only the number being typed.
+    fn clear_label(&self) -> &'static str {
+        if self.fresh || self.display == "0" {
+            "AC"
+        } else {
+            "C"
+        }
+    }
+}
+
+fn symbol(op: char) -> &'static str {
+    match op {
+        '+' => "+",
+        '-' => "−",
+        '*' => "×",
+        _ => "÷",
+    }
+}
+
+/// "1024.5" as "1,024.5".
+fn grouped(s: &str) -> String {
+    let (sign, rest) = s.strip_prefix('-').map_or(("", s), |r| ("−", r));
+    if !rest.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+        return String::from(s);
+    }
+    let (int, frac) = rest.split_once('.').map_or((rest, None), |(i, f)| (i, Some(f)));
+    let mut out = String::from(sign);
+    for (i, c) in int.chars().enumerate() {
+        if i > 0 && (int.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if let Some(f) = frac {
+        out.push('.');
+        out.push_str(f);
+    }
+    out
 }
 
 impl App for Calculator {
@@ -140,13 +196,13 @@ impl App for Calculator {
         "Calculator".into()
     }
     fn size(&self) -> (i32, i32) {
-        (300, 440)
+        (330, 520)
     }
     fn resizable(&self) -> bool {
         false
     }
 
-    fn update(&mut self, msg: Msg, _cx: &mut Context<Msg>) {
+    fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
         match msg {
             Msg::Key(k) => self.press(k),
             Msg::Digit(c) => self.press(c.encode_utf8(&mut [0; 4])),
@@ -158,10 +214,20 @@ impl App for Calculator {
                     self.fresh = true;
                 }
             }
+            Msg::Copy => cx.copy(&self.display),
+            Msg::ToggleTape => self.show_tape = !self.show_tape,
+            Msg::ClearTape => self.tape.clear(),
         }
     }
 
     fn key(&self, ev: &KeyEvent) -> Option<Msg> {
+        if ev.mods.ctrl {
+            return match ev.ch.map(|c| c.to_ascii_lowercase()) {
+                Some('c') => Some(Msg::Copy),
+                Some('t') => Some(Msg::ToggleTape),
+                _ => None,
+            };
+        }
         Some(match (ev.code, ev.ch) {
             (KeyCode::Enter, _) => Msg::Key("="),
             (KeyCode::Escape, _) => Msg::Key("C"),
@@ -179,67 +245,144 @@ impl App for Calculator {
         })
     }
 
-    fn view(&self, env: &Env) -> View<'_, Msg> {
-        let dark = env.dark;
-        let (pad, gap) = (14, 10);
-        let cw = (env.size.0 - 2 * pad - 3 * gap) / 4;
-        let ch = 56;
+    fn sheet(&self, _env: &Env) -> Option<View<'_, Msg>> {
+        if !self.show_tape {
+            return None;
+        }
+        let mut rows = VStack::new()
+            .push(
+                HStack::new()
+                    .push(Text::label("Tape"))
+                    .push(Spacer::new())
+                    .push(
+                        Button::new("CLEAR")
+                            .action(Msg::ClearTape)
+                            .button_style(ButtonStyle::Plain)
+                            .style(TextStyle::Label)
+                            .foreground(Color::TertiaryLabel)
+                            .disabled(self.tape.is_empty()),
+                    )
+                    .padding_insets(Insets { top: 0, leading: 0, bottom: 6, trailing: 0 })
+                    .fill_width(),
+            )
+            .spacing(0)
+            .alignment(Align::Stretch);
+        if self.tape.is_empty() {
+            rows = rows.push(
+                Text::new("Finished sums show here.")
+                    .style(TextStyle::Callout)
+                    .foreground(Color::SecondaryLabel)
+                    .padding_xy(0, 10),
+            );
+        }
+        for (expr, result) in self.tape.iter().rev().take(12).rev() {
+            rows = rows
+                .push(
+                    HStack::new()
+                        .push(Text::new(expr.clone()).style(TextStyle::Monospaced).foreground(Color::SecondaryLabel))
+                        .push(Spacer::new())
+                        .push(Text::new(result.clone()).style(TextStyle::Sized(13, Weight::Bold)))
+                        .height(32)
+                        .fill_width(),
+                )
+                .push(Divider::new());
+        }
+        rows = rows.push(
+            HStack::new()
+                .push(Text::new("Copy result").style(TextStyle::Callout).foreground(Color::SecondaryLabel))
+                .push(Spacer::new())
+                .push(Text::new("^C").style(TextStyle::Sized(13, Weight::Bold)).foreground(Color::AccentText))
+                .height(34)
+                .fill_width()
+                .on_tap(Msg::Copy),
+        );
+        rows = rows.push(
+            HStack::new()
+                .push(Spacer::new())
+                .push(
+                    Button::new("Done")
+                        .action(Msg::ToggleTape)
+                        .shortcut(Shortcut::cancel())
+                        .control_size(ControlSize::Small),
+                )
+                .padding_insets(Insets { top: 8, leading: 0, bottom: 0, trailing: 0 })
+                .fill_width(),
+        );
+        Some(rows.width(264))
+    }
+
+    fn view(&self, _env: &Env) -> View<'_, Msg> {
+        let (gap, kw, kh) = (10, 66, 58);
+        let pending = if self.fresh { self.op } else { None };
+        let key = |k: &'static str, r: usize, c: usize| -> View<'_, Msg> {
+            let label = if k == "C" { self.clear_label() } else { k };
+            let w = if r == 4 && c == 0 { 2 * kw + gap } else { kw };
+            let text = Text::new(label).style(TextStyle::Sized(if c == 3 { 22 } else { 20 }, Weight::Regular));
+            let text = if r == 4 && c == 0 { text.padding_xy(22, 0).fill_width().align(Align::Start) } else { text };
+            let b = Button::with(text).action(Msg::Key(k)).corner_radius(kh / 2).size(w, kh).accessibility_label(label);
+            if c == 3 {
+                let op = match k {
+                    "+" => Some('+'),
+                    "−" => Some('-'),
+                    "×" => Some('*'),
+                    "÷" => Some('/'),
+                    _ => None,
+                };
+                if op.is_some() && op == pending {
+                    // The operation waiting for its second number: a ring.
+                    b.button_style(ButtonStyle::Toolbar).border(Color::Accent, kh / 2).foreground(Color::AccentText)
+                } else {
+                    b.button_style(ButtonStyle::Prominent)
+                }
+            } else {
+                let fill = if r == 0 { Color::TertiaryFill } else { Color::SecondaryFill };
+                b.button_style(ButtonStyle::Toolbar).background_rounded(fill, kh / 2)
+            }
+        };
         let keypad = VStack::with(
             KEYS.iter()
                 .enumerate()
                 .map(|(r, keys)| {
                     HStack::with(
-                        keys.iter()
-                            .enumerate()
-                            .filter(|(_, k)| !k.is_empty())
-                            .map(|(c, k)| {
-                                let w = if r == 4 && c == 0 { 2 * cw + gap } else { cw };
-                                let (style, tint) = if c == 3 {
-                                    (ButtonStyle::Prominent, Color::Orange)
-                                } else if r == 0 {
-                                    let g = if dark { rgb(0x5A, 0x5A, 0x66) } else { rgb(0xD4, 0xD4, 0xDC) };
-                                    (ButtonStyle::Bordered, Color::Custom(g))
-                                } else {
-                                    let g = if dark { rgb(0x36, 0x36, 0x40) } else { 0xFFFF_FFFF };
-                                    (ButtonStyle::Bordered, Color::Custom(g))
-                                };
-                                Button::with(Text::new(*k).style(TextStyle::Sized(20, Weight::Regular)))
-                                    .action(Msg::Key(k))
-                                    .button_style(style)
-                                    .tint(tint)
-                                    .corner_radius(ch / 2)
-                                    .size(w, ch)
-                                    .accessibility_label(*k)
-                            })
-                            .collect(),
+                        keys.iter().enumerate().filter(|(_, k)| !k.is_empty()).map(|(c, k)| key(k, r, c)).collect(),
                     )
                     .spacing(gap)
                 })
                 .collect(),
         )
         .spacing(gap);
-        let size = if self.display.len() > 11 { 28 } else { 40 };
-        let bg = if dark { rgb(0x1C, 0x1C, 0x22) } else { rgb(0xF2, 0xF2, 0xF6) };
+        let shown = grouped(&self.display);
+        let n = shown.chars().count();
+        let size = if n > 12 {
+            30
+        } else if n > 9 {
+            40
+        } else {
+            56
+        };
         VStack::new()
+            .push(Spacer::new())
             .push(
                 Text::new(self.hint().unwrap_or_default())
-                    .style(TextStyle::Sized(14, Weight::Regular))
+                    .style(TextStyle::Sized(15, Weight::Regular))
                     .foreground(Color::SecondaryLabel)
                     .text_align(Align::End)
                     .fill_width(),
             )
             .push(
-                Text::new(self.display.clone())
-                    .style(TextStyle::Sized(size, Weight::Regular))
+                Text::new(shown)
+                    .style(TextStyle::Sized(size, Weight::Light))
                     .text_align(Align::End)
-                    .fill_width(),
+                    .fill_width()
+                    .context_menu(vec![
+                        MenuItem::new("Copy", Msg::Copy),
+                        MenuItem::new(if self.show_tape { "Hide Tape" } else { "Show Tape" }, Msg::ToggleTape),
+                    ]),
             )
-            .push(Spacer::new())
-            .push(keypad)
-            .spacing(4)
+            .push(keypad.padding_insets(Insets { top: 14, leading: 0, bottom: 0, trailing: 0 }))
+            .spacing(2)
             .alignment(Align::End)
-            .padding_insets(Insets { top: 18, leading: 20, bottom: pad, trailing: 20 })
-            .background(Color::Custom(bg))
+            .padding_insets(Insets { top: 18, leading: 18, bottom: 22, trailing: 18 })
             .fill()
     }
 }

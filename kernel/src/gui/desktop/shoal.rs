@@ -308,7 +308,7 @@ impl Desktop {
         }
         let pw = self.shoal_power();
         cv.fill_round_rect(pw, 18, if l.hover == Some(Hover::Power) { t.hover } else { with_alpha(t.text, 0x10) });
-        let bg = cv.buf[(pw.y * cv.width + pw.x + pw.w / 2) as usize];
+        let bg = cv.pixel(pw.x + pw.w / 2, pw.y);
         let (cx, cy) = pw.center();
         icons::power(cv, cx, cy, 16, t.text, bg);
 

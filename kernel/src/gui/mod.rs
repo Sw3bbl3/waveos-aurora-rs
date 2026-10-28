@@ -47,7 +47,7 @@ fn current_fb() -> Option<Framebuffer> {
 fn load_fonts() {
     use lumen::font::{self, Face};
     lumen::icons::set_loader(load_icon);
-    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono] {
+    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono, Face::Light] {
         let ok = crate::fs::read_all(face.file())
             .is_ok_and(|data| font::install(face, alloc::boxed::Box::leak(data.into_boxed_slice())));
         if !ok {
@@ -63,11 +63,43 @@ fn load_icon(path: &str) -> Option<(alloc::vec::Vec<u32>, u32, u32)> {
     Some((img.pixels, img.width, img.height))
 }
 
+/// The screen's size in points (what windows and the pointer use).
 pub fn screen_size() -> (i32, i32) {
+    let (w, h) = screen_pixels();
+    (w / scale(), h / scale())
+}
+
+/// The screen's size in device pixels.
+pub fn screen_pixels() -> (i32, i32) {
     current_fb().map(|f| (f.width as i32, f.height as i32)).unwrap_or((1024, 768))
 }
 
+/// Device pixels per point: 2 on a HiDPI screen.
+static SCALE: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(1);
+
+pub fn scale() -> i32 {
+    SCALE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The scale for a `w`×`h` screen: Settings' choice (`pref::DISPLAY_SCALE`
+/// 1 or 2, when 2× still leaves 1024×640 points), or automatically 2× when
+/// the screen is at least 2560 pixels wide and 1440 tall.
+fn scale_for(w: i32, h: i32) -> i32 {
+    let fits = w / 2 >= 1024 && h / 2 >= 640;
+    match settings::get(aurora_abi::pref::DISPLAY_SCALE).as_deref() {
+        Some("1") => 1,
+        Some("2") if fits => 2,
+        _ if w >= 2560 && h >= 1440 => 2,
+        _ => 1,
+    }
+}
+
 pub fn start() {
+    // A ported GPU driver took over the screen in a mode of its own.
+    if let Some(fb) = crate::drivers::display::drm_framebuffer() {
+        *FB.lock() = Some(fb);
+        input::set_screen_size(fb.width as i32, fb.height as i32);
+    }
     // The compositor keeps its own SIMD registers, so drawing can use SSE2.
     lumen::simd::set_gate(simd_allowed);
     sched::spawn_simd("lumen-server", run);
@@ -81,6 +113,11 @@ fn simd_allowed() -> bool {
 }
 
 /// A network interface got (or lost) its address.
+/// A ported GPU driver reported new display modes (see `crate::linux`).
+pub fn display_changed() {
+    server::command(server::Command::DisplayChanged);
+}
+
 pub fn network_changed() {
     server::command(server::Command::NetworkChanged);
 }
@@ -183,18 +220,29 @@ fn flush(front: &mut [u32], back: &[u32], fb: &Framebuffer, r: Rect) {
 
 fn run() {
     let mut fb = current_fb().expect("gui::init not called");
-    let (mut w, mut h) = (fb.width as i32, fb.height as i32);
     input::set_consumer(sched::current_id());
     server::set_compositor(sched::current_id());
 
     crate::telemetry::stage("gui", "Lumen Server window server");
     load_settings();
     prefs::apply_appearance();
+    // The desktop works in points; the back buffer is in device pixels.
+    let mut s = scale_for(fb.width as i32, fb.height as i32);
+    SCALE.store(s, core::sync::atomic::Ordering::Relaxed);
+    let (mut w, mut h) = (fb.width as i32 / s, fb.height as i32 / s);
+    input::set_screen_size(w, h);
     let t0 = time::uptime_ms();
     let mut desktop = Desktop::new(w, h);
     log!("gui", "desktop composed in {} ms ({}x{})", time::uptime_ms() - t0, w, h);
 
-    let mut back = vec![0u32; (w * h) as usize];
+    // A ported GPU driver starts in the screen's preferred mode; switch to
+    // the resolution chosen in Settings, if the screen has it.
+    if crate::drivers::display::drm() {
+        if let Some((bw, bh)) = prefs::boot_resolution().filter(|&r| r != (fb.width, fb.height)) {
+            desktop.resolution_request = Some((bw, bh));
+        }
+    }
+    let mut back = vec![0u32; (fb.width * fb.height) as usize];
     let mut materials = lumen::material::MaterialCache::default();
     let mut front = front_buffer(&fb);
     let mut ready = false;
@@ -210,18 +258,50 @@ fn run() {
             desktop.handle(ev, now);
         }
         desktop.process_commands();
+        // A new scale at the same resolution: lay out and draw everything again.
+        if core::mem::take(&mut desktop.rescale_request) {
+            let ns = scale_for(fb.width as i32, fb.height as i32);
+            if ns != s {
+                s = ns;
+                SCALE.store(s, core::sync::atomic::Ordering::Relaxed);
+                (w, h) = (fb.width as i32 / s, fb.height as i32 / s);
+                materials.clear();
+                input::set_screen_size(w, h);
+                desktop.resize(w, h);
+                server::broadcast(aurora_abi::Event {
+                    kind: aurora_abi::event::SCREEN,
+                    x: w,
+                    y: h,
+                    ..Default::default()
+                });
+                log!("gui", "drawing at {}x ({}x{} points)", s, w, h);
+            }
+        }
         // A new resolution: new framebuffer, back buffer and layout.
         if let Some((nw, nh)) = desktop.resolution_request.take() {
             match crate::drivers::display::set_mode(nw, nh) {
+                // Following the screen: it already has this size.
+                Some(new_fb) if (nw, nh) == (0, 0) && (new_fb.width, new_fb.height) == (fb.width, fb.height) => {
+                    front = front_buffer(&new_fb);
+                    fb = new_fb;
+                    *FB.lock() = Some(fb);
+                    desktop.damage_all();
+                }
                 Some(new_fb) => {
                     fb = new_fb;
                     *FB.lock() = Some(fb);
-                    (w, h) = (fb.width as i32, fb.height as i32);
-                    back = vec![0u32; (w * h) as usize];
+                    let before = s;
+                    s = scale_for(fb.width as i32, fb.height as i32);
+                    SCALE.store(s, core::sync::atomic::Ordering::Relaxed);
+                    (w, h) = (fb.width as i32 / s, fb.height as i32 / s);
+                    back = vec![0u32; (fb.width * fb.height) as usize];
                     materials.clear();
                     front = front_buffer(&fb);
                     input::set_screen_size(w, h);
                     desktop.resize(w, h);
+                    if s != before {
+                        log!("gui", "drawing at {}x ({}x{} points)", s, w, h);
+                    }
                     server::broadcast(aurora_abi::Event {
                         kind: aurora_abi::event::SCREEN,
                         x: w,
@@ -229,6 +309,7 @@ fn run() {
                         ..Default::default()
                     });
                 }
+                None if (nw, nh) == (0, 0) => {}
                 None => log!("gui", "the display can't show {}x{}", nw, nh),
             }
         }
@@ -249,12 +330,13 @@ fn run() {
         for r in damage {
             let started = time::now_ns();
             crate::telemetry::PIXELS.fetch_add(r.area() as u64, core::sync::atomic::Ordering::Relaxed);
-            let mut cv = Canvas::new(&mut back, w, h);
+            let mut cv = Canvas::new(&mut back, fb.width as i32, fb.height as i32).with_scale(s);
             materials.begin_frame();
             cv.materials = Some(&mut materials);
             cv.clip = r;
             desktop.paint(&mut cv);
-            flush(front, &back, &fb, r);
+            let px = cv.to_px(r);
+            flush(front, &back, &fb, px);
             let elapsed = time::now_ns() - started;
             if r.area() == i64::from(w) * i64::from(h) {
                 frame_stats.0 += 1;
@@ -419,6 +501,10 @@ impl<const N: usize> Write for StackText<N> {
 pub fn panic_screen(details: &str) {
     // Never block here: the panic may have hit while the lock was held.
     let Some(fb) = FB.try_lock().and_then(|g| *g) else { return };
+    // A ported GPU driver's screen has no physical framebuffer to write to.
+    if fb.phys_addr == 0 {
+        return;
+    }
     // Through the physical window: mapping anew could allocate or wait on a lock.
     let front = unsafe {
         core::slice::from_raw_parts_mut(phys_to_virt(fb.phys_addr) as *mut u32, (fb.stride * fb.height) as usize)

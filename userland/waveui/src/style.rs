@@ -2,32 +2,36 @@
 //! colours. Views take their look from here, so every app reads as WaveOS
 //! and follows the appearance (light, dark, high contrast, accent colour).
 
-use lumen::canvas::{mix, rgb};
+use lumen::canvas::{mix, rgb, with_alpha};
 use lumen::font::Font;
 use lumen::theme;
 
-/// Text styles, largest first. Each maps to a face and size of Manrope.
+/// Text styles, largest first. Each maps to a face and size of Manrope
+/// (the WaveOS type scale: Display 56, Title 1 30, Title 2 22, Headline 15,
+/// Body 14, Callout 13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TextStyle {
-    /// Big numbers and the title of a page (26 px, bold).
+    /// Big numbers and the title of a page (30 px, extra bold).
     LargeTitle,
-    /// The title of a window's content (20 px, semibold).
+    /// The title of a window's content (22 px, bold).
     Title,
-    /// Section titles (16 px, semibold).
+    /// Section titles (17 px, bold).
     Title2,
-    /// Emphasized body text, row titles (13 px, semibold).
+    /// Emphasized body text, row titles (15 px, bold).
     Headline,
-    /// Everything else (13 px).
+    /// Everything else (14 px).
     #[default]
     Body,
-    /// Secondary explanations (12 px).
+    /// Secondary explanations (13 px).
     Callout,
     /// Under a row title (12 px).
     Subheadline,
-    /// Small print, section footers (11 px).
+    /// Small print, section footers (12 px).
     Footnote,
-    /// Labels on small controls (10 px).
+    /// Labels on small controls, status lines (11 px, bold).
     Caption,
+    /// Small capitals over a group: "PLACES" (11 px, bold; see [`crate::Text::label`]).
+    Label,
     /// Code and terminals (13 px, monospaced).
     Monospaced,
     /// Any size, for the rare place the scale doesn't fit (a calculator's
@@ -44,25 +48,28 @@ pub enum Weight {
     /// The display face (titles).
     Display,
     Mono,
+    /// Thin numerals (a calculator's display, a timer).
+    Light,
 }
 
 impl TextStyle {
     pub fn font(self) -> Font {
         match self {
-            TextStyle::LargeTitle => theme::display(26),
-            TextStyle::Title => theme::ui_bold(20),
-            TextStyle::Title2 => theme::ui_bold(16),
-            TextStyle::Headline => theme::ui_bold(13),
-            TextStyle::Body => theme::ui(13),
-            TextStyle::Callout | TextStyle::Subheadline => theme::ui(12),
-            TextStyle::Footnote => theme::ui(11),
-            TextStyle::Caption => theme::ui(10),
+            TextStyle::LargeTitle => theme::display(30),
+            TextStyle::Title => theme::ui_bold(22),
+            TextStyle::Title2 => theme::ui_bold(17),
+            TextStyle::Headline => theme::ui_bold(15),
+            TextStyle::Body => theme::ui(14),
+            TextStyle::Callout => theme::ui(13),
+            TextStyle::Subheadline | TextStyle::Footnote => theme::ui(12),
+            TextStyle::Caption | TextStyle::Label => theme::ui_bold(11),
             TextStyle::Monospaced => theme::mono(13),
             TextStyle::Sized(size, w) => match w {
                 Weight::Regular => theme::ui(size),
                 Weight::Bold => theme::ui_bold(size),
                 Weight::Display => theme::display(size),
                 Weight::Mono => theme::mono(size),
+                Weight::Light => theme::light(size),
             },
         }
     }
@@ -79,24 +86,28 @@ pub mod space {
     pub const XXL: i32 = 32;
 }
 
-/// Corner radii.
+/// Corner radii. (Buttons, search fields and switches are capsules.)
 pub mod radius {
-    /// Buttons, fields, segmented controls.
-    pub const CONTROL: i32 = 8;
+    /// Text fields.
+    pub const CONTROL: i32 = 11;
+    /// Sidebar items and selected rows.
+    pub const ITEM: i32 = 10;
     /// Grouped lists, cards.
-    pub const CARD: i32 = 12;
-    /// Sheets and popovers.
-    pub const SHEET: i32 = 16;
+    pub const CARD: i32 = 14;
+    /// Sheets, popovers and windows.
+    pub const SHEET: i32 = 18;
 }
 
 /// Standard control heights.
 pub mod size {
-    pub const CONTROL: i32 = 30;
-    pub const CONTROL_LARGE: i32 = 38;
-    pub const CONTROL_SMALL: i32 = 24;
-    pub const ROW: i32 = 40;
+    pub const CONTROL: i32 = 32;
+    pub const CONTROL_LARGE: i32 = 40;
+    pub const CONTROL_SMALL: i32 = 26;
+    /// Text fields.
+    pub const FIELD: i32 = 34;
+    pub const ROW: i32 = 42;
     pub const SIDEBAR_ROW: i32 = 32;
-    pub const TOOLBAR: i32 = 48;
+    pub const TOOLBAR: i32 = 54;
 }
 
 /// Colours by meaning, for the current appearance.
@@ -134,8 +145,12 @@ pub enum Color {
     ControlBackground,
     /// Hairlines between rows.
     Separator,
-    /// A subtle fill (hover, unselected chips).
+    /// A subtle fill: cards, fields (6% of the text colour).
     Fill,
+    /// A stronger fill: buttons, segmented controls, chips (10%).
+    SecondaryFill,
+    /// The strongest fill: switch and slider tracks (16%).
+    TertiaryFill,
     /// Exactly this colour (0xAARRGGBB).
     Custom(u32),
     Clear,
@@ -146,28 +161,32 @@ impl Color {
         let t = theme::current();
         let dark = t.dark;
         let pick = |light: u32, dark_c: u32| if dark { dark_c } else { light };
+        // The text colour at an opacity: fills and hairlines.
+        let ink = |light_a: u8, dark_a: u8| with_alpha(t.text, if dark { dark_a } else { light_a });
         match self {
             Color::Label => t.text,
-            Color::SecondaryLabel => t.text_secondary,
-            Color::TertiaryLabel => mix(t.text_secondary, t.window_bg, 96),
+            Color::SecondaryLabel => mix(t.window_bg, t.text, if dark { 174 } else { 169 }),
+            Color::TertiaryLabel => mix(t.window_bg, t.text, if dark { 133 } else { 158 }),
             Color::Accent => theme::accent(),
             Color::AccentText => theme::accent_ink(),
             Color::OnAccent => rgb(0xFF, 0xFF, 0xFF),
-            Color::Red => pick(rgb(0xE5, 0x3E, 0x3E), rgb(0xFF, 0x6B, 0x63)),
-            Color::Orange => pick(rgb(0xE8, 0x7A, 0x00), rgb(0xFF, 0x9F, 0x2E)),
+            Color::Red => pick(rgb(0xD9, 0x3A, 0x3A), rgb(0xFF, 0x6B, 0x6B)),
+            Color::Orange => pick(rgb(0xB8, 0x6E, 0x00), rgb(0xFF, 0xB5, 0x47)),
             Color::Yellow => pick(rgb(0xC9, 0x9A, 0x00), rgb(0xFF, 0xD6, 0x3C)),
-            Color::Green => pick(rgb(0x1F, 0x9D, 0x4B), rgb(0x40, 0xD3, 0x6A)),
+            Color::Green => pick(rgb(0x12, 0x8A, 0x5A), rgb(0x3D, 0xDC, 0x97)),
             Color::Teal => pick(rgb(0x0A, 0x9C, 0x8E), rgb(0x3D, 0xE0, 0xC8)),
-            Color::Blue => pick(rgb(0x1F, 0x6F, 0xEB), rgb(0x5A, 0xA2, 0xFF)),
+            Color::Blue => pick(rgb(0x1F, 0x6F, 0xEB), rgb(0x4A, 0x9B, 0xFF)),
             Color::Purple => pick(rgb(0x7C, 0x5C, 0xFF), rgb(0xA9, 0x91, 0xFF)),
             Color::Pink => pick(rgb(0xE0, 0x3E, 0x7A), rgb(0xFF, 0x6E, 0xA3)),
-            Color::Gray => pick(rgb(0x8A, 0x8E, 0x9C), rgb(0x8E, 0x93, 0xA6)),
+            Color::Gray => pick(rgb(0x8A, 0x8E, 0x9C), rgb(0x88, 0x92, 0xB0)),
             Color::Background => t.window_bg,
             Color::GroupedBackground => t.window_bg_alt,
-            Color::SecondaryBackground => pick(rgb(0xFF, 0xFF, 0xFF), rgb(0x1B, 0x20, 0x36)),
-            Color::ControlBackground => t.control_bg,
-            Color::Separator => t.separator,
-            Color::Fill => t.hover,
+            Color::SecondaryBackground => mix(t.window_bg, t.text, if dark { 15 } else { 11 }),
+            Color::ControlBackground => ink(11, 15),
+            Color::Separator => ink(20, 20),
+            Color::Fill => ink(11, 15),
+            Color::SecondaryFill => ink(19, 26),
+            Color::TertiaryFill => ink(31, 41),
             Color::Custom(c) => c,
             Color::Clear => 0,
         }

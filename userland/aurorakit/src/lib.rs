@@ -158,7 +158,13 @@ impl Window {
     fn surface(id: u64) -> SurfaceInfo {
         let mut s = SurfaceInfo::default();
         let _ = call(nr::WIN_SURFACE, &[id, &mut s as *mut SurfaceInfo as u64]);
+        s.scale = s.scale.max(1);
         s
+    }
+
+    /// The window's content size in points.
+    fn points(&self) -> (i32, i32) {
+        ((self.surface.width / self.surface.scale) as i32, (self.surface.height / self.surface.scale) as i32)
     }
 
     fn pixels(&mut self) -> &mut [u32] {
@@ -232,7 +238,7 @@ fn apply(requests: Vec<Request>) {
 /// Installs the system's TrueType faces (once per process).
 pub fn load_fonts() {
     use font::Face;
-    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono] {
+    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono, Face::Light] {
         if !font::installed(face) {
             if let Ok(data) = corekit::fs::read(face.file()) {
                 font::install(face, alloc::boxed::Box::leak(data.into_boxed_slice()));
@@ -264,7 +270,10 @@ pub fn run<A: App>(mut app: A) -> i32 {
     let info = corekit::process::sys_info();
     let screen = (info.screen_w as i32, info.screen_h as i32);
 
+    // Windows open no larger than the screen leaves room for (the bar above,
+    // Harbor below).
     let (w, h) = app.size();
+    let (w, h) = (w.min(screen.0 - 48), h.min(screen.1 - 150));
     let mut title = app.title();
     let [tp, tl] = str_args(&title);
     let flags = if app.resizable() { win::RESIZABLE } else { 0 };
@@ -329,15 +338,16 @@ pub fn run<A: App>(mut app: A) -> i32 {
             events = 0;
         }
         if dirty {
-            let (sw, sh) = (win.surface.width as i32, win.surface.height as i32);
-            let stride = win.surface.stride as i32;
-            let area = Rect::new(0, 0, sw, sh);
+            // The app draws in points; the surface is in device pixels.
+            let (pw, ph) = win.points();
+            let (sh, stride, scale) = (win.surface.height as i32, win.surface.stride as i32, win.surface.scale as i32);
+            let area = Rect::new(0, 0, pw, ph);
             let materials = app.materials(area);
             let _ = call(nr::WIN_MATERIALS, &[id, materials.as_ptr() as u64, materials.len() as u64]);
-            let mut cv = Canvas::new(win.pixels(), stride, sh);
+            let mut cv = Canvas::new(win.pixels(), stride, sh).with_scale(scale);
             cv.fill_rect(area, theme::current().window_bg);
             for region in &materials {
-                let r = Rect::new(region.x, region.y, region.width, region.height).intersect(&area);
+                let r = cv.to_px(Rect::new(region.x, region.y, region.width, region.height).intersect(&area));
                 for y in r.y..r.bottom() {
                     let start = (y * stride + r.x) as usize;
                     cv.buf[start..start + r.w as usize].fill(0);
@@ -372,7 +382,8 @@ pub fn run<A: App>(mut app: A) -> i32 {
         ) {
             env.mods = Modifiers::from_bits(ev.d);
         }
-        let area = Rect::new(0, 0, win.surface.width as i32, win.surface.height as i32);
+        let (pw, ph) = win.points();
+        let area = Rect::new(0, 0, pw, ph);
         dirty |= match ev.kind {
             event::KEY => app.key(&KeyEvent::from_event(&ev), &mut env),
             event::POINTER_DOWN if ev.a == 2 => app.right_click(ev.x, ev.y, area, &mut env),
@@ -386,8 +397,9 @@ pub fn run<A: App>(mut app: A) -> i32 {
             event::DRAG_LEAVE => app.drag_over(-1, -1, area, &mut env),
             event::DROP => app.drop(ev.x, ev.y, ev.a, area, &mut env),
             event::DRAG_END => app.drag_end(ev.a != 0, &mut env),
+            // A new size, or a new scale (`a`): a new surface.
             event::RESIZE => {
-                if (ev.x as u32, ev.y as u32) != (win.surface.width, win.surface.height) {
+                if (ev.x, ev.y) != win.points() || (ev.a != 0 && ev.a != win.surface.scale) {
                     let _ = call(nr::WIN_RESIZE, &[id, ev.x as u64, ev.y as u64]);
                     win.surface = Window::surface(id);
                 }

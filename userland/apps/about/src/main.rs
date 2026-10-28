@@ -13,21 +13,33 @@ use waveui::prelude::*;
 
 pub struct About {
     info: SysInfo,
+    tab: usize,
     /// The WayV logo for the footer, scaled once.
     maker: Option<Rc<Pixmap>>,
 }
 
 #[derive(Clone)]
-pub enum Msg {}
+pub enum Msg {
+    Tab(usize),
+    Report,
+    Updates,
+    Guide(&'static str),
+    Web(&'static str),
+}
+
+/// Opens a guide in Learn, or a page in Nebula.
+fn spawn(program: &str, arg: &str) {
+    let _ = corekit::process::spawn(program, &[arg], corekit::process::Stdio::default());
+}
 
 impl About {
     fn new() -> Self {
         let maker = corekit::fs::read("/System/Brand/wayv-logo.png")
             .ok()
             .and_then(|d| aurora_image::decode(&d).ok())
-            .map(|img| img.thumbnail(92, 40))
+            .map(|img| img.thumbnail(80, 30))
             .map(|img| Rc::new(Pixmap { width: img.width, height: img.height, pixels: img.pixels }));
-        Self { info: corekit::process::sys_info(), maker }
+        Self { info: corekit::process::sys_info(), tab: 0, maker }
     }
 }
 
@@ -42,14 +54,20 @@ impl App for About {
         "About This Computer".into()
     }
     fn size(&self) -> (i32, i32) {
-        (520, 560)
+        (760, 500)
     }
     fn resizable(&self) -> bool {
         false
     }
 
-    fn update(&mut self, msg: Msg, _cx: &mut Context<Msg>) {
-        match msg {}
+    fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
+        match msg {
+            Msg::Tab(t) => self.tab = t,
+            Msg::Report => cx.open_app("Pulse"),
+            Msg::Updates => spawn("/System/Apps/Learn.elf", "start-installation"),
+            Msg::Guide(id) => spawn("/System/Apps/Learn.elf", id),
+            Msg::Web(url) => spawn("/System/Apps/Nebula.elf", url),
+        }
     }
 
     fn poll_interval(&self) -> Option<u64> {
@@ -64,50 +82,139 @@ impl App for About {
     fn view(&self, env: &Env) -> View<'_, Msg> {
         let i = &self.info;
         let version = fixed_str(&i.version, i.version_len);
-        let rows = [
-            ("Kernel", format!("Aster {version} · x86_64")),
-            ("Processor", fixed_str(&i.cpu, i.cpu_len)),
-            ("Memory", format!("{} · {} in use", mib(i.mem_total), mib(i.mem_used))),
-            ("Processes", format!("{} running", i.processes)),
-            ("Volume", fixed_str(&i.root, i.root_len)),
-            ("Display", format!("{} × {}", env.screen.0, env.screen.1)),
-            ("Uptime", corekit::time::format_uptime(env.now_ms)),
-        ];
+        let gb = |b: u64| {
+            if b >= 1 << 30 {
+                format!("{:.1} GB", b as f64 / (1u64 << 30) as f64)
+            } else {
+                mib(b)
+            }
+        };
+        let rows: Vec<(&str, String)> = match self.tab {
+            0 => vec![
+                ("Processor", fixed_str(&i.cpu, i.cpu_len)),
+                ("Memory", format!("{} · {} in use", gb(i.mem_total), gb(i.mem_used))),
+                ("Display", format!("{} × {}", env.screen.0, env.screen.1)),
+                ("Startup disk", fixed_str(&i.root, i.root_len)),
+                ("Kernel", format!("aster {version}")),
+                ("Uptime", corekit::time::format_uptime(env.now_ms)),
+            ],
+            1 => vec![
+                ("Resolution", format!("{} × {}", env.screen.0, env.screen.1)),
+                ("Appearance", String::from(if env.dark { "Dark" } else { "Light" })),
+                (
+                    "Wallpaper",
+                    String::from(
+                        waveui::lumen::wallpaper::NAMES
+                            .get(waveui::lumen::theme::wallpaper() as usize)
+                            .copied()
+                            .unwrap_or("Your picture"),
+                    ),
+                ),
+                ("Compositor", String::from("Lumen")),
+            ],
+            2 => vec![
+                ("Volume", fixed_str(&i.root, i.root_len)),
+                ("Capacity", gb(i.disk_total)),
+                ("Available", gb(i.disk_free)),
+                ("Used", gb(i.disk_total.saturating_sub(i.disk_free))),
+            ],
+            _ => Vec::new(),
+        };
+        let mut facts = VStack::new().spacing(9).alignment(Align::Stretch);
+        for (k, v) in rows {
+            facts = facts.push(
+                HStack::new()
+                    .push(
+                        Text::new(k)
+                            .style(TextStyle::Sized(14, waveui::style::Weight::Regular))
+                            .foreground(Color::SecondaryLabel)
+                            .text_align(Align::End)
+                            .width(110),
+                    )
+                    .push(Text::new(v).style(TextStyle::Sized(14, waveui::style::Weight::Bold)).grow(1))
+                    .spacing(18)
+                    .fill_width(),
+            );
+        }
+        let extra: View<'_, Msg> = match self.tab {
+            0 => HStack::new()
+                .push(Button::new("System Report…").action(Msg::Report).control_size(ControlSize::Small))
+                .push(Button::new("Software Update…").action(Msg::Updates).control_size(ControlSize::Small))
+                .spacing(10),
+            1 => {
+                Button::new("Display Settings…").action(Msg::Guide("system-hardware")).control_size(ControlSize::Small)
+            }
+            2 => ProgressView::new(Some(i.disk_total.saturating_sub(i.disk_free) as f32 / i.disk_total.max(1) as f32))
+                .width(300),
+            _ => VStack::new()
+                .push(
+                    Text::new("Help is close at hand.")
+                        .style(TextStyle::Sized(14, waveui::style::Weight::Regular))
+                        .foreground(Color::SecondaryLabel),
+                )
+                .push(
+                    Button::new("Open the WaveOS Guide")
+                        .action(Msg::Guide("start-welcome"))
+                        .control_size(ControlSize::Small),
+                )
+                .push(
+                    Button::new("Troubleshooting and Recovery")
+                        .action(Msg::Guide("reference-recovery"))
+                        .control_size(ControlSize::Small),
+                )
+                .push(
+                    Button::new("Report a Problem…")
+                        .action(Msg::Web("https://github.com/Sw3bbl3/waveos-aurora-rs/issues"))
+                        .control_size(ControlSize::Small),
+                )
+                .spacing(10)
+                .alignment(Align::Start),
+        };
         let dark = env.dark;
         // The WVOS mark with a soft glow.
         let mark = ZStack::with(vec![
             Canvas::new(move |cv, r| {
-                cv.glow(r.inset(16), 26, 28, waveui::lumen::theme::accent_glow(), if dark { 70 } else { 40 })
+                cv.glow(r.inset(20), 30, 34, waveui::lumen::theme::accent_glow(), if dark { 70 } else { 40 })
             })
-            .size(124, 124),
-            Image::app_icon(Icon::Aurora, 100),
+            .size(170, 170),
+            Image::app_icon(Icon::Aurora, 128),
         ]);
-        let details = Section::new()
-            .extend(rows.into_iter().map(|(k, v)| row(k, Text::new(v).foreground(Color::SecondaryLabel)).height(34)));
+        let name = HStack::new()
+            .push(Text::new("WaveOS").style(TextStyle::Sized(38, waveui::style::Weight::Display)))
+            .push(Text::new("Aurora").style(TextStyle::Sized(38, waveui::style::Weight::Light)))
+            .spacing(10);
+        let info = VStack::new()
+            .push(name)
+            .push(
+                Text::new(format!("Version {version}"))
+                    .style(TextStyle::Sized(14, waveui::style::Weight::Regular))
+                    .foreground(Color::SecondaryLabel),
+            )
+            .push(facts.padding_insets(Insets { top: 14, leading: 0, bottom: 6, trailing: 0 }))
+            .push(extra)
+            .spacing(4)
+            .alignment(Align::Start);
         let maker = match &self.maker {
-            Some(img) => HStack::new()
-                .push(Text::new("Made by").style(TextStyle::Callout).foreground(Color::SecondaryLabel))
-                .push(Image::new(img.clone()).size(img.width as i32, img.height as i32)),
-            None => Text::new("Made by WayV").style(TextStyle::Callout).foreground(Color::SecondaryLabel),
+            Some(img) => Image::new(img.clone()).size(img.width as i32, img.height as i32),
+            None => Text::new("WayV").style(TextStyle::Headline),
         };
         VStack::new()
-            .push(mark)
-            .push(
-                VStack::new()
-                    .push(Text::new("WaveOS Aurora").style(TextStyle::Sized(30, waveui::style::Weight::Display)))
-                    .push(Text::new(format!("Version {version}")).foreground(Color::SecondaryLabel))
-                    .spacing(4),
-            )
-            .push(details.padding_xy(28, 0))
+            .push(toolbar(vec![
+                Spacer::new(),
+                Picker::new(["Overview", "Displays", "Storage", "Support"], self.tab).on_change(Msg::Tab).width(330),
+                Spacer::new(),
+            ]))
+            .push(Spacer::new())
+            .push(HStack::new().push(mark).push(info).spacing(40).alignment(Align::Center))
             .push(Spacer::new())
             .push(maker)
             .push(
-                Text::new("© 2026 WaveOS Aurora contributors · MIT License")
-                    .style(TextStyle::Footnote)
-                    .foreground(Color::SecondaryLabel),
+                Text::new("™ and © 2026 WayV. Made with Rust. MIT License.")
+                    .style(TextStyle::Sized(12, waveui::style::Weight::Regular))
+                    .foreground(Color::TertiaryLabel),
             )
-            .spacing(10)
-            .padding_insets(Insets { top: 14, leading: 0, bottom: 12, trailing: 0 })
+            .spacing(6)
+            .padding_insets(Insets { top: 0, leading: 0, bottom: 18, trailing: 0 })
             .fill()
     }
 }
