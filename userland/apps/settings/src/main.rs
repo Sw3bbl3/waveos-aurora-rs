@@ -485,22 +485,34 @@ impl Settings {
 
     fn display_pane(&self) -> View<'_, Msg> {
         let live = self.modes.iter().any(|m| m.flags & display::LIVE != 0);
-        let sub = if live {
+        let follows = self.modes.iter().any(|m| m.flags & display::FOLLOWS_WINDOW != 0);
+        let sub = if follows {
+            "Changes apply right away. In a virtual machine, WaveOS also follows the window: make it larger or full screen for more room."
+        } else if live {
             "Changes apply right away; you'll be asked to keep them."
         } else {
             "This display is set up by the firmware: changes apply when you restart."
         };
-        let rows = self.modes.iter().take(12).enumerate().map(|(i, m)| {
+        let current = self.modes.iter().find(|m| m.flags & display::CURRENT != 0);
+        let summary = current.map(|m| {
+            card(vec![row_detail(
+                "Showing",
+                format!("{} × {} pixels", m.width, m.height),
+                Text::new(aspect(m.width, m.height)).foreground(Color::SecondaryLabel),
+            )])
+        });
+        // Largest first, as the screen's own list is.
+        let rows = self.modes.iter().enumerate().rev().map(|(i, m)| {
             let mut tags = Vec::new();
             let current = m.flags & display::CURRENT != 0;
+            if m.flags & display::PREFERRED != 0 {
+                tags.push("Recommended");
+            }
             if current {
                 tags.push("In use");
             }
             if m.flags & display::AT_BOOT != 0 && !current {
                 tags.push("After restart");
-            }
-            if (m.width, m.height) == (1280, 800) {
-                tags.push("Designed for");
             }
             HStack::new()
                 .push(Text::new(format!("{} × {}", m.width, m.height)).grow(1))
@@ -511,7 +523,10 @@ impl Settings {
                 .fill_width()
                 .on_tap(Msg::Mode(i))
         });
-        page("Display", vec![footer(sub), Section::titled("Resolution", card(rows.collect()).id("display/resolution"))])
+        let mut sections = vec![footer(sub)];
+        sections.extend(summary);
+        sections.push(Section::titled("Resolution", card(rows.collect()).id("display/resolution")));
+        page("Display", sections)
     }
 
     fn keyboard(&self) -> View<'_, Msg> {
@@ -1090,6 +1105,23 @@ fn status_dot<'a>(c: Color) -> View<'a, Msg> {
         cv.fill_circle(x, y, 6, c.argb());
     })
     .size(16, 16)
+}
+
+/// "16:10", "16:9", … for a resolution.
+fn aspect(w: u32, h: u32) -> String {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 {
+            a
+        } else {
+            gcd(b, a % b)
+        }
+    }
+    let g = gcd(w, h).max(1);
+    match (w / g, h / g) {
+        (8, 5) => "16:10".into(),
+        (683, 384) | (85, 48) => "16:9".into(),
+        (a, b) => format!("{a}:{b}"),
+    }
 }
 
 fn radio<'a>(on: bool) -> View<'a, Msg> {

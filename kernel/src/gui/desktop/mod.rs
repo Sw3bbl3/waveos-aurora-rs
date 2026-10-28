@@ -782,6 +782,8 @@ impl Desktop {
                     self.damage_all();
                 }
                 Command::NetworkChanged => self.damage(Rect::new(0, 0, self.w, MENUBAR_H)),
+                // Follow the screen's new preferred size, without asking.
+                Command::DisplayChanged => self.resolution_request = Some((0, 0)),
                 Command::SetResolution(w, h) => {
                     if (w as i32, h as i32) != (self.w, self.h) {
                         self.previous_resolution.get_or_insert((self.w as u32, self.h as u32));

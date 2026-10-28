@@ -778,6 +778,10 @@ pub mod display {
     pub const LIVE: u32 = 2;
     /// Chosen for the next start (in `\aurora\boot.conf`).
     pub const AT_BOOT: u32 = 4;
+    /// The screen's own preferred size (a virtual machine's window size).
+    pub const PREFERRED: u32 = 8;
+    /// The screen follows its preferred size (a virtual machine's window).
+    pub const FOLLOWS_WINDOW: u32 = 16;
 }
 
 /// Drag images for `drag_start`.

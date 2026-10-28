@@ -68,6 +68,11 @@ pub fn screen_size() -> (i32, i32) {
 }
 
 pub fn start() {
+    // A ported GPU driver took over the screen in a mode of its own.
+    if let Some(fb) = crate::drivers::display::drm_framebuffer() {
+        *FB.lock() = Some(fb);
+        input::set_screen_size(fb.width as i32, fb.height as i32);
+    }
     // The compositor keeps its own SIMD registers, so drawing can use SSE2.
     lumen::simd::set_gate(simd_allowed);
     sched::spawn_simd("lumen-server", run);
@@ -81,6 +86,11 @@ fn simd_allowed() -> bool {
 }
 
 /// A network interface got (or lost) its address.
+/// A ported GPU driver reported new display modes (see `crate::linux`).
+pub fn display_changed() {
+    server::command(server::Command::DisplayChanged);
+}
+
 pub fn network_changed() {
     server::command(server::Command::NetworkChanged);
 }
@@ -194,6 +204,13 @@ fn run() {
     let mut desktop = Desktop::new(w, h);
     log!("gui", "desktop composed in {} ms ({}x{})", time::uptime_ms() - t0, w, h);
 
+    // A ported GPU driver starts in the screen's preferred mode; switch to
+    // the resolution chosen in Settings, if the screen has it.
+    if crate::drivers::display::drm() {
+        if let Some((bw, bh)) = prefs::boot_resolution().filter(|&r| r != (w as u32, h as u32)) {
+            desktop.resolution_request = Some((bw, bh));
+        }
+    }
     let mut back = vec![0u32; (w * h) as usize];
     let mut materials = lumen::material::MaterialCache::default();
     let mut front = front_buffer(&fb);
@@ -213,6 +230,13 @@ fn run() {
         // A new resolution: new framebuffer, back buffer and layout.
         if let Some((nw, nh)) = desktop.resolution_request.take() {
             match crate::drivers::display::set_mode(nw, nh) {
+                // Following the screen: it already has this size.
+                Some(new_fb) if (nw, nh) == (0, 0) && (new_fb.width as i32, new_fb.height as i32) == (w, h) => {
+                    front = front_buffer(&new_fb);
+                    fb = new_fb;
+                    *FB.lock() = Some(fb);
+                    desktop.damage_all();
+                }
                 Some(new_fb) => {
                     fb = new_fb;
                     *FB.lock() = Some(fb);
@@ -229,6 +253,7 @@ fn run() {
                         ..Default::default()
                     });
                 }
+                None if (nw, nh) == (0, 0) => {}
                 None => log!("gui", "the display can't show {}x{}", nw, nh),
             }
         }

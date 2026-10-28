@@ -1,9 +1,12 @@
 //! Display modes.
 //!
 //! On the Bochs/QEMU "std VGA" family (also VirtualBox's) the resolution can
-//! change at run time through the DISPI registers. Everywhere else the mode is
-//! set by the firmware (GOP) at boot: Settings writes the choice to
-//! `\aurora\boot.conf` and the bootloader applies it on the next start.
+//! change at run time through the DISPI registers, and so can it when a
+//! ported Linux GPU driver runs the screen (`crate::linux`, virtio-gpu),
+//! which also reports the sizes the screen supports and follows the host
+//! window. Everywhere else the mode is set by the firmware (GOP) at boot:
+//! Settings writes the choice to `\aurora\boot.conf` and the bootloader
+//! applies it on the next start.
 
 use crate::sync::IrqMutex;
 use alloc::vec::Vec;
@@ -27,7 +30,7 @@ const ENABLED: u16 = 0x01;
 const LFB: u16 = 0x40;
 
 /// Resolutions offered when the mode can be changed at run time.
-const LIVE_MODES: [(u32, u32); 11] = [
+const LIVE_MODES: [(u32, u32); 16] = [
     (1024, 768),
     (1152, 864),
     (1280, 720),
@@ -39,6 +42,11 @@ const LIVE_MODES: [(u32, u32); 11] = [
     (1920, 1080),
     (1920, 1200),
     (2560, 1440),
+    (2560, 1600),
+    (2880, 1800),
+    (3200, 1800),
+    (3840, 2160),
+    (3840, 2400),
 ];
 
 struct State {
@@ -92,13 +100,51 @@ pub fn init(boot: &BootInfo) {
 }
 
 pub fn live() -> bool {
-    STATE.lock().bochs.is_some()
+    STATE.lock().bochs.is_some() || drm()
+}
+
+/// The screen a ported GPU driver runs, described as a framebuffer (the
+/// compositor draws through `crate::linux::display`, not the address).
+pub fn drm_framebuffer() -> Option<Framebuffer> {
+    #[cfg(linuxkpi)]
+    return crate::linux::display().map(|d| Framebuffer {
+        phys_addr: 0,
+        size: d.pitch as u64 * d.height as u64,
+        width: d.width,
+        height: d.height,
+        stride: d.pitch / 4,
+        format: PixelFormat::Bgr,
+    });
+    #[cfg(not(linuxkpi))]
+    None
+}
+
+/// A ported GPU driver runs the screen.
+pub fn drm() -> bool {
+    #[cfg(linuxkpi)]
+    return crate::linux::display().is_some();
+    #[cfg(not(linuxkpi))]
+    false
 }
 
 /// The resolutions to offer, with the current one flagged.
 pub fn modes(current: (u32, u32), at_boot: Option<(u32, u32)>) -> Vec<DisplayMode> {
+    #[cfg(linuxkpi)]
+    let drm_modes: Vec<DisplayMode> = crate::linux::display_modes()
+        .iter()
+        .filter(|m| m.width >= 800 && m.height >= 600)
+        .map(|m| DisplayMode {
+            width: m.width,
+            height: m.height,
+            flags: display::LIVE | display::FOLLOWS_WINDOW | if m.preferred != 0 { display::PREFERRED } else { 0 },
+            _pad: 0,
+        })
+        .collect();
+    #[cfg(not(linuxkpi))]
+    let drm_modes: Vec<DisplayMode> = Vec::new();
     let s = STATE.lock();
     let mut out: Vec<DisplayMode> = match s.bochs {
+        _ if !drm_modes.is_empty() => drm_modes,
         Some((_, vram)) => LIVE_MODES
             .iter()
             .filter(|(w, h)| (*w as u64) * (*h as u64) * 4 <= vram)
@@ -135,8 +181,18 @@ pub fn resume(w: u32, h: u32) {
     }
 }
 
-/// Switches to `w`×`h` now (Bochs VBE only). Returns the new framebuffer.
+/// Switches to `w`×`h` now (Bochs VBE or a ported GPU driver). Returns the
+/// new framebuffer. `0`×`0` follows the screen's preferred size when it
+/// changed (the host window was resized), and is `None` otherwise.
 pub fn set_mode(w: u32, h: u32) -> Option<Framebuffer> {
+    #[cfg(linuxkpi)]
+    if drm() {
+        let (w, h) = if (w, h) == (0, 0) { crate::linux::display_preferred_changed()? } else { (w, h) };
+        crate::linux::display_set_mode(w, h)?;
+        let fb = drm_framebuffer()?;
+        log!("display", "switched to {}x{}", fb.width, fb.height);
+        return Some(fb);
+    }
     let (phys, vram) = STATE.lock().bochs?;
     if (w as u64) * (h as u64) * 4 > vram || w < 640 || h < 480 || w > 4096 || h > 4096 {
         return None;

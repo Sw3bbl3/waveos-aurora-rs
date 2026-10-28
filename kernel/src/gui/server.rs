@@ -65,6 +65,8 @@ pub enum Command {
     Pref(String),
     /// Switch the screen resolution (live-capable displays only).
     SetResolution(u32, u32),
+    /// The screen's modes changed (a ported GPU driver's hotplug event).
+    DisplayChanged,
     /// The hardware power button (ACPI).
     PowerButton,
     /// Battery / power adapter / lid state changed (ACPI).

@@ -19,6 +19,7 @@ const DRIVER_FEATURE_SELECT: u64 = 0x08;
 const DRIVER_FEATURE: u64 = 0x0C;
 const MSIX_CONFIG: u64 = 0x10;
 const DEVICE_STATUS: u64 = 0x14;
+const CONFIG_GENERATION: u64 = 0x15;
 const QUEUE_SELECT: u64 = 0x16;
 const QUEUE_SIZE: u64 = 0x18;
 const QUEUE_MSIX_VECTOR: u64 = 0x1A;
@@ -159,6 +160,16 @@ impl Transport {
 
     pub fn no_config_interrupt(&self) {
         self.w16(MSIX_CONFIG, NO_VECTOR);
+    }
+
+    /// Signals configuration changes on MSI-X `vector`.
+    pub fn config_interrupt(&self, vector: u16) {
+        self.w16(MSIX_CONFIG, vector);
+    }
+
+    /// Changes whenever the device changes its configuration.
+    pub fn config_generation(&self) -> u8 {
+        self.r8(CONFIG_GENERATION)
     }
 
     pub fn driver_ok(&self) {
