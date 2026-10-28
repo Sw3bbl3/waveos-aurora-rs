@@ -227,6 +227,20 @@ pub(crate) fn draw(cv: &mut Canvas, s: Symbol, r: Rect, c: u32) {
             dot(cv, 11, 7, 1);
             dot(cv, 13, 9, 1);
         }
+        Symbol::Photo => {
+            rect(cv, 2, 3, 14, 13, 1);
+            line(cv, &[(2, 11), (6, 7), (9, 10), (10, 9), (14, 12)]);
+        }
+        Symbol::Terminal => {
+            rect(cv, 1, 2, 15, 14, 2);
+            line(cv, &[(4, 6), (7, 8), (4, 10)]);
+            line(cv, &[(8, 11), (12, 11)]);
+        }
+        Symbol::Drive => {
+            rect(cv, 1, 5, 15, 12, 2);
+            dot(cv, 4, 8, 1);
+            line(cv, &[(8, 8), (12, 8)]);
+        }
         Symbol::Display => {
             rect(cv, 1, 2, 15, 11, 1);
             line(cv, &[(8, 11), (8, 14)]);

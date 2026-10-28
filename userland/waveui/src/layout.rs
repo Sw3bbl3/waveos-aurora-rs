@@ -304,7 +304,7 @@ fn measure_node<M>(v: &View<'_, M>, pw: i32, ph: i32, inh: Inherit, lay: &mut La
         Node::Button { label, style, size, .. } => {
             let h = control_height(*size);
             match style {
-                ButtonStyle::Plain => measure(label, pw, ph, inh, lay),
+                ButtonStyle::Plain => measure(label, pw, ph, Inherit { style: crate::render::button_text(*size) }, lay),
                 ButtonStyle::Toolbar => {
                     let (lw, lh) = measure(label, sub(pw, 14), ph, inh, lay);
                     ((lw + 14).max(h), (lh + 14).max(h))
@@ -315,6 +315,7 @@ fn measure_node<M>(v: &View<'_, M>, pw: i32, ph: i32, inh: Inherit, lay: &mut La
                 }
                 _ => {
                     let p = button_padding(*size);
+                    let inh = Inherit { style: crate::render::button_text(*size) };
                     let (lw, lh) = measure(label, sub(pw, 2 * p), ph, inh, lay);
                     ((lw + 2 * p).max(h), (lh + 8).max(h))
                 }
@@ -345,11 +346,15 @@ fn measure_node<M>(v: &View<'_, M>, pw: i32, ph: i32, inh: Inherit, lay: &mut La
         }
         Node::Picker { options, style, .. } => match style {
             PickerStyle::Segmented => {
-                let ideal: i32 = options.iter().map(|o| body.width(o) + 28).sum();
-                (ideal.min(pw).max(40), 28)
+                // Equal segments, each wide enough for the longest label.
+                let f = lumen::theme::ui_bold(13);
+                let widest = options.iter().map(|o| f.width(o)).max().unwrap_or(0) + 28;
+                let ideal = widest * options.len().max(1) as i32 + 6;
+                (ideal.min(pw).max(40), 32)
             }
             PickerStyle::Menu => {
-                let w = options.iter().map(|o| body.width(o)).max().unwrap_or(0) + 28 + 18;
+                let f = lumen::theme::ui_bold(13);
+                let w = options.iter().map(|o| f.width(o)).max().unwrap_or(0) + 28 + 18;
                 (w.min(pw), crate::style::size::CONTROL)
             }
             PickerStyle::Inline => {
@@ -357,7 +362,10 @@ fn measure_node<M>(v: &View<'_, M>, pw: i32, ph: i32, inh: Inherit, lay: &mut La
                 (bounded(pw, w), 30 * options.len() as i32)
             }
         },
-        Node::TextField { .. } => (bounded(pw, 220).max(60), crate::style::size::CONTROL),
+        Node::TextField { plain, .. } => {
+            let h = if *plain { line_height(body) + 6 } else { crate::style::size::FIELD.max(line_height(body) + 12) };
+            (bounded(pw, 220).max(60), h)
+        }
         Node::TextEditor { .. } => (bounded(pw, 320), bounded(ph, 160)),
         Node::Progress { circular: true, .. } => (20, 20),
         Node::Progress { .. } => (bounded(pw, 160), 6),
@@ -574,6 +582,11 @@ pub(crate) fn place<'a, M>(v: &View<'a, M>, rect: Rect, key: u64, inh: Inherit, 
             }
         }
         Node::Button { label, style, size, .. } => {
+            // Labels are in the button font, except in toolbars and rows.
+            let inh = match style {
+                ButtonStyle::Row | ButtonStyle::Toolbar => inh,
+                _ => Inherit { style: crate::render::button_text(*size) },
+            };
             let r = match style {
                 ButtonStyle::Plain => node,
                 ButtonStyle::Row => Rect::new(node.x + 10, node.y, node.w - 20, node.h),

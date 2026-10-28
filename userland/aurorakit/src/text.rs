@@ -425,6 +425,9 @@ impl Clicks {
     }
 }
 
+/// How an open task line starts (see `TextView::tasks`).
+pub const TASK_OPEN: &str = "- [ ] ";
+
 /// A scrolling, word-wrapping multi-line editor.
 pub struct TextView {
     /// Lightweight Rust lexical coloring; language intelligence is supplied separately.
@@ -432,12 +435,17 @@ pub struct TextView {
     pub edit: TextEdit,
     pub font: Font,
     pub line_h: i32,
+    /// Extra space between lines, in pixels.
+    pub line_spacing: i32,
     /// Scroll offset in pixels.
     pub scroll: i32,
     /// Byte ranges to highlight (e.g. find matches); `current` is drawn stronger.
     pub highlights: Vec<(usize, usize)>,
     pub current_highlight: Option<usize>,
     pub placeholder: String,
+    /// Draws lines starting `- [ ] ` / `- [x] ` as checkboxes that toggle
+    /// when clicked (checklists in notes).
+    pub tasks: bool,
     layout: Vec<(usize, usize)>,
     layout_key: (u64, i32, Font),
     rect: Rect,
@@ -461,10 +469,12 @@ impl TextView {
             rust_syntax: false,
             font,
             line_h: font.line_height as i32 + 3,
+            line_spacing: 0,
             scroll: 0,
             highlights: Vec::new(),
             current_highlight: None,
             placeholder: String::new(),
+            tasks: false,
             layout: Vec::new(),
             layout_key: (u64::MAX, 0, font),
             rect: Rect::new(0, 0, 0, 0),
@@ -481,8 +491,17 @@ impl TextView {
 
     pub fn set_font(&mut self, font: Font) {
         self.font = font;
-        self.line_h = font.line_height as i32 + 3;
+        self.line_h = font.line_height as i32 + 3 + self.line_spacing;
         self.follow = true;
+    }
+
+    /// Opens the lines up by `px` (a reading measure for prose).
+    pub fn set_line_spacing(&mut self, px: i32) {
+        if self.line_spacing != px {
+            self.line_spacing = px;
+            self.line_h = self.font.line_height as i32 + 3 + px;
+            self.follow = true;
+        }
     }
 
     fn relayout(&mut self, width: i32) {
@@ -576,6 +595,39 @@ impl TextView {
         self.last_blink = now;
     }
 
+    /// For checklists: whether the logical line starting at `s` is a task,
+    /// and whether it is checked.
+    fn task_at(&self, s: usize) -> Option<bool> {
+        let t = &self.edit.text()[s..];
+        if t.starts_with(TASK_OPEN) {
+            Some(false)
+        } else if t.starts_with("- [x] ") || t.starts_with("- [X] ") {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// The start of the logical line holding byte `pos`.
+    fn line_start(&self, pos: usize) -> usize {
+        self.edit.text()[..pos].rfind('\n').map_or(0, |i| i + 1)
+    }
+
+    fn draw_checkbox(&self, cv: &mut Canvas, x: i32, y: i32, checked: bool) {
+        let t = theme::current();
+        let size = (self.font.line_height as i32 + 2).clamp(14, 22);
+        let b = Rect::new(x, y + (self.line_h - size) / 2, size, size);
+        let radius = size / 3;
+        if checked {
+            cv.fill_round_rect(b, radius, theme::accent());
+            let (cx, cy, k) = (b.x + size / 2, b.y + size / 2, size / 5);
+            cv.polyline(&[(cx - k - 1, cy), (cx - 1, cy + k), (cx + k + 1, cy - k)], 2, 0xFFFF_FFFF);
+        } else {
+            cv.stroke_round_rect(b, radius, with_alpha(t.text_secondary, 0xB0));
+            cv.stroke_round_rect(b.inset(1), radius - 1, with_alpha(t.text_secondary, 0x50));
+        }
+    }
+
     pub fn draw(&mut self, cv: &mut Canvas, r: Rect, focused: bool) {
         self.rect = r;
         self.relayout(r.w);
@@ -629,7 +681,27 @@ impl TextView {
                         span(cv, a, b, sel_color, &mut stops);
                     }
                 }
-                cv.text(r.x, y + baseline, line, f, t.text);
+                let task = if self.tasks { self.task_at(self.line_start(s)) } else { None };
+                match task {
+                    Some(checked) => {
+                        let head = self.line_start(s) == s;
+                        let (body, x) = if head {
+                            self.draw_checkbox(cv, r.x, y, checked);
+                            (&line[TASK_OPEN.len().min(line.len())..], r.x + f.width(TASK_OPEN))
+                        } else {
+                            (line, r.x)
+                        };
+                        let color = if checked { t.text_secondary } else { t.text };
+                        let w = cv.text(x, y + baseline, body, f, color);
+                        if checked && w > 0 {
+                            let mid = y + baseline - f.ascent as i32 * 3 / 10;
+                            cv.fill_rect(Rect::new(x, mid, w, 1), color);
+                        }
+                    }
+                    None => {
+                        cv.text(r.x, y + baseline, line, f, t.text);
+                    }
+                }
                 if self.rust_syntax {
                     let mut offset = 0;
                     while offset < line.len() {
@@ -724,8 +796,34 @@ impl TextView {
             return false;
         }
         let n = self.clicks.register(x, y, now, false);
+        if self.tasks && !shift && self.toggle_task(x, y, now) {
+            return true;
+        }
         self.press(x, y, n, shift && n == 1, now);
         true
+    }
+
+    /// Ticks or unticks the checkbox under (x, y), if there is one.
+    fn toggle_task(&mut self, x: i32, y: i32, now: u64) -> bool {
+        if x - self.rect.x > self.f_box() {
+            return false;
+        }
+        let line = (y - self.rect.y + self.scroll).div_euclid(self.line_h);
+        let Some(&(s, _)) = self.layout.get(line.max(0) as usize) else { return false };
+        if line < 0 || self.line_start(s) != s {
+            return false;
+        }
+        let Some(checked) = self.task_at(s) else { return false };
+        let caret = self.edit.caret();
+        self.edit.select(s + 3, s + 4);
+        self.edit.insert(if checked { " " } else { "x" }, now);
+        self.edit.set_caret(caret, false);
+        self.wake_caret(now);
+        true
+    }
+
+    fn f_box(&self) -> i32 {
+        self.font.width(TASK_OPEN)
     }
 
     pub fn double_click(&mut self, x: i32, y: i32, now: u64) -> bool {
@@ -858,6 +956,10 @@ pub struct TextField {
     pub inset: i32,
     /// Corner radius (a capsule for search fields).
     pub radius: i32,
+    /// The typeface (Manrope 14 when unset).
+    pub font: Option<Font>,
+    /// No box: just the text (a title typed in place).
+    pub plain: bool,
     scroll_x: i32,
     rect: Rect,
     caret_on: bool,
@@ -873,7 +975,9 @@ impl TextField {
             placeholder: String::from(placeholder),
             secure: false,
             inset: 12,
-            radius: 8,
+            radius: 11,
+            font: None,
+            plain: false,
             scroll_x: 0,
             rect: Rect::new(0, 0, 0, 0),
             caret_on: true,
@@ -899,8 +1003,8 @@ impl TextField {
         self.scroll_x = 0;
     }
 
-    fn font() -> Font {
-        theme::ui(14)
+    fn font(&self) -> Font {
+        self.font.unwrap_or_else(|| theme::ui(14))
     }
 
     /// What the field shows: the text, or a bullet per character.
@@ -915,8 +1019,8 @@ impl TextField {
 
     fn pos_at(&self, x: i32) -> usize {
         let text = self.edit.text();
-        let stops = Self::font().caret_stops(&self.shown());
-        let rel = x - (self.rect.x + self.inset) + self.scroll_x;
+        let stops = self.font().caret_stops(&self.shown());
+        let rel = x - (self.rect.x + if self.plain { 0 } else { self.inset }) + self.scroll_x;
         for (k, (i, _)) in text.char_indices().enumerate() {
             if rel < (stops[k] + stops[k + 1]) / 2 {
                 return i;
@@ -928,14 +1032,39 @@ impl TextField {
     pub fn draw(&mut self, cv: &mut Canvas, r: Rect, focused: bool) {
         self.rect = r;
         let t = theme::current();
-        let f = Self::font();
-        cv.fill_round_rect(r, self.radius, t.control_bg);
+        let f = self.font();
+        // A faint fill with a hairline (capsules, the search fields, a step
+        // stronger); focus adds an accent edge and a soft accent halo.
+        if self.plain {
+            return self.draw_text(cv, r, focused, f);
+        }
+        let capsule = self.radius * 2 >= r.h - 2;
+        let fill = with_alpha(
+            t.text,
+            match (capsule, t.dark) {
+                (true, true) => 26,
+                (true, false) => 19,
+                (false, true) => 15,
+                (false, false) => 11,
+            },
+        );
+        if focused {
+            cv.glow(r, self.radius, 4, theme::accent(), 56);
+        }
+        cv.fill_round_rect(r, self.radius, fill);
         cv.stroke_round_rect(
             r,
             self.radius,
-            if focused { with_alpha(theme::accent(), 0xC0) } else { t.control_border },
+            if focused { with_alpha(theme::accent(), 0xB3) } else { with_alpha(t.text, 20) },
         );
-        let inner = Rect::new(r.x + self.inset, r.y, r.w - self.inset - 12, r.h);
+        self.draw_text(cv, r, focused, f);
+    }
+
+    /// The text, selection and caret.
+    fn draw_text(&mut self, cv: &mut Canvas, r: Rect, focused: bool, f: Font) {
+        let t = theme::current();
+        let (inset, end) = if self.plain { (0, 0) } else { (self.inset, 12) };
+        let inner = Rect::new(r.x + inset, r.y, r.w - inset - end, r.h);
         let base = r.y + (r.h + f.ascent as i32 + f.descent as i32) / 2;
         let shown = self.shown();
         let text = self.edit.text();
@@ -950,7 +1079,8 @@ impl TextField {
         }
         cv.with_clip(inner, |cv| {
             if text.is_empty() {
-                cv.text(inner.x, base, &self.placeholder, f, t.text_secondary);
+                let faint = lumen::canvas::mix(t.window_bg, t.text, if t.dark { 133 } else { 158 });
+                cv.text(inner.x, base, &self.placeholder, f, faint);
             }
             if let Some((a, b)) = self.edit.selection() {
                 let c = if focused { with_alpha(theme::accent(), 0x55) } else { with_alpha(t.text_secondary, 0x40) };

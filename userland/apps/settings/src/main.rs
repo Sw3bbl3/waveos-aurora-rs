@@ -254,7 +254,7 @@ fn page<'a>(title: &str, sections: Vec<View<'a, Msg>>) -> View<'a, Msg> {
         .extend(sections)
         .spacing(18)
         .alignment(Align::Start)
-        .padding_insets(Insets { top: 22, leading: 28, bottom: 28, trailing: 28 })
+        .padding_insets(Insets { top: 26, leading: 34, bottom: 30, trailing: 34 })
         .fill_width()
 }
 
@@ -308,7 +308,7 @@ fn pref_slider<'a>(
 /// The small coloured tile of a pane, with its glyph.
 fn pane_tile<'a>(pane: Pane, color: u32) -> View<'a, Msg> {
     Canvas::new(move |cv, r| {
-        cv.fill_round_rect(r, 6, color);
+        cv.fill_round_rect(r, 7, color);
         pane_glyph(cv, pane, r, color);
     })
     .size(22, 22)
@@ -319,32 +319,46 @@ impl Settings {
         let items = PANES.iter().map(|&(pane, label, _, color)| {
             HStack::new()
                 .push(pane_tile(pane, color))
-                .push(Text::new(label).grow(1))
+                .push(Text::new(label).style(TextStyle::Sized(14, waveui::style::Weight::Bold)).grow(1))
                 .spacing(10)
-                .padding_xy(8, 0)
+                .padding_xy(10, 0)
                 .height(size::SIDEBAR_ROW)
                 .fill_width()
+                .corner_radius(radius::ITEM)
                 .selected(self.query.trim().is_empty() && pane == self.pane)
                 .on_tap(Msg::Pane(pane))
         });
-        VStack::new()
-            .push(Text::new("Settings").style(TextStyle::Title2).padding_insets(Insets {
-                top: 18,
-                leading: 10,
-                bottom: 0,
-                trailing: 0,
-            }))
+        // The system itself heads the list: its mark, name and version.
+        let info = corekit::process::sys_info();
+        let version = corekit::process::fixed_str(&info.version, info.version_len);
+        let header = HStack::new()
+            .push(Image::app_icon(Icon::Aurora, 40))
             .push(
-                TextField::search("Search", self.query.clone())
+                VStack::new()
+                    .push(Text::new("WaveOS Aurora").style(TextStyle::Sized(14, waveui::style::Weight::Bold)))
+                    .push(
+                        Text::new(format!("Version {version}"))
+                            .style(TextStyle::Caption)
+                            .foreground(Color::TertiaryLabel),
+                    )
+                    .spacing(1)
+                    .alignment(Align::Start),
+            )
+            .spacing(10)
+            .padding_insets(Insets { top: 8, leading: 8, bottom: 2, trailing: 8 });
+        VStack::new()
+            .push(header)
+            .push(
+                TextField::search("Seek in Settings", self.query.clone())
                     .on_change(Msg::Search)
                     .on_submit(Msg::SearchOpen)
                     .shortcut(Shortcut::ctrl('f'))
                     .id("search"),
             )
-            .push(ScrollView::new(VStack::with(items.collect()).spacing(2).fill_width()))
+            .push(ScrollView::new(VStack::with(items.collect()).spacing(1).fill_width()))
             .spacing(10)
             .alignment(Align::Stretch)
-            .padding_insets(Insets { top: 0, leading: 10, bottom: 10, trailing: 10 })
+            .padding_insets(Insets { top: 14, leading: 10, bottom: 10, trailing: 10 })
             .fill()
     }
 
@@ -1169,7 +1183,7 @@ impl App for Settings {
     }
 
     fn size(&self) -> (i32, i32) {
-        (880, 620)
+        (1140, 728)
     }
 
     fn started(&mut self, cx: &mut Context<Msg>) {
@@ -1394,7 +1408,7 @@ impl App for Settings {
                 .padding(20)
                 .fill()
         });
-        SplitView::new(self.sidebar(), ZStack::with(vec![detail]).push_if(note).fill()).sidebar_width(220)
+        SplitView::new(self.sidebar(), ZStack::with(vec![detail]).push_if(note).fill()).sidebar_width(250)
     }
 }
 

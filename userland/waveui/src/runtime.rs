@@ -397,7 +397,7 @@ impl Rt {
             f.placeholder = placeholder.to_string();
         }
         f.secure = secure;
-        (f.inset, f.radius) = if search { (30, 15) } else { (12, 8) };
+        (f.inset, f.radius) = if search { (32, 17) } else { (12, crate::style::radius::CONTROL) };
         f
     }
 
@@ -1401,7 +1401,12 @@ impl<A: App> aurorakit::App for Host<A> {
             }
             HitKind::Field => self.rt.fields.get_mut(&h.key).is_some_and(|f| f.click(x, y, shift, now)),
             HitKind::Editor => {
+                let rev = self.rt.editors.get(&h.key).map(|e| e.edit.revision());
                 let r = self.rt.editors.get_mut(&h.key).is_some_and(|e| e.click(x, y, shift, now));
+                // A click can tick a checklist's box.
+                if self.rt.editors.get(&h.key).map(|e| e.edit.revision()) != rev {
+                    self.text_changed(&h);
+                }
                 self.caret_moved(&h);
                 r
             }

@@ -238,7 +238,7 @@ fn apply(requests: Vec<Request>) {
 /// Installs the system's TrueType faces (once per process).
 pub fn load_fonts() {
     use font::Face;
-    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono] {
+    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono, Face::Light] {
         if !font::installed(face) {
             if let Ok(data) = corekit::fs::read(face.file()) {
                 font::install(face, alloc::boxed::Box::leak(data.into_boxed_slice()));
@@ -270,7 +270,10 @@ pub fn run<A: App>(mut app: A) -> i32 {
     let info = corekit::process::sys_info();
     let screen = (info.screen_w as i32, info.screen_h as i32);
 
+    // Windows open no larger than the screen leaves room for (the bar above,
+    // Harbor below).
     let (w, h) = app.size();
+    let (w, h) = (w.min(screen.0 - 48), h.min(screen.1 - 150));
     let mut title = app.title();
     let [tp, tl] = str_args(&title);
     let flags = if app.resizable() { win::RESIZABLE } else { 0 };

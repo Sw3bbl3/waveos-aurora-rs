@@ -47,7 +47,7 @@ fn current_fb() -> Option<Framebuffer> {
 fn load_fonts() {
     use lumen::font::{self, Face};
     lumen::icons::set_loader(load_icon);
-    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono] {
+    for face in [Face::Regular, Face::SemiBold, Face::Bold, Face::Mono, Face::Light] {
         let ok = crate::fs::read_all(face.file())
             .is_ok_and(|data| font::install(face, alloc::boxed::Box::leak(data.into_boxed_slice())));
         if !ok {

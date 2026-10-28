@@ -30,29 +30,31 @@ use window::Files;
 
 type SearchWorker = Arc<Mutex<Option<corekit::thread::JoinHandle<()>>>>;
 
-pub const TILE_W: i32 = 108;
-pub const TILE_H: i32 = 108;
-pub const ROW_H: i32 = 28;
+/// The narrowest a grid card gets, and every card's height (picture, name
+/// and padding).
+pub const TILE_W: i32 = 180;
+pub const TILE_H: i32 = 148;
+pub const ROW_H: i32 = 32;
 const TRASH: &str = "/Trash";
 
 pub struct Place {
     pub label: &'static str,
     pub path: &'static str,
-    pub icon: Icon,
+    pub symbol: waveui::Symbol,
 }
 
 pub const FAVORITES: [Place; 4] = [
-    Place { label: "Desktop", path: "/Desktop", icon: Icon::Folder },
-    Place { label: "Documents", path: "/Documents", icon: Icon::Folder },
-    Place { label: "Downloads", path: "/Downloads", icon: Icon::Folder },
-    Place { label: "Pictures", path: "/Pictures", icon: Icon::Folder },
+    Place { label: "Desktop", path: "/Desktop", symbol: waveui::Symbol::Display },
+    Place { label: "Documents", path: "/Documents", symbol: waveui::Symbol::Document },
+    Place { label: "Downloads", path: "/Downloads", symbol: waveui::Symbol::Download },
+    Place { label: "Pictures", path: "/Pictures", symbol: waveui::Symbol::Photo },
 ];
 
 pub const LOCATIONS: [Place; 4] = [
-    Place { label: "Aurora HD", path: "/", icon: Icon::Files },
-    Place { label: "System", path: "/System", icon: Icon::Aurora },
-    Place { label: "EFI Boot", path: "/Boot", icon: Icon::Settings },
-    Place { label: "Trash", path: TRASH, icon: Icon::Trash },
+    Place { label: "Aurora HD", path: "/", symbol: waveui::Symbol::Drive },
+    Place { label: "System", path: "/System", symbol: waveui::Symbol::Gear },
+    Place { label: "EFI Boot", path: "/Boot", symbol: waveui::Symbol::Lock },
+    Place { label: "Trash", path: TRASH, symbol: waveui::Symbol::Trash },
 ];
 
 const VOLUMES: &str = "/Volumes";
@@ -989,7 +991,7 @@ impl Folder {
             .find(|e| !e.is_dir && is_image(&e.name) && e.size < 12 << 20 && !self.thumbs.contains_key(&e.path));
         let Some(e) = next else { return false };
         let path = e.path.clone();
-        let thumb = fs::read(&path).ok().and_then(|d| aurora_image::decode(&d).ok()).map(|img| img.thumbnail(104, 104));
+        let thumb = fs::read(&path).ok().and_then(|d| aurora_image::decode(&d).ok()).map(|img| img.thumbnail(420, 280));
         // Charge capacity, path storage and conservative map-node overhead,
         // including failed decodes. Negative cache entries must not grow
         // without bound while browsing many folders of unsupported images.

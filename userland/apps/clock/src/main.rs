@@ -32,7 +32,7 @@ enum Tab {
 }
 
 const TABS: [(Tab, &str); 4] =
-    [(Tab::World, "World Clock"), (Tab::Alarms, "Alarms"), (Tab::Stopwatch, "Stopwatch"), (Tab::Timers, "Timers")];
+    [(Tab::World, "World"), (Tab::Alarms, "Alarms"), (Tab::Timers, "Timer"), (Tab::Stopwatch, "Stopwatch")];
 
 /// (city, UTC offset in minutes)
 const CITIES: [(&str, i32); 8] = [
@@ -115,7 +115,7 @@ fn fmt_timer(ms: u64) -> String {
     if s >= 3600 {
         format!("{}:{}:{}", s / 3600, two(s / 60 % 60), two(s % 60))
     } else {
-        format!("{}:{}", two(s / 60), two(s % 60))
+        format!("{}:{}", s / 60, two(s % 60))
     }
 }
 
@@ -131,22 +131,20 @@ fn fmt_time(h: u32, m: u32, h24: bool) -> String {
     }
 }
 
-/// Draws an analog clock face.
+/// Draws an analog clock face: light by day, dark by night.
 fn face(cv: &mut Surface, cx: i32, cy: i32, r: i32, (h, m, s): (u32, u32, Option<u32>), dark_face: bool) {
-    let t = theme::current();
-    let (bg, fg) = if dark_face { (0xFF1C_1C22, 0xFFF4_F4F8) } else { (0xFFFF_FFFF, 0xFF1D_1D24) };
+    let (bg, fg) = if dark_face { (0xFF2A_2D3D, 0xFFF4_F5FA) } else { (0xFFF4_F5FA, 0xFF14_1726) };
+    let accent = theme::accent();
     cv.fill_circle(cx, cy + 2, r + 1, with_alpha(0x000000, 0x30));
     cv.fill_circle(cx, cy, r, bg);
-    let _ = t;
-    for k in 0..60 {
-        let a = k * 1024 / 60;
-        let (len, w) = if k % 5 == 0 { (r / 7, if r > 60 { 3 } else { 2 }) } else { (r / 22, 1) };
-        if k % 5 != 0 && r < 60 {
-            continue;
+    if r >= 60 {
+        for k in 0..60 {
+            let a = k * 1024 / 60;
+            let (len, w) = if k % 5 == 0 { (r / 9, 3) } else { (r / 26, 1) };
+            let (x0, y0) = (cx + (r - 6) * sin(a + 256) / 16384, cy + (r - 6) * sin(a) / 16384);
+            let (x1, y1) = (cx + (r - 6 - len) * sin(a + 256) / 16384, cy + (r - 6 - len) * sin(a) / 16384);
+            cv.line(x0, y0, x1, y1, w, with_alpha(fg, if k % 5 == 0 { 0xE0 } else { 0x60 }));
         }
-        let (x0, y0) = (cx + (r - 4) * sin(a + 256) / 16384, cy + (r - 4) * sin(a) / 16384);
-        let (x1, y1) = (cx + (r - 4 - len) * sin(a + 256) / 16384, cy + (r - 4 - len) * sin(a) / 16384);
-        cv.line(x0, y0, x1, y1, w, with_alpha(fg, if k % 5 == 0 { 0xFF } else { 0x80 }));
     }
     let hand = |cv: &mut Surface, turns_1024: i32, len: i32, w: i32, c: u32| {
         let a = turns_1024 - 256;
@@ -154,14 +152,23 @@ fn face(cv: &mut Surface, cx: i32, cy: i32, r: i32, (h, m, s): (u32, u32, Option
     };
     let hour_a = ((h % 12) * 60 + m) as i32 * 1024 / 720;
     let min_a = (m * 60 + s.unwrap_or(0)) as i32 * 1024 / 3600;
-    hand(cv, hour_a, r * 50 / 100, (r / 14).max(3), fg);
-    hand(cv, min_a, r * 75 / 100, (r / 20).max(2), fg);
+    hand(cv, hour_a, r * 50 / 100, (r / 12).max(2), fg);
+    hand(cv, min_a, r * 76 / 100, (r / 18).max(2), if s.is_some() { fg } else { accent });
     if let Some(s) = s {
-        hand(cv, s as i32 * 1024 / 60, r * 82 / 100, 1, 0xFFFF_9500);
-        cv.fill_circle(cx, cy, (r / 22).max(2), 0xFFFF_9500);
-    } else {
-        cv.fill_circle(cx, cy, (r / 22).max(2), fg);
+        hand(cv, s as i32 * 1024 / 60, r * 84 / 100, 1, accent);
     }
+    cv.fill_circle(cx, cy, (r / 14).max(2), accent);
+}
+
+/// A ring with `frac` (of 1024) lit in the accent, glowing while it runs.
+fn ring(cv: &mut Surface, cx: i32, cy: i32, r: i32, width: i32, frac: i32, glow: bool) {
+    let t = theme::current();
+    if glow && frac > 0 {
+        let b = waveui::lumen::geom::Rect::new(cx - r, cy - r, 2 * r, 2 * r);
+        cv.glow(b, r, 18, theme::accent(), 70);
+    }
+    cv.stroke_arc(cx * 16, cy * 16, r * 16, width * 16, 0, 1024, with_alpha(t.text_secondary, 0x30));
+    cv.stroke_arc(cx * 16, cy * 16, r * 16, width * 16, 768, frac.clamp(0, 1024), theme::accent());
 }
 
 impl Clock {
@@ -246,120 +253,110 @@ fn city_offset(rel: i32) -> String {
     if rel == 0 {
         String::from("same time")
     } else if rel % 60 == 0 {
-        format!("{}{}h", if rel > 0 { "+" } else { "−" }, rel.abs() / 60)
+        format!("{}{} h", if rel > 0 { "+" } else { "−" }, rel.abs() / 60)
     } else {
-        format!("{}{}h{:02}", if rel > 0 { "+" } else { "−" }, rel.abs() / 60, rel.abs() % 60)
+        format!("{}{}:{:02} h", if rel > 0 { "+" } else { "−" }, rel.abs() / 60, rel.abs() % 60)
     }
 }
 
 impl Clock {
-    fn world(&self, env: &Env) -> View<'_, Msg> {
+    /// The world list beside every tab.
+    fn world_list(&self) -> View<'_, Msg> {
         let d = time::now();
         let h24 = prefs::get_bool(pref::CLOCK_24H);
         let local = prefs::get_int("utc_offset", 0) as i32;
-        let dark = env.dark;
+        let utc_min = d.hour as i32 * 60 + d.minute as i32 - local;
         let tz = if local == 0 {
             String::from("UTC")
         } else {
             format!("UTC{}{}:{:02}", if local < 0 { "−" } else { "+" }, local.abs() / 60, local.abs() % 60)
         };
-        let hms = (d.hour as u32, d.minute as u32, Some(d.second as u32));
-        let big = HStack::new()
-            .push(
-                Canvas::new(move |cv, r| {
-                    let (cx, cy) = r.center();
-                    face(cv, cx, cy, 100, hms, dark)
-                })
-                .size(210, 210),
-            )
-            .push(
-                VStack::new()
-                    .push(Text::new("Local time").foreground(Color::SecondaryLabel))
-                    .push(
-                        Text::new(fmt_time(d.hour as u32, d.minute as u32, h24))
-                            .style(TextStyle::Sized(42, Weight::Bold)),
-                    )
-                    .push(
-                        Text::new(String::from(&time::format_date(&d)[..10]))
-                            .style(TextStyle::Sized(15, Weight::Regular))
-                            .foreground(Color::SecondaryLabel),
-                    )
-                    .push(
-                        Text::new(format!("Time zone {tz} · set in Settings"))
-                            .style(TextStyle::Footnote)
-                            .foreground(Color::SecondaryLabel),
-                    )
-                    .spacing(4)
-                    .alignment(Align::Start),
-            )
-            .spacing(32);
-        // Cities: a grid of small cards.
-        let utc_min = d.hour as i32 * 60 + d.minute as i32 - local;
-        let mut grid = Grid::new(170).spacing(12);
-        for (city, off) in CITIES {
+        let city = |name: String, detail: String, m: i32| -> View<'_, Msg> {
+            let hm = ((m / 60) as u32, (m % 60) as u32, None);
+            let night = !(6 * 60..18 * 60).contains(&m);
+            HStack::new()
+                .push(
+                    Canvas::new(move |cv, r| {
+                        let (cx, cy) = r.center();
+                        face(cv, cx, cy, 21, hm, night)
+                    })
+                    .size(44, 44),
+                )
+                .push(
+                    VStack::new()
+                        .push(Text::new(name).style(TextStyle::Sized(14, Weight::Bold)))
+                        .push(
+                            Text::new(detail)
+                                .style(TextStyle::Sized(12, Weight::Bold))
+                                .foreground(Color::TertiaryLabel),
+                        )
+                        .spacing(2)
+                        .alignment(Align::Start)
+                        .grow(1),
+                )
+                .push(Text::new(fmt_time(hm.0, hm.1, h24)).style(TextStyle::Sized(26, Weight::Light)))
+                .spacing(14)
+                .height(68)
+                .fill_width()
+        };
+        let mut list = VStack::new()
+            .push(Text::label("World").padding_insets(Insets { top: 0, leading: 0, bottom: 6, trailing: 0 }))
+            .push(city(String::from("Here"), format!("Today · {tz}"), (utc_min + local).rem_euclid(1440)))
+            .spacing(0)
+            .alignment(Align::Stretch);
+        for (name, off) in CITIES {
             let m = utc_min + off;
-            let day = m.div_euclid(1440);
-            let m = m.rem_euclid(1440);
-            let when = match day {
+            let when = match m.div_euclid(1440) {
                 0 => "Today",
                 d if d > 0 => "Tomorrow",
                 _ => "Yesterday",
             };
-            let hm = ((m / 60) as u32, (m % 60) as u32, None);
-            grid = grid.push(
-                HStack::new()
-                    .push(
-                        Canvas::new(move |cv, r| {
-                            let (cx, cy) = r.center();
-                            face(cv, cx, cy, 30, hm, dark)
-                        })
-                        .size(64, 64),
-                    )
-                    .push(
-                        VStack::new()
-                            .push(Text::new(city).style(TextStyle::Headline))
-                            .push(Text::new(fmt_time(hm.0, hm.1, h24)).style(TextStyle::Sized(15, Weight::Regular)))
-                            .push(
-                                Text::new(format!("{when}, {}", city_offset(off - local)))
-                                    .style(TextStyle::Caption)
-                                    .foreground(Color::SecondaryLabel),
-                            )
-                            .spacing(2)
-                            .alignment(Align::Start)
-                            .grow(1),
-                    )
-                    .spacing(10)
-                    .padding(12)
-                    .background_rounded(Color::GroupedBackground, 12)
-                    .fill_width(),
-            );
+            let rel = off - local;
+            let detail =
+                if rel == 0 { format!("{when} · same time") } else { format!("{when} · {}", city_offset(rel)) };
+            list = list.push(Divider::new()).push(city(String::from(name), detail, m.rem_euclid(1440)));
         }
-        VStack::new().push(big).push(grid).spacing(24).alignment(Align::Start).padding(24).fill_width()
+        ScrollView::new(list.padding_insets(Insets { top: 24, leading: 20, bottom: 20, trailing: 20 }))
+    }
+
+    fn world(&self, env: &Env) -> View<'_, Msg> {
+        let d = time::now();
+        let h24 = prefs::get_bool(pref::CLOCK_24H);
+        let dark = env.dark;
+        let hms = (d.hour as u32, d.minute as u32, Some(d.second as u32));
+        let date = time::format_date(&d);
+        VStack::new()
+            .push(Spacer::new())
+            .push(
+                Canvas::new(move |cv, r| {
+                    let (cx, cy) = r.center();
+                    face(cv, cx, cy, 130, hms, dark)
+                })
+                .size(280, 280),
+            )
+            .push(Text::new(fmt_time(d.hour as u32, d.minute as u32, h24)).style(TextStyle::Sized(56, Weight::Light)))
+            .push(
+                Text::new(String::from(&date[..10]))
+                    .style(TextStyle::Sized(13, Weight::Bold))
+                    .foreground(Color::SecondaryLabel),
+            )
+            .push(Spacer::new())
+            .spacing(8)
+            .fill()
     }
 
     fn stopwatch(&self) -> View<'_, Msg> {
         let ms = self.stopwatch_ms();
         let running = self.sw_start.is_some();
-        // A sweep dial: one turn per minute.
         let dial = Canvas::new(move |cv, r| {
-            let t = theme::current();
             let (cx, cy) = r.center();
-            cv.fill_circle(cx, cy, 110, t.window_bg_alt);
-            let progress = (ms % 60_000) as i32 * 1024 / 60_000;
-            for k in 0..120 {
-                let a = k * 1024 / 120;
-                let on = a <= progress && ms > 0;
-                let c = if on { theme::accent() } else { with_alpha(t.text_secondary, 0x40) };
-                let (x0, y0) = (cx + 104 * sin(a) / 16384, cy - 104 * sin(a + 256) / 16384);
-                let (x1, y1) = (cx + 92 * sin(a) / 16384, cy - 92 * sin(a + 256) / 16384);
-                cv.line(x0, y0, x1, y1, if k % 10 == 0 { 3 } else { 1 }, c);
-            }
+            // One turn a minute.
+            ring(cv, cx, cy, 150, 10, ((ms % 60_000) * 1024 / 60_000) as i32, running);
             let text = fmt_stopwatch(ms);
-            let f = theme::mono(34);
-            cv.text(cx - f.width(&text) / 2, cy + 12, &text, f, t.text);
+            let f = TextStyle::Sized(52, Weight::Light).font();
+            cv.text(cx - f.width(&text) / 2, cy + 18, &text, f, theme::current().text);
         })
-        .size(240, 240);
-        // Laps (newest first), fastest in green, slowest in red.
+        .size(340, 340);
         let splits: Vec<u64> =
             (0..self.laps.len()).map(|i| self.laps[i] - self.laps.get(i + 1).copied().unwrap_or(0)).collect();
         let (best, worst) =
@@ -376,10 +373,11 @@ impl Clock {
                 format!("Lap {}", splits.len() - i),
                 Text::new(fmt_stopwatch(*s)).style(TextStyle::Sized(14, Weight::Mono)),
             )
-            .height(32)
+            .height(36)
             .foreground(c)
         });
         VStack::new()
+            .push(Spacer::new())
             .push(dial)
             .push(
                 HStack::new()
@@ -387,133 +385,233 @@ impl Clock {
                         Button::new(if running { "Lap" } else { "Reset" })
                             .action(Msg::LapReset)
                             .control_size(ControlSize::Large)
-                            .width(150),
+                            .disabled(!running && ms == 0)
+                            .width(120),
                     )
                     .push(
                         Button::new(if running { "Stop" } else { "Start" })
                             .action(Msg::StartStop)
-                            .button_style(if running { ButtonStyle::Destructive } else { ButtonStyle::Prominent })
+                            .button_style(if running { ButtonStyle::Destructive } else { ButtonStyle::Tinted })
                             .control_size(ControlSize::Large)
                             .shortcut(Shortcut::key(Key::Char(' ')))
-                            .width(150),
+                            .width(120),
                     )
-                    .spacing(20),
+                    .spacing(14),
             )
-            .push(Section::new().extend(laps).width(420).hidden(splits.is_empty()))
-            .spacing(24)
+            .push(Section::new().extend(laps).width(360).hidden(splits.is_empty()))
+            .push(Spacer::new())
+            .spacing(28)
             .padding(24)
-            .fill_width()
+            .fill()
     }
 
     fn timers_tab(&self) -> View<'_, Msg> {
-        let mut presets = Grid::new(150).spacing(12);
-        for (i, m) in PRESETS.iter().enumerate() {
-            let label = if *m == 60 { String::from("1 hour") } else { format!("{m} min") };
-            presets = presets.push(
-                Text::centered(label)
-                    .style(TextStyle::Sized(15, Weight::Bold))
-                    .height(50)
-                    .background_rounded(Color::GroupedBackground, 12)
-                    .on_tap(Msg::Preset(i))
-                    .disabled(self.timers.len() >= 4),
-            );
-        }
-        let mut v = VStack::new()
-            .push(Text::new("Start a timer").style(TextStyle::Headline).foreground(Color::SecondaryLabel))
-            .push(presets)
-            .spacing(12)
-            .alignment(Align::Stretch);
-        if self.timers.is_empty() {
-            v = v.push(
-                Text::centered("Running timers appear here. You'll get a notification when one ends.")
-                    .foreground(Color::SecondaryLabel)
-                    .padding(32),
-            );
-        }
-        for (i, tm) in self.timers.iter().enumerate() {
-            let left = Self::timer_left(tm);
-            let frac = (left * 1024 / tm.total_ms.max(1)) as i32;
-            let ring = Canvas::new(move |cv, r| {
-                let t = theme::current();
-                let (cx, cy) = r.center();
-                for k in 0..64 {
-                    let a = k * 1024 / 64;
-                    let c = if a < frac { theme::accent() } else { with_alpha(t.text_secondary, 0x40) };
-                    cv.fill_circle(cx + 20 * sin(a) / 16384, cy - 20 * sin(a + 256) / 16384, 2, c);
-                }
-            })
-            .size(48, 48);
-            v =
-                v.push(
-                    HStack::new()
-                        .push(ring)
-                        .push(
-                            Text::new(fmt_timer(left))
-                                .style(TextStyle::Sized(26, Weight::Mono))
-                                .foreground(if left == 0 { Color::Red } else { Color::Label }),
-                        )
-                        .push(Text::new(tm.label.clone()).foreground(Color::SecondaryLabel).grow(1))
-                        .push(
-                            Button::new(if tm.running_since.is_some() { "Pause" } else { "Resume" })
-                                .action(Msg::TimerToggle(i))
-                                .hidden(left == 0)
-                                .min_width(80),
-                        )
-                        .push(
-                            Button::new(if left == 0 { "Done" } else { "Cancel" })
-                                .action(Msg::TimerCancel(i))
-                                .min_width(80),
-                        )
-                        .spacing(14)
-                        .padding_xy(14, 8)
-                        .background_rounded(Color::GroupedBackground, 14)
+        let presets = |cols: usize| {
+            let mut g = Grid::new(if cols > 2 { 110 } else { 150 }).spacing(10);
+            for (i, m) in PRESETS.iter().enumerate() {
+                let label = if *m == 60 { String::from("1 hour") } else { format!("{m} min") };
+                g = g.push(
+                    Button::new(label)
+                        .action(Msg::Preset(i))
+                        .control_size(ControlSize::Large)
+                        .disabled(self.timers.len() >= 4)
                         .fill_width(),
                 );
+            }
+            g
+        };
+        let Some(first) = self.timers.first() else {
+            return VStack::new()
+                .push(Spacer::new())
+                .push(Text::new("Start a timer").style(TextStyle::Title2))
+                .push(
+                    Text::new("It shows in Crest while it runs, and you'll be told when it ends.")
+                        .style(TextStyle::Callout)
+                        .foreground(Color::SecondaryLabel),
+                )
+                .push(presets(4).width(500).padding_insets(Insets { top: 14, leading: 0, bottom: 0, trailing: 0 }))
+                .push(Spacer::new())
+                .spacing(6)
+                .padding(24)
+                .fill();
+        };
+        let left = Self::timer_left(first);
+        let running = first.running_since.is_some();
+        let frac = (left * 1024 / first.total_ms.max(1)) as i32;
+        let ends = {
+            let d = time::now();
+            let m = (d.hour as u64 * 60 + d.minute as u64 + (d.second as u64 + left / 1000) / 60) % 1440;
+            fmt_time((m / 60) as u32, (m % 60) as u32, prefs::get_bool(pref::CLOCK_24H))
+        };
+        let caption = if left == 0 {
+            format!("{} · done", first.label)
+        } else if running {
+            format!("{} · ends {ends}", first.label)
+        } else {
+            format!("{} · paused", first.label)
+        };
+        let big = Canvas::new(move |cv, r| {
+            let t = theme::current();
+            let (cx, cy) = r.center();
+            ring(cv, cx, cy, 150, 10, frac, running);
+            let text = fmt_timer(left);
+            let f = TextStyle::Sized(72, Weight::Light).font();
+            cv.text(cx - f.width(&text) / 2, cy + 18, &text, f, if left == 0 { 0xFFFF_5A5F } else { t.text });
+            let fc = TextStyle::Sized(13, Weight::Bold).font();
+            let w = fc.width(&caption) + 20;
+            let x = cx - w / 2;
+            // A small flag before the label.
+            let (fx, fy) = (x + 2, cy + 46);
+            cv.line(fx, fy, fx, fy + 11, 1, t.text_secondary);
+            cv.fill_rect(waveui::lumen::geom::Rect::new(fx, fy, 7, 5), with_alpha(t.text_secondary, 0xC0));
+            cv.text(x + 20, cy + 56, &caption, fc, t.text_secondary);
+        })
+        .size(340, 340);
+        let mut v = VStack::new()
+            .push(Spacer::new())
+            .push(big)
+            .push(
+                HStack::new()
+                    .push(
+                        Button::new(if left == 0 { "Done" } else { "Cancel" })
+                            .action(Msg::TimerCancel(0))
+                            .control_size(ControlSize::Large)
+                            .width(120),
+                    )
+                    .push(
+                        Button::new(if running { "Pause" } else { "Resume" })
+                            .action(Msg::TimerToggle(0))
+                            .button_style(ButtonStyle::Tinted)
+                            .control_size(ControlSize::Large)
+                            .shortcut(Shortcut::key(Key::Char(' ')))
+                            .hidden(left == 0)
+                            .width(120),
+                    )
+                    .push(
+                        Button::symbol(Symbol::Plus)
+                            .menu(
+                                PRESETS
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, m)| {
+                                        MenuItem::new(
+                                            if *m == 60 { String::from("1 hour") } else { format!("{m} min") },
+                                            Msg::Preset(i),
+                                        )
+                                    })
+                                    .collect(),
+                            )
+                            .disabled(self.timers.len() >= 4)
+                            .help("Another timer"),
+                    )
+                    .spacing(14),
+            )
+            .push(
+                Text::new("Also shown in Crest while it runs")
+                    .style(TextStyle::Sized(12, Weight::Bold))
+                    .foreground(Color::TertiaryLabel),
+            )
+            .spacing(22)
+            .alignment(Align::Center);
+        // The others, smaller.
+        for (i, tm) in self.timers.iter().enumerate().skip(1) {
+            let left = Self::timer_left(tm);
+            let frac = (left * 1024 / tm.total_ms.max(1)) as i32;
+            v = v.push(
+                HStack::new()
+                    .push(
+                        Canvas::new(move |cv, r| {
+                            let (cx, cy) = r.center();
+                            ring(cv, cx, cy, 14, 4, frac, false);
+                        })
+                        .size(36, 36),
+                    )
+                    .push(Text::new(fmt_timer(left)).style(TextStyle::Sized(22, Weight::Light)))
+                    .push(Text::new(tm.label.clone()).foreground(Color::SecondaryLabel).grow(1))
+                    .push(
+                        Button::new(if tm.running_since.is_some() { "Pause" } else { "Resume" })
+                            .action(Msg::TimerToggle(i))
+                            .control_size(ControlSize::Small)
+                            .hidden(left == 0),
+                    )
+                    .push(
+                        Button::new(if left == 0 { "Done" } else { "Cancel" })
+                            .action(Msg::TimerCancel(i))
+                            .control_size(ControlSize::Small),
+                    )
+                    .spacing(12)
+                    .padding_xy(14, 6)
+                    .background_rounded(Color::Fill, 14)
+                    .width(420),
+            );
         }
-        v.padding(24).fill_width()
+        v.push(Spacer::new()).padding(24).fill()
     }
 
     fn alarms_tab(&self) -> View<'_, Msg> {
         let h24 = prefs::get_bool(pref::CLOCK_24H);
-        let mut v = VStack::new()
-            .push(
-                HStack::new()
-                    .push(
-                        Text::new("Alarms ring while Clock is open (it can stay minimized).")
-                            .style(TextStyle::Callout)
-                            .foreground(Color::SecondaryLabel)
-                            .grow(1),
-                    )
-                    .push(Button::new("Add Alarm").action(Msg::AddAlarm).button_style(ButtonStyle::Prominent))
-                    .fill_width(),
-            )
-            .spacing(10)
-            .alignment(Align::Stretch);
-        if self.alarms.is_empty() {
-            v = v.push(
-                Text::centered("No alarms").style(TextStyle::Title2).foreground(Color::SecondaryLabel).padding(60),
-            );
-        }
+        let mut list = VStack::new().spacing(0).alignment(Align::Stretch);
         for (i, a) in self.alarms.iter().enumerate() {
             let label = if a.label.is_empty() { String::from("Alarm") } else { a.label.clone() };
-            v = v.push(
+            if i > 0 {
+                list = list.push(Divider::new());
+            }
+            list = list.push(
                 HStack::new()
                     .push(
-                        Text::new(fmt_time(a.hour as u32, a.minute as u32, h24))
-                            .style(TextStyle::Sized(28, Weight::Regular))
-                            .foreground(if a.enabled { Color::Label } else { Color::SecondaryLabel })
-                            .width(170),
+                        VStack::new()
+                            .push(
+                                Text::new(fmt_time(a.hour as u32, a.minute as u32, h24))
+                                    .style(TextStyle::Sized(40, Weight::Light))
+                                    .foreground(if a.enabled { Color::Label } else { Color::TertiaryLabel }),
+                            )
+                            .push(
+                                Text::new(label)
+                                    .style(TextStyle::Sized(12, Weight::Bold))
+                                    .foreground(Color::TertiaryLabel),
+                            )
+                            .spacing(0)
+                            .alignment(Align::Start)
+                            .grow(1),
                     )
-                    .push(Text::new(label).foreground(Color::SecondaryLabel).grow(1))
                     .push(Toggle::new("", a.enabled).on_change(move |on| Msg::AlarmToggle(i, on)))
-                    .push(Button::symbol(Symbol::Close).action(Msg::AlarmDelete(i)).help("Delete alarm"))
                     .spacing(12)
-                    .padding_xy(18, 8)
-                    .background_rounded(Color::GroupedBackground, 12)
+                    .height(88)
+                    .fill_width()
+                    .context_menu(vec![MenuItem::new("Delete Alarm", Msg::AlarmDelete(i))]),
+            );
+        }
+        if self.alarms.is_empty() {
+            list = list.push(
+                VStack::new()
+                    .push(Text::new("No alarms").style(TextStyle::Title2))
+                    .push(
+                        Text::new("Alarms ring while Clock is open; it can stay minimized.")
+                            .style(TextStyle::Callout)
+                            .foreground(Color::SecondaryLabel),
+                    )
+                    .spacing(6)
+                    .padding_xy(0, 80)
                     .fill_width(),
             );
         }
-        v.padding(24).fill_width()
+        VStack::new()
+            .push(
+                HStack::new()
+                    .push(Text::new("Alarms").style(TextStyle::Title).grow(1))
+                    .push(
+                        Button::new("Add Alarm")
+                            .action(Msg::AddAlarm)
+                            .button_style(ButtonStyle::Tinted)
+                            .shortcut(Shortcut::ctrl('n')),
+                    )
+                    .fill_width(),
+            )
+            .push(list)
+            .spacing(14)
+            .alignment(Align::Stretch)
+            .padding_insets(Insets { top: 24, leading: 32, bottom: 24, trailing: 32 })
+            .fill_width()
     }
 }
 
@@ -525,7 +623,7 @@ impl App for Clock {
     }
 
     fn size(&self) -> (i32, i32) {
-        (800, 560)
+        (1060, 700)
     }
 
     fn update(&mut self, msg: Msg, _cx: &mut Context<Msg>) {
@@ -681,16 +779,22 @@ impl App for Clock {
             Tab::World => self.world(env),
             Tab::Stopwatch => self.stopwatch(),
             Tab::Timers => self.timers_tab(),
-            Tab::Alarms => self.alarms_tab(),
+            Tab::Alarms => ScrollView::new(self.alarms_tab()).id(("tab", sel)),
         };
         VStack::new()
             .push(toolbar(vec![
                 Spacer::new(),
-                Picker::new(TABS.iter().map(|t| t.1), sel).on_change(Msg::Tab).width(440),
+                Picker::new(TABS.iter().map(|t| t.1), sel).on_change(Msg::Tab).width(320),
                 Spacer::new(),
             ]))
-            .push(Divider::new())
-            .push(ScrollView::new(content).id(("tab", sel)))
+            .push(
+                HStack::new()
+                    .push(content.grow(1))
+                    .push(Divider::new())
+                    .push(self.world_list().width(340).fill_height())
+                    .spacing(0)
+                    .fill(),
+            )
             .spacing(0)
             .fill()
     }

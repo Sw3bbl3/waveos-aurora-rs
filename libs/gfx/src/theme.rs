@@ -345,6 +345,11 @@ pub fn display(size: u16) -> Font {
     font::get(Face::Bold, size)
 }
 
+/// Manrope Light, for large numerals.
+pub fn light(size: u16) -> Font {
+    font::get(Face::Light, size)
+}
+
 pub fn mono(size: u16) -> Font {
     font::get(Face::Mono, size)
 }

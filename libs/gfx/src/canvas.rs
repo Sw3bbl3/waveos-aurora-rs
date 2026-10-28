@@ -311,6 +311,47 @@ impl<'a> Canvas<'a> {
         self.draw_image_px(src, src_w, src_h, self.to_px(dst), opacity)
     }
 
+    /// Draws an image scaled into `dst` (as [`draw_image`](Self::draw_image)),
+    /// showing only what falls inside `shape` with its corners rounded at
+    /// `radius` (anti-aliased): thumbnails and photo cards.
+    pub fn draw_image_rounded(&mut self, src: &[u32], sw: u32, sh: u32, dst: Rect, shape: Rect, radius: i32) {
+        let (dst, shape) = (self.to_px(dst), self.to_px(shape));
+        let radius = (radius * self.scale).min(shape.w / 2).min(shape.h / 2).max(0);
+        let clip = self.pclip().intersect(&shape);
+        if clip.is_empty() {
+            return;
+        }
+        // What lies under the four corners, to blend back outside the curve.
+        let corners = [
+            Rect::new(shape.x, shape.y, radius, radius),
+            Rect::new(shape.right() - radius, shape.y, radius, radius),
+            Rect::new(shape.x, shape.bottom() - radius, radius, radius),
+            Rect::new(shape.right() - radius, shape.bottom() - radius, radius, radius),
+        ]
+        .map(|c| c.intersect(&clip));
+        let saved: alloc::vec::Vec<alloc::vec::Vec<u32>> = corners
+            .iter()
+            .map(|c| {
+                let mut v = alloc::vec::Vec::with_capacity((c.w * c.h).max(0) as usize);
+                for y in c.y..c.bottom() {
+                    let row = (y * self.width) as usize;
+                    v.extend_from_slice(&self.buf[row + c.x as usize..row + c.right() as usize]);
+                }
+                v
+            })
+            .collect();
+        self.with_pclip(clip, |cv| cv.draw_image_px(src, sw, sh, dst, 255));
+        for (c, old) in corners.iter().zip(&saved) {
+            for (k, y) in (c.y..c.bottom()).enumerate() {
+                for (j, x) in (c.x..c.right()).enumerate() {
+                    let cov = round_rect_coverage(&shape, radius, x, y);
+                    let i = (y * self.width + x) as usize;
+                    self.buf[i] = mix(old[k * c.w as usize + j], self.buf[i], cov as i32);
+                }
+            }
+        }
+    }
+
     /// Copies opaque pixels at (x, y), a pixel per point, clipped (video frames).
     pub fn blit_opaque(&mut self, src: &[u32], src_w: u32, src_h: u32, x: i32, y: i32) {
         let s = self.scale;
