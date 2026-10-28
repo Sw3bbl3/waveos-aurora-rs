@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WaveSDK Developer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a single reading column of chapters, each opened by an eyebrow and a large title,
+   the WaveOS "living water" palette (cool paper day, deep navy night, Aurora violet). */
+:root {
+  --page: #f1f4fc;
+  --sheet: #fbfcff;
+  --ink: #0e1530;
+  --ink-2: #5f6476;
+  --rule: rgba(14, 21, 48, .10);
+  --control: #ffffff;
+  --accent: #7c5cff;
+  --accent-text: #5a3ee0;
+  --accent-soft: #ece8ff;
+  --code-bg: #0f1428;
+  --code-ink: #e6e9f5;
+  --code-key: #b7a8ff;
+  --code-str: #8fe3c0;
+  --code-com: #7d84a0;
+  --code-type: #7cc7ff;
+  --water-1: #c9d9ff;
+  --water-2: #a9c4ff;
+  --water-3: #d8ccff;
+  --font: "Manrope", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --r-control: 8px;
+  --r-card: 12px;
+  --r-sheet: 16px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #111527; --sheet: #171c32; --ink: #f2f4fa; --ink-2: #a3a7b7;
+    --rule: rgba(255, 255, 255, .09); --control: #1f243a;
+    --accent: #8b6dff; --accent-text: #b7a8ff; --accent-soft: #252047;
+    --code-bg: #0b0f1f;
+    --water-1: #1d2a5c; --water-2: #263a7a; --water-3: #2f2466;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page: #111527; --sheet: #171c32; --ink: #f2f4fa; --ink-2: #a3a7b7;
+  --rule: rgba(255, 255, 255, .09); --control: #1f243a;
+  --accent: #8b6dff; --accent-text: #b7a8ff; --accent-soft: #252047;
+  --code-bg: #0b0f1f;
+  --water-1: #1d2a5c; --water-2: #263a7a; --water-3: #2f2466;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 400 16px/1.6 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent-text); text-decoration: none; }
+a:hover { text-decoration: underline; }
+a:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+code, pre { font-family: var(--mono); font-variant-ligatures: none; }
+:not(pre) > code { font-size: .88em; background: var(--accent-soft); color: var(--ink); padding: .08em .35em; border-radius: 5px; }
+.wrap { max-width: 1080px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+
+/* Navigation */
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--sheet); }
+.nav { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: color-mix(in srgb, var(--sheet) 86%, transparent); backdrop-filter: blur(18px) saturate(1.4); -webkit-backdrop-filter: blur(18px) saturate(1.4); border-bottom: 1px solid var(--rule); }
+.nav .wrap { display: flex; align-items: center; gap: 24px; height: 56px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; color: var(--ink); letter-spacing: -.01em; }
+.brand:hover { text-decoration: none; }
+.brand svg { flex: none; }
+.nav ul { display: flex; gap: 20px; list-style: none; margin: 0 0 0 auto; padding: 0; font-size: 14px; font-weight: 600; overflow-x: auto; scrollbar-width: none; }
+.nav li a { color: var(--ink-2); white-space: nowrap; }
+.nav li a:hover { color: var(--ink); text-decoration: none; }
+@media (max-width: 720px) { .nav ul { display: none; } }
+
+/* Hero */
+.hero { position: relative; overflow: hidden; padding-block: 72px 88px; }
+.hero::after { content: ""; position: absolute; inset: auto -10% -40px -10%; height: 220px; z-index: 0;
+  background:
+    radial-gradient(60% 90% at 20% 100%, var(--water-2), transparent 70%),
+    radial-gradient(55% 80% at 70% 100%, var(--water-3), transparent 70%),
+    radial-gradient(70% 70% at 45% 100%, var(--water-1), transparent 75%);
+  opacity: .9; pointer-events: none; }
+.hero .wrap { position: relative; z-index: 1; display: grid; grid-template-columns: 1.05fr 1fr; gap: 56px; align-items: center; }
+.hero .wrap > * { min-width: 0; }
+@media (max-width: 880px) { .hero .wrap { grid-template-columns: 1fr; gap: 40px; } .hero { padding-block: 48px 72px; } }
+.eyebrow { margin: 0 0 10px; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-text); }
+h1 { margin: 0 0 18px; font-size: clamp(40px, 6vw, 64px); line-height: 1.04; font-weight: 800; letter-spacing: -.035em; text-wrap: balance; }
+.lead { margin: 0 0 28px; font-size: 19px; line-height: 1.55; color: var(--ink-2); max-width: 34em; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.btn { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 18px; border-radius: 999px; font: 600 15px var(--font); border: 1px solid var(--rule); background: var(--control); color: var(--ink); cursor: pointer; }
+.btn:hover { text-decoration: none; border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.06); }
+
+/* The live window */
+.window { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r-sheet); box-shadow: 0 1px 0 var(--rule), 0 24px 60px -24px rgba(14, 21, 48, .35); overflow: hidden; min-width: 0; }
+.window .bar { display: flex; align-items: center; justify-content: center; position: relative; height: 40px; border-bottom: 1px solid var(--rule); font-size: 13px; font-weight: 700; }
+.window .bar::before { content: ""; position: absolute; left: 50%; top: 6px; width: 44px; height: 4px; margin-left: -22px; border-radius: 4px; background: var(--rule); }
+.window .bar span { margin-top: 6px; }
+.counter { display: grid; place-items: center; gap: 18px; padding: 36px 20px 30px; }
+.count { font-size: 64px; font-weight: 800; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+.counter .row { display: flex; gap: 10px; }
+.wbtn { height: 30px; padding: 0 16px; border-radius: var(--r-control); border: 1px solid var(--rule); background: var(--control); color: var(--ink); font: 600 13px var(--font); cursor: pointer; }
+.wbtn.prominent { background: var(--accent); border-color: var(--accent); color: #fff; }
+.wbtn:active { transform: translateY(1px); }
+.window pre { margin: 0; border-radius: 0; border-top: 1px solid var(--rule); }
+.caption { margin: 10px 4px 0; font-size: 13px; color: var(--ink-2); }
+
+/* Code */
+pre { background: var(--code-bg); color: var(--code-ink); font-size: 13.5px; line-height: 1.65; padding: 18px 20px; border-radius: var(--r-card); overflow-x: auto; margin: 0; }
+.k { color: var(--code-key); } .s { color: var(--code-str); } .c { color: var(--code-com); } .t { color: var(--code-type); }
+
+/* Chapters */
+section.chapter { padding-block: 72px; border-top: 1px solid var(--rule); }
+section.chapter:nth-of-type(even) { background: var(--sheet); }
+h2 { margin: 0 0 14px; font-size: clamp(30px, 4vw, 42px); line-height: 1.1; font-weight: 800; letter-spacing: -.03em; text-wrap: balance; }
+h3 { margin: 0 0 8px; font-size: 19px; font-weight: 700; letter-spacing: -.01em; }
+.intro { margin: 0 0 40px; font-size: 18px; color: var(--ink-2); max-width: 40em; }
+p { max-width: 65ch; }
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: start; }
+.split > * { min-width: 0; }
+@media (max-width: 880px) { .split { grid-template-columns: 1fr; gap: 28px; } }
+
+/* The parts of the SDK: a definition list, not tiles */
+.parts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0 40px; margin: 0; }
+.part { display: grid; grid-template-columns: 36px 1fr; gap: 4px 14px; padding: 18px 0; border-top: 1px solid var(--rule); }
+.part svg { grid-row: span 2; color: var(--accent); }
+.part dt { font-weight: 700; }
+.part dd { margin: 0; color: var(--ink-2); font-size: 15px; }
+
+/* Tables */
+.table { overflow-x: auto; border: 1px solid var(--rule); border-radius: var(--r-card); background: var(--sheet); }
+section.chapter:nth-of-type(even) .table { background: var(--page); }
+table { width: 100%; border-collapse: collapse; font-size: 15px; }
+th, td { text-align: left; padding: 11px 16px; vertical-align: top; }
+th { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); border-bottom: 1px solid var(--rule); }
+tr + tr td { border-top: 1px solid var(--rule); }
+td:first-child { white-space: nowrap; font-weight: 600; }
+td code { white-space: nowrap; }
+
+/* Design system specimens */
+.specimens { display: grid; grid-template-columns: 1.2fr 1fr; gap: 40px; }
+.specimens > * { min-width: 0; }
+@media (max-width: 880px) { .specimens { grid-template-columns: 1fr; } }
+.type-scale { list-style: none; margin: 0; padding: 0; }
+.type-scale li { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 10px 0; border-top: 1px solid var(--rule); }
+.type-scale .meta { flex: none; font: 500 12px var(--mono); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.swatches { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 28px; }
+.swatch { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.chip { flex: none; width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--rule); }
+.swatch b { display: block; font-weight: 700; font-size: 13px; }
+.swatch small { color: var(--ink-2); font: 500 12px var(--mono); }
+.scale { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+.scale div { display: grid; justify-items: center; gap: 6px; font: 500 12px var(--mono); color: var(--ink-2); }
+.scale i { display: block; background: var(--accent); border-radius: 3px; height: 14px; }
+.radii { display: flex; gap: 16px; margin-top: 22px; flex-wrap: wrap; }
+.radii div { width: 72px; height: 52px; border: 2px solid var(--accent); display: grid; place-items: center; font: 500 12px var(--mono); color: var(--ink-2); }
+
+/* Principles */
+.principles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 32px; margin-bottom: 48px; }
+.principles p { margin: 0; color: var(--ink-2); font-size: 15px; }
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 40px; }
+.rules > div { padding: 20px 0; border-top: 1px solid var(--rule); }
+.rules ul { margin: 0; padding-left: 18px; color: var(--ink-2); font-size: 15px; }
+.rules li + li { margin-top: 6px; }
+.do { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 40px; }
+@media (max-width: 640px) { .do { grid-template-columns: 1fr; } }
+.do figure { margin: 0; border: 1px solid var(--rule); border-radius: var(--r-card); padding: 18px; background: var(--page); }
+section.chapter:nth-of-type(odd) .do figure { background: var(--sheet); }
+.do figcaption { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; margin-bottom: 14px; }
+.do .yes { color: #1f9d55; } .do .no { color: #d6455d; }
+.alert { max-width: 300px; margin: 0 auto; text-align: center; border-radius: var(--r-sheet); background: var(--sheet); border: 1px solid var(--rule); padding: 18px 16px 14px; box-shadow: 0 14px 30px -18px rgba(14, 21, 48, .5); }
+.alert strong { display: block; font-size: 15px; margin-bottom: 4px; }
+.alert p { margin: 0 0 14px; font-size: 13px; color: var(--ink-2); }
+.alert .row { display: flex; gap: 8px; justify-content: flex-end; }
+.wbtn.destructive { background: #d6455d; border-color: #d6455d; color: #fff; }
+
+/* Checklist */
+.checklist { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.checklist li { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border: 1px solid var(--rule); border-radius: var(--r-card); background: var(--sheet); font-size: 15px; }
+.checklist input { flex: none; width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--accent); }
+.checklist label { cursor: pointer; }
+.progress { margin: 0 0 20px; font-size: 14px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var(--ink-2); font-size: 14px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 32px; justify-content: space-between; }
+</style>
+
+<nav class="nav" aria-label="Sections">
+  <div class="wrap">
+    <a class="brand" href="#top">
+      <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><rect width="28" height="28" rx="8" fill="var(--accent)"/><path d="M5 17c3-5 6-5 9 0s6 5 9 0" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/><path d="M5 11c3-4 6-4 9 0s6 4 9 0" fill="none" stroke="#fff" stroke-opacity=".55" stroke-width="2" stroke-linecap="round"/></svg>
+      WaveSDK
+    </a>
+    <ul>
+      <li><a href="#sdk">SDK</a></li>
+      <li><a href="#waveui">WaveUI</a></li>
+      <li><a href="#design">Design</a></li>
+      <li><a href="#tools">Tools</a></li>
+      <li><a href="#ship">Ship</a></li>
+    </ul>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <div>
+      <p class="eyebrow">WaveSDK 0.9 · WaveOS Aurora</p>
+      <h1>Build apps that feel at home on WaveOS.</h1>
+      <p class="lead">Describe your interface from your app's state. WaveUI handles the rest: layout, drawing in the WaveOS look, the keyboard, focus, scrolling, menus and sheets. Every app that comes with WaveOS is built this way.</p>
+      <div class="actions">
+        <a class="btn primary" href="#waveui">Start with WaveUI</a>
+        <a class="btn" href="#design">Read the design guidelines</a>
+      </div>
+    </div>
+    <div>
+      <div class="window" role="group" aria-label="A WaveUI counter app">
+        <div class="bar"><span>Counter</span></div>
+        <div class="counter">
+          <div class="count" id="count" aria-live="polite">0</div>
+          <div class="row">
+            <button class="wbtn" id="reset" type="button">Reset</button>
+            <button class="wbtn prominent" id="add" type="button">Add</button>
+          </div>
+        </div>
+        <pre aria-label="The view for this window"><code><span class="k">fn</span> view(&amp;<span class="k">self</span>, _env: &amp;<span class="t">Env</span>) -&gt; <span class="t">View</span>&lt;'_, <span class="t">Msg</span>&gt; {
+    <span class="t">VStack</span>::new()
+        .push(<span class="t">Text</span>::new(format!(<span class="s">"{}"</span>, <span class="k">self</span>.count))
+            .style(<span class="t">TextStyle</span>::LargeTitle))
+        .push(<span class="t">HStack</span>::new()
+            .push(<span class="t">Button</span>::new(<span class="s">"Reset"</span>).action(<span class="t">Msg</span>::Reset))
+            .push(<span class="t">Button</span>::new(<span class="s">"Add"</span>).action(<span class="t">Msg</span>::Add)
+                .button_style(<span class="t">ButtonStyle</span>::Prominent)))
+        .spacing(<span class="t">16</span>)
+}</code></pre>
+      </div>
+      <p class="caption">Press the buttons: each sends a message to <code>update</code>, and the window redraws from the new state.</p>
+    </div>
+  </div>
+</header>
+
+<section class="chapter" id="sdk">
+  <div class="wrap">
+    <p class="eyebrow">The SDK</p>
+    <h2>Everything you need, in one place.</h2>
+    <p class="intro">The WaveSDK was called Constellation until 0.9. The <code>constellation</code> command still works, and packages made for SDK 0.6 to 0.8 still install.</p>
+    <dl class="parts">
+      <div class="part">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18M8 13h8M8 16h5"/></svg>
+        <dt>WaveUI</dt>
+        <dd>Declarative interfaces: views, modifiers, a design system and the runtime that draws them.</dd>
+      </div>
+      <div class="part">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l3 3M16 16l3 3M5 19l3-3M16 8l3-3"/></svg>
+        <dt>CoreKit</dt>
+        <dd>Files, processes, threads, preferences, the clipboard, notifications, networking and IPC.</dd>
+      </div>
+      <div class="part">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5M13.5 4l-3 16"/></svg>
+        <dt>Studio</dt>
+        <dd>Create projects, edit code, lay out a window, and export or install packages.</dd>
+      </div>
+      <div class="part">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>
+        <dt><code>wavesdk</code></dt>
+        <dd>The same operations from Terminal, from <code>new</code> to <code>launch</code>.</dd>
+      </div>
+      <div class="part">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8M12 13v8"/></svg>
+        <dt>GINA packages</dt>
+        <dd>The validated archive format apps are installed and updated from.</dd>
+      </div>
+      <div class="part">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/></svg>
+        <dt>WaveUI Gallery</dt>
+        <dd>Every view and control in one example app, at <code>/System/Developer/Examples</code>.</dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<section class="chapter" id="waveui">
+  <div class="wrap">
+    <p class="eyebrow">WaveUI</p>
+    <h2>State in, interface out.</h2>
+    <p class="intro">An app has four parts: its state, the messages that change it, <code>update</code> and <code>view</code>. If you know SwiftUI or Elm, you already know the shape.</p>
+    <div class="split">
+      <pre><code><span class="k">use</span> waveui::prelude::*;
+
+<span class="k">struct</span> <span class="t">Counter</span> { count: <span class="t">i64</span> }
+
+#[derive(<span class="t">Clone</span>)]
+<span class="k">enum</span> <span class="t">Msg</span> { Add, Reset }
+
+<span class="k">impl</span> <span class="t">App</span> <span class="k">for</span> <span class="t">Counter</span> {
+    <span class="k">type</span> <span class="t">Message</span> = <span class="t">Msg</span>;
+    <span class="k">fn</span> title(&amp;<span class="k">self</span>) -&gt; <span class="t">String</span> { <span class="s">"Counter"</span>.into() }
+
+    <span class="k">fn</span> update(&amp;<span class="k">mut</span> <span class="k">self</span>, msg: <span class="t">Msg</span>, _cx: &amp;<span class="k">mut</span> <span class="t">Context</span>&lt;<span class="t">Msg</span>&gt;) {
+        <span class="k">match</span> msg {
+            <span class="t">Msg</span>::Add =&gt; <span class="k">self</span>.count += <span class="t">1</span>,
+            <span class="t">Msg</span>::Reset =&gt; <span class="k">self</span>.count = <span class="t">0</span>,
+        }
+    }
+
+    <span class="k">fn</span> view(&amp;<span class="k">self</span>, _env: &amp;<span class="t">Env</span>) -&gt; <span class="t">View</span>&lt;'_, <span class="t">Msg</span>&gt; { <span class="c">/* as above */</span> }
+}
+
+corekit::entry!(main);
+<span class="k">fn</span> main(_: corekit::<span class="t">Args</span>) -&gt; <span class="t">i32</span> {
+    waveui::run(<span class="t">Counter</span> { count: <span class="t">0</span> })
+}</code></pre>
+      <div>
+        <h3>Views</h3>
+        <p style="margin-top:0;color:var(--ink-2)">Small values you build fresh on every update. <code>List</code> only builds the rows on screen, so it handles thousands of items.</p>
+        <div class="table">
+          <table>
+            <thead><tr><th>Kind</th><th>Views</th></tr></thead>
+            <tbody>
+              <tr><td>Content</td><td><code>Text</code>, <code>Image</code>, <code>ProgressView</code>, <code>Divider</code></td></tr>
+              <tr><td>Controls</td><td><code>Button</code>, <code>Toggle</code>, <code>Slider</code>, <code>Stepper</code>, <code>Picker</code>, <code>TextField</code>, <code>TextEditor</code></td></tr>
+              <tr><td>Layout</td><td><code>VStack</code>, <code>HStack</code>, <code>ZStack</code>, <code>Spacer</code>, <code>Grid</code>, <code>ScrollView</code>, <code>List</code>, <code>SplitView</code></td></tr>
+              <tr><td>Grouping</td><td><code>Section</code>, <code>row</code>, <code>row_detail</code>, <code>sidebar_item</code>, <code>toolbar</code></td></tr>
+              <tr><td>Drawing</td><td><code>Canvas</code> for charts, documents and games</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 style="margin-top:28px">Modifiers chain</h3>
+        <pre><code><span class="t">Text</span>::new(<span class="s">"Storage"</span>)
+    .style(<span class="t">TextStyle</span>::Headline)
+    .foreground(<span class="t">Color</span>::SecondaryLabel)
+    .padding(<span class="t">12</span>)</code></pre>
+        <p style="color:var(--ink-2);font-size:15px">Layout, appearance, behaviour (<code>on_tap</code>, <code>context_menu</code>, <code>help</code>, <code>shortcut</code>, drag and drop) and identity (<code>id</code>, which keeps focus and scroll position stable).</p>
+      </div>
+    </div>
+
+    <h3 style="margin-top:56px">The design system</h3>
+    <p style="color:var(--ink-2);margin-top:0">Semantic styles follow the reader's text size, appearance and accent colour. These are WaveOS's real values.</p>
+    <div class="specimens">
+      <ul class="type-scale" aria-label="Text styles">
+        <li><span style="font-size:26px;font-weight:800;letter-spacing:-.02em">Large Title</span><span class="meta">26 px · bold</span></li>
+        <li><span style="font-size:20px;font-weight:700">Title</span><span class="meta">20 px · semibold</span></li>
+        <li><span style="font-size:16px;font-weight:700">Title 2</span><span class="meta">16 px · semibold</span></li>
+        <li><span style="font-size:13px;font-weight:700">Headline</span><span class="meta">13 px · semibold</span></li>
+        <li><span style="font-size:13px">Body</span><span class="meta">13 px</span></li>
+        <li><span style="font-size:12px;color:var(--ink-2)">Callout and Subheadline</span><span class="meta">12 px</span></li>
+        <li><span style="font-size:11px;color:var(--ink-2)">Footnote</span><span class="meta">11 px</span></li>
+        <li><span style="font-size:10px;color:var(--ink-2)">Caption</span><span class="meta">10 px</span></li>
+        <li><span style="font:13px var(--mono)">Monospaced</span><span class="meta">13 px · mono</span></li>
+      </ul>
+      <div>
+        <div class="swatches">
+          <div class="swatch"><span class="chip" style="background:#7c5cff"></span><span><b>Accent</b><small>Aurora violet</small></span></div>
+          <div class="swatch"><span class="chip" style="background:#0e1530"></span><span><b>Label</b><small>#0E1530 / #F2F4FA</small></span></div>
+          <div class="swatch"><span class="chip" style="background:#fbfcff"></span><span><b>Background</b><small>#FBFCFF / #111527</small></span></div>
+          <div class="swatch"><span class="chip" style="background:#5f6476"></span><span><b>SecondaryLabel</b><small>#5F6476 / #A3A7B7</small></span></div>
+        </div>
+        <p class="meta" style="margin:0 0 10px;font-size:13px;font-weight:700">Spacing</p>
+        <div class="scale" aria-label="Spacing scale">
+          <div><i style="width:4px"></i>XS 4</div>
+          <div><i style="width:8px"></i>S 8</div>
+          <div><i style="width:12px"></i>M 12</div>
+          <div><i style="width:16px"></i>L 16</div>
+          <div><i style="width:24px"></i>XL 24</div>
+          <div><i style="width:32px"></i>XXL 32</div>
+        </div>
+        <div class="radii" aria-label="Corner radii">
+          <div style="border-radius:8px">8</div>
+          <div style="border-radius:12px">12</div>
+          <div style="border-radius:16px">16</div>
+        </div>
+        <p style="font-size:13px;color:var(--ink-2);margin-top:8px">Controls, cards and sheets: <code>radius::CONTROL</code>, <code>CARD</code>, <code>SHEET</code>.</p>
+      </div>
+    </div>
+
+    <div class="split" style="margin-top:56px">
+      <div>
+        <h3>Context: talking to the system</h3>
+        <p style="color:var(--ink-2);margin-top:0;font-size:15px"><code>update</code> receives a <code>Context</code>: send messages and timers (<code>send</code>, <code>after</code>), open apps and files, use the clipboard, post notifications, close the window, and move focus or scroll. For background work, return an interval from <code>poll_interval</code> and do it in <code>poll</code>.</p>
+      </div>
+      <div>
+        <h3>Sheets, alerts and menus</h3>
+        <p style="color:var(--ink-2);margin-top:0;font-size:15px">Return a view from <code>sheet</code> to show a dialog; the window waits until it goes. <code>Alert</code> builds the standard question with default, cancel and destructive roles. <code>Button::menu</code> and <code>context_menu</code> add menus to anything.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="chapter" id="design">
+  <div class="wrap">
+    <p class="eyebrow">Design guidelines</p>
+    <h2>Calm, clear and quick.</h2>
+    <p class="intro">How built-in apps look and behave, so yours feels at home next to them. WaveUI's standard views do most of this for you.</p>
+    <div class="principles">
+      <div><h3>Clarity</h3><p>Content comes first. Plenty of space, a clear type hierarchy and few colours, so the important things stand out.</p></div>
+      <div><h3>Depth</h3><p>Sidebars and toolbars are translucent, like living water over the desktop. Cards and sheets lift what they hold.</p></div>
+      <div><h3>Deference</h3><p>The interface supports the work. Prefer familiar controls, and keep chrome quiet.</p></div>
+      <div><h3>Respect</h3><p>Follow appearance, accent, text size, Reduce Motion and Reduce Transparency. Never lose anyone's work.</p></div>
+    </div>
+    <div class="rules">
+      <div>
+        <h3>Layout</h3>
+        <ul>
+          <li>Navigation in a leading sidebar with <code>SplitView</code>; content on the trailing side.</li>
+          <li>Actions in a toolbar, the most frequent at the trailing end.</li>
+          <li>Space by the scale: 8 within a group, 16 between groups, 24 around a window's content.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Colour</h3>
+        <ul>
+          <li>Semantic colours only; they adapt to light and dark.</li>
+          <li>The accent marks selection, links and the one primary action.</li>
+          <li>Red is for destructive actions and errors. Never rely on colour alone.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Controls</h3>
+        <ul>
+          <li>One prominent button per view; bordered for the rest.</li>
+          <li>Toggles in settings; segmented pickers for two to five short choices.</li>
+          <li>A bar when you know how much is left, a spinner when you don't.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Motion</h3>
+        <ul>
+          <li>Under 250 ms, and only to show where something came from or went.</li>
+          <li>Nothing animates with Reduce Motion on; check <code>env.reduce_motion</code>.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Keyboard</h3>
+        <ul>
+          <li>Everything works without a pointer: Tab, Space, Return, Escape.</li>
+          <li>Support Ctrl+N, O, S, W, Z, C, V and F, and show shortcuts in menus.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Writing</h3>
+        <ul>
+          <li>Sentence case, short labels that say what happens.</li>
+          <li>Errors say what happened and what to do next, without blame or codes.</li>
+          <li>WaveOS ships in English and Canadian French. Translate yours too.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="do">
+      <figure>
+        <figcaption class="yes"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M4.8 8.2l2 2 4.4-4.4" stroke="#fff" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>Ask a question, answer with verbs</figcaption>
+        <div class="alert"><strong>Delete 3 items?</strong><p>They will be removed from Trash right away. You can't undo this.</p><div class="row"><button class="wbtn" type="button" tabindex="-1">Cancel</button><button class="wbtn destructive" type="button" tabindex="-1">Delete</button></div></div>
+      </figure>
+      <figure>
+        <figcaption class="no"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg>Vague title, yes and no</figcaption>
+        <div class="alert"><strong>Warning</strong><p>Are you sure you want to continue?</p><div class="row"><button class="wbtn" type="button" tabindex="-1">No</button><button class="wbtn prominent" type="button" tabindex="-1">Yes</button></div></div>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="chapter" id="tools">
+  <div class="wrap">
+    <p class="eyebrow">Studio and Terminal</p>
+    <h2>From idea to installed app.</h2>
+    <p class="intro">Create a project in Studio with <strong>New</strong>, or from Terminal. Studio's Design view writes WaveUI code for simple screens, and never overwrites your <code>src/main.rs</code>.</p>
+    <div class="split">
+      <div>
+        <pre><code><span class="c"># a new WaveUI project</span>
+wavesdk new /Documents/Projects/MyApp dev.example.myapp <span class="s">"My App"</span>
+
+MyApp/
+  manifest.toml        <span class="c">identity, version and SDK</span>
+  Cargo.toml           <span class="c">corekit and waveui from the SDK</span>
+  src/main.rs          <span class="c">your code</span>
+  src/generated_ui.rs  <span class="c">written from the layout</span>
+  layouts/main.ui      <span class="c">heading, label, button, toggle</span></code></pre>
+        <p style="font-size:14px;color:var(--ink-2)">Rust, Cargo and LLVM don't run inside WaveOS yet. Build on a host with <code>cargo xtask build</code>, then package the result. Build and Run in Studio say what's missing; they never pretend to succeed.</p>
+      </div>
+      <div class="table">
+        <table>
+          <thead><tr><th>Command</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td><code>doctor</code></td><td>Lists missing native tools</td></tr>
+            <tr><td><code>new</code></td><td>Creates a project</td></tr>
+            <tr><td><code>generate</code></td><td>Writes the layout's WaveUI code</td></tr>
+            <tr><td><code>build</code>, <code>run</code></td><td>Compile and run, once native tools exist</td></tr>
+            <tr><td><code>package</code></td><td>Exports a <code>.gina</code> from <code>build/app.elf</code></td></tr>
+            <tr><td><code>inspect</code></td><td>Shows a package's name, ID, version and files</td></tr>
+            <tr><td><code>install</code></td><td>Installs or updates an app</td></tr>
+            <tr><td><code>list</code>, <code>launch</code></td><td>Lists and starts installed apps</td></tr>
+            <tr><td><code>uninstall</code></td><td>Removes an app and keeps its data</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="chapter" id="ship">
+  <div class="wrap">
+    <p class="eyebrow">Ship</p>
+    <h2>Package, test, install.</h2>
+    <div class="split">
+      <div>
+        <p style="margin-top:0;color:var(--ink-2)">A <code>.gina</code> is an uncompressed ustar archive with <code>manifest.toml</code> at its root, at most 64 MiB and 1,024 entries. The validator checks paths, checksums, bounds, resources, x86-64, SDK 0.6 to 0.9 and ABI 1.</p>
+        <pre><code>format = <span class="t">1</span>
+id = <span class="s">"dev.example.myapp"</span>
+name = <span class="s">"My App"</span>
+developer = <span class="s">"Example Developer"</span>
+version = <span class="s">"1.0.0"</span>
+architecture = <span class="s">"x86_64"</span>
+sdk = <span class="s">"0.9"</span>
+abi = <span class="t">1</span>
+entry = <span class="s">"bin/app"</span>
+icon = <span class="s">""</span>
+resources = []
+extensions = []</code></pre>
+        <p style="font-size:14px;color:var(--ink-2)">Package with <code>cargo xtask package manifest.toml app.elf MyApp.gina</code>, then open it in Files or run <code>wavesdk install</code>. Updates stage a new generation and switch only after it is written and synced; app data in <code>/AppData</code> survives.</p>
+      </div>
+      <div>
+        <h3>Before you ship</h3>
+        <p class="progress" id="progress">0 of 6 checked</p>
+        <ul class="checklist">
+          <li><input type="checkbox" id="c1"><label for="c1">Resizes cleanly, down to its smallest size.</label></li>
+          <li><input type="checkbox" id="c2"><label for="c2">Works with the keyboard alone.</label></li>
+          <li><input type="checkbox" id="c3"><label for="c3">Looks right in light, dark and another accent colour.</label></li>
+          <li><input type="checkbox" id="c4"><label for="c4">Respects Reduce Motion and larger text.</label></li>
+          <li><input type="checkbox" id="c5"><label for="c5">Asks before closing with unsaved work.</label></li>
+          <li><input type="checkbox" id="c6"><label for="c6">Speaks plainly, in every language you can.</label></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>WaveSDK 0.9 for WaveOS Aurora. In WaveOS, open Learn and choose Developers for these guides in English and French.</span>
+    <a href="https://github.com/Sw3bbl3/waveos-aurora-rs">Source on GitHub</a>
+  </div>
+</footer>
+
+<script>
+(() => {
+  const count = document.getElementById('count');
+  let n = 0;
+  document.getElementById('add').addEventListener('click', () => { count.textContent = ++n; });
+  document.getElementById('reset').addEventListener('click', () => { n = 0; count.textContent = n; });
+
+  const boxes = [...document.querySelectorAll('.checklist input')];
+  const progress = document.getElementById('progress');
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('wavesdk-checklist') || '{}'); } catch (e) {}
+  const show = () => { progress.textContent = `${boxes.filter(b => b.checked).length} of ${boxes.length} checked`; };
+  boxes.forEach(b => {
+    b.checked = !!saved[b.id];
+    b.addEventListener('change', () => {
+      saved[b.id] = b.checked;
+      try { localStorage.setItem('wavesdk-checklist', JSON.stringify(saved)); } catch (e) {}
+      show();
+    });
+  });
+  show();
+})();
+</script>

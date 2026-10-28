@@ -94,7 +94,8 @@ A minute later, you're at the desktop. Add `--monitor` to open the System Explor
 | **Aster** | Hybrid kernel: multicore, ACPI, sleep and resume |
 | **AuroraFS** | Journaled, extent-based filesystem |
 | **Lumen Server** | Compositing window server |
-| **AuroraKit** | The UI toolkit every app is built with |
+| **WaveUI** | Declarative interface framework every app is built with ([WaveSDK](docs/WAVESDK.md)) |
+| **AuroraKit** | Windowing toolkit WaveUI runs on |
 | **Lyra** | TrueType font engine |
 | **Nebula** | Web browser: HTTP, TLS, HTML, CSS and layout |
 | **Pulsar** | JavaScript engine: compiler, VM, collector, DOM — [status](docs/PULSAR.md) |

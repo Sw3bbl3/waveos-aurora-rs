@@ -1,10 +1,10 @@
-# Constellation Studio
-Créez et modifiez des projets d’applications natives et des interfaces simples.
+# Studio
+Créez et modifiez des projets d’applications WaveUI et des interfaces simples avec le WaveSDK.
 
 ## Utiliser l’application
-1. Ouvrez Constellation Studio et créez un projet dans `/Documents/Projects`.
-2. Modifiez le Rust écrit à la main dans `src/main.rs`.
-3. Utilisez Design pour modifier `layouts/main.ui`; le code généré appartient à `src/generated_ui.rs`.
+1. Ouvrez Studio et créez un projet dans `/Documents/Projects`.
+2. Modifiez le Rust écrit à la main dans `src/main.rs`. Un nouveau projet commence par une petite application [WaveUI](developer-waveui.md).
+3. Utilisez Design pour modifier `layouts/main.ui`; Studio écrit le code WaveUI correspondant dans `src/generated_ui.rs`.
 4. Enregistrez le projet. L’exportation du paquet exige un véritable exécutable dans `build/app.elf`.
 
 ## Résultat attendu et dépannage

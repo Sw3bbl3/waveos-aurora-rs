@@ -11,7 +11,7 @@ Programs are stored in /System/Bin. Run `help` in Terminal for shell commands; i
 | Devices | lspci, lsusb, battery |
 | Network | ifconfig, nslookup, ping, fetch |
 | Sound | play, volume |
-| Apps | constellation, gina-check, gina-demo |
+| Apps | wavesdk, constellation, gina-check, gina-demo |
 
 ## Practice safely
 1. Create a temporary directory with `mkdir /Documents/practice`.

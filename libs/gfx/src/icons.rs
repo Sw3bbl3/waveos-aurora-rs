@@ -33,7 +33,7 @@ pub enum Icon {
     Picture,
     Trash,
     TrashFull,
-    /// The code editor (Constellation Studio).
+    /// The code editor (WaveSDK Studio).
     Studio,
     /// The package installer.
     Installer,

@@ -7,14 +7,12 @@
 //! contexts the controller owns (output) and that we fill in to change it
 //! (input).
 
-use super::{Configuration, DeviceDescriptor, Endpoint, Setup, Speed};
+use super::{Bus, Endpoint, Hcd, HubInfo, PipeHandler, Position, Setup, Speed};
 use crate::drivers::block::Dma;
 use crate::drivers::pci;
 use crate::sync::{IrqMutex, Mutex, WaitQueue};
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
-use alloc::format;
-use alloc::string::String;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -83,11 +81,10 @@ const TRB_CHAIN: u32 = 1 << 4;
 const TRB_IOC: u32 = 1 << 5;
 const TRB_IDT: u32 = 1 << 6;
 
-pub const CC_SUCCESS: u8 = 1;
-pub const CC_STALL: u8 = 6;
-pub const CC_SHORT: u8 = 13;
-/// Our own code for "no completion arrived in time".
-pub const CC_TIMEOUT: u8 = 0xFF;
+const CC_SUCCESS: u8 = super::OK;
+const CC_STALL: u8 = super::STALL;
+const CC_SHORT: u8 = 13;
+const CC_TIMEOUT: u8 = super::TIMEOUT;
 
 const RING_TRBS: usize = 256;
 const EVENT_TRBS: usize = 256;
@@ -162,15 +159,6 @@ pub struct Completion {
     pub slot: u8,
 }
 
-/// A driver fed by an interrupt IN endpoint (keyboard reports, hub changes).
-pub trait PipeHandler: Send + Sync {
-    fn data(&self, data: &[u8]);
-    /// Periodic work (key repeat); returns ms until it wants to run again.
-    fn tick(&self, _now_ms: u64) -> Option<u64> {
-        None
-    }
-}
-
 struct Pipe {
     handler: Arc<dyn PipeHandler>,
     buf: Dma,
@@ -183,18 +171,7 @@ struct SlotState {
     output: Dma,
     input: Dma,
     rings: [Option<Ring>; 32],
-}
-
-/// What we know about an attached device (for listing and teardown).
-#[derive(Clone)]
-pub struct DeviceRecord {
-    pub slot: u8,
-    pub root_port: u8,
-    pub route: u32,
-    pub speed: Speed,
-    pub desc: DeviceDescriptor,
-    pub name: String,
-    pub driver: String,
+    speed: Speed,
 }
 
 struct Inner {
@@ -202,9 +179,6 @@ struct Inner {
     dcbaa: Dma,
     slots: BTreeMap<u8, SlotState>,
 }
-
-/// Run when a device goes away.
-type DetachHook = Box<dyn Fn() + Send + Sync>;
 
 pub struct Controller {
     pub index: usize,
@@ -223,22 +197,11 @@ pub struct Controller {
     irq: WaitQueue,
     has_irq: AtomicBool,
     pipes: IrqMutex<BTreeMap<(u8, u8), Pipe>>,
-    port_events: IrqMutex<VecDeque<u8>>,
-    hub_events: IrqMutex<VecDeque<(u8, u32)>>,
-    enum_wake: WaitQueue,
-    devices: IrqMutex<Vec<DeviceRecord>>,
-    /// Hooks run when a device goes away (storage unmounts, …).
-    detach: IrqMutex<Vec<(u8, DetachHook)>>,
-    pub interrupts: AtomicU64,
-    /// Set once the devices present at boot are set up: later ones are announced.
-    settled: AtomicBool,
+    interrupts: AtomicU64,
+    bus: spin::Once<&'static Bus>,
 }
 
-static CONTROLLERS: IrqMutex<Vec<&'static Controller>> = IrqMutex::new(Vec::new());
-
-pub fn controllers() -> Vec<&'static Controller> {
-    CONTROLLERS.lock().clone()
-}
+static COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 fn r32(a: u64) -> u32 {
     unsafe { (a as *const u32).read_volatile() }
@@ -353,7 +316,7 @@ pub fn probe(dev: &pci::Device) {
     w64(rt + ERSTBA, table.phys);
 
     let c: &'static Controller = Box::leak(Box::new(Controller {
-        index: CONTROLLERS.lock().len(),
+        index: COUNT.fetch_add(1, Ordering::Relaxed),
         op,
         rt,
         db,
@@ -368,13 +331,8 @@ pub fn probe(dev: &pci::Device) {
         irq: WaitQueue::new(),
         has_irq: AtomicBool::new(false),
         pipes: IrqMutex::new(BTreeMap::new()),
-        port_events: IrqMutex::new(VecDeque::new()),
-        hub_events: IrqMutex::new(VecDeque::new()),
-        enum_wake: WaitQueue::new(),
-        devices: IrqMutex::new(Vec::new()),
-        detach: IrqMutex::new(Vec::new()),
         interrupts: AtomicU64::new(0),
-        settled: AtomicBool::new(false),
+        bus: spin::Once::new(),
     }));
     if dev.enable_msi("xhci", interrupt, c as *const Controller as usize).is_some() {
         c.has_irq.store(true, Ordering::Relaxed);
@@ -396,27 +354,15 @@ pub fn probe(dev: &pci::Device) {
         scratch,
         if c.has_irq.load(Ordering::Relaxed) { "MSI" } else { "polling" }
     );
-    CONTROLLERS.lock().push(c);
-    // Power every port, then look at what is already plugged in.
-    for p in 1..=max_ports {
-        let sc = c.portsc(p);
-        if sc & PORT_POWER == 0 {
-            c.set_portsc(p, (sc & PORT_KEEP) | PORT_POWER);
-        }
-        c.port_events.lock().push_back(p);
-    }
+    // Power every port; the bus then looks at what is already plugged in.
+    c.power_ports();
+    c.bus.call_once(|| super::register(c));
     let arg = c as *const Controller as u64;
-    let kernel = crate::mm::vmm::kernel_pml4();
-    crate::sched::spawn_task("xhci-events", event_task_entry, arg, 0, kernel);
-    crate::sched::spawn_task("usb", enum_task_entry, arg, 0, kernel);
+    crate::sched::spawn_task("xhci-events", event_task_entry, arg, 0, crate::mm::vmm::kernel_pml4());
 }
 
 fn event_task_entry(arg: u64) {
     unsafe { &*(arg as *const Controller) }.event_task();
-}
-
-fn enum_task_entry(arg: u64) {
-    unsafe { &*(arg as *const Controller) }.enum_task();
 }
 
 impl Controller {
@@ -435,20 +381,21 @@ impl Controller {
 
     // ---------------------------------------------------------------- events
 
+    fn power_ports(&self) {
+        for p in 1..=self.max_ports {
+            let sc = self.portsc(p);
+            if sc & PORT_POWER == 0 {
+                self.set_portsc(p, (sc & PORT_KEEP) | PORT_POWER);
+            }
+        }
+    }
+
     fn event_task(&'static self) {
         loop {
-            let mut next = 1000;
-            let now = crate::time::uptime_ms();
-            let handlers: Vec<Arc<dyn PipeHandler>> = self.pipes.lock().values().map(|p| p.handler.clone()).collect();
-            for h in handlers {
-                if let Some(ms) = h.tick(now) {
-                    next = next.min(ms.max(1));
-                }
-            }
             if self.has_irq.load(Ordering::Relaxed) {
-                self.irq.wait(next, || self.event_pending());
+                self.irq.wait(1000, || self.event_pending());
             } else {
-                crate::sched::sleep_ms(next.min(8));
+                crate::sched::sleep_ms(8);
             }
             self.drain_events();
         }
@@ -506,8 +453,9 @@ impl Controller {
                 }
             }
             TRB_PORT_CHANGE => {
-                self.port_events.lock().push_back((param >> 24) as u8);
-                self.enum_wake.wake_all();
+                if let Some(bus) = self.bus.get() {
+                    bus.port_changed((param >> 24) as u8);
+                }
             }
             _ => {}
         }
@@ -548,8 +496,7 @@ impl Controller {
         self.doorbell(slot, ep);
     }
 
-    /// Starts polling an interrupt IN endpoint: `handler` gets every report.
-    pub fn open_pipe(&self, slot: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool {
+    fn open_pipe_inner(&self, slot: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool {
         const BUFFERS: usize = 4;
         let size = (ep.max_packet as usize).clamp(8, 1024);
         let Some(buf) = Dma::new(size * BUFFERS) else { return false };
@@ -621,8 +568,7 @@ impl Controller {
 
     // -------------------------------------------------------------- transfers
 
-    /// A control transfer on endpoint 0; returns the bytes transferred.
-    pub fn control(&self, slot: u8, setup: Setup, data: Option<&mut [u8]>) -> Result<usize, u8> {
+    fn control_inner(&self, slot: u8, setup: Setup, data: Option<&mut [u8]>) -> Result<usize, u8> {
         let len = setup.length as usize;
         let mut buf = if len > 0 { Some(Dma::new(len).ok_or(CC_TIMEOUT)?) } else { None };
         if let (Some(b), Some(d), false) = (&mut buf, &data, setup.is_in()) {
@@ -663,7 +609,7 @@ impl Controller {
 
     /// A bulk (or interrupt OUT) transfer of `len` bytes at `phys`, split at
     /// 64 KiB boundaries as TRBs require. Returns the bytes transferred.
-    pub fn bulk(&self, slot: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8> {
+    fn bulk(&self, slot: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8> {
         let dci = ep.dci();
         let trbs = {
             let mut inner = self.inner.lock();
@@ -697,52 +643,18 @@ impl Controller {
         Ok(len.saturating_sub(c.residual as usize))
     }
 
-    // ------------------------------------------------------------ enumeration
+    // ------------------------------------------------------------ devices
 
-    fn enum_task(&'static self) {
-        loop {
-            self.enum_wake.wait(1000, || !self.port_events.lock().is_empty() || !self.hub_events.lock().is_empty());
-            // Each pop is its own statement, so the queue lock (interrupts
-            // off) isn't held while a device is enumerated.
-            loop {
-                let Some(port) = self.port_events.lock().pop_front() else { break };
-                self.root_port_changed(port);
-            }
-            loop {
-                let Some((hub_slot, bitmap)) = self.hub_events.lock().pop_front() else { break };
-                super::hub::changed(self, hub_slot, bitmap);
-            }
-            self.settled.store(true, Ordering::Release);
-        }
-    }
-
-    /// After sleep the controller was reset and every device lost power: drop
-    /// them all (their drivers see an unplug), start the controller again on
-    /// the same memory, and enumerate what is attached now.
-    pub fn resume(&'static self) {
-        let all: Vec<DeviceRecord> = self.devices.lock().drain(..).collect();
-        for d in &all {
-            let hooks: Vec<_> = {
-                let mut hooks = self.detach.lock();
-                let (mine, rest): (Vec<_>, Vec<_>) = hooks.drain(..).partition(|(s, _)| *s == d.slot);
-                *hooks = rest;
-                mine
-            };
-            for (_, hook) in hooks {
-                hook();
-            }
-        }
+    /// Resets the controller and starts it again on the same memory.
+    fn reset_and_start(&self) -> bool {
         self.pipes.lock().clear();
         self.completions.lock().clear();
-        self.port_events.lock().clear();
-        self.hub_events.lock().clear();
         let op = self.op;
         w32(op + USBCMD, r32(op + USBCMD) & !CMD_RUN);
         wait_until(100, || r32(op + USBSTS) & STS_HALTED != 0);
         w32(op + USBCMD, CMD_RESET);
         if !wait_until(1000, || r32(op + USBCMD) & CMD_RESET == 0 && r32(op + USBSTS) & STS_NOT_READY == 0) {
-            log!("xhci", "controller {} did not come back after sleep", self.index);
-            return;
+            return false;
         }
         w32(op + CONFIG, self.max_slots as u32);
         {
@@ -768,243 +680,14 @@ impl Controller {
         w32(self.rt + IMAN, 0b11);
         w32(op + USBCMD, CMD_RUN | CMD_INTE);
         if !wait_until(100, || r32(op + USBSTS) & STS_HALTED == 0) {
-            log!("xhci", "controller {} did not restart", self.index);
-            return;
+            return false;
         }
-        self.settled.store(false, Ordering::Release);
-        for p in 1..=self.max_ports {
-            let sc = self.portsc(p);
-            if sc & PORT_POWER == 0 {
-                self.set_portsc(p, (sc & PORT_KEEP) | PORT_POWER);
-            }
-            self.port_events.lock().push_back(p);
-        }
-        self.enum_wake.wake_all();
-    }
-
-    /// Called by the hub driver's status pipe.
-    pub fn hub_changed(&self, slot: u8, bitmap: u32) {
-        self.hub_events.lock().push_back((slot, bitmap));
-        self.enum_wake.wake_all();
-    }
-
-    fn root_port_changed(&'static self, port: u8) {
-        if port == 0 || port > self.max_ports {
-            return;
-        }
-        let sc = self.portsc(port);
-        // Acknowledge the change bits.
-        self.set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));
-        let attached = self.has_device(port, 0);
-        if sc & PORT_CCS == 0 {
-            if attached {
-                self.detach_port(port, 0, 0);
-            }
-            return;
-        }
-        if attached {
-            return;
-        }
-        // USB 2 ports need a reset to become enabled; USB 3 ports train on their own.
-        if self.port_major[port as usize] != 3 || self.portsc(port) & PORT_PED == 0 {
-            let sc = self.portsc(port);
-            self.set_portsc(port, (sc & PORT_KEEP) | PORT_RESET);
-            if !wait_until(500, || self.portsc(port) & PORT_PRC != 0) {
-                log!("usb", "port {}: reset timed out", port);
-                return;
-            }
-            let sc = self.portsc(port);
-            self.set_portsc(port, (sc & PORT_KEEP) | PORT_PRC);
-        }
-        if !wait_until(100, || self.portsc(port) & PORT_PED != 0) {
-            log!("usb", "port {}: not enabled after reset", port);
-            return;
-        }
-        let speed = Speed::from_xhci((self.portsc(port) >> 10) & 0xF);
-        crate::sched::sleep_ms(10); // reset recovery
-        self.enumerate(port, 0, 0, speed, None);
-    }
-
-    /// Is there a device at this position (root port + route)?
-    pub fn has_device(&self, root_port: u8, route: u32) -> bool {
-        self.devices.lock().iter().any(|d| d.root_port == root_port && d.route == route)
-    }
-
-    /// The device at root `port` + `route` (whose route has `depth` tiers) and
-    /// everything behind it are gone. `depth` 0 means the whole root port.
-    pub fn detach_port(&self, port: u8, route: u32, depth: u32) {
-        let mask = if depth == 0 { 0 } else { (1u32 << (4 * depth)) - 1 };
-        let gone: Vec<DeviceRecord> = {
-            let mut devs = self.devices.lock();
-            let (gone, keep): (Vec<_>, Vec<_>) =
-                devs.drain(..).partition(|d| d.root_port == port && d.route & mask == route & mask);
-            *devs = keep;
-            gone
-        };
-        for d in gone {
-            log!("usb", "{} disconnected", d.name);
-            let hooks: Vec<_> = {
-                let mut all = self.detach.lock();
-                let (mine, rest): (Vec<_>, Vec<_>) = all.drain(..).partition(|(s, _)| *s == d.slot);
-                *all = rest;
-                mine
-            };
-            for (_, hook) in hooks {
-                hook();
-            }
-            self.pipes.lock().retain(|&(s, _), _| s != d.slot);
-            self.command(0, TRB_DISABLE_SLOT << 10 | (d.slot as u32) << 24);
-            let mut inner = self.inner.lock();
-            inner.dcbaa.write::<u64>(d.slot as usize * 8, 0);
-            inner.slots.remove(&d.slot);
-            drop(inner);
-            if d.driver != "hub" {
-                crate::gui::notify::system("USB device removed", &d.name);
-            }
-        }
-    }
-
-    /// Plugged in while running (not present at boot): worth a notification.
-    pub fn announce(&self) -> bool {
-        self.settled.load(Ordering::Acquire)
-    }
-
-    /// Runs `hook` when the device in `slot` is unplugged.
-    pub fn on_detach(&self, slot: u8, hook: Box<dyn Fn() + Send + Sync>) {
-        self.detach.lock().push((slot, hook));
+        self.power_ports();
+        true
     }
 
     fn ep_ctx(&self, dci: u8) -> usize {
         self.ctx_size * (1 + dci as usize)
-    }
-
-    /// Addresses and configures a new device, then hands it to a class driver.
-    pub fn enumerate(
-        &'static self,
-        root_port: u8,
-        route: u32,
-        depth: u32,
-        speed: Speed,
-        hub: Option<(u8, u8, bool)>,
-    ) -> Option<u8> {
-        let c = self.command(0, TRB_ENABLE_SLOT << 10);
-        if c.code != CC_SUCCESS {
-            log!("usb", "port {}: no free device slot ({})", root_port, c.code);
-            return None;
-        }
-        let slot = c.slot;
-        let (Some(output), Some(input), Some(ep0)) =
-            (Dma::new(self.ctx_size * 32), Dma::new(self.ctx_size * 33), Ring::new())
-        else {
-            return None;
-        };
-        // Input control context: add the slot and endpoint 0.
-        input.write::<u32>(4, 0b11);
-        // Input context: the control context, then the slot context, then endpoints.
-        let s = self.ctx_size;
-        input.write::<u32>(s, route & 0xF_FFFF | (speed as u32) << 20 | 1 << 27);
-        input.write::<u32>(s + 4, (root_port as u32) << 16);
-        if let Some((hub_slot, hub_port, true)) = hub {
-            // A full/low-speed device behind a high-speed hub: its transaction translator.
-            input.write::<u32>(s + 8, hub_slot as u32 | (hub_port as u32) << 8);
-        }
-        let mps = speed.default_max_packet() as u32;
-        let e = self.ep_ctx(1);
-        input.write::<u32>(e + 4, 3 << 1 | 4 << 3 | mps << 16);
-        input.write::<u64>(e + 8, ep0.phys() | 1);
-        input.write::<u32>(e + 16, 8);
-        let input_phys = input.phys;
-        {
-            let mut inner = self.inner.lock();
-            inner.dcbaa.write::<u64>(slot as usize * 8, output.phys);
-            let mut rings: [Option<Ring>; 32] = Default::default();
-            rings[1] = Some(ep0);
-            inner.slots.insert(slot, SlotState { output, input, rings });
-        }
-        let c = self.command(input_phys, TRB_ADDRESS_DEVICE << 10 | (slot as u32) << 24);
-        if c.code != CC_SUCCESS {
-            log!("usb", "port {}: address device failed ({})", root_port, c.code);
-            self.release_slot(slot);
-            return None;
-        }
-
-        // The first 8 bytes tell the real packet size of endpoint 0.
-        let mut head = [0u8; 8];
-        if self.control(slot, Setup::get_descriptor(super::DESC_DEVICE, 0, 0, 8), Some(&mut head)).is_err() {
-            log!("usb", "port {}: device does not answer", root_port);
-            self.release_slot(slot);
-            return None;
-        }
-        let real = if speed as u8 >= Speed::Super as u8 { 1u32 << head[7].min(10) } else { head[7] as u32 };
-        if real != mps && real >= 8 {
-            {
-                let inner = self.inner.lock();
-                let st = &inner.slots[&slot];
-                st.input.write::<u32>(0, 0);
-                st.input.write::<u32>(4, 0b10);
-                let e = self.ep_ctx(1);
-                let old = st.input.read::<u32>(e + 4);
-                st.input.write::<u32>(e + 4, (old & 0xFFFF) | real << 16);
-            }
-            self.command(input_phys, TRB_EVALUATE_CTX << 10 | (slot as u32) << 24);
-        }
-        let mut d = [0u8; 18];
-        self.control(slot, Setup::get_descriptor(super::DESC_DEVICE, 0, 0, 18), Some(&mut d)).ok()?;
-        let desc = DeviceDescriptor::parse(&d)?;
-        let product = self.string(slot, desc.product_index);
-        let maker = self.string(slot, desc.manufacturer_index);
-        let name = match (maker.is_empty(), product.is_empty()) {
-            (_, true) => format!("USB device {:04x}:{:04x}", desc.vendor, desc.product),
-            (true, false) => product,
-            (false, false) if product.starts_with(maker.as_str()) => product,
-            (false, false) => format!("{maker} {product}"),
-        };
-        let mut head = [0u8; 9];
-        self.control(slot, Setup::get_descriptor(super::DESC_CONFIG, 0, 0, 9), Some(&mut head)).ok()?;
-        let total = u16::from_le_bytes([head[2], head[3]]).clamp(9, 4096);
-        let mut full = vec![0u8; total as usize];
-        let n = self.control(slot, Setup::get_descriptor(super::DESC_CONFIG, 0, 0, total), Some(&mut full)).ok()?;
-        let config = Configuration::parse(&full[..n])?;
-        self.control(slot, Setup::set_configuration(config.value), None).ok()?;
-
-        let dev = super::UsbDevice {
-            ctrl: self,
-            slot,
-            speed,
-            root_port,
-            route,
-            depth,
-            desc: desc.clone(),
-            config,
-            name: name.clone(),
-        };
-        // Recorded first, so an unplug during the driver's setup still finds it.
-        self.devices.lock().push(DeviceRecord {
-            slot,
-            root_port,
-            route,
-            speed,
-            desc,
-            name: name.clone(),
-            driver: String::new(),
-        });
-        let driver = super::attach(&dev);
-        log!(
-            "usb",
-            "{} ({}, port {}{}) — {}",
-            name,
-            speed.name(),
-            root_port,
-            if route != 0 { format!(", route {:x}", route) } else { String::new() },
-            driver
-        );
-        if let Some(d) = self.devices.lock().iter_mut().find(|d| d.slot == slot) {
-            d.driver = driver.clone();
-        }
-        if driver != "hub" && self.announce() {
-            crate::gui::notify::system("USB device connected", &name);
-        }
-        Some(slot)
     }
 
     fn release_slot(&self, slot: u8) {
@@ -1014,22 +697,12 @@ impl Controller {
         inner.slots.remove(&slot);
     }
 
-    fn string(&self, slot: u8, index: u8) -> String {
-        if index == 0 {
-            return String::new();
-        }
-        let mut b = [0u8; 255];
-        match self.control(slot, Setup::get_descriptor(super::DESC_STRING, index, 0x0409, 255), Some(&mut b)) {
-            Ok(n) => super::parse_string(&b[..n]),
-            Err(_) => String::new(),
-        }
-    }
-
     /// Configures endpoints (and hub properties) for `slot`, creating their rings.
-    pub fn configure(&self, slot: u8, speed: Speed, eps: &[Endpoint], hub: Option<(u8, u32)>) -> bool {
+    fn configure_inner(&self, slot: u8, eps: &[Endpoint], hub: Option<HubInfo>) -> bool {
         let input_phys = {
             let mut inner = self.inner.lock();
             let Some(st) = inner.slots.get_mut(&slot) else { return false };
+            let speed = st.speed;
             let max_dci = eps.iter().map(|e| e.dci()).max().unwrap_or(1).max(1);
             let mut add = 1u32; // the slot context
             for e in eps {
@@ -1048,12 +721,12 @@ impl Controller {
             let entries = (input.read::<u32>(s) >> 27).max(max_dci as u32);
             let mut dw0 = input.read::<u32>(s) & !(0x1F << 27);
             dw0 |= entries << 27;
-            if let Some((ports, ttt)) = hub {
-                dw0 |= 1 << 26;
+            if let Some(h) = hub {
+                dw0 |= 1 << 26 | (h.multi_tt as u32) << 25;
                 let dw1 = input.read::<u32>(s + 4) & 0x00FF_FFFF;
-                input.write::<u32>(s + 4, dw1 | (ports as u32) << 24);
+                input.write::<u32>(s + 4, dw1 | (h.ports as u32) << 24);
                 let dw2 = input.read::<u32>(s + 8) & !(3 << 16);
-                input.write::<u32>(s + 8, dw2 | (ttt & 3) << 16);
+                input.write::<u32>(s + 8, dw2 | (h.think_time & 3) << 16);
             }
             input.write::<u32>(s, dw0);
             for e in eps {
@@ -1091,24 +764,133 @@ impl Controller {
         }
         c.code == CC_SUCCESS
     }
+}
 
-    pub fn describe_devices(&self) -> Vec<String> {
-        self.devices
-            .lock()
-            .iter()
-            .map(|d| {
-                format!(
-                    "Bus {:03} Port {:>2}{} {:04x}:{:04x} {} [{}, {}]",
-                    self.index + 1,
-                    d.root_port,
-                    if d.route != 0 { format!(".{:x}", d.route) } else { String::new() },
-                    d.desc.vendor,
-                    d.desc.product,
-                    d.name,
-                    d.speed.name(),
-                    d.driver
-                )
-            })
-            .collect()
+impl Hcd for Controller {
+    fn kind(&self) -> &'static str {
+        "xHCI"
+    }
+
+    fn ports(&self) -> u8 {
+        self.max_ports
+    }
+
+    /// Port changes arrive as events (and go straight to the bus).
+    fn changed_ports(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn port_connected(&self, port: u8) -> bool {
+        let sc = self.portsc(port);
+        // Acknowledge the change bits.
+        self.set_portsc(port, (sc & PORT_KEEP) | (sc & PORT_CHANGES));
+        sc & PORT_CCS != 0
+    }
+
+    fn port_reset(&self, port: u8) -> Option<Speed> {
+        // USB 2 ports need a reset to become enabled; USB 3 ports train on their own.
+        if self.port_major[port as usize] != 3 || self.portsc(port) & PORT_PED == 0 {
+            let sc = self.portsc(port);
+            self.set_portsc(port, (sc & PORT_KEEP) | PORT_RESET);
+            if !wait_until(500, || self.portsc(port) & PORT_PRC != 0) {
+                log!("usb", "port {}: reset timed out", port);
+                return None;
+            }
+            let sc = self.portsc(port);
+            self.set_portsc(port, (sc & PORT_KEEP) | PORT_PRC);
+        }
+        if !wait_until(100, || self.portsc(port) & PORT_PED != 0) {
+            log!("usb", "port {}: not enabled after reset", port);
+            return None;
+        }
+        Some(Speed::from_xhci((self.portsc(port) >> 10) & 0xF))
+    }
+
+    fn new_device(&self, pos: &Position) -> Option<u8> {
+        let c = self.command(0, TRB_ENABLE_SLOT << 10);
+        if c.code != CC_SUCCESS {
+            log!("usb", "port {}: no free device slot ({})", pos.root_port, c.code);
+            return None;
+        }
+        let slot = c.slot;
+        let (Some(output), Some(input), Some(ep0)) =
+            (Dma::new(self.ctx_size * 32), Dma::new(self.ctx_size * 33), Ring::new())
+        else {
+            return None;
+        };
+        // Input control context: add the slot and endpoint 0.
+        input.write::<u32>(4, 0b11);
+        // Input context: the control context, then the slot context, then endpoints.
+        let s = self.ctx_size;
+        input.write::<u32>(s, pos.route & 0xF_FFFF | (pos.speed as u32) << 20 | 1 << 27);
+        input.write::<u32>(s + 4, (pos.root_port as u32) << 16);
+        if let Some(tt) = pos.tt {
+            // A full/low-speed device behind a high-speed hub: its transaction translator.
+            input.write::<u32>(s, input.read::<u32>(s) | (tt.multi as u32) << 25);
+            input.write::<u32>(s + 8, tt.hub as u32 | (tt.port as u32) << 8);
+        }
+        let mps = pos.speed.default_max_packet() as u32;
+        let e = self.ep_ctx(1);
+        input.write::<u32>(e + 4, 3 << 1 | 4 << 3 | mps << 16);
+        input.write::<u64>(e + 8, ep0.phys() | 1);
+        input.write::<u32>(e + 16, 8);
+        let input_phys = input.phys;
+        {
+            let mut inner = self.inner.lock();
+            inner.dcbaa.write::<u64>(slot as usize * 8, output.phys);
+            let mut rings: [Option<Ring>; 32] = Default::default();
+            rings[1] = Some(ep0);
+            inner.slots.insert(slot, SlotState { output, input, rings, speed: pos.speed });
+        }
+        let c = self.command(input_phys, TRB_ADDRESS_DEVICE << 10 | (slot as u32) << 24);
+        if c.code != CC_SUCCESS {
+            log!("usb", "port {}: address device failed ({})", pos.root_port, c.code);
+            self.release_slot(slot);
+            return None;
+        }
+        Some(slot)
+    }
+
+    fn set_ep0_max_packet(&self, slot: u8, max_packet: u16) {
+        let input_phys = {
+            let inner = self.inner.lock();
+            let Some(st) = inner.slots.get(&slot) else { return };
+            st.input.write::<u32>(0, 0);
+            st.input.write::<u32>(4, 0b10);
+            let e = self.ep_ctx(1);
+            let old = st.input.read::<u32>(e + 4);
+            st.input.write::<u32>(e + 4, (old & 0xFFFF) | (max_packet as u32) << 16);
+            st.input.phys
+        };
+        self.command(input_phys, TRB_EVALUATE_CTX << 10 | (slot as u32) << 24);
+    }
+
+    fn control(&self, slot: u8, setup: Setup, data: Option<&mut [u8]>) -> Result<usize, u8> {
+        self.control_inner(slot, setup, data)
+    }
+
+    fn transfer(&self, slot: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8> {
+        self.bulk(slot, ep, phys, len, timeout_ms)
+    }
+
+    fn configure(&self, slot: u8, eps: &[Endpoint], hub: Option<HubInfo>) -> bool {
+        self.configure_inner(slot, eps, hub)
+    }
+
+    fn open_pipe(&self, slot: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool {
+        self.open_pipe_inner(slot, ep, handler)
+    }
+
+    fn release(&self, slot: u8) {
+        self.pipes.lock().retain(|&(s, _), _| s != slot);
+        self.release_slot(slot);
+    }
+
+    fn restart(&self) -> bool {
+        self.reset_and_start()
+    }
+
+    fn interrupts(&self) -> u64 {
+        self.interrupts.load(Ordering::Relaxed)
     }
 }

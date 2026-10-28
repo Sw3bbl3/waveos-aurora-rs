@@ -12,16 +12,6 @@ macro_rules! check_log { ($($arg:tt)*) => {{
 
 const SITE: &str = "https://nebula-self-check.invalid/";
 
-fn env() -> Env {
-    Env {
-        now_ms: corekit::time::uptime_ms(),
-        focused: true,
-        screen: (1280, 800),
-        requests: Vec::new(),
-        mods: Default::default(),
-    }
-}
-
 /// A page as if it had loaded from `path` on the check's site.
 fn fixture(path: &str, html: &str) -> Loaded {
     let page = Page::parse(html);
@@ -50,21 +40,20 @@ fn install(b: &mut Browser, i: usize, loaded: Loaded) {
 }
 
 fn draw(b: &mut Browser, pixels: &mut [u32]) {
-    let env = env();
     let mut cv = Canvas::new(pixels, 1100, 760);
-    b.draw(&mut cv, Rect::new(0, 0, 1100, 760), &env);
+    b.render(&mut cv, Rect::new(0, 0, 1100, 680));
 }
 
 /// Ticks every 10 ms until `done` or `ms` pass. Returns whether `done` held.
 fn run_until(b: &mut Browser, ms: u64, mut done: impl FnMut(&Browser) -> bool) -> bool {
     let deadline = corekit::time::uptime_ms() + ms;
     loop {
-        let mut env = env();
-        b.tick(&mut env);
+        let now = corekit::time::uptime_ms();
+        b.tick_all(now);
         if done(b) {
             return true;
         }
-        if env.now_ms > deadline {
+        if now > deadline {
             return false;
         }
         corekit::time::sleep_ms(10);
@@ -184,8 +173,7 @@ fn checks() -> Result<(), String> {
     for i in 0..200 {
         b.select(i % 2);
         draw(&mut b, &mut pixels);
-        let mut env = env();
-        b.tick(&mut env);
+        b.tick_all(corekit::time::uptime_ms());
         if i == 19 {
             before = memory();
         }

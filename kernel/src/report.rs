@@ -53,7 +53,7 @@ pub fn pci() -> String {
 
 pub fn usb() -> String {
     let mut s = String::new();
-    for line in crate::drivers::usb::list() {
+    for line in crate::drivers::usb::controllers().iter().chain(crate::drivers::usb::list().iter()) {
         let _ = writeln!(s, "{line}");
     }
     if s.is_empty() {

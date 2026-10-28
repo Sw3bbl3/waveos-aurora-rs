@@ -101,6 +101,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::net::init();
     drivers::wifi::init();
     telemetry::stage("usb", "USB controllers and devices");
+    drivers::input::start();
     drivers::usb::init();
     if !fs::root_persistent() {
         // Perhaps we booted from a USB stick that holds the home volume.
@@ -142,6 +143,7 @@ fn panic(info: &PanicInfo) -> ! {
     unsafe { drivers::serial::force_unlock() };
     kprintln!("\n*** KERNEL PANIC: {}", info);
     if cfg!(feature = "ktest") {
+        sched::dump_stacks();
         power::qemu_exit(0x11);
     }
     let mut text = gui::StackText::<2048>::new();

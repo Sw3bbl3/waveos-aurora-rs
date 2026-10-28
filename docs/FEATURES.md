@@ -16,7 +16,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
 - **Real user space.** Every app is its own **ring-3 process** with its own address space:
   - **Crash isolation:** an app that crashes gets a "quit unexpectedly" report, and everything else keeps running.
   - **System calls:** about 55 of them, covering processes, threads, files, pipes, windows, events, the clipboard, drag and drop, notifications, preferences, sound and power. Every pointer is validated.
-  - **Libraries:** the `corekit` runtime, and the **AuroraKit** UI toolkit.
+  - **Libraries:** the `corekit` runtime, the **AuroraKit** windowing toolkit, and **WaveUI**, the declarative interface framework every app is written with. Together with Studio, the `wavesdk` command and GINA packages they make up the **WaveSDK**.
 - **Lumen Server window server**, in the kernel like Windows NT's:
   - apps draw into shared-memory surfaces that Lumen Server composites
   - rendering is damage-tracked, with anti-aliased shapes, soft shadows and frosted glass, drawn with SSE2 in the window server's own task
@@ -64,7 +64,8 @@ Everything that works today, layer by layer. For the short tour, see the [README
 - **Notes** is a proper editor: selection, the system clipboard, undo, find, fonts, Save As. **Lens** opens PNG, JPEG, GIF and BMP pictures (our own codecs), **Paint** draws and saves PNGs, **Clock** has world clocks, alarms, a stopwatch and timers, and **Pulse** shows every process, CPU, memory and disk.
 - **Settings:** appearance with accent colours and any picture as wallpaper, display resolution (live on QEMU), six keyboard layouts with dead keys, date and time, and more. Everything is remembered.
 - **Threads** in user space, with futex-based locks, and SSE for apps.
-- **USB:** an xHCI (USB 3) driver with hubs, keyboards, mice, tablets and storage, plugged in at any time.
+- **USB:** xHCI (USB 3), EHCI (USB 2), OHCI and UHCI (USB 1.1) controllers, with hubs and storage plugged in at any time.
+- **Input:** keyboards in any rollover format with media keys and a shared Caps Lock light; mice with side buttons and two wheels; touchpads with tap to click, tap-and-drag, two-finger click and smooth two-finger scrolling; game controllers (Xbox, PlayStation, Switch Pro, generic) in one standard layout with rumble, for apps through `corekit::gamepad`.
 - **Sound:** an Intel HD Audio driver and a mixer. System sounds, a menu-bar volume control, volume keys, headphone detection, and programs can play audio.
 - **Laptop-ready:** a battery indicator with time remaining, low-battery warnings, the power button, and sleep from the menu, Spotlight or the lid.
 
@@ -74,7 +75,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
 |---|---|
 | `cargo xtask build` | Builds the bootloader, kernel and user space into `target/esp/` |
 | `cargo xtask run --monitor` | Same as `run`, plus the live System Explorer in your browser |
-| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB, network). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--net virtio\|e1000\|e1000e\|none` the network card, `--smp N` the CPUs, `--battery` adds a laptop battery (`--battery=host` mirrors this computer's, `--battery=20,charging` fixes one), `--usb-stick` plugs in a USB stick, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
+| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB, network). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--net virtio\|e1000\|e1000e\|none` the network card, `--usb xhci\|ehci\|ehci-ohci\|ohci\|uhci` the USB controller, `--smp N` the CPUs, `--battery` adds a laptop battery (`--battery=host` mirrors this computer's, `--battery=20,charging` fixes one), `--usb-stick` plugs in a USB stick, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
 | `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller, `--net` the network card, `--smp 1` for one CPU |
 | `cargo xtask image` | Creates `target/waveos-aurora-usb.img` (ESP plus AuroraFS), ready to `dd` onto a USB stick |
 | `cargo xtask lint` | Clippy on the host libraries, kernel, bootloader and user space, each for its own target, with warnings as errors |
@@ -117,7 +118,8 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
              ├─ acpi/     tables, AML runtime (power button, battery, lid), SCI
              ├─ power/    shutdown, restart, S3 sleep and resume
              ├─ drivers/  serial, PS/2 + keyboard layouts, vmmouse, RTC, HPET, PCI, display modes,
-             │            block (AHCI, virtio-blk, NVMe, GPT, MBR), USB (xHCI, hubs, HID, storage), audio (HDA, mixer),
+             │            block (AHCI, virtio-blk, NVMe, GPT, MBR), USB (xHCI, EHCI, OHCI, UHCI, hubs, HID,
+             │            storage), game controllers, audio (HDA, mixer),
              │            network (virtio-net, e1000)
              ├─ net/      IPv4, ARP, ICMP, UDP, TCP, DHCP, sockets
              ├─ proc/     processes, pipes, reaper
@@ -125,7 +127,7 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
              ├─ fs/       VFS, block cache, AuroraFS (/), FAT32 (/Boot), TarFS (/System), RamFS
              └─ gui/      Lumen Server window server, desktop shell, clipboard, drag and drop, notifications, Spotlight
                   ↕ syscalls, shared-memory surfaces
- User space (userland/)     corekit runtime · AuroraKit toolkit · apps · /System/Bin tools
+ User space (userland/)     corekit runtime · AuroraKit · WaveUI · apps · /System/Bin tools
    libs/web · libs/tls · libs/surf   HTTP, TLS 1.3/1.2 and the Nebula engine (no_std, tested on the host)
 ```
 

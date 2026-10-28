@@ -1,24 +1,17 @@
-//! Studio: native projects, editing, visual layouts and GINA tools.
+//! Studio: WaveSDK projects — edit the code, design the interface, build,
+//! run and package apps as `.gina` files.
 #![no_std]
 #![no_main]
 extern crate alloc;
-use alloc::{
-    format,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
-use aurorakit::{
-    canvas::Canvas,
-    geom::Rect,
-    text::{TextField, TextView},
-    theme,
-    ui::{self, View},
-    App, Env, KeyCode, KeyEvent, Request,
-};
-use constellation_sdk as sdk;
+
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 use corekit::{apps, fs, process, sync::Mutex, thread};
+use wavesdk as sdk;
+use waveui::prelude::*;
+
+const CODE: &str = "code";
+const LAYOUT: &str = "layouts/main.ui";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -26,77 +19,102 @@ enum Mode {
     Design,
     Guide,
 }
+
 #[derive(Clone)]
 enum Pending {
     File(usize),
     Close,
 }
+
+/// What the background worker is doing.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Operation {
+    Build,
+    BuildRun,
+    Export,
+    Install,
+}
+
 #[derive(Default)]
 struct Job {
     running: bool,
     log: String,
     pid: Option<u32>,
 }
-struct Studio {
-    project: TextField,
-    project_focused: bool,
+
+#[derive(Clone)]
+pub enum Msg {
+    Project(String),
+    New,
+    Open,
+    Save,
+    Mode(usize),
+    Run(Operation),
+    Stop,
+    File(usize),
+    Edit(String),
+    Caret((usize, usize)),
+    PendingSave,
+    PendingDiscard,
+    PendingCancel,
+    Add(&'static str),
+    Select(usize),
+    Property(String),
+    Apply,
+    Remove,
+    Move(i32),
+}
+
+pub struct Studio {
+    project: String,
     files: Vec<String>,
     file: Option<String>,
-    editor: TextView,
+    text: String,
     saved: String,
-    controls: ui::State,
-    preview: ui::State,
+    caret: (usize, usize),
     mode: Mode,
     status: String,
-    area: Rect,
-    editor_area: Rect,
-    design_drag: Option<(usize, i32)>,
-    property: TextField,
-    property_focused: bool,
+    property: String,
     selected: Option<usize>,
     pending: Option<Pending>,
     job: Arc<Mutex<Job>>,
     cancel: Arc<AtomicBool>,
-    log_view: TextView,
+    log: String,
 }
+
 impl Studio {
     fn new(path: Option<String>) -> Self {
         let mut s = Self {
-            project: TextField::new(path.as_deref().unwrap_or("/Documents/Projects/MyApp"), "Project folder"),
-            project_focused: false,
+            project: path.clone().unwrap_or_else(|| String::from("/Documents/Projects/MyApp")),
             files: Vec::new(),
             file: None,
-            editor: TextView::new("", theme::mono(14)),
+            text: String::new(),
             saved: String::new(),
-            controls: ui::State::default(),
-            preview: ui::State::default(),
+            caret: (1, 1),
             mode: Mode::Guide,
             status: "Create or open a project to begin.".into(),
-            area: Rect::default(),
-            editor_area: Rect::default(),
-            design_drag: None,
-            property: TextField::new("", "Component label"),
-            property_focused: false,
+            property: String::new(),
             selected: None,
             pending: None,
             job: Arc::new(Mutex::new(Job::default())),
             cancel: Arc::new(AtomicBool::new(false)),
-            log_view: TextView::new("", theme::mono(12)),
+            log: String::new(),
         };
-        s.editor.rust_syntax = true;
         if path.is_some() {
             s.open_project();
         }
         s
     }
+
     fn dirty(&self) -> bool {
-        self.editor.edit.text() != self.saved
+        self.text != self.saved
     }
+
     fn open_project(&mut self) {
-        match sdk::manifest(self.project.text()) {
+        match sdk::manifest(&self.project) {
             Ok(_) => {
                 self.files.clear();
-                let root = self.project.text().to_string();
+                let root = self.project.clone();
                 self.scan(&root, "");
                 self.mode = Mode::Code;
                 if let Some(i) = self.files.iter().position(|f| f == "src/main.rs") {
@@ -107,6 +125,7 @@ impl Studio {
             Err(e) => self.status = e,
         }
     }
+
     fn scan(&mut self, root: &str, relative: &str) {
         if relative.split('/').count() > 5 || self.files.len() > 128 {
             return;
@@ -119,39 +138,35 @@ impl Studio {
             let name = if relative.is_empty() { e.name.clone() } else { format!("{relative}/{}", e.name) };
             if e.is_dir {
                 self.scan(root, &name);
-            } else if e.name.ends_with(".rs")
-                || e.name.ends_with(".toml")
-                || e.name.ends_with(".ui")
-                || e.name.ends_with(".md")
-            {
+            } else if [".rs", ".toml", ".ui", ".md"].iter().any(|x| e.name.ends_with(x)) {
                 self.files.push(name);
             }
         }
         self.files.sort();
     }
+
     fn load(&mut self, i: usize) {
         if let Some(file) = self.files.get(i).cloned() {
-            match fs::read_to_string(&format!("{}/{file}", self.project.text())) {
+            match fs::read_to_string(&format!("{}/{file}", self.project)) {
                 Ok(text) => {
-                    self.editor.edit.set_text(&text);
+                    self.text = text.clone();
                     self.saved = text;
-                    self.editor.rust_syntax = file.ends_with(".rs");
                     self.file = Some(file);
-                    self.editor.scroll = 0;
                 }
                 Err(e) => self.status = format!("Cannot open file: {e}"),
             }
         }
     }
+
     fn save(&mut self) -> bool {
         let Some(file) = &self.file else { return false };
-        let path = format!("{}/{file}", self.project.text());
-        match fs::write(&path, self.editor.edit.text().as_bytes()) {
+        let path = format!("{}/{file}", self.project);
+        match fs::write(&path, self.text.as_bytes()) {
             Ok(()) => {
-                self.saved = self.editor.edit.text().into();
+                self.saved = self.text.clone();
                 self.status = "Saved.".into();
-                if file == "layouts/main.ui" {
-                    if let Err(e) = sdk::generate_ui(self.project.text()) {
+                if file == LAYOUT {
+                    if let Err(e) = sdk::generate_ui(&self.project) {
                         self.status = e;
                     }
                 }
@@ -163,38 +178,36 @@ impl Studio {
             }
         }
     }
-    fn finish_pending(&mut self, env: &mut Env) {
+
+    fn finish_pending(&mut self, cx: &mut Context<Msg>) {
         match self.pending.take() {
             Some(Pending::File(i)) => self.load(i),
-            Some(Pending::Close) => env.requests.push(Request::Close),
+            Some(Pending::Close) => cx.close(),
             None => {}
         }
     }
-    fn select_file(&mut self, i: usize) {
-        if self.dirty() {
-            self.pending = Some(Pending::File(i));
-        } else {
-            self.load(i);
-        }
-    }
+
     fn design(&mut self) {
         if self.dirty() && !self.save() {
             return;
         }
-        if let Some(i) = self.files.iter().position(|f| f == "layouts/main.ui") {
+        if let Some(i) = self.files.iter().position(|f| f == LAYOUT) {
             self.load(i);
             self.mode = Mode::Design;
             self.selected = None;
+        } else {
+            self.status = "This project has no layouts/main.ui to design.".into();
         }
     }
-    fn perform(&mut self, operation: u64) {
-        if operation == 9 {
-            self.cancel.store(true, Ordering::Relaxed);
-            if let Some(pid) = self.job.lock().pid.take() {
-                let _ = process::kill(pid);
-            }
-            return;
-        }
+
+    /// The layout's lines, edited and written back to the text.
+    fn edit_layout(&mut self, f: impl FnOnce(&mut Vec<String>)) {
+        let mut lines: Vec<String> = self.text.lines().map(String::from).collect();
+        f(&mut lines);
+        self.text = lines.join("\n") + "\n";
+    }
+
+    fn perform(&mut self, operation: Operation) {
         if self.job.lock().running {
             return;
         }
@@ -202,7 +215,7 @@ impl Studio {
             return;
         }
         self.cancel.store(false, Ordering::Relaxed);
-        let project = self.project.text().to_string();
+        let project = self.project.clone();
         let job = self.job.clone();
         let cancel = self.cancel.clone();
         {
@@ -212,7 +225,7 @@ impl Studio {
         }
         let spawn = thread::spawn(move || {
             let result = (|| -> sdk::Result<()> {
-                if operation == 7 || operation == 8 {
+                if matches!(operation, Operation::Build | Operation::BuildRun) {
                     sdk::build(
                         &project,
                         |s| {
@@ -225,51 +238,51 @@ impl Studio {
                         &cancel,
                     )?;
                 }
-                if operation == 8 || operation == 10 || operation == 11 {
-                    let (path, bytes) = sdk::package(&project)?;
-                    job.lock().log.push_str(&format!("Exported {path}\n"));
-                    if operation == 8 || operation == 11 {
-                        let app = apps::install(&bytes, |n, t| {
-                            job.lock().log.push_str(&format!("Installed file {n}/{t}\n"));
-                        })?;
-                        if operation == 8 {
-                            let pipe = process::pipe(true).map_err(|e| format!("{e}"))?;
-                            let pid = process::spawn(
-                                &app.executable,
-                                &[],
-                                process::Stdio { stdin: None, stdout: Some(pipe[1]), stderr: Some(pipe[1]) },
-                            )
-                            .map_err(|e| format!("{e}"))?;
-                            process::close(pipe[1]);
-                            job.lock().pid = Some(pid);
-                            job.lock()
-                                .log
-                                .push_str(&format!("Running {} on this desktop (pid {pid}).\n", app.manifest.name));
-                            let log = job.clone();
-                            let _ = thread::spawn(move || {
-                                let mut reader = unsafe { fs::File::from_owned_fd(pipe[0]) };
-                                let mut buf = [0; 1024];
-                                loop {
-                                    while let Ok(n) = reader.read(&mut buf) {
-                                        if n == 0 {
-                                            break;
-                                        }
-                                        let mut j = log.lock();
-                                        if j.log.len() < 64000 {
-                                            j.log.push_str(&String::from_utf8_lossy(&buf[..n]));
-                                        }
-                                    }
-                                    if let Ok(code) = process::wait(pid, Some(0)) {
-                                        let mut j = log.lock();
-                                        j.pid = None;
-                                        j.log.push_str(&format!("Process exited: {code}\n"));
-                                        break;
-                                    }
-                                    corekit::time::sleep_ms(50);
+                if operation == Operation::Build {
+                    return Ok(());
+                }
+                let (path, bytes) = sdk::package(&project)?;
+                job.lock().log.push_str(&format!("Exported {path}\n"));
+                if operation == Operation::Export {
+                    return Ok(());
+                }
+                let app = apps::install(&bytes, |n, t| {
+                    job.lock().log.push_str(&format!("Installed file {n}/{t}\n"));
+                })?;
+                if operation == Operation::BuildRun {
+                    let pipe = process::pipe(true).map_err(|e| format!("{e}"))?;
+                    let pid = process::spawn(
+                        &app.executable,
+                        &[],
+                        process::Stdio { stdin: None, stdout: Some(pipe[1]), stderr: Some(pipe[1]) },
+                    )
+                    .map_err(|e| format!("{e}"))?;
+                    process::close(pipe[1]);
+                    job.lock().pid = Some(pid);
+                    job.lock().log.push_str(&format!("Running {} on this desktop (pid {pid}).\n", app.manifest.name));
+                    let log = job.clone();
+                    let _ = thread::spawn(move || {
+                        let mut reader = unsafe { fs::File::from_owned_fd(pipe[0]) };
+                        let mut buf = [0; 1024];
+                        loop {
+                            while let Ok(n) = reader.read(&mut buf) {
+                                if n == 0 {
+                                    break;
                                 }
-                            });
+                                let mut j = log.lock();
+                                if j.log.len() < 64000 {
+                                    j.log.push_str(&String::from_utf8_lossy(&buf[..n]));
+                                }
+                            }
+                            if let Ok(code) = process::wait(pid, Some(0)) {
+                                let mut j = log.lock();
+                                j.pid = None;
+                                j.log.push_str(&format!("Process exited: {code}\n"));
+                                break;
+                            }
+                            corekit::time::sleep_ms(50);
                         }
-                    }
+                    });
                 }
                 Ok(())
             })();
@@ -286,396 +299,303 @@ impl Studio {
             j.log = format!("Cannot start worker: {e}");
         }
     }
-    fn action(&mut self, action: Option<ui::Action>, env: &mut Env) -> bool {
-        let Some(ui::Action::Activate(id)) = action else { return false };
-        match id {
-            1 => {
+
+    fn stop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        if let Some(pid) = self.job.lock().pid.take() {
+            let _ = process::kill(pid);
+        }
+    }
+
+    // ------------------------------------------------------------ views
+
+    fn sidebar(&self) -> View<'_, Msg> {
+        let files = &self.files;
+        let list: View<'_, Msg> = if files.is_empty() {
+            Text::paragraph("Open a project to see its files.")
+                .foreground(Color::SecondaryLabel)
+                .padding(10)
+                .align(Align::Start)
+        } else {
+            List::new(files.len(), 30, move |i| {
+                let f = &files[i];
+                let symbol = if f.ends_with(".rs") { Symbol::Document } else { Symbol::Text };
+                label(symbol, f.clone()).padding_xy(12, 0).fill()
+            })
+            .selection(self.file.as_ref().and_then(|f| files.iter().position(|x| x == f)))
+            .on_select(Msg::File)
+            .id("files")
+        };
+        VStack::new()
+            .push(Text::new("PROJECT").style(TextStyle::Caption).foreground(Color::SecondaryLabel).padding_xy(12, 0))
+            .push(list.grow(1))
+            .spacing(8)
+            .alignment(Align::Stretch)
+            .padding_insets(Insets { top: 14, leading: 6, bottom: 8, trailing: 6 })
+            .fill()
+    }
+
+    fn guide(&self) -> View<'_, Msg> {
+        let missing = sdk::doctor();
+        let steps = [
+            "Choose a project folder, then New or Open.",
+            "Edit Rust source, or use Design for the interface.",
+            "Build & Run installs and launches the real app.",
+            "Export a .gina package to share your app.",
+        ];
+        let mut v = VStack::new()
+            .push(Text::new("Develop directly on WaveOS").style(TextStyle::LargeTitle))
+            .push(
+                Text::paragraph(
+                    "Apps are written in Rust with WaveUI, the WaveSDK's declarative interface framework: \
+                     describe your interface from your app's state, and WaveUI keeps the window in step.",
+                )
+                .foreground(Color::SecondaryLabel),
+            )
+            .spacing(12)
+            .alignment(Align::Stretch);
+        let mut card = Section::new();
+        for (i, s) in steps.iter().enumerate() {
+            card = card.push(
+                HStack::new()
+                    .push(
+                        Text::centered(format!("{}", i + 1))
+                            .style(TextStyle::Headline)
+                            .foreground(Color::OnAccent)
+                            .size(24, 24)
+                            .background_rounded(Color::Accent, 12),
+                    )
+                    .push(Text::new(*s))
+                    .spacing(12)
+                    .min_height(size::ROW)
+                    .fill_width(),
+            );
+        }
+        v = v.push(card);
+        let (title, detail) = if missing.is_empty() {
+            ("Toolchain ready", String::from("Native compiler executables were found."))
+        } else {
+            (
+                "Native Rust tools are not installed in this image",
+                String::from(
+                    "Build & Run reports this prerequisite; it never simulates a build. Export and install work.",
+                ),
+            )
+        };
+        v = v.push(Section::titled(
+            "Toolchain",
+            Section::new().push(row_detail(
+                title,
+                detail,
+                Image::symbol(if missing.is_empty() { Symbol::Check } else { Symbol::Warning })
+                    .foreground(if missing.is_empty() { Color::Green } else { Color::Orange }),
+            )),
+        ));
+        ScrollView::new(v.padding(28).fill_width())
+    }
+
+    fn design_view(&self) -> View<'_, Msg> {
+        let mut preview = VStack::new().spacing(12).alignment(Align::Start);
+        for (i, line) in self.text.lines().enumerate() {
+            let Some((kind, text)) = line.split_once(' ') else { continue };
+            let node: View<'_, Msg> = match kind {
+                "heading" => Text::new(text).style(TextStyle::Title),
+                "button" => Button::new(text),
+                "toggle" => Toggle::new(text, false).width(260),
+                _ => Text::paragraph(text),
+            };
+            preview = preview.push(
+                node.padding(4)
+                    .border(if self.selected == Some(i) { Color::Accent } else { Color::Clear }, 6)
+                    .on_tap(Msg::Select(i))
+                    .corner_radius(6),
+            );
+        }
+        let has = self.selected.is_some();
+        let palette = VStack::new()
+            .push(Text::new("COMPONENTS").style(TextStyle::Caption).foreground(Color::SecondaryLabel))
+            .push(Button::with(label(Symbol::Plus, "Heading")).action(Msg::Add("heading Heading")).fill_width())
+            .push(Button::with(label(Symbol::Plus, "Label")).action(Msg::Add("label Label")).fill_width())
+            .push(Button::with(label(Symbol::Plus, "Button")).action(Msg::Add("button Button")).fill_width())
+            .push(Button::with(label(Symbol::Plus, "Toggle")).action(Msg::Add("toggle Toggle")).fill_width())
+            .push(Divider::new())
+            .push(Text::new("INSPECTOR").style(TextStyle::Caption).foreground(Color::SecondaryLabel))
+            .push(
+                TextField::new("Component label", self.property.clone())
+                    .on_change(Msg::Property)
+                    .on_submit(Msg::Apply)
+                    .disabled(!has),
+            )
+            .push(
+                HStack::new()
+                    .push(Button::new("Apply").action(Msg::Apply).disabled(!has).grow(1))
+                    .push(
+                        Button::new("Remove")
+                            .action(Msg::Remove)
+                            .button_style(ButtonStyle::Destructive)
+                            .disabled(!has)
+                            .grow(1),
+                    )
+                    .spacing(8),
+            )
+            .push(
+                HStack::new()
+                    .push(Button::symbol(Symbol::ChevronUp).action(Msg::Move(-1)).disabled(!has).help("Move up"))
+                    .push(Button::symbol(Symbol::ChevronDown).action(Msg::Move(1)).disabled(!has).help("Move down"))
+                    .spacing(4),
+            )
+            .spacing(8)
+            .alignment(Align::Stretch)
+            .width(190);
+        HStack::new()
+            .push(
+                ScrollView::new(preview.padding(20).fill_width())
+                    .background_rounded(Color::GroupedBackground, 14)
+                    .grow(1),
+            )
+            .push(palette)
+            .spacing(16)
+            .alignment(Align::Start)
+            .padding(16)
+            .fill()
+    }
+
+    fn code_view(&self) -> View<'_, Msg> {
+        let rust = self.file.as_deref().is_some_and(|f| f.ends_with(".rs"));
+        let mut editor = TextEditor::monospaced(self.text.clone())
+            .on_change(Msg::Edit)
+            .on_caret(Msg::Caret)
+            .placeholder("Choose a file in the project.")
+            .style(TextStyle::Sized(14, waveui::style::Weight::Mono))
+            .id(CODE);
+        if rust {
+            editor = editor.rust_syntax();
+        }
+        editor.padding_insets(Insets { top: 12, leading: 16, bottom: 8, trailing: 8 }).fill()
+    }
+}
+
+impl App for Studio {
+    type Message = Msg;
+
+    fn title(&self) -> String {
+        format!("Studio{}", if self.dirty() { " — Edited" } else { "" })
+    }
+
+    fn size(&self) -> (i32, i32) {
+        (1180, 740)
+    }
+
+    fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
+        match msg {
+            Msg::Project(p) => self.project = p,
+            Msg::New => {
                 if self.dirty() {
                     self.status = "Save your current file before creating a project.".into();
                 } else {
-                    let slug = self.project.text().rsplit('/').next().unwrap_or("app").to_ascii_lowercase();
+                    let slug = self.project.rsplit('/').next().unwrap_or("app").to_ascii_lowercase();
                     let id = format!("dev.local.{slug}");
-                    match sdk::new_project(self.project.text(), &id, "My App") {
+                    match sdk::new_project(&self.project, &id, "My App") {
                         Ok(()) => self.open_project(),
                         Err(e) => self.status = e,
                     }
                 }
             }
-            2 => {
+            Msg::Open => {
                 if self.dirty() {
                     self.status = "Save your current file before opening another project.".into();
                 } else {
                     self.open_project();
                 }
             }
-            3 => {
+            Msg::Save => {
                 self.save();
             }
-            4 => self.mode = Mode::Code,
-            5 => self.design(),
-            6 => self.mode = Mode::Guide,
-            7..=11 => self.perform(id),
-            20 => {
-                if self.save() {
-                    self.finish_pending(env);
+            Msg::Mode(i) => match i {
+                0 => self.mode = Mode::Code,
+                1 => self.design(),
+                _ => self.mode = Mode::Guide,
+            },
+            Msg::Run(op) => self.perform(op),
+            Msg::Stop => self.stop(),
+            Msg::File(i) => {
+                if self.files.get(i) == self.file.as_ref() {
+                    return;
+                }
+                if self.dirty() {
+                    self.pending = Some(Pending::File(i));
+                } else {
+                    self.load(i);
                 }
             }
-            21 => self.finish_pending(env),
-            22 => self.pending = None,
-            30..=33 => {
-                let node = match id {
-                    30 => "heading Heading",
-                    31 => "label Label",
-                    32 => "button Button",
-                    _ => "toggle Toggle",
-                };
-                let mut text = self.editor.edit.text().to_string();
+            Msg::Edit(t) => self.text = t,
+            Msg::Caret(at) => self.caret = at,
+            Msg::PendingSave => {
+                if self.save() {
+                    self.finish_pending(cx);
+                }
+            }
+            Msg::PendingDiscard => {
+                self.text = self.saved.clone();
+                self.finish_pending(cx);
+            }
+            Msg::PendingCancel => self.pending = None,
+            Msg::Add(node) => {
+                let mut text = self.text.clone();
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
                 }
                 text.push_str(node);
                 text.push('\n');
-                self.editor.edit.set_text(&text);
+                self.text = text;
+                self.selected = Some(self.text.lines().count() - 1);
+                self.property = String::from(node.split_once(' ').map(|p| p.1).unwrap_or(""));
             }
-            34 => {
+            Msg::Select(i) => {
+                self.selected = Some(i);
+                self.property = self
+                    .text
+                    .lines()
+                    .nth(i)
+                    .and_then(|l| l.split_once(' '))
+                    .map(|p| String::from(p.1))
+                    .unwrap_or_default();
+            }
+            Msg::Property(p) => self.property = p,
+            Msg::Apply => {
                 if let Some(i) = self.selected {
-                    let mut lines: Vec<String> = self.editor.edit.text().lines().map(String::from).collect();
-                    if let Some(line) = lines.get_mut(i) {
-                        let kind = line.split_once(' ').map(|p| p.0).unwrap_or("label");
-                        *line = format!("{kind} {}", self.property.text().replace('\n', " "));
-                        self.editor.edit.set_text(&(lines.join("\n") + "\n"));
-                    }
+                    let label = self.property.replace('\n', " ");
+                    self.edit_layout(|lines| {
+                        if let Some(line) = lines.get_mut(i) {
+                            let kind = String::from(line.split_once(' ').map(|p| p.0).unwrap_or("label"));
+                            *line = format!("{kind} {label}");
+                        }
+                    });
                 }
             }
-            35 => {
+            Msg::Remove => {
+                if let Some(i) = self.selected.take() {
+                    self.edit_layout(|lines| {
+                        if i < lines.len() {
+                            lines.remove(i);
+                        }
+                    });
+                }
+            }
+            Msg::Move(d) => {
                 if let Some(i) = self.selected {
-                    let mut lines: Vec<&str> = self.editor.edit.text().lines().collect();
-                    if i < lines.len() {
-                        lines.remove(i);
-                        let text = lines.join("\n") + "\n";
-                        self.editor.edit.set_text(&text);
-                        self.selected = None;
+                    let n = self.text.lines().count();
+                    let to = (i as i32 + d).clamp(0, n as i32 - 1) as usize;
+                    if to != i {
+                        self.edit_layout(|lines| lines.swap(i, to));
+                        self.selected = Some(to);
                     }
                 }
             }
-            100..=299 => self.select_file((id - 100) as usize),
-            _ => {}
-        }
-        true
-    }
-}
-impl App for Studio {
-    fn title(&self) -> String {
-        format!("Studio{}", if self.dirty() { " — Edited" } else { "" })
-    }
-    fn size(&self) -> (i32, i32) {
-        (1180, 740)
-    }
-    fn draw(&mut self, cv: &mut Canvas, r: Rect, _: &Env) {
-        self.area = r;
-        let t = theme::current();
-        cv.fill_rect(r, t.window_bg);
-        self.project.draw(cv, Rect::new(r.x + 16, r.y + 12, (r.w - 500).max(200), 34), self.project_focused);
-        let buttons = View::row(alloc::vec![
-            View::button(1, "New"),
-            View::button(2, "Open"),
-            View::button(3, "Save"),
-            View::button(7, "Build"),
-            View::button(8, "Build & Run"),
-            View::button(9, "Stop")
-        ])
-        .gap(8);
-        // One control tree includes toolbar, navigation, files, palette, and modal.
-        let body = Rect::new(r.x + 220, r.y + 108, (r.w - 236).max(1), (r.h - 300).max(1));
-        self.editor_area = body;
-        let mut controls = View::column(alloc::vec![
-            buttons,
-            View::row(alloc::vec![
-                View::button(4, "Code"),
-                View::button(5, "Design"),
-                View::button(6, "Guide"),
-                View::button(10, "Export .gina"),
-                View::button(11, "Install built app")
-            ])
-            .gap(8)
-        ])
-        .gap(12);
-        controls.height = Some(88);
-        self.controls.draw(cv, &controls, Rect::new(r.x + 16, r.y + 54, r.w - 32, 88));
-        // File navigator uses shared button rendering; coordinates are also used below.
-        cv.fill_rect(Rect::new(r.x, r.y + 146, 204, r.h - 174), t.window_bg_alt);
-        cv.text(r.x + 16, r.y + 170, "PROJECT", theme::ui_bold(11), t.text_secondary);
-        for (i, file) in self.files.iter().take(18).enumerate() {
-            let row = Rect::new(r.x + 8, r.y + 184 + i as i32 * 25, 188, 24);
-            if self.file.as_ref() == Some(file) {
-                cv.fill_round_rect(row, 6, t.hover);
-            }
-            cv.text_clipped(row.x + 8, row.y + 17, file, theme::ui(12), t.text, row.w - 16);
-        }
-        let editor = Rect::new(body.x, r.y + 154, body.w, (r.h - 340).max(80));
-        self.editor_area = editor;
-        match self.mode {
-            Mode::Code => {
-                cv.fill_round_rect(editor.inset(-4), 10, t.window_bg_alt);
-                self.editor.draw(cv, editor, !self.project_focused && !self.property_focused && self.pending.is_none());
-            }
-            Mode::Guide => {
-                let lines = [
-                    "Studio",
-                    "Develop directly on WaveOS",
-                    "1. Choose a project folder, then New or Open.",
-                    "2. Edit Rust source, or use Design for the interface.",
-                    "3. Build & Run installs and launches the real app.",
-                    "4. Export a .gina package to share your app.",
-                    "",
-                    "Toolchain status",
-                ];
-                for (i, line) in lines.iter().enumerate() {
-                    cv.text(
-                        editor.x + 16,
-                        editor.y + 30 + i as i32 * 27,
-                        line,
-                        if i == 0 { theme::ui_bold(24) } else { theme::ui(14) },
-                        t.text,
-                    );
-                }
-                let missing = sdk::doctor();
-                let note = if missing.is_empty() {
-                    "Native compiler executables found."
-                } else {
-                    "Native Rust tools are not installed in this image."
-                };
-                cv.text(editor.x + 16, editor.y + 258, note, theme::ui(13), t.text_secondary);
-                cv.text(
-                    editor.x + 16,
-                    editor.y + 284,
-                    "Build & Run reports this prerequisite; it never simulates a build.",
-                    theme::ui(12),
-                    t.text_secondary,
-                );
-            }
-            Mode::Design => {
-                let preview = Rect::new(editor.x, editor.y, (editor.w - 192).max(160), editor.h);
-                cv.fill_round_rect(preview, 14, t.window_bg_alt);
-                let mut nodes = Vec::new();
-                for (i, line) in self.editor.edit.text().lines().enumerate() {
-                    if let Some((kind, text)) = line.split_once(' ') {
-                        nodes.push(match kind {
-                            "heading" => View::heading(text),
-                            "button" => View::button(i as u64 + 1, text),
-                            "toggle" => View::toggle(i as u64 + 1, text, false),
-                            _ => View::label(text),
-                        });
-                    }
-                }
-                self.preview.draw(cv, &View::column(nodes).padding(20), preview);
-                let x = preview.right() + 16;
-                cv.text(x, editor.y + 20, "COMPONENTS", theme::ui_bold(11), t.text_secondary);
-                for (i, label) in ["+ Heading", "+ Label", "+ Button", "+ Toggle"].iter().enumerate() {
-                    aurorakit::widgets::button(
-                        cv,
-                        Rect::new(x, editor.y + 36 + i as i32 * 40, 160, 32),
-                        label,
-                        aurorakit::widgets::ButtonStyle::Secondary,
-                        false,
-                    );
-                }
-                cv.text(x, editor.y + 218, "INSPECTOR", theme::ui_bold(11), t.text_secondary);
-                self.property.draw(cv, Rect::new(x, editor.y + 232, 160, 34), self.property_focused);
-                aurorakit::widgets::button(
-                    cv,
-                    Rect::new(x, editor.y + 278, 76, 32),
-                    "Apply",
-                    aurorakit::widgets::ButtonStyle::Secondary,
-                    false,
-                );
-                aurorakit::widgets::button(
-                    cv,
-                    Rect::new(x + 84, editor.y + 278, 76, 32),
-                    "Remove",
-                    aurorakit::widgets::ButtonStyle::Secondary,
-                    false,
-                );
-            }
-        }
-        let output = Rect::new(body.x, r.bottom() - 166, body.w, 126);
-        cv.fill_round_rect(output.inset(-4), 10, t.window_bg_alt);
-        self.log_view.draw(cv, output, false);
-        let job = self.job.lock();
-        cv.text_clipped(
-            r.x + 16,
-            r.bottom() - 12,
-            if job.running { "Working…" } else { &self.status },
-            theme::ui(12),
-            t.text_secondary,
-            r.w - 32,
-        );
-        drop(job);
-        if self.pending.is_some() {
-            cv.fill_rect(r, 0x99000000);
-            let panel = Rect::new(r.x + (r.w - 460) / 2, r.y + (r.h - 170) / 2, 460, 170);
-            cv.fill_round_rect(panel, 16, t.window_bg);
-            cv.text(panel.x + 24, panel.y + 42, "Save your changes?", theme::ui_bold(22), t.text);
-            cv.text(panel.x + 24, panel.y + 75, "Your edits have not been saved.", theme::ui(14), t.text_secondary);
-            for (i, label) in ["Save", "Discard", "Cancel"].iter().enumerate() {
-                aurorakit::widgets::button(
-                    cv,
-                    Rect::new(panel.x + 24 + i as i32 * 140, panel.y + 112, 128, 34),
-                    label,
-                    aurorakit::widgets::ButtonStyle::Secondary,
-                    false,
-                );
-            }
         }
     }
-    fn click(&mut self, x: i32, y: i32, _: Rect, env: &mut Env) -> bool {
-        let r = self.area;
-        if self.pending.is_some() {
-            let p = Rect::new(r.x + (r.w - 460) / 2, r.y + (r.h - 170) / 2, 460, 170);
-            for i in 0..3 {
-                if Rect::new(p.x + 24 + i * 140, p.y + 112, 128, 34).contains(x, y) {
-                    return self.action(Some(ui::Action::Activate(20 + i as u64)), env);
-                }
-            }
-            return true;
-        }
-        self.project_focused = self.project.click(x, y, env.mods.shift, env.now_ms);
-        if self.project_focused {
-            return true;
-        }
-        if let Some(a) = self.controls.click(x, y) {
-            return self.action(Some(a), env);
-        }
-        if x < r.x + 204 && y >= r.y + 184 {
-            let i = ((y - r.y - 184) / 25) as usize;
-            if i < self.files.len() {
-                self.select_file(i);
-                return true;
-            }
-        }
-        self.property_focused = false;
-        if self.mode == Mode::Code {
-            return self.editor.click(x, y, env.mods.shift, env.now_ms);
-        }
-        if self.mode == Mode::Design {
-            let editor = self.editor_area;
-            let px = editor.x + (editor.w - 192).max(160) + 16;
-            for i in 0..4 {
-                if Rect::new(px, editor.y + 36 + i * 40, 160, 32).contains(x, y) {
-                    return self.action(Some(ui::Action::Activate(30 + i as u64)), env);
-                }
-            }
-            self.property_focused = self.property.click(x, y, env.mods.shift, env.now_ms);
-            if self.property_focused {
-                return true;
-            }
-            for i in 0..2 {
-                if Rect::new(px + i * 84, editor.y + 278, 76, 32).contains(x, y) {
-                    return self.action(Some(ui::Action::Activate(34 + i as u64)), env);
-                }
-            }
-            if x >= editor.x && x < px - 16 {
-                let mut top = editor.y + 20;
-                for (i, line) in self.editor.edit.text().lines().enumerate() {
-                    let height = match line.split_once(' ').map(|p| p.0).unwrap_or("") {
-                        "heading" => 34,
-                        "button" => 36,
-                        "toggle" => 44,
-                        _ => 24,
-                    };
-                    if y >= top && y < top + height {
-                        self.selected = Some(i);
-                        self.design_drag = Some((i, y));
-                        self.property.edit.set_text(line.split_once(' ').map(|p| p.1).unwrap_or(""));
-                        return true;
-                    }
-                    top += height + 12;
-                }
-            }
-        }
-        false
-    }
-    fn hover(&mut self, x: i32, y: i32, _: Rect) -> bool {
-        self.controls.hover(x, y)
-    }
-    fn drag(&mut self, x: i32, y: i32, _: Rect, _: &mut Env) -> bool {
-        if let Some((_, at)) = self.design_drag.as_mut() {
-            *at = y;
-            return true;
-        }
-        if self.project_focused {
-            self.project.drag(x)
-        } else if self.property_focused {
-            self.property.drag(x)
-        } else {
-            self.editor.drag(x, y)
-        }
-    }
-    fn release(&mut self, _: i32, y: i32, _: Rect, _: &mut Env) -> bool {
-        if let Some((from, _)) = self.design_drag.take() {
-            let mut lines: Vec<String> = self.editor.edit.text().lines().map(String::from).collect();
-            let mut top = self.editor_area.y + 20;
-            let mut to = lines.len().saturating_sub(1);
-            for (i, line) in lines.iter().enumerate() {
-                let h = match line.split_once(' ').map(|p| p.0).unwrap_or("") {
-                    "heading" => 34,
-                    "button" => 36,
-                    "toggle" => 44,
-                    _ => 24,
-                };
-                if y < top + h + 6 {
-                    to = i;
-                    break;
-                }
-                top += h + 12;
-            }
-            if from < lines.len() && from != to {
-                let line = lines.remove(from);
-                lines.insert(to.min(lines.len()), line);
-                self.editor.edit.set_text(&(lines.join("\n") + "\n"));
-                self.selected = Some(to);
-            }
-        }
-        self.editor.release();
-        self.project.release();
-        self.property.release();
-        false
-    }
-    fn scroll(&mut self, d: i32, _: Rect) -> bool {
-        self.editor.scroll_by(d)
-    }
-    fn key(&mut self, k: &KeyEvent, env: &mut Env) -> bool {
-        if self.pending.is_some() {
-            if k.pressed && k.code == KeyCode::Escape {
-                self.pending = None;
-                return true;
-            }
-            return false;
-        }
-        if k.pressed && k.mods.ctrl {
-            match k.ch.map(|c| c.to_ascii_lowercase()) {
-                Some('s') => {
-                    self.save();
-                    return true;
-                }
-                Some('r') => {
-                    self.perform(8);
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        if self.project_focused {
-            self.project.key(k, env.now_ms).handled
-        } else if self.property_focused {
-            self.property.key(k, env.now_ms).handled
-        } else if self.mode == Mode::Code {
-            self.editor.key(k, env.now_ms).handled
-        } else {
-            false
-        }
-    }
-    fn close_requested(&mut self, _: &mut Env) -> bool {
+
+    fn close_requested(&mut self, _cx: &mut Context<Msg>) -> bool {
         if self.dirty() {
             self.pending = Some(Pending::Close);
             false
@@ -683,20 +603,132 @@ impl App for Studio {
             true
         }
     }
-    fn tick(&mut self, env: &mut Env) -> bool {
-        let log = self.job.lock().log.clone();
-        let changed = log != self.log_view.edit.text();
-        if changed {
-            self.log_view.edit.set_text(&log);
-            self.log_view.scroll = i32::MAX / 4;
+
+    fn poll_interval(&self) -> Option<u64> {
+        Some(250)
+    }
+
+    fn poll(&mut self, _cx: &mut Context<Msg>) -> bool {
+        let job = self.job.lock();
+        if job.log != self.log {
+            self.log = job.log.clone();
+            return true;
         }
-        self.editor.tick(env.now_ms, env.focused)
-            | self.project.tick(env.now_ms, self.project_focused)
-            | self.property.tick(env.now_ms, self.property_focused)
-            | changed
+        false
+    }
+
+    fn sheet(&self, _env: &Env) -> Option<View<'_, Msg>> {
+        self.pending.as_ref()?;
+        Some(
+            Alert::new("Save your changes?", "Your edits to this file have not been saved.")
+                .button("Don't Save", Msg::PendingDiscard, AlertRole::Destructive)
+                .button("Cancel", Msg::PendingCancel, AlertRole::Cancel)
+                .button("Save", Msg::PendingSave, AlertRole::Default)
+                .view(),
+        )
+    }
+
+    fn view(&self, _env: &Env) -> View<'_, Msg> {
+        let running = self.job.lock().running;
+        let mode = match self.mode {
+            Mode::Code => 0,
+            Mode::Design => 1,
+            Mode::Guide => 2,
+        };
+        let bar = toolbar(vec![
+            TextField::new("Project folder", self.project.clone())
+                .on_change(Msg::Project)
+                .on_submit(Msg::Open)
+                .width(300),
+            Button::new("New").action(Msg::New),
+            Button::new("Open").action(Msg::Open),
+            Button::new("Save").action(Msg::Save).disabled(!self.dirty()).shortcut(Shortcut::ctrl('s')),
+            Spacer::new(),
+            Picker::new(["Code", "Design", "Guide"], mode).on_change(Msg::Mode).width(230),
+            Spacer::new(),
+            Button::with(label(Symbol::Share, "Share"))
+                .button_style(ButtonStyle::Toolbar)
+                .menu(vec![
+                    MenuItem::new("Export .gina Package", Msg::Run(Operation::Export)),
+                    MenuItem::new("Install Built App", Msg::Run(Operation::Install)),
+                ])
+                .disabled(running),
+            Button::new("Build").action(Msg::Run(Operation::Build)).disabled(running).shortcut(Shortcut::ctrl('b')),
+            if running {
+                Button::with(label(Symbol::Stop, "Stop")).action(Msg::Stop).button_style(ButtonStyle::Destructive)
+            } else {
+                Button::with(label(Symbol::Play, "Build & Run"))
+                    .action(Msg::Run(Operation::BuildRun))
+                    .button_style(ButtonStyle::Prominent)
+                    .shortcut(Shortcut::ctrl('r'))
+            },
+        ]);
+        let content = match self.mode {
+            Mode::Code => self.code_view(),
+            Mode::Design => self.design_view(),
+            Mode::Guide => self.guide(),
+        };
+        let output = VStack::new()
+            .push(
+                HStack::new()
+                    .push(Text::new("OUTPUT").style(TextStyle::Caption).foreground(Color::SecondaryLabel).grow(1))
+                    .push_if(running.then(ProgressView::spinner))
+                    .padding_xy(16, 0)
+                    .height(28)
+                    .fill_width(),
+            )
+            .push(
+                ScrollView::new(
+                    Text::paragraph(if self.log.is_empty() {
+                        String::from("Build output appears here.")
+                    } else {
+                        self.log.clone()
+                    })
+                    .style(TextStyle::Sized(12, waveui::style::Weight::Mono))
+                    .foreground(if self.log.is_empty() { Color::SecondaryLabel } else { Color::Label })
+                    .padding_xy(16, 4)
+                    .fill_width(),
+                )
+                .stick_to_end()
+                .id("output"),
+            )
+            .spacing(0)
+            .height(170)
+            .background(Color::GroupedBackground);
+        let status = HStack::new()
+            .push(
+                Text::new(if running { String::from("Working…") } else { self.status.clone() })
+                    .style(TextStyle::Footnote)
+                    .foreground(Color::SecondaryLabel)
+                    .grow(1),
+            )
+            .push_if((self.mode == Mode::Code && self.file.is_some()).then(|| {
+                Text::new(format!("Line {}, Column {}", self.caret.0, self.caret.1))
+                    .style(TextStyle::Footnote)
+                    .foreground(Color::SecondaryLabel)
+            }))
+            .padding_xy(16, 0)
+            .height(26)
+            .fill_width();
+        let detail = VStack::new()
+            .push(content)
+            .push(Divider::new())
+            .push(output)
+            .push(Divider::new())
+            .push(status)
+            .spacing(0)
+            .fill();
+        VStack::new()
+            .push(bar)
+            .push(Divider::new())
+            .push(SplitView::new(self.sidebar(), detail).sidebar_width(220))
+            .spacing(0)
+            .fill()
     }
 }
+
 corekit::entry!(main);
+
 fn main(args: corekit::Args) -> i32 {
-    aurorakit::run(Studio::new(args.get(1).cloned()))
+    waveui::run(Studio::new(args.get(1).cloned()))
 }

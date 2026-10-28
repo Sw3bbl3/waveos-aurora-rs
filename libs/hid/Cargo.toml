@@ -1,0 +1,8 @@
+[package]
+name = "aurora-hid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Integer-only and no_std: the soft-float kernel runs it, the host tests it.
+[dependencies]

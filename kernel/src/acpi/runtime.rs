@@ -208,6 +208,8 @@ struct Devices {
     adapters: Vec<AmlName>,
     lids: Vec<AmlName>,
     power_buttons: usize,
+    /// PCI host bridges (their `_PRT` routes legacy interrupts).
+    pci_roots: Vec<AmlName>,
 }
 
 fn find_devices(interp: &Interp) -> Devices {
@@ -220,7 +222,13 @@ fn find_devices(interp: &Interp) -> Devices {
         Ok(true)
     });
     drop(ns);
-    let mut d = Devices { batteries: Vec::new(), adapters: Vec::new(), lids: Vec::new(), power_buttons: 0 };
+    let mut d = Devices {
+        batteries: Vec::new(),
+        adapters: Vec::new(),
+        lids: Vec::new(),
+        power_buttons: 0,
+        pci_roots: Vec::new(),
+    };
     for p in paths {
         let Some(hid) = hardware_id(interp, &p) else { continue };
         match hid.as_str() {
@@ -228,6 +236,7 @@ fn find_devices(interp: &Interp) -> Devices {
             "ACPI0003" => d.adapters.push(p),
             "PNP0C0D" => d.lids.push(p),
             "PNP0C0C" => d.power_buttons += 1,
+            "PNP0A08" | "PNP0A03" => d.pci_roots.push(p),
             _ => {}
         }
     }
@@ -375,7 +384,45 @@ fn init() -> Option<(Interp, Devices)> {
     interp.initialize_namespace();
     read_sleep_types(&interp);
     let devices = find_devices(&interp);
+    read_pci_routing(&interp, &devices.pci_roots);
     Some((interp, devices))
+}
+
+/// One slot pin's route: `(device, pin, gsi, level, active_low)`.
+type PciRoute = (u8, u8, u32, bool, bool);
+
+/// Bus 0's interrupt routing (`_PRT`), resolved through link devices.
+static PCI_ROUTES: IrqMutex<Vec<PciRoute>> = IrqMutex::new(Vec::new());
+
+fn pci_route(device: u8, pin: u8) -> Option<(u32, bool, bool)> {
+    PCI_ROUTES.lock().iter().find(|r| r.0 == device && r.1 == pin).map(|r| (r.2, r.3, r.4))
+}
+
+/// Reads the first PCI root bridge's `_PRT` and lets the PCI code route
+/// legacy interrupts with it (AML only runs here, so every slot and pin is
+/// resolved now).
+fn read_pci_routing(interp: &Interp, roots: &[AmlName]) {
+    use acpi::aml::pci_routing::{PciRoutingTable, Pin};
+    use acpi::aml::resource::{InterruptPolarity, InterruptTrigger};
+    let Some(table) =
+        roots.iter().filter_map(|r| child(r, "_PRT")).find_map(|p| PciRoutingTable::from_prt_path(p, interp).ok())
+    else {
+        log!("acpi", "no PCI interrupt routing table; legacy PCI interrupts are polled");
+        return;
+    };
+    let mut routes = Vec::new();
+    for device in 0..32u8 {
+        for (n, pin) in [Pin::IntA, Pin::IntB, Pin::IntC, Pin::IntD].into_iter().enumerate() {
+            if let Ok(irq) = table.route(device as u16, 0, pin, interp) {
+                let level = matches!(irq.trigger, InterruptTrigger::Level);
+                let low = matches!(irq.polarity, InterruptPolarity::ActiveLow);
+                routes.push((device, n as u8, irq.irq, level, low));
+            }
+        }
+    }
+    log!("acpi", "PCI interrupt routing: {} slot pins", routes.len());
+    *PCI_ROUTES.lock() = routes;
+    crate::drivers::pci::set_intx_resolver(pci_route);
 }
 
 fn worker() {

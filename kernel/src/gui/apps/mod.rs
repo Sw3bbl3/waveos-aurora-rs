@@ -306,7 +306,9 @@ pub trait App {
     fn drag(&mut self, x: i32, y: i32, area: Rect) -> bool {
         self.hover(x, y, area)
     }
-    fn scroll(&mut self, _delta: i32, _area: Rect) -> bool {
+    /// Scrolling over the window: whole wheel notches `(right, down)` for
+    /// apps that step, and the exact amount in 1/120 notch for smooth ones.
+    fn scroll(&mut self, _notches: (i32, i32), _precise: (i32, i32), _area: Rect) -> bool {
         false
     }
     fn focus(&mut self, _focused: bool) {}

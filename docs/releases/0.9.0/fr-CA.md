@@ -2,7 +2,13 @@
 
 Pas encore publiée.
 
-WaveOS dessine plus vite, affiche votre batterie, exécute son premier pilote graphique venu de Linux et offre le Wi-Fi dans Réglages. Cette mise à jour comprend aussi tous les changements annoncés pour la version 0.8.0.
+WaveOS dessine plus vite, affiche votre batterie, exécute son premier pilote graphique venu de Linux, offre le Wi-Fi dans Réglages, fonctionne avec tous les types de contrôleurs USB comprend les pavés tactiles et les manettes de jeu, et toutes ses applications sont reconstruites avec WaveUI, le nouveau cadriciel d’interface du WaveSDK. Cette mise à jour comprend aussi tous les changements annoncés pour la version 0.8.0.
+
+## Toutes les applications, reconstruites
+- Les quinze applications fournies avec WaveOS sont réécrites avec **WaveUI**, un nouveau cadriciel d’interface déclaratif. Elles partagent un même style et les mêmes commandes : les mêmes boutons, interrupteurs, listes, barres latérales, barres d’outils, menus, alertes et feuilles partout, en apparence claire et sombre et dans votre couleur d’accent.
+- Toutes les commandes fonctionnent au clavier : Tab passe de l’une à l’autre, Espace et Retour les activent, et la commande ciblée défile pour devenir visible.
+- Le défilement est fluide partout, les menus et les feuilles apparaissent en douceur (ou non, avec Réduire les animations), et les boutons des barres d’outils s’expliquent au survol.
+- Le guide de Learn a une nouvelle allure : chaque article repose sur une page arrondie, avec un titre plus clair, des exemples de code arrondis et des notes en évidence, en apparence claire et sombre.
 
 ## Plus rapide
 - Le dessin du bureau prend moins de la moitié du temps qu’avant : les ombres des fenêtres, les remplissages translucides, les bordures et le verre sont tous plus rapides, et le flou d’arrière-plan de l’écran de connexion est environ six fois plus rapide (mesuré sur le processeur hôte; les données se trouvent dans `docs/measurements/drawing-2026-10-27` du code source).
@@ -27,13 +33,31 @@ WaveOS dessine plus vite, affiche votre batterie, exécute son premier pilote gr
 
 ![Rejoindre un réseau](../../screenshots/0.9/wifi-password.png)
 
+## L’USB sur les ordinateurs plus anciens aussi
+- WaveOS pilote maintenant tous les types de contrôleurs USB : en plus de l’USB 3 (xHCI), les contrôleurs USB 2 (EHCI) des ordinateurs d’avant 2012 environ, et les contrôleurs USB 1.1 (OHCI et UHCI) qui les accompagnent. Les claviers, les souris, les concentrateurs et les clés USB fonctionnent sur chacun d’eux, branchés à tout moment.
+- Cela comprend le contrôleur USB 2.0 de VirtualBox (EHCI avec OHCI).
+- Les clés USB sont prêtes plus tôt : en monter une prend maintenant environ une seconde, sur n’importe quel contrôleur.
+
+## Claviers, souris, pavés tactiles et manettes de jeu
+- **Claviers :** chaque touche compte, peu importe combien vous en tenez enfoncées; les touches de volume, de lecture, de luminosité et de navigation fonctionnent; et le voyant du verrouillage des majuscules suit la touche sur tous vos claviers branchés.
+- **Souris :** les boutons latéraux reculent et avancent, et les souris à molette inclinable ou à deuxième molette défilent sur le côté.
+- **Pavés tactiles** (USB) : touchez pour cliquer, touchez avec deux doigts pour un clic secondaire, touchez puis touchez de nouveau pour glisser, appuyez avec deux doigts pour un clic secondaire, et défilez avec deux doigts — en douceur, le contenu continuant de glisser après un geste rapide. Le défilement suit vos doigts, comme sur un écran tactile.
+- **Manettes de jeu :** les manettes Xbox 360, Xbox One et Series, PlayStation (DualShock 4 et DualSense), Switch Pro et les autres manettes USB fonctionnent, toutes avec la même disposition de boutons pour les jeux, et vibrent sur les manettes qui le peuvent.
+- Les souris PS/2 à boutons latéraux fonctionnent aussi.
+- **Réglages** offre de nouveaux panneaux **Trackpad**, **Mouse** et **Game Controllers** : toucher pour cliquer, défilement naturel, vitesse du suivi et du pointeur, et chaque manette branchée avec un aperçu en direct de ses boutons et un test de vibration.
+
 ## Pour les développeurs
+- **Le WaveSDK** est le nouveau nom du SDK Constellation. La commande `wavesdk` remplace `constellation`, qui fonctionne toujours; les paquets créés pour les SDK 0.6 à 0.8 s’installent encore, et les nouveaux indiquent le SDK 0.9.
+- **WaveUI**, dans le WaveSDK, est maintenant la façon d’écrire les applications WaveOS : décrivez l’interface à partir de l’état de votre application, et WaveUI s’occupe de la mise en page, du dessin, des entrées, du focus, du défilement, des menus, des feuilles et des animations. Les nouveaux projets de Studio et de `wavesdk new` sont des applications WaveUI, et l’exemple WaveUI Gallery présente toutes les vues.
+- Learn propose trois nouveaux guides pour les développeurs : [WaveUI](../../handbook/0.7/fr-CA/developer-waveui.md), [WaveSDK](../../handbook/0.7/fr-CA/developer-wavesdk.md) et les [Directives de design](../../handbook/0.7/fr-CA/developer-design.md).
 - `cargo xtask run --gpu virtio` démarre avec un écran virtio piloté par le pilote de Linux; `cargo xtask test --gpu virtio` vérifie aussi que l’écran s’est allumé.
 - `cargo xtask run --wifi-sim` ajoute les réseaux Wi-Fi simulés.
+- `cargo xtask run --usb ehci` (ou `ehci-ohci`, `ohci`, `uhci`) choisit le contrôleur USB de la machine virtuelle.
+- Les applications peuvent lire les manettes de jeu avec `corekit::gamepad` : les manettes branchées, leurs boutons, leurs manches et leurs gâchettes dans la disposition standard, et la vibration. Les évènements de défilement donnent aussi la valeur exacte, pour un défilement en douceur.
 - La compilation des pilotes graphiques demande clang. Sans lui, le noyau se compile sans ces pilotes.
 
 ## Limites connues
-Aucune vraie carte Wi-Fi ne fonctionne encore : le pilote Intel s’arrête avant de démarrer la radio, et rien de ce pilote n’a encore tourné sur du vrai matériel. Le pilote graphique de Linux fonctionne dans les machines virtuelles (virtio); les pilotes pour les cartes graphiques AMD, Intel et NVIDIA, ainsi que l’accélération 3D, ne sont pas encore là. Dans la machine d’essai de cette mise à jour, le micrologiciel ne sortait pas de la suspension; le test de suspension a donc été sauté, comme il l’a été sur le code de la version 0.8.0.
+Les pavés tactiles intégrés des portables se branchent surtout en I²C, que WaveOS ne pilote pas encore; plusieurs fonctionnent aussi comme simple pointeur PS/2, sans gestes. Les claviers, souris et manettes Bluetooth ne sont pas pris en charge. Les nouveaux contrôleurs USB (EHCI, OHCI, UHCI) n’ont été essayés que dans des machines virtuelles. Aucune vraie carte Wi-Fi ne fonctionne encore : le pilote Intel s’arrête avant de démarrer la radio, et rien de ce pilote n’a encore tourné sur du vrai matériel. Le pilote graphique de Linux fonctionne dans les machines virtuelles (virtio); les pilotes pour les cartes graphiques AMD, Intel et NVIDIA, ainsi que l’accélération 3D, ne sont pas encore là. Dans la machine d’essai de cette mise à jour, le micrologiciel ne sortait pas de la suspension; le test de suspension a donc été sauté, comme il l’a été sur le code de la version 0.8.0.
 
 ## Résultats de validation
-`cargo xtask lint`, les tests hôte décrits dans [Compiler et tester](../../handbook/0.7/fr-CA/developer-build.md) (qui comprennent maintenant les tests de la bibliothèque Wi-Fi, vérifiés avec les vecteurs d’essai IEEE 802.11 et une implémentation indépendante) et les autotests du noyau sur deux démarrages (37 tests, dont l’autotest de la couche de compatibilité Linux et une connexion WPA2 avec DHCP sur le réseau simulé) ont été exécutés sur ce changement, de même que `cargo xtask test --gpu virtio`. Les captures d’écran de `docs/screenshots/0.9` proviennent de QEMU à 1280 × 800.
+`cargo xtask lint`, les tests hôte décrits dans [Compiler et tester](../../handbook/0.7/fr-CA/developer-build.md) (qui comprennent maintenant les tests de la bibliothèque Wi-Fi, vérifiés avec les vecteurs d’essai IEEE 802.11 et une implémentation indépendante) et les autotests du noyau sur deux démarrages (38 tests, dont l’autotest de la couche de compatibilité Linux et une connexion WPA2 avec DHCP sur le réseau simulé) ont été exécutés sur ce changement, de même que `cargo xtask test --gpu virtio`. Les tests de l’USB et des entrées ont été exécutés sur chaque contrôleur USB (`--usb xhci`, `ehci`, `ehci-ohci`, `ohci`, `uhci`), avec des appareils virtuels branchés par redirection USB : un clavier à touches multimédias, un pavé tactile de précision, une DualShock 4 et une manette Xbox 360; la bibliothèque d’entrées a ses propres tests sur les descripteurs de ces appareils. Les captures d’écran de `docs/screenshots/0.9` proviennent de QEMU à 1280 × 800.

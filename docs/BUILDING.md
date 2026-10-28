@@ -37,7 +37,7 @@ cargo xtask run --gpu virtio        # virtio-vga display, driven by the ported L
 cargo xtask run --wifi-sim          # simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
 cargo xtask test [--disk virtio] [--smp 1] [--gpu virtio]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
 cargo xtask lint                    # Clippy on every crate, for its own target; warnings are errors
-cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-wifi -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
+cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-wifi -p aurora-hid -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
 AURORA_MUTATIONS=100 cargo test -p aurorafs --release   # robustness tests, 100x longer than CI runs them
 cargo xtask image                   # target/waveos-aurora-usb.img for USB boot
 cargo xtask iso                     # target/waveos-aurora.iso for UEFI virtual machines
@@ -50,7 +50,7 @@ cargo xtask iso --no-build          # package an existing target/esp without reb
 
 The virtual machine has 4 CPUs, Intel HD Audio (played through your Mac's speakers with Core Audio), a USB 3 controller with a tablet and, behind a hub, a keyboard, and S3 sleep enabled. On macOS, interactive launches request Cocoa full keyboard capture, forward Command, and disable Option/Command swapping. QEMU needs Accessibility permission; event-tap failures are reported on stderr. Click in the VM to capture and press **Control+Option+G** to release. Use `--no-keyboard-capture` to opt out. To wake WaveOS from sleep, press a key, or run `tools/qmp.py qmp:system_wakeup`.
 
-See [Constellation development](CONSTELLATION.md) for GINA packaging, native CLI commands, Studio, the compiler-port gap, developer disk sizing, and compatibility details.
+The WaveSDK developer site is [docs/developer/index.html](developer/index.html). See [WaveSDK development](WAVESDK.md) for GINA packaging, native CLI commands, Studio, the compiler-port gap, developer disk sizing, and compatibility details.
 
 `cargo xtask test` also attaches a USB stick, the test battery, and records the sound output to `target/test-audio.wav`. Its sleep test puts the VM to sleep and wakes it over QMP. Some OVMF builds (Ubuntu's, for one) fault while resuming, before WaveOS gets control: the harness notices and runs the suite again with `sleep=off`. Set `AURORA_TEST_SLEEP=off` to skip it from the start.
 

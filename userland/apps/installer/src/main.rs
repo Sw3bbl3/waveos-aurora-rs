@@ -1,19 +1,13 @@
+//! Installer — installs `.gina` packages and removes installed apps.
+
 #![no_std]
 #![no_main]
+
 extern crate alloc;
-use alloc::{
-    format,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
-use aurorakit::{
-    canvas::Canvas,
-    geom::Rect,
-    ui::{self, View},
-    App, Env, KeyCode, KeyEvent,
-};
+
+use alloc::sync::Arc;
 use corekit::{apps, fs, sync::Mutex, thread};
+use waveui::prelude::*;
 
 #[derive(Clone)]
 enum Phase {
@@ -23,14 +17,27 @@ enum Phase {
     Installed(String),
     Failed(String),
 }
+
 struct Installer {
     path: Option<String>,
     phase: Arc<Mutex<Phase>>,
-    controls: ui::State,
     installed: Vec<apps::Installed>,
-    selected: usize,
+    selected: Option<usize>,
     delete_data: bool,
+    /// What the last frame showed, to redraw only when the phase moves.
+    shown: (u8, usize),
 }
+
+#[derive(Clone)]
+enum Msg {
+    Install,
+    Open,
+    Close,
+    Select(usize),
+    DeleteData(bool),
+    Uninstall,
+}
+
 impl Installer {
     fn new(path: Option<String>) -> Self {
         let phase = Arc::new(Mutex::new(Phase::Reading));
@@ -49,14 +56,160 @@ impl Installer {
                 *phase.lock() = Phase::Failed(format!("Cannot start installer: {e}"));
             }
         }
-        Self { path, phase, controls: ui::State::default(), installed: apps::list(), selected: 0, delete_data: false }
+        Self { path, phase, installed: apps::list(), selected: None, delete_data: false, shown: (0, 0) }
     }
-    fn act(&mut self, action: Option<ui::Action>, env: &mut Env) -> bool {
-        match action {
-            Some(ui::Action::Activate(1)) => {
-                let Some(path) = self.path.clone() else { return false };
+
+    fn package(&self) -> View<'_, Msg> {
+        let mut v = VStack::new().spacing(16).alignment(Align::Stretch);
+        match self.phase.lock().clone() {
+            Phase::Reading => {
+                v = v.push(
+                    HStack::new()
+                        .push(ProgressView::spinner())
+                        .push(Text::new("Reading and validating the package…").foreground(Color::SecondaryLabel))
+                        .spacing(10),
+                )
+            }
+            Phase::Ready(m) => {
+                let update = apps::installed(&m.id).is_ok();
+                v = v
+                    .push(
+                        Section::new().push(
+                            VStack::new()
+                                .push(Text::new(m.name.clone()).style(TextStyle::Title2))
+                                .push(
+                                    Text::new(format!("{} · {}", m.developer, m.version))
+                                        .foreground(Color::SecondaryLabel),
+                                )
+                                .push(
+                                    Text::new(m.id.clone())
+                                        .style(TextStyle::Footnote)
+                                        .foreground(Color::SecondaryLabel),
+                                )
+                                .push(Text::paragraph(if update {
+                                    "Updates the installed app; its data is kept."
+                                } else {
+                                    "Installs in Applications and adds the app to Shoal."
+                                }))
+                                .spacing(4)
+                                .alignment(Align::Start)
+                                .padding_xy(0, 14)
+                                .fill_width(),
+                        ),
+                    )
+                    .push(
+                        HStack::new()
+                            .push(Spacer::new())
+                            .push(Button::new("Cancel").action(Msg::Close).shortcut(Shortcut::cancel()))
+                            .push(
+                                Button::new(if update { "Update App" } else { "Install App" })
+                                    .action(Msg::Install)
+                                    .button_style(ButtonStyle::Prominent)
+                                    .shortcut(Shortcut::default_action()),
+                            ),
+                    );
+            }
+            Phase::Installing(n, total) => {
+                v = v
+                    .push(Text::new("Installing…").style(TextStyle::Title2))
+                    .push(ProgressView::new(Some(n as f32 / total.max(1) as f32)))
+                    .push(Text::new(format!("Writing files: {n} of {total}")).foreground(Color::SecondaryLabel));
+            }
+            Phase::Installed(_) => {
+                v = v
+                    .push(Text::new("Installed").style(TextStyle::Title2))
+                    .push(Text::new("Your app is ready in Shoal and in Seek.").foreground(Color::SecondaryLabel))
+                    .push(
+                        HStack::new().push(Spacer::new()).push(Button::new("Done").action(Msg::Close)).push(
+                            Button::new("Open App")
+                                .action(Msg::Open)
+                                .button_style(ButtonStyle::Prominent)
+                                .shortcut(Shortcut::default_action()),
+                        ),
+                    );
+            }
+            Phase::Failed(e) => {
+                v = v
+                    .push(Text::new("Could not install").style(TextStyle::Title2))
+                    .push(Text::paragraph(e).foreground(Color::SecondaryLabel))
+                    .push(HStack::new().push(Spacer::new()).push(Button::new("Close").action(Msg::Close)));
+            }
+        }
+        v
+    }
+
+    fn manage(&self) -> View<'_, Msg> {
+        let mut v = VStack::new()
+            .push(
+                Text::new("Open a .gina package in Files to install an application.").foreground(Color::SecondaryLabel),
+            )
+            .spacing(16)
+            .alignment(Align::Stretch);
+        if self.installed.is_empty() {
+            v = v.push(
+                Section::card(
+                    Text::centered("No apps from other developers are installed.")
+                        .foreground(Color::SecondaryLabel)
+                        .padding(28),
+                )
+                .fill_width(),
+            );
+        } else {
+            let apps = &self.installed;
+            v = v
+                .push(Section::titled(
+                    "Installed apps",
+                    List::new(apps.len(), 44, move |i| {
+                        let a = &apps[i];
+                        HStack::new()
+                            .push(Text::new(a.manifest.name.clone()).style(TextStyle::Headline).grow(1))
+                            .push(Text::new(a.manifest.version.clone()).foreground(Color::SecondaryLabel))
+                            .padding_xy(18, 0)
+                            .fill()
+                    })
+                    .selection(self.selected)
+                    .on_select(Msg::Select)
+                    .height((apps.len() as i32 * 44).min(264))
+                    .background_rounded(Color::GroupedBackground, 12),
+                ))
+                .push(
+                    HStack::new()
+                        .push(
+                            Toggle::checkbox("Also delete the app's saved data", self.delete_data)
+                                .on_change(Msg::DeleteData),
+                        )
+                        .push(Spacer::new())
+                        .push(
+                            Button::new("Uninstall…")
+                                .action(Msg::Uninstall)
+                                .button_style(ButtonStyle::Destructive)
+                                .disabled(self.selected.is_none()),
+                        ),
+                );
+        }
+        if let Phase::Failed(e) = self.phase.lock().clone() {
+            v = v.push(Text::paragraph(e).foreground(Color::Red));
+        }
+        v
+    }
+}
+
+impl App for Installer {
+    type Message = Msg;
+
+    fn title(&self) -> String {
+        "Installer".into()
+    }
+    fn size(&self) -> (i32, i32) {
+        (640, 540)
+    }
+
+    fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
+        match msg {
+            Msg::Install => {
+                let Some(path) = self.path.clone() else { return };
                 if !matches!(*self.phase.lock(), Phase::Ready(_)) {
-                    return false;
+                    return;
                 }
                 *self.phase.lock() = Phase::Installing(0, 1);
                 let state = self.phase.clone();
@@ -73,7 +226,7 @@ impl Installer {
                     *self.phase.lock() = Phase::Failed(format!("Cannot start installer: {e}"));
                 }
             }
-            Some(ui::Action::Activate(2)) => {
+            Msg::Open => {
                 let phase = self.phase.lock().clone();
                 if let Phase::Installed(id) = phase {
                     if let Err(e) = apps::launch(&id) {
@@ -81,130 +234,56 @@ impl Installer {
                     }
                 }
             }
-            Some(ui::Action::Activate(3)) => env.requests.push(aurorakit::Request::Close),
-            Some(ui::Action::Activate(10)) => {
-                if let Some(app) = self.installed.get(self.selected) {
+            Msg::Close => cx.close(),
+            Msg::Select(i) => self.selected = Some(i),
+            Msg::DeleteData(on) => self.delete_data = on,
+            Msg::Uninstall => {
+                if let Some(app) = self.selected.and_then(|i| self.installed.get(i)) {
                     match apps::uninstall(&app.manifest.id, self.delete_data) {
                         Ok(()) => {
                             self.installed = apps::list();
-                            self.selected = 0;
+                            self.selected = None;
                         }
                         Err(e) => *self.phase.lock() = Phase::Failed(e),
                     }
                 }
             }
-            Some(ui::Action::Toggle(11, on)) => self.delete_data = on,
-            Some(ui::Action::Activate(id)) if id >= 100 => self.selected = (id - 100) as usize,
-            _ => return false,
         }
-        true
     }
-}
-impl App for Installer {
-    fn title(&self) -> String {
-        "Installer".into()
+
+    fn poll_interval(&self) -> Option<u64> {
+        self.path.as_ref().map(|_| 300)
     }
-    fn size(&self) -> (i32, i32) {
-        (640, 540)
-    }
-    fn draw(&mut self, cv: &mut Canvas, r: Rect, _: &Env) {
-        let mut rows = alloc::vec![View::heading("Installer"), View::label("Native applications for WaveOS Aurora")];
-        if self.path.is_some() {
-            match self.phase.lock().clone() {
-                Phase::Reading => rows.push(View::label("Reading and validating package…")),
-                Phase::Ready(m) => {
-                    let update = apps::installed(&m.id).is_ok();
-                    rows.push(View::card(alloc::vec![
-                        View::heading(&m.name),
-                        View::label(&format!("{} · {}", m.developer, m.version)),
-                        View::label(&m.id),
-                        View::label(if update {
-                            "Updates the installed app; app data is preserved."
-                        } else {
-                            "Installs in Applications and adds the app to Launcher."
-                        })
-                    ]));
-                    rows.push(View::row(alloc::vec![
-                        View::button(3, "Cancel"),
-                        View::button(1, if update { "Update app" } else { "Install app" })
-                    ]));
-                }
-                Phase::Installing(n, total) => {
-                    rows.push(View::heading("Installing…"));
-                    rows.push(View::label(&format!("Writing files: {n} of {total}")));
-                }
-                Phase::Installed(_) => {
-                    rows.push(View::heading("Installed"));
-                    rows.push(View::label("Your app is ready in Launcher and desktop search."));
-                    rows.push(View::row(alloc::vec![View::button(3, "Done"), View::button(2, "Open app")]));
-                }
-                Phase::Failed(e) => {
-                    rows.push(View::heading("Could not install"));
-                    for line in aurorakit::widgets::wrap(&e, aurorakit::theme::ui(13), r.w - 64) {
-                        rows.push(View::label(&e[line.0..line.1]));
-                    }
-                    rows.push(View::button(3, "Close"));
-                }
-            }
-        } else {
-            rows.push(View::label("Open a .gina package in Files to install an application."));
-            for (i, a) in self.installed.iter().take(6).enumerate() {
-                rows.push(View::button(
-                    100 + i as u64,
-                    &format!(
-                        "{}{} · {}",
-                        if i == self.selected { "✓ " } else { "" },
-                        a.manifest.name,
-                        a.manifest.version
-                    ),
-                ));
-            }
-            if self.installed.is_empty() {
-                rows.push(View::label("No third-party applications installed."));
-            } else {
-                rows.push(View::toggle(11, "Also delete this app's saved data", self.delete_data));
-                rows.push(View::button(10, "Uninstall selected app"));
-            }
-            if let Phase::Failed(e) = self.phase.lock().clone() {
-                rows.push(View::label(&e));
-            }
-        }
-        self.controls.draw(cv, &View::column(rows).padding(28).gap(16), r);
-    }
-    fn click(&mut self, x: i32, y: i32, _: Rect, env: &mut Env) -> bool {
-        let a = self.controls.click(x, y);
-        self.act(a, env)
-    }
-    fn hover(&mut self, x: i32, y: i32, _: Rect) -> bool {
-        self.controls.hover(x, y)
-    }
-    fn key(&mut self, k: &KeyEvent, env: &mut Env) -> bool {
-        if !k.pressed {
-            return false;
-        }
-        let key = match k.code {
-            KeyCode::Tab => {
-                if k.mods.shift {
-                    ui::Key::Previous
-                } else {
-                    ui::Key::Next
-                }
-            }
-            KeyCode::Enter => ui::Key::Activate,
-            _ => return false,
+
+    fn poll(&mut self, _cx: &mut Context<Msg>) -> bool {
+        let now = match *self.phase.lock() {
+            Phase::Reading => (0, 0),
+            Phase::Ready(_) => (1, 0),
+            Phase::Installing(n, _) => (2, n),
+            Phase::Installed(_) => (3, 0),
+            Phase::Failed(_) => (4, 0),
         };
-        let a = self.controls.key(key);
-        self.act(a, env);
-        true
+        core::mem::replace(&mut self.shown, now) != now
     }
-    fn tick(&mut self, _: &mut Env) -> bool {
-        self.path.is_some()
-    }
-    fn tick_interval(&self) -> u64 {
-        300
+
+    fn view(&self, _env: &Env) -> View<'_, Msg> {
+        VStack::new()
+            .push(Text::new("Installer").style(TextStyle::Title))
+            .push(Text::new("Apps for WaveOS Aurora").foreground(Color::SecondaryLabel))
+            .push(
+                if self.path.is_some() { self.package() } else { self.manage() }
+                    .padding_insets(Insets { top: 10, ..Default::default() }),
+            )
+            .push(Spacer::new())
+            .spacing(4)
+            .alignment(Align::Stretch)
+            .padding(28)
+            .fill()
     }
 }
+
 corekit::entry!(main);
+
 fn main(args: corekit::Args) -> i32 {
-    aurorakit::run(Installer::new(args.get(1).cloned()))
+    waveui::run(Installer::new(args.get(1).cloned()))
 }

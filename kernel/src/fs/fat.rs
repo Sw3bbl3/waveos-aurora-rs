@@ -5,36 +5,81 @@ use crate::drivers::block::BlockDevice;
 use crate::sync::Mutex;
 use ::fat32::{Error, Fat32, SectorDisk, SECTOR};
 
-/// 512-byte sector access on any block device (emulated on 4 KiB-sector disks).
-pub struct Sectors(pub Arc<dyn BlockDevice>);
+/// 512-byte sector access on any block device (emulated on 4 KiB-sector
+/// disks), reading ahead in 32 KiB windows: the FAT library asks for one
+/// sector at a time, and mounting alone reads the whole allocation table.
+pub struct Sectors {
+    dev: Arc<dyn BlockDevice>,
+    /// A window of the disk: its first 512-byte sector and contents.
+    window: Option<(u64, Vec<u8>)>,
+}
+
+/// Read-ahead window, in 512-byte sectors.
+const WINDOW: u64 = 64;
+
+impl Sectors {
+    pub fn new(dev: Arc<dyn BlockDevice>) -> Sectors {
+        Sectors { dev, window: None }
+    }
+
+    /// Native sectors per 512-byte sector group.
+    fn per(&self) -> u64 {
+        (self.dev.sector_size() as u64 / SECTOR as u64).max(1)
+    }
+
+    fn cached(&self, lba: u64) -> Option<&[u8]> {
+        let (start, data) = self.window.as_ref()?;
+        let o = lba.checked_sub(*start)? as usize * SECTOR;
+        data.get(o..o + SECTOR)
+    }
+
+    /// Reads the window holding `lba` (aligned, clipped to the disk's end).
+    fn fill(&mut self, lba: u64) -> ::fat32::Result<()> {
+        let per = self.per();
+        let window = WINDOW.max(per);
+        let start = lba / window * window;
+        let count = window.min(self.sectors() - start);
+        let mut data = alloc::vec![0u8; (count * SECTOR as u64) as usize];
+        self.dev.read(start / per, &mut data).map_err(|_| Error::Io)?;
+        self.window = Some((start, data));
+        Ok(())
+    }
+}
 
 impl SectorDisk for Sectors {
     fn sectors(&self) -> u64 {
-        self.0.sectors() * (self.0.sector_size() as u64 / SECTOR as u64)
+        self.dev.sectors() * self.per()
     }
     fn read(&mut self, lba: u64, buf: &mut [u8; SECTOR]) -> ::fat32::Result<()> {
-        let ss = self.0.sector_size() as u64;
-        let per = ss / SECTOR as u64;
-        let mut tmp = alloc::vec![0u8; ss as usize];
-        self.0.read(lba / per, &mut tmp).map_err(|_| Error::Io)?;
-        let o = (lba % per) as usize * SECTOR;
-        buf.copy_from_slice(&tmp[o..o + SECTOR]);
+        if self.cached(lba).is_none() {
+            self.fill(lba)?;
+        }
+        buf.copy_from_slice(self.cached(lba).ok_or(Error::Io)?);
         Ok(())
     }
     fn write(&mut self, lba: u64, buf: &[u8; SECTOR]) -> ::fat32::Result<()> {
-        let ss = self.0.sector_size() as u64;
-        let per = ss / SECTOR as u64;
+        let per = self.per();
         if per == 1 {
-            return self.0.write(lba, buf).map_err(|_| Error::Io);
+            self.dev.write(lba, buf).map_err(|_| Error::Io)?;
+        } else {
+            let mut tmp = alloc::vec![0u8; self.dev.sector_size() as usize];
+            self.dev.read(lba / per, &mut tmp).map_err(|_| Error::Io)?;
+            let o = (lba % per) as usize * SECTOR;
+            tmp[o..o + SECTOR].copy_from_slice(buf);
+            self.dev.write(lba / per, &tmp).map_err(|_| Error::Io)?;
         }
-        let mut tmp = alloc::vec![0u8; ss as usize];
-        self.0.read(lba / per, &mut tmp).map_err(|_| Error::Io)?;
-        let o = (lba % per) as usize * SECTOR;
-        tmp[o..o + SECTOR].copy_from_slice(buf);
-        self.0.write(lba / per, &tmp).map_err(|_| Error::Io)
+        // Keep the window current.
+        if let Some((start, data)) = self.window.as_mut() {
+            if let Some(o) = lba.checked_sub(*start).map(|d| d as usize * SECTOR) {
+                if let Some(slot) = data.get_mut(o..o + SECTOR) {
+                    slot.copy_from_slice(buf);
+                }
+            }
+        }
+        Ok(())
     }
     fn flush(&mut self) -> ::fat32::Result<()> {
-        self.0.flush().map_err(|_| Error::Io)
+        self.dev.flush().map_err(|_| Error::Io)
     }
 }
 
@@ -60,7 +105,7 @@ pub struct FatFs {
 impl FatFs {
     pub fn mount(dev: Arc<dyn BlockDevice>) -> Result<FatFs, isize> {
         let device = super::short_device(dev.as_ref());
-        let fs = Fat32::mount(Sectors(dev), crate::time::wall_seconds).map_err(errno)?;
+        let fs = Fat32::mount(Sectors::new(dev), crate::time::wall_seconds).map_err(errno)?;
         Ok(FatFs { fs: Mutex::new(fs), device })
     }
 }

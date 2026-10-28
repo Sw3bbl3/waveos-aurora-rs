@@ -3,6 +3,7 @@ pub mod serial;
 pub mod audio;
 pub mod block;
 pub mod display;
+pub mod gamepad;
 pub mod hpet;
 pub mod input;
 pub mod keyboard;
@@ -13,8 +14,8 @@ pub mod ps2;
 pub mod rtc;
 pub mod usb;
 pub mod virtio;
-pub mod wifi;
 pub mod vmmouse;
+pub mod wifi;
 
 /// After sleep every controller was reset: bring each driver's hardware back.
 pub fn resume() {

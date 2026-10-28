@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 corekit.workspace = true
-aurorakit.workspace = true
+waveui.workspace = true
 aurora-image.workspace = true
 nebula-web.workspace = true
 nebula-engine.workspace = true

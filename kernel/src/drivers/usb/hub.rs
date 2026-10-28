@@ -3,8 +3,7 @@
 //! enumerated behind it, with its route (hub ports on the way) and, for slow
 //! devices behind a high-speed hub, the hub's transaction translator.
 
-use super::xhci::{Controller, PipeHandler};
-use super::{Setup, Speed, UsbDevice};
+use super::{Bus, HubInfo, PipeHandler, Position, Setup, Speed, Tt, UsbDevice};
 use crate::sync::IrqMutex;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -21,20 +20,17 @@ const PORT_POWER: u16 = 8;
 const CHANGE_FEATURES: [(u16, u16); 8] = [(0, 16), (1, 17), (2, 18), (3, 19), (4, 20), (6, 25), (7, 26), (5, 29)];
 
 struct Hub {
-    slot: u8,
-    speed: Speed,
+    dev: u8,
+    pos: Position,
     ports: u8,
-    root_port: u8,
-    route: u32,
-    depth: u32,
     usb3: bool,
 }
 
 static HUBS: IrqMutex<BTreeMap<(usize, u8), Arc<Hub>>> = IrqMutex::new(BTreeMap::new());
 
 struct StatusPipe {
-    ctrl: &'static Controller,
-    slot: u8,
+    bus: &'static Bus,
+    dev: u8,
 }
 
 impl PipeHandler for StatusPipe {
@@ -45,7 +41,7 @@ impl PipeHandler for StatusPipe {
         }
         if bitmap != 0 {
             // Port work needs control transfers: done on the enumeration task.
-            self.ctrl.hub_changed(self.slot, bitmap);
+            self.bus.hub_changed(self.dev, bitmap);
         }
     }
 }
@@ -54,15 +50,15 @@ fn port_request(request: u8, feature: u16, port: u8) -> Setup {
     Setup { request_type: 0x23, request, value: feature, index: port as u16, length: 0 }
 }
 
-fn port_status(ctrl: &Controller, slot: u8, port: u8) -> Option<(u16, u16)> {
+fn port_status(bus: &Bus, dev: u8, port: u8) -> Option<(u16, u16)> {
     let mut b = [0u8; 4];
     let setup = Setup { request_type: 0xA3, request: GET_STATUS, value: 0, index: port as u16, length: 4 };
-    ctrl.control(slot, setup, Some(&mut b)).ok()?;
+    bus.control(dev, setup, Some(&mut b)).ok()?;
     Some((u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])))
 }
 
 pub fn attach(dev: &UsbDevice) -> bool {
-    let usb3 = dev.speed as u8 >= Speed::Super as u8;
+    let usb3 = dev.speed() as u8 >= Speed::Super as u8;
     let mut d = [0u8; 12];
     let kind = if usb3 { 0x2A00 } else { 0x2900 };
     let setup = Setup { request_type: 0xA0, request: 6, value: kind, index: 0, length: 12 };
@@ -73,80 +69,72 @@ pub fn attach(dev: &UsbDevice) -> bool {
     let ttt = ((u16::from_le_bytes([d[3], d[4]]) >> 5) & 3) as u32;
     let power_good = (d[5] as u64 * 2).max(100);
     if usb3 {
-        let depth = Setup { request_type: 0x20, request: SET_HUB_DEPTH, value: dev.depth as u16, index: 0, length: 0 };
+        let depth =
+            Setup { request_type: 0x20, request: SET_HUB_DEPTH, value: dev.pos.depth as u16, index: 0, length: 0 };
         let _ = dev.control(depth, None);
     }
     let Some(iface) = dev.config.interfaces.first() else { return false };
     let Some(ep) = iface.endpoints.iter().find(|e| e.kind == 3 && e.is_in()).copied() else { return false };
-    if !dev.ctrl.configure(dev.slot, dev.speed, &[ep], Some((ports, ttt))) {
+    if !dev.bus.configure(dev.dev, &[ep], Some(HubInfo { ports, think_time: ttt, multi_tt: false })) {
         return false;
     }
     for p in 1..=ports {
         let _ = dev.control(port_request(SET_FEATURE, PORT_POWER, p), None);
     }
     crate::sched::sleep_ms(power_good);
-    let hub = Arc::new(Hub {
-        slot: dev.slot,
-        speed: dev.speed,
-        ports,
-        root_port: dev.root_port,
-        route: dev.route,
-        depth: dev.depth,
-        usb3,
-    });
-    HUBS.lock().insert((dev.ctrl.index, dev.slot), hub.clone());
-    let slot = dev.slot;
-    let index = dev.ctrl.index;
-    dev.ctrl.on_detach(
-        slot,
+    let hub = Arc::new(Hub { dev: dev.dev, pos: dev.pos, ports, usb3 });
+    HUBS.lock().insert((dev.bus.index, dev.dev), hub.clone());
+    let (index, id) = (dev.bus.index, dev.dev);
+    dev.bus.on_detach(
+        id,
         alloc::boxed::Box::new(move || {
-            HUBS.lock().remove(&(index, slot));
+            HUBS.lock().remove(&(index, id));
         }),
     );
     log!("usb", "{}: hub with {} ports", dev.name, ports);
     // Devices already plugged in, then changes as they come.
     for p in 1..=ports {
-        port_changed(dev.ctrl, &hub, p);
+        port_changed(dev.bus, &hub, p);
     }
-    dev.ctrl.open_pipe(dev.slot, &ep, Arc::new(StatusPipe { ctrl: dev.ctrl, slot: dev.slot }))
+    dev.bus.open_pipe(dev.dev, &ep, Arc::new(StatusPipe { bus: dev.bus, dev: dev.dev }))
 }
 
 /// A hub's status pipe reported changes on the ports in `bitmap`.
-pub fn changed(ctrl: &'static Controller, slot: u8, bitmap: u32) {
-    let Some(hub) = HUBS.lock().get(&(ctrl.index, slot)).cloned() else { return };
+pub fn changed(bus: &'static Bus, dev: u8, bitmap: u32) {
+    let Some(hub) = HUBS.lock().get(&(bus.index, dev)).cloned() else { return };
     for p in 1..=hub.ports {
         if bitmap & (1 << p) != 0 {
-            port_changed(ctrl, &hub, p);
+            port_changed(bus, &hub, p);
         }
     }
 }
 
-fn port_changed(ctrl: &'static Controller, hub: &Hub, port: u8) {
-    let Some((status, change)) = port_status(ctrl, hub.slot, port) else { return };
+fn port_changed(bus: &'static Bus, hub: &Hub, port: u8) {
+    let Some((status, change)) = port_status(bus, hub.dev, port) else { return };
     for (bit, feature) in CHANGE_FEATURES {
         if change & (1 << bit) != 0 {
-            let _ = ctrl.control(hub.slot, port_request(CLEAR_FEATURE, feature, port), None);
+            let _ = bus.control(hub.dev, port_request(CLEAR_FEATURE, feature, port), None);
         }
     }
-    let route = hub.route | (port as u32) << (4 * hub.depth);
-    let depth = hub.depth + 1;
-    let present = ctrl.has_device(hub.root_port, route);
+    let route = hub.pos.route | (port as u32) << (4 * hub.pos.depth);
+    let depth = hub.pos.depth + 1;
+    let present = bus.has_device(hub.pos.root_port, route);
     if status & 1 == 0 {
         if present {
-            ctrl.detach_port(hub.root_port, route, depth);
+            bus.detach_port(hub.pos.root_port, route, depth);
         }
         return;
     }
     if present {
         return;
     }
-    let _ = ctrl.control(hub.slot, port_request(SET_FEATURE, PORT_RESET, port), None);
+    let _ = bus.control(hub.dev, port_request(SET_FEATURE, PORT_RESET, port), None);
     let deadline = crate::time::uptime_ms() + 500;
     let status = loop {
         crate::sched::sleep_ms(10);
-        let Some((s, c)) = port_status(ctrl, hub.slot, port) else { return };
+        let Some((s, c)) = port_status(bus, hub.dev, port) else { return };
         if c & (1 << 4) != 0 || crate::time::uptime_ms() > deadline {
-            let _ = ctrl.control(hub.slot, port_request(CLEAR_FEATURE, 20, port), None);
+            let _ = bus.control(hub.dev, port_request(CLEAR_FEATURE, 20, port), None);
             break s;
         }
     };
@@ -164,7 +152,12 @@ fn port_changed(ctrl: &'static Controller, hub: &Hub, port: u8) {
         Speed::Full
     };
     crate::sched::sleep_ms(10);
-    // Low/full-speed devices behind a high-speed hub use its transaction translator.
-    let tt = hub.speed == Speed::High && matches!(speed, Speed::Low | Speed::Full);
-    ctrl.enumerate(hub.root_port, route, depth, speed, Some((hub.slot, port, tt)));
+    // Low/full-speed devices behind a high-speed hub use its transaction
+    // translator; behind a slow hub, whichever translator that hub uses.
+    let tt = if hub.pos.speed == Speed::High && matches!(speed, Speed::Low | Speed::Full) {
+        Some(Tt { hub: hub.dev, port, multi: false })
+    } else {
+        hub.pos.tt
+    };
+    bus.enumerate(Position { root_port: hub.pos.root_port, route, depth, speed, tt });
 }

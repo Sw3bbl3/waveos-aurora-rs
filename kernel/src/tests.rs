@@ -37,6 +37,7 @@ const TESTS: &[Test] = &[
     ("sound: HDA playback", sound),
     ("ACPI: AML, sleep states, battery", acpi_runtime),
     ("USB: hub, keyboard, tablet, storage", usb),
+    ("USB HID: media keys, lights, touchpad gestures, game controllers (virtual devices)", usb_hid),
     ("TCP: retransmission ACK bounds", crate::net::tcp::retransmission_ack_test),
     ("network: DHCP, ICMP, UDP, TCP", network),
     ("Wi-Fi: scan, WPA2 join, DHCP over CCMP (simulated network)", wifi),
@@ -128,12 +129,7 @@ fn wifi() {
 
     wifi::connect(b"Harbor Cafe", sim::PASSWORD).unwrap();
     assert!(eventually(5000, || state() == CONNECTED), "did not connect: state {}", state());
-    let wlan_ip = || {
-        crate::net::interfaces()
-            .into_iter()
-            .find(|i| i.name.starts_with(b"wlan"))
-            .map(|i| i.ip)
-    };
+    let wlan_ip = || crate::net::interfaces().into_iter().find(|i| i.name.starts_with(b"wlan")).map(|i| i.ip);
     assert!(eventually(10_000, || wlan_ip() == Some(sim::CLIENT_IP)), "no DHCP address: {:?}", wlan_ip());
     crate::kprint!("(wlan0 {:?} over WPA2) ", sim::CLIENT_IP);
     wifi::disconnect();
@@ -786,6 +782,100 @@ fn usb() {
     assert!(wait_for(all, 10_000), "missing drivers: {:?}", crate::drivers::usb::list());
     let devices = crate::drivers::usb::list();
     crate::kprint!("[{} devices] ", devices.len());
+}
+
+/// The virtual devices xtask serves over usb-redir (see xtask/src/usbredir.rs).
+fn usb_hid() {
+    use crate::drivers::input::{self, InputEvent, KeyCode};
+    use crate::drivers::{gamepad, usb};
+    use aurora_abi::gamepad as pad;
+    let all_there = || {
+        let d = usb::list();
+        d.iter().any(|l| l.contains("touchpad"))
+            && d.iter().filter(|l| l.contains("game controller")).count() >= 2
+            && d.iter().any(|l| l.contains("WaveOS Test Keyboard"))
+    };
+    assert!(wait_for(all_there, 15_000), "virtual devices missing: {:?}", usb::list());
+
+    // Watch the input queue (no compositor runs during the self-tests).
+    #[derive(Default, Debug)]
+    struct Seen {
+        volume_down: bool,
+        volume_up: bool,
+        moved_right: i32,
+        scrolled_down: i32,
+        clicked: bool,
+        released: bool,
+        f12: bool,
+        last_x: Option<i32>,
+    }
+    let mut seen = Seen::default();
+    let watch = |seen: &mut Seen, until: &dyn Fn(&Seen) -> bool, ms: u64| {
+        let end = time::ticks() + ms;
+        while time::ticks() < end {
+            while let Some(ev) = input::pop() {
+                match ev {
+                    InputEvent::Key(k) if k.code == KeyCode::VolumeUp => {
+                        if k.pressed {
+                            seen.volume_down = true;
+                        } else {
+                            seen.volume_up = true;
+                        }
+                    }
+                    InputEvent::Key(k) if k.code == KeyCode::F12 && k.pressed => seen.f12 = true,
+                    InputEvent::Pointer { x, buttons, .. } => {
+                        if buttons == 0 {
+                            if let Some(lx) = seen.last_x {
+                                seen.moved_right += (x - lx).max(0);
+                            }
+                            seen.last_x = Some(x);
+                        }
+                        if buttons & 1 != 0 {
+                            seen.clicked = true;
+                        } else if seen.clicked {
+                            seen.released = true;
+                        }
+                    }
+                    InputEvent::Scroll { dy, .. } => seen.scrolled_down += dy,
+                    _ => {}
+                }
+            }
+            if until(seen) {
+                return true;
+            }
+            crate::sched::sleep_ms(10);
+        }
+        false
+    };
+    // Media key down and up; the touchpad's swipe, two-finger scroll and tap.
+    let done = |s: &Seen| {
+        s.volume_down && s.volume_up && s.moved_right >= 40 && s.scrolled_down >= 2 * input::NOTCH && s.released
+    };
+    assert!(watch(&mut seen, &done, 8000), "touchpad and media keys: {seen:?}");
+    // Caps Lock lights every keyboard; the test keyboard answers with F12.
+    input::toggle_caps();
+    let lit = watch(&mut seen, &|s: &Seen| s.f12, 5000);
+    input::toggle_caps();
+    assert!(lit, "the keyboard's Caps Lock light was not set");
+
+    // Game controllers: the standard layout, and rumble reaching them.
+    let pads = gamepad::list();
+    let find = |family| pads.iter().find(|p| p.family == family).map(|p| p.id);
+    let (ds4, xbox) = (find(pad::PLAYSTATION).expect("DualShock 4"), find(pad::XBOX).expect("Xbox 360"));
+    assert!(wait_for(|| gamepad::state(ds4).is_some_and(|s| s.sequence > 0), 3000), "no DualShock 4 reports");
+    let s = gamepad::state(ds4).unwrap();
+    assert!(s.buttons & pad::SOUTH != 0, "cross is south: {:#x}", s.buttons);
+    assert_eq!(s.axes[1], -32768, "left stick up");
+    assert!(wait_for(|| gamepad::state(xbox).is_some_and(|s| s.buttons & pad::SOUTH != 0), 3000), "no Xbox reports");
+    assert_eq!(gamepad::state(xbox).unwrap().axes[0], 32767, "Xbox left stick right");
+    for id in [ds4, xbox] {
+        gamepad::rumble(id, 200, 100, 300).expect("rumble");
+        // The devices press their north button once they feel it.
+        assert!(
+            wait_for(|| gamepad::state(id).is_some_and(|s| s.buttons & pad::NORTH != 0), 3000),
+            "controller {id} did not feel the rumble"
+        );
+    }
 }
 
 fn sleep_and_wake() {

@@ -6,7 +6,7 @@
 use crate::mm::{paging, phys_to_virt};
 use crate::sync::IrqMutex;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use x86_64::instructions::port::Port;
 
 static ECAM: AtomicU64 = AtomicU64::new(0);
@@ -109,10 +109,49 @@ impl Device {
     }
 
     /// Enables memory decoding and bus mastering; masks legacy INTx (drivers
-    /// use MSI/MSI-X, or poll).
+    /// use MSI/MSI-X, [`Device::enable_intx`], or poll).
     pub fn enable(&self) {
         let cmd = self.read16(0x04);
         self.write16(0x04, cmd | CMD_MEMORY | CMD_IO | CMD_BUS_MASTER | CMD_INTX_DISABLE);
+    }
+
+    /// The legacy interrupt pin (INTA–INTD as 1–4; 0 = none).
+    pub fn interrupt_pin(&self) -> u8 {
+        (self.read32(0x3C) >> 8) as u8
+    }
+
+    /// Asks for the device's legacy interrupt (INTx), for controllers without
+    /// MSI. `handler(arg)` runs on every interrupt of the (possibly shared,
+    /// level-triggered) line and returns whether its device raised it. Which
+    /// interrupt-controller input the pin is wired to comes from ACPI (`_PRT`),
+    /// which is read after the drivers start, so the line goes live later:
+    /// drivers poll until [`IntxLine::live`] says otherwise. `None` when the
+    /// device has no interrupt pin.
+    pub fn enable_intx(&self, name: &str, handler: fn(usize) -> bool, arg: usize) -> Option<&'static IntxLine> {
+        let pin = self.interrupt_pin();
+        if !(1..=4).contains(&pin) {
+            return None;
+        }
+        let line: &'static IntxLine = alloc::boxed::Box::leak(alloc::boxed::Box::new(IntxLine {
+            live: AtomicBool::new(false),
+            gsi: AtomicU32::new(u32::MAX),
+        }));
+        let cmd = self.read16(0x04);
+        self.write16(0x04, cmd & !CMD_INTX_DISABLE);
+        let req = IntxRequest {
+            dev: (self.bus, self.dev, self.func),
+            pin: pin - 1,
+            name: alloc::string::String::from(name),
+            handler,
+            arg,
+            line,
+        };
+        let resolver = *INTX_RESOLVER.lock();
+        match resolver {
+            Some(r) => route_intx(&req, r),
+            None => INTX_PENDING.lock().push(req),
+        }
+        Some(line)
     }
 
     /// Maps a memory BAR (uncached) and returns its kernel virtual address.
@@ -159,6 +198,135 @@ impl Device {
             guard += 1;
         }
         out
+    }
+}
+
+// ------------------------------------------------------------ legacy INTx
+
+/// A device's legacy interrupt, once routed.
+pub struct IntxLine {
+    live: AtomicBool,
+    gsi: AtomicU32,
+}
+
+impl IntxLine {
+    /// True once interrupts arrive (until then, and if routing fails, poll).
+    pub fn live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+}
+
+struct IntxRequest {
+    dev: (u8, u8, u8),
+    /// 0–3 for INTA–INTD.
+    pin: u8,
+    name: alloc::string::String,
+    handler: fn(usize) -> bool,
+    arg: usize,
+    line: &'static IntxLine,
+}
+
+/// Where a bus-0 device's pin goes: `(device, pin)` → `(gsi, level, active_low)`.
+pub type IntxResolver = fn(u8, u8) -> Option<(u32, bool, bool)>;
+
+static INTX_PENDING: IrqMutex<Vec<IntxRequest>> = IrqMutex::new(Vec::new());
+static INTX_RESOLVER: IrqMutex<Option<IntxResolver>> = IrqMutex::new(None);
+
+/// A driver's INTx handler: the function, its argument, and the line it watches.
+type IntxHandler = (fn(usize) -> bool, usize, &'static IntxLine);
+
+/// One interrupt-controller input shared by any number of INTx handlers.
+struct SharedLine {
+    gsi: u32,
+    handlers: Vec<IntxHandler>,
+    /// Interrupts in a row nobody claimed (a stuck line gets masked).
+    unclaimed: u32,
+}
+
+static SHARED: IrqMutex<Vec<SharedLine>> = IrqMutex::new(Vec::new());
+
+fn shared_dispatch(index: usize) {
+    let mut lines = SHARED.lock();
+    let Some(l) = lines.get_mut(index) else { return };
+    let mut claimed = false;
+    for &(h, arg, _) in &l.handlers {
+        claimed |= h(arg);
+    }
+    if claimed {
+        l.unclaimed = 0;
+        return;
+    }
+    l.unclaimed += 1;
+    if l.unclaimed == 100_000 {
+        // Something we don't drive holds the line: mask it, and its drivers poll.
+        crate::arch::apic::mask_gsi(l.gsi);
+        for &(_, _, line) in &l.handlers {
+            line.live.store(false, Ordering::Release);
+        }
+        log!("pci", "GSI {}: interrupt storm nobody claims; masked (drivers poll)", l.gsi);
+    }
+}
+
+/// Follows a device's pin up through PCI-to-PCI bridges to bus 0 (the
+/// standard swizzle), where the firmware's routing table applies.
+fn root_pin(mut dev: (u8, u8, u8), mut pin: u8) -> Option<(u8, u8)> {
+    for _ in 0..8 {
+        if dev.0 == 0 {
+            return Some((dev.1, pin));
+        }
+        pin = (pin + dev.1) % 4;
+        let bridge = devices().into_iter().find(|b| {
+            b.class == 0x06 && b.subclass == 0x04 && (read32(b.bus, b.dev, b.func, 0x18) >> 8) as u8 == dev.0
+        })?;
+        dev = (bridge.bus, bridge.dev, bridge.func);
+    }
+    None
+}
+
+fn route_intx(req: &IntxRequest, resolver: IntxResolver) {
+    let Some((slot, pin)) = root_pin(req.dev, req.pin) else {
+        log!("pci", "{}: no route to the root bus for its interrupt; polling", req.name);
+        return;
+    };
+    let Some((gsi, level, active_low)) = resolver(slot, pin) else {
+        log!("pci", "{}: the firmware gives no route for INT{}; polling", req.name, (b'A' + pin) as char);
+        return;
+    };
+    let mut lines = SHARED.lock();
+    let index = match lines.iter().position(|l| l.gsi == gsi) {
+        Some(i) => i,
+        None => {
+            let index = lines.len();
+            let Some(vector) = crate::arch::irq::alloc("pci-intx", shared_dispatch, index) else {
+                log!("pci", "{}: no interrupt vector left; polling", req.name);
+                return;
+            };
+            lines.push(SharedLine { gsi, handlers: Vec::new(), unclaimed: 0 });
+            if !crate::arch::apic::route_gsi(gsi, vector, level, active_low) {
+                log!("pci", "{}: GSI {} is not on the I/O APIC; polling", req.name, gsi);
+                return;
+            }
+            index
+        }
+    };
+    lines[index].handlers.push((req.handler, req.arg, req.line));
+    drop(lines);
+    req.line.gsi.store(gsi, Ordering::Relaxed);
+    req.line.live.store(true, Ordering::Release);
+    // A device already holding its line up from before (while the pin was
+    // masked) would wait forever on some interrupt controllers, which only
+    // see a new rising level: run its handler once so it lets go.
+    x86_64::instructions::interrupts::without_interrupts(|| (req.handler)(req.arg));
+    log!("pci", "{}: INT{} → GSI {}", req.name, (b'A' + req.pin) as char, gsi);
+}
+
+/// Called by the ACPI task once the firmware's PCI routing is known: routes
+/// the lines drivers asked for so far, and later ones as they ask.
+pub fn set_intx_resolver(resolver: IntxResolver) {
+    *INTX_RESOLVER.lock() = Some(resolver);
+    let pending: Vec<IntxRequest> = INTX_PENDING.lock().drain(..).collect();
+    for req in &pending {
+        route_intx(req, resolver);
     }
 }
 

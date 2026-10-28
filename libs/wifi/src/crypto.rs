@@ -120,11 +120,25 @@ pub const CCMP_MIC: usize = 8;
 
 /// The 48-bit packet number from a CCMP header.
 pub fn ccmp_pn(h: &[u8]) -> u64 {
-    u64::from(h[0]) | u64::from(h[1]) << 8 | u64::from(h[4]) << 16 | u64::from(h[5]) << 24 | u64::from(h[6]) << 32 | u64::from(h[7]) << 40
+    u64::from(h[0])
+        | u64::from(h[1]) << 8
+        | u64::from(h[4]) << 16
+        | u64::from(h[5]) << 24
+        | u64::from(h[6]) << 32
+        | u64::from(h[7]) << 40
 }
 
 fn ccmp_header(pn: u64, key_id: u8) -> [u8; 8] {
-    [pn as u8, (pn >> 8) as u8, 0, 0x20 | (key_id & 3) << 6, (pn >> 16) as u8, (pn >> 24) as u8, (pn >> 32) as u8, (pn >> 40) as u8]
+    [
+        pn as u8,
+        (pn >> 8) as u8,
+        0,
+        0x20 | (key_id & 3) << 6,
+        (pn >> 16) as u8,
+        (pn >> 24) as u8,
+        (pn >> 32) as u8,
+        (pn >> 40) as u8,
+    ]
 }
 
 /// Nonce: priority || A2 || PN (most significant byte first).

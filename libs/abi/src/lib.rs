@@ -161,7 +161,14 @@ pub mod nr {
     pub const WIFI_CONNECT: usize = 74;
     /// `wifi_disconnect()`
     pub const WIFI_DISCONNECT: usize = 75;
-    pub const COUNT: usize = 76;
+    /// `gamepads(*mut GamepadInfo, max) -> count` — the game controllers connected now.
+    pub const GAMEPADS: usize = 76;
+    /// `gamepad_state(id, *mut GamepadState)` — `-ENODEV` once it is unplugged.
+    pub const GAMEPAD_STATE: usize = 77;
+    /// `gamepad_rumble(id, strong, weak, duration_ms)` — motors 0–255;
+    /// `-ENOSYS` for controllers without them.
+    pub const GAMEPAD_RUMBLE: usize = 78;
+    pub const COUNT: usize = 79;
 }
 
 #[repr(C)]
@@ -275,6 +282,69 @@ pub mod wifi {
     pub const UNSUPPORTED: u32 = 3;
 }
 
+/// Game controllers, in the standard layout (see [`GamepadState`]).
+pub mod gamepad {
+    /// Bits of [`super::GamepadState::buttons`]: face buttons by position
+    /// (Xbox A/B/X/Y, PlayStation cross/circle/square/triangle).
+    pub const SOUTH: u32 = 1 << 0;
+    pub const EAST: u32 = 1 << 1;
+    pub const WEST: u32 = 1 << 2;
+    pub const NORTH: u32 = 1 << 3;
+    pub const LEFT_SHOULDER: u32 = 1 << 4;
+    pub const RIGHT_SHOULDER: u32 = 1 << 5;
+    pub const LEFT_TRIGGER: u32 = 1 << 6;
+    pub const RIGHT_TRIGGER: u32 = 1 << 7;
+    pub const BACK: u32 = 1 << 8;
+    pub const START: u32 = 1 << 9;
+    pub const LEFT_STICK: u32 = 1 << 10;
+    pub const RIGHT_STICK: u32 = 1 << 11;
+    pub const UP: u32 = 1 << 12;
+    pub const DOWN: u32 = 1 << 13;
+    pub const LEFT: u32 = 1 << 14;
+    pub const RIGHT: u32 = 1 << 15;
+    pub const GUIDE: u32 = 1 << 16;
+    /// PlayStation touchpad click, Switch capture.
+    pub const EXTRA: u32 = 1 << 17;
+
+    /// [`super::GamepadInfo::family`]: what to call the buttons.
+    pub const GENERIC: u32 = 0;
+    pub const XBOX: u32 = 1;
+    pub const PLAYSTATION: u32 = 2;
+    pub const NINTENDO: u32 = 3;
+}
+
+/// A connected game controller, as `gamepads` lists it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GamepadInfo {
+    pub id: u32,
+    pub vendor: u16,
+    pub product: u16,
+    pub family: u32,
+    /// It has rumble motors.
+    pub rumble: u32,
+    pub name_len: u32,
+    pub name: [u8; 64],
+}
+
+impl Default for GamepadInfo {
+    fn default() -> Self {
+        GamepadInfo { id: 0, vendor: 0, product: 0, family: 0, rumble: 0, name_len: 0, name: [0; 64] }
+    }
+}
+
+/// A controller's state. Sticks run -32768..=32767 with right and down
+/// positive; triggers 0..=65535. `sequence` counts the reports received.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GamepadState {
+    pub buttons: u32,
+    /// Left X, left Y, right X, right Y.
+    pub axes: [i16; 4],
+    pub triggers: [u16; 2],
+    pub sequence: u32,
+}
+
 /// The Wi-Fi adapter's state, as `wifi_status` reports it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -290,7 +360,15 @@ pub struct WifiStatus {
 
 impl Default for WifiStatus {
     fn default() -> Self {
-        WifiStatus { state: 0, ssid_len: 0, ssid: [0; 32], message_len: 0, driver_len: 0, message: [0; 96], driver: [0; 48] }
+        WifiStatus {
+            state: 0,
+            ssid_len: 0,
+            ssid: [0; 32],
+            message_len: 0,
+            driver_len: 0,
+            message: [0; 96],
+            driver: [0; 48],
+        }
     }
 }
 
@@ -659,6 +737,14 @@ pub mod pref {
     /// Key repeat: delay before repeating (0–3 = 250–1000 ms) and rate (0 fastest – 31 slowest).
     pub const REPEAT_DELAY: &str = "repeat_delay";
     pub const REPEAT_RATE: &str = "repeat_rate";
+    /// Touchpads: tap to click ("1"/"0", default on).
+    pub const TAP_TO_CLICK: &str = "tap_to_click";
+    /// Touchpads: content follows the fingers ("1"/"0", default on).
+    pub const NATURAL_SCROLLING: &str = "natural_scrolling";
+    /// Touchpad tracking speed, 1–10 (default 5).
+    pub const TRACKING_SPEED: &str = "tracking_speed";
+    /// Mouse pointer speed, 1–10 (default 5: one pixel per count).
+    pub const POINTER_SPEED: &str = "pointer_speed";
     pub const CLOCK_24H: &str = "clock24";
     pub const CLOCK_SECONDS: &str = "clock_seconds";
     pub const CLOCK_DATE: &str = "clock_date";
@@ -736,7 +822,8 @@ pub mod event {
 /// A single input/window event. Field meaning depends on `kind`:
 /// - pointer events: `x`, `y` (window-local), `a` = button (1 left, 2 right), `b` = click count;
 ///   for `POINTER_MOVE`, `a` = 1 while the left button is held (a drag, delivered even outside the window)
-/// - `SCROLL`: `a` = wheel delta (positive = down)
+/// - `SCROLL`: `a` = whole wheel notches down, `b` = notches right (negative: up, left);
+///   `x`, `y` = the same in 1/120 notch, for smooth scrolling (touchpads)
 /// - `KEY`: `a` = [`input::KeyCode`] as u32, `b` = char (0 = none), `c` = pressed, `d` = modifier bits
 /// - `RESIZE`: `x` = width, `y` = height
 #[repr(C)]

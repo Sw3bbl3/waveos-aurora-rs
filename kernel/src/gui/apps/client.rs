@@ -112,8 +112,18 @@ impl App for ClientApp {
         }
         false
     }
-    fn scroll(&mut self, delta: i32, _area: Rect) -> bool {
-        server::push_event(self.id, Event { kind: event::SCROLL, a: delta as u32, ..Default::default() });
+    fn scroll(&mut self, notches: (i32, i32), precise: (i32, i32), _area: Rect) -> bool {
+        server::push_event(
+            self.id,
+            Event {
+                kind: event::SCROLL,
+                a: notches.1 as u32,
+                b: notches.0 as u32,
+                x: precise.0,
+                y: precise.1,
+                ..Default::default()
+            },
+        );
         false
     }
     fn focus(&mut self, focused: bool) {

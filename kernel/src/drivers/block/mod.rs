@@ -205,6 +205,14 @@ impl Dma {
         d.bytes_mut().fill(0);
         Some(d)
     }
+    /// A buffer below 4 GiB, for devices with 32-bit addresses (USB 1.1 controllers).
+    pub fn new32(bytes: usize) -> Option<Dma> {
+        let pages = (bytes as u64).div_ceil(PAGE_SIZE).max(1);
+        let phys = frame::alloc_contiguous_below(pages, 1 << 32)?;
+        let mut d = Dma { phys, pages };
+        d.bytes_mut().fill(0);
+        Some(d)
+    }
     pub fn len(&self) -> usize {
         (self.pages * PAGE_SIZE) as usize
     }

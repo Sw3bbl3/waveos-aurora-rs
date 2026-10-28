@@ -103,13 +103,6 @@ impl Files {
             fs::write(&fs::join(&source, &format!("sample-{i}.txt")), b"search fixture").map_err(io)?;
         }
         let mut app = Self::new(&source);
-        let mut env = Env {
-            now_ms: corekit::time::uptime_ms(),
-            focused: true,
-            screen: (1280, 800),
-            requests: Vec::new(),
-            mods: Default::default(),
-        };
         app.tabs[0].selection.insert(0);
         app.add();
         app.tabs[1].navigate(&destination, true);
@@ -121,24 +114,23 @@ impl Files {
             || corekit::process::list().into_iter().find(|p| p.user == 1 && p.pid == corekit::process::pid()).unwrap();
         let mut before = (0, 0);
         for i in 0..60 {
-            app.tabs[0].search.edit.set_text(if i % 2 == 0 { "sample" } else { "missing" });
+            app.tabs[0].query = String::from(if i % 2 == 0 { "sample" } else { "missing" });
             app.tabs[0].start_search();
             // Explicitly cross the production debounce deadline, then race
             // cancellation/switching against the real guest worker.
             corekit::time::sleep_ms(205);
-            env.now_ms = corekit::time::uptime_ms();
-            app.tick(&mut env);
+            app.background(corekit::time::uptime_ms());
             app.switch(1);
             app.switch(0);
             app.tabs[0].stop_search();
             let deadline = corekit::time::uptime_ms() + 5000;
             loop {
-                env.now_ms = corekit::time::uptime_ms();
-                app.tick(&mut env);
+                let now = corekit::time::uptime_ms();
+                app.background(now);
                 if app.worker.lock().is_none() {
                     break;
                 }
-                if env.now_ms > deadline {
+                if now > deadline {
                     return Err(String::from("search worker did not finish"));
                 }
                 corekit::time::sleep_ms(10);
@@ -236,13 +228,12 @@ impl Files {
         while app.transfers.lock().state.lock().conflict.is_none() {
             corekit::time::sleep_ms(10);
         }
-        if app.close_requested(&mut env) {
+        if app.ask_close() {
             return Err(String::from("window closed during transfer"));
         }
         app.cancel_close();
         loop {
-            env.now_ms = corekit::time::uptime_ms();
-            app.tick(&mut env);
+            app.background(corekit::time::uptime_ms());
             if !app.transfers.lock().busy() {
                 break;
             }

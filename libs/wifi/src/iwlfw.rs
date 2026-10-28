@@ -98,10 +98,13 @@ mod tests {
         let fw = parse(&f).unwrap();
         assert_eq!(fw.version, "77.ad46c98b.0");
         assert_eq!(fw.tlv_count, 4);
-        assert_eq!(fw.runtime, alloc::vec![
-            Section { offset: 0x40_0000, data: &[0xAA, 0xBB, 0xCC] },
-            Section { offset: 0x80_0000, data: &[0xDD] }
-        ]);
+        assert_eq!(
+            fw.runtime,
+            alloc::vec![
+                Section { offset: 0x40_0000, data: &[0xAA, 0xBB, 0xCC] },
+                Section { offset: 0x80_0000, data: &[0xDD] }
+            ]
+        );
         assert_eq!(fw.init.len(), 1);
         // Not firmware, and truncations, never panic.
         assert!(parse(b"hello").is_none());

@@ -22,9 +22,9 @@ fn main(_: corekit::Args) -> i32 {
 }
 fn run() -> Result<(), String> {
     let io = |e: corekit::Error| format!("{e}");
-    let fixture = fs::read("/System/Developer/Examples/AuroraKitGallery.gina").map_err(io)?;
+    let fixture = fs::read("/System/Developer/Examples/WaveUIGallery.gina").map_err(io)?;
     let parsed = gina::Package::parse(&fixture).map_err(ToString::to_string)?;
-    let id = format!("dev.constellation.check-p{}-t{}", corekit::process::pid(), corekit::time::uptime_ms());
+    let id = format!("dev.wavesdk.check-p{}-t{}", corekit::process::pid(), corekit::time::uptime_ms());
     let mut manifest = parsed.manifest.clone();
     manifest.id = id.clone();
     manifest.name = "GINA installation test".into();

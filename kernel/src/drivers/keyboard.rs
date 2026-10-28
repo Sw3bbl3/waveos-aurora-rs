@@ -114,6 +114,10 @@ impl Decoder {
                 0x22 => KeyCode::PlayPause,
                 0x19 => KeyCode::NextTrack,
                 0x10 => KeyCode::PrevTrack,
+                0x6A => KeyCode::Back,
+                0x69 => KeyCode::Forward,
+                0x5F => KeyCode::Sleep,
+                0x5E => KeyCode::Power,
                 _ => KeyCode::Unknown,
             }
         } else {
@@ -166,9 +170,13 @@ impl Decoder {
             KeyCode::Alt if ext => self.altgr = pressed,
             KeyCode::Alt => self.mods.alt = pressed,
             KeyCode::Super => self.mods.super_key = pressed,
-            KeyCode::CapsLock if pressed => self.mods.caps = !self.mods.caps,
+            KeyCode::CapsLock if pressed => {
+                super::input::toggle_caps();
+            }
             _ => {}
         }
+        // One Caps Lock for every keyboard.
+        self.mods.caps = super::input::caps();
 
         let ch = match code {
             KeyCode::Char if !pressed => None,

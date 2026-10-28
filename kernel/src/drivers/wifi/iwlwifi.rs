@@ -53,7 +53,11 @@ const MODELS: &[Model] = &[
     Model { ids: &[0x24F3], name: "Intel Wireless 8260", firmware: "iwlwifi-8000C" },
     Model { ids: &[0x24FD], name: "Intel Wireless 8265", firmware: "iwlwifi-8265" },
     Model { ids: &[0x2526], name: "Intel Wireless-AC 9260", firmware: "iwlwifi-9260-th-b0-jf-b0" },
-    Model { ids: &[0x9DF0, 0xA370, 0x30DC, 0x31DC], name: "Intel Wireless-AC 9560", firmware: "iwlwifi-9000-pu-b0-jf-b0" },
+    Model {
+        ids: &[0x9DF0, 0xA370, 0x30DC, 0x31DC],
+        name: "Intel Wireless-AC 9560",
+        firmware: "iwlwifi-9000-pu-b0-jf-b0",
+    },
     Model { ids: &[0x2723], name: "Intel Wi-Fi 6 AX200", firmware: "iwlwifi-cc-a0" },
     Model {
         ids: &[0x02F0, 0x06F0, 0x34F0, 0x3DF0, 0x43F0, 0x4DF0, 0xA0F0],
@@ -61,7 +65,11 @@ const MODELS: &[Model] = &[
         firmware: "iwlwifi-QuZ-a0-hr-b0",
     },
     Model { ids: &[0x2725], name: "Intel Wi-Fi 6E AX210", firmware: "iwlwifi-ty-a0-gf-a0" },
-    Model { ids: &[0x51F0, 0x54F0, 0x7A70, 0x7AF0, 0x7E40], name: "Intel Wi-Fi 6E AX211", firmware: "iwlwifi-so-a0-gf-a0" },
+    Model {
+        ids: &[0x51F0, 0x54F0, 0x7A70, 0x7AF0, 0x7E40],
+        name: "Intel Wi-Fi 6E AX211",
+        firmware: "iwlwifi-so-a0-gf-a0",
+    },
 ];
 
 struct Iwl {
@@ -141,9 +149,12 @@ fn find_firmware(model: &Model) -> Result<String, String> {
     let Some((_, file)) = best else {
         return Err(format!("Firmware is not installed ({}-*.ucode in {FIRMWARE_DIR})", model.firmware));
     };
-    let data = crate::fs::read_all(&crate::fs::join(FIRMWARE_DIR, &file)).map_err(|_| format!("{file} could not be read"))?;
+    let data =
+        crate::fs::read_all(&crate::fs::join(FIRMWARE_DIR, &file)).map_err(|_| format!("{file} could not be read"))?;
     match aurora_wifi::iwlfw::parse(&data) {
-        Some(fw) if !fw.runtime.is_empty() => Ok(format!("{file}, version {}, {} sections", fw.version, fw.runtime.len())),
+        Some(fw) if !fw.runtime.is_empty() => {
+            Ok(format!("{file}, version {}, {} sections", fw.version, fw.runtime.len()))
+        }
         _ => Err(format!("{file} is not a valid Intel firmware file")),
     }
 }

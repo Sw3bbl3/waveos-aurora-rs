@@ -54,32 +54,32 @@ name = "app-about"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
 name = "app-activity"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
 name = "app-calculator"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
 name = "app-clock"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -87,17 +87,17 @@ name = "app-files"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
 name = "app-installer"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
  "gina",
+ "waveui",
 ]
 
 [[package]]
@@ -106,9 +106,9 @@ version = "0.8.0"
 dependencies = [
  "aurora-help",
  "aurora-image",
- "aurorakit",
  "corekit",
  "nebula-engine",
+ "waveui",
 ]
 
 [[package]]
@@ -116,19 +116,19 @@ name = "app-nebula"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
  "nebula-engine",
  "nebula-media",
  "nebula-web",
+ "waveui",
 ]
 
 [[package]]
 name = "app-notes"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -136,9 +136,9 @@ name = "app-paint"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
  "libm",
+ "waveui",
 ]
 
 [[package]]
@@ -146,8 +146,8 @@ name = "app-preview"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -155,34 +155,34 @@ name = "app-settings"
 version = "0.8.0"
 dependencies = [
  "aurora-image",
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
 name = "app-studio"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
- "constellation-sdk",
  "corekit",
  "gina",
+ "wavesdk",
+ "waveui",
 ]
 
 [[package]]
 name = "app-terminal"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
 name = "app-welcome"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -300,23 +300,6 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
-
-[[package]]
-name = "constellation"
-version = "0.8.0"
-dependencies = [
- "constellation-sdk",
- "corekit",
- "gina",
-]
-
-[[package]]
-name = "constellation-sdk"
-version = "0.8.0"
-dependencies = [
- "corekit",
- "gina",
-]
 
 [[package]]
 name = "core_maths"
@@ -561,8 +544,8 @@ dependencies = [
 name = "gina-demo"
 version = "0.8.0"
 dependencies = [
- "aurorakit",
  "corekit",
+ "waveui",
 ]
 
 [[package]]
@@ -1243,6 +1226,33 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "wavesdk"
+version = "0.8.0"
+dependencies = [
+ "corekit",
+ "gina",
+]
+
+[[package]]
+name = "wavesdk-cli"
+version = "0.8.0"
+dependencies = [
+ "corekit",
+ "gina",
+ "wavesdk",
+]
+
+[[package]]
+name = "waveui"
+version = "0.8.0"
+dependencies = [
+ "aurora-image",
+ "aurorakit",
+ "corekit",
+ "lumen",
+]
 
 [[package]]
 name = "wide"

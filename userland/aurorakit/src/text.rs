@@ -854,6 +854,10 @@ pub struct TextField {
     pub placeholder: String,
     /// A password field: shows bullets and won't copy or cut.
     pub secure: bool,
+    /// Space before the text (room for a search glyph, say).
+    pub inset: i32,
+    /// Corner radius (a capsule for search fields).
+    pub radius: i32,
     scroll_x: i32,
     rect: Rect,
     caret_on: bool,
@@ -868,6 +872,8 @@ impl TextField {
             edit: TextEdit::new(text, false),
             placeholder: String::from(placeholder),
             secure: false,
+            inset: 12,
+            radius: 8,
             scroll_x: 0,
             rect: Rect::new(0, 0, 0, 0),
             caret_on: true,
@@ -910,7 +916,7 @@ impl TextField {
     fn pos_at(&self, x: i32) -> usize {
         let text = self.edit.text();
         let stops = Self::font().caret_stops(&self.shown());
-        let rel = x - (self.rect.x + 12) + self.scroll_x;
+        let rel = x - (self.rect.x + self.inset) + self.scroll_x;
         for (k, (i, _)) in text.char_indices().enumerate() {
             if rel < (stops[k] + stops[k + 1]) / 2 {
                 return i;
@@ -923,9 +929,13 @@ impl TextField {
         self.rect = r;
         let t = theme::current();
         let f = Self::font();
-        cv.fill_round_rect(r, 8, t.control_bg);
-        cv.stroke_round_rect(r, 8, if focused { with_alpha(theme::accent(), 0xC0) } else { t.control_border });
-        let inner = Rect::new(r.x + 12, r.y, r.w - 24, r.h);
+        cv.fill_round_rect(r, self.radius, t.control_bg);
+        cv.stroke_round_rect(
+            r,
+            self.radius,
+            if focused { with_alpha(theme::accent(), 0xC0) } else { t.control_border },
+        );
+        let inner = Rect::new(r.x + self.inset, r.y, r.w - self.inset - 12, r.h);
         let base = r.y + (r.h + f.ascent as i32 + f.descent as i32) / 2;
         let shown = self.shown();
         let text = self.edit.text();

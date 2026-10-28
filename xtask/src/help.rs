@@ -186,7 +186,12 @@ pub fn build(root: &Path) -> Result<PathBuf, String> {
         html::push_html(&mut body, events.into_iter());
         let title = headings[0].1.clone();
         let language = if locale == "en" { "English" } else { "Français (Canada)" };
-        let html=format!("<!doctype html><html lang=\"{locale}\"><head><meta charset=\"utf-8\"><title>{}</title><style>body{{font-family:sans-serif;font-size:16px;line-height:1.55;max-width:850px;margin:24px auto;padding:0 20px;color:#202331}}h1{{font-size:30px}}h2{{font-size:23px;margin-top:28px}}a{{color:#5550c8}}pre{{background:#edf0f6;padding:16px;white-space:pre-wrap}}code{{font-family:monospace}}img{{max-width:100%;height:auto}}table{{width:100%;border-collapse:collapse}}td,th{{padding:8px;border:1px solid #c8cad4}}nav{{margin-bottom:24px}}</style></head><body><nav><a href=\"../index.html\">WaveOS Learn · {language}</a></nav>{body}</body></html>",escape(&title));
+        let category = id.split('-').next().unwrap();
+        let html = format!(
+            "<!doctype html><html lang=\"{locale}\"><head><meta charset=\"utf-8\"><title>{}</title><style>{STYLE}</style></head><body><nav><a href=\"../index.html\">WaveOS Learn</a> · {language}</nav><main><p class=\"eyebrow\">{}</p>{body}</main></body></html>",
+            escape(&title),
+            category_name(category, locale)
+        );
         fs::create_dir_all(out.join(locale)).map_err(|e| e.to_string())?;
         fs::write(out.join(locale).join(format!("{id}.html")), html).map_err(|e| e.to_string())?;
         catalog.push(Article {
@@ -201,21 +206,112 @@ pub fn build(root: &Path) -> Result<PathBuf, String> {
     }
     catalog.sort_by(|a, b| a.locale.cmp(&b.locale).then(a.id.cmp(&b.id)));
     fs::write(out.join("catalog.json"), serde_json::to_vec(&catalog).unwrap()).map_err(|e| e.to_string())?;
-    let mut index=String::from("<!doctype html><html><head><meta charset=\"utf-8\"><title>WaveOS Learn 0.7</title></head><body><h1>WaveOS Learn 0.7</h1>");
+    let mut index = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>WaveOS Learn</title><style>{STYLE}</style></head><body><main><p class=\"eyebrow\">WaveOS 0.9</p><h1>WaveOS Learn</h1><p class=\"lead\">Guides for using, managing and building for WaveOS.</p>"
+    );
     for locale in ["en", "fr-CA"] {
-        index.push_str(&format!("<h2>{}</h2><ul>", if locale == "en" { "English" } else { "Français (Canada)" }));
+        index.push_str(&format!("<h2>{}</h2>", if locale == "en" { "English" } else { "Français (Canada)" }));
         let mut search = String::new();
+        let mut section = "";
         for a in catalog.iter().filter(|a| a.locale == locale) {
+            if a.category != section {
+                if !section.is_empty() {
+                    index.push_str("</ul>");
+                }
+                section = &a.category;
+                index.push_str(&format!("<h3>{}</h3><ul>", category_name(section, locale)));
+            }
             index.push_str(&format!("<li><a href=\"{}\">{}</a></li>", a.path, escape(&a.title)));
             search.push_str(&format!("{}\t{}\t{}\n", a.id, a.title, a.text.replace('\n', " ")));
         }
-        index.push_str("</ul>");
+        if !section.is_empty() {
+            index.push_str("</ul>");
+        }
         fs::write(out.join(format!("search-{locale}.txt")), search).map_err(|e| e.to_string())?;
     }
-    index.push_str("</body></html>");
+    index.push_str("</main></body></html>");
     fs::write(out.join("index.html"), index).map_err(|e| e.to_string())?;
     Ok(out)
 }
+/// The handbook's look: a soft page, a rounded white sheet, an accent
+/// eyebrow over a large title, rounded code and callouts. Learn swaps the
+/// colour and size tokens for the reader's text size and dark appearance,
+/// so keep them in step with `load_doc` in userland/apps/learn.
+const STYLE: &str = "body{font-family:sans-serif;font-size:16px;line-height:1.6;margin:0;padding:20px;background:#f6f7fb;color:#202331}\
+nav{max-width:820px;margin:0 auto 12px auto;font-size:13px;color:#6b7084}\
+main{max-width:820px;margin:0 auto;padding:28px 36px;background:#ffffff;border:1px solid #e3e6ee;border-radius:18px}\
+.eyebrow{margin:0;font-size:13px;font-weight:bold;text-transform:uppercase;color:#5550c8}\
+.lead{color:#6b7084}\
+h1{font-size:30px;margin:4px 0 16px 0}\
+h2{font-size:23px;margin:32px 0 8px 0}\
+h3{font-size:19px;margin:24px 0 6px 0}\
+a{color:#5550c8;text-decoration:none}\
+pre{background:#edf0f6;border-radius:12px;padding:14px 16px;white-space:pre-wrap}\
+code{font-family:monospace}\
+blockquote{margin:16px 0;padding:10px 16px;background:#eeedfb;border:1px solid #d9d6f6;border-radius:12px}\
+blockquote p{margin:0}\
+img{max-width:100%;height:auto;border-radius:12px}\
+table{width:100%;border-collapse:collapse;border:1px solid #e3e6ee;border-radius:12px}\
+th{background:#edf0f6;text-align:left}\
+td,th{padding:8px 12px;vertical-align:top}\
+li{margin:4px 0}";
+
+fn category_name(category: &str, locale: &str) -> &'static str {
+    let fr = locale != "en";
+    match category {
+        "start" => {
+            if fr {
+                "Premiers pas"
+            } else {
+                "Get started"
+            }
+        }
+        "desktop" => {
+            if fr {
+                "Bureau"
+            } else {
+                "Desktop"
+            }
+        }
+        "apps" => {
+            if fr {
+                "Applications"
+            } else {
+                "Apps"
+            }
+        }
+        "system" => {
+            if fr {
+                "Système"
+            } else {
+                "System"
+            }
+        }
+        "developer" => {
+            if fr {
+                "Développeurs"
+            } else {
+                "Developers"
+            }
+        }
+        "reference" => {
+            if fr {
+                "Référence"
+            } else {
+                "Reference"
+            }
+        }
+        "release" => {
+            if fr {
+                "Notes de version"
+            } else {
+                "Release notes"
+            }
+        }
+        _ => "Guide",
+    }
+}
+
 pub fn bundle(t: &mut crate::tar::Tar, root: &Path) {
     let help = build(root).unwrap_or_else(|e| panic!("documentation: {e}"));
     fn walk(t: &mut crate::tar::Tar, path: &Path, dest: &str) {

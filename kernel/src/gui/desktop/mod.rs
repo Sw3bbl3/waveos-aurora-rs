@@ -125,6 +125,8 @@ pub struct Desktop {
     windows: Vec<Window>,
     mru: Vec<u32>,
     switcher: Option<Switcher>,
+    /// Scrolling not yet a whole notch: the window it is for, and the amounts.
+    scroll: (Option<u32>, i32, i32),
     next_id: u32,
     cursor: (i32, i32),
     buttons: u8,
@@ -203,6 +205,7 @@ impl Desktop {
             windows: Vec::new(),
             mru: Vec::new(),
             switcher: None,
+            scroll: (None, 0, 0),
             next_id: 1,
             cursor: (w / 2, h / 2),
             buttons: 0,
@@ -864,7 +867,8 @@ impl Desktop {
     pub fn handle(&mut self, ev: InputEvent, now_ms: u64) {
         self.now_ms = now_ms;
         match ev {
-            InputEvent::Pointer { x, y, buttons, wheel } => self.pointer(x, y, buttons, wheel),
+            InputEvent::Pointer { x, y, buttons } => self.pointer(x, y, buttons),
+            InputEvent::Scroll { dx, dy } => self.scroll(dx, dy),
             InputEvent::Key(k) => self.key(k),
         }
         if self.shore.is_none() {
@@ -872,7 +876,7 @@ impl Desktop {
         }
     }
 
-    fn pointer(&mut self, x: i32, y: i32, buttons: u8, wheel: i8) {
+    fn pointer(&mut self, x: i32, y: i32, buttons: u8) {
         let x = x.clamp(0, self.w - 1);
         let y = y.clamp(0, self.h - 1);
         let moved = (x, y) != self.cursor;
@@ -929,12 +933,30 @@ impl Desktop {
                 }
             }
         }
-        if wheel != 0 && self.switcher.is_none() {
-            if let Some(w) = self.window_at(x, y) {
-                let id = self.windows[w].id;
-                self.with_app(id, |app, area, _| app.scroll(wheel as i32, area));
-            }
+    }
+
+    /// Scrolling (1/120 notch units) for the window under the pointer: whole
+    /// notches for apps that step, and the exact amount for smooth ones.
+    fn scroll(&mut self, dx: i32, dy: i32) {
+        use crate::drivers::input::NOTCH;
+        if self.shore.is_some() || self.switcher.is_some() {
+            return;
         }
+        let (x, y) = self.cursor;
+        let Some(w) = self.window_at(x, y) else {
+            self.scroll = (None, 0, 0);
+            return;
+        };
+        let id = self.windows[w].id;
+        if self.scroll.0 != Some(id) {
+            self.scroll = (Some(id), 0, 0);
+        }
+        self.scroll.1 += dx;
+        self.scroll.2 += dy;
+        let notches = (self.scroll.1 / NOTCH, self.scroll.2 / NOTCH);
+        self.scroll.1 %= NOTCH;
+        self.scroll.2 %= NOTCH;
+        self.with_app(id, |app, area, _| app.scroll(notches, (dx, dy), area));
     }
 
     fn window_at(&self, x: i32, y: i32) -> Option<usize> {

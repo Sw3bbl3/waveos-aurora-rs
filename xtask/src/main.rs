@@ -10,6 +10,8 @@
 //!       --audio-wav PATH                  record guest audio to a WAV file
 //!       --gpu std|virtio                  display adapter (default std; virtio runs the ported Linux driver)
 //!       --wifi-sim                        simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
+//!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
+//!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
 //!       --headless --no-build --debug --gdb --int
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
@@ -24,6 +26,7 @@ mod monitor;
 mod package;
 mod sounds;
 mod tar;
+mod usbredir;
 
 use std::env;
 use std::fs;
@@ -71,6 +74,13 @@ fn main() {
         exit(2);
     }
 
+    let usb =
+        args.iter().position(|a| a == "--usb").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("xhci");
+    if !["xhci", "ehci", "ehci-ohci", "ohci", "uhci"].contains(&usb) {
+        eprintln!("--usb must be xhci, ehci, ehci-ohci, ohci or uhci");
+        exit(2);
+    }
+
     match args.first().map(String::as_str) {
         Some("docs") => {
             println!("{}", help::build(&root()).unwrap_or_else(|e| panic!("{e}")).display());
@@ -105,7 +115,8 @@ fn main() {
                 prepare_disk(&esp, &img, flag("--fresh-disk"), size);
             }
             // Simulated Wi-Fi networks (the kernel's software radio).
-            image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" }).expect("write boot.conf");
+            image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
+                .expect("write boot.conf");
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
             let opts = RunOpts {
                 memory_mib: number("--memory-mib", 4096, 256, 32768),
@@ -135,6 +146,8 @@ fn main() {
                 net,
                 netdev_extra: String::new(),
                 gpu,
+                usb,
+                virtual_hid: Vec::new(),
                 usb_stick: flag("--usb-stick").then(|| {
                     let stick = root().join("target/usb-stick.img");
                     image::create_usb_stick(&stick).expect("USB stick image");
@@ -188,7 +201,7 @@ fn main() {
             }
             println!("wrote {}", out.display());
         }
-        Some("test") => test(profile, disk, smp, net, gpu),
+        Some("test") => test(profile, disk, smp, net, gpu, usb),
         Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
@@ -406,7 +419,9 @@ fn build_userland(profile: Profile) -> Vec<Program> {
     for entry in fs::read_dir(&out_dir).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if !path.is_file() || name.contains('.') || name.starts_with("lib") {
+        // `constellation` is the WaveSDK command's old name: an alias below,
+        // never a leftover binary from an older build.
+        if !path.is_file() || name.contains('.') || name.starts_with("lib") || name == "constellation" {
             continue;
         }
         let dest = match name.strip_prefix("app-") {
@@ -417,6 +432,9 @@ fn build_userland(profile: Profile) -> Vec<Program> {
             }
             None => format!("Bin/{name}"),
         };
+        if name == "wavesdk" {
+            programs.push((String::from("Bin/constellation"), path.clone()));
+        }
         programs.push((dest, path));
     }
     programs.sort();
@@ -515,8 +533,8 @@ fn system_image(programs: &[Program], out: &Path) {
     if let Some((_, elf)) = programs.iter().find(|(p, _)| p == "Bin/gina-demo") {
         let manifest = gina::Manifest {
             id: "dev.example.gallery".into(),
-            name: "AuroraKit Gallery".into(),
-            developer: "Constellation SDK Example".into(),
+            name: "WaveUI Gallery".into(),
+            developer: "WaveSDK Example".into(),
             version: "1.0.0".into(),
             entry: "bin/app".into(),
             icon: String::new(),
@@ -525,7 +543,7 @@ fn system_image(programs: &[Program], out: &Path) {
         };
         let executable = fs::read(elf).unwrap();
         let package = gina::pack(&manifest, &[("bin/app", &executable)]).expect("package gallery");
-        t.file("Developer/Examples/AuroraKitGallery.gina", &package);
+        t.file("Developer/Examples/WaveUIGallery.gina", &package);
     }
     t.finish(out).expect("write system.tar");
 }
@@ -549,6 +567,7 @@ fn bundle_sdk(t: &mut tar::Tar) {
     for relative in [
         "userland/corekit",
         "userland/aurorakit",
+        "userland/waveui",
         "libs/abi",
         "libs/elf",
         "libs/gfx",
@@ -567,12 +586,12 @@ fn bundle_sdk(t: &mut tar::Tar) {
     let user = fs::read_to_string(base.join("userland/Cargo.toml")).unwrap();
     let user = user
         .lines()
-        .map(|l| if l.starts_with("members =") { "members = [\"corekit\", \"aurorakit\"]" } else { l })
+        .map(|l| if l.starts_with("members =") { "members = [\"corekit\", \"aurorakit\", \"waveui\"]" } else { l })
         .collect::<Vec<_>>()
         .join("\n");
     t.file("Developer/SDK/userland/Cargo.toml", user.as_bytes());
     t.file("Developer/SDK/Cargo.toml",b"[workspace]\nmembers = [\"libs/*\"]\nresolver = \"2\"\n[workspace.package]\nversion = \"0.8.0\"\nedition = \"2021\"\nlicense = \"MIT\"\n");
-    t.file("Developer/STATUS.txt",b"Constellation SDK\nNative project editing, UI design and GINA packaging/installation are available.\nThe native Rust/LLVM toolchain and source debugger have not been ported.\nBuild operations fail explicitly until the native toolchain is installed.\nThe gallery package is precompiled on the build host, not compiled inside WaveOS.\n");
+    t.file("Developer/STATUS.txt",b"WaveSDK\nNative project editing, declarative interfaces (WaveUI), UI design and GINA packaging/installation are available.\nThe native Rust/LLVM toolchain and source debugger have not been ported.\nBuild operations fail explicitly until the native toolchain is installed.\nThe gallery package is precompiled on the build host, not compiled inside WaveOS.\n");
 }
 
 /// Mozilla's root CAs (via webpki-roots) for HTTPS, in nebula-secure's
@@ -660,6 +679,11 @@ struct RunOpts<'a> {
     netdev_extra: String,
     /// Display adapter: std (Bochs VGA) or virtio (virtio-vga, driven by the ported Linux driver).
     gpu: &'a str,
+    /// USB controller: xhci, ehci (with UHCI companions), ehci-ohci (with an OHCI one), ohci or uhci.
+    usb: &'a str,
+    /// Virtual USB devices (keyboard with media keys, touchpad, game
+    /// controllers) served over usb-redir, behind the hub.
+    virtual_hid: Vec<(usbredir::Kind, PathBuf)>,
 }
 
 /// The host's own sound output, for interactive runs.
@@ -707,12 +731,49 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     };
     cmd.arg("-audiodev").arg(backend);
     cmd.args(["-device", "ich9-intel-hda", "-device", "hda-output,audiodev=snd"]);
-    // USB 3 controller: a tablet (absolute pointer) and, behind a hub, a keyboard.
-    cmd.args(["-device", "qemu-xhci,id=xhci", "-device", "usb-tablet,bus=xhci.0,port=1"]);
-    cmd.args(["-device", "usb-hub,bus=xhci.0,port=3", "-device", "usb-kbd,bus=xhci.0,port=3.1"]);
+    // A USB controller with a tablet (absolute pointer), a hub with a
+    // keyboard behind it, and the USB stick.
+    let (bus, tablet, hub, stick_port) = match opts.usb {
+        "ehci" => {
+            // An ICH9 EHCI with its three UHCI companions: the high-speed
+            // tablet and stick stay on EHCI; the full-speed hub (and the
+            // keyboard behind it) is handed to a companion.
+            cmd.args(["-device", "ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on"]);
+            for (i, f) in [(1, 0), (2, 1), (3, 2)] {
+                cmd.arg("-device").arg(format!(
+                    "ich9-usb-uhci{i},masterbus=ehci.0,firstport={},addr=1d.{f},multifunction=on",
+                    (i - 1) * 2
+                ));
+            }
+            ("ehci.0", "2", "3", "1")
+        }
+        "ehci-ohci" => {
+            // VirtualBox's USB 2.0 controller: an EHCI with an OHCI companion.
+            cmd.args(["-device", "ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on"]);
+            cmd.args(["-device", "pci-ohci,masterbus=ehci.0,firstport=0,num-ports=6,addr=1d.0,multifunction=on"]);
+            ("ehci.0", "2", "3", "1")
+        }
+        "ohci" => {
+            cmd.args(["-device", "pci-ohci,id=ohci,num-ports=4"]);
+            ("ohci.0", "2", "3", "1")
+        }
+        "uhci" => {
+            // Two ports: the stick, and a hub with the tablet and keyboard.
+            cmd.args(["-device", "piix3-usb-uhci,id=uhci"]);
+            ("uhci.0", "2.2", "2", "1")
+        }
+        _ => {
+            cmd.args(["-device", "qemu-xhci,id=xhci"]);
+            ("xhci.0", "1", "3", "2")
+        }
+    };
+    cmd.arg("-device").arg(format!("usb-hub,bus={bus},port={hub}"));
+    cmd.arg("-device").arg(format!("usb-tablet,bus={bus},port={tablet}"));
+    cmd.arg("-device").arg(format!("usb-kbd,bus={bus},port={hub}.1"));
+    cmd.args(usbredir::qemu_args(&opts.virtual_hid, bus, hub));
     if let Some(stick) = &opts.usb_stick {
         cmd.arg("-drive").arg(format!("id=stick,if=none,format=raw,file={}", stick.display()));
-        cmd.args(["-device", "usb-storage,bus=xhci.0,port=2,drive=stick"]);
+        cmd.arg("-device").arg(format!("usb-storage,bus={bus},port={stick_port},drive=stick"));
     }
     if let Some(source) = opts.host_battery {
         let page = battery::start(source, root().join("target/battery-page"));
@@ -846,10 +907,10 @@ fn inbound_check(port: u16) {
     });
 }
 
-fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str) {
+fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str) {
     let esp = build(profile, true);
     let img = root().join("target/test-disk.img");
-    println!("running kernel tests with the disk on {disk}, network {net}, display {gpu}");
+    println!("running kernel tests with the disk on {disk}, network {net}, display {gpu}, USB on {usb}");
     let http_port = start_test_http_server();
     let fwd_port = free_port();
     // AURORA_TEST_SLEEP=off skips the sleep test (firmware that can't resume).
@@ -866,7 +927,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str) {
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let output = match run_tests_once(&img, disk, smp, net, gpu, fwd_port) {
+            let output = match run_tests_once(&img, disk, smp, net, gpu, usb, fwd_port) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
                     // The firmware never handed back control: some OVMF builds
@@ -928,7 +989,15 @@ fn recorded_peak(path: &Path) -> i32 {
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
 /// as an error if the tests failed or timed out.
-fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, gpu: &str, fwd_port: u16) -> Result<String, String> {
+fn run_tests_once(
+    img: &Path,
+    disk: &str,
+    smp: u32,
+    net: &str,
+    gpu: &str,
+    usb: &str,
+    fwd_port: u16,
+) -> Result<String, String> {
     use std::io::{BufRead, BufReader};
     let audio = root().join("target/test-audio.wav");
     let _ = fs::remove_file(&audio);
@@ -946,6 +1015,8 @@ fn run_tests_once(img: &Path, disk: &str, smp: u32, net: &str, gpu: &str, fwd_po
         net,
         netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
         gpu,
+        usb,
+        virtual_hid: usbredir::ALL.iter().map(|&k| (k, usbredir::start(k, &root().join("target")))).collect(),
         battery: true,
         host_battery: None,
         usb_stick: Some({

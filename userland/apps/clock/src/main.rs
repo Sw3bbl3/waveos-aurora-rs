@@ -13,17 +13,14 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use aurorakit::canvas::{with_alpha, Canvas};
-use aurorakit::geom::Rect;
-use aurorakit::math::sin;
-use aurorakit::text::TextField;
-use aurorakit::theme;
-use aurorakit::widgets::{self, button, ButtonStyle};
-use aurorakit::{App, Env, KeyCode, KeyEvent};
 use corekit::abi::pref;
 use corekit::{fs, prefs, time};
+use waveui::lumen::canvas::{with_alpha, Canvas as Surface};
+use waveui::lumen::math::sin;
+use waveui::lumen::theme;
+use waveui::prelude::*;
+use waveui::style::Weight;
 
-const TOOLBAR_H: i32 = 52;
 const ALARMS: &str = "/Settings/clock.conf";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,8 +65,8 @@ struct Timer {
     label: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Hit {
+#[derive(Clone)]
+pub enum Msg {
     Tab(usize),
     StartStop,
     LapReset,
@@ -77,22 +74,23 @@ enum Hit {
     TimerToggle(usize),
     TimerCancel(usize),
     AddAlarm,
-    AlarmToggle(usize),
+    AlarmToggle(usize, bool),
     AlarmDelete(usize),
-    SheetStep(usize, i32),
+    SheetHour(i64),
+    SheetMinute(i64),
+    SheetLabel(String),
     SheetSave,
     SheetCancel,
 }
 
 struct Sheet {
-    hour: i32,
-    minute: i32,
-    label: TextField,
+    hour: i64,
+    minute: i64,
+    label: String,
 }
 
 pub struct Clock {
     tab: Tab,
-    hover: Option<Hit>,
     // Stopwatch.
     sw_start: Option<u64>,
     sw_accum: u64,
@@ -101,7 +99,6 @@ pub struct Clock {
     timers: Vec<Timer>,
     alarms: Vec<Alarm>,
     sheet: Option<Sheet>,
-    area: Rect,
     last_second: u8,
 }
 
@@ -135,7 +132,7 @@ fn fmt_time(h: u32, m: u32, h24: bool) -> String {
 }
 
 /// Draws an analog clock face.
-fn face(cv: &mut Canvas, cx: i32, cy: i32, r: i32, (h, m, s): (u32, u32, Option<u32>), dark_face: bool) {
+fn face(cv: &mut Surface, cx: i32, cy: i32, r: i32, (h, m, s): (u32, u32, Option<u32>), dark_face: bool) {
     let t = theme::current();
     let (bg, fg) = if dark_face { (0xFF1C_1C22, 0xFFF4_F4F8) } else { (0xFFFF_FFFF, 0xFF1D_1D24) };
     cv.fill_circle(cx, cy + 2, r + 1, with_alpha(0x000000, 0x30));
@@ -151,7 +148,7 @@ fn face(cv: &mut Canvas, cx: i32, cy: i32, r: i32, (h, m, s): (u32, u32, Option<
         let (x1, y1) = (cx + (r - 4 - len) * sin(a + 256) / 16384, cy + (r - 4 - len) * sin(a) / 16384);
         cv.line(x0, y0, x1, y1, w, with_alpha(fg, if k % 5 == 0 { 0xFF } else { 0x80 }));
     }
-    let hand = |cv: &mut Canvas, turns_1024: i32, len: i32, w: i32, c: u32| {
+    let hand = |cv: &mut Surface, turns_1024: i32, len: i32, w: i32, c: u32| {
         let a = turns_1024 - 256;
         cv.line(cx, cy, cx + len * sin(a + 256) / 16384, cy + len * sin(a) / 16384, w, c);
     };
@@ -171,14 +168,12 @@ impl Clock {
     fn new() -> Self {
         let mut c = Clock {
             tab: Tab::World,
-            hover: None,
             sw_start: None,
             sw_accum: 0,
             laps: Vec::new(),
             timers: Vec::new(),
             alarms: Vec::new(),
             sheet: None,
-            area: Rect::new(0, 0, 780, 540),
             last_second: 99,
         };
         c.load_alarms();
@@ -212,378 +207,8 @@ impl Clock {
         self.sw_accum + self.sw_start.map(|s| time::uptime_ms() - s).unwrap_or(0)
     }
 
-    fn tabs(area: Rect) -> Rect {
-        Rect::new(area.x + (area.w - 440) / 2, area.y + 11, 440, 30)
-    }
-
-    fn hits(&self, area: Rect) -> Vec<(Hit, Rect)> {
-        let mut v = Vec::new();
-        for (i, r) in widgets::segments(Self::tabs(area), TABS.len()).into_iter().enumerate() {
-            v.push((Hit::Tab(i), r));
-        }
-        let body = Rect::new(area.x, area.y + TOOLBAR_H, area.w, area.h - TOOLBAR_H);
-        if self.sheet.is_some() {
-            let s = Self::sheet_rect(area);
-            let fields = [(0, s.x + 60), (1, s.x + 190)];
-            for (i, x) in fields {
-                v.push((Hit::SheetStep(i, 1), Rect::new(x, s.y + 60, 64, 26)));
-                v.push((Hit::SheetStep(i, -1), Rect::new(x, s.y + 146, 64, 26)));
-            }
-            v.push((Hit::SheetSave, Rect::new(s.right() - 108, s.bottom() - 48, 90, 32)));
-            v.push((Hit::SheetCancel, Rect::new(s.right() - 208, s.bottom() - 48, 90, 32)));
-            return v;
-        }
-        match self.tab {
-            Tab::World => {}
-            Tab::Stopwatch => {
-                let y = body.y + 300;
-                v.push((Hit::LapReset, Rect::new(body.x + body.w / 2 - 170, y, 150, 40)));
-                v.push((Hit::StartStop, Rect::new(body.x + body.w / 2 + 20, y, 150, 40)));
-            }
-            Tab::Timers => {
-                for i in 0..PRESETS.len() {
-                    let (col, row) = (i as i32 % 4, i as i32 / 4);
-                    let w = (body.w - 48 - 3 * 12) / 4;
-                    v.push((Hit::Preset(i), Rect::new(body.x + 24 + col * (w + 12), body.y + 44 + row * 60, w, 50)));
-                }
-                for i in 0..self.timers.len().min(4) {
-                    let y = body.y + 208 + i as i32 * 72;
-                    v.push((Hit::TimerToggle(i), Rect::new(body.right() - 196, y + 18, 80, 32)));
-                    v.push((Hit::TimerCancel(i), Rect::new(body.right() - 108, y + 18, 84, 32)));
-                }
-            }
-            Tab::Alarms => {
-                v.push((Hit::AddAlarm, Rect::new(body.right() - 140, body.y + 16, 116, 32)));
-                for i in 0..self.alarms.len().min(6) {
-                    let y = body.y + 64 + i as i32 * 66;
-                    v.push((Hit::AlarmToggle(i), Rect::new(body.right() - 110, y + 21, 44, 24)));
-                    v.push((Hit::AlarmDelete(i), Rect::new(body.right() - 56, y + 19, 30, 28)));
-                }
-            }
-        }
-        v
-    }
-
-    fn sheet_rect(area: Rect) -> Rect {
-        Rect::new(area.x + (area.w - 360) / 2, area.y + TOOLBAR_H + 30, 360, 290)
-    }
-
-    fn hit_at(&self, x: i32, y: i32) -> Option<Hit> {
-        self.hits(self.area).into_iter().find(|(_, r)| r.contains(x, y)).map(|(h, _)| h)
-    }
-
-    fn run(&mut self, h: Hit) {
-        let now = time::uptime_ms();
-        match h {
-            Hit::Tab(i) => self.tab = TABS[i].0,
-            Hit::StartStop => match self.sw_start.take() {
-                Some(s) => self.sw_accum += now - s,
-                None => self.sw_start = Some(now),
-            },
-            Hit::LapReset => {
-                if self.sw_start.is_some() {
-                    self.laps.insert(0, self.stopwatch_ms());
-                } else {
-                    self.sw_accum = 0;
-                    self.laps.clear();
-                }
-            }
-            Hit::Preset(i) => {
-                if self.timers.len() < 4 {
-                    let ms = PRESETS[i] * 60_000;
-                    let label = if PRESETS[i] == 60 { String::from("1 hour") } else { format!("{} min", PRESETS[i]) };
-                    self.timers.push(Timer { total_ms: ms, left_ms: ms, running_since: Some(now), label });
-                }
-            }
-            Hit::TimerToggle(i) => {
-                if let Some(t) = self.timers.get_mut(i) {
-                    match t.running_since.take() {
-                        Some(s) => t.left_ms = t.left_ms.saturating_sub(now - s),
-                        None => t.running_since = Some(now),
-                    }
-                }
-            }
-            Hit::TimerCancel(i) => {
-                if i < self.timers.len() {
-                    self.timers.remove(i);
-                }
-            }
-            Hit::AddAlarm => {
-                let d = time::now();
-                self.sheet = Some(Sheet {
-                    hour: d.hour as i32,
-                    minute: (d.minute as i32 / 5 * 5 + 5) % 60,
-                    label: TextField::new("", "Label (optional)"),
-                });
-            }
-            Hit::AlarmToggle(i) => {
-                if let Some(a) = self.alarms.get_mut(i) {
-                    a.enabled = !a.enabled;
-                    self.save_alarms();
-                }
-            }
-            Hit::AlarmDelete(i) => {
-                if i < self.alarms.len() {
-                    self.alarms.remove(i);
-                    self.save_alarms();
-                }
-            }
-            Hit::SheetStep(field, d) => {
-                if let Some(s) = &mut self.sheet {
-                    if field == 0 {
-                        s.hour = (s.hour + d).rem_euclid(24);
-                    } else {
-                        s.minute = (s.minute + d * 5).rem_euclid(60);
-                    }
-                }
-            }
-            Hit::SheetSave => {
-                if let Some(s) = self.sheet.take() {
-                    let label = String::from(s.label.text().trim()).replace('|', "/");
-                    self.alarms.push(Alarm {
-                        hour: s.hour as u8,
-                        minute: s.minute as u8,
-                        enabled: true,
-                        label,
-                        rang: None,
-                    });
-                    self.alarms.sort_by_key(|a| (a.hour, a.minute));
-                    self.save_alarms();
-                }
-            }
-            Hit::SheetCancel => self.sheet = None,
-        }
-    }
-
     fn timer_left(t: &Timer) -> u64 {
         t.left_ms.saturating_sub(t.running_since.map(|s| time::uptime_ms() - s).unwrap_or(0))
-    }
-
-    // ------------------------------------------------------------ drawing
-
-    fn draw_world(&self, cv: &mut Canvas, body: Rect) {
-        let t = theme::current();
-        let d = time::now();
-        let h24 = prefs::get_bool(pref::CLOCK_24H);
-        let local_offset = prefs::get_int("utc_offset", 0) as i32;
-        // Local: large.
-        let (cx, cy) = (body.x + 130, body.y + 150);
-        face(cv, cx, cy, 100, (d.hour as u32, d.minute as u32, Some(d.second as u32)), t.dark);
-        cv.text(body.x + 260, body.y + 110, "Local time", theme::ui(14), t.text_secondary);
-        cv.text(body.x + 260, body.y + 160, &fmt_time(d.hour as u32, d.minute as u32, h24), theme::ui_bold(42), t.text);
-        cv.text(body.x + 260, body.y + 192, &time::format_date(&d)[..10], theme::ui(15), t.text_secondary);
-        let tz = if local_offset == 0 {
-            String::from("UTC")
-        } else {
-            format!(
-                "UTC{}{}:{:02}",
-                if local_offset < 0 { "−" } else { "+" },
-                local_offset.abs() / 60,
-                local_offset.abs() % 60
-            )
-        };
-        cv.text(
-            body.x + 260,
-            body.y + 216,
-            &format!("Time zone {tz} · set in Settings"),
-            theme::ui(12),
-            t.text_secondary,
-        );
-
-        // Cities: a grid of small cards.
-        let local_min = d.hour as i32 * 60 + d.minute as i32;
-        let utc_min = local_min - local_offset;
-        let cols = 4;
-        let cw = (body.w - 48 - (cols - 1) * 12) / cols;
-        for (i, (city, off)) in CITIES.iter().enumerate() {
-            let (col, row) = (i as i32 % cols, i as i32 / cols);
-            let r = Rect::new(body.x + 24 + col * (cw + 12), body.y + 280 + row * 104, cw, 92);
-            cv.fill_round_rect(r, 12, t.window_bg_alt);
-            let m = utc_min + off;
-            let day = m.div_euclid(1440);
-            let m = m.rem_euclid(1440);
-            face(cv, r.x + 44, r.y + 46, 30, ((m / 60) as u32, (m % 60) as u32, None), t.dark);
-            cv.text_clipped(r.x + 86, r.y + 30, city, theme::ui_bold(13), t.text, r.w - 94);
-            cv.text(r.x + 86, r.y + 54, &fmt_time((m / 60) as u32, (m % 60) as u32, h24), theme::ui(15), t.text);
-            let rel = off - local_offset;
-            let when = match day {
-                0 => "Today",
-                d if d > 0 => "Tomorrow",
-                _ => "Yesterday",
-            };
-            let diff = if rel == 0 {
-                String::from("same time")
-            } else if rel % 60 == 0 {
-                format!("{}{}h", if rel > 0 { "+" } else { "−" }, rel.abs() / 60)
-            } else {
-                format!("{}{}h{:02}", if rel > 0 { "+" } else { "−" }, rel.abs() / 60, rel.abs() % 60)
-            };
-            cv.text_clipped(r.x + 86, r.y + 74, &format!("{when}, {diff}"), theme::ui(11), t.text_secondary, r.w - 94);
-        }
-    }
-
-    fn draw_stopwatch(&self, cv: &mut Canvas, body: Rect) {
-        let t = theme::current();
-        let ms = self.stopwatch_ms();
-        let (cx, cy) = (body.x + body.w / 2, body.y + 150);
-        // A sweep dial: one turn per minute.
-        cv.fill_circle(cx, cy, 110, t.window_bg_alt);
-        let progress = (ms % 60_000) as i32 * 1024 / 60_000;
-        for k in 0..120 {
-            let a = k * 1024 / 120;
-            let on = a <= progress && (ms > 0);
-            let c = if on { theme::accent() } else { with_alpha(t.text_secondary, 0x40) };
-            let (x0, y0) = (cx + 104 * sin(a) / 16384, cy - 104 * sin(a + 256) / 16384);
-            let (x1, y1) = (cx + 92 * sin(a) / 16384, cy - 92 * sin(a + 256) / 16384);
-            cv.line(x0, y0, x1, y1, if k % 10 == 0 { 3 } else { 1 }, c);
-        }
-        let text = fmt_stopwatch(ms);
-        let f = theme::mono(34);
-        cv.text(cx - f.width(&text) / 2, cy + 12, &text, f, t.text);
-        let running = self.sw_start.is_some();
-        let [lap_r, start_r] = [Hit::LapReset, Hit::StartStop]
-            .map(|h| self.hits(self.area).into_iter().find(|(k, _)| *k == h).map(|(_, r)| r).unwrap());
-        let lap_label = if running { "Lap" } else { "Reset" };
-        button(cv, lap_r, lap_label, ButtonStyle::Secondary, self.hover == Some(Hit::LapReset));
-        let (label, style) = if running { ("Stop", ButtonStyle::Danger) } else { ("Start", ButtonStyle::Primary) };
-        button(cv, start_r, label, style, self.hover == Some(Hit::StartStop));
-        // Laps (newest first), fastest in green, slowest in red.
-        let splits: Vec<u64> =
-            (0..self.laps.len()).map(|i| self.laps[i] - self.laps.get(i + 1).copied().unwrap_or(0)).collect();
-        let (best, worst) =
-            if splits.len() > 1 { (splits.iter().min().copied(), splits.iter().max().copied()) } else { (None, None) };
-        let list = Rect::new(body.x + (body.w - 420) / 2, body.y + 360, 420, body.h - 370);
-        cv.with_clip(list, |cv| {
-            for (i, s) in splits.iter().enumerate() {
-                let y = list.y + i as i32 * 28;
-                let c = if Some(*s) == best {
-                    0xFF30_B050
-                } else if Some(*s) == worst {
-                    0xFFFF_453A
-                } else {
-                    t.text
-                };
-                cv.text(list.x, y + 18, &format!("Lap {}", splits.len() - i), theme::ui(14), c);
-                let v = fmt_stopwatch(*s);
-                let f = theme::mono(14);
-                cv.text(list.right() - f.width(&v), y + 18, &v, f, c);
-                cv.fill_rect(Rect::new(list.x, y + 27, list.w, 1), t.separator);
-            }
-        });
-    }
-
-    fn draw_timers(&self, cv: &mut Canvas, body: Rect) {
-        let t = theme::current();
-        cv.text(body.x + 24, body.y + 30, "Start a timer", theme::ui_bold(14), t.text_secondary);
-        let hits = self.hits(self.area);
-        for (i, m) in PRESETS.iter().enumerate() {
-            let r = hits.iter().find(|(h, _)| *h == Hit::Preset(i)).unwrap().1;
-            let hovered = self.hover == Some(Hit::Preset(i));
-            cv.fill_round_rect(r, 12, if hovered { t.hover } else { t.window_bg_alt });
-            let label = if *m == 60 { String::from("1 hour") } else { format!("{m} min") };
-            cv.text_centered(r, &label, theme::ui_bold(15), t.text);
-        }
-        if self.timers.is_empty() {
-            let msg = "Running timers appear here. You'll get a notification when one ends.";
-            cv.text_centered(Rect::new(body.x, body.y + 250, body.w, 20), msg, theme::ui(13), t.text_secondary);
-        }
-        for (i, tm) in self.timers.iter().enumerate().take(4) {
-            let y = body.y + 208 + i as i32 * 72;
-            let card = Rect::new(body.x + 24, y, body.w - 48, 64);
-            cv.fill_round_rect(card, 14, t.window_bg_alt);
-            // Progress ring.
-            let left = Self::timer_left(tm);
-            let (cx, cy) = (card.x + 36, card.y + 32);
-            let frac = (left * 1024 / tm.total_ms.max(1)) as i32;
-            for k in 0..64 {
-                let a = k * 1024 / 64;
-                let c = if a < frac { theme::accent() } else { with_alpha(t.text_secondary, 0x40) };
-                cv.fill_circle(cx + 20 * sin(a) / 16384, cy - 20 * sin(a + 256) / 16384, 2, c);
-            }
-            let f = theme::mono(26);
-            let text = fmt_timer(left);
-            cv.text(card.x + 76, card.y + 42, &text, f, if left == 0 { theme::CLOSE } else { t.text });
-            cv.text(card.x + 76 + f.width(&text) + 14, card.y + 40, &tm.label, theme::ui(13), t.text_secondary);
-            let toggle = hits.iter().find(|(h, _)| *h == Hit::TimerToggle(i)).unwrap().1;
-            let cancel = hits.iter().find(|(h, _)| *h == Hit::TimerCancel(i)).unwrap().1;
-            let label = if tm.running_since.is_some() { "Pause" } else { "Resume" };
-            if left > 0 {
-                button(cv, toggle, label, ButtonStyle::Secondary, self.hover == Some(Hit::TimerToggle(i)));
-            }
-            button(
-                cv,
-                cancel,
-                if left == 0 { "Done" } else { "Cancel" },
-                ButtonStyle::Secondary,
-                self.hover == Some(Hit::TimerCancel(i)),
-            );
-        }
-    }
-
-    fn draw_alarms(&self, cv: &mut Canvas, body: Rect) {
-        let t = theme::current();
-        let h24 = prefs::get_bool(pref::CLOCK_24H);
-        let hits = self.hits(self.area);
-        cv.text(
-            body.x + 24,
-            body.y + 38,
-            "Alarms ring while Clock is open (it can stay minimized).",
-            theme::ui(12),
-            t.text_secondary,
-        );
-        let add = hits.iter().find(|(h, _)| *h == Hit::AddAlarm).unwrap().1;
-        button(cv, add, "Add Alarm", ButtonStyle::Primary, self.hover == Some(Hit::AddAlarm));
-        if self.alarms.is_empty() {
-            cv.text_centered(Rect::new(body.x, body.y + 200, body.w, 24), "No alarms", theme::ui(15), t.text_secondary);
-        }
-        for (i, a) in self.alarms.iter().enumerate().take(6) {
-            let y = body.y + 64 + i as i32 * 66;
-            let card = Rect::new(body.x + 24, y, body.w - 48, 58);
-            cv.fill_round_rect(card, 12, t.window_bg_alt);
-            let c = if a.enabled { t.text } else { t.text_secondary };
-            cv.text(card.x + 18, card.y + 38, &fmt_time(a.hour as u32, a.minute as u32, h24), theme::ui(28), c);
-            let label = if a.label.is_empty() { "Alarm" } else { a.label.as_str() };
-            cv.text_clipped(card.x + 190, card.y + 35, label, theme::ui(14), t.text_secondary, card.w - 330);
-            let tr = hits.iter().find(|(h, _)| *h == Hit::AlarmToggle(i)).unwrap().1;
-            widgets::toggle(cv, tr, a.enabled);
-            let dr = hits.iter().find(|(h, _)| *h == Hit::AlarmDelete(i)).unwrap().1;
-            if self.hover == Some(Hit::AlarmDelete(i)) {
-                cv.fill_round_rect(dr, 7, t.hover);
-            }
-            let (cx, cy) = dr.center();
-            cv.line(cx - 5, cy - 5, cx + 5, cy + 5, 2, t.text_secondary);
-            cv.line(cx + 5, cy - 5, cx - 5, cy + 5, 2, t.text_secondary);
-        }
-    }
-
-    fn draw_sheet(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
-        let t = theme::current();
-        let Some(s) = &mut self.sheet else { return };
-        cv.fill_rect(area, with_alpha(0x000000, 0x30));
-        let r = Self::sheet_rect(area);
-        cv.shadow(r, 14, 24, 8, t.shadow);
-        cv.fill_round_rect(r, 14, t.window_bg);
-        cv.stroke_round_rect(r, 14, t.window_border);
-        cv.text(r.x + 20, r.y + 34, "New Alarm", theme::ui_bold(16), t.text);
-        for (x, v) in [(r.x + 60, s.hour), (r.x + 190, s.minute)] {
-            let cx = x + 32;
-            cv.line(cx - 7, r.y + 77, cx, r.y + 70, 2, t.text_secondary);
-            cv.line(cx, r.y + 70, cx + 7, r.y + 77, 2, t.text_secondary);
-            cv.text_centered(Rect::new(x, r.y + 92, 64, 50), &format!("{:02}", v), theme::mono(40), t.text);
-            cv.line(cx - 7, r.y + 155, cx, r.y + 162, 2, t.text_secondary);
-            cv.line(cx, r.y + 162, cx + 7, r.y + 155, 2, t.text_secondary);
-        }
-        cv.text_centered(Rect::new(r.x + 124, r.y + 92, 66, 50), ":", theme::mono(40), t.text);
-        s.label.draw(cv, Rect::new(r.x + 20, r.y + 186, r.w - 40, 34), env.focused);
-        let hits = self.hits(area);
-        for (h, hr) in hits {
-            match h {
-                Hit::SheetSave => button(cv, hr, "Save", ButtonStyle::Primary, self.hover == Some(h)),
-                Hit::SheetCancel => button(cv, hr, "Cancel", ButtonStyle::Secondary, self.hover == Some(h)),
-                Hit::SheetStep(..) if self.hover == Some(h) => cv.fill_round_rect(hr, 6, with_alpha(t.text, 0x14)),
-                _ => {}
-            }
-        }
     }
 
     /// Timers that ended and alarms that are due post notifications.
@@ -617,7 +242,284 @@ impl Clock {
     }
 }
 
+fn city_offset(rel: i32) -> String {
+    if rel == 0 {
+        String::from("same time")
+    } else if rel % 60 == 0 {
+        format!("{}{}h", if rel > 0 { "+" } else { "−" }, rel.abs() / 60)
+    } else {
+        format!("{}{}h{:02}", if rel > 0 { "+" } else { "−" }, rel.abs() / 60, rel.abs() % 60)
+    }
+}
+
+impl Clock {
+    fn world(&self, env: &Env) -> View<'_, Msg> {
+        let d = time::now();
+        let h24 = prefs::get_bool(pref::CLOCK_24H);
+        let local = prefs::get_int("utc_offset", 0) as i32;
+        let dark = env.dark;
+        let tz = if local == 0 {
+            String::from("UTC")
+        } else {
+            format!("UTC{}{}:{:02}", if local < 0 { "−" } else { "+" }, local.abs() / 60, local.abs() % 60)
+        };
+        let hms = (d.hour as u32, d.minute as u32, Some(d.second as u32));
+        let big = HStack::new()
+            .push(
+                Canvas::new(move |cv, r| {
+                    let (cx, cy) = r.center();
+                    face(cv, cx, cy, 100, hms, dark)
+                })
+                .size(210, 210),
+            )
+            .push(
+                VStack::new()
+                    .push(Text::new("Local time").foreground(Color::SecondaryLabel))
+                    .push(
+                        Text::new(fmt_time(d.hour as u32, d.minute as u32, h24))
+                            .style(TextStyle::Sized(42, Weight::Bold)),
+                    )
+                    .push(
+                        Text::new(String::from(&time::format_date(&d)[..10]))
+                            .style(TextStyle::Sized(15, Weight::Regular))
+                            .foreground(Color::SecondaryLabel),
+                    )
+                    .push(
+                        Text::new(format!("Time zone {tz} · set in Settings"))
+                            .style(TextStyle::Footnote)
+                            .foreground(Color::SecondaryLabel),
+                    )
+                    .spacing(4)
+                    .alignment(Align::Start),
+            )
+            .spacing(32);
+        // Cities: a grid of small cards.
+        let utc_min = d.hour as i32 * 60 + d.minute as i32 - local;
+        let mut grid = Grid::new(170).spacing(12);
+        for (city, off) in CITIES {
+            let m = utc_min + off;
+            let day = m.div_euclid(1440);
+            let m = m.rem_euclid(1440);
+            let when = match day {
+                0 => "Today",
+                d if d > 0 => "Tomorrow",
+                _ => "Yesterday",
+            };
+            let hm = ((m / 60) as u32, (m % 60) as u32, None);
+            grid = grid.push(
+                HStack::new()
+                    .push(
+                        Canvas::new(move |cv, r| {
+                            let (cx, cy) = r.center();
+                            face(cv, cx, cy, 30, hm, dark)
+                        })
+                        .size(64, 64),
+                    )
+                    .push(
+                        VStack::new()
+                            .push(Text::new(city).style(TextStyle::Headline))
+                            .push(Text::new(fmt_time(hm.0, hm.1, h24)).style(TextStyle::Sized(15, Weight::Regular)))
+                            .push(
+                                Text::new(format!("{when}, {}", city_offset(off - local)))
+                                    .style(TextStyle::Caption)
+                                    .foreground(Color::SecondaryLabel),
+                            )
+                            .spacing(2)
+                            .alignment(Align::Start)
+                            .grow(1),
+                    )
+                    .spacing(10)
+                    .padding(12)
+                    .background_rounded(Color::GroupedBackground, 12)
+                    .fill_width(),
+            );
+        }
+        VStack::new().push(big).push(grid).spacing(24).alignment(Align::Start).padding(24).fill_width()
+    }
+
+    fn stopwatch(&self) -> View<'_, Msg> {
+        let ms = self.stopwatch_ms();
+        let running = self.sw_start.is_some();
+        // A sweep dial: one turn per minute.
+        let dial = Canvas::new(move |cv, r| {
+            let t = theme::current();
+            let (cx, cy) = r.center();
+            cv.fill_circle(cx, cy, 110, t.window_bg_alt);
+            let progress = (ms % 60_000) as i32 * 1024 / 60_000;
+            for k in 0..120 {
+                let a = k * 1024 / 120;
+                let on = a <= progress && ms > 0;
+                let c = if on { theme::accent() } else { with_alpha(t.text_secondary, 0x40) };
+                let (x0, y0) = (cx + 104 * sin(a) / 16384, cy - 104 * sin(a + 256) / 16384);
+                let (x1, y1) = (cx + 92 * sin(a) / 16384, cy - 92 * sin(a + 256) / 16384);
+                cv.line(x0, y0, x1, y1, if k % 10 == 0 { 3 } else { 1 }, c);
+            }
+            let text = fmt_stopwatch(ms);
+            let f = theme::mono(34);
+            cv.text(cx - f.width(&text) / 2, cy + 12, &text, f, t.text);
+        })
+        .size(240, 240);
+        // Laps (newest first), fastest in green, slowest in red.
+        let splits: Vec<u64> =
+            (0..self.laps.len()).map(|i| self.laps[i] - self.laps.get(i + 1).copied().unwrap_or(0)).collect();
+        let (best, worst) =
+            if splits.len() > 1 { (splits.iter().min().copied(), splits.iter().max().copied()) } else { (None, None) };
+        let laps = splits.iter().enumerate().map(|(i, s)| {
+            let c = if Some(*s) == best {
+                Color::Green
+            } else if Some(*s) == worst {
+                Color::Red
+            } else {
+                Color::Label
+            };
+            row(
+                format!("Lap {}", splits.len() - i),
+                Text::new(fmt_stopwatch(*s)).style(TextStyle::Sized(14, Weight::Mono)),
+            )
+            .height(32)
+            .foreground(c)
+        });
+        VStack::new()
+            .push(dial)
+            .push(
+                HStack::new()
+                    .push(
+                        Button::new(if running { "Lap" } else { "Reset" })
+                            .action(Msg::LapReset)
+                            .control_size(ControlSize::Large)
+                            .width(150),
+                    )
+                    .push(
+                        Button::new(if running { "Stop" } else { "Start" })
+                            .action(Msg::StartStop)
+                            .button_style(if running { ButtonStyle::Destructive } else { ButtonStyle::Prominent })
+                            .control_size(ControlSize::Large)
+                            .shortcut(Shortcut::key(Key::Char(' ')))
+                            .width(150),
+                    )
+                    .spacing(20),
+            )
+            .push(Section::new().extend(laps).width(420).hidden(splits.is_empty()))
+            .spacing(24)
+            .padding(24)
+            .fill_width()
+    }
+
+    fn timers_tab(&self) -> View<'_, Msg> {
+        let mut presets = Grid::new(150).spacing(12);
+        for (i, m) in PRESETS.iter().enumerate() {
+            let label = if *m == 60 { String::from("1 hour") } else { format!("{m} min") };
+            presets = presets.push(
+                Text::centered(label)
+                    .style(TextStyle::Sized(15, Weight::Bold))
+                    .height(50)
+                    .background_rounded(Color::GroupedBackground, 12)
+                    .on_tap(Msg::Preset(i))
+                    .disabled(self.timers.len() >= 4),
+            );
+        }
+        let mut v = VStack::new()
+            .push(Text::new("Start a timer").style(TextStyle::Headline).foreground(Color::SecondaryLabel))
+            .push(presets)
+            .spacing(12)
+            .alignment(Align::Stretch);
+        if self.timers.is_empty() {
+            v = v.push(
+                Text::centered("Running timers appear here. You'll get a notification when one ends.")
+                    .foreground(Color::SecondaryLabel)
+                    .padding(32),
+            );
+        }
+        for (i, tm) in self.timers.iter().enumerate() {
+            let left = Self::timer_left(tm);
+            let frac = (left * 1024 / tm.total_ms.max(1)) as i32;
+            let ring = Canvas::new(move |cv, r| {
+                let t = theme::current();
+                let (cx, cy) = r.center();
+                for k in 0..64 {
+                    let a = k * 1024 / 64;
+                    let c = if a < frac { theme::accent() } else { with_alpha(t.text_secondary, 0x40) };
+                    cv.fill_circle(cx + 20 * sin(a) / 16384, cy - 20 * sin(a + 256) / 16384, 2, c);
+                }
+            })
+            .size(48, 48);
+            v =
+                v.push(
+                    HStack::new()
+                        .push(ring)
+                        .push(
+                            Text::new(fmt_timer(left))
+                                .style(TextStyle::Sized(26, Weight::Mono))
+                                .foreground(if left == 0 { Color::Red } else { Color::Label }),
+                        )
+                        .push(Text::new(tm.label.clone()).foreground(Color::SecondaryLabel).grow(1))
+                        .push(
+                            Button::new(if tm.running_since.is_some() { "Pause" } else { "Resume" })
+                                .action(Msg::TimerToggle(i))
+                                .hidden(left == 0)
+                                .min_width(80),
+                        )
+                        .push(
+                            Button::new(if left == 0 { "Done" } else { "Cancel" })
+                                .action(Msg::TimerCancel(i))
+                                .min_width(80),
+                        )
+                        .spacing(14)
+                        .padding_xy(14, 8)
+                        .background_rounded(Color::GroupedBackground, 14)
+                        .fill_width(),
+                );
+        }
+        v.padding(24).fill_width()
+    }
+
+    fn alarms_tab(&self) -> View<'_, Msg> {
+        let h24 = prefs::get_bool(pref::CLOCK_24H);
+        let mut v = VStack::new()
+            .push(
+                HStack::new()
+                    .push(
+                        Text::new("Alarms ring while Clock is open (it can stay minimized).")
+                            .style(TextStyle::Callout)
+                            .foreground(Color::SecondaryLabel)
+                            .grow(1),
+                    )
+                    .push(Button::new("Add Alarm").action(Msg::AddAlarm).button_style(ButtonStyle::Prominent))
+                    .fill_width(),
+            )
+            .spacing(10)
+            .alignment(Align::Stretch);
+        if self.alarms.is_empty() {
+            v = v.push(
+                Text::centered("No alarms").style(TextStyle::Title2).foreground(Color::SecondaryLabel).padding(60),
+            );
+        }
+        for (i, a) in self.alarms.iter().enumerate() {
+            let label = if a.label.is_empty() { String::from("Alarm") } else { a.label.clone() };
+            v = v.push(
+                HStack::new()
+                    .push(
+                        Text::new(fmt_time(a.hour as u32, a.minute as u32, h24))
+                            .style(TextStyle::Sized(28, Weight::Regular))
+                            .foreground(if a.enabled { Color::Label } else { Color::SecondaryLabel })
+                            .width(170),
+                    )
+                    .push(Text::new(label).foreground(Color::SecondaryLabel).grow(1))
+                    .push(Toggle::new("", a.enabled).on_change(move |on| Msg::AlarmToggle(i, on)))
+                    .push(Button::symbol(Symbol::Close).action(Msg::AlarmDelete(i)).help("Delete alarm"))
+                    .spacing(12)
+                    .padding_xy(18, 8)
+                    .background_rounded(Color::GroupedBackground, 12)
+                    .fill_width(),
+            );
+        }
+        v.padding(24).fill_width()
+    }
+}
+
 impl App for Clock {
+    type Message = Msg;
+
     fn title(&self) -> String {
         String::from("Clock")
     }
@@ -626,78 +528,104 @@ impl App for Clock {
         (800, 560)
     }
 
-    fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
-        self.area = area;
-        let t = theme::current();
-        let bar = Rect::new(area.x, area.y, area.w, TOOLBAR_H);
-        cv.fill_rect(bar, t.titlebar);
-        cv.fill_rect(Rect::new(area.x, bar.bottom() - 1, area.w, 1), t.separator);
-        let labels: Vec<&str> = TABS.iter().map(|(_, l)| *l).collect();
-        let sel = TABS.iter().position(|(k, _)| *k == self.tab).unwrap_or(0);
-        let hov = match self.hover {
-            Some(Hit::Tab(i)) => Some(i),
-            _ => None,
-        };
-        widgets::segmented(cv, Self::tabs(area), &labels, sel, hov);
-        let body = Rect::new(area.x, area.y + TOOLBAR_H, area.w, area.h - TOOLBAR_H);
-        match self.tab {
-            Tab::World => self.draw_world(cv, body),
-            Tab::Stopwatch => self.draw_stopwatch(cv, body),
-            Tab::Timers => self.draw_timers(cv, body),
-            Tab::Alarms => self.draw_alarms(cv, body),
-        }
-        if self.sheet.is_some() {
-            self.draw_sheet(cv, area, env);
-        }
-    }
-
-    fn click(&mut self, x: i32, y: i32, _area: Rect, env: &mut Env) -> bool {
-        if let Some(s) = &mut self.sheet {
-            if s.label.click(x, y, env.mods.shift, env.now_ms) {
-                return true;
-            }
-        }
-        match self.hit_at(x, y) {
-            Some(h) => {
-                self.run(h);
-                true
-            }
-            None => false,
-        }
-    }
-
-    fn hover(&mut self, x: i32, y: i32, _area: Rect) -> bool {
-        let h = if x < 0 { None } else { self.hit_at(x, y) };
-        core::mem::replace(&mut self.hover, h) != h
-    }
-
-    fn key(&mut self, ev: &KeyEvent, env: &mut Env) -> bool {
-        if !ev.pressed {
-            return false;
-        }
-        if let Some(s) = &mut self.sheet {
-            match ev.code {
-                KeyCode::Enter => self.run(Hit::SheetSave),
-                KeyCode::Escape => self.sheet = None,
-                _ => {
-                    s.label.key(ev, env.now_ms);
+    fn update(&mut self, msg: Msg, _cx: &mut Context<Msg>) {
+        let now = time::uptime_ms();
+        match msg {
+            Msg::Tab(i) => self.tab = TABS[i].0,
+            Msg::StartStop => match self.sw_start.take() {
+                Some(s) => self.sw_accum += now - s,
+                None => self.sw_start = Some(now),
+            },
+            Msg::LapReset => {
+                if self.sw_start.is_some() {
+                    self.laps.insert(0, self.stopwatch_ms());
+                } else {
+                    self.sw_accum = 0;
+                    self.laps.clear();
                 }
             }
-            return true;
+            Msg::Preset(i) => {
+                if self.timers.len() < 4 {
+                    let ms = PRESETS[i] * 60_000;
+                    let label = if PRESETS[i] == 60 { String::from("1 hour") } else { format!("{} min", PRESETS[i]) };
+                    self.timers.push(Timer { total_ms: ms, left_ms: ms, running_since: Some(now), label });
+                }
+            }
+            Msg::TimerToggle(i) => {
+                if let Some(t) = self.timers.get_mut(i) {
+                    match t.running_since.take() {
+                        Some(s) => t.left_ms = t.left_ms.saturating_sub(now - s),
+                        None => t.running_since = Some(now),
+                    }
+                }
+            }
+            Msg::TimerCancel(i) => {
+                if i < self.timers.len() {
+                    self.timers.remove(i);
+                }
+            }
+            Msg::AddAlarm => {
+                let d = time::now();
+                self.sheet = Some(Sheet {
+                    hour: d.hour as i64,
+                    minute: (d.minute as i64 / 5 * 5 + 5) % 60,
+                    label: String::new(),
+                });
+            }
+            Msg::AlarmToggle(i, on) => {
+                if let Some(a) = self.alarms.get_mut(i) {
+                    a.enabled = on;
+                    self.save_alarms();
+                }
+            }
+            Msg::AlarmDelete(i) => {
+                if i < self.alarms.len() {
+                    self.alarms.remove(i);
+                    self.save_alarms();
+                }
+            }
+            Msg::SheetHour(h) => {
+                if let Some(s) = &mut self.sheet {
+                    s.hour = h;
+                }
+            }
+            Msg::SheetMinute(m) => {
+                if let Some(s) = &mut self.sheet {
+                    s.minute = m;
+                }
+            }
+            Msg::SheetLabel(l) => {
+                if let Some(s) = &mut self.sheet {
+                    s.label = l;
+                }
+            }
+            Msg::SheetSave => {
+                if let Some(s) = self.sheet.take() {
+                    let label = String::from(s.label.trim()).replace('|', "/");
+                    self.alarms.push(Alarm {
+                        hour: s.hour as u8,
+                        minute: s.minute as u8,
+                        enabled: true,
+                        label,
+                        rang: None,
+                    });
+                    self.alarms.sort_by_key(|a| (a.hour, a.minute));
+                    self.save_alarms();
+                }
+            }
+            Msg::SheetCancel => self.sheet = None,
         }
-        if self.tab == Tab::Stopwatch && ev.ch == Some(' ') {
-            self.run(Hit::StartStop);
-            return true;
-        }
-        false
     }
 
-    fn tick(&mut self, env: &mut Env) -> bool {
+    fn poll_interval(&self) -> Option<u64> {
+        Some(match self.tab {
+            Tab::Stopwatch if self.sw_start.is_some() => 33,
+            _ => 200,
+        })
+    }
+
+    fn poll(&mut self, _cx: &mut Context<Msg>) -> bool {
         let alerts = self.check_alerts();
-        let caret = match &mut self.sheet {
-            Some(s) => s.label.tick(env.now_ms, env.focused),
-            None => false,
-        };
         // Redraw only when something on screen moves.
         let second = time::now().second;
         let new_second = core::mem::replace(&mut self.last_second, second) != second;
@@ -707,20 +635,69 @@ impl App for Clock {
             Tab::Timers => new_second && self.timers.iter().any(|t| t.running_since.is_some()),
             Tab::Alarms => false,
         };
-        alerts || caret || moving
+        alerts || moving
     }
 
-    fn tick_interval(&self) -> u64 {
-        match self.tab {
-            Tab::Stopwatch if self.sw_start.is_some() => 33,
-            _ if self.sheet.is_some() => 250,
-            _ => 200,
-        }
+    fn sheet(&self, _env: &Env) -> Option<View<'_, Msg>> {
+        let s = self.sheet.as_ref()?;
+        Some(
+            VStack::new()
+                .push(Text::new("New Alarm").style(TextStyle::Title2))
+                .push(
+                    Section::new()
+                        .push(Stepper::new("Hour", s.hour, 0..=23).on_change(Msg::SheetHour).min_height(size::ROW))
+                        .push(
+                            Stepper::new("Minute", s.minute, 0..=59).on_change(Msg::SheetMinute).min_height(size::ROW),
+                        ),
+                )
+                .push(
+                    TextField::new("Label (optional)", s.label.clone())
+                        .on_change(Msg::SheetLabel)
+                        .on_submit(Msg::SheetSave)
+                        .focused(),
+                )
+                .push(
+                    HStack::new()
+                        .push(Spacer::new())
+                        .push(Button::new("Cancel").action(Msg::SheetCancel).shortcut(Shortcut::cancel()).min_width(84))
+                        .push(
+                            Button::new("Save")
+                                .action(Msg::SheetSave)
+                                .button_style(ButtonStyle::Prominent)
+                                .shortcut(Shortcut::default_action())
+                                .min_width(84),
+                        )
+                        .spacing(8),
+                )
+                .spacing(14)
+                .alignment(Align::Stretch)
+                .width(340),
+        )
+    }
+
+    fn view(&self, env: &Env) -> View<'_, Msg> {
+        let sel = TABS.iter().position(|(k, _)| *k == self.tab).unwrap_or(0);
+        let content = match self.tab {
+            Tab::World => self.world(env),
+            Tab::Stopwatch => self.stopwatch(),
+            Tab::Timers => self.timers_tab(),
+            Tab::Alarms => self.alarms_tab(),
+        };
+        VStack::new()
+            .push(toolbar(vec![
+                Spacer::new(),
+                Picker::new(TABS.iter().map(|t| t.1), sel).on_change(Msg::Tab).width(440),
+                Spacer::new(),
+            ]))
+            .push(Divider::new())
+            .push(ScrollView::new(content).id(("tab", sel)))
+            .spacing(0)
+            .fill()
     }
 }
 
 corekit::entry!(main);
 
 fn main(_: corekit::Args) -> i32 {
-    aurorakit::run(Clock::new())
+    waveui::run(Clock::new())
 }
