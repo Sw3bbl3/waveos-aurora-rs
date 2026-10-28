@@ -15,12 +15,16 @@
 //!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
 //!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
 //!       --headless --no-build --debug --gdb --int
+//!       --linux-root                      put target/linux-root (Debian packages) on a fresh disk as /Linux
+//!   cargo xtask linux-root [PKG...]     fetch Debian packages (default: Firefox ESR, bash, coreutils,
+//!                                         Python) and their dependencies into target/linux-root
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
+mod debian;
 mod display;
 mod help;
 mod image;
@@ -115,7 +119,14 @@ fn main() {
                 });
             let size = number("--disk-size-mib", if developer { 8192 } else { 256 }, 128, 65536) * 1024 * 1024;
             if !flag("--no-refresh") {
-                prepare_disk(&esp, &img, flag("--fresh-disk"), size);
+                if flag("--linux-root") {
+                    let linux = linux_root();
+                    let size = size.max(dir_size(&linux) + 512 * 1024 * 1024);
+                    image::create_with(&esp, &root().join("assets/home"), Some(&linux), &img, size)
+                        .expect("image creation failed");
+                } else {
+                    prepare_disk(&esp, &img, flag("--fresh-disk"), size);
+                }
             }
             // Simulated Wi-Fi networks (the kernel's software radio).
             image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
@@ -187,6 +198,11 @@ fn main() {
             let status = child.wait().expect("qemu failed");
             mon.finish();
             exit(status.code().unwrap_or(1));
+        }
+        Some("linux-root") => {
+            let pkgs: Vec<String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).cloned().collect();
+            let dir = debian::build(&pkgs_or_default(pkgs));
+            println!("wrote {} ({} MiB)", dir.display(), dir_size(&dir) >> 20);
         }
         Some("image") => {
             let esp = build(profile, false);
@@ -296,6 +312,39 @@ fn root() -> PathBuf {
 }
 
 const DISK_SIZE: u64 = 256 * 1024 * 1024;
+
+fn pkgs_or_default(pkgs: Vec<String>) -> Vec<String> {
+    if pkgs.is_empty() {
+        debian::DEFAULT_PACKAGES.iter().map(|s| s.to_string()).collect()
+    } else {
+        pkgs
+    }
+}
+
+/// `target/linux-root`, built with the default packages if it isn't there yet.
+fn linux_root() -> PathBuf {
+    let dir = root().join("target/linux-root");
+    if dir.join(".links").exists() {
+        dir
+    } else {
+        debian::build(&pkgs_or_default(Vec::new()))
+    }
+}
+
+/// Bytes of the files under `dir`.
+fn dir_size(dir: &Path) -> u64 {
+    fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| match e.metadata() {
+                    Ok(m) if m.is_dir() => dir_size(&e.path()),
+                    Ok(m) => m.len(),
+                    Err(_) => 0,
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
 
 /// Creates the persistent disk if needed; otherwise refreshes only its ESP so
 /// files saved on the AuroraFS volume survive rebuilds.

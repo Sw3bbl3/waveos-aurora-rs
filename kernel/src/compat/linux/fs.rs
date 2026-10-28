@@ -38,11 +38,28 @@ const SYSTEM_DIRS: [&str; 7] = ["bin", "etc", "lib", "lib64", "opt", "sbin", "us
 /// Top-level Linux folders kept on the writable volume.
 const WRITABLE_DIRS: [&str; 8] = ["home", "media", "mnt", "root", "run", "srv", "tmp", "var"];
 
+/// True if `guest` is in one of the system folders (`/usr`, `/lib`, `/etc`…).
+fn in_system_dirs(guest: &str) -> bool {
+    SYSTEM_DIRS.contains(&guest.trim_start_matches('/').split('/').next().unwrap_or(""))
+}
+
 /// A WaveOS path for the Linux path `guest` (absolute, normalised).
+///
+/// The system folders are layered: Linux packages installed on the disk
+/// (`/Linux/usr`, …) come first, then the system image (`/System/Linux`).
+/// Something new is made on the disk when its folder is there.
 pub fn to_host(guest: &str) -> String {
     let first = guest.trim_start_matches('/').split('/').next().unwrap_or("");
     if SYSTEM_DIRS.contains(&first) {
-        format!("{SYSTEM_ROOT}{guest}")
+        let disk = format!("{WRITABLE_ROOT}{guest}");
+        if fs::stat(&disk).is_ok() {
+            return disk;
+        }
+        let image = format!("{SYSTEM_ROOT}{guest}");
+        if fs::stat(&image).is_err() && fs::is_dir(&fs::parent_path(&disk)) {
+            return disk;
+        }
+        image
     } else if WRITABLE_DIRS.contains(&first) {
         format!("{WRITABLE_ROOT}{guest}")
     } else {
@@ -52,7 +69,9 @@ pub fn to_host(guest: &str) -> String {
 
 /// The Linux path for the WaveOS path `host`.
 pub fn to_guest(host: &str) -> String {
-    for (root, dirs) in [(SYSTEM_ROOT, &SYSTEM_DIRS[..]), (WRITABLE_ROOT, &WRITABLE_DIRS[..])] {
+    for (root, dirs) in
+        [(SYSTEM_ROOT, &SYSTEM_DIRS[..]), (WRITABLE_ROOT, &WRITABLE_DIRS[..]), (WRITABLE_ROOT, &SYSTEM_DIRS[..])]
+    {
         if let Some(rest) = host.strip_prefix(root) {
             let first = rest.trim_start_matches('/').split('/').next().unwrap_or("");
             if rest.starts_with('/') && dirs.contains(&first) {
@@ -635,6 +654,19 @@ fn dir_entries(host: &str) -> Vec<(String, u8)> {
 
 fn plain_entries(host: &str) -> Vec<(String, u8)> {
     let kind = |dir: bool| if dir { DT_DIR } else { DT_REG };
+    // A layered system folder: what the disk has, then the system image.
+    let guest = to_guest(host);
+    if in_system_dirs(&guest) {
+        let mut v: Vec<(String, u8)> = Vec::new();
+        for root in [WRITABLE_ROOT, SYSTEM_ROOT] {
+            for e in fs::readdir(&format!("{root}{guest}")).unwrap_or_default() {
+                if !v.iter().any(|(n, _)| *n == e.name) {
+                    v.push((e.name, kind(e.kind == Kind::Dir)));
+                }
+            }
+        }
+        return v;
+    }
     let names: &[(&str, bool)] = match host {
         "/dev" => &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true)],
         "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false)],

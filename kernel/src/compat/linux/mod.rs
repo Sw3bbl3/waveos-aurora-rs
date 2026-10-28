@@ -202,6 +202,7 @@ mod nr {
     pub const SETRLIMIT: u64 = 160;
     pub const SYNC: u64 = 162;
     pub const GETTID: u64 = 186;
+    pub const READAHEAD: u64 = 187;
     pub const TKILL: u64 = 200;
     pub const EPOLL_CREATE: u64 = 213;
     pub const TIME: u64 = 201;
@@ -334,7 +335,7 @@ pub fn dispatch(f: &mut SyscallFrame) -> Result<u64, isize> {
         nr::FTRUNCATE => fs::ftruncate(&p, a[0], a[1]),
         nr::STATFS => fs::statfs(a[1]),
         nr::FSTATFS => fs::statfs(a[1]),
-        nr::FSYNC | nr::FDATASYNC | nr::FLOCK | nr::FADVISE64 | nr::FALLOCATE => {
+        nr::FSYNC | nr::FDATASYNC | nr::FLOCK | nr::FADVISE64 | nr::FALLOCATE | nr::READAHEAD => {
             p.fd(a[0] as usize)?;
             Ok(0)
         }

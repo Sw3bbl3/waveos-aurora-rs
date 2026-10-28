@@ -46,7 +46,10 @@ fn with<R>(f: impl FnOnce(&mut Table) -> R) -> R {
 
 /// The target of the link at `path`, if it is one.
 pub fn target(path: &str) -> Option<String> {
-    with(|t| t.user.get(path).or_else(|| t.system.get(path)).cloned())
+    let (user, system) = with(|t| (t.user.get(path).cloned(), t.system.get(path).cloned()));
+    // A file installed on the disk takes the place of a system image link
+    // (a Debian package's own `/usr/bin/awk` over BusyBox's).
+    user.or_else(|| system.filter(|_| fs::stat(&alloc::format!("/Linux{path}")).is_err()))
 }
 
 /// The links directly inside folder `dir` (their names).

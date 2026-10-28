@@ -12,8 +12,8 @@ This is being built in steps. What works today:
 | M0 | Static programs: files, memory, threads, clocks | Done |
 | M1 | `fork`, `exec`, `wait`, signals, `poll`/`epoll`: an interactive shell | Done |
 | M2 | Linux programs open WaveOS windows and play sound; Doom | Done |
-| M3 | Dynamically linked programs (glibc), Debian packages | Next |
-| M4 | Sockets (TCP, UDP, local) | Planned |
+| M3 | Dynamically linked programs (glibc), Debian packages | Done |
+| M4 | Sockets (TCP, UDP, local) | Next |
 | M5 | Shared memory and a Wayland bridge, for GTK programs | Planned |
 | M6 | Firefox ESR | Planned |
 
@@ -34,8 +34,25 @@ that only ever held WaveOS programs (`/Applications`, `/System/Apps`,
 still a Linux program if it has a GNU note, an interpreter or the Linux
 OS/ABI byte.
 
-Dynamically linked programs are refused with `ENOEXEC` for now (M3). Build
-programs static, with musl (`musl-gcc -static`) or glibc.
+Dynamically linked programs start in their interpreter (`ld.so`), which
+the kernel loads next to them; it then loads the libraries itself.
+
+## Debian packages
+
+`cargo xtask linux-root [PKG…]` fetches Debian 12 packages and everything
+they depend on into `target/linux-root` (by default Firefox ESR, bash,
+coreutils, Python 3 and the DejaVu fonts: about 140 packages, 440 MiB).
+They come from a fixed snapshot of the Debian archive, and every download
+is checked: the archive's `Release` file against a SHA-256 pinned in
+`xtask/src/debian.rs`, the package list against `Release`, and each package
+against the list. Symbolic links are recorded in `.links`; maintainer
+scripts don't run.
+
+`cargo xtask run --linux-root` makes a fresh disk with that root as
+`/Linux`. The system folders are layered: what the disk has (`/Linux/usr`,
+`/Linux/lib`, …) comes first, then the system image (`/System/Linux`), so a
+Debian program takes the place of the BusyBox command of the same name.
+In the shell, `bash`, `python3` and `firefox-esr --version` run as on Debian.
 
 ## What a Linux program sees
 

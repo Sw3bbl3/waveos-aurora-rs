@@ -48,7 +48,7 @@ pub fn fetch(url: &str, sha256: &str) -> Option<PathBuf> {
 }
 
 /// Unpacks a Debian package into `target/linux/deb/<name>` and returns that folder.
-fn unpack_deb(deb: &PathBuf) -> Option<PathBuf> {
+pub fn unpack_deb(deb: &PathBuf) -> Option<PathBuf> {
     let name = deb.file_stem().unwrap().to_string_lossy().into_owned();
     let out = root().join("target/linux/deb").join(&name);
     if out.is_dir() {

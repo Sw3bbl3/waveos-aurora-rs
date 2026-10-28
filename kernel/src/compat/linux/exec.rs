@@ -14,6 +14,9 @@ use aurora_elf::{Image, PF_W, PF_X};
 
 /// Where a position-independent program is loaded.
 const PIE_BASE: u64 = 0x1000_0000;
+/// Where the dynamic linker (the program's interpreter) is loaded: above
+/// the `mmap` region, below the stack.
+const INTERP_BASE: u64 = 0x7e00_0000_0000;
 /// The stack: 8 MiB below the top of user space, like Linux's default.
 const STACK_SIZE: u64 = 8 << 20;
 
@@ -39,7 +42,7 @@ fn map_segments(data: &[u8], image: &Image, bias: u64, aspace: &mut AddressSpace
     for seg in &image.segments {
         let start = (seg.vaddr + bias) & !0xFFF;
         let stop = seg.vaddr + bias + seg.memsz;
-        if stop > layout::MMAP_END || start < PAGE_SIZE {
+        if stop > layout::STACK_TOP - STACK_SIZE || start < PAGE_SIZE {
             return Err(EINVAL);
         }
         aspace.map_anon(start, (stop - start).div_ceil(PAGE_SIZE), seg_prot(seg.flags))?;
@@ -86,13 +89,26 @@ pub fn load(
     env: &[String],
     aspace: &mut AddressSpace,
 ) -> Result<Start, isize> {
-    if image.interp.is_some() {
-        // Dynamically linked programs need the loader (next step).
-        return Err(ENOEXEC);
-    }
     let bias = if image.dynamic { PIE_BASE } else { 0 };
     let end = map_segments(data, image, bias, aspace)?;
     let brk = end.next_multiple_of(PAGE_SIZE);
+    // A dynamically linked program starts in its interpreter (`ld.so`),
+    // which loads the libraries and then jumps to the program's entry.
+    let (start_at, interp_base) = match image.interp {
+        Some((off, len)) => {
+            let raw = data.get(off..off + len).ok_or(ENOEXEC)?;
+            let path = core::str::from_utf8(raw).map_err(|_| ENOEXEC)?.trim_end_matches('\0');
+            let host = super::fs::resolve_host(path)?;
+            let ld = crate::fs::read_all(&host).map_err(|_| ENOENT)?;
+            let ld_image = aurora_elf::parse(&ld).ok_or(ELIBBAD)?;
+            if ld_image.interp.is_some() || !ld_image.dynamic {
+                return Err(ELIBBAD);
+            }
+            map_segments(&ld, &ld_image, INTERP_BASE, aspace)?;
+            (ld_image.entry + INTERP_BASE, INTERP_BASE)
+        }
+        None => (image.entry + bias, 0),
+    };
 
     let stack_bottom = layout::STACK_TOP - STACK_SIZE;
     aspace.map_anon(stack_bottom, STACK_SIZE / PAGE_SIZE, Prot::ReadWrite)?;
@@ -123,7 +139,7 @@ pub fn load(
         (4, image.phentsize as u64),    // AT_PHENT
         (5, image.phnum as u64),        // AT_PHNUM
         (6, PAGE_SIZE),                 // AT_PAGESZ
-        (7, 0),                         // AT_BASE (no interpreter)
+        (7, interp_base),               // AT_BASE: where the interpreter is
         (8, 0),                         // AT_FLAGS
         (9, image.entry + bias),        // AT_ENTRY
         (11, super::UID),               // AT_UID
@@ -156,5 +172,5 @@ pub fn load(
     aspace.write_bytes(sp, &bytes)?;
     aspace.write_bytes(strings_at, &strings)?;
     aspace.write_bytes(random_at, &random)?;
-    Ok(Start { entry: image.entry + bias, sp, brk })
+    Ok(Start { entry: start_at, sp, brk })
 }

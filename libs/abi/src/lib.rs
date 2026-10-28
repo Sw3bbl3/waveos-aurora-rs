@@ -513,6 +513,7 @@ pub mod err {
     pub const ENOSYS: isize = 38;
     pub const ENOTEMPTY: isize = 39;
     pub const ELOOP: isize = 40;
+    pub const ELIBBAD: isize = 80;
     pub const EMSGSIZE: isize = 90;
     pub const EADDRINUSE: isize = 98;
     pub const ENETUNREACH: isize = 101;
@@ -555,6 +556,7 @@ pub mod err {
             ENOSYS => "not implemented",
             ENOTEMPTY => "directory not empty",
             ELOOP => "too many levels of symbolic links",
+            ELIBBAD => "the program's loader is damaged",
             ETIMEDOUT => "timed out",
             EMSGSIZE => "message too long",
             EADDRINUSE => "address already in use",
