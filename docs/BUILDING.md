@@ -36,7 +36,7 @@ cargo xtask run --developer         # separate 8 GiB developer disk, 4 GiB RAM
 cargo xtask run --net none          # disable networking for offline validation
 cargo xtask run --gpu virtio        # virtio-vga display, driven by the ported Linux DRM virtio-gpu driver
 cargo xtask run --wifi-sim          # simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
-cargo xtask test [--disk virtio] [--smp 1] [--gpu virtio]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
+cargo xtask test [--disk virtio] [--smp 1] [--gpu virtio] [--memory-mib 6144]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass); 512 MiB unless --memory-mib
 cargo xtask lint                    # Clippy on every crate, for its own target; warnings are errors
 cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-wifi -p aurora-hid -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
 AURORA_MUTATIONS=100 cargo test -p aurorafs --release   # robustness tests, 100x longer than CI runs them

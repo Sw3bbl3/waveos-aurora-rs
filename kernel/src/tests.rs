@@ -15,6 +15,7 @@ type Test = (&'static str, fn());
 
 const TESTS: &[Test] = &[
     ("frame allocator", frame_allocator),
+    ("memory above 4 GiB", memory_above_4gib),
     ("heap", heap),
     ("isqrt", sqrt),
     ("account_password_hash", crate::gui::account::self_test),
@@ -91,6 +92,51 @@ fn frame_allocator() {
         mm::frame::free(run + i * 4096);
     }
     assert_eq!(mm::frame::counts().1, free_before);
+}
+
+/// With RAM above 4 GiB (`cargo xtask test --memory-mib 6144`), single
+/// frames come from up there and work through the physical window, kernel
+/// mappings and the large heap, while 32-bit allocations stay below.
+fn memory_above_4gib() {
+    use mm::frame::LIMIT_32BIT;
+    let (_, free_before) = mm::frame::counts();
+    let low = mm::frame::alloc_below(LIMIT_32BIT).unwrap();
+    let run = mm::frame::alloc_contiguous_below(4, LIMIT_32BIT).unwrap();
+    assert!(low < LIMIT_32BIT && run + 4 * 4096 <= LIMIT_32BIT, "32-bit allocations stay below 4 GiB");
+    mm::frame::free(low);
+    for i in 0..4 {
+        mm::frame::free(run + i * 4096);
+    }
+    assert_eq!(mm::frame::counts().1, free_before);
+    let top = mm::frame::top();
+    if top > LIMIT_32BIT {
+        // The physical window reaches the last frame of RAM.
+        let last = unsafe { (mm::phys_to_virt(top - 8) as *const u64).read_volatile() };
+        core::hint::black_box(last);
+        let frames: Vec<u64> = (0..64).map(|_| mm::frame::alloc().unwrap()).collect();
+        assert!(frames.iter().all(|&f| f >= LIMIT_32BIT), "single frames come from above 4 GiB first");
+        for (i, &f) in frames.iter().enumerate() {
+            let p = mm::phys_to_virt(f) as *mut u64;
+            unsafe {
+                p.write_volatile(f ^ i as u64);
+                p.add(511).write_volatile(!f);
+            }
+        }
+        let va = mm::vmm::kmap(&frames).unwrap();
+        for (i, &f) in frames.iter().enumerate() {
+            let p = (va + i as u64 * 4096) as *const u64;
+            unsafe {
+                assert_eq!(p.read_volatile(), f ^ i as u64, "kernel mapping of a frame above 4 GiB");
+                assert_eq!(p.add(511).read_volatile(), !f);
+            }
+        }
+        mm::vmm::kunmap(va, frames.len() as u64);
+        frames.iter().for_each(|&f| mm::frame::free(f));
+        let big = alloc::vec![0x5Au8; 4 << 20];
+        let phys = mm::vmm::translate(big.as_ptr() as u64).unwrap();
+        assert!(phys >= LIMIT_32BIT, "large heap allocations use memory above 4 GiB");
+        assert!(big.iter().all(|&b| b == 0x5A));
+    }
 }
 
 fn heap() {

@@ -138,9 +138,9 @@ fn boot_page_table() -> Option<u64> {
     const WRITABLE: u64 = 2;
     const HUGE: u64 = 1 << 7;
     let zeroed = || {
-        let f = frame::alloc()?;
+        let f = frame::alloc_below(frame::LIMIT_32BIT)?;
         unsafe { core::ptr::write_bytes(phys_to_virt(f) as *mut u8, 0, PAGE_SIZE as usize) };
-        (f < 1 << 32).then_some(f)
+        Some(f)
     };
     let (pml4, pdpt, pd) = (zeroed()?, zeroed()?, zeroed()?);
     let table = |p: u64| unsafe { &mut *(phys_to_virt(p) as *mut [u64; 512]) };

@@ -21,6 +21,7 @@
 //!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
+//!       --memory-mib N                    guest RAM in MiB (default 512; above 4096 puts RAM above 4 GiB)
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
@@ -246,7 +247,9 @@ fn main() {
             }
             println!("wrote {}", out.display());
         }
-        Some("test") => test(profile, disk, smp, net, gpu, usb),
+        Some("test") => {
+            test(profile, TestMachine { disk, smp, net, gpu, usb, memory_mib: number("--memory-mib", 512, 256, 32768) })
+        }
         Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
@@ -1029,10 +1032,22 @@ fn inbound_check(port: u16) {
     });
 }
 
-fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str) {
+/// The virtual machine the kernel tests boot.
+#[derive(Clone, Copy)]
+struct TestMachine<'a> {
+    disk: &'a str,
+    smp: u32,
+    net: &'a str,
+    gpu: &'a str,
+    usb: &'a str,
+    memory_mib: u64,
+}
+
+fn test(profile: Profile, vm: TestMachine) {
+    let TestMachine { disk, net, gpu, usb, memory_mib, .. } = vm;
     let esp = build(profile, true);
     let img = root().join("target/test-disk.img");
-    println!("running kernel tests with the disk on {disk}, network {net}, display {gpu}, USB on {usb}");
+    println!("running kernel tests with the disk on {disk}, network {net}, display {gpu}, USB on {usb}, {memory_mib} MiB of RAM");
     let http_port = start_test_http_server();
     let fwd_port = free_port();
     // AURORA_TEST_SLEEP=off skips the sleep test (firmware that can't resume).
@@ -1049,7 +1064,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let output = match run_tests_once(&img, disk, smp, net, gpu, usb, fwd_port) {
+            let output = match run_tests_once(&img, vm, fwd_port) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
                     // The firmware never handed back control: some OVMF builds
@@ -1111,20 +1126,13 @@ fn recorded_peak(path: &Path) -> i32 {
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
 /// as an error if the tests failed or timed out.
-fn run_tests_once(
-    img: &Path,
-    disk: &str,
-    smp: u32,
-    net: &str,
-    gpu: &str,
-    usb: &str,
-    fwd_port: u16,
-) -> Result<String, String> {
+fn run_tests_once(img: &Path, vm: TestMachine, fwd_port: u16) -> Result<String, String> {
     use std::io::{BufRead, BufReader};
+    let TestMachine { disk, smp, net, gpu, usb, memory_mib } = vm;
     let audio = root().join("target/test-audio.wav");
     let _ = fs::remove_file(&audio);
     let opts = RunOpts {
-        memory_mib: 512,
+        memory_mib,
         keyboard_capture: false,
         headless: true,
         gdb: false,

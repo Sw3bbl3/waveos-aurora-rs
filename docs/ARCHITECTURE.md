@@ -75,7 +75,7 @@ serial → GDT/TSS → IDT → syscall MSRs → FPU → mm (frames, heap, drop i
 | `0xffff_c000_0000_0000 …` | kernel mappings of window surfaces (`vmm::kmap`) |
 | `0xffff_ffff_8000_0000 …` | kernel image (`kernel/linker.ld`) |
 
-- **Frames** (`mm/frame.rs`): one bit per 4 KiB frame, covering the usable regions above 1 MiB. The bitmap is carved from the first region that is large enough. Frames can be allocated singly (next-fit) or as a contiguous run.
+- **Frames** (`mm/frame.rs`): one bit per 4 KiB frame, covering the usable regions above 1 MiB. The bitmap is carved from the first region that is large enough. Frames can be allocated singly (next-fit) or as a contiguous run (first-fit from the bottom, optionally below a limit). Single frames come from above 4 GiB first, so memory below 4 GiB stays free for what needs a 32-bit address: USB 1.1 and EHCI DMA, contiguous device buffers and the page table the other CPUs start on. On QEMU's q35 machine everything past the first 2 GiB of RAM lies above 4 GiB; `cargo xtask test --memory-mib 6144` checks that memory.
 - **Heap** (`mm/heap.rs`): a quarter of RAM, clamped to between 16 and 128 MiB. It is taken as one contiguous run and used through the physical window, so it needs no extra mappings. It is managed by `linked_list_allocator`, with interrupts disabled around each allocation.
 - **Paging** (`mm/paging.rs`): removes the identity map. It also provides `map_mmio` for devices beyond the physical window.
 
