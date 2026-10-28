@@ -17,10 +17,14 @@
 //! [`WAVE_BASE`] up: `WAVE_BASE + n` is WaveOS's call `n`, with WaveOS's
 //! arguments (`libs/linux/include/waveos.h` describes them for C).
 
+mod events;
 pub mod exec;
 pub mod fs;
+mod links;
 mod misc;
 mod mm;
+mod process;
+pub mod signal;
 
 use crate::arch::syscall::SyscallFrame;
 use crate::proc;
@@ -36,11 +40,52 @@ pub struct Linux {
     /// Each thread's `set_tid_address` word (by task), cleared and woken
     /// when the thread exits: how `pthread_join` learns of it.
     pub clear_tid: Mutex<BTreeMap<u64, u64>>,
+    /// Descriptors closed by `exec` (one bit per descriptor; only open ones are set).
+    pub cloexec: Mutex<[u64; 16]>,
+    pub signals: signal::Signals,
 }
 
 impl Linux {
     pub fn new(brk: u64) -> Linux {
-        Linux { mm: Mutex::new(mm::Memory::new(brk)), clear_tid: Mutex::new(BTreeMap::new()) }
+        Linux {
+            mm: Mutex::new(mm::Memory::new(brk)),
+            clear_tid: Mutex::new(BTreeMap::new()),
+            cloexec: Mutex::new([0; 16]),
+            signals: signal::Signals::new(),
+        }
+    }
+
+    /// A forked child's copy.
+    pub fn for_child(&self) -> Linux {
+        Linux {
+            mm: Mutex::new(self.mm.lock().clone()),
+            clear_tid: Mutex::new(BTreeMap::new()),
+            cloexec: Mutex::new(*self.cloexec.lock()),
+            signals: self.signals.for_child(),
+        }
+    }
+
+    /// A new program (`exec`) with its heap at `brk`.
+    pub fn exec_reset(&self, brk: u64) {
+        *self.mm.lock() = mm::Memory::new(brk);
+        self.clear_tid.lock().clear();
+        self.signals.exec_reset();
+    }
+
+    /// Marks descriptor `fd` close-on-exec, or not.
+    pub fn set_cloexec(&self, fd: usize, on: bool) {
+        if fd < 1024 {
+            let mut bits = self.cloexec.lock();
+            if on {
+                bits[fd / 64] |= 1 << (fd % 64);
+            } else {
+                bits[fd / 64] &= !(1 << (fd % 64));
+            }
+        }
+    }
+
+    pub fn cloexec(&self, fd: usize) -> bool {
+        fd < 1024 && self.cloexec.lock()[fd / 64] & (1 << (fd % 64)) != 0
     }
 }
 
@@ -74,6 +119,7 @@ mod nr {
     pub const BRK: u64 = 12;
     pub const RT_SIGACTION: u64 = 13;
     pub const RT_SIGPROCMASK: u64 = 14;
+    pub const RT_SIGRETURN: u64 = 15;
     pub const IOCTL: u64 = 16;
     pub const PREAD64: u64 = 17;
     pub const PWRITE64: u64 = 18;
@@ -81,16 +127,23 @@ mod nr {
     pub const WRITEV: u64 = 20;
     pub const ACCESS: u64 = 21;
     pub const PIPE: u64 = 22;
+    pub const SELECT: u64 = 23;
     pub const SCHED_YIELD: u64 = 24;
     pub const MREMAP: u64 = 25;
     pub const MSYNC: u64 = 26;
     pub const MADVISE: u64 = 28;
     pub const DUP: u64 = 32;
     pub const DUP2: u64 = 33;
+    pub const PAUSE: u64 = 34;
     pub const NANOSLEEP: u64 = 35;
     pub const GETPID: u64 = 39;
     pub const CLONE: u64 = 56;
+    pub const FORK: u64 = 57;
+    pub const VFORK: u64 = 58;
+    pub const EXECVE: u64 = 59;
     pub const EXIT: u64 = 60;
+    pub const WAIT4: u64 = 61;
+    pub const KILL: u64 = 62;
     pub const UNAME: u64 = 63;
     pub const FCNTL: u64 = 72;
     pub const FLOCK: u64 = 73;
@@ -106,6 +159,7 @@ mod nr {
     pub const RMDIR: u64 = 84;
     pub const CREAT: u64 = 85;
     pub const UNLINK: u64 = 87;
+    pub const SYMLINK: u64 = 88;
     pub const READLINK: u64 = 89;
     pub const CHMOD: u64 = 90;
     pub const FCHMOD: u64 = 91;
@@ -133,6 +187,9 @@ mod nr {
     pub const GETRESGID: u64 = 120;
     pub const GETPGID: u64 = 121;
     pub const GETSID: u64 = 124;
+    pub const RT_SIGPENDING: u64 = 127;
+    pub const RT_SIGTIMEDWAIT: u64 = 128;
+    pub const RT_SIGSUSPEND: u64 = 130;
     pub const SIGALTSTACK: u64 = 131;
     pub const STATFS: u64 = 137;
     pub const FSTATFS: u64 = 138;
@@ -145,6 +202,8 @@ mod nr {
     pub const SETRLIMIT: u64 = 160;
     pub const SYNC: u64 = 162;
     pub const GETTID: u64 = 186;
+    pub const TKILL: u64 = 200;
+    pub const EPOLL_CREATE: u64 = 213;
     pub const TIME: u64 = 201;
     pub const FUTEX: u64 = 202;
     pub const SCHED_SETAFFINITY: u64 = 203;
@@ -156,20 +215,32 @@ mod nr {
     pub const CLOCK_GETRES: u64 = 229;
     pub const CLOCK_NANOSLEEP: u64 = 230;
     pub const EXIT_GROUP: u64 = 231;
+    pub const EPOLL_WAIT: u64 = 232;
+    pub const EPOLL_CTL: u64 = 233;
     pub const TGKILL: u64 = 234;
     pub const UTIMES: u64 = 235;
+    pub const WAITID: u64 = 247;
     pub const OPENAT: u64 = 257;
     pub const MKDIRAT: u64 = 258;
     pub const FCHOWNAT: u64 = 260;
     pub const NEWFSTATAT: u64 = 262;
     pub const UNLINKAT: u64 = 263;
     pub const RENAMEAT: u64 = 264;
+    pub const SYMLINKAT: u64 = 266;
     pub const READLINKAT: u64 = 267;
     pub const FCHMODAT: u64 = 268;
     pub const FACCESSAT: u64 = 269;
+    pub const PSELECT6: u64 = 270;
     pub const PPOLL: u64 = 271;
     pub const SET_ROBUST_LIST: u64 = 273;
     pub const UTIMENSAT: u64 = 280;
+    pub const EPOLL_PWAIT: u64 = 281;
+    pub const TIMERFD_CREATE: u64 = 283;
+    pub const EVENTFD: u64 = 284;
+    pub const TIMERFD_SETTIME: u64 = 286;
+    pub const TIMERFD_GETTIME: u64 = 287;
+    pub const EVENTFD2: u64 = 290;
+    pub const EPOLL_CREATE1: u64 = 291;
     pub const FALLOCATE: u64 = 285;
     pub const DUP3: u64 = 292;
     pub const PIPE2: u64 = 293;
@@ -177,9 +248,11 @@ mod nr {
     pub const RENAMEAT2: u64 = 316;
     pub const GETRANDOM: u64 = 318;
     pub const STATX: u64 = 332;
+    pub const EXECVEAT: u64 = 322;
     pub const RSEQ: u64 = 334;
     pub const CLONE3: u64 = 435;
     pub const FACCESSAT2: u64 = 439;
+    pub const EPOLL_PWAIT2: u64 = 441;
 }
 
 /// Linux programs make WaveOS call `n` as `WAVE_BASE + n` ("WA" in ASCII).
@@ -213,6 +286,7 @@ pub const UID: u64 = 1000;
 
 /// Entry for a Linux process's system call (from `syscall::dispatch`).
 pub fn dispatch(f: &mut SyscallFrame) -> Result<u64, isize> {
+    const SIGCHLD: u64 = signal::SIGCHLD as u64;
     let a = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
     let p = proc::current().ok_or(EPERM)?;
     match f.rax {
@@ -222,7 +296,10 @@ pub fn dispatch(f: &mut SyscallFrame) -> Result<u64, isize> {
         nr::CREAT => fs::openat(&p, fs::AT_FDCWD, a[0], fs::O_CREAT | fs::O_WRONLY | fs::O_TRUNC, a[1]),
         nr::OPENAT => fs::openat(&p, a[0], a[1], a[2], a[3]),
         nr::CLOSE => fs::close(&p, a[0]),
-        nr::STAT | nr::LSTAT => fs::stat_path(&p, fs::AT_FDCWD, a[0], a[1], 0),
+        nr::STAT => fs::stat_path(&p, fs::AT_FDCWD, a[0], a[1], 0),
+        nr::LSTAT => fs::stat_path(&p, fs::AT_FDCWD, a[0], a[1], fs::AT_SYMLINK_NOFOLLOW),
+        nr::SYMLINK => fs::symlinkat(&p, a[0], fs::AT_FDCWD, a[1]),
+        nr::SYMLINKAT => fs::symlinkat(&p, a[0], a[1], a[2]),
         nr::FSTAT => fs::fstat(&p, a[0], a[1]),
         nr::NEWFSTATAT => fs::stat_path(&p, a[0], a[1], a[2], a[3]),
         nr::STATX => fs::statx(&p, a[0], a[1], a[2], a[4]),
@@ -270,7 +347,29 @@ pub fn dispatch(f: &mut SyscallFrame) -> Result<u64, isize> {
         nr::UTIMES | nr::UTIMENSAT => Ok(0),
         nr::UMASK => Ok(0o022),
         nr::POLL => fs::poll(&p, a[0], a[1], a[2] as i64),
-        nr::PPOLL => fs::poll(&p, a[0], a[1], if a[2] == 0 { -1 } else { 0 }),
+        nr::PPOLL => fs::ppoll(&p, a[0], a[1], a[2], a[3]),
+        nr::SELECT => fs::select(&p, a[0], [a[1], a[2], a[3]], fs::Timeout::Timeval(a[4]), 0),
+        nr::PSELECT6 => fs::select(&p, a[0], [a[1], a[2], a[3]], fs::Timeout::Timespec(a[4]), a[5]),
+
+        nr::EVENTFD => events::eventfd(&p, a[0], 0),
+        nr::EVENTFD2 => events::eventfd(&p, a[0], a[1]),
+        nr::TIMERFD_CREATE => events::timerfd_create(&p, a[0], a[1]),
+        nr::TIMERFD_SETTIME => events::timerfd_settime(&p, a[0], a[1], a[2], a[3]),
+        nr::TIMERFD_GETTIME => events::timerfd_gettime(&p, a[0], a[1]),
+        nr::EPOLL_CREATE => events::epoll_create(&p, 0),
+        nr::EPOLL_CREATE1 => events::epoll_create(&p, a[0]),
+        nr::EPOLL_CTL => events::epoll_ctl(&p, a[0], a[1], a[2], a[3]),
+        nr::EPOLL_WAIT => events::epoll_wait(&p, a[0], a[1], a[2], a[3] as i32 as i64, 0),
+        nr::EPOLL_PWAIT => events::epoll_wait(&p, a[0], a[1], a[2], a[3] as i32 as i64, a[4]),
+        nr::EPOLL_PWAIT2 => {
+            let ms = if a[3] == 0 {
+                -1
+            } else {
+                let [sec, nsec]: [i64; 2] = crate::syscall::user::get(a[3])?;
+                sec.max(0) * 1000 + nsec.max(0) / 1_000_000
+            };
+            events::epoll_wait(&p, a[0], a[1], a[2], ms, a[4])
+        }
 
         nr::MMAP => mm::mmap(&p, a[0], a[1], a[2], a[3], a[4] as i64, a[5]),
         nr::MUNMAP => mm::munmap(&p, a[0], a[1]),
@@ -294,16 +393,25 @@ pub fn dispatch(f: &mut SyscallFrame) -> Result<u64, isize> {
         }
         nr::SETUID | nr::SETGID => Ok(0),
         nr::GETGROUPS => Ok(0),
-        nr::GETPGRP | nr::GETPGID | nr::GETSID => Ok(p.pid as u64),
-        nr::SETPGID => Ok(0),
-        nr::SETSID => Ok(p.pid as u64),
+        nr::GETPGRP => process::getpgid(&p, 0),
+        nr::GETPGID => process::getpgid(&p, a[0]),
+        nr::GETSID => process::getsid(&p, a[0]),
+        nr::SETPGID => process::setpgid(&p, a[0], a[1]),
+        nr::SETSID => process::setsid(&p),
         nr::SET_TID_ADDRESS => {
             if let Some(l) = &p.linux {
                 l.clear_tid.lock().insert(crate::sched::current_id(), a[0]);
             }
             Ok(misc::tid(&p))
         }
-        nr::CLONE => misc::clone(&p, f, a[0], a[1], a[2], a[3], a[4]),
+        nr::CLONE => process::clone(&p, f, a[0], a[1], a[2], a[3], a[4]),
+        nr::FORK => process::clone(&p, f, SIGCHLD, 0, 0, 0, 0),
+        nr::VFORK => process::clone(&p, f, 0x4000 | 0x100 | SIGCHLD, 0, 0, 0, 0),
+        nr::EXECVE => process::execve(&p, f, fs::AT_FDCWD, a[0], a[1], a[2]),
+        nr::EXECVEAT => process::execve(&p, f, a[0], a[1], a[2], a[3]),
+        nr::WAIT4 => process::wait4(&p, a[0] as i32 as i64, a[1], a[2], a[3]),
+        nr::WAITID => process::waitid(&p, a[0], a[1], a[2], a[3]),
+        nr::KILL => signal::kill(&p, a[0] as i32 as i64, a[1]),
         nr::SET_ROBUST_LIST => Ok(0),
         nr::RSEQ | nr::CLONE3 => Err(ENOSYS),
         nr::ARCH_PRCTL => misc::arch_prctl(a[0], a[1]),
@@ -316,8 +424,16 @@ pub fn dispatch(f: &mut SyscallFrame) -> Result<u64, isize> {
         nr::SCHED_GETAFFINITY => misc::sched_getaffinity(a[1], a[2]),
         nr::SCHED_SETAFFINITY | nr::SCHED_GETPARAM | nr::SCHED_GETSCHEDULER | nr::SETPRIORITY => Ok(0),
         nr::GETPRIORITY => Ok(20),
-        nr::RT_SIGACTION | nr::RT_SIGPROCMASK | nr::SIGALTSTACK => misc::signals_stub(a),
-        nr::TGKILL => misc::tgkill(&p, a[1], a[2]),
+        nr::RT_SIGACTION => signal::sigaction(&p, a[0], a[1], a[2]),
+        nr::RT_SIGPROCMASK => signal::sigprocmask(&p, a[0], a[1], a[2]),
+        nr::RT_SIGRETURN => signal::sigreturn(&p, f),
+        nr::SIGALTSTACK => signal::sigaltstack(&p, a[0], a[1]),
+        nr::RT_SIGPENDING => signal::sigpending(&p, a[0]),
+        nr::RT_SIGSUSPEND => signal::suspend(&p, Some(a[0])),
+        nr::PAUSE => signal::suspend(&p, None),
+        nr::RT_SIGTIMEDWAIT => signal::sigtimedwait(&p, a[0], a[1], a[2]),
+        nr::TGKILL => signal::tgkill(&p, Some(a[0]), a[1], a[2]),
+        nr::TKILL => signal::tgkill(&p, None, a[0], a[1]),
 
         nr::UNAME => misc::uname(a[0]),
         nr::SYSINFO => misc::sysinfo(a[0]),
@@ -351,7 +467,7 @@ fn unimplemented(n: u64) {
     let (word, bit) = ((n / 64) as usize, 1u64 << (n % 64));
     if seen[word] & bit == 0 {
         seen[word] |= bit;
-        let name = proc::current().map(|p| p.name.clone()).unwrap_or_default();
+        let name = proc::current().map(|p| p.name()).unwrap_or_default();
         log!("linux", "{name}: system call {n} is not supported yet (ENOSYS)");
     }
 }

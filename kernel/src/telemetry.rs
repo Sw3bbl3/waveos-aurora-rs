@@ -264,9 +264,9 @@ fn snapshot() -> String {
             "{}{{\"pid\":{},\"n\":{},\"ppid\":{},\"path\":{},\"kib\":{},\"alive\":{}}}",
             if i > 0 { "," } else { "" },
             p.pid,
-            json_str(&p.name),
+            json_str(&p.name()),
             p.parent,
-            json_str(&p.path),
+            json_str(&p.path()),
             p.resident_kib.load(Ordering::Relaxed),
             p.exit_code().is_none()
         );

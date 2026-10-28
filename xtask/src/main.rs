@@ -524,7 +524,17 @@ fn system_image(programs: &[Program], out: &Path) {
     t.dir("Apps");
     t.dir("Bin");
     // The read-only half of the Linux tree (see kernel/src/compat/linux).
-    for dir in ["Linux", "Linux/bin", "Linux/etc", "Linux/lib", "Linux/usr", "Linux/usr/bin", "Linux/usr/lib"] {
+    for dir in [
+        "Linux",
+        "Linux/bin",
+        "Linux/etc",
+        "Linux/lib",
+        "Linux/sbin",
+        "Linux/usr",
+        "Linux/usr/bin",
+        "Linux/usr/lib",
+        "Linux/usr/sbin",
+    ] {
         t.dir(dir);
     }
     t.dir("Games");
@@ -575,6 +585,7 @@ fn system_image(programs: &[Program], out: &Path) {
         let name = f.file_name().unwrap().to_string_lossy().into_owned();
         t.file(&format!("Library/Nebula/{name}"), &fs::read(&f).unwrap());
     }
+    t.file("Linux/.links", linux::links(programs).as_bytes());
     for (dest, src) in programs {
         t.file(dest, &fs::read(src).unwrap());
     }

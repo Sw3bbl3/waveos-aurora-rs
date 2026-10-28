@@ -168,7 +168,11 @@ pub mod nr {
     /// `gamepad_rumble(id, strong, weak, duration_ms)` — motors 0–255;
     /// `-ENOSYS` for controllers without them.
     pub const GAMEPAD_RUMBLE: usize = 78;
-    pub const COUNT: usize = 79;
+    /// `signal(target, sig)` — sends Linux signal `sig` to process `target`,
+    /// or to process group `-target`. WaveOS programs end on the usual
+    /// ending signals (INT, TERM, HUP, QUIT, KILL) and ignore the rest.
+    pub const SIGNAL: usize = 79;
+    pub const COUNT: usize = 80;
 }
 
 #[repr(C)]
@@ -508,6 +512,7 @@ pub mod err {
     pub const ENAMETOOLONG: isize = 36;
     pub const ENOSYS: isize = 38;
     pub const ENOTEMPTY: isize = 39;
+    pub const ELOOP: isize = 40;
     pub const EMSGSIZE: isize = 90;
     pub const EADDRINUSE: isize = 98;
     pub const ENETUNREACH: isize = 101;
@@ -549,6 +554,7 @@ pub mod err {
             ENAMETOOLONG => "name too long",
             ENOSYS => "not implemented",
             ENOTEMPTY => "directory not empty",
+            ELOOP => "too many levels of symbolic links",
             ETIMEDOUT => "timed out",
             EMSGSIZE => "message too long",
             EADDRINUSE => "address already in use",

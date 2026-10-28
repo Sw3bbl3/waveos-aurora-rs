@@ -66,6 +66,10 @@ fn unpack_deb(deb: &PathBuf) -> Option<PathBuf> {
     Some(out)
 }
 
+/// The commands BusyBox provides and where Debian puts them (from
+/// `busybox --list-full` of the pinned build).
+const BUSYBOX_APPLETS: &str = include_str!("busybox-applets.txt");
+
 /// BusyBox for `/System/Linux/bin`, and its copyright for `/System/Licenses`.
 fn busybox() -> Vec<Program> {
     let Some(deb) = fetch(&format!("{DEBIAN}/{}", BUSYBOX.0), BUSYBOX.1) else { return Vec::new() };
@@ -74,6 +78,18 @@ fn busybox() -> Vec<Program> {
         (String::from("Linux/bin/busybox"), dir.join("bin/busybox")),
         (String::from("Licenses/busybox.txt"), dir.join("usr/share/doc/busybox-static/copyright")),
     ]
+}
+
+/// The symbolic links of the Linux tree (`/System/Linux/.links`, one
+/// `path<TAB>target` per line): every BusyBox command, as Debian installs them.
+pub fn links(programs: &[Program]) -> String {
+    let mut out = String::new();
+    if programs.iter().any(|(p, _)| p == "Linux/bin/busybox") {
+        for applet in BUSYBOX_APPLETS.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            out.push_str(&format!("/{applet}\t/bin/busybox\n"));
+        }
+    }
+    out
 }
 
 /// Builds every `linux-tests/*.c` into `target/linux/<name>`. Without

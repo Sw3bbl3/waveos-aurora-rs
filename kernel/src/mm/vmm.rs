@@ -411,6 +411,50 @@ impl AddressSpace {
         }
     }
 
+    /// A copy of this address space (Linux `fork`): every private page is
+    /// duplicated; shared mappings (window surfaces) are left out.
+    pub fn fork_copy(&self) -> Option<AddressSpace> {
+        let mut child = AddressSpace::new()?;
+        child.mmap_next = self.mmap_next;
+        let mut resident = 0;
+        let ok = Self::copy_level(self.pml4, child.pml4, 3, &mut resident);
+        child.resident = resident;
+        // On failure, dropping the partial copy frees what it holds.
+        ok.then_some(child)
+    }
+
+    fn copy_level(src: u64, dst: u64, level: u32, resident: &mut u64) -> bool {
+        let limit = if level == 3 { 256 } else { 512 };
+        for i in 0..limit {
+            let e = table(src)[i];
+            if e & PRESENT == 0 {
+                continue;
+            }
+            if level == 0 {
+                if e & SHARED != 0 {
+                    continue;
+                }
+                let Some(f) = frame::alloc() else { return false };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        phys_to_virt(e & ADDR) as *const u8,
+                        phys_to_virt(f) as *mut u8,
+                        PAGE_SIZE as usize,
+                    );
+                }
+                table(dst)[i] = f | (e & !ADDR);
+                *resident += PAGE_SIZE;
+            } else {
+                let Some(t) = zeroed_frame() else { return false };
+                table(dst)[i] = t | (e & !ADDR);
+                if !Self::copy_level(e & ADDR, t, level - 1, resident) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Reserves `pages` of address space in the mmap region (with a guard page after).
     pub fn reserve(&mut self, pages: u64) -> Option<u64> {
         let va = self.mmap_next;

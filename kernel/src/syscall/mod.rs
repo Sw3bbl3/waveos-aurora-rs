@@ -20,11 +20,15 @@ pub extern "sysv64" fn dispatch(f: &mut SyscallFrame) {
     crate::telemetry::syscall(f.rax as usize);
     // Linux programs use Linux's numbers and meanings.
     let linux = proc::current().is_some_and(|p| p.linux.is_some());
+    let nr = f.rax;
     let result = if linux { crate::compat::linux::dispatch(f) } else { handle(f.rax as usize, a) };
     f.rax = match result {
         Ok(v) => v,
         Err(e) => (-e.abs()) as u64,
     };
+    if linux {
+        crate::compat::linux::signal::on_return(f, nr);
+    }
     proc::check_killed();
 }
 
@@ -48,6 +52,20 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::SPAWN => spawn(a),
         nr::WAIT => proc::wait(a[0] as u32, a[1]).map(|c| c as i32 as u32 as u64),
         nr::KILL => proc::kill(a[0] as u32).map(|_| 0),
+        nr::SIGNAL => {
+            let me = proc::current().ok_or(EPERM)?;
+            let target = a[0] as i64;
+            let targets =
+                if target < 0 { proc::group((-target) as u32) } else { proc::get(target as u32).into_iter().collect() };
+            if targets.is_empty() {
+                return Err(ESRCH);
+            }
+            let info = crate::compat::linux::signal::Info { pid: me.pid, ..Default::default() };
+            for t in targets {
+                crate::compat::linux::signal::send(&t, a[1] as u32, info, None);
+            }
+            Ok(0)
+        }
         nr::PROC_LIST => proc_list(a[0], a[1]),
         nr::MMAP => mmap(a[0]),
         nr::MUNMAP => munmap(a[0], a[1]),
@@ -172,7 +190,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             let title = user::str(a[0], a[1].min(512))?;
             let body = user::str(a[2], a[3].min(2048))?;
             let p = proc::current().ok_or(EPERM)?;
-            crate::gui::notify::post(p.pid, &p.path, &title, &body);
+            crate::gui::notify::post(p.pid, &p.path(), &title, &body);
             Ok(0)
         }
         nr::PREF_GET => {
@@ -479,7 +497,7 @@ impl core::ops::Deref for SocketRef {
 }
 
 fn log_line(text: &[u8]) {
-    let name = proc::current().map(|p| p.name.clone()).unwrap_or_default();
+    let name = proc::current().map(|p| p.name()).unwrap_or_default();
     let text = String::from_utf8_lossy(text);
     for line in text.trim_end_matches('\n').split('\n') {
         log!(name.as_str(), "{}", line);
@@ -545,7 +563,7 @@ fn mmap(len: u64) -> SysResult {
     }
     let pages = len.div_ceil(mm::PAGE_SIZE);
     let p = proc::current().ok_or(EPERM)?;
-    let mut guard = p.aspace.lock();
+    let mut guard = p.mem();
     let aspace = guard.as_mut().ok_or(ESRCH)?;
     let va = aspace.reserve(pages).ok_or(ENOMEM)?;
     if let Err(e) = aspace.map_anon(va, pages, mm::vmm::Prot::ReadWrite) {
@@ -562,7 +580,7 @@ fn munmap(addr: u64, len: u64) -> SysResult {
         return Err(EINVAL);
     }
     let p = proc::current().ok_or(EPERM)?;
-    let mut guard = p.aspace.lock();
+    let mut guard = p.mem();
     let aspace = guard.as_mut().ok_or(ESRCH)?;
     aspace.unmap(addr, len.div_ceil(mm::PAGE_SIZE));
     p.resident_kib.store(aspace.resident / 1024, Ordering::Relaxed);
@@ -620,7 +638,7 @@ fn proc_list(ptr: u64, max: u64) -> SysResult {
     }
     for p in proc::all() {
         let mine: Vec<&sched::TaskInfo> = tasks.iter().filter(|t| t.pid == p.pid).collect();
-        let (name, name_len) = fixed::<32>(&p.name);
+        let (name, name_len) = fixed::<32>(&p.name());
         let state = match (p.exit_code(), mine.first()) {
             (Some(_), _) | (None, None) => aurora_abi::PROC_EXITED,
             (None, Some(t)) => state_of(t.state),

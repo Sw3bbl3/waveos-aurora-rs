@@ -17,6 +17,9 @@ use aurora_abi::err::*;
 pub const AT_FDCWD: u64 = -100i64 as u64;
 pub const AT_REMOVEDIR: u64 = 0x200;
 const AT_EMPTY_PATH: u64 = 0x1000;
+pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+const O_NOFOLLOW: u64 = 0o400000;
+pub const O_CLOEXEC: u64 = 0o2000000;
 
 pub const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
@@ -80,7 +83,7 @@ pub enum Special {
     /// A directory (`getdents64`), by WaveOS path; listed when first read.
     Dir {
         host: String,
-        entries: Option<Vec<(String, bool)>>,
+        entries: Option<Vec<(String, u8)>>,
         pos: usize,
     },
     /// A file whose contents are made up when opened (`/proc`, `/etc/passwd`).
@@ -91,11 +94,18 @@ pub enum Special {
     Null,
     Zero,
     Random,
+    /// `eventfd`, `timerfd` and `epoll` descriptors (see [`super::events`]).
+    Event(Arc<super::events::EventFd>),
+    Timer(Arc<super::events::TimerFd>),
+    Epoll(Arc<super::events::Epoll>),
 }
 
 impl Special {
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize, isize> {
         match self {
+            Special::Event(e) => e.read(out),
+            Special::Timer(t) => t.read(out),
+            Special::Epoll(_) => Err(EINVAL),
             Special::Dir { .. } => Err(EISDIR),
             Special::Mem { data, pos } => {
                 let n = out.len().min(data.len().saturating_sub(*pos));
@@ -119,6 +129,8 @@ impl Special {
         match self {
             Special::Dir { .. } => Err(EISDIR),
             Special::Mem { .. } => Err(EACCES),
+            Special::Event(e) => e.write(data),
+            Special::Timer(_) | Special::Epoll(_) => Err(EINVAL),
             _ => Ok(data.len()),
         }
     }
@@ -131,6 +143,8 @@ impl Special {
             Special::Null => (S_IFCHR | 0o666, makedev(1, 3)),
             Special::Zero => (S_IFCHR | 0o666, makedev(1, 5)),
             Special::Random => (S_IFCHR | 0o666, makedev(1, 9)),
+            // Anonymous inodes on Linux.
+            Special::Event(_) | Special::Timer(_) | Special::Epoll(_) => (0o600, 0),
         }
     }
 }
@@ -139,6 +153,7 @@ const S_IFIFO: u32 = 0o010000;
 const S_IFCHR: u32 = 0o020000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
+const S_IFLNK: u32 = 0o120000;
 const S_IFSOCK: u32 = 0o140000;
 
 fn makedev(major: u64, minor: u64) -> u64 {
@@ -175,10 +190,34 @@ fn guest_path(p: &Process, dirfd: u64, raw: &str) -> Result<String, isize> {
         return Err(ENOENT);
     }
     let base = if raw.starts_with('/') { String::from("/") } else { base_dir(p, dirfd)? };
-    Ok(fs::resolve(&base, raw))
+    let mut path = super::links::resolve(&fs::resolve(&base, raw), false)?;
+    // A trailing slash means the folder itself (follow a link to it).
+    if raw.ends_with('/') && path != "/" {
+        path = follow(&path)?;
+    }
+    Ok(path)
 }
 
-fn path_arg(p: &Process, dirfd: u64, ptr: u64) -> Result<String, isize> {
+/// `guest` with a link in its last component followed too.
+pub fn follow(guest: &str) -> Result<String, isize> {
+    super::links::resolve(guest, true)
+}
+
+/// The WaveOS path a Linux path finally leads to.
+pub fn resolve_host(guest: &str) -> Result<String, isize> {
+    Ok(to_host(&follow(guest)?))
+}
+
+/// `path` made absolute against the caller's working folder.
+pub fn absolute(p: &Process, path: &str) -> String {
+    if path.starts_with('/') {
+        String::from(path)
+    } else {
+        fs::resolve(&to_guest(&p.cwd.lock()), path)
+    }
+}
+
+pub fn path_arg(p: &Process, dirfd: u64, ptr: u64) -> Result<String, isize> {
     guest_path(p, dirfd, &user::cstr(ptr)?)
 }
 
@@ -196,9 +235,16 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/proc/cpuinfo" => mem(cpuinfo()),
         "/proc/meminfo" => mem(meminfo()),
         "/proc/self/maps" => mem(String::new()),
-        "/proc/self/cmdline" => mem(format!("{}\0", p.name)),
-        "/proc/self/comm" | "/proc/self/task/self/comm" => mem(format!("{}\n", p.name)),
-        "/proc/self/stat" => mem(format!("{} ({}) R {} {} {} 0 -1 0\n", p.pid, p.name, p.parent, p.pid, p.pid)),
+        "/proc/self/cmdline" => mem(format!("{}\0", p.name())),
+        "/proc/self/comm" | "/proc/self/task/self/comm" => mem(format!("{}\n", p.name())),
+        "/proc/self/stat" => mem(format!(
+            "{} ({}) R {} {} {} 0 -1 0\n",
+            p.pid,
+            p.name(),
+            p.parent,
+            p.pgid.load(core::sync::atomic::Ordering::Relaxed),
+            p.sid.load(core::sync::atomic::Ordering::Relaxed)
+        )),
         "/proc/mounts" | "/proc/self/mounts" | "/etc/mtab" => mem(mounts()),
         "/proc/version" => mem(String::from("Linux version 6.12.0-waveos (WaveOS Aurora)\n")),
         "/proc/sys/kernel/osrelease" => mem(String::from("6.12.0-waveos\n")),
@@ -273,18 +319,113 @@ fn resolv_conf() -> String {
 // ------------------------------------------------------------------ files
 
 /// Read and write share WaveOS's own (they know every kind of handle).
-pub fn read(_p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
-    crate::syscall::read(fd as usize, ptr, len)
+pub fn read(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
+    // Event and timer reads may block: not while holding the descriptor's lock.
+    if let Handle::Special(s) = &*p.fd(fd as usize)? {
+        let blocking = match &*s.lock() {
+            Special::Event(e) => Some((Some(e.clone()), None)),
+            Special::Timer(t) => Some((None, Some(t.clone()))),
+            _ => None,
+        };
+        if let Some((e, t)) = blocking {
+            let mut out = user::slice_mut(ptr, len)?;
+            let n = match (e, t) {
+                (Some(e), _) => e.read(&mut out)?,
+                (_, Some(t)) => t.read(&mut out)?,
+                _ => 0,
+            };
+            out.commit(n)?;
+            return Ok(n as u64);
+        }
+    }
+    match crate::syscall::read(fd as usize, ptr, len) {
+        // A blocking read cut short by a signal.
+        Err(EAGAIN) if crate::proc::interrupted() && !nonblocking(p, fd) => Err(EINTR),
+        r => r,
+    }
 }
 
-pub fn write(_p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
-    crate::syscall::write(fd as usize, ptr, len)
+pub fn write(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
+    if let Handle::Special(s) = &*p.fd(fd as usize)? {
+        let event = match &*s.lock() {
+            Special::Event(e) => Some(e.clone()),
+            _ => None,
+        };
+        if let Some(e) = event {
+            let data = user::slice(ptr, len)?;
+            return e.write(&data).map(|n| n as u64);
+        }
+    }
+    let r = crate::syscall::write(fd as usize, ptr, len);
+    if r == Err(EPIPE) {
+        // Nobody reads the pipe any more: SIGPIPE (which ends the program unless handled).
+        let info = super::signal::Info { code: super::signal::SI_USER, pid: p.pid, ..Default::default() };
+        super::signal::send(p, super::signal::SIGPIPE, info, Some(crate::sched::current_id()));
+    }
+    r
+}
+
+fn nonblocking(p: &Process, fd: u64) -> bool {
+    p.fd(fd as usize).is_ok_and(|h| matches!(&*h, Handle::PipeRead { nonblocking: true, .. }))
+}
+
+/// Whether descriptor `fd` could be read and written without blocking, and
+/// whether its other end has gone; `None` if it isn't open. (`depth`
+/// bounds epoll sets watching epoll sets.)
+pub fn readiness_of(p: &Process, fd: usize, depth: u32) -> Option<(bool, bool, bool)> {
+    let h = p.fd(fd).ok()?;
+    Some(match &*h {
+        Handle::PipeRead { pipe, .. } => (pipe.readable(), false, false),
+        Handle::PipeWrite(pipe) => (false, pipe.writable(), false),
+        Handle::Special(s) => {
+            let inner = match &*s.lock() {
+                Special::Event(e) => Ok((e.readable(), e.writable())),
+                Special::Timer(t) => Ok((t.readable(), false)),
+                Special::Epoll(e) => Err(e.clone()),
+                _ => Ok((true, true)),
+            };
+            match inner {
+                Ok((rd, wr)) => (rd, wr, false),
+                Err(ep) => (ep.readable(p, depth), false, false),
+            }
+        }
+        _ => (true, true, false),
+    })
+}
+
+/// When the soonest timer among `fds` expires (ms from now).
+fn next_timer(p: &Process, fds: impl Iterator<Item = usize>) -> Option<u64> {
+    fds.filter_map(|fd| match &*p.fd(fd).ok()? {
+        Handle::Special(s) => match &*s.lock() {
+            Special::Timer(t) => t.due_in(),
+            _ => None,
+        },
+        _ => None,
+    })
+    .min()
 }
 
 pub fn openat(p: &Process, dirfd: u64, ptr: u64, flags: u64, _mode: u64) -> Result<u64, isize> {
     let guest = path_arg(p, dirfd, ptr)?;
-    let handle = open_guest(p, &guest, flags)?;
-    p.install_fd(handle).map(|fd| fd as u64)
+    if super::links::target(&guest).is_some() && flags & O_NOFOLLOW != 0 {
+        return Err(ELOOP);
+    }
+    let handle = open_guest(p, &follow(&guest)?, flags)?;
+    install(p, handle, flags & O_CLOEXEC != 0)
+}
+
+/// Installs a new made-up descriptor (event, timer, epoll).
+pub fn install_special(p: &Process, s: Special, cloexec: bool) -> Result<u64, isize> {
+    install(p, special(s), cloexec)
+}
+
+/// Installs a new descriptor, close-on-exec or not.
+fn install(p: &Process, h: Arc<Handle>, cloexec: bool) -> Result<u64, isize> {
+    let fd = p.install_fd(h)?;
+    if let Some(l) = &p.linux {
+        l.set_cloexec(fd, cloexec);
+    }
+    Ok(fd as u64)
 }
 
 /// Opens a Linux path as a handle.
@@ -336,14 +477,19 @@ pub fn open_guest(p: &Process, guest: &str, flags: u64) -> Result<Arc<Handle>, i
 }
 
 pub fn close(p: &Process, fd: u64) -> Result<u64, isize> {
-    let mut fds = p.fds.lock();
-    match fds.get_mut(fd as usize) {
-        Some(slot @ Some(_)) => {
-            slot.take();
-            Ok(0)
+    let old = {
+        let mut fds = p.fds.lock();
+        match fds.get_mut(fd as usize) {
+            Some(slot @ Some(_)) => slot.take(),
+            _ => return Err(EBADF),
         }
-        _ => Err(EBADF),
+    };
+    if let Some(l) = &p.linux {
+        l.set_cloexec(fd as usize, false);
     }
+    // The handle goes after the lock (a pipe end wakes its peer).
+    drop(old);
+    Ok(0)
 }
 
 pub fn lseek(p: &Process, fd: u64, offset: i64, whence: u64) -> Result<u64, isize> {
@@ -442,14 +588,14 @@ pub fn getdents64(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize
     let mut s = s.lock();
     let Special::Dir { host, entries, pos } = &mut *s else { return Err(ENOTDIR) };
     if entries.is_none() {
-        let mut list = alloc::vec![(String::from("."), true), (String::from(".."), true)];
+        let mut list = alloc::vec![(String::from("."), DT_DIR), (String::from(".."), DT_DIR)];
         list.extend(dir_entries(host));
         *entries = Some(list);
     }
     let entries = entries.as_ref().unwrap();
     let mut out = user::slice_mut(ptr, len)?;
     let mut used = 0usize;
-    while let Some((name, dir)) = entries.get(*pos) {
+    while let Some((name, kind)) = entries.get(*pos) {
         let reclen = (19 + name.len() + 1 + 7) & !7;
         if used + reclen > out.len() {
             if used == 0 {
@@ -463,7 +609,7 @@ pub fn getdents64(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize
         rec[0..8].copy_from_slice(&ino.to_le_bytes());
         rec[8..16].copy_from_slice(&((*pos + 1) as u64).to_le_bytes());
         rec[16..18].copy_from_slice(&(reclen as u16).to_le_bytes());
-        rec[18] = if *dir { 4 } else { 8 };
+        rec[18] = *kind;
         rec[19..19 + name.len()].copy_from_slice(name.as_bytes());
         used += reclen;
         *pos += 1;
@@ -472,28 +618,47 @@ pub fn getdents64(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize
     Ok(used as u64)
 }
 
-/// The entries of a directory: real ones, or the virtual `/dev` and `/proc`.
-fn dir_entries(host: &str) -> Vec<(String, bool)> {
+const DT_DIR: u8 = 4;
+const DT_REG: u8 = 8;
+const DT_LNK: u8 = 10;
+
+/// The entries of a directory: real ones (and links), or the virtual `/dev` and `/proc`.
+fn dir_entries(host: &str) -> Vec<(String, u8)> {
+    let mut v = plain_entries(host);
+    for name in super::links::in_dir(&to_guest(host)) {
+        if !v.iter().any(|(n, _)| *n == name) {
+            v.push((name, DT_LNK));
+        }
+    }
+    v
+}
+
+fn plain_entries(host: &str) -> Vec<(String, u8)> {
+    let kind = |dir: bool| if dir { DT_DIR } else { DT_REG };
     let names: &[(&str, bool)] = match host {
         "/dev" => &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true)],
         "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false)],
         "/proc/self" => &[("exe", false), ("maps", false), ("cmdline", false), ("comm", false), ("stat", false)],
         "/dev/shm" => &[],
         _ => {
-            let mut v: Vec<(String, bool)> =
-                fs::readdir(host).unwrap_or_default().into_iter().map(|e| (e.name, e.kind == Kind::Dir)).collect();
+            let mut v: Vec<(String, u8)> = fs::readdir(host)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| !(e.name == ".links" && (host == SYSTEM_ROOT || host == WRITABLE_ROOT)))
+                .map(|e| (e.name, kind(e.kind == Kind::Dir)))
+                .collect();
             // The Linux tree shows its top folders at the root.
             if host == "/" {
                 for d in SYSTEM_DIRS.iter().chain(WRITABLE_DIRS.iter()).chain(["dev", "proc"].iter()) {
                     if !v.iter().any(|(n, _)| n == d) {
-                        v.push((String::from(*d), true));
+                        v.push((String::from(*d), DT_DIR));
                     }
                 }
             }
             return v;
         }
     };
-    names.iter().map(|&(n, d)| (String::from(n), d)).collect()
+    names.iter().map(|&(n, d)| (String::from(n), kind(d))).collect()
 }
 
 fn fnv(s: &str) -> u64 {
@@ -527,7 +692,14 @@ fn file_mode(host: &str) -> u32 {
     S_IFREG | if exec { 0o755 } else { 0o644 }
 }
 
-fn info_for_path(p: &Process, guest: &str) -> Result<Info, isize> {
+fn info_for_path(p: &Process, guest: &str, follow_link: bool) -> Result<Info, isize> {
+    if let Some(to) = super::links::target(guest) {
+        if !follow_link {
+            let mode = S_IFLNK | 0o777;
+            return Ok(Info { mode, size: to.len() as u64, ino: fnv(guest), rdev: 0, mtime: 0, ctime: 0 });
+        }
+        return info_for_path(p, &follow(guest)?, false);
+    }
     if let Some(v) = virtual_file(p, guest) {
         let s = v?;
         let (mode, rdev) = s.mode();
@@ -599,7 +771,7 @@ pub fn stat_path(p: &Process, dirfd: u64, ptr: u64, buf: u64, flags: u64) -> Res
         return fstat(p, dirfd, buf);
     }
     let guest = guest_path(p, dirfd, &raw)?;
-    put_stat(buf, &info_for_path(p, &guest)?)
+    put_stat(buf, &info_for_path(p, &guest, flags & AT_SYMLINK_NOFOLLOW == 0)?)
 }
 
 pub fn fstat(p: &Process, fd: u64, buf: u64) -> Result<u64, isize> {
@@ -613,7 +785,7 @@ pub fn statx(p: &Process, dirfd: u64, ptr: u64, flags: u64, buf: u64) -> Result<
     let info = if raw.is_empty() && flags & AT_EMPTY_PATH != 0 {
         info_for_handle(&*p.fd(dirfd as usize)?)?
     } else {
-        info_for_path(p, &guest_path(p, dirfd, &raw)?)?
+        info_for_path(p, &guest_path(p, dirfd, &raw)?, flags & AT_SYMLINK_NOFOLLOW == 0)?
     };
     let mut b = [0u8; 256];
     let put32 = |b: &mut [u8; 256], off: usize, v: u32| b[off..off + 4].copy_from_slice(&v.to_le_bytes());
@@ -639,8 +811,8 @@ pub fn statx(p: &Process, dirfd: u64, ptr: u64, flags: u64, buf: u64) -> Result<
 }
 
 pub fn access(p: &Process, dirfd: u64, ptr: u64, mode: u64) -> Result<u64, isize> {
-    let guest = path_arg(p, dirfd, ptr)?;
-    let info = info_for_path(p, &guest)?;
+    let guest = follow(&path_arg(p, dirfd, ptr)?)?;
+    let info = info_for_path(p, &guest, true)?;
     if mode & 2 != 0 && virtual_file(p, &guest).is_none() {
         let host = to_host(&guest);
         if fs::stat(&host).is_ok_and(|(_, ro)| ro) {
@@ -680,11 +852,20 @@ pub fn fcntl(p: &Process, fd: u64, cmd: u64, arg: u64) -> Result<u64, isize> {
                 fds.resize(slot + 1, None);
             }
             fds[slot] = Some(h);
+            drop(fds);
+            if let Some(l) = &p.linux {
+                l.set_cloexec(slot, cmd == 1030);
+            }
             Ok(slot as u64)
         }
-        // F_GETFD, F_SETFD (close-on-exec is not tracked yet).
-        1 => Ok(0),
-        2 => Ok(0),
+        // F_GETFD, F_SETFD: the close-on-exec flag.
+        1 => Ok(p.linux.as_ref().is_some_and(|l| l.cloexec(fd as usize)) as u64),
+        2 => {
+            if let Some(l) = &p.linux {
+                l.set_cloexec(fd as usize, arg & 1 != 0);
+            }
+            Ok(0)
+        }
         // F_GETFL.
         3 => Ok(match &*h {
             Handle::File(f) => {
@@ -709,10 +890,10 @@ pub fn fcntl(p: &Process, fd: u64, cmd: u64, arg: u64) -> Result<u64, isize> {
 
 pub fn dup(p: &Process, fd: u64) -> Result<u64, isize> {
     let h = p.fd(fd as usize)?;
-    p.install_fd(h).map(|n| n as u64)
+    install(p, h, false)
 }
 
-pub fn dup3(p: &Process, old: u64, new: u64, _flags: u64, dup2: bool) -> Result<u64, isize> {
+pub fn dup3(p: &Process, old: u64, new: u64, flags: u64, dup2: bool) -> Result<u64, isize> {
     let h = p.fd(old as usize)?;
     if old == new {
         return if dup2 { Ok(new) } else { Err(EINVAL) };
@@ -725,72 +906,207 @@ pub fn dup3(p: &Process, old: u64, new: u64, _flags: u64, dup2: bool) -> Result<
     if fds.len() <= new {
         fds.resize(new + 1, None);
     }
-    // The old handle (if any) is dropped after the lock, outside this scope.
-    let _old = fds[new].replace(h);
+    let old_handle = fds[new].replace(h);
+    drop(fds);
+    if let Some(l) = &p.linux {
+        l.set_cloexec(new, flags & O_CLOEXEC != 0);
+    }
+    // The replaced handle goes after the lock.
+    drop(old_handle);
     Ok(new as u64)
 }
 
 pub fn pipe2(p: &Process, ptr: u64, flags: u64) -> Result<u64, isize> {
     user::writable(ptr, 8)?;
     let (r, w) = crate::proc::new_pipe(flags & O_NONBLOCK != 0);
-    let rfd = p.install_fd(r)?;
-    let wfd = match p.install_fd(w) {
+    let cloexec = flags & O_CLOEXEC != 0;
+    let rfd = install(p, r, cloexec)?;
+    let wfd = match install(p, w, cloexec) {
         Ok(fd) => fd,
         Err(e) => {
-            p.fds.lock()[rfd] = None;
+            let _ = close(p, rfd);
             return Err(e);
         }
     };
     user::put(ptr, &[rfd as i32, wfd as i32]).map(|_| 0)
 }
 
-/// `poll`: files and devices are always ready; pipes when they have data
-/// (or room). Sleeps in short steps until something is ready.
-pub fn poll(p: &Process, fds_ptr: u64, count: u64, timeout_ms: i64) -> Result<u64, isize> {
-    if count > 1024 {
-        return Err(EINVAL);
-    }
-    let deadline = (timeout_ms >= 0).then(|| crate::time::uptime_ms() + timeout_ms as u64);
-    loop {
-        let mut ready = 0u64;
-        let mut out = Vec::with_capacity(count as usize);
-        for i in 0..count {
-            let [fd, ev]: [i32; 2] = user::get(fds_ptr + i * 8)?;
-            let events = (ev & 0xFFFF) as u16;
-            let revents: u16 = if fd < 0 {
-                0
-            } else {
-                match p.fd(fd as usize) {
-                    Err(_) => 0x20, // POLLNVAL
-                    Ok(h) => {
-                        let (rd, wr) = match &*h {
-                            Handle::PipeRead { pipe, .. } => (pipe.readable(), false),
-                            Handle::PipeWrite(pipe) => (false, pipe.writable()),
-                            _ => (true, true),
-                        };
-                        (if rd { events & 0x1 } else { 0 }) | (if wr { events & 0x4 } else { 0 })
-                    }
-                }
-            };
-            if revents != 0 {
-                ready += 1;
-            }
-            out.push((fd, ev, revents));
+/// Whether descriptor `fd` could be read and written without blocking:
+/// files and devices always; pipes, events and timers when they are ready.
+fn readiness(p: &Process, fd: usize) -> Option<(bool, bool)> {
+    readiness_of(p, fd, 0).map(|(rd, wr, _)| (rd, wr))
+}
+
+/// How long `poll`/`select` may wait.
+pub enum Timeout {
+    /// A `struct timeval` (`select`), or none (0: forever).
+    Timeval(u64),
+    /// A `struct timespec` (`ppoll`, `pselect6`), or none.
+    Timespec(u64),
+}
+
+/// The deadline (uptime ms) for a timeout; `None`: wait forever.
+fn deadline(t: Timeout) -> Result<Option<u64>, isize> {
+    let ms = match t {
+        Timeout::Timeval(0) | Timeout::Timespec(0) => return Ok(None),
+        Timeout::Timeval(ptr) => {
+            let [sec, usec]: [i64; 2] = user::get(ptr)?;
+            sec.max(0) as u64 * 1000 + (usec.max(0) as u64).div_ceil(1000)
         }
-        let done = ready > 0 || deadline.is_some_and(|d| crate::time::uptime_ms() >= d);
-        if done {
-            for (i, (fd, ev, rev)) in out.into_iter().enumerate() {
-                let word = (fd as u32 as u64) | ((ev as u16 as u64) << 32) | ((rev as u64) << 48);
-                user::put(fds_ptr + i as u64 * 8, &word)?;
-            }
-            return Ok(ready);
+        Timeout::Timespec(ptr) => {
+            let [sec, nsec]: [i64; 2] = user::get(ptr)?;
+            sec.max(0) as u64 * 1000 + (nsec.max(0) as u64).div_ceil(1_000_000)
+        }
+    };
+    Ok(Some(crate::time::uptime_ms() + ms))
+}
+
+/// Waits until `check` finds something ready (it returns a count), the
+/// deadline passes (0), or a signal comes (`EINTR`). It wakes when anything
+/// changes, or when the soonest of `timers` (ms) expires.
+fn wait_ready(
+    deadline: Option<u64>,
+    timers: impl Fn() -> Option<u64>,
+    mut check: impl FnMut(bool) -> Result<u64, isize>,
+) -> Result<u64, isize> {
+    use crate::proc::readiness;
+    loop {
+        let gen = readiness::generation();
+        let timed_out = deadline.is_some_and(|d| crate::time::uptime_ms() >= d);
+        let n = check(timed_out)?;
+        if n > 0 || timed_out {
+            return Ok(n);
         }
         if crate::proc::interrupted() {
             return Err(EINTR);
         }
-        let wait = deadline.map_or(10, |d| d.saturating_sub(crate::time::uptime_ms()).min(10));
-        crate::sched::wait_until(wait.max(1), crate::proc::interrupted);
+        let mut wait = deadline.map_or(1000, |d| d.saturating_sub(crate::time::uptime_ms()));
+        if let Some(t) = timers() {
+            wait = wait.min(t);
+        }
+        readiness::wait(gen, wait.max(1));
     }
+}
+
+pub fn poll(p: &Process, fds_ptr: u64, count: u64, timeout_ms: i64) -> Result<u64, isize> {
+    let deadline = (timeout_ms >= 0).then(|| crate::time::uptime_ms() + timeout_ms as u64);
+    poll_until(p, fds_ptr, count, deadline)
+}
+
+/// `ppoll`: a timespec, and a signal mask to wait with.
+pub fn ppoll(p: &Process, fds_ptr: u64, count: u64, timeout: u64, mask: u64) -> Result<u64, isize> {
+    let deadline = deadline(Timeout::Timespec(timeout))?;
+    if mask != 0 {
+        super::signal::wait_with_mask(p, mask)?;
+    }
+    poll_until(p, fds_ptr, count, deadline)
+}
+
+fn poll_until(p: &Process, fds_ptr: u64, count: u64, deadline: Option<u64>) -> Result<u64, isize> {
+    if count > 1024 {
+        return Err(EINVAL);
+    }
+    let polled = || {
+        (0..count).filter_map(|i| user::get::<i32>(fds_ptr + i * 8).ok()).filter(|&fd| fd >= 0).map(|fd| fd as usize)
+    };
+    wait_ready(
+        deadline,
+        || next_timer(p, polled()),
+        |final_pass| {
+            let mut ready = 0u64;
+            let mut out = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let [fd, ev]: [i32; 2] = user::get(fds_ptr + i * 8)?;
+                let events = (ev & 0xFFFF) as u16;
+                let revents: u16 = if fd < 0 {
+                    0
+                } else {
+                    match readiness(p, fd as usize) {
+                        None => 0x20, // POLLNVAL
+                        Some((rd, wr)) => (if rd { events & 0x1 } else { 0 }) | (if wr { events & 0x4 } else { 0 }),
+                    }
+                };
+                if revents != 0 {
+                    ready += 1;
+                }
+                out.push((fd, ev, revents));
+            }
+            if ready > 0 || final_pass {
+                for (i, (fd, ev, rev)) in out.into_iter().enumerate() {
+                    let word = (fd as u32 as u64) | ((ev as u16 as u64) << 32) | ((rev as u64) << 48);
+                    user::put(fds_ptr + i as u64 * 8, &word)?;
+                }
+            }
+            Ok(ready)
+        },
+    )
+}
+
+/// `select` and `pselect6`: descriptor bit sets for reading, writing and
+/// exceptions (never any).
+pub fn select(p: &Process, nfds: u64, sets: [u64; 3], timeout: Timeout, sigdata: u64) -> Result<u64, isize> {
+    if nfds > 1024 {
+        return Err(EINVAL);
+    }
+    let words = nfds.div_ceil(64) as usize;
+    let read_set = |ptr: u64| -> Result<Vec<u64>, isize> {
+        let mut v = alloc::vec![0u64; words];
+        for (i, w) in v.iter_mut().enumerate() {
+            if ptr != 0 {
+                *w = user::get(ptr + i as u64 * 8)?;
+            }
+        }
+        Ok(v)
+    };
+    let want = [read_set(sets[0])?, read_set(sets[1])?];
+    for fd in 0..nfds as usize {
+        let asked = (want[0][fd / 64] | want[1][fd / 64]) & (1 << (fd % 64)) != 0;
+        if asked && readiness(p, fd).is_none() {
+            return Err(EBADF);
+        }
+    }
+    let deadline = deadline(timeout)?;
+    if sigdata != 0 {
+        // pselect6's sixth argument: { const sigset_t *mask; size_t size }.
+        let [mask, _]: [u64; 2] = user::get(sigdata)?;
+        if mask != 0 {
+            super::signal::wait_with_mask(p, mask)?;
+        }
+    }
+    let watched = || (0..nfds as usize).filter(|&fd| (want[0][fd / 64] | want[1][fd / 64]) & (1 << (fd % 64)) != 0);
+    wait_ready(
+        deadline,
+        || next_timer(p, watched()),
+        |final_pass| {
+            let mut got = [alloc::vec![0u64; words], alloc::vec![0u64; words]];
+            let mut n = 0;
+            for fd in 0..nfds as usize {
+                let bit = 1u64 << (fd % 64);
+                if (want[0][fd / 64] | want[1][fd / 64]) & bit == 0 {
+                    continue;
+                }
+                let (rd, wr) = readiness(p, fd).unwrap_or((true, true));
+                for (k, ok) in [rd, wr].into_iter().enumerate() {
+                    if ok && want[k][fd / 64] & bit != 0 {
+                        got[k][fd / 64] |= bit;
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 || final_pass {
+                for (k, ptr) in [sets[0], sets[1], sets[2]].into_iter().enumerate() {
+                    if ptr == 0 {
+                        continue;
+                    }
+                    let none = alloc::vec![0u64; words];
+                    for (i, w) in got.get(k).unwrap_or(&none).iter().enumerate() {
+                        user::put(ptr + i as u64 * 8, w)?;
+                    }
+                }
+            }
+            Ok(n)
+        },
+    )
 }
 
 // ------------------------------------------------------------------ folders
@@ -806,7 +1122,7 @@ pub fn getcwd(p: &Process, ptr: u64, size: u64) -> Result<u64, isize> {
 }
 
 pub fn chdir(p: &Process, ptr: u64) -> Result<u64, isize> {
-    let guest = path_arg(p, AT_FDCWD, ptr)?;
+    let guest = follow(&path_arg(p, AT_FDCWD, ptr)?)?;
     set_cwd(p, &guest)
 }
 
@@ -830,7 +1146,11 @@ pub fn mkdirat(p: &Process, dirfd: u64, ptr: u64) -> Result<u64, isize> {
 }
 
 pub fn unlinkat(p: &Process, dirfd: u64, ptr: u64, flags: u64) -> Result<u64, isize> {
-    let host = to_host(&path_arg(p, dirfd, ptr)?);
+    let guest = path_arg(p, dirfd, ptr)?;
+    if super::links::target(&guest).is_some() {
+        return super::links::remove(&guest).map(|_| 0);
+    }
+    let host = to_host(&guest);
     let dir = fs::is_dir(&host);
     if flags & AT_REMOVEDIR != 0 && !dir {
         return Err(ENOTDIR);
@@ -857,20 +1177,40 @@ pub fn renameat(p: &Process, olddir: u64, old: u64, newdir: u64, new: u64) -> Re
 pub fn readlinkat(p: &Process, dirfd: u64, ptr: u64, buf: u64, size: u64) -> Result<u64, isize> {
     let guest = path_arg(p, dirfd, ptr)?;
     let target = match guest.as_str() {
-        "/proc/self/exe" => to_guest(&p.path),
+        "/proc/self/exe" => to_guest(&p.path()),
         "/proc/self/cwd" => to_guest(&p.cwd.lock()),
-        _ => {
-            info_for_path(p, &guest)?;
-            return Err(EINVAL); // there are no symbolic links
-        }
+        _ => match super::links::target(&guest) {
+            Some(to) => to,
+            None => {
+                info_for_path(p, &guest, false)?;
+                return Err(EINVAL); // not a link
+            }
+        },
     };
     let n = target.len().min(size as usize);
     user::put_bytes(buf, &target.as_bytes()[..n])?;
     Ok(n as u64)
 }
 
+/// `symlink`/`symlinkat`: links can be made where files can be written.
+pub fn symlinkat(p: &Process, target: u64, dirfd: u64, ptr: u64) -> Result<u64, isize> {
+    let to = user::cstr(target)?;
+    let guest = path_arg(p, dirfd, ptr)?;
+    if to.is_empty() {
+        return Err(ENOENT);
+    }
+    let host = to_host(&guest);
+    if host.starts_with(SYSTEM_ROOT) || host.starts_with("/System") {
+        return Err(EROFS);
+    }
+    if fs::stat(&host).is_ok() || virtual_file(p, &guest).is_some() {
+        return Err(EEXIST);
+    }
+    super::links::create(&guest, &to).map(|_| 0)
+}
+
 pub fn truncate(p: &Process, ptr: u64, len: u64) -> Result<u64, isize> {
-    let host = to_host(&path_arg(p, AT_FDCWD, ptr)?);
+    let host = to_host(&follow(&path_arg(p, AT_FDCWD, ptr)?)?);
     let mut f = fs::open(&host, aurora_abi::open::WRITE)?;
     f.truncate(len).map(|_| 0)
 }

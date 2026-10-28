@@ -49,6 +49,12 @@ pub fn kill(pid: u32) -> Result<()> {
     call(nr::KILL, &[pid as u64]).map(|_| ())
 }
 
+/// Sends Linux signal `sig` to process `target`, or to process group
+/// `-target` (WaveOS programs end on SIGINT, SIGTERM and the like).
+pub fn signal(target: i64, sig: u32) -> Result<()> {
+    call(nr::SIGNAL, &[target as u64, sig as u64]).map(|_| ())
+}
+
 /// `[read_end, write_end]`
 pub fn pipe(nonblocking_read: bool) -> Result<[u64; 2]> {
     let mut fds = [0i32; 2];

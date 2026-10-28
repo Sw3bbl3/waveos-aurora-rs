@@ -26,6 +26,7 @@ const BRK_LIMIT: u64 = 1 << 30;
 /// Largest single mapping.
 const MAX_MAP: u64 = 1 << 36;
 
+#[derive(Clone)]
 pub struct Memory {
     /// Where the heap starts (just past the program) and where it ends now.
     brk_start: u64,
@@ -94,7 +95,7 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
     } else {
         None
     };
-    let mut guard = p.aspace.lock();
+    let mut guard = p.mem();
     let aspace = guard.as_mut().ok_or(ESRCH)?;
     let va = if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 {
         if !addr.is_multiple_of(PAGE_SIZE) || !user_range(addr, n * PAGE_SIZE) {
@@ -131,7 +132,7 @@ pub fn munmap(p: &Process, addr: u64, len: u64) -> Result<u64, isize> {
     if !addr.is_multiple_of(PAGE_SIZE) || len == 0 || !user_range(addr, len) {
         return Err(EINVAL);
     }
-    let mut guard = p.aspace.lock();
+    let mut guard = p.mem();
     let aspace = guard.as_mut().ok_or(ESRCH)?;
     aspace.unmap(addr, pages(len));
     update_resident(p, aspace);
@@ -145,7 +146,7 @@ pub fn mprotect(p: &Process, addr: u64, len: u64, prot_bits: u64) -> Result<u64,
     if len == 0 {
         return Ok(0);
     }
-    let mut guard = p.aspace.lock();
+    let mut guard = p.mem();
     let aspace = guard.as_mut().ok_or(ESRCH)?;
     aspace.protect(addr, pages(len), prot(prot_bits))?;
     update_resident(p, aspace);
@@ -160,7 +161,7 @@ pub fn brk(p: &Process, want: u64) -> Result<u64, isize> {
     }
     let old_end = m.brk.next_multiple_of(PAGE_SIZE);
     let new_end = want.next_multiple_of(PAGE_SIZE);
-    let mut guard = p.aspace.lock();
+    let mut guard = p.mem();
     let aspace = guard.as_mut().ok_or(ESRCH)?;
     if new_end > old_end {
         let n = (new_end - old_end) / PAGE_SIZE;
@@ -180,7 +181,7 @@ pub fn mremap(p: &Process, addr: u64, old_len: u64, new_len: u64, flags: u64) ->
         return Err(EINVAL);
     }
     let (old_n, new_n) = (pages(old_len), pages(new_len));
-    let mut guard = p.aspace.lock();
+    let mut guard = p.mem();
     let aspace = guard.as_mut().ok_or(ESRCH)?;
     if new_n <= old_n {
         aspace.unmap(addr + new_n * PAGE_SIZE, old_n - new_n);
@@ -218,7 +219,7 @@ pub fn madvise(p: &Process, addr: u64, len: u64, advice: u64) -> Result<u64, isi
     if advice == MADV_DONTNEED && len > 0 && user_range(addr, len) {
         // The pages read as zero afterwards.
         let zero = alloc::vec![0u8; PAGE_SIZE as usize];
-        let guard = p.aspace.lock();
+        let guard = p.mem();
         let aspace = guard.as_ref().ok_or(ESRCH)?;
         for i in 0..pages(len) {
             let _ = aspace.write_bytes(addr + i * PAGE_SIZE, &zero);

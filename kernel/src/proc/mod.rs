@@ -2,7 +2,8 @@
 //!
 //! A process owns an [`AddressSpace`], a table of [`Handle`]s (files, pipe
 //! ends, the log console) and one or more threads (scheduler tasks sharing
-//! the address space). Processes are created with [`spawn`] (no fork).
+//! the address space). WaveOS programs are started with [`spawn`]; Linux
+//! programs may also `fork` ([`fork`]) and `exec` ([`exec`]).
 //!
 //! Termination is cooperative: exiting, crashing or being killed records the
 //! exit code and flags the process; every thread then leaves at its next safe
@@ -12,6 +13,7 @@
 
 pub mod futex;
 pub mod pipe;
+pub mod readiness;
 
 use crate::fs::{self, OpenFile};
 use crate::mm::vmm::{AddressSpace, Prot};
@@ -71,18 +73,31 @@ pub fn new_pipe(nonblocking_read: bool) -> (Arc<Handle>, Arc<Handle>) {
 pub struct Process {
     pub pid: Pid,
     pub parent: Pid,
-    pub name: String,
+    /// The program's name (it changes with `exec`).
+    name: Mutex<String>,
     /// Program path, e.g. `/System/Apps/Notes.elf`.
-    pub path: String,
+    path: Mutex<String>,
     pub aspace: Mutex<Option<AddressSpace>>,
-    /// CR3 of the address space (stable for the process lifetime).
-    pub cr3: u64,
+    /// CR3 of the address space the process runs in (changes with `exec`).
+    cr3: AtomicU64,
+    /// The process whose address space this one runs in: itself, or its
+    /// parent between `vfork` and `exec` (see [`Process::mem`]).
+    vm_owner: AtomicU32,
+    /// Set once a `vfork` child has called `exec` or ended (its parent waits for it).
+    pub vfork_done: AtomicBool,
+    /// Process group and session (Linux job control).
+    pub pgid: AtomicU32,
+    pub sid: AtomicU32,
     pub fds: Mutex<Vec<Option<Arc<Handle>>>>,
     pub cwd: Mutex<String>,
     exit: AtomicI64,
     pub killed: AtomicBool,
     /// Set once a parent has collected the exit code with `wait`.
     waited: AtomicBool,
+    /// Set once the reaper has freed the process's resources.
+    reaped: AtomicBool,
+    /// The thread carrying out `exec`: every other thread leaves.
+    exec_leader: AtomicU64,
     pub main_task: AtomicU64,
     /// Threads that have not been reaped yet.
     threads: AtomicU32,
@@ -94,7 +109,60 @@ pub struct Process {
     arg: u64,
 }
 
+/// The address space a process runs in, locked (see [`Process::mem`]).
+pub struct MemGuard<'a> {
+    // Declared first, so it is dropped before the owner it borrows from.
+    guard: crate::sync::MutexGuard<'a, Option<AddressSpace>>,
+    _owner: Option<Arc<Process>>,
+}
+
+impl core::ops::Deref for MemGuard<'_> {
+    type Target = Option<AddressSpace>;
+    fn deref(&self) -> &Option<AddressSpace> {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for MemGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Option<AddressSpace> {
+        &mut self.guard
+    }
+}
+
 impl Process {
+    pub fn name(&self) -> String {
+        self.name.lock().clone()
+    }
+
+    pub fn path(&self) -> String {
+        self.path.lock().clone()
+    }
+
+    pub fn cr3(&self) -> u64 {
+        self.cr3.load(Ordering::Acquire)
+    }
+
+    /// The address space this process runs in: its own, or, for a `vfork`
+    /// child that has not called `exec` yet, its parent's.
+    pub fn mem(&self) -> MemGuard<'_> {
+        let owner = self.vm_owner.load(Ordering::Acquire);
+        if owner != self.pid {
+            if let Some(o) = get(owner) {
+                let guard = o.aspace.lock();
+                // SAFETY: the guard borrows from `o`, which the MemGuard owns
+                // and drops after the guard (field order).
+                let guard = unsafe {
+                    core::mem::transmute::<
+                        crate::sync::MutexGuard<'_, Option<AddressSpace>>,
+                        crate::sync::MutexGuard<'_, Option<AddressSpace>>,
+                    >(guard)
+                };
+                return MemGuard { guard, _owner: Some(o) };
+            }
+        }
+        MemGuard { guard: self.aspace.lock(), _owner: None }
+    }
+
     pub fn exit_code(&self) -> Option<i64> {
         let c = self.exit.load(Ordering::Acquire);
         (c != RUNNING).then_some(c)
@@ -213,9 +281,14 @@ pub fn spawn_env(
     let process = Arc::new(Process {
         pid,
         parent,
-        name: name.clone(),
-        path: String::from(path),
-        cr3: aspace.cr3(),
+        name: Mutex::new(name.clone()),
+        path: Mutex::new(String::from(path)),
+        cr3: AtomicU64::new(aspace.cr3()),
+        vm_owner: AtomicU32::new(pid),
+        vfork_done: AtomicBool::new(false),
+        // A program started this way leads its own process group (`fork` children join their parent's).
+        pgid: AtomicU32::new(pid),
+        sid: AtomicU32::new(pid),
         resident_kib: AtomicU64::new(aspace.resident / 1024),
         aspace: Mutex::new(Some(aspace)),
         fds: Mutex::new(fds),
@@ -223,6 +296,8 @@ pub fn spawn_env(
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
         waited: AtomicBool::new(false),
+        reaped: AtomicBool::new(false),
+        exec_leader: AtomicU64::new(0),
         main_task: AtomicU64::new(0),
         threads: AtomicU32::new(1),
         linux: linux_state,
@@ -231,7 +306,7 @@ pub fn spawn_env(
         arg,
     });
     TABLE.lock().insert(pid, process.clone());
-    let task = sched::spawn_task(&name, user_main, pid as u64, pid, process.cr3);
+    let task = sched::spawn_task(&name, user_main, pid as u64, pid, process.cr3());
     process.main_task.store(task, Ordering::Relaxed);
     log!("proc", "started pid {} '{}' ({} KiB)", pid, path, process.resident_kib.load(Ordering::Relaxed));
     crate::telemetry::process("start", pid, &name, path);
@@ -315,7 +390,7 @@ pub fn spawn_thread(entry: u64, stack: u64, arg: u64) -> Result<u64, isize> {
     p.threads.fetch_add(1, Ordering::AcqRel);
     let start = alloc::boxed::Box::new(ThreadStart { entry, stack: stack & !0xF, arg });
     let raw = alloc::boxed::Box::into_raw(start) as u64;
-    Ok(sched::spawn_task(&p.name, user_thread, raw, p.pid, p.cr3))
+    Ok(sched::spawn_task(&p.name(), user_thread, raw, p.pid, p.cr3()))
 }
 
 /// Starts a Linux thread in the calling process: it begins as a copy of
@@ -327,7 +402,7 @@ pub fn spawn_linux_thread(frame: crate::arch::syscall::SyscallFrame, fs_base: u6
     }
     p.threads.fetch_add(1, Ordering::AcqRel);
     let raw = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(frame)) as u64;
-    Ok(sched::spawn_task_tls(&p.name, linux_thread, raw, p.pid, p.cr3, fs_base))
+    Ok(sched::spawn_task_tls(&p.name(), linux_thread, raw, p.pid, p.cr3(), fs_base))
 }
 
 fn linux_thread(raw: u64) {
@@ -360,6 +435,15 @@ pub fn thread_gone(pid: Pid) {
     }
     // A process whose threads all returned without calling exit.
     let _ = p.exit.compare_exchange(RUNNING, 0, Ordering::AcqRel, Ordering::Acquire);
+    // A `vfork` parent may go on now: nothing runs on its memory any more.
+    p.vfork_done.store(true, Ordering::Release);
+    p.vm_owner.store(p.pid, Ordering::Release);
+    if let Some(parent) = get(p.parent) {
+        if let Some(l) = &parent.linux {
+            let code = p.exit_code().unwrap_or(0);
+            l.signals.child_exited(&parent, p.pid, code);
+        }
+    }
     sched::wake_process(p.parent);
     REAP_QUEUE.lock().push_back(pid);
     sched::wake(REAPER.load(Ordering::Relaxed));
@@ -370,6 +454,11 @@ fn terminate(p: &Process, code: i64) {
     let _ = p.exit.compare_exchange(RUNNING, code, Ordering::AcqRel, Ordering::Acquire);
     p.killed.store(true, Ordering::Release);
     sched::wake_process(p.pid);
+}
+
+/// Ends process `p` as signal `sig` does (its exit code is `-sig`).
+pub fn terminate_by_signal(p: &Process, sig: u32) {
+    terminate(p, -(sig as i64));
 }
 
 /// Terminates the calling process. Never returns.
@@ -392,12 +481,12 @@ pub fn crash_current(reason: core::fmt::Arguments) -> ! {
     let mut text = crate::gui::StackText::<256>::new();
     let _ = core::fmt::Write::write_fmt(&mut text, reason);
     if let Some(p) = get(pid) {
-        log!("proc", "pid {} '{}' crashed: {}", pid, p.name, text.as_str());
+        log!("proc", "pid {} '{}' crashed: {}", pid, p.name(), text.as_str());
         if p.exit_code().is_none() {
             CRASHES.lock().push_back(Crash {
                 parent: p.parent,
-                name: p.name.clone(),
-                path: p.path.clone(),
+                name: p.name(),
+                path: p.path(),
                 reason: String::from(text.as_str()),
             });
         }
@@ -420,15 +509,31 @@ pub fn kill(pid: Pid) -> Result<(), isize> {
     Ok(())
 }
 
-/// True if the current process has been asked to terminate.
+/// True if the current thread should stop waiting: its process is
+/// terminating, another thread is replacing the program (`exec`), or (Linux)
+/// a signal is waiting for it.
 pub fn interrupted() -> bool {
     let pid = sched::current_pid();
-    pid != 0 && get(pid).is_some_and(|p| p.killed.load(Ordering::Acquire))
+    if pid == 0 {
+        return false;
+    }
+    let Some(p) = get(pid) else { return false };
+    p.killed.load(Ordering::Acquire)
+        || leaving_for_exec(&p)
+        || p.linux.as_ref().is_some_and(|l| l.signals.deliverable(sched::current_id()))
 }
 
-/// Ends the current thread if its process is terminating. Call only at safe points.
+/// True if another thread of `p` is carrying out `exec` (this one must leave).
+fn leaving_for_exec(p: &Process) -> bool {
+    let leader = p.exec_leader.load(Ordering::Acquire);
+    leader != 0 && leader != sched::current_id()
+}
+
+/// Ends the current thread if its process is terminating (or another thread
+/// is replacing the program). Call only at safe points.
 pub fn check_killed() {
-    if interrupted() {
+    let pid = sched::current_pid();
+    if pid != 0 && get(pid).is_some_and(|p| p.killed.load(Ordering::Acquire) || leaving_for_exec(&p)) {
         sched::exit();
     }
 }
@@ -443,11 +548,7 @@ pub fn wait(pid: Pid, timeout_ms: u64) -> Result<i64, isize> {
     let deadline = crate::time::uptime_ms().saturating_add(timeout_ms);
     loop {
         if let Some(code) = p.exit_code() {
-            p.waited.store(true, Ordering::Release);
-            // Already reaped: drop the zombie now (otherwise the reaper will).
-            if p.aspace.lock().is_none() {
-                TABLE.lock().remove(&pid);
-            }
+            collect(&p);
             return Ok(code);
         }
         let now = crate::time::uptime_ms();
@@ -456,6 +557,188 @@ pub fn wait(pid: Pid, timeout_ms: u64) -> Result<i64, isize> {
         }
         sched::wait_until(deadline - now, || p.exit_code().is_some() || interrupted());
     }
+}
+
+/// Marks an exited child as waited for, dropping it from the table once
+/// the reaper is done with it (otherwise the reaper will).
+fn collect(p: &Process) {
+    p.waited.store(true, Ordering::Release);
+    if p.reaped.load(Ordering::Acquire) {
+        TABLE.lock().remove(&p.pid);
+    }
+}
+
+/// Which children a Linux `wait` accepts.
+#[derive(Clone, Copy)]
+pub enum Which {
+    Any,
+    Pid(Pid),
+    Group(Pid),
+}
+
+/// Linux `wait4`/`waitid`: an exited child of the caller matching `which`,
+/// as (pid, exit code). With `nohang`, `Ok(None)` while none has exited;
+/// `ECHILD` if there is no such child at all. `consume` false leaves it
+/// waitable (`WNOWAIT`).
+pub fn wait_child(which: Which, nohang: bool, consume: bool) -> Result<Option<(Pid, i64)>, isize> {
+    let me = sched::current_pid();
+    loop {
+        let children: Vec<Arc<Process>> = TABLE
+            .lock()
+            .values()
+            .filter(|c| c.parent == me && !c.waited.load(Ordering::Acquire))
+            .filter(|c| match which {
+                Which::Any => true,
+                Which::Pid(pid) => c.pid == pid,
+                Which::Group(g) => c.pgid.load(Ordering::Relaxed) == g,
+            })
+            .cloned()
+            .collect();
+        if children.is_empty() {
+            return Err(ECHILD);
+        }
+        if let Some(c) = children.iter().find(|c| c.exit_code().is_some()) {
+            let code = c.exit_code().unwrap_or(0);
+            if consume {
+                collect(c);
+            }
+            return Ok(Some((c.pid, code)));
+        }
+        if nohang {
+            return Ok(None);
+        }
+        if interrupted() {
+            return Err(EINTR);
+        }
+        sched::wait_until(100, || children.iter().any(|c| c.exit_code().is_some()) || interrupted());
+    }
+}
+
+/// A child of `parent` (a Linux `fork`, `vfork` or process-creating
+/// `clone`): it starts as a copy of the caller's registers `frame`, with
+/// thread pointer `fs_base`, in a copy of the caller's memory — or, with
+/// `share_vm` (`vfork`), in the caller's memory itself until it calls
+/// `exec` or ends.
+pub fn fork(
+    parent: &Process,
+    frame: crate::arch::syscall::SyscallFrame,
+    fs_base: u64,
+    share_vm: bool,
+    linux: crate::compat::linux::Linux,
+) -> Result<Arc<Process>, isize> {
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let (aspace, cr3, owner, resident) = if share_vm {
+        (None, parent.cr3(), parent.vm_owner.load(Ordering::Acquire), 0)
+    } else {
+        let mem = parent.mem();
+        let copy = mem.as_ref().ok_or(ESRCH)?.fork_copy().ok_or(ENOMEM)?;
+        let (cr3, resident) = (copy.cr3(), copy.resident);
+        (Some(copy), cr3, pid, resident)
+    };
+    let name = parent.name();
+    let process = Arc::new(Process {
+        pid,
+        parent: parent.pid,
+        name: Mutex::new(name.clone()),
+        path: Mutex::new(parent.path()),
+        cr3: AtomicU64::new(cr3),
+        vm_owner: AtomicU32::new(owner),
+        vfork_done: AtomicBool::new(false),
+        pgid: AtomicU32::new(parent.pgid.load(Ordering::Relaxed)),
+        sid: AtomicU32::new(parent.sid.load(Ordering::Relaxed)),
+        resident_kib: AtomicU64::new(resident / 1024),
+        aspace: Mutex::new(aspace),
+        fds: Mutex::new(parent.fds.lock().clone()),
+        cwd: Mutex::new(parent.cwd.lock().clone()),
+        exit: AtomicI64::new(RUNNING),
+        killed: AtomicBool::new(false),
+        waited: AtomicBool::new(false),
+        reaped: AtomicBool::new(false),
+        exec_leader: AtomicU64::new(0),
+        main_task: AtomicU64::new(0),
+        threads: AtomicU32::new(1),
+        linux: Some(linux),
+        entry: 0,
+        user_sp: 0,
+        arg: 0,
+    });
+    TABLE.lock().insert(pid, process.clone());
+    // The child's SIMD registers are the caller's, as they are right now.
+    let mut fpu = alloc::boxed::Box::new(crate::arch::fpu::FpuState::new());
+    fpu.save();
+    let raw = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(frame)) as u64;
+    log!("proc", "pid {} forked pid {}{}", parent.pid, pid, if share_vm { " (sharing memory)" } else { "" });
+    let task = sched::spawn_user(&name, fork_main, raw, pid, cr3, fs_base, fpu);
+    process.main_task.store(task, Ordering::Release);
+    crate::telemetry::process("start", pid, &name, &parent.path());
+    Ok(process)
+}
+
+/// Main task of a forked child: returns to user mode from the copied frame.
+fn fork_main(raw: u64) {
+    let frame = unsafe { alloc::boxed::Box::from_raw(raw as *mut crate::arch::syscall::SyscallFrame) };
+    let f = *frame;
+    drop(frame);
+    if let Some(p) = current() {
+        p.main_task.store(sched::current_id(), Ordering::Release);
+    }
+    if interrupted() && current().is_some_and(|p| p.killed.load(Ordering::Acquire)) {
+        return;
+    }
+    crate::arch::syscall::enter_user_frame(&f);
+}
+
+/// First step of `exec`: every other thread of the caller's process leaves.
+/// Returns `EINTR` (and nothing changes) if the process is being killed.
+pub fn exec_single_thread(p: &Process) -> Result<(), isize> {
+    let me = sched::current_id();
+    if p.exec_leader.compare_exchange(0, me, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        // Another thread is already replacing the program: this one leaves.
+        sched::exit();
+    }
+    sched::wake_process(p.pid);
+    while p.threads.load(Ordering::Acquire) > 1 {
+        if p.killed.load(Ordering::Acquire) {
+            p.exec_leader.store(0, Ordering::Release);
+            return Err(EINTR);
+        }
+        sched::wait_until(5, || p.threads.load(Ordering::Acquire) <= 1);
+    }
+    Ok(())
+}
+
+/// Last step of `exec`: the caller's process runs `aspace` (already loaded)
+/// as the program `path`. The calling thread becomes its main thread.
+pub fn exec_replace(p: &Process, aspace: AddressSpace, path: &str) {
+    let cr3 = aspace.cr3();
+    p.resident_kib.store(aspace.resident / 1024, Ordering::Relaxed);
+    let old = p.aspace.lock().replace(aspace);
+    p.cr3.store(cr3, Ordering::Release);
+    let was_vfork = p.vm_owner.swap(p.pid, Ordering::AcqRel) != p.pid;
+    sched::switch_address_space(cr3);
+    // Not running on it any more (and no other thread is): free it.
+    drop(old);
+    let name = String::from(path.rsplit('/').next().unwrap_or(path));
+    sched::rename_current(&name);
+    *p.name.lock() = name;
+    *p.path.lock() = String::from(path);
+    p.main_task.store(sched::current_id(), Ordering::Release);
+    p.exec_leader.store(0, Ordering::Release);
+    if was_vfork {
+        p.vfork_done.store(true, Ordering::Release);
+        sched::wake_process(p.parent);
+    }
+    crate::telemetry::process("exec", p.pid, &p.name(), path);
+}
+
+/// Processes in process group `pgid`.
+pub fn group(pgid: Pid) -> Vec<Arc<Process>> {
+    TABLE
+        .lock()
+        .values()
+        .filter(|p| p.pgid.load(Ordering::Relaxed) == pgid && p.exit_code().is_none())
+        .cloned()
+        .collect()
 }
 
 /// Frees resources of exited processes (runs as a kernel task).
@@ -467,15 +750,31 @@ fn reaper() {
         loop {
             let Some(pid) = REAP_QUEUE.lock().pop_front() else { break };
             let Some(p) = get(pid) else { continue };
+            // `vfork` children still running in its memory go first.
+            let borrowers: Vec<Arc<Process>> = TABLE
+                .lock()
+                .values()
+                .filter(|c| c.pid != pid && c.vm_owner.load(Ordering::Acquire) == pid)
+                .cloned()
+                .collect();
+            if !borrowers.is_empty() {
+                for b in &borrowers {
+                    terminate(b, KILLED_CODE);
+                }
+                REAP_QUEUE.lock().push_back(pid);
+                sched::sleep_ms(10);
+                continue;
+            }
             // Closing handles signals EOF/EPIPE to pipe peers.
             p.fds.lock().clear();
             crate::gui::server::process_exited(pid);
             p.aspace.lock().take();
+            p.reaped.store(true, Ordering::Release);
             let code = p.exit_code().unwrap_or(0);
-            log!("proc", "pid {} '{}' exited with code {}", pid, p.name, code);
+            log!("proc", "pid {} '{}' exited with code {}", pid, p.name(), code);
             let mut detail = String::new();
             let _ = core::fmt::Write::write_fmt(&mut detail, format_args!("{code}"));
-            crate::telemetry::process(if code == CRASH_CODE { "crash" } else { "exit" }, pid, &p.name, &detail);
+            crate::telemetry::process(if code == CRASH_CODE { "crash" } else { "exit" }, pid, &p.name(), &detail);
             // Nobody will wait for children of the kernel or of dead parents.
             let orphan = p.parent == 0 || get(p.parent).is_none_or(|pp| pp.exit_code().is_some());
             if orphan || p.waited.load(Ordering::Acquire) {
@@ -485,23 +784,12 @@ fn reaper() {
             let zombies: Vec<Pid> = TABLE
                 .lock()
                 .values()
-                .filter(|c| c.parent == pid && c.exit_code().is_some() && c.aspace.try_is_none())
+                .filter(|c| c.parent == pid && c.reaped.load(Ordering::Acquire))
                 .map(|c| c.pid)
                 .collect();
             for z in zombies {
                 TABLE.lock().remove(&z);
             }
         }
-    }
-}
-
-trait TryIsNone {
-    fn try_is_none(&self) -> bool;
-}
-
-impl TryIsNone for Mutex<Option<AddressSpace>> {
-    /// Non-blocking check used while holding the process table lock.
-    fn try_is_none(&self) -> bool {
-        self.try_lock().is_some_and(|g| g.is_none())
     }
 }

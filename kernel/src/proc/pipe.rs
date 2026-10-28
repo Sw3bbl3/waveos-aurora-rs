@@ -28,6 +28,7 @@ impl Pipe {
         for t in inner.waiting.iter_mut().filter_map(|t| t.take()) {
             sched::wake(t);
         }
+        super::readiness::notify();
     }
 
     pub fn read(&self, out: &mut [u8], nonblocking: bool) -> Result<usize, isize> {
@@ -65,9 +66,6 @@ impl Pipe {
                 if g.readers == 0 {
                     return if done > 0 { Ok(done) } else { Err(EPIPE) };
                 }
-                if super::interrupted() {
-                    return Err(EPIPE);
-                }
                 let room = CAPACITY - g.buf.len();
                 if room > 0 {
                     let n = room.min(data.len() - done);
@@ -75,6 +73,10 @@ impl Pipe {
                     done += n;
                     Self::wake_all(&mut g);
                     continue;
+                }
+                // Full: waiting is cut short by a kill or a signal.
+                if super::interrupted() {
+                    return if done > 0 { Ok(done) } else { Err(EINTR) };
                 }
                 g.waiting[1] = Some(sched::current_id());
             }

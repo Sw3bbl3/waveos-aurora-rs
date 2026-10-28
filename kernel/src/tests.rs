@@ -47,6 +47,7 @@ const TESTS: &[Test] = &[
     ("user processes (usertest)", user_processes),
     ("Learn: both offline libraries", learn_library),
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
+    ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
     ("AuroraFS on RAM disk (kernel adapter)", wavefs_ramdisk),
@@ -333,22 +334,32 @@ fn learn_library() {
 /// A static Linux program (built with musl) checks the compatibility layer
 /// from inside: files and folders, memory, threads with TLS, clocks.
 fn linux_programs() {
-    const PATH: &str = "/System/Linux/bin/linuxtest";
-    if crate::fs::stat(PATH).is_err() {
+    run_linux_test("linuxtest", "linux-test passed");
+}
+
+/// Another checks processes and signals: fork, exec, wait, scripts and the
+/// BusyBox shell, posix_spawn and vfork, handlers, poll, select, links.
+fn linux_processes() {
+    run_linux_test("proctest", "proc-test passed");
+}
+
+fn run_linux_test(name: &str, passed: &str) {
+    let path = alloc::format!("/System/Linux/bin/{name}");
+    if crate::fs::stat(&path).is_err() {
         crate::kprint!("(skipped: built without musl-gcc) ");
         return;
     }
     let (r, w) = crate::proc::new_pipe(false);
-    let pid = crate::proc::spawn(PATH, &["linuxtest"], [None, Some(w.clone()), Some(w)], 0).expect("spawn linuxtest");
+    let pid = crate::proc::spawn(&path, &[name], [None, Some(w.clone()), Some(w)], 0).expect("spawn Linux test");
     let p = crate::proc::get(pid).unwrap();
     let mut out = alloc::vec::Vec::new();
-    let deadline = time::uptime_ms() + 60_000;
+    let deadline = time::uptime_ms() + 120_000;
     let mut buf = [0u8; 512];
+    let reader = match &*r {
+        crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
+        _ => unreachable!(),
+    };
     loop {
-        let reader = match &*r {
-            crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
-            _ => unreachable!(),
-        };
         if reader.readable() {
             match reader.read(&mut buf, true) {
                 Ok(0) => break,
@@ -365,8 +376,8 @@ fn linux_programs() {
     for line in text.lines() {
         crate::kprintln!("    {line}");
     }
-    assert_eq!(p.exit_code(), Some(0), "linuxtest failed");
-    assert!(text.contains("linux-test passed"), "linuxtest did not finish");
+    assert_eq!(p.exit_code(), Some(0), "{name} failed");
+    assert!(text.contains(passed), "{name} did not finish");
 }
 
 use crate::drivers::block::{self, BlockDevice, BlockResult};

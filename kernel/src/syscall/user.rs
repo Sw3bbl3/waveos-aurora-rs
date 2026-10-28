@@ -52,7 +52,7 @@ pub fn fixup(rip: u64, addr: u64) -> Option<u64> {
 
 fn check(ptr: u64, len: u64, write: bool) -> Result<(), isize> {
     let p = proc::current().ok_or(EPERM)?;
-    let guard = p.aspace.lock();
+    let guard = p.mem();
     let aspace = guard.as_ref().ok_or(ESRCH)?;
     if aspace.check(ptr, len, write) {
         Ok(())
@@ -174,6 +174,11 @@ pub fn put<T: Copy>(ptr: u64, value: &T) -> Result<(), isize> {
 /// Copies bytes out to user memory.
 pub fn put_bytes(ptr: u64, src: &[u8]) -> Result<(), isize> {
     copy_out(ptr, src)
+}
+
+/// Copies bytes in from user memory.
+pub fn get_bytes(ptr: u64, dst: &mut [u8]) -> Result<(), isize> {
+    copy_in(dst, ptr)
 }
 
 /// Copies a plain-data value in from user memory.

@@ -21,6 +21,25 @@ impl FpuState {
         s
     }
 
+    pub fn as_bytes(&self) -> &[u8; 512] {
+        &self.0
+    }
+
+    /// A state from bytes a program supplied (a Linux signal frame), with the
+    /// MXCSR bits this CPU doesn't have cleared: restoring them would fault.
+    pub fn from_bytes(bytes: &[u8; 512]) -> FpuState {
+        let mut s = FpuState(*bytes);
+        let mut probe = FpuState::new();
+        probe.save();
+        let mask = match u32::from_le_bytes(probe.0[28..32].try_into().unwrap()) {
+            0 => 0xFFBF,
+            m => m,
+        };
+        let mxcsr = u32::from_le_bytes(s.0[24..28].try_into().unwrap()) & mask;
+        s.0[24..28].copy_from_slice(&mxcsr.to_le_bytes());
+        s
+    }
+
     #[inline]
     pub fn save(&mut self) {
         unsafe { asm!("fxsave64 [{}]", in(reg) self.0.as_mut_ptr(), options(nostack)) };

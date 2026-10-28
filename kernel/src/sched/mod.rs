@@ -238,6 +238,39 @@ pub fn spawn_task_tls(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64, fs_b
     spawn_inner(name, f, arg, pid, cr3, false, false, fs_base)
 }
 
+/// Like [`spawn_task_tls`], with the SIMD registers the task starts with
+/// (a forked Linux child continues with its parent's).
+pub fn spawn_user(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64, fs_base: u64, fpu: Box<FpuState>) -> TaskId {
+    spawn_inner_fpu(name, f, arg, pid, cr3, false, Some(fpu), fs_base)
+}
+
+/// Makes the running task use page tables `cr3` from now on (Linux `exec`).
+pub fn switch_address_space(cr3: u64) {
+    interrupts::without_interrupts(|| {
+        let cpu = percpu::cpu_id();
+        if let Some(s) = SCHED.lock().as_mut() {
+            let cur = s.cpus[cpu].current;
+            if let Some(t) = s.tasks.get_mut(&cur) {
+                t.cr3 = cr3;
+            }
+        }
+        unsafe { vmm::load(cr3) };
+        percpu::CPUS[cpu].cr3.store(cr3, Ordering::Relaxed);
+    });
+}
+
+/// Renames the running task (shown in Pulse).
+pub fn rename_current(name: &str) {
+    interrupts::without_interrupts(|| {
+        if let Some(s) = SCHED.lock().as_mut() {
+            let cur = s.cpus[percpu::cpu_id()].current;
+            if let Some(t) = s.tasks.get_mut(&cur) {
+                t.name = String::from(name);
+            }
+        }
+    });
+}
+
 /// Sets the running task's thread pointer (Linux `arch_prctl(ARCH_SET_FS)`).
 pub fn set_fs_base(base: u64) {
     interrupts::without_interrupts(|| {
@@ -292,6 +325,21 @@ fn spawn_inner(
     simd: bool,
     fs_base: u64,
 ) -> TaskId {
+    let fpu = simd.then(|| Box::new(FpuState::new()));
+    spawn_inner_fpu(name, f, arg, pid, cr3, bsp_only, fpu, fs_base)
+}
+
+#[allow(clippy::too_many_arguments)] // the task's whole starting state
+fn spawn_inner_fpu(
+    name: &str,
+    f: fn(u64),
+    arg: u64,
+    pid: u32,
+    cr3: u64,
+    bsp_only: bool,
+    fpu: Option<Box<FpuState>>,
+    fs_base: u64,
+) -> TaskId {
     let stack = alloc::vec![0u8; STACK_SIZE].into_boxed_slice();
     let top = (stack.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -303,8 +351,8 @@ fn spawn_inner(
         let mut t = new_task(name, rsp, Some(stack), pid, cr3, top, cpu);
         t.bsp_only = bsp_only;
         t.fs_base = fs_base;
-        if simd {
-            t.fpu = Some(Box::new(FpuState::new()));
+        if fpu.is_some() {
+            t.fpu = fpu;
         }
         s.tasks.insert(id, t);
         enqueue(s, id, cpu)
@@ -332,6 +380,11 @@ pub fn exit() -> ! {
     }
     schedule();
     unreachable!("dead task was rescheduled");
+}
+
+/// The process task `id` belongs to, if it exists.
+pub fn task_pid(id: TaskId) -> Option<u32> {
+    interrupts::without_interrupts(|| SCHED.lock().as_ref().and_then(|s| s.tasks.get(&id).map(|t| t.pid)))
 }
 
 pub fn current_id() -> TaskId {

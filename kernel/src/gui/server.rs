@@ -164,7 +164,7 @@ fn alloc_surface(pid: u32, width: u32, height: u32) -> Result<Surface, isize> {
         return Err(ENOMEM);
     };
     let p = proc::get(pid).ok_or(ESRCH)?;
-    let mut guard = p.aspace.lock();
+    let mut guard = p.mem();
     let aspace = guard.as_mut().ok_or(ESRCH)?;
     let user_va = aspace.reserve(pages).ok_or(ENOMEM)?;
     aspace.map_shared(user_va, &frames, Prot::ReadWrite)?;
@@ -176,7 +176,7 @@ fn alloc_surface(pid: u32, width: u32, height: u32) -> Result<Surface, isize> {
 fn free_surface(s: Surface, pid: u32, unmap_user: bool) {
     if unmap_user {
         if let Some(p) = proc::get(pid) {
-            if let Some(a) = p.aspace.lock().as_mut() {
+            if let Some(a) = p.mem().as_mut() {
                 a.unmap(s.user_va, s.pages());
             }
         }

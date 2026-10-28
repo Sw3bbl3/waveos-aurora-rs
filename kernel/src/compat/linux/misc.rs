@@ -21,6 +21,7 @@ pub fn tid(p: &Process) -> u64 {
 /// `exit`: ends the calling thread; the last one ends the process.
 pub fn exit_thread(p: &Process, code: i64) -> ! {
     if let Some(l) = &p.linux {
+        l.signals.thread_exited(sched::current_id());
         let addr = l.clear_tid.lock().remove(&sched::current_id()).unwrap_or(0);
         if addr != 0 {
             // Joiners wait for the thread id to become 0.
@@ -34,9 +35,8 @@ pub fn exit_thread(p: &Process, code: i64) -> ! {
     proc::exit_thread();
 }
 
-/// `clone`: a new thread of this process. (New processes come with `fork`,
-/// the next step.)
-pub fn clone(
+/// `clone` with `CLONE_THREAD`: a new thread of this process.
+pub fn clone_thread(
     p: &Process,
     f: &SyscallFrame,
     flags: u64,
@@ -67,6 +67,7 @@ pub fn clone(
     // clear-tid word is recorded under the lock it takes when it exits.
     let mut clear = linux.clear_tid.lock();
     let task = proc::spawn_linux_thread(child, fs)?;
+    linux.signals.thread_started(sched::current_id(), task);
     let tid_ = task + 0x10_0000;
     if flags & CLONE_CHILD_CLEARTID != 0 {
         clear.insert(task, ctid);
@@ -103,8 +104,9 @@ pub fn prctl(p: &Process, option: u64, arg: u64) -> Result<u64, isize> {
         15 => Ok(0),
         16 => {
             let mut name = [0u8; 16];
-            let n = p.name.len().min(15);
-            name[..n].copy_from_slice(&p.name.as_bytes()[..n]);
+            let own = p.name();
+            let n = own.len().min(15);
+            name[..n].copy_from_slice(&own.as_bytes()[..n]);
             user::put(arg, &name).map(|_| 0)
         }
         // PR_SET_PDEATHSIG, PR_GET_DUMPABLE, PR_SET_DUMPABLE, PR_SET_NO_NEW_PRIVS
@@ -155,24 +157,6 @@ pub fn sched_getaffinity(len: u64, ptr: u64) -> Result<u64, isize> {
         return Err(EINVAL);
     }
     user::put(ptr, &mask).map(|_| 8)
-}
-
-/// Signals come with processes (next step): handlers are accepted and the
-/// mask is reported as empty.
-pub fn signals_stub(a: [u64; 6]) -> Result<u64, isize> {
-    let _ = a;
-    Ok(0)
-}
-
-/// `tgkill` to oneself (`raise`, `abort`): the process ends as a signal would.
-pub fn tgkill(p: &Process, tid_: u64, sig: u64) -> Result<u64, isize> {
-    if sig == 0 {
-        return Ok(0);
-    }
-    if tid_ == tid(p) || tid_ == p.pid as u64 {
-        proc::exit_current(128 + sig as i64);
-    }
-    Err(ESRCH)
 }
 
 pub fn uname(ptr: u64) -> Result<u64, isize> {

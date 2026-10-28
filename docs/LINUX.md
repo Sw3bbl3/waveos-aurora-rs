@@ -10,12 +10,20 @@ This is being built in steps. What works today:
 | Step | What it brings | State |
 |---|---|---|
 | M0 | Static programs: files, memory, threads, clocks | Done |
+| M1 | `fork`, `exec`, `wait`, signals, `poll`/`epoll`: an interactive shell | Done |
 | M2 | Linux programs open WaveOS windows and play sound; Doom | Done |
-| M1 | `fork`, `exec`, `wait`, signals, `poll`/`epoll`: an interactive shell | Next |
-| M3 | Dynamically linked programs (glibc), Debian packages | Planned |
+| M3 | Dynamically linked programs (glibc), Debian packages | Next |
 | M4 | Sockets (TCP, UDP, local) | Planned |
 | M5 | Shared memory and a Wayland bridge, for GTK programs | Planned |
 | M6 | Firefox ESR | Planned |
+
+## The shell
+
+In Terminal, `sh -i` starts BusyBox's shell interactively: pipelines,
+loops, scripts, `cd`, `trap` and the rest of `ash`. Ctrl+C sends SIGINT to
+the program and the commands it runs (a second Ctrl+C ends them). There is
+no terminal device yet, so the shell runs without job control and
+full-screen programs (`vi`, `less`) don't work.
 
 ## Which programs are Linux programs
 
@@ -49,6 +57,25 @@ programs static, with musl (`musl-gcc -static`) or glibc.
   reservations take no memory until made accessible.
 - **Threads:** `clone` for threads with thread-local storage (`arch_prctl`),
   `futex`, and the child-tid handshake `pthread_join` uses.
+- **Processes:** `fork` copies the program's memory; `vfork` and
+  `posix_spawn` run the child in the parent's memory until it calls `exec`.
+  `execve` runs Linux programs and `#!` scripts in place (descriptors marked
+  close-on-exec close); `exec` of a WaveOS program runs it as a process of
+  its own and passes its exit code on. `wait4` and `waitid`, process groups
+  and sessions (`setpgid`, `setsid`) work as on Linux.
+- **Signals:** `rt_sigaction` handlers run with a real signal frame
+  (`siginfo`, the registers and SIMD state in a `ucontext`, `sigaltstack`)
+  and return with `rt_sigreturn`; masks, `kill`, `tgkill`, `sigsuspend`,
+  `sigtimedwait`, `SIGCHLD` when a child ends and `SIGPIPE` on a closed pipe.
+  Blocking calls return `EINTR`, or start again with `SA_RESTART`. A signal
+  reaches a thread when it returns from a system call; a program that never
+  makes one only notices signals that end it.
+- **Waiting:** `poll`, `ppoll`, `select`, `pselect6`, `epoll`, `eventfd` and
+  `timerfd` (all level-triggered), woken as soon as a pipe, event, timer or
+  the network changes.
+- **Symbolic links:** the read-only tree's links come with the system image
+  (`/bin/sh` and every other BusyBox command are links to `/bin/busybox`,
+  where Debian puts them); `symlink` makes new ones in the writable tree.
 - **Everything else:** calls that aren't there yet return `ENOSYS`, and the
   first use of each is written to the system log (`linux: … system call N
   is not supported yet`).
@@ -106,6 +133,9 @@ strafes, number keys switch weapons, Esc opens the menu.
 Debian, pinned by SHA-256. Without `musl-gcc` the image is built without
 Linux programs (with a warning), and the kernel's Linux self-test is skipped.
 
-The self-test `linux-tests/linuxtest.c` runs inside WaveOS as part of
-`cargo xtask test`: files, memory, threads, clocks, `/proc` and `/dev`, and
-the WaveOS calls.
+Two self-tests run inside WaveOS as part of `cargo xtask test`:
+`linux-tests/linuxtest.c` (files, memory, threads, clocks, `/proc` and
+`/dev`, the WaveOS calls) and `linux-tests/proctest.c` (fork, exec, wait,
+scripts and the shell, `posix_spawn` and `vfork`, signals and handlers,
+interrupted calls, `poll`, `select`, `epoll`, `eventfd`, `timerfd`,
+close-on-exec and symbolic links).
