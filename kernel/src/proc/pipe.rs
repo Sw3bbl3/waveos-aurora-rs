@@ -86,6 +86,18 @@ impl Pipe {
         Ok(done)
     }
 
+    /// A read would not block: there is data, or no writer is left.
+    pub fn readable(&self) -> bool {
+        let g = self.inner.lock();
+        !g.buf.is_empty() || g.writers == 0
+    }
+
+    /// A write would not block: there is room, or no reader is left (EPIPE).
+    pub fn writable(&self) -> bool {
+        let g = self.inner.lock();
+        g.buf.len() < CAPACITY || g.readers == 0
+    }
+
     pub fn close_reader(&self) {
         let mut g = self.inner.lock();
         g.readers = g.readers.saturating_sub(1);

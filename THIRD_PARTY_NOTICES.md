@@ -9,6 +9,12 @@ WaveOS uses these vendored components:
 | Linux DRM core, virtio-gpu driver, HDMI helpers and DRM/virtio protocol headers | 6.12 | MIT, HPND or BSD-3-Clause, per file (each keeps its notice); see [kernel/linux](kernel/linux/README.md) | Compiled against WaveOS's own MIT LinuxKPI; GPL-only Linux parts are replaced, not used |
 | acpi (AML interpreter) | 6.1.1 | [MIT](vendor/acpi/LICENCE-MIT) or [Apache-2.0](vendor/acpi/LICENCE-APACHE) | [stores through references, PCI configuration offsets](vendor/acpi/WAVEOS-PATCHES.md) |
 
+Programs downloaded at build time (pinned by SHA-256) and shipped as separate programs in the system image:
+
+| Program | Version | License | Where |
+|---|---|---|---|
+| BusyBox (Debian's `busybox-static`) | 1.35.0 | GPL-2.0; Debian's copyright file is in `/System/Licenses/busybox.txt`, the source is in Debian's archive | `/System/Linux/bin/busybox`, run as a Linux program |
+
 The interface typefaces ship in `/System/Fonts` next to their licenses:
 
 | Font | License | Local changes |

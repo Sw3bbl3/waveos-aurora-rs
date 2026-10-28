@@ -54,6 +54,8 @@ struct Task {
     kstack_top: u64,
     /// SIMD registers of user tasks (kernel threads never use them).
     fpu: Option<Box<FpuState>>,
+    /// The thread pointer of a user task (`IA32_FS_BASE`: Linux TLS).
+    fs_base: u64,
     last_cpu: usize,
     /// The CPU it is scheduled on right now, if any.
     running_on: Option<usize>,
@@ -109,6 +111,7 @@ fn new_task(
         cr3,
         kstack_top,
         fpu: (pid != 0).then(|| Box::new(FpuState::new())),
+        fs_base: 0,
         last_cpu: cpu,
         running_on: None,
         on_cpu: AtomicBool::new(false),
@@ -222,12 +225,48 @@ pub fn spawn_on_bsp(name: &str, f: fn()) -> TaskId {
         let f: fn() = unsafe { core::mem::transmute(f as usize) };
         f();
     }
-    spawn_inner(name, call, f as usize as u64, 0, vmm::kernel_pml4(), true, false)
+    spawn_inner(name, call, f as usize as u64, 0, vmm::kernel_pml4(), true, false, 0)
 }
 
 /// Spawns a task running `f(arg)` in process `pid` with page tables `cr3`.
 pub fn spawn_task(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64) -> TaskId {
-    spawn_inner(name, f, arg, pid, cr3, false, false)
+    spawn_inner(name, f, arg, pid, cr3, false, false, 0)
+}
+
+/// Like [`spawn_task`], with the thread pointer (FS base) the task starts with.
+pub fn spawn_task_tls(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64, fs_base: u64) -> TaskId {
+    spawn_inner(name, f, arg, pid, cr3, false, false, fs_base)
+}
+
+/// Sets the running task's thread pointer (Linux `arch_prctl(ARCH_SET_FS)`).
+pub fn set_fs_base(base: u64) {
+    interrupts::without_interrupts(|| {
+        if let Some(s) = SCHED.lock().as_mut() {
+            let cur = s.cpus[percpu::cpu_id()].current;
+            if let Some(t) = s.tasks.get_mut(&cur) {
+                t.fs_base = base;
+            }
+        }
+        write_fs_base(base);
+    });
+}
+
+/// The running task's thread pointer.
+pub fn fs_base() -> u64 {
+    interrupts::without_interrupts(|| {
+        SCHED
+            .lock()
+            .as_ref()
+            .and_then(|s| s.tasks.get(&s.cpus[percpu::cpu_id()].current).map(|t| t.fs_base))
+            .unwrap_or(0)
+    })
+}
+
+fn write_fs_base(base: u64) {
+    // A non-canonical base would fault the wrmsr itself.
+    if base < 0x8000_0000_0000 {
+        unsafe { x86_64::registers::model_specific::Msr::new(0xC000_0100).write(base) };
+    }
 }
 
 /// Spawns a kernel thread that keeps its own SIMD registers across switches,
@@ -237,12 +276,22 @@ pub fn spawn_simd(name: &str, f: fn()) -> TaskId {
         let f: fn() = unsafe { core::mem::transmute(f as usize) };
         f();
     }
-    let id = spawn_inner(name, call, f as usize as u64, 0, vmm::kernel_pml4(), false, true);
+    let id = spawn_inner(name, call, f as usize as u64, 0, vmm::kernel_pml4(), false, true, 0);
     log!("sched", "spawned task {} '{}' (with SIMD state)", id, name);
     id
 }
 
-fn spawn_inner(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64, bsp_only: bool, simd: bool) -> TaskId {
+#[allow(clippy::too_many_arguments)] // the task's whole starting state
+fn spawn_inner(
+    name: &str,
+    f: fn(u64),
+    arg: u64,
+    pid: u32,
+    cr3: u64,
+    bsp_only: bool,
+    simd: bool,
+    fs_base: u64,
+) -> TaskId {
     let stack = alloc::vec![0u8; STACK_SIZE].into_boxed_slice();
     let top = (stack.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -253,6 +302,7 @@ fn spawn_inner(name: &str, f: fn(u64), arg: u64, pid: u32, cr3: u64, bsp_only: b
         let cpu = if bsp_only { 0 } else { least_loaded(s) };
         let mut t = new_task(name, rsp, Some(stack), pid, cr3, top, cpu);
         t.bsp_only = bsp_only;
+        t.fs_base = fs_base;
         if simd {
             t.fpu = Some(Box::new(FpuState::new()));
         }
@@ -387,6 +437,9 @@ fn schedule() {
         next.last_cpu = cpu;
         if let Some(f) = next.fpu.as_ref() {
             f.restore();
+        }
+        if next.pid != 0 {
+            write_fs_base(next.fs_base);
         }
         if next.cr3 != cur_cr3 {
             unsafe { vmm::load(next.cr3) };

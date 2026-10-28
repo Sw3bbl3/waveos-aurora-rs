@@ -1,6 +1,7 @@
-//! A tiny ELF64 reader: just enough to find PT_LOAD segments and the entry
-//! point. Shared by the bootloader (loading the kernel) and the kernel
-//! (loading user programs).
+//! A tiny ELF64 reader: the PT_LOAD segments and the entry point, plus what
+//! loading a Linux program needs (its interpreter, TLS template, program
+//! headers and notes). Shared by the bootloader (loading the kernel) and the
+//! kernel (loading user programs).
 
 #![no_std]
 
@@ -23,6 +24,20 @@ pub struct Segment {
 
 pub struct Image {
     pub entry: u64,
+    /// `ET_DYN` (position independent: loaded at any base) rather than `ET_EXEC`.
+    pub dynamic: bool,
+    /// Where the program headers are in the file, their count and size.
+    pub phoff: u64,
+    pub phnum: u16,
+    pub phentsize: u16,
+    /// The `PT_INTERP` path (Linux's dynamic loader), as a range of the file.
+    pub interp: Option<(usize, usize)>,
+    /// A `.note.waveos` note: built for WaveOS.
+    pub waveos_note: bool,
+    /// A note owned by "GNU" (build id, ABI tag): built with a Linux toolchain.
+    pub gnu_note: bool,
+    /// `EI_OSABI` (3 = GNU/Linux).
+    pub osabi: u8,
     /// Page-aligned lowest virtual address of any PT_LOAD segment.
     pub virt_start: u64,
     /// Page-aligned end of the highest PT_LOAD segment.
@@ -31,6 +46,9 @@ pub struct Image {
 }
 
 const PT_LOAD: u32 = 1;
+const PT_INTERP: u32 = 3;
+const PT_NOTE: u32 = 4;
+const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 62;
 
 fn u16_at(b: &[u8], o: usize) -> u16 {
@@ -60,9 +78,30 @@ pub fn parse(file: &[u8]) -> Option<Image> {
 
     let mut segments = Vec::new();
     let (mut lo, mut hi) = (u64::MAX, 0u64);
+    let (mut interp, mut waveos_note, mut gnu_note) = (None, false, false);
     for i in 0..phnum {
         let ph = phoff.checked_add(i.checked_mul(phentsize)?)?;
-        if ph.checked_add(56)? > file.len() || u32_at(file, ph) != PT_LOAD {
+        if ph.checked_add(56)? > file.len() {
+            continue;
+        }
+        let kind = u32_at(file, ph);
+        if kind == PT_INTERP || kind == PT_NOTE {
+            let off = u64_at(file, ph + 8) as usize;
+            let len = u64_at(file, ph + 32) as usize;
+            let Some(end) = off.checked_add(len).filter(|&e| e <= file.len()) else { continue };
+            if kind == PT_INTERP {
+                // Without its trailing NUL.
+                let path = &file[off..end];
+                let n = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+                interp = Some((off, n));
+            } else {
+                let (w, g) = notes(&file[off..end]);
+                waveos_note |= w;
+                gnu_note |= g;
+            }
+            continue;
+        }
+        if kind != PT_LOAD {
             continue;
         }
         let flags = u32_at(file, ph + 4);
@@ -86,8 +125,45 @@ pub fn parse(file: &[u8]) -> Option<Image> {
     if segments.is_empty() {
         return None;
     }
-    Some(Image { entry, virt_start: lo, virt_end: hi, segments })
+    Some(Image {
+        entry,
+        dynamic: u16_at(file, 16) == ET_DYN,
+        phoff: phoff as u64,
+        phnum: phnum as u16,
+        phentsize: phentsize as u16,
+        interp,
+        waveos_note,
+        gnu_note,
+        osabi: file[7],
+        virt_start: lo,
+        virt_end: hi,
+        segments,
+    })
 }
+
+/// The owners of the notes in a PT_NOTE segment: (a "WaveOS" note, a "GNU" note).
+fn notes(mut b: &[u8]) -> (bool, bool) {
+    let (mut waveos, mut gnu) = (false, false);
+    while b.len() >= 12 {
+        let namesz = u32_at(b, 0) as usize;
+        let descsz = u32_at(b, 4) as usize;
+        let name_end = 12usize.saturating_add(namesz);
+        let Some(name) = b.get(12..name_end) else { break };
+        let name = &name[..name.iter().position(|&c| c == 0).unwrap_or(name.len())];
+        waveos |= name == b"WaveOS";
+        gnu |= name == b"GNU";
+        let next = 12usize.saturating_add(namesz.saturating_add(3) & !3).saturating_add(descsz.saturating_add(3) & !3);
+        match b.get(next..) {
+            Some(rest) => b = rest,
+            None => break,
+        }
+    }
+    (waveos, gnu)
+}
+
+/// What a WaveOS program carries in its `.note.waveos` section (see
+/// `corekit`): an ELF note owned by "WaveOS", type 1, no description.
+pub const WAVEOS_NOTE: [u8; 20] = [7, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, b'W', b'a', b'v', b'e', b'O', b'S', 0, 0];
 
 #[cfg(test)]
 mod tests {
@@ -121,6 +197,16 @@ mod tests {
         assert_eq!((img.virt_start, img.virt_end), (0x400000, 0x401000));
         assert_eq!(img.segments.len(), 1);
         assert_eq!(img.segments[0].flags, PF_R | PF_X);
+    }
+
+    #[test]
+    fn reads_notes() {
+        assert_eq!(notes(&WAVEOS_NOTE), (true, false));
+        let mut gnu = vec![4, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0];
+        gnu.extend_from_slice(b"GNU\0abcd");
+        let both = [&gnu[..], &WAVEOS_NOTE[..]].concat();
+        assert_eq!(notes(&both), (true, true));
+        assert_eq!(notes(&[1, 2, 3]), (false, false));
     }
 
     /// Programs are untrusted: the kernel loads whatever is on the disk.

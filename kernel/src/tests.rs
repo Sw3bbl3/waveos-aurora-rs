@@ -46,6 +46,7 @@ const TESTS: &[Test] = &[
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
     ("Learn: both offline libraries", learn_library),
+    ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
     ("AuroraFS on RAM disk (kernel adapter)", wavefs_ramdisk),
@@ -327,6 +328,45 @@ fn learn_library() {
         sched::sleep_ms(10);
     }
     assert_eq!(p.exit_code(), Some(0), "Learn offline library validation failed");
+}
+
+/// A static Linux program (built with musl) checks the compatibility layer
+/// from inside: files and folders, memory, threads with TLS, clocks.
+fn linux_programs() {
+    const PATH: &str = "/System/Linux/bin/linuxtest";
+    if crate::fs::stat(PATH).is_err() {
+        crate::kprint!("(skipped: built without musl-gcc) ");
+        return;
+    }
+    let (r, w) = crate::proc::new_pipe(false);
+    let pid = crate::proc::spawn(PATH, &["linuxtest"], [None, Some(w.clone()), Some(w)], 0).expect("spawn linuxtest");
+    let p = crate::proc::get(pid).unwrap();
+    let mut out = alloc::vec::Vec::new();
+    let deadline = time::uptime_ms() + 60_000;
+    let mut buf = [0u8; 512];
+    loop {
+        let reader = match &*r {
+            crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
+            _ => unreachable!(),
+        };
+        if reader.readable() {
+            match reader.read(&mut buf, true) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => {}
+            }
+        } else if p.exit_code().is_some() || time::uptime_ms() > deadline {
+            break;
+        } else {
+            sched::sleep_ms(10);
+        }
+    }
+    let text = String::from_utf8_lossy(&out);
+    for line in text.lines() {
+        crate::kprintln!("    {line}");
+    }
+    assert_eq!(p.exit_code(), Some(0), "linuxtest failed");
+    assert!(text.contains("linux-test passed"), "linuxtest did not finish");
 }
 
 use crate::drivers::block::{self, BlockDevice, BlockResult};

@@ -18,7 +18,9 @@ type SysResult = Result<u64, isize>;
 pub extern "sysv64" fn dispatch(f: &mut SyscallFrame) {
     let a = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
     crate::telemetry::syscall(f.rax as usize);
-    let result = handle(f.rax as usize, a);
+    // Linux programs use Linux's numbers and meanings.
+    let linux = proc::current().is_some_and(|p| p.linux.is_some());
+    let result = if linux { crate::compat::linux::dispatch(f) } else { handle(f.rax as usize, a) };
     f.rax = match result {
         Ok(v) => v,
         Err(e) => (-e.abs()) as u64,
@@ -505,20 +507,21 @@ fn spawn(a: [u64; 6]) -> SysResult {
     proc::spawn(&path, &args, stdio, me.pid).map(|pid| pid as u64)
 }
 
-fn read(fd: usize, ptr: u64, len: u64) -> SysResult {
+pub(crate) fn read(fd: usize, ptr: u64, len: u64) -> SysResult {
     let h = proc::current().ok_or(EPERM)?.fd(fd)?;
     let mut buf = user::slice_mut(ptr, len)?;
     let n = match &*h {
         Handle::File(f) => f.lock().read(&mut buf)?,
         Handle::PipeRead { pipe, nonblocking } => pipe.read(&mut buf, *nonblocking)?,
         Handle::Socket(s) => s.read(&mut buf)?,
+        Handle::Special(s) => s.lock().read(&mut buf)?,
         Handle::PipeWrite(_) | Handle::Log | Handle::Audio(_) => return Err(EBADF),
     };
     buf.commit(n)?;
     Ok(n as u64)
 }
 
-fn write(fd: usize, ptr: u64, len: u64) -> SysResult {
+pub(crate) fn write(fd: usize, ptr: u64, len: u64) -> SysResult {
     let h = proc::current().ok_or(EPERM)?.fd(fd)?;
     let buf = user::slice(ptr, len)?;
     let n = match &*h {
@@ -530,6 +533,7 @@ fn write(fd: usize, ptr: u64, len: u64) -> SysResult {
         }
         Handle::Audio(stream) => stream.write(&buf)?,
         Handle::Socket(s) => s.write(&buf)?,
+        Handle::Special(s) => s.lock().write(&buf)?,
         Handle::PipeRead { .. } => return Err(EBADF),
     };
     Ok(n as u64)

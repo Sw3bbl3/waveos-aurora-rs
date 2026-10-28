@@ -135,6 +135,25 @@ pub fn str(ptr: u64, len: u64) -> Result<String, isize> {
     String::from_utf8(slice(ptr, len)?).map_err(|_| EINVAL)
 }
 
+/// A NUL-terminated string at `ptr` (Linux paths and arguments), at most
+/// `MAX_STR` bytes. Read page by page, so it may end just before an
+/// unmapped page.
+pub fn cstr(ptr: u64) -> Result<String, isize> {
+    let mut out = Vec::new();
+    let mut at = ptr;
+    while (out.len() as u64) < MAX_STR {
+        let chunk = (4096 - at % 4096).min(MAX_STR - out.len() as u64);
+        let bytes = slice(at, chunk)?;
+        if let Some(n) = bytes.iter().position(|&b| b == 0) {
+            out.extend_from_slice(&bytes[..n]);
+            return String::from_utf8(out).map_err(|_| EINVAL);
+        }
+        out.extend_from_slice(&bytes);
+        at += chunk;
+    }
+    Err(ENAMETOOLONG)
+}
+
 /// A path argument, resolved against the process's working directory.
 pub fn path(ptr: u64, len: u64) -> Result<String, isize> {
     let raw = str(ptr, len)?;
@@ -149,6 +168,11 @@ pub fn path(ptr: u64, len: u64) -> Result<String, isize> {
 pub fn put<T: Copy>(ptr: u64, value: &T) -> Result<(), isize> {
     let size = core::mem::size_of::<T>();
     let src = unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size) };
+    copy_out(ptr, src)
+}
+
+/// Copies bytes out to user memory.
+pub fn put_bytes(ptr: u64, src: &[u8]) -> Result<(), isize> {
     copy_out(ptr, src)
 }
 

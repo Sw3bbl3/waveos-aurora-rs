@@ -28,7 +28,8 @@ use pipe::Pipe;
 pub type Pid = u32;
 
 const RUNNING: i64 = i64::MIN;
-const MAX_FDS: usize = 64;
+/// Open files a process may have (Linux programs expect a thousand).
+pub const MAX_FDS: usize = 1024;
 /// Exit code used when a process is killed by a CPU exception.
 pub const CRASH_CODE: i64 = -11;
 pub const KILLED_CODE: i64 = -9;
@@ -47,6 +48,8 @@ pub enum Handle {
     Audio(Arc<crate::drivers::audio::Stream>),
     /// A network socket.
     Socket(crate::net::socket::Socket),
+    /// A directory, generated file or device opened by a Linux program.
+    Special(Mutex<crate::compat::linux::Special>),
 }
 
 impl Drop for Handle {
@@ -84,6 +87,8 @@ pub struct Process {
     /// Threads that have not been reaped yet.
     threads: AtomicU32,
     pub resident_kib: AtomicU64,
+    /// Set for Linux programs (their system calls go to `compat::linux`).
+    pub linux: Option<crate::compat::linux::Linux>,
     entry: u64,
     user_sp: u64,
     arg: u64,
@@ -165,13 +170,85 @@ fn prot_for(flags: u32) -> Prot {
 /// Starts `path` as a new process. `stdio` handles become fds 0, 1, 2
 /// (missing ones default to the log console).
 pub fn spawn(path: &str, argv: &[&str], stdio: [Option<Arc<Handle>>; 3], parent: Pid) -> Result<Pid, isize> {
+    spawn_env(path, argv, None, stdio, parent)
+}
+
+/// Like [`spawn`], with the environment a Linux program gets (`None`: the
+/// default one). WaveOS programs have no environment.
+pub fn spawn_env(
+    path: &str,
+    argv: &[&str],
+    env: Option<&[String]>,
+    stdio: [Option<Arc<Handle>>; 3],
+    parent: Pid,
+) -> Result<Pid, isize> {
+    use crate::compat::linux;
     let data = fs::read_all(path)?;
-    let image = aurora_elf::parse(&data).ok_or(EINVAL)?;
+    let image = aurora_elf::parse(&data).ok_or(ENOEXEC)?;
+    let mut aspace = AddressSpace::new().ok_or(ENOMEM)?;
+    let (entry, user_sp, arg, linux_state) = if linux::is_linux(&image, path) {
+        let user = linux::fs::account_user();
+        linux::fs::prepare_root(&user);
+        let default_env;
+        let env = match env {
+            Some(e) => e,
+            None => {
+                default_env = linux::exec::default_env(&user);
+                &default_env[..]
+            }
+        };
+        let start = linux::exec::load(&data, &image, &linux::fs::to_guest(path), argv, env, &mut aspace)?;
+        (start.entry, start.sp, 0, Some(linux::Linux::new(start.brk)))
+    } else {
+        let (sp, block) = load_waveos(&data, &image, argv, &mut aspace)?;
+        (image.entry, sp, block, None)
+    };
+
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let name = String::from(path.rsplit('/').next().unwrap_or(path).trim_end_matches(".elf"));
+    let [i, o, e] = stdio;
+    let log = || Some(Arc::new(Handle::Log));
+    let fds = alloc::vec![i.or_else(log), o.or_else(log), e.or_else(log)];
+    let cwd = if parent != 0 { get(parent).map(|p| p.cwd.lock().clone()) } else { None };
+    let process = Arc::new(Process {
+        pid,
+        parent,
+        name: name.clone(),
+        path: String::from(path),
+        cr3: aspace.cr3(),
+        resident_kib: AtomicU64::new(aspace.resident / 1024),
+        aspace: Mutex::new(Some(aspace)),
+        fds: Mutex::new(fds),
+        cwd: Mutex::new(cwd.unwrap_or_else(|| String::from("/"))),
+        exit: AtomicI64::new(RUNNING),
+        killed: AtomicBool::new(false),
+        waited: AtomicBool::new(false),
+        main_task: AtomicU64::new(0),
+        threads: AtomicU32::new(1),
+        linux: linux_state,
+        entry,
+        user_sp,
+        arg,
+    });
+    TABLE.lock().insert(pid, process.clone());
+    let task = sched::spawn_task(&name, user_main, pid as u64, pid, process.cr3);
+    process.main_task.store(task, Ordering::Relaxed);
+    log!("proc", "started pid {} '{}' ({} KiB)", pid, path, process.resident_kib.load(Ordering::Relaxed));
+    crate::telemetry::process("start", pid, &name, path);
+    Ok(pid)
+}
+
+/// Loads a WaveOS program and its argument block: [argc][argv pointers][strings].
+/// Returns the stack pointer and the block's address.
+fn load_waveos(
+    data: &[u8],
+    image: &aurora_elf::Image,
+    argv: &[&str],
+    aspace: &mut AddressSpace,
+) -> Result<(u64, u64), isize> {
     if image.virt_start < layout::PROGRAM_BASE || image.virt_end > layout::MMAP_BASE {
         return Err(EINVAL);
     }
-    let mut aspace = AddressSpace::new().ok_or(ENOMEM)?;
-
     // Program segments. Map all first (pages may be shared between segments),
     // then copy file contents in.
     for seg in &image.segments {
@@ -209,38 +286,7 @@ pub fn spawn(path: &str, argv: &[&str], stdio: [Option<Arc<Handle>>; 3], parent:
     // Entered like a function call: rsp ≡ 8 (mod 16), with a null return address.
     let user_sp = block_va - 8;
     aspace.write_bytes(user_sp, &0u64.to_le_bytes())?;
-
-    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
-    let name = String::from(path.rsplit('/').next().unwrap_or(path).trim_end_matches(".elf"));
-    let [i, o, e] = stdio;
-    let log = || Some(Arc::new(Handle::Log));
-    let fds = alloc::vec![i.or_else(log), o.or_else(log), e.or_else(log)];
-    let cwd = if parent != 0 { get(parent).map(|p| p.cwd.lock().clone()) } else { None };
-    let process = Arc::new(Process {
-        pid,
-        parent,
-        name: name.clone(),
-        path: String::from(path),
-        cr3: aspace.cr3(),
-        resident_kib: AtomicU64::new(aspace.resident / 1024),
-        aspace: Mutex::new(Some(aspace)),
-        fds: Mutex::new(fds),
-        cwd: Mutex::new(cwd.unwrap_or_else(|| String::from("/"))),
-        exit: AtomicI64::new(RUNNING),
-        killed: AtomicBool::new(false),
-        waited: AtomicBool::new(false),
-        main_task: AtomicU64::new(0),
-        threads: AtomicU32::new(1),
-        entry: image.entry,
-        user_sp,
-        arg: block_va,
-    });
-    TABLE.lock().insert(pid, process.clone());
-    let task = sched::spawn_task(&name, user_main, pid as u64, pid, process.cr3);
-    process.main_task.store(task, Ordering::Relaxed);
-    log!("proc", "started pid {} '{}' ({} KiB)", pid, path, process.resident_kib.load(Ordering::Relaxed));
-    crate::telemetry::process("start", pid, &name, path);
-    Ok(pid)
+    Ok((user_sp, block_va))
 }
 
 /// Main task of a user process: drops to ring 3.
@@ -270,6 +316,28 @@ pub fn spawn_thread(entry: u64, stack: u64, arg: u64) -> Result<u64, isize> {
     let start = alloc::boxed::Box::new(ThreadStart { entry, stack: stack & !0xF, arg });
     let raw = alloc::boxed::Box::into_raw(start) as u64;
     Ok(sched::spawn_task(&p.name, user_thread, raw, p.pid, p.cr3))
+}
+
+/// Starts a Linux thread in the calling process: it begins as a copy of
+/// `frame` (the caller's registers at `clone`), with thread pointer `fs_base`.
+pub fn spawn_linux_thread(frame: crate::arch::syscall::SyscallFrame, fs_base: u64) -> Result<u64, isize> {
+    let p = current().ok_or(EPERM)?;
+    if p.threads.load(Ordering::Acquire) >= 512 {
+        return Err(EAGAIN);
+    }
+    p.threads.fetch_add(1, Ordering::AcqRel);
+    let raw = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(frame)) as u64;
+    Ok(sched::spawn_task_tls(&p.name, linux_thread, raw, p.pid, p.cr3, fs_base))
+}
+
+fn linux_thread(raw: u64) {
+    let frame = unsafe { alloc::boxed::Box::from_raw(raw as *mut crate::arch::syscall::SyscallFrame) };
+    let f = *frame;
+    drop(frame);
+    if interrupted() {
+        return;
+    }
+    crate::arch::syscall::enter_user_frame(&f);
 }
 
 fn user_thread(raw: u64) {

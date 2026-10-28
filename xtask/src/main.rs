@@ -24,6 +24,7 @@ mod battery;
 mod display;
 mod help;
 mod image;
+mod linux;
 mod monitor;
 mod package;
 mod sounds;
@@ -385,7 +386,8 @@ fn build(profile: Profile, test: bool) -> PathBuf {
             .expect("llvm-objcopy (install llvm-tools-preview)");
         assert!(status.success(), "could not strip packaged kernel debug information");
     }
-    let programs = build_userland(profile);
+    let mut programs = build_userland(profile);
+    programs.extend(linux::programs());
     system_image(&programs, &esp.join("aurora/system.tar"));
     esp
 }
@@ -496,6 +498,10 @@ fn system_image(programs: &[Program], out: &Path) {
     );
     t.dir("Apps");
     t.dir("Bin");
+    // The read-only half of the Linux tree (see kernel/src/compat/linux).
+    for dir in ["Linux", "Linux/bin", "Linux/etc", "Linux/lib", "Linux/usr", "Linux/usr/bin", "Linux/usr/lib"] {
+        t.dir(dir);
+    }
     t.dir("Fonts");
     let fonts = root().join("assets/fonts");
     let mut font_files: Vec<_> = fs::read_dir(&fonts).unwrap().map(|e| e.unwrap().path()).collect();

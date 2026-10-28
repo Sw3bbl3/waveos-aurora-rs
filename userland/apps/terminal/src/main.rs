@@ -66,6 +66,30 @@ fn user_name() -> String {
     first.chars().filter(|c| c.is_alphanumeric()).collect::<String>()
 }
 const BIN: &str = "/System/Bin";
+/// Where commands are looked for: WaveOS's own, then Linux programs.
+const PATH: [&str; 4] = [BIN, "/System/Linux/bin", "/System/Linux/usr/bin", "/Linux/usr/local/bin"];
+
+/// Tabs as spaces to the next multiple of eight columns.
+fn expand_tabs(line: &str) -> String {
+    if !line.contains('\t') {
+        return line.to_string();
+    }
+    let mut out = String::new();
+    for c in line.chars() {
+        if c == '\t' {
+            let n = 8 - out.chars().count() % 8;
+            out.extend(core::iter::repeat_n(' ', n));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The program a command name runs (WaveOS's own first).
+fn find_program(name: &str) -> String {
+    PATH.iter().map(|dir| format!("{dir}/{name}")).find(|p| fs::exists(p)).unwrap_or_else(|| format!("{BIN}/{name}"))
+}
 
 /// A running pipeline.
 struct Job {
@@ -180,7 +204,7 @@ impl Session {
 
     fn out(&mut self, s: &str, color: u32) {
         for line in s.split('\n') {
-            self.lines.push((line.to_string(), color));
+            self.lines.push((expand_tabs(line.trim_end_matches('\r')), color));
         }
         if self.lines.len() > 2000 {
             self.lines.drain(..self.lines.len() - 2000);
@@ -254,7 +278,8 @@ impl Session {
                 "Built-in:\n  cd DIR · clear · history · theme light|dark · exit\n\nPrograms in /System/Bin (each runs as \
                  its own process):\n  files: ls cat echo mkdir rm mv cp touch grep wc df sync\n  system: ps kill uname \
                  uptime date mem cpuinfo lspci lsusb dmesg battery neofetch\n  sound: play volume\n  network: ping \
-                 ifconfig nslookup fetch (http and https)\n\nAlso: open APP|FILE · shutdown · reboot\nPipelines and \
+                 ifconfig nslookup fetch (http and https)\n\nLinux programs in /System/Linux/bin run too: \
+                 busybox ls, busybox vi, busybox awk…\n\nAlso: open APP|FILE · shutdown · reboot\nPipelines and \
                  redirection: ls | grep txt, echo hi > note.txt, cmd >> log\nLists: a && b (b if a worked), a || b (b \
                  if a failed), a; b\nCtrl+C stops the running program, Ctrl+L clears the screen.",
                 FG,
@@ -329,7 +354,7 @@ impl Session {
         let n = stages.len();
         for (i, argv) in stages.iter().enumerate() {
             let program =
-                if argv[0].contains('/') { fs::resolve(&fs::cwd(), &argv[0]) } else { format!("{BIN}/{}", argv[0]) };
+                if argv[0].contains('/') { fs::resolve(&fs::cwd(), &argv[0]) } else { find_program(&argv[0]) };
             let (stdout, next_read) = if i + 1 < n {
                 let [r, w] = process::pipe(false).map_err(|e| format!("aurora-sh: pipe: {e}"))?;
                 (w, Some(r))

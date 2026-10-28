@@ -258,6 +258,8 @@ pub enum Prot {
     ReadOnly,
     ReadWrite,
     ReadExec,
+    /// Writable code (just-in-time compilers in Linux programs).
+    ReadWriteExec,
 }
 
 pub struct AddressSpace {
@@ -288,6 +290,7 @@ impl AddressSpace {
                 Prot::ReadOnly => NO_EXECUTE,
                 Prot::ReadWrite => WRITABLE | NO_EXECUTE,
                 Prot::ReadExec => 0,
+                Prot::ReadWriteExec => WRITABLE,
             }
     }
 
@@ -310,7 +313,7 @@ impl AddressSpace {
             let e = walk(self.pml4, page, true, true).ok_or(ENOMEM)?;
             if *e & PRESENT != 0 {
                 let mut f = *e | Self::flags(prot) & (WRITABLE | USER);
-                if prot == Prot::ReadExec {
+                if matches!(prot, Prot::ReadExec | Prot::ReadWriteExec) {
                     f &= !NO_EXECUTE;
                 }
                 *e = f;
@@ -319,6 +322,56 @@ impl AddressSpace {
                 self.resident += PAGE_SIZE;
             }
             self.invalidate(page);
+        }
+        Ok(())
+    }
+
+    /// Gives `[va, va + pages*4K)` the protection `prot` (Linux `mprotect`):
+    /// present pages change their permissions, missing ones are mapped
+    /// zeroed, and `None` (no access) unmaps the range.
+    pub fn protect(&mut self, va: u64, pages: u64, prot: Option<Prot>) -> Result<(), isize> {
+        use aurora_abi::err::*;
+        if !va.is_multiple_of(PAGE_SIZE) || va.checked_add(pages * PAGE_SIZE).is_none_or(|e| e > layout::USER_END) {
+            return Err(EINVAL);
+        }
+        let Some(prot) = prot else {
+            self.unmap(va, pages);
+            return Ok(());
+        };
+        for i in 0..pages {
+            let page = va + i * PAGE_SIZE;
+            let e = walk(self.pml4, page, true, true).ok_or(ENOMEM)?;
+            if *e & PRESENT != 0 {
+                *e = (*e & (ADDR | SHARED)) | Self::flags(prot);
+            } else {
+                *e = zeroed_frame().ok_or(ENOMEM)? | Self::flags(prot);
+                self.resident += PAGE_SIZE;
+            }
+            self.invalidate(page);
+        }
+        // Permissions shrank too: every CPU running this process must see it.
+        shootdown(va, pages, Some(self.pml4));
+        Ok(())
+    }
+
+    /// True if no page of `[va, va + pages*4K)` is mapped.
+    pub fn is_free(&self, va: u64, pages: u64) -> bool {
+        (0..pages).all(|i| self.user_page(va + i * PAGE_SIZE).is_none())
+    }
+
+    /// Reads user memory at `va` through the physical window (works even when
+    /// this address space is not the active one).
+    pub fn read_bytes(&self, va: u64, out: &mut [u8]) -> Result<(), isize> {
+        let mut done = 0usize;
+        while done < out.len() {
+            let cur = va + done as u64;
+            let (phys, _) = self.user_page(cur).ok_or(aurora_abi::err::EFAULT)?;
+            let off = cur % PAGE_SIZE;
+            let n = ((PAGE_SIZE - off) as usize).min(out.len() - done);
+            unsafe {
+                core::ptr::copy_nonoverlapping((phys_to_virt(phys) + off) as *const u8, out[done..].as_mut_ptr(), n);
+            }
+            done += n;
         }
         Ok(())
     }

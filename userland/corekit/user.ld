@@ -27,6 +27,12 @@ SECTIONS
         *(COMMON)
     }
 
+    /* Says "built for WaveOS": files without it run as Linux programs. */
+    .waveos_note : ALIGN(4)
+    {
+        KEEP(*(.waveos_note))
+    }
+
     /DISCARD/ :
     {
         *(.eh_frame*)

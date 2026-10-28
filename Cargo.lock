@@ -1992,6 +1992,7 @@ dependencies = [
  "gina",
  "pulldown-cmark",
  "serde_json",
+ "sha2",
  "webpki-roots",
 ]
 
