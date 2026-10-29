@@ -94,6 +94,55 @@ pub fn write(path: &str, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// A successful publication, including a possible final durability error.
+pub use aurora_desktop::save::Published;
+
+struct Adapter;
+impl aurora_desktop::save::Storage for Adapter {
+    fn create_new(&mut self, p: &str, data: &[u8]) -> core::result::Result<(), isize> {
+        let mut f = File::open(p, open::WRITE | open::CREATE | open::EXCLUSIVE).map_err(|e| e.0.abs())?;
+        let result = (|| {
+            let mut at = 0;
+            while at < data.len() {
+                let n = f.write(&data[at..])?;
+                if n == 0 {
+                    return Err(Error(abi::err::EIO));
+                }
+                at += n;
+            }
+            Ok(())
+        })();
+        drop(f);
+        if result.is_err() {
+            let _ = remove(p);
+        }
+        result.map_err(|e| e.0.abs())
+    }
+    fn sync(&mut self, _: &str) -> core::result::Result<(), isize> {
+        try_sync().map_err(|e| e.0.abs())
+    }
+    fn rename(&mut self, a: &str, b: &str) -> core::result::Result<(), isize> {
+        rename(a, b).map_err(|e| e.0.abs())
+    }
+    fn remove(&mut self, p: &str) -> core::result::Result<(), isize> {
+        remove(p).map_err(|e| e.0.abs())
+    }
+}
+
+/// Replaces a document without truncating its previous contents first.
+/// On `Ok`, the destination has been published even when `sync_error` is set.
+pub fn write_atomic(path: &str, data: &[u8]) -> Result<Published> {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let nonce = (crate::process::pid() as u64) << 32 | NEXT.fetch_add(1, Ordering::Relaxed);
+    aurora_desktop::save::write(&mut Adapter, path, data, nonce).map_err(Error)
+}
+
+/// Rename a saved document while retaining its published identity on a flush error.
+pub fn rename_durable(path: &mut String, to: &str) -> Result<Published> {
+    aurora_desktop::save::rename(&mut Adapter, path, to).map_err(Error)
+}
+
 pub fn stat(path: &str) -> Result<Stat> {
     let mut st = Stat::default();
     let [p, l] = str_args(path);

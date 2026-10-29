@@ -13,6 +13,7 @@ bench = false
 ktest = []
 
 [dependencies]
+aurora-desktop = { path = "../libs/desktop" }
 gina = { path = "../libs/gina" }
 bootinfo = { path = "../libs/bootinfo" }
 lumen = { path = "../libs/gfx" }

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aurora-desktop = { path = "../../libs/desktop" }
 aurora-abi.workspace = true
 aurora-wav.workspace = true
 nebula-web.workspace = true
