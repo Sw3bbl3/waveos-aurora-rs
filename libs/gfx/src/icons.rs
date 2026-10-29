@@ -41,6 +41,8 @@ pub enum Icon {
     Doom,
     /// Firefox ESR, a Linux program: a plain globe (not Mozilla's logo).
     Firefox,
+    /// Voyage, the web browser (on WebKit): a compass on the sea.
+    Voyage,
 }
 
 impl Icon {
@@ -65,7 +67,7 @@ impl Icon {
             Icon::Studio => "studio",
             Icon::Installer => "installer",
             Icon::Doom => "doom",
-            Icon::Folder | Icon::Document | Icon::Picture | Icon::Firefox => return None,
+            Icon::Folder | Icon::Document | Icon::Picture | Icon::Firefox | Icon::Voyage => return None,
         })
     }
 }
@@ -316,6 +318,29 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
                 let half = rr * 4 / 5;
                 cv.line(cx - half, cy + dy, cx + half, cy + dy, (t / 2).max(1), 0xC0FF_FFFF);
             }
+        }
+        Icon::Voyage => {
+            cv.fill_round_rect_vgradient(r, rad, rgb(0x4C, 0xC9, 0xFF), rgb(0x1F, 0x3F, 0xD8));
+            let (cx, cy) = r.center();
+            let t = u(2).max(2);
+            let rr = u(14);
+            // The dial, its marks, and a needle pointing north-east.
+            cv.fill_circle(cx, cy, rr + t / 2, 0xFFFF_FFFF);
+            cv.fill_circle(cx, cy, rr - t / 2, rgb(0x16, 0x2C, 0x7A));
+            for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+                cv.line(
+                    cx + dx * (rr - u(4)),
+                    cy + dy * (rr - u(4)),
+                    cx + dx * (rr - u(1)),
+                    cy + dy * (rr - u(1)),
+                    t,
+                    0xFFFF_FFFF,
+                );
+            }
+            let (nx, ny) = (u(7), u(7));
+            cv.line(cx, cy, cx + nx, cy - ny, u(3).max(2), rgb(0xFF, 0x4D, 0x5E));
+            cv.line(cx, cy, cx - nx, cy + ny, u(3).max(2), 0xFFFF_FFFF);
+            cv.fill_circle(cx, cy, u(2).max(2), 0xFFFF_FFFF);
         }
         Icon::Document => {
             let page = Rect::new(r.x + u(8), r.y + u(3), s - u(16), s - u(6));

@@ -552,6 +552,11 @@ pub fn open_guest(p: &Process, guest: &str, flags: u64) -> Result<Arc<Handle>, i
     if let Some(n) = std_alias {
         return p.fd(n);
     }
+    // The kernel log (what WaveOS's system log and serial port show), as
+    // on Linux: `2>/dev/kmsg` keeps a program's messages.
+    if guest == "/dev/kmsg" {
+        return Ok(Arc::new(Handle::Log));
+    }
     if let Some(name) = guest.strip_prefix("/dev/shm/") {
         let file = super::shm::open(name, flags & O_CREAT != 0, flags & O_EXCL != 0, flags & O_TRUNC != 0)?;
         return Ok(special(Special::Shm { file, pos: 0 }));

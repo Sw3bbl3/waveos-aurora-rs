@@ -33,12 +33,12 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 
 ## The whole web.
 
-**Firefox** is the browser: Mozilla's Firefox ESR, with full JavaScript, running unchanged on WaveOS's Linux layer and showing its window through our Wayland bridge. It starts clean (no welcome tour, no extra buttons, the dark theme when WaveOS is dark) and reaches the web through our own network drivers and TCP/IP. **NetSurf**, a small browser that starts in seconds, comes in the system image too.
+**Voyage** is the browser: our own, around WebKit, the engine of Safari, with JavaScriptCore and all of WebKit's CSS, running on WaveOS's Linux layer and showing its window through our Wayland bridge. It has tabs, find in page, zoom and downloads to your Downloads folder, follows WaveOS's light or dark look, and opens pages in half the time Firefox takes. Mozilla's **Firefox ESR**, unchanged, is a launcher away, and **NetSurf**, a small browser that starts in seconds, comes in the system image too.
 
 | | |
 |---|---|
-| ![Firefox on WaveOS in the dark theme, showing example.com in several languages](docs/screenshots/firefox.png) | ![NetSurf showing Wikipedia's main page, with photos](docs/screenshots/netsurf-wikipedia.png) |
-| **Firefox.** The web, JavaScript and all. | **NetSurf.** Small and quick, no JavaScript. |
+| ![Voyage on WaveOS showing Wikipedia's article on WebKit](docs/screenshots/voyage.png) | ![Firefox on WaveOS in the dark theme, showing example.com in several languages](docs/screenshots/firefox.png) |
+| **Voyage.** WebKit, JavaScript and all, quickly. | **Firefox.** Mozilla's engine, unchanged. |
 
 ## JavaScript, written from scratch too.
 

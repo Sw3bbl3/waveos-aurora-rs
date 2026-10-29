@@ -19,8 +19,7 @@ fn key(addr: u64) -> Result<Key, isize> {
         return Err(EINVAL);
     }
     let p = super::current().ok_or(EPERM)?;
-    // (The page tables the CPU runs on are the process's: no need for its lock.)
-    if !crate::mm::vmm::check_current(addr, 4, true) {
+    if crate::syscall::user::check(addr, 4, true).is_err() {
         return Err(EFAULT);
     }
     Ok((p.cr3(), addr))

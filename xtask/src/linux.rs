@@ -195,6 +195,7 @@ pub fn programs() -> Vec<Program> {
     let mut all = busybox();
     all.extend(rust_programs());
     all.push((String::from("Linux/bin/firefox"), root().join("linux-programs/firefox/firefox.sh")));
+    all.push((String::from("Linux/bin/voyage"), root().join("linux-programs/voyage/voyage.sh")));
     let Some(cc) = Cc::find() else {
         eprintln!(
             "warning: no C compiler for Linux programs (install musl-tools, or clang): \
@@ -303,7 +304,7 @@ impl Cc {
 }
 
 /// The Rust toolchain's lld.
-fn rust_lld() -> Option<PathBuf> {
+pub fn rust_lld() -> Option<PathBuf> {
     let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().ok()?;
     let version = Command::new("rustc").arg("-vV").output().ok()?;
     let version = String::from_utf8_lossy(&version.stdout);

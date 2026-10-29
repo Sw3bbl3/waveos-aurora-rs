@@ -101,7 +101,7 @@ fn classify_document(path: String) -> Resolved {
     let kind = if aurora_image::is_image_name(&path) {
         AppKind::Preview
     } else if lower.ends_with(".html") || lower.ends_with(".htm") {
-        AppKind::Firefox
+        AppKind::Voyage
     } else {
         AppKind::Notes
     };
@@ -744,6 +744,7 @@ pub(super) fn builtin_id(a: &apps::AppInfo) -> String {
         Studio => "studio",
         Doom => "doom",
         Firefox => "firefox",
+        Voyage => "voyage",
     };
     id.into()
 }

@@ -47,7 +47,8 @@ fn group_of(kind: Option<AppKind>) -> Group {
             | AppKind::Calculator
             | AppKind::Clock
             | AppKind::NetSurf
-            | AppKind::Firefox,
+            | AppKind::Firefox
+            | AppKind::Voyage,
         ) => Group::Work,
         Some(AppKind::Studio | AppKind::Paint | AppKind::Preview) => Group::Create,
         Some(AppKind::Doom) => Group::Play,

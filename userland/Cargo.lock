@@ -183,6 +183,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-voyage"
+version = "0.8.0"
+dependencies = [
+ "corekit",
+]
+
+[[package]]
 name = "app-welcome"
 version = "0.8.0"
 dependencies = [

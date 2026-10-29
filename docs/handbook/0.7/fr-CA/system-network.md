@@ -5,7 +5,7 @@ WaveOS prend en charge virtio-net et certains adaptateurs Intel e1000/e1000e, IP
 1. Démarrez QEMU avec le réseau par défaut ou `--net e1000e`.
 2. Ouvrez Settings → Network ou exécutez `ifconfig`.
 3. Essayez `nslookup example.com`, `ping example.com` et `fetch -i https://example.com`.
-4. Ouvrez une page dans Firefox.
+4. Ouvrez une page dans Voyage.
 
 L’échec d’un ping ne prouve pas à lui seul que HTTP est indisponible. Vérifiez DHCP et DNS séparément. `--net none` désactive volontairement le réseau invité; Learn continue de fonctionner.
 

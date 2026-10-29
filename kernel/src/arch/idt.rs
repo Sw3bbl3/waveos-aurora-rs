@@ -89,14 +89,33 @@ impl core::fmt::Display for Callers {
     }
 }
 
+/// The 16 bytes of code at a user address, for crash reports (what an
+/// invalid instruction was, say).
+struct CodeBytes(u64);
+
+impl core::fmt::Display for CodeBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        let mut code = [0u8; 16];
+        if crate::syscall::user::get_bytes(self.0, &mut code).is_err() {
+            return Ok(());
+        }
+        write!(f, " (code:")?;
+        for b in code {
+            write!(f, " {b:02x}")?;
+        }
+        write!(f, ")")
+    }
+}
+
 fn fatal(name: &str, frame: &InterruptStackFrame, detail: core::fmt::Arguments) -> ! {
     if from_user(frame) {
         crate::proc::crash_current(format_args!(
-            "{} at {:#x}{}{}",
+            "{} at {:#x}{}{}{}",
             name,
             frame.instruction_pointer.as_u64(),
             if detail.as_str() == Some("") { "" } else { " — " },
-            detail
+            detail,
+            CodeBytes(frame.instruction_pointer.as_u64())
         ));
     }
     panic!(
@@ -157,19 +176,22 @@ extern "x86-interrupt" fn machine_check(frame: InterruptStackFrame) -> ! {
 
 extern "x86-interrupt" fn page_fault(mut frame: InterruptStackFrame, code: PageFaultErrorCode) {
     let addr = Cr2::read_raw();
-    // A write to a page shared since `fork` (by the program, or by a system
-    // call copying out to it): the page becomes the writer's own and the
-    // write goes again. Only where interrupts were on (a program, or a
-    // system call holding no spinning lock): this may wait for the process's
-    // memory lock and for other CPUs.
-    let write_protected = PageFaultErrorCode::CAUSED_BY_WRITE | PageFaultErrorCode::PROTECTION_VIOLATION;
-    if code.contains(write_protected)
+    // A first touch of lazy memory, or a write to a page shared since
+    // `fork` (by the program, or by a system call copying to it): the page
+    // is made (or becomes the writer's own) and the access goes again. Only
+    // where interrupts were on (a program, or a system call holding no
+    // spinning lock): this may wait for the process's memory lock and for
+    // other CPUs.
+    let write = code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);
+    let fixable = !code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        || (write && !code.contains(PageFaultErrorCode::INSTRUCTION_FETCH));
+    if fixable
         && addr < aurora_abi::layout::USER_END
         && frame.cpu_flags.contains(x86_64::registers::rflags::RFlags::INTERRUPT_FLAG)
         && (from_user(&frame) || crate::syscall::user::fixup(frame.instruction_pointer.as_u64(), addr).is_some())
     {
         x86_64::instructions::interrupts::enable();
-        let resolved = crate::proc::resolve_write(addr);
+        let resolved = crate::proc::resolve_fault(addr, write);
         x86_64::instructions::interrupts::disable();
         if resolved {
             return;
