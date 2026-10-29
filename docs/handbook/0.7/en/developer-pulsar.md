@@ -12,9 +12,9 @@ Pulsar compiles to bytecode and interprets it with a garbage collector. Ordinary
 2. Use the CC0 MP4 and generated AAC fixtures under `libs/media/tests/fixtures`; their provenance is documented there. Test invalid and truncated input as well as valid decoding.
 3. Build with `cargo xtask build`, boot a separate disposable disk and run your scripts with `js` in Terminal.
 
-Expected result: the host suite passes and scripts behave the same in the guest. The web browser, [NetSurf](apps-netsurf.md), is a separate program without JavaScript; the Nebula engine and Pulsar no longer run web pages in the guest. Re-run conformance tests after changing the runtime; historical test262 snapshots do not describe every newer change.
+Expected result: the host suite passes and scripts behave the same in the guest. The web browsers, [Firefox](apps-firefox.md) (with its own JavaScript engine) and [NetSurf](apps-netsurf.md), are separate programs; the Nebula engine and Pulsar no longer run web pages in the guest. Re-run conformance tests after changing the runtime; historical test262 snapshots do not describe every newer change.
 
 ## Troubleshooting and limits
 Keep script execution, parsing/compilation, layout, networking and media decoding measurements separate. Do not infer a browser responsiveness gain from a host compiler benchmark. JavaScript modules, BigInt, Intl, DRM and broad streaming-site compatibility remain incomplete. The native Rust compiler/debugger is still unavailable; JavaScript execution does not supply that toolchain.
 
-See [NetSurf](apps-netsurf.md) for the web browser and [Validation](reference-validation.md) for measurement requirements.
+See [Firefox](apps-firefox.md) for the web browser and [Validation](reference-validation.md) for measurement requirements.

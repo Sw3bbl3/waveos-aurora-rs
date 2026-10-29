@@ -101,7 +101,7 @@ fn classify_document(path: String) -> Resolved {
     let kind = if aurora_image::is_image_name(&path) {
         AppKind::Preview
     } else if lower.ends_with(".html") || lower.ends_with(".htm") {
-        AppKind::NetSurf
+        AppKind::Firefox
     } else {
         AppKind::Notes
     };

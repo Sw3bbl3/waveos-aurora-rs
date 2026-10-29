@@ -267,7 +267,7 @@ fn task() {
         });
         GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         CHANGED.wake_all();
-        crate::proc::readiness::notify();
+        crate::proc::readiness::notify(crate::proc::readiness::NET);
     }
 }
 

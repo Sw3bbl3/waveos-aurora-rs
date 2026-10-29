@@ -24,11 +24,11 @@ impl Pipe {
         Pipe { inner: IrqMutex::new(Inner { buf: VecDeque::new(), readers: 1, writers: 1, waiting: [None, None] }) }
     }
 
-    fn wake_all(inner: &mut Inner) {
+    fn wake_all(&self, inner: &mut Inner) {
         for t in inner.waiting.iter_mut().filter_map(|t| t.take()) {
             sched::wake(t);
         }
-        super::readiness::notify();
+        super::readiness::notify(super::readiness::key(self));
     }
 
     pub fn read(&self, out: &mut [u8], nonblocking: bool) -> Result<usize, isize> {
@@ -40,7 +40,7 @@ impl Pipe {
                     for (o, b) in out.iter_mut().zip(g.buf.drain(..n)) {
                         *o = b;
                     }
-                    Self::wake_all(&mut g);
+                    self.wake_all(&mut g);
                     return Ok(n);
                 }
                 if g.writers == 0 || out.is_empty() {
@@ -71,7 +71,7 @@ impl Pipe {
                     let n = room.min(data.len() - done);
                     g.buf.extend(&data[done..done + n]);
                     done += n;
-                    Self::wake_all(&mut g);
+                    self.wake_all(&mut g);
                     continue;
                 }
                 // Full: waiting is cut short by a kill or a signal.
@@ -108,12 +108,12 @@ impl Pipe {
     pub fn close_reader(&self) {
         let mut g = self.inner.lock();
         g.readers = g.readers.saturating_sub(1);
-        Self::wake_all(&mut g);
+        self.wake_all(&mut g);
     }
 
     pub fn close_writer(&self) {
         let mut g = self.inner.lock();
         g.writers = g.writers.saturating_sub(1);
-        Self::wake_all(&mut g);
+        self.wake_all(&mut g);
     }
 }

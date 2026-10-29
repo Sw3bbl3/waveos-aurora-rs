@@ -41,8 +41,9 @@ the kernel loads next to them; it then loads the libraries itself.
 
 `cargo xtask linux-root [PKG…]` fetches Debian 12 packages and everything
 they depend on into `target/linux-root` (by default Firefox ESR, bash,
-coreutils, Python 3, the DejaVu fonts and glibc's locale data: about 140
-packages, 440 MiB).
+coreutils, Python 3, the DejaVu fonts, WenQuanYi Micro Hei for Chinese,
+Japanese and Korean text, and glibc's locale data: about 150 packages,
+450 MiB). Without arguments it also rebuilds a root that lacks one of these.
 They come from a fixed snapshot of the Debian archive, and every download
 is checked: the archive's `Release` file against a SHA-256 pinned in
 `xtask/src/debian.rs`, the package list against `Release`, and each package
@@ -53,11 +54,24 @@ machine's `update-mime-database` and `glib-compile-schemas`
 (`shared-mime-info` and `libglib2.0-bin` on Debian and Ubuntu; `brew install
 shared-mime-info glib` on macOS).
 
-`cargo xtask run --linux-root` makes a fresh disk with that root as
-`/Linux`. The system folders are layered: what the disk has (`/Linux/usr`,
+`cargo xtask run` puts that root on the disk as `/Linux`, fetching the
+packages the first time: a new disk is made large enough for them, and an
+older disk gets them when its volume has room (otherwise xtask says so and
+`--fresh-disk` makes a new one). `--no-linux-root` leaves them off, and
+when they can't be fetched (offline) WaveOS runs without them. `cargo
+xtask image` does the same for the USB image. WaveOS's own settings for the
+programs (Firefox's preferences and policies, GTK's settings; see
+`linux-programs/firefox`) are written into the root on every build and
+onto the disk on every run; when the root's packages change (its
+`packages.txt`), the files the disk doesn't have yet are added too. The system folders are layered: what the disk has (`/Linux/usr`,
 `/Linux/lib`, …) comes first, then the system image (`/System/Linux`), so a
 Debian program takes the place of the BusyBox command of the same name.
 In the shell, `bash`, `python3` and the rest run as on Debian.
+
+Libraries and other files programs map (`mmap`) are read once and shared
+(`kernel/src/fs/mapcache.rs`): every process mapping a file gets the same
+pages, read-only, and a process that makes one writable gets its own copy.
+Writing to the file, or deleting it, drops it from the cache.
 
 ## What a Linux program sees
 
@@ -165,29 +179,67 @@ What isn't there yet: pop-up menus stay inside their window, drag and drop
 between programs, GPU buffers (`linux-dmabuf`: programs draw in software),
 input methods, and touch.
 
-## Firefox ESR
+## Firefox
 
-With the Linux packages on the disk (`cargo xtask run --linux-root`),
-**Firefox ESR** is in Shoal and Seek (in Terminal: `firefox`). It runs
-Debian's Firefox ESR 140, unchanged, through `/System/Linux/bin/firefox`:
-that script starts `wl-bridge --background` (which returns once the bridge
-is listening, or at once if it already is) and then Firefox with Wayland
-on. Firefox runs in several processes as usual (content, sockets, media),
-loads and renders pages over HTTP and HTTPS with its own root
-certificates, and takes the keyboard, mouse, scrolling and clipboard.
-Without the packages, the app says how to get them.
+**Firefox** is WaveOS's web browser: Debian's Firefox ESR 140, unchanged,
+from the Linux packages on the disk. It's in the dock, Shoal and Seek (in
+Terminal: `firefox`), and web links and `.html` files open in it. The
+Firefox app (`userland/apps/firefox`) runs `/System/Linux/bin/firefox`
+with the addresses or files it was given, which starts `wl-bridge
+--background` (it returns once the bridge is listening, or at once if it
+already is) and then Firefox with Wayland on. When WaveOS is dark, Firefox
+gets the dark GTK theme, and pages that offer a dark look use it. Without
+the packages on the disk, the app opens NetSurf instead.
+
+Firefox runs pages in a few content processes and loads them over HTTP
+and HTTPS with its own root certificates; the keyboard, mouse, scrolling,
+the clipboard and a mouse's back and forward buttons work. WaveOS's
+settings (`linux-programs/firefox`) give it a clean start and a quiet
+window:
+
+- no welcome tour, "what's new" page, default-browser question or
+  restore-session page after an unclean stop;
+- no window buttons of its own (WaveOS's window handle has them; GTK's
+  `gtk-decoration-layout` is empty for every GTK program), a compact
+  toolbar without the account and Pocket buttons, and a new tab page with
+  only a search box (no site tiles or sponsored content);
+- nothing sent to Mozilla (telemetry, studies), and downloads in WaveOS's
+  Downloads folder;
+- fewer processes: pages share up to four content processes instead of one
+  per site (site isolation is off), and networking and extensions run in
+  processes that are there anyway, since each process starts Firefox from
+  scratch.
+
+These are defaults: what you change in Firefox's settings wins.
 
 Firefox's sandboxes rely on Linux features WaveOS doesn't have yet
-(seccomp filters, namespaces), so the launcher turns them off and Firefox
-shows a notice that some security features offer less protection. It
-draws in software. Starting takes a while in QEMU without hardware
-acceleration (libxul is read in full when it loads).
+(seccomp filters, namespaces), so the launcher turns them off; with site
+isolation off too, a page that broke into its content process could read
+other sites' pages there. Firefox draws in software. In QEMU emulating
+the processor it takes 25 to 31 seconds to show its new tab page (at
+1920 × 1080, on four virtual processors); `cargo xtask run` uses the
+host's virtualization instead when it has some (KVM, HVF, WHPX), which is
+many times faster.
+
+What made it start faster, for anyone working on the layer: the kernel
+heap gives small blocks from per-size free lists; `fork` shares pages
+copy-on-write (`mm::vmm`, resolved in the page fault handler); `poll`,
+`select` and `epoll` wait on keys of the objects they watch
+(`proc::readiness`) instead of waking on every change in the system;
+checking user pointers, the signal check on return and finding the
+current process take no lock shared by the process's threads; and
+`link` fails with `EPERM`, as on file systems without hard links, so that
+fontconfig can save its cache. Sampling the virtual processors through
+QEMU's monitor (`info registers -a`, then following frame pointers) found
+each of these.
 
 ## NetSurf
 
-The web browser, **NetSurf**, is a Linux program too: NetSurf 3.11 built
+**NetSurf** is the small browser, in the system image: NetSurf 3.11 built
 static with musl, with a libnsfb surface that is a WaveOS window, in
-`/System/NetSurf`. It needs nothing on the disk. See [NETSURF.md](NETSURF.md).
+`/System/NetSurf`. It needs nothing on the disk and starts in seconds, but
+doesn't run JavaScript. It's in Shoal and Seek, and stands in for Firefox
+when the Linux packages aren't on the disk. See [NETSURF.md](NETSURF.md).
 
 ## Doom
 

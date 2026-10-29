@@ -152,17 +152,20 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
         let got = shm.read_at(offset, &mut data);
         data.truncate(got);
         Some(data)
-    } else if flags & MAP_ANONYMOUS == 0 {
+    } else {
+        None
+    };
+    // A disk file's pages come from the cache every mapping of it shares
+    // (read first if need be). Shared mappings of disk files are private
+    // for now: what is written to them stays in the process.
+    let cached = if flags & MAP_ANONYMOUS == 0 && file_data.is_none() {
         let h = p.fd(fd as usize)?;
         let Handle::File(f) = &*h else { return Err(ENODEV) };
-        let f = f.lock();
-        let size = f.fs.metadata(f.ino)?.size;
-        let want = len.min(size.saturating_sub(offset)) as usize;
-        let mut data = alloc::vec![0u8; want];
-        let got = if want > 0 { f.fs.read(f.ino, offset, &mut data)? } else { 0 };
-        data.truncate(got);
-        // (Shared mappings of disk files are private copies for now.)
-        Some(data)
+        let (fs, ino) = {
+            let f = f.lock();
+            (f.fs.clone(), f.ino)
+        };
+        Some(crate::fs::mapcache::pages(&fs, ino, offset, n)?)
     } else {
         None
     };
@@ -181,6 +184,17 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
         place(aspace, addr & !(PAGE_SIZE - 1), n)?
     };
     let target = prot(prot_bits);
+    if let Some(pages) = cached {
+        // No access: the range stays reserved, unmapped.
+        if let Some(pr) = target {
+            if let Err(e) = pages.map(aspace, va, pr) {
+                aspace.unmap(va, n);
+                return Err(e);
+            }
+        }
+        update_resident(p, aspace);
+        return Ok(va);
+    }
     // Contents go in through a writable mapping; the protection comes after.
     let initial = if file_data.is_some() { Some(Prot::ReadWrite) } else { target };
     if let Some(pr) = initial {
@@ -285,8 +299,8 @@ pub fn madvise(p: &Process, addr: u64, len: u64, advice: u64) -> Result<u64, isi
     if advice == MADV_DONTNEED && len > 0 && user_range(addr, len) {
         // The pages read as zero afterwards.
         let zero = alloc::vec![0u8; PAGE_SIZE as usize];
-        let guard = p.mem();
-        let aspace = guard.as_ref().ok_or(ESRCH)?;
+        let mut guard = p.mem();
+        let aspace = guard.as_mut().ok_or(ESRCH)?;
         for i in 0..pages(len) {
             let _ = aspace.write_bytes(addr + i * PAGE_SIZE, &zero);
         }

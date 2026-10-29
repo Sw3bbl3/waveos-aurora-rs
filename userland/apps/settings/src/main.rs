@@ -651,7 +651,7 @@ impl Settings {
                     Some(("Slow", "Fast")),
                 )]),
                 footer(
-                    "The side buttons of five-button mice go back and forward in NetSurf and Files. \
+                    "The side buttons of five-button mice go back and forward in Firefox, NetSurf and Files. \
                      Scroll wheels scroll smoothly a notch at a time.",
                 ),
             ],
@@ -855,7 +855,7 @@ impl Settings {
         }
         sections.push(footer(
             "Addresses come from the network's DHCP server. Test the connection with `ping` or `fetch` \
-             in Terminal, or browse with NetSurf.",
+             in Terminal, or browse with Firefox.",
         ));
         page("Network", sections)
     }

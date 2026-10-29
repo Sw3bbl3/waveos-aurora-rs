@@ -23,7 +23,10 @@ const RELEASE_SHA256: &str = "abcf5882746e0f68171f41adbb4ac01b74b49d62d203379bef
 const INDEX: &str = "main/binary-amd64/Packages.gz";
 
 /// What `cargo xtask linux-root` installs without arguments.
-pub const DEFAULT_PACKAGES: &[&str] = &["bash", "coreutils", "python3", "firefox-esr", "fonts-dejavu-core", "libc-bin"];
+/// (WenQuanYi Micro Hei: Chinese, Japanese and Korean text, which DejaVu
+/// doesn't have, in 4 MiB.)
+pub const DEFAULT_PACKAGES: &[&str] =
+    &["bash", "coreutils", "python3", "firefox-esr", "fonts-dejavu-core", "fonts-wqy-microhei", "libc-bin"];
 
 /// Packages never installed: they only matter to a running Debian system
 /// (package management, init, the system bus).
@@ -158,6 +161,29 @@ pub fn build(packages: &[String]) -> PathBuf {
     fs::write(out.join(".links"), text).unwrap();
     fs::write(out.join("packages.txt"), names.into_iter().collect::<Vec<_>>().join("\n") + "\n").unwrap();
     out
+}
+
+/// WaveOS's settings for the programs in the root, from `linux-programs`:
+/// Firefox's default preferences and policies (no welcome tour or warning
+/// bars, a compact toolbar, downloads in WaveOS's Downloads) and GTK's
+/// (no window buttons: WaveOS's window handle has them). Written on every
+/// build, so a change reaches the disk without fetching the packages again.
+/// Returns the files, as (path in the root, source).
+pub fn waveos_settings(dir: &Path) -> Vec<(String, PathBuf)> {
+    let src = root().join("linux-programs/firefox");
+    let files = [
+        ("/etc/firefox-esr/waveos.js", src.join("waveos.js")),
+        ("/usr/share/firefox-esr/distribution/policies.json", src.join("policies.json")),
+        ("/etc/xdg/gtk-3.0/settings.ini", src.join("gtk-settings.ini")),
+    ];
+    for (path, from) in &files {
+        let to = dir.join(&path[1..]);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        // A fresh file, not a write through a hard link into the package cache.
+        let _ = fs::remove_file(&to);
+        fs::copy(from, &to).unwrap_or_else(|e| panic!("{}: {e}", from.display()));
+    }
+    files.into_iter().map(|(p, f)| (String::from(p), f)).collect()
 }
 
 /// Copies a package's files into the root (hard links, to save space);

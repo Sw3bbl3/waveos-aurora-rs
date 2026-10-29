@@ -50,11 +50,14 @@ pub fn fixup(rip: u64, addr: u64) -> Option<u64> {
         .then_some(unsafe { &aurora_user_copy_fault as *const u8 as u64 })
 }
 
+/// Checks the range against the page tables the CPU runs on (the calling
+/// process's), without its address space's lock, which every thread of
+/// the process would otherwise contend for on most system calls. Another
+/// thread may change the mapping right after: the copy then faults
+/// (`EFAULT`), and CR0.WP keeps it from writing through a page that became
+/// read-only.
 fn check(ptr: u64, len: u64, write: bool) -> Result<(), isize> {
-    let p = proc::current().ok_or(EPERM)?;
-    let guard = p.mem();
-    let aspace = guard.as_ref().ok_or(ESRCH)?;
-    if aspace.check(ptr, len, write) {
+    if crate::mm::vmm::check_current(ptr, len, write) {
         Ok(())
     } else {
         Err(EFAULT)

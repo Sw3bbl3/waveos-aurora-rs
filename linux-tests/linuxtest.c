@@ -7,12 +7,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
@@ -55,6 +57,9 @@ static void files(void) {
     CHECK(pread(fd, buf, 7, 7) == 7 && memcmp(buf, "line 1\n", 7) == 0, "pread");
     CHECK(lseek(fd, -9, SEEK_END) == 8881, "lseek");
     CHECK(read(fd, buf, 9) == 9 && memcmp(buf, "line 999\n", 9) == 0, "read at end");
+    // Nobody else holds a lock on it (SQLite asks this before using WAL).
+    struct flock lk = {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 1};
+    CHECK(fcntl(fd, F_GETLK, &lk) == 0 && lk.l_type == F_UNLCK, "F_GETLK finds no lock");
     close(fd);
     DIR *d = opendir("/tmp/lt");
     CHECK(d, "opendir");
@@ -118,6 +123,35 @@ static void threads(void) {
     printf("PASS threads and TLS\n");
 }
 
+// Thread ids as glibc's pthread_create asks clone for them: one word, set
+// for the new thread and cleared when it exits. The id must be there before
+// the thread's first instruction (glibc takes locks with it), and once
+// cleared it must stay cleared (pthread_join waits for that).
+static _Atomic int tid_word;
+static atomic_int ids_seen;
+
+static int quick_thread(void *arg) {
+    if (atomic_load(&tid_word) == (int)syscall(SYS_gettid)) atomic_fetch_add(&ids_seen, 1);
+    syscall(SYS_exit, 0);
+    return 0;
+}
+
+static void clone_ids(void) {
+    static char stack[64 << 10] __attribute__((aligned(16)));
+    const int flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM |
+                      CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID;
+    for (int i = 0; i < 50; i++) {
+        atomic_store(&tid_word, 0);
+        int tid = clone(quick_thread, stack + sizeof stack, flags, 0, &tid_word, 0, &tid_word);
+        CHECK(tid > 0, "clone");
+        int waited = 0;
+        while (atomic_load(&tid_word) != 0 && waited++ < 5000) usleep(1000);
+        CHECK(atomic_load(&tid_word) == 0, "the exited thread's id stays cleared");
+    }
+    CHECK(atomic_load(&ids_seen) == 50, "each new thread sees its id at once");
+    printf("PASS clone thread ids\n");
+}
+
 static void clocks(void) {
     struct timespec a, b;
     CHECK(clock_gettime(CLOCK_MONOTONIC, &a) == 0, "monotonic");
@@ -174,6 +208,7 @@ int main(int argc, char **argv) {
     files();
     memory();
     threads();
+    clone_ids();
     clocks();
     machine();
     wave();

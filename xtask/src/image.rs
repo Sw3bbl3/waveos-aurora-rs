@@ -14,7 +14,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SECTOR: u64 = 512;
 const ENTRIES: u64 = 128;
@@ -58,6 +58,134 @@ pub fn create_with(esp: &Path, home: &Path, linux: Option<&Path>, out: &Path, si
     format_esp(&mut file, ESP_START, ESP_SECTORS, esp)?;
     mkfs_home(&mut file, l.home_start, l.home_end - l.home_start + 1, home, linux)?;
     Ok(())
+}
+
+/// What [`add_linux`] did to an existing image.
+pub enum LinuxOnDisk {
+    /// The Linux root went onto the disk.
+    Added,
+    /// It was there already; WaveOS's settings files were rewritten.
+    Updated,
+    /// It was there, from a different package list: the files new to it
+    /// were added (and the settings rewritten).
+    Upgraded,
+    /// The home volume has `free` bytes, and the Linux root needs `need`.
+    NoRoom { need: u64, free: u64 },
+}
+
+/// Puts the Linux root (`cargo xtask linux-root`) on an existing image's
+/// home volume as `/Linux`, keeping the files saved there: all of it when
+/// Firefox isn't on the disk yet and it fits; otherwise `settings` (paths
+/// in the root and their sources), which change with WaveOS, and, when the
+/// root has other packages than the disk, the files the disk doesn't have.
+pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io::Result<LinuxOnDisk> {
+    let mut file = OpenOptions::new().read(true).write(true).open(img)?;
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    file.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE))?;
+    file.read_exact(&mut entry)?;
+    if entry[0..16] != aurorafs::PARTITION_TYPE {
+        return Err(io::Error::other("the disk has no AuroraFS volume"));
+    }
+    let start = u64::from_le_bytes(entry[32..40].try_into().unwrap());
+    let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
+    let bytes = (end - start + 1) * SECTOR;
+    let region = Region { file: &mut file, start: start * SECTOR, len: bytes, pos: 0 };
+    let err = |e: aurorafs::Error| io::Error::other(format!("AuroraFS: {e:?}"));
+    let mut vol = aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now).map_err(err)?;
+    let done = if vol.resolve("/Linux/usr/lib/firefox-esr/firefox-esr").is_ok() {
+        let mut done = LinuxOnDisk::Updated;
+        let packages = fs::read(linux.join("packages.txt")).unwrap_or_default();
+        if read_file(&mut vol, "/Linux/packages.txt") != packages {
+            let need = missing_blocks(&mut vol, linux, "/Linux") * 4096 * 9 / 8;
+            let (_, free) = vol.space();
+            if free < need {
+                return Ok(LinuxOnDisk::NoRoom { need, free });
+            }
+            seed_missing(&mut vol, linux, "/Linux").map_err(err)?;
+            // The links and the package list describe the root as it is now.
+            vol.write_file("/Linux/.links", &fs::read(linux.join(".links"))?).map_err(err)?;
+            vol.write_file("/Linux/packages.txt", &packages).map_err(err)?;
+            done = LinuxOnDisk::Upgraded;
+        }
+        for (path, from) in settings {
+            let path = format!("/Linux{path}");
+            vol.mkdir_all(&path[..path.rfind('/').unwrap()]).map_err(err)?;
+            vol.write_file(&path, &fs::read(from)?).map_err(err)?;
+        }
+        done
+    } else {
+        // Whole blocks per file, and an eighth more for the volume's own records.
+        let need = tree_blocks(linux) * 4096 * 9 / 8;
+        let (_, free) = vol.space();
+        if free < need {
+            return Ok(LinuxOnDisk::NoRoom { need, free });
+        }
+        vol.mkdir_all("/Linux").map_err(err)?;
+        seed(&mut vol, linux, "/Linux").map_err(err)?;
+        LinuxOnDisk::Added
+    };
+    vol.commit().map_err(err)?;
+    vol.fsck().map_err(io::Error::other)?;
+    Ok(done)
+}
+
+/// A file's contents on the volume (empty if it isn't there).
+fn read_file<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, path: &str) -> Vec<u8> {
+    let Ok(ino) = vol.resolve(path) else { return Vec::new() };
+    let size = vol.stat(ino).map(|m| m.size).unwrap_or(0);
+    let mut data = vec![0u8; size as usize];
+    let got = vol.read(ino, 0, &mut data).unwrap_or(0);
+    data.truncate(got);
+    data
+}
+
+/// [`tree_blocks`] for the files under `src` that aren't at `prefix` yet.
+fn missing_blocks<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, src: &Path, prefix: &str) -> u64 {
+    let Ok(entries) = fs::read_dir(src) else { return 0 };
+    let mut blocks = 0;
+    for entry in entries.flatten() {
+        let path = format!("{prefix}/{}", entry.file_name().to_string_lossy());
+        match entry.metadata() {
+            Ok(m) if m.is_dir() => blocks += 1 + missing_blocks(vol, &entry.path(), &path),
+            Ok(m) if vol.resolve(&path).is_err() => blocks += 1 + m.len().div_ceil(4096),
+            _ => {}
+        }
+    }
+    blocks
+}
+
+/// [`seed`], leaving the files already at `prefix` as they are.
+fn seed_missing<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, src: &Path, prefix: &str) -> aurorafs::Result<()> {
+    let Ok(entries) = fs::read_dir(src) else { return Ok(()) };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = format!("{prefix}/{name}");
+        if entry.path().is_dir() {
+            vol.mkdir_all(&path)?;
+            seed_missing(vol, &entry.path(), &path)?;
+        } else if vol.resolve(&path).is_err() {
+            vol.write_file(&path, &fs::read(entry.path()).map_err(|_| aurorafs::Error::Io)?)?;
+        }
+    }
+    Ok(())
+}
+
+/// 4 KiB blocks the files under `dir` take, one more for each file and folder.
+fn tree_blocks(dir: &Path) -> u64 {
+    fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| match e.metadata() {
+                    Ok(m) if m.is_dir() => 1 + tree_blocks(&e.path()),
+                    Ok(m) => 1 + m.len().div_ceil(4096),
+                    Err(_) => 0,
+                })
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 /// Creates a FAT16 EFI boot image for an optical disc's El Torito entry.

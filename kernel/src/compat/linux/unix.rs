@@ -96,6 +96,14 @@ impl Socket {
         (a, b)
     }
 
+    /// Both queues of a connection changed state (one end shut down or went).
+    fn notify_ends(rx: &QueueRef, tx: Option<&QueueRef>) {
+        readiness::notify(readiness::key(Arc::as_ptr(rx)));
+        if let Some(t) = tx {
+            readiness::notify(readiness::key(Arc::as_ptr(t)));
+        }
+    }
+
     fn join(a: &Arc<Socket>, b: &Arc<Socket>, a_pid: u32, b_pid: u32) {
         {
             let mut s = a.st.lock();
@@ -169,7 +177,8 @@ impl Socket {
             ls.backlog.push_back(server);
         }
         self.st.lock().remote = Some(name);
-        readiness::notify();
+        readiness::notify(readiness::key(Arc::as_ptr(&listener)));
+        readiness::notify(readiness::key(Arc::as_ptr(self)));
         Ok(())
     }
 
@@ -188,7 +197,7 @@ impl Socket {
                     return Ok(c);
                 }
             }
-            wait(gen, nonblock)?;
+            wait(gen, &[readiness::key(self)], nonblock)?;
         }
     }
 
@@ -245,7 +254,7 @@ impl Socket {
                     });
                     done += n;
                     drop(q);
-                    readiness::notify();
+                    readiness::notify(readiness::key(Arc::as_ptr(&queue)));
                     if whole || done == data.len() {
                         return Ok(done);
                     }
@@ -255,7 +264,7 @@ impl Socket {
             if done > 0 && nonblock {
                 return Ok(done);
             }
-            wait(gen, nonblock)?;
+            wait(gen, &[readiness::key(Arc::as_ptr(&queue))], nonblock)?;
         }
     }
 
@@ -267,13 +276,19 @@ impl Socket {
             {
                 let mut q = self.rx.lock();
                 if !q.segs.is_empty() {
-                    return Ok(self.take(&mut q, out, peek));
+                    let r = self.take(&mut q, out, peek);
+                    drop(q);
+                    if !peek {
+                        // Room for whoever waits to write.
+                        readiness::notify(readiness::key(Arc::as_ptr(&self.rx)));
+                    }
+                    return Ok(r);
                 }
                 if q.writer_gone || (self.ty != Type::Dgram && !self.st.lock().connected && !self.listening()) {
                     return Ok(Received::default());
                 }
             }
-            wait(gen, nonblock)?;
+            wait(gen, &[readiness::key(Arc::as_ptr(&self.rx)), readiness::key(self)], nonblock)?;
         }
     }
 
@@ -333,6 +348,15 @@ impl Socket {
         }
     }
 
+    /// What to wait on for a change in [`Socket::readiness`] (see `proc::readiness`).
+    pub fn wait_keys(&self, keys: &mut Vec<usize>) {
+        keys.push(readiness::key(self));
+        keys.push(readiness::key(Arc::as_ptr(&self.rx)));
+        if let Some(t) = &self.st.lock().tx {
+            keys.push(readiness::key(Arc::as_ptr(t)));
+        }
+    }
+
     /// Whether a read and a write would go ahead, and whether the other end is gone.
     pub fn readiness(&self) -> (bool, bool, bool) {
         let s = self.st.lock();
@@ -367,8 +391,9 @@ impl Socket {
                 t.lock().writer_gone = true;
             }
         }
+        let tx = s.tx.clone();
         drop(s);
-        readiness::notify();
+        Self::notify_ends(&self.rx, tx.as_ref());
         Ok(())
     }
 }
@@ -380,6 +405,7 @@ impl Drop for Socket {
             t.lock().writer_gone = true;
         }
         let local = s.local.clone();
+        let tx = s.tx.clone();
         drop(s);
         if let Some(name) = local {
             let mut names = NAMES.lock();
@@ -392,7 +418,7 @@ impl Drop for Socket {
         // Descriptors in flight to nobody close now.
         q.segs.clear();
         drop(q);
-        readiness::notify();
+        Socket::notify_ends(&self.rx, tx.as_ref());
     }
 }
 
@@ -405,14 +431,14 @@ pub struct Received {
     pub truncated: bool,
 }
 
-/// Waits for the next change (or fails at once without blocking).
-fn wait(gen: u64, nonblock: bool) -> Result<(), isize> {
+/// Waits for the next change to `keys` (or fails at once without blocking).
+fn wait(gen: u64, keys: &[usize], nonblock: bool) -> Result<(), isize> {
     if nonblock {
         return Err(EAGAIN);
     }
     if crate::proc::interrupted() {
         return Err(EINTR);
     }
-    readiness::wait(gen, 1000);
+    readiness::wait(gen, keys, 1000);
     Ok(())
 }

@@ -194,7 +194,7 @@ pub fn links(programs: &[Program]) -> String {
 pub fn programs() -> Vec<Program> {
     let mut all = busybox();
     all.extend(rust_programs());
-    all.push((String::from("Linux/bin/firefox"), root().join("linux-programs/firefox.sh")));
+    all.push((String::from("Linux/bin/firefox"), root().join("linux-programs/firefox/firefox.sh")));
     let Some(cc) = Cc::find() else {
         eprintln!(
             "warning: no C compiler for Linux programs (install musl-tools, or clang): \

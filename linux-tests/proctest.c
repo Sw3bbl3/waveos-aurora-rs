@@ -77,6 +77,35 @@ static void forking(void) {
     printf("PASS fork and wait\n");
 }
 
+// fork shares memory copy-on-write: a write by either side, its own or the
+// kernel's for a system call (read() below), stays its own.
+static char cow[3 * 4096] __attribute__((aligned(4096)));
+
+static void copy_on_write(void) {
+    memset(cow, 'a', sizeof cow);
+    int go[2];
+    CHECK(pipe(go) == 0, "pipe");
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork");
+    if (pid == 0) {
+        close(go[1]);
+        // The kernel writes into the shared page here.
+        int ok = read(go[0], cow + 4096, 1) == 1 && cow[4096] == 'x';
+        ok = ok && cow[0] == 'a';  // the parent's write isn't seen
+        cow[8192] = 'c';
+        _exit(ok && cow[8192] == 'c' ? 42 : 1);
+    }
+    close(go[0]);
+    cow[0] = 'p';
+    CHECK(write(go[1], "x", 1) == 1, "write to the child");
+    close(go[1]);
+    int status;
+    CHECK(waitpid(pid, &status, 0) == pid, "waitpid");
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 42, "the child saw its own writes only");
+    CHECK(cow[0] == 'p' && cow[4096] == 'a' && cow[8192] == 'a', "the parent sees its own writes only");
+    printf("PASS copy-on-write fork\n");
+}
+
 static void executing(void) {
     char out[256];
     char *echo[] = {"/bin/echo", "hello", "from", "echo", NULL};
@@ -340,6 +369,7 @@ int main(int argc, char **argv) {
     self[n] = 0;
     setvbuf(stdout, NULL, _IONBF, 0);
     forking();
+    copy_on_write();
     executing();
     scripts();
     spawning();

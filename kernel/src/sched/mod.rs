@@ -91,6 +91,14 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 /// nothing but their idle task, which halts.
 static PARKING: AtomicBool = AtomicBool::new(false);
 static PARKED: AtomicU64 = AtomicU64::new(0);
+/// The earliest tick a sleeping task wants to wake at (`u64::MAX`: none),
+/// so the timer looks through the tasks only when one is due. Changed
+/// under `SCHED`'s lock.
+static NEXT_WAKE: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Per CPU: the `on_cpu` flag of the task it just switched away from, for
+/// [`finish_switch`] to clear without taking the lock (0: that task exited,
+/// and is freed under the lock).
+static PREV_ON_CPU: [AtomicU64; percpu::MAX_CPUS] = [const { AtomicU64::new(0) }; percpu::MAX_CPUS];
 
 fn new_task(
     name: &str,
@@ -144,6 +152,7 @@ fn adopt_idle(s: &mut Scheduler, cpu: usize, id: TaskId) {
     let old = core::mem::replace(&mut c.idle, id);
     c.current = id;
     c.prev = None;
+    PREV_ON_CPU[cpu].store(0, Ordering::Relaxed);
     c.slice_start = time::now_ns();
     if old != id && old != 0 && s.tasks.get(&old).is_some_and(|t| t.idle) {
         s.tasks.remove(&old);
@@ -427,13 +436,17 @@ fn pick_next(s: &mut Scheduler, cpu: usize) -> Option<TaskId> {
 }
 
 /// Picks the next task for this CPU and switches to it. Interrupts must be off.
+///
+/// Only the choice is made under the scheduler's lock, which every CPU
+/// takes: saving and loading registers and switching page tables (slow,
+/// especially in an emulator) come after it.
 fn schedule() {
     if !STARTED.load(Ordering::Acquire) {
         return;
     }
     let cpu = percpu::cpu_id();
     let now = time::now_ns();
-    let (save, load, next_flag) = {
+    let (save, load, next_flag, switch_to) = {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
         if cpu >= s.cpus.len() {
@@ -475,31 +488,29 @@ fn schedule() {
             let home = if cpu != 0 && PARKING.load(Ordering::Acquire) { 0 } else { cpu };
             s.cpus[home].queue.push_back(cur_id);
         }
-        // Record the switch.
-        let (cur_cr3, save) = {
+        // Record the switch. The tasks' boxes stay put while their stacks
+        // are in use (`on_cpu`), so pointers into them outlive the lock.
+        let (cur_cr3, save, save_fpu) = {
             let cur = s.tasks.get_mut(&cur_id).unwrap();
             cur.running_on = None;
-            if let Some(f) = cur.fpu.as_mut() {
-                f.save();
-            }
-            (cur.cr3, &mut cur.rsp as *mut u64)
+            let dead = cur.state == State::Dead;
+            let flag = if dead { 0 } else { &cur.on_cpu as *const AtomicBool as u64 };
+            PREV_ON_CPU[cpu].store(flag, Ordering::Relaxed);
+            s.cpus[cpu].prev = dead.then_some(cur_id);
+            let fpu = cur.fpu.as_mut().filter(|_| !dead).map(|f| &mut **f as *mut FpuState);
+            (cur.cr3, &mut cur.rsp as *mut u64, fpu)
         };
         let next = s.tasks.get_mut(&next_id).unwrap();
         next.state = State::Running;
         next.running_on = Some(cpu);
         next.last_cpu = cpu;
-        if let Some(f) = next.fpu.as_ref() {
-            f.restore();
-        }
-        if next.pid != 0 {
-            write_fs_base(next.fs_base);
-        }
-        if next.cr3 != cur_cr3 {
-            unsafe { vmm::load(next.cr3) };
-        }
-        if next.kstack_top != 0 {
-            syscall::set_kernel_stack(next.kstack_top);
-        }
+        let switch_to = SwitchTo {
+            save_fpu,
+            restore_fpu: next.fpu.as_ref().map(|f| &**f as *const FpuState),
+            fs_base: (next.pid != 0).then_some(next.fs_base),
+            cr3: (next.cr3 != cur_cr3).then_some(next.cr3),
+            kstack_top: next.kstack_top,
+        };
         let pc = &percpu::CPUS[cpu];
         pc.task.store(next_id, Ordering::Relaxed);
         pc.pid.store(next.pid, Ordering::Relaxed);
@@ -511,25 +522,56 @@ fn schedule() {
         let load = &next.rsp as *const u64;
         let flag = &next.on_cpu as *const AtomicBool;
         s.cpus[cpu].current = next_id;
-        s.cpus[cpu].prev = Some(cur_id);
         crate::telemetry::switched(next_id, cpu);
-        (save, load, flag)
+        (save, load, flag, switch_to)
         // The lock guard drops here; interrupts stay off because the caller disabled them.
     };
-    // The task may still be leaving another CPU: wait until its stack is free.
+    // The task we leave is ours until `finish_switch` on the other side.
+    if let Some(f) = switch_to.save_fpu {
+        unsafe { (*f).save() };
+    }
+    // The task may still be leaving another CPU: wait until its stack (and
+    // its saved registers) are free.
     let flag = unsafe { &*next_flag };
     while flag.swap(true, Ordering::Acquire) {
         core::hint::spin_loop();
+    }
+    if let Some(f) = switch_to.restore_fpu {
+        unsafe { (*f).restore() };
+    }
+    if let Some(base) = switch_to.fs_base {
+        write_fs_base(base);
+    }
+    if let Some(cr3) = switch_to.cr3 {
+        unsafe { vmm::load(cr3) };
+    }
+    if switch_to.kstack_top != 0 {
+        syscall::set_kernel_stack(switch_to.kstack_top);
     }
     let load = unsafe { load.read_volatile() };
     unsafe { switch::switch(save, load) };
     finish_switch();
 }
 
+/// What [`schedule`] does after letting go of the lock.
+struct SwitchTo {
+    save_fpu: Option<*mut FpuState>,
+    restore_fpu: Option<*const FpuState>,
+    fs_base: Option<u64>,
+    cr3: Option<u64>,
+    kstack_top: u64,
+}
+
 /// Runs on a CPU right after it switched to a new stack: releases the task it
 /// left and frees it if it had exited.
 fn finish_switch() {
     let cpu = percpu::cpu_id();
+    // Usually the task lives on: it may now run elsewhere.
+    let flag = PREV_ON_CPU[cpu].swap(0, Ordering::Relaxed);
+    if flag != 0 {
+        unsafe { (*(flag as *const AtomicBool)).store(false, Ordering::Release) };
+        return;
+    }
     let dead = {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
@@ -587,13 +629,23 @@ pub fn on_reschedule_ipi() {
 /// Wakes tasks whose sleep has run out (CPU 0, every tick).
 fn wake_sleepers() {
     let now = time::ticks();
+    if now < NEXT_WAKE.load(Ordering::Relaxed) {
+        return;
+    }
     let due: Vec<TaskId> = match SCHED.lock().as_ref() {
-        Some(s) => s
-            .tasks
-            .iter()
-            .filter(|(_, t)| matches!(t.state, State::Sleeping(u) if now >= u))
-            .map(|(&id, _)| id)
-            .collect(),
+        Some(s) => {
+            let mut next = u64::MAX;
+            let mut due = Vec::new();
+            for (&id, t) in &s.tasks {
+                match t.state {
+                    State::Sleeping(u) if now >= u => due.push(id),
+                    State::Sleeping(u) => next = next.min(u),
+                    _ => {}
+                }
+            }
+            NEXT_WAKE.store(next, Ordering::Relaxed);
+            due
+        }
         None => return,
     };
     for id in due {
@@ -611,6 +663,7 @@ fn mark_sleeping(until: u64) {
         if let Some(t) = s.tasks.get_mut(&cur) {
             if !t.idle {
                 t.state = State::Sleeping(until);
+                NEXT_WAKE.fetch_min(until, Ordering::Relaxed);
             }
         }
     }

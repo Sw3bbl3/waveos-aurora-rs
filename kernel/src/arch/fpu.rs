@@ -57,6 +57,10 @@ pub fn init() {
         Cr0::update(|f| {
             f.remove(Cr0Flags::EMULATE_COPROCESSOR | Cr0Flags::TASK_SWITCHED);
             f.insert(Cr0Flags::MONITOR_COPROCESSOR | Cr0Flags::NUMERIC_ERROR);
+            // The kernel can't write through read-only pages either (shared
+            // pages of mapped files; see `syscall::user`). The firmware sets
+            // this on the boot CPU; the others start without it.
+            f.insert(Cr0Flags::WRITE_PROTECT);
         });
         Cr4::update(|f| f.insert(Cr4Flags::OSFXSR | Cr4Flags::OSXMMEXCPT_ENABLE));
         asm!("fninit", options(nomem, nostack));

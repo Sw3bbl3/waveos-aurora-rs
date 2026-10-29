@@ -200,6 +200,7 @@ mod nr {
     pub const MKDIR: u64 = 83;
     pub const RMDIR: u64 = 84;
     pub const CREAT: u64 = 85;
+    pub const LINK: u64 = 86;
     pub const UNLINK: u64 = 87;
     pub const SYMLINK: u64 = 88;
     pub const READLINK: u64 = 89;
@@ -271,6 +272,7 @@ mod nr {
     pub const NEWFSTATAT: u64 = 262;
     pub const UNLINKAT: u64 = 263;
     pub const RENAMEAT: u64 = 264;
+    pub const LINKAT: u64 = 265;
     pub const SYMLINKAT: u64 = 266;
     pub const READLINKAT: u64 = 267;
     pub const FCHMODAT: u64 = 268;
@@ -340,14 +342,13 @@ pub fn tracing(env: &[alloc::string::String]) -> bool {
 pub const UID: u64 = 1000;
 
 /// Entry for a Linux process's system call (from `syscall::dispatch`).
-pub fn dispatch(f: &mut SyscallFrame) -> Result<u64, isize> {
-    let p = proc::current().ok_or(EPERM)?;
+pub fn dispatch(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
     if !p.linux.as_ref().is_some_and(|l| l.trace.load(core::sync::atomic::Ordering::Relaxed)) {
-        return call(f, &p);
+        return call(f, p);
     }
     let (nr, a) = (f.rax, [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
-    let r = call(f, &p);
-    let tid = misc::tid(&p);
+    let r = call(f, p);
+    let tid = misc::tid(p);
     match r {
         Ok(v) => log!("strace", "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}) = {:#x}", a[0], a[1], a[2], a[3], v),
         Err(e) => log!("strace", "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}) = -{}", a[0], a[1], a[2], a[3], e.abs()),
@@ -368,6 +369,11 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::CLOSE => fs::close(&p, a[0]),
         nr::STAT => fs::stat_path(&p, fs::AT_FDCWD, a[0], a[1], 0),
         nr::LSTAT => fs::stat_path(&p, fs::AT_FDCWD, a[0], a[1], fs::AT_SYMLINK_NOFOLLOW),
+        // Hard links: WaveOS's file systems have none. EPERM is what Linux
+        // says on such file systems (FAT), and what programs expect there:
+        // fontconfig then locks its cache with a folder instead, and can
+        // save the cache that spares each program a scan of every font.
+        nr::LINK | nr::LINKAT => Err(EPERM),
         nr::SYMLINK => fs::symlinkat(&p, a[0], fs::AT_FDCWD, a[1]),
         nr::SYMLINKAT => fs::symlinkat(&p, a[0], a[1], a[2]),
         nr::FSTAT => fs::fstat(&p, a[0], a[1]),

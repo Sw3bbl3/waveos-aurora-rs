@@ -478,6 +478,27 @@ pub fn readiness_of(p: &Process, fd: usize, depth: u32) -> Option<(bool, bool, b
     })
 }
 
+/// Adds to `keys` what to wait on for a change in descriptor `fd`'s
+/// readiness (see `proc::readiness`).
+pub fn wait_keys(p: &Process, fd: usize, keys: &mut Vec<usize>) {
+    use crate::proc::readiness::{key, ANY, NET};
+    let Ok(h) = p.fd(fd) else { return };
+    match &*h {
+        Handle::PipeRead { pipe, .. } | Handle::PipeWrite(pipe) => keys.push(key(Arc::as_ptr(pipe))),
+        Handle::Special(s) => match &*s.lock() {
+            Special::Event(e) => keys.push(key(Arc::as_ptr(e))),
+            Special::Timer(t) => keys.push(key(Arc::as_ptr(t))),
+            // A set inside the set: any change.
+            Special::Epoll(_) => keys.push(ANY),
+            Special::Unix(u) => u.wait_keys(keys),
+            _ => {}
+        },
+        Handle::Socket(_) => keys.push(NET),
+        // The rest is always ready.
+        _ => {}
+    }
+}
+
 /// When the soonest timer among `fds` expires (ms from now).
 fn next_timer(p: &Process, fds: impl Iterator<Item = usize>) -> Option<u64> {
     fds.filter_map(|fd| match &*p.fd(fd).ok()? {
@@ -1064,8 +1085,14 @@ pub fn fcntl(p: &Process, fd: u64, cmd: u64, arg: u64) -> Result<u64, isize> {
             }
             Ok(0)
         }
-        // Locks, pipe sizes: accepted.
-        5..=7 | 1031 | 1032 => Ok(0),
+        // F_GETLK, F_OFD_GETLK: record locks aren't kept, so none is ever in
+        // the way (`l_type`, the first field of `struct flock`, becomes
+        // F_UNLCK). Left as it was, the asker would read back its own
+        // request as someone else's lock (SQLite then can't open a database
+        // in WAL mode).
+        5 | 36 => user::put(arg, &2u16).map(|_| 0),
+        // Setting locks (F_SETLK, F_SETLKW and the OFD ones), pipe sizes: accepted.
+        6 | 7 | 37 | 38 | 1031 | 1032 => Ok(0),
         // Seals on memory files: accepted, none reported.
         1033 | 1034 if shm_of(p, fd).is_some() => Ok(0),
         _ => Err(EINVAL),
@@ -1150,11 +1177,12 @@ fn deadline(t: Timeout) -> Result<Option<u64>, isize> {
 }
 
 /// Waits until `check` finds something ready (it returns a count), the
-/// deadline passes (0), or a signal comes (`EINTR`). It wakes when anything
-/// changes, or when the soonest of `timers` (ms) expires.
+/// deadline passes (0), or a signal comes (`EINTR`). It wakes when one of
+/// `fds` changes, or when the soonest of their timers expires.
 fn wait_ready(
+    p: &Process,
     deadline: Option<u64>,
-    timers: impl Fn() -> Option<u64>,
+    fds: impl Fn() -> Vec<usize>,
     mut check: impl FnMut(bool) -> Result<u64, isize>,
 ) -> Result<u64, isize> {
     use crate::proc::readiness;
@@ -1168,11 +1196,16 @@ fn wait_ready(
         if crate::proc::interrupted() {
             return Err(EINTR);
         }
+        let fds = fds();
         let mut wait = deadline.map_or(1000, |d| d.saturating_sub(crate::time::uptime_ms()));
-        if let Some(t) = timers() {
+        if let Some(t) = next_timer(p, fds.iter().copied()) {
             wait = wait.min(t);
         }
-        readiness::wait(gen, wait.max(1));
+        let mut keys = Vec::new();
+        for &fd in &fds {
+            wait_keys(p, fd, &mut keys);
+        }
+        readiness::wait(gen, &keys, wait.max(1));
     }
 }
 
@@ -1198,8 +1231,9 @@ fn poll_until(p: &Process, fds_ptr: u64, count: u64, deadline: Option<u64>) -> R
         (0..count).filter_map(|i| user::get::<i32>(fds_ptr + i * 8).ok()).filter(|&fd| fd >= 0).map(|fd| fd as usize)
     };
     wait_ready(
+        p,
         deadline,
-        || next_timer(p, polled()),
+        || polled().collect(),
         |final_pass| {
             let mut ready = 0u64;
             let mut out = Vec::with_capacity(count as usize);
@@ -1263,8 +1297,9 @@ pub fn select(p: &Process, nfds: u64, sets: [u64; 3], timeout: Timeout, sigdata:
     }
     let watched = || (0..nfds as usize).filter(|&fd| (want[0][fd / 64] | want[1][fd / 64]) & (1 << (fd % 64)) != 0);
     wait_ready(
+        p,
         deadline,
-        || next_timer(p, watched()),
+        || watched().collect(),
         |final_pass| {
             let mut got = [alloc::vec![0u64; words], alloc::vec![0u64; words]];
             let mut n = 0;

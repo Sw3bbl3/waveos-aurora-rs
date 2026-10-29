@@ -69,6 +69,16 @@ pub type Block = [u8; BLOCK];
 pub trait Disk {
     fn blocks(&self) -> u64;
     fn read(&mut self, block: u64, buf: &mut Block) -> Result<()>;
+    /// Reads `buf.len() / BLOCK` consecutive blocks from `block`. File data
+    /// is read this way, a run at a time; a disk can do it in one request.
+    fn read_run(&mut self, block: u64, buf: &mut [u8]) -> Result<()> {
+        let mut blk = zero_block();
+        for (i, chunk) in buf.chunks_mut(BLOCK).enumerate() {
+            self.read(block + i as u64, &mut blk)?;
+            chunk.copy_from_slice(&blk[..chunk.len()]);
+        }
+        Ok(())
+    }
     fn write(&mut self, block: u64, buf: &Block) -> Result<()>;
     /// Makes all previous writes durable.
     fn flush(&mut self) -> Result<()>;
@@ -969,6 +979,17 @@ impl<D: Disk> Volume<D> {
         while done < len {
             let pos = offset + done as u64;
             let (fb, off) = (pos / BLOCK as u64, (pos % BLOCK as u64) as usize);
+            // Whole blocks of file data go straight into `buf`, as many
+            // as lie one after another on the disk.
+            if !dir && off == 0 && len - done >= BLOCK {
+                if let Some(pb) = inode.map(fb) {
+                    let most = ((len - done) / BLOCK) as u64;
+                    let run = (1..most).take_while(|&i| inode.map(fb + i) == Some(pb + i)).count() + 1;
+                    self.disk.read_run(pb, &mut buf[done..done + run * BLOCK])?;
+                    done += run * BLOCK;
+                    continue;
+                }
+            }
             let n = (BLOCK - off).min(len - done);
             match inode.map(fb) {
                 Some(pb) => {

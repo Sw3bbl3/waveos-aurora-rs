@@ -1,8 +1,8 @@
 # NetSurf on WaveOS
 
-NetSurf 3.11 is WaveOS's web browser. It is a separate GPL-2.0 program in `/System/NetSurf`, built the same way as Doom: a static Linux (musl) program that runs on the [Linux compatibility layer](LINUX.md) and draws straight into a WaveOS window through the WaveOS display calls (`libs/linux/include/waveos.h`). It needs no Linux root, no Wayland bridge and no X server.
+NetSurf 3.11 is WaveOS's small web browser; the main one is [Firefox](LINUX.md#firefox), on the disk with the Linux packages. NetSurf is a separate GPL-2.0 program in `/System/NetSurf`, built the same way as Doom: a static Linux (musl) program that runs on the [Linux compatibility layer](LINUX.md) and draws straight into a WaveOS window through the WaveOS display calls (`libs/linux/include/waveos.h`). It needs no Linux root, no Wayland bridge and no X server.
 
-It replaces Nebula, the browser written for WaveOS. Nebula's libraries stay: Learn lays out the handbook with the Nebula engine, `fetch` and apps use its HTTP and TLS, and `js` runs Pulsar.
+It starts in seconds and opens wherever Firefox would when the Linux packages aren't on the disk. It replaced Nebula, the browser written for WaveOS, whose libraries stay: Learn lays out the handbook with the Nebula engine, `fetch` and apps use its HTTP and TLS, and `js` runs Pulsar.
 
 ## What it does
 
@@ -13,11 +13,11 @@ It replaces Nebula, the browser written for WaveOS. Nebula's libraries stay: Lea
 - Clipboard shared with other apps; typing in any keyboard layout (characters come through as Unicode). Ctrl+U clears the address bar.
 - Back and forward from the toolbar, Alt+Left and Alt+Right, a mouse's side buttons and a keyboard's browser keys.
 
-There is no JavaScript: pages that need scripts show what their HTML and CSS give. There are no tabs; open another window from the dock or launcher.
+There is no JavaScript: pages that need scripts show what their HTML and CSS give. There are no tabs; open another window from Shoal or Seek.
 
 ## Using it
 
-Open **NetSurf** from the dock, the launcher or Seek. `.html` files open in it, and so do web links in Learn and About. In Terminal, `/System/NetSurf/netsurf https://example.com` opens a page, and a path such as `/Documents/page.html` opens a local file.
+Open **NetSurf** from Shoal or Seek. Without Firefox on the disk, the dock's browser, `.html` files and web links in Learn and About open in it too. In Terminal, `/System/NetSurf/netsurf https://example.com` opens a page, and a path such as `/Documents/page.html` opens a local file.
 
 Click in the address bar, type an address and press Enter. The centre of the window's top edge belongs to the window handle: click the address bar to either side of the centre.
 

@@ -15,10 +15,13 @@
 //!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
 //!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
 //!       --headless --no-build --debug --gdb --int
-//!       --linux-root                      put target/linux-root (Debian packages) on a fresh disk as /Linux
+//!       --no-linux-root                   leave the Linux packages (Firefox, bash, Python) off the disk; by
+//!                                         default they're fetched into target/linux-root and put on new disks
+//!                                         as /Linux, and on older disks when there's room
+//!       --linux-root                      a fresh disk with the Linux packages (stops if they can't be fetched)
 //!   cargo xtask linux-root [PKG...]     fetch Debian packages (default: Firefox ESR, bash, coreutils,
 //!                                         Python) and their dependencies into target/linux-root
-//!   cargo xtask image                   build a fresh USB image target/waveos-aurora-usb.img
+//!   cargo xtask image [--no-linux-root] build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
@@ -120,14 +123,16 @@ fn main() {
                 });
             let size = number("--disk-size-mib", if developer { 8192 } else { 256 }, 128, 65536) * 1024 * 1024;
             if !flag("--no-refresh") {
-                if flag("--linux-root") {
-                    let linux = linux_root();
-                    let size = size.max(dir_size(&linux) + 512 * 1024 * 1024);
-                    image::create_with(&esp, &root().join("assets/home"), Some(&linux), &img, size)
-                        .expect("image creation failed");
+                // Firefox and the other Linux programs live on the disk, in /Linux.
+                let linux = if flag("--linux-root") {
+                    Some(linux_root())
+                } else if flag("--no-linux-root") {
+                    None
                 } else {
-                    prepare_disk(&esp, &img, flag("--fresh-disk"), size);
-                }
+                    optional_linux_root()
+                };
+                let fresh = flag("--fresh-disk") || flag("--linux-root");
+                prepare_disk(&esp, &img, fresh, size, linux.as_deref());
             }
             // Simulated Wi-Fi networks (the kernel's software radio).
             image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
@@ -208,7 +213,10 @@ fn main() {
         Some("image") => {
             let esp = build(profile, false);
             let out = root().join("target/waveos-aurora-usb.img");
-            image::create(&esp, &root().join("assets/home"), &out, DISK_SIZE).expect("image creation failed");
+            let linux = if flag("--no-linux-root") { None } else { optional_linux_root() };
+            let size = linux.as_deref().map_or(DISK_SIZE, |l| DISK_SIZE.max(dir_size(l) + 512 * 1024 * 1024));
+            image::create_with(&esp, &root().join("assets/home"), linux.as_deref(), &out, size)
+                .expect("image creation failed");
             println!("wrote {}", out.display());
             println!("flash to a USB stick with: sudo dd if={} of=/dev/rdiskN bs=4m", out.display());
         }
@@ -322,14 +330,26 @@ fn pkgs_or_default(pkgs: Vec<String>) -> Vec<String> {
     }
 }
 
-/// `target/linux-root`, built with the default packages if it isn't there yet.
+/// `target/linux-root`, built with the default packages if it isn't there
+/// yet (or is missing one of them), with WaveOS's settings for its programs.
 fn linux_root() -> PathBuf {
     let dir = root().join("target/linux-root");
-    if dir.join(".links").exists() {
-        dir
-    } else {
-        debian::build(&pkgs_or_default(Vec::new()))
-    }
+    let installed = fs::read_to_string(dir.join("packages.txt")).unwrap_or_default();
+    let complete = dir.join(".links").exists()
+        && debian::DEFAULT_PACKAGES.iter().all(|p| installed.lines().any(|l| l.split(' ').next() == Some(*p)));
+    let dir = if complete { dir } else { debian::build(&pkgs_or_default(Vec::new())) };
+    debian::waveos_settings(&dir);
+    dir
+}
+
+/// [`linux_root`], or nothing (with a warning) when the packages can't be
+/// fetched, say offline: WaveOS then runs without Firefox.
+fn optional_linux_root() -> Option<PathBuf> {
+    std::panic::catch_unwind(linux_root)
+        .map_err(|_| {
+            eprintln!("warning: no Linux packages, so no Firefox on the disk (NetSurf stands in); see above");
+        })
+        .ok()
 }
 
 /// Bytes of the files under `dir`.
@@ -347,21 +367,38 @@ fn dir_size(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Creates the persistent disk if needed; otherwise refreshes only its ESP so
-/// files saved on the AuroraFS volume survive rebuilds.
-fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64) {
+/// Creates the persistent disk if needed (with `linux` as `/Linux`, if
+/// given); otherwise refreshes only its ESP so files saved on the AuroraFS
+/// volume survive rebuilds, and adds `linux` to it if it isn't there yet.
+fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64, linux: Option<&Path>) {
     let home = root().join("assets/home");
     if !fresh && img.exists() {
         match image::refresh_esp(esp, img) {
-            Ok(true) => return,
+            Ok(true) => {}
             Ok(false) => panic!(
                 "{} has an unsupported layout; disk preserved. Back it up before using --fresh-disk",
                 img.display()
             ),
             Err(e) => panic!("could not update {}: {e}; disk preserved", img.display()),
         }
+        let Some(linux) = linux else { return };
+        match image::add_linux(img, linux, &debian::waveos_settings(linux)) {
+            Ok(image::LinuxOnDisk::Added) => println!("added the Linux packages (Firefox) to {}", img.display()),
+            Ok(image::LinuxOnDisk::Updated) => {}
+            Ok(image::LinuxOnDisk::Upgraded) => println!("updated the Linux packages on {}", img.display()),
+            Ok(image::LinuxOnDisk::NoRoom { need, free }) => eprintln!(
+                "warning: {} has {} MiB free and Firefox needs {} MiB, so NetSurf stands in for it; \
+                 run with --fresh-disk for a disk with Firefox (this erases files saved inside WaveOS)",
+                img.display(),
+                free >> 20,
+                need >> 20
+            ),
+            Err(e) => eprintln!("warning: could not add the Linux packages to {}: {e}", img.display()),
+        }
+        return;
     }
-    image::create(esp, &home, img, size).expect("image creation failed");
+    let size = linux.map_or(size, |l| size.max(dir_size(l) + 512 * 1024 * 1024));
+    image::create_with(esp, &home, linux, img, size).expect("image creation failed");
 }
 
 fn esp_dir(test: bool) -> PathBuf {
@@ -800,6 +837,34 @@ fn host_audio() -> String {
     String::from(if cfg!(target_os = "macos") { "coreaudio" } else { "none" })
 }
 
+/// How QEMU runs the virtual CPUs, best first (QEMU takes the first that
+/// works). On an x86-64 host the processor's own virtualization runs
+/// WaveOS at close to native speed (KVM on Linux, HVF on macOS, WHPX on
+/// Windows), many times faster than emulating it; otherwise, and as the
+/// fallback, software emulation with one translation thread per CPU and a
+/// large translation cache. `AURORA_ACCEL` picks one instead (e.g. "tcg"
+/// or "tcg,thread=single").
+fn accelerators() -> Vec<String> {
+    if let Ok(a) = env::var("AURORA_ACCEL") {
+        return vec![a];
+    }
+    let mut list = Vec::new();
+    if cfg!(target_arch = "x86_64") {
+        if cfg!(target_os = "linux") {
+            // Only when this user may use it; otherwise QEMU would stop with an error.
+            if fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok() {
+                list.push(String::from("kvm"));
+            }
+        } else if cfg!(target_os = "macos") {
+            list.push(String::from("hvf"));
+        } else if cfg!(target_os = "windows") {
+            list.push(String::from("whpx"));
+        }
+    }
+    list.push(String::from("tcg,thread=multi,tb-size=1024"));
+    list
+}
+
 fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let code = find_ovmf();
     let vars = ovmf_vars(&code);
@@ -820,11 +885,9 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         // 64 MiB of video memory: room for 4K modes.
         cmd.args(["-vga", "std", "-global", "VGA.vgamem_mb=64"]);
     }
-    // Software emulation on non-x86 hosts: one translation thread per CPU and
-    // a large translation cache. AURORA_ACCEL overrides it
-    // (e.g. "tcg,thread=single").
-    let accel = env::var("AURORA_ACCEL").unwrap_or_else(|_| String::from("tcg,thread=multi,tb-size=1024"));
-    cmd.args(["-accel", &accel]);
+    for accel in accelerators() {
+        cmd.args(["-accel", &accel]);
+    }
     cmd.arg("-m").arg(opts.memory_mib.to_string());
     cmd.arg("-smp").arg(opts.smp.to_string());
     if !opts.allow_reboot {
