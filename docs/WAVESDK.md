@@ -14,7 +14,7 @@ The WaveSDK (formerly the Constellation SDK) contains the WaveUI interface frame
 | Font engine | Lyra (Lumen's TrueType implementation) |
 | UI / runtime | WaveUI / AuroraKit / CoreKit (`userland/waveui`, `userland/aurorakit`, `userland/corekit`) |
 | Boot / filesystem | FirstLight / AuroraFS |
-| Browser / rendering | Nebula / Nebula Engine |
+| Browser / rendering | NetSurf (`/System/NetSurf`) / Nebula Engine |
 | HTTP / TLS / network | Nebula Web / Nebula Secure / Nebula Net |
 | Developer tools | WaveSDK (formerly Constellation SDK) / Studio (`userland/wavesdk`, `userland/bin/wavesdk`) |
 | External apps | GINA — General Interface for Native Applications |

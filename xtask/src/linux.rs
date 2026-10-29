@@ -1,7 +1,6 @@
 //! Linux programs for the system image (`/System/Linux`):
 //!
-//! - the C programs in `linux-tests/`, built static with musl (`musl-gcc`,
-//!   from Debian's `musl-tools`);
+//! - the C programs in `linux-tests/`, built static with musl (see [`Cc`]);
 //! - BusyBox, from Debian's `busybox-static` package (GPL-2.0, a separate
 //!   program; its copyright file goes along);
 //! - Doom: doomgeneric (`third_party/doomgeneric`, GPL-2.0, a separate
@@ -14,11 +13,16 @@
 
 use super::{root, Program};
 use sha2::{Digest, Sha256};
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const DEBIAN: &str = "http://deb.debian.org/debian";
+/// Debian 12's musl headers and static library, for building C programs
+/// with clang where there is no `musl-gcc`.
+const MUSL_DEV: (&str, &str) =
+    ("pool/main/m/musl/musl-dev_1.2.3-1_amd64.deb", "7c34f29a0c1aa12f6da1d25ed6de6fe6bbd9e048ee76b3dcb88c5e51fb65507f");
 /// Debian 12's static BusyBox.
 const BUSYBOX: (&str, &str) = (
     "pool/main/b/busybox/busybox-static_1.35.0-4+deb12u1+b1_amd64.deb",
@@ -49,7 +53,9 @@ pub fn fetch(url: &str, sha256: &str) -> Option<PathBuf> {
     Some(file)
 }
 
-/// Unpacks a Debian package into `target/linux/deb/<name>` and returns that folder.
+/// Unpacks a Debian package into `target/linux/deb/<name>` and returns that
+/// folder. A `.deb` is an `ar` archive whose `data.tar.*` member holds the
+/// files; it is read here, so no Debian tools are needed (macOS has none).
 pub fn unpack_deb(deb: &PathBuf) -> Option<PathBuf> {
     let name = deb.file_stem().unwrap().to_string_lossy().into_owned();
     let out = root().join("target/linux/deb").join(&name);
@@ -59,13 +65,67 @@ pub fn unpack_deb(deb: &PathBuf) -> Option<PathBuf> {
     let tmp = out.with_extension("tmp");
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).unwrap();
-    let status = Command::new("dpkg-deb").arg("-x").arg(deb).arg(&tmp).status();
-    if !status.is_ok_and(|s| s.success()) {
-        eprintln!("warning: could not unpack {} (needs dpkg-deb)", deb.display());
+    if let Err(e) = unpack_into(deb, &tmp) {
+        eprintln!("warning: could not unpack {}: {e}", deb.display());
         return None;
     }
     fs::rename(&tmp, &out).unwrap();
     Some(out)
+}
+
+fn unpack_into(deb: &PathBuf, dir: &PathBuf) -> Result<(), String> {
+    let bytes = fs::read(deb).map_err(|e| e.to_string())?;
+    let (member, data) = ar_member(&bytes, "data.tar").ok_or("no data.tar in the package")?;
+    let tar = if member.ends_with(".xz") {
+        let mut out = Vec::new();
+        lzma_rs::xz_decompress(&mut &data[..], &mut out).map_err(|e| format!("{member}: {e:?}"))?;
+        out
+    } else if member.ends_with(".gz") {
+        gunzip(data)
+    } else if member == "data.tar" {
+        data.to_vec()
+    } else {
+        return Err(format!("{member} is compressed in a way this can't read"));
+    };
+    let mut archive = tar::Archive::new(&tar[..]);
+    archive.set_preserve_permissions(true);
+    archive.unpack(dir).map_err(|e| e.to_string())
+}
+
+/// The first member of `ar` archive `bytes` whose name starts with `prefix`.
+fn ar_member<'a>(bytes: &'a [u8], prefix: &str) -> Option<(String, &'a [u8])> {
+    let mut at = bytes.strip_prefix(b"!<arch>\n").map(|_| 8)?;
+    while at + 60 <= bytes.len() {
+        let header = &bytes[at..at + 60];
+        let name = String::from_utf8_lossy(&header[..16]).trim_end().trim_end_matches('/').to_string();
+        let size: usize = String::from_utf8_lossy(&header[48..58]).trim().parse().ok()?;
+        let start = at + 60;
+        let data = bytes.get(start..start + size)?;
+        if name.starts_with(prefix) {
+            return Some((name, data));
+        }
+        at = start + size + (size & 1);
+    }
+    None
+}
+
+/// Decompresses a gzip file.
+pub fn gunzip(data: &[u8]) -> Vec<u8> {
+    assert!(data.len() > 18 && data[0] == 0x1f && data[1] == 0x8b && data[2] == 8, "not gzip");
+    let flags = data[3];
+    let mut at = 10;
+    if flags & 4 != 0 {
+        at += 2 + u16::from_le_bytes([data[at], data[at + 1]]) as usize;
+    }
+    for bit in [8, 16] {
+        if flags & bit != 0 {
+            at += data[at..].iter().position(|&b| b == 0).unwrap() + 1;
+        }
+    }
+    if flags & 2 != 0 {
+        at += 2;
+    }
+    miniz_oxide::inflate::decompress_to_vec(&data[at..]).expect("bad gzip data")
 }
 
 /// The commands BusyBox provides and where Debian puts them (from
@@ -94,20 +154,126 @@ pub fn links(programs: &[Program]) -> String {
     out
 }
 
-/// Builds every `linux-tests/*.c` into `target/linux/<name>`. Without
-/// `musl-gcc` they are left out (with a warning), and the kernel's Linux
-/// self-test is skipped.
+/// Builds every `linux-tests/*.c` into `target/linux/<name>`, and Doom.
+/// Without a C compiler for Linux (see [`Cc`]) they are left out (with a
+/// warning), and the kernel's Linux self-tests are skipped.
 pub fn programs() -> Vec<Program> {
     let mut all = busybox();
     all.extend(rust_programs());
     all.push((String::from("Linux/bin/firefox"), root().join("linux-programs/firefox.sh")));
-    if Command::new("musl-gcc").arg("--version").output().is_err() {
-        eprintln!("warning: musl-gcc not found (install musl-tools): Linux programs are left out of the image");
+    let Some(cc) = Cc::find() else {
+        eprintln!(
+            "warning: no C compiler for Linux programs (install musl-tools, or clang): \
+             the Linux self-tests and Doom are left out of the image"
+        );
         return all;
+    };
+    all.extend(test_programs(&cc));
+    all.extend(doom(&cc));
+    match super::netsurf::build(&cc) {
+        Some(files) => all.extend(files),
+        None => eprintln!("warning: NetSurf's sources could not be downloaded: the browser is left out of the image"),
     }
-    all.extend(test_programs());
-    all.extend(doom());
     all
+}
+
+/// How C programs are built for Linux, static with musl: with Debian's
+/// `musl-gcc` (package `musl-tools`), or else with clang, Debian's
+/// `musl-dev` package (downloaded) and the Rust toolchain's lld, which
+/// works on any host, macOS included. `WAVEOS_LINUX_CC=clang` picks the
+/// second even where `musl-gcc` is installed.
+pub enum Cc {
+    MuslGcc,
+    Clang { musl: PathBuf, builtins: PathBuf, lld: PathBuf },
+}
+
+impl Cc {
+    fn find() -> Option<Cc> {
+        let forced = std::env::var("WAVEOS_LINUX_CC").is_ok_and(|v| v == "clang");
+        if !forced && Command::new("musl-gcc").arg("--version").output().is_ok() {
+            return Some(Cc::MuslGcc);
+        }
+        Command::new("clang").arg("--version").output().ok()?;
+        let musl = unpack_deb(&fetch(&format!("{DEBIAN}/{}", MUSL_DEV.0), MUSL_DEV.1)?)?.join("usr");
+        // The compiler's own headers (stdatomic.h, intrinsics), after musl's.
+        let resource = Command::new("clang").arg("-print-resource-dir").output().ok()?;
+        let builtins = PathBuf::from(String::from_utf8_lossy(&resource.stdout).trim()).join("include");
+        Some(Cc::Clang { musl, builtins, lld: rust_lld()? })
+    }
+
+    /// Builds `sources` into the static program `exe` with compiler
+    /// options `flags` (defines, include folders, warnings).
+    fn build(&self, exe: &Path, sources: &[PathBuf], flags: &[&OsStr]) {
+        let name = exe.file_name().unwrap().to_string_lossy().into_owned();
+        let objs_dir = root().join("target/linux/obj").join(&name);
+        let _ = fs::remove_dir_all(&objs_dir);
+        fs::create_dir_all(&objs_dir).unwrap();
+        let mut objs = Vec::new();
+        for src in sources {
+            let obj = objs_dir.join(src.file_stem().unwrap()).with_extension("o");
+            assert!(self.compile(src, &obj, flags), "could not compile {}", src.display());
+            objs.push(obj);
+        }
+        assert!(self.link(exe, &objs), "could not link {name}");
+    }
+
+    /// Compiles `src` into the object file `obj`.
+    pub fn compile(&self, src: &Path, obj: &Path, flags: &[&OsStr]) -> bool {
+        let mut cmd = match self {
+            Cc::MuslGcc => {
+                let mut c = Command::new("musl-gcc");
+                c.args(["-O2", "-pthread"]);
+                c
+            }
+            Cc::Clang { musl, builtins, .. } => {
+                let mut c = Command::new("clang");
+                c.args(["--target=x86_64-linux-musl", "-nostdinc", "-fno-pic", "-O2", "-isystem"])
+                    .arg(musl.join("include/x86_64-linux-musl"))
+                    .arg("-isystem")
+                    .arg(builtins);
+                c
+            }
+        };
+        cmd.args(flags).arg("-c").arg(src).arg("-o").arg(obj).status().is_ok_and(|s| s.success())
+    }
+
+    /// Links `objs` into the static program `exe`.
+    pub fn link(&self, exe: &Path, objs: &[PathBuf]) -> bool {
+        let status = match self {
+            Cc::MuslGcc => Command::new("musl-gcc")
+                .args(["-static", "-no-pie", "-s", "-pthread", "-Wl,--gc-sections", "-o"])
+                .arg(exe)
+                .args(objs)
+                .arg("-lm")
+                .status(),
+            Cc::Clang { musl, lld, .. } => {
+                let lib = musl.join("lib/x86_64-linux-musl");
+                Command::new(lld)
+                    .args(["-flavor", "gnu", "-static", "--gc-sections", "-s", "-o"])
+                    .arg(exe)
+                    .arg(lib.join("crt1.o"))
+                    .arg(lib.join("crti.o"))
+                    .args(objs)
+                    .arg(lib.join("libc.a"))
+                    .arg(lib.join("crtn.o"))
+                    .status()
+            }
+        };
+        status.is_ok_and(|s| s.success())
+    }
+}
+
+/// The Rust toolchain's lld.
+fn rust_lld() -> Option<PathBuf> {
+    let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().ok()?;
+    let version = Command::new("rustc").arg("-vV").output().ok()?;
+    let version = String::from_utf8_lossy(&version.stdout);
+    let host = version.lines().find_map(|l| l.strip_prefix("host: "))?;
+    let lld = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
+        .join("lib/rustlib")
+        .join(host)
+        .join("bin/rust-lld");
+    lld.exists().then_some(lld)
 }
 
 /// Target of the Rust programs in `linux-programs/`.
@@ -165,7 +331,7 @@ fn files_in(dir: &PathBuf, ext: &[&str]) -> Vec<PathBuf> {
 }
 
 /// Doom for `/System/Games/Doom`, and its license.
-fn doom() -> Vec<Program> {
+fn doom(cc: &Cc) -> Vec<Program> {
     let top = root().join("third_party/doomgeneric");
     let (src, port, header) = (top.join("src"), top.join("waveos"), root().join("libs/linux/include"));
     let exe = root().join("target/linux/doom");
@@ -178,48 +344,29 @@ fn doom() -> Vec<Program> {
         .chain(files_in(&header, &["h"]))
         .collect();
     if !fresh(&exe, &inputs) {
-        let status = Command::new("musl-gcc")
-            .args(["-static", "-no-pie", "-O2", "-pthread", "-s", "-w"])
-            .args(["-DNORMALUNIX", "-DLINUX", "-D_DEFAULT_SOURCE", "-DFEATURE_SOUND"])
-            .arg("-I")
-            .arg(&header)
-            .arg("-I")
-            .arg(&port)
-            .arg("-I")
-            .arg(&src)
-            .arg("-o")
-            .arg(&exe)
-            .args(&sources)
-            .arg("-lm")
-            .status()
-            .expect("run musl-gcc");
-        assert!(status.success(), "could not build Doom");
+        let flags: Vec<OsString> = ["-w", "-DNORMALUNIX", "-DLINUX", "-D_DEFAULT_SOURCE", "-DFEATURE_SOUND"]
+            .iter()
+            .map(OsString::from)
+            .chain([&header, &port, &src].iter().map(|d| OsString::from(format!("-I{}", d.display()))))
+            .collect();
+        let flags: Vec<&OsStr> = flags.iter().map(OsString::as_os_str).collect();
+        cc.build(&exe, &sources, &flags);
     }
     vec![(String::from("Games/Doom/doom"), exe), (String::from("Licenses/doomgeneric.txt"), top.join("COPYING"))]
 }
 
-fn test_programs() -> Vec<Program> {
+fn test_programs(cc: &Cc) -> Vec<Program> {
     let src = root().join("linux-tests");
     let out = root().join("target/linux");
     fs::create_dir_all(&out).unwrap();
-    let mut sources: Vec<PathBuf> = fs::read_dir(&src)
-        .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "c")).collect())
-        .unwrap_or_default();
-    sources.sort();
+    let header = root().join("libs/linux/include");
+    let include = OsString::from(format!("-I{}", header.display()));
     let mut programs = Vec::new();
-    for c in sources {
+    for c in files_in(&src, &["c"]) {
         let name = c.file_stem().unwrap().to_string_lossy().into_owned();
         let exe = out.join(&name);
-        if !fresh(&exe, &[c.clone(), root().join("libs/linux/include/waveos.h")]) {
-            let status = Command::new("musl-gcc")
-                .args(["-static", "-no-pie", "-O2", "-pthread", "-Wall", "-I"])
-                .arg(root().join("libs/linux/include"))
-                .arg("-o")
-                .arg(&exe)
-                .arg(&c)
-                .status()
-                .expect("run musl-gcc");
-            assert!(status.success(), "could not build {}", c.display());
+        if !fresh(&exe, &[c.clone(), header.join("waveos.h")]) {
+            cc.build(&exe, std::slice::from_ref(&c), &[OsStr::new("-Wall"), &include]);
         }
         programs.push((format!("Linux/bin/{name}"), exe));
     }

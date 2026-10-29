@@ -50,7 +50,8 @@ against the list. Symbolic links are recorded in `.links`; maintainer
 scripts don't run. What their triggers would generate for GTK programs (the
 MIME database and compiled GSettings schemas) is made with the build
 machine's `update-mime-database` and `glib-compile-schemas`
-(`shared-mime-info` and `libglib2.0-bin` on Debian and Ubuntu).
+(`shared-mime-info` and `libglib2.0-bin` on Debian and Ubuntu; `brew install
+shared-mime-info glib` on macOS).
 
 `cargo xtask run --linux-root` makes a fresh disk with that root as
 `/Linux`. The system folders are layered: what the disk has (`/Linux/usr`,
@@ -182,6 +183,12 @@ shows a notice that some security features offer less protection. It
 draws in software. Starting takes a while in QEMU without hardware
 acceleration (libxul is read in full when it loads).
 
+## NetSurf
+
+The web browser, **NetSurf**, is a Linux program too: NetSurf 3.11 built
+static with musl, with a libnsfb surface that is a WaveOS window, in
+`/System/NetSurf`. It needs nothing on the disk. See [NETSURF.md](NETSURF.md).
+
 ## Doom
 
 **Doom** in Shoal (under Play) starts the game: [doomgeneric][dg] (GPL-2.0),
@@ -206,10 +213,17 @@ strafes, number keys switch weapons, Esc opens the menu.
 
 ## Building Linux programs into the image
 
-`cargo xtask build` builds every `linux-tests/*.c` and Doom with `musl-gcc`
-(Debian/Ubuntu: `sudo apt install musl-tools`) and downloads BusyBox from
-Debian, pinned by SHA-256. Without `musl-gcc` the image is built without
-Linux programs (with a warning), and the kernel's Linux self-test is skipped.
+`cargo xtask build` builds every `linux-tests/*.c` and Doom static with
+musl, and downloads BusyBox from Debian, pinned by SHA-256. C programs are
+built with `musl-gcc` where it is installed (Debian/Ubuntu: `sudo apt
+install musl-tools`); elsewhere, macOS included, with `clang`, Debian's
+`musl-dev` package (downloaded and checked the same way) and the Rust
+toolchain's `rust-lld` (`WAVEOS_LINUX_CC=clang` picks this way everywhere).
+Without either, the image is built without them (with a warning), and the
+kernel's Linux self-tests are skipped. `wl-bridge` is built with Cargo for
+`x86_64-unknown-linux-musl` and linked with `rust-lld` too (set in
+`.cargo/config.toml`), so it needs nothing besides the Rust toolchain.
+Debian packages are unpacked by `xtask` itself; no Debian tools are needed.
 
 Two self-tests run inside WaveOS as part of `cargo xtask test`:
 `linux-tests/linuxtest.c` (files, memory, threads, clocks, `/proc` and

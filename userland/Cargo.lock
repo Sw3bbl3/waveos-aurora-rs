@@ -129,18 +129,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "app-nebula"
-version = "0.8.0"
-dependencies = [
- "aurora-image",
- "corekit",
- "nebula-engine",
- "nebula-media",
- "nebula-web",
- "waveui",
-]
-
-[[package]]
 name = "app-notes"
 version = "0.8.0"
 dependencies = [

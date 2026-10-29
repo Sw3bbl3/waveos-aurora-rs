@@ -362,7 +362,7 @@ impl Desktop {
         }
     }
 
-    /// Opens a document in the app for its type (pictures in Preview, web pages in Nebula, the rest in Notes).
+    /// Opens a document in the app for its type (pictures in Preview, web pages in NetSurf, the rest in Notes).
     pub fn open_file(&mut self, path: &str) {
         let lower = path.to_ascii_lowercase();
         if lower.ends_with(".gina") {
@@ -380,7 +380,7 @@ impl Desktop {
         let kind = if aurora_image::is_image_name(path) {
             AppKind::Preview
         } else if lower.ends_with(".html") || lower.ends_with(".htm") {
-            AppKind::Nebula
+            AppKind::NetSurf
         } else {
             AppKind::Notes
         };

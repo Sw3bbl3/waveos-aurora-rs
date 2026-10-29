@@ -1,4 +1,4 @@
-//! Offline bilingual handbook. HTML layout is shared with Nebula; no network fetches.
+//! Offline bilingual handbook. HTML layout uses the nebula-engine library; no network fetches.
 #![no_std]
 #![no_main]
 extern crate alloc;
@@ -408,7 +408,7 @@ impl Learn {
 
     fn follow(&mut self, href: &str) {
         if href.starts_with("https://") || href.starts_with("http://") {
-            let _ = corekit::process::spawn("/System/Apps/Nebula.elf", &[href], corekit::process::Stdio::default());
+            let _ = corekit::process::spawn("/System/NetSurf/netsurf", &[href], corekit::process::Stdio::default());
             return;
         }
         if href.ends_with("index.html") {
@@ -867,8 +867,8 @@ impl App for Learn {
                 .fill(),
         };
         let footer = Text::new(self.tr(
-            "Offline library · External links open in Nebula and require a network",
-            "Bibliothèque hors ligne · Les liens externes exigent le réseau et ouvrent Nebula",
+            "Offline library · External links open in NetSurf and require a network",
+            "Bibliothèque hors ligne · Les liens externes exigent le réseau et ouvrent NetSurf",
         ))
         .style(TextStyle::Caption)
         .foreground(Color::SecondaryLabel)

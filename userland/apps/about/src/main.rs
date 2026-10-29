@@ -27,7 +27,7 @@ pub enum Msg {
     Web(&'static str),
 }
 
-/// Opens a guide in Learn, or a page in Nebula.
+/// Opens a guide in Learn, or a page in NetSurf.
 fn spawn(program: &str, arg: &str) {
     let _ = corekit::process::spawn(program, &[arg], corekit::process::Stdio::default());
 }
@@ -66,7 +66,7 @@ impl App for About {
             Msg::Report => cx.open_app("Pulse"),
             Msg::Updates => spawn("/System/Apps/Learn.elf", "start-installation"),
             Msg::Guide(id) => spawn("/System/Apps/Learn.elf", id),
-            Msg::Web(url) => spawn("/System/Apps/Nebula.elf", url),
+            Msg::Web(url) => spawn("/System/NetSurf/netsurf", url),
         }
     }
 

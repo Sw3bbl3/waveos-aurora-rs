@@ -12,7 +12,7 @@
 //! Maintainer scripts don't run; the few things they would set up are done
 //! here (see [`configure`]).
 
-use super::linux::{fetch, unpack_deb};
+use super::linux::{fetch, gunzip, unpack_deb};
 use super::root;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -53,24 +53,6 @@ impl Package {
     fn get(&self, k: &str) -> &str {
         self.fields.get(k).map(String::as_str).unwrap_or("")
     }
-}
-
-fn gunzip(data: &[u8]) -> Vec<u8> {
-    assert!(data.len() > 18 && data[0] == 0x1f && data[1] == 0x8b && data[2] == 8, "not gzip");
-    let flags = data[3];
-    let mut at = 10;
-    if flags & 4 != 0 {
-        at += 2 + u16::from_le_bytes([data[at], data[at + 1]]) as usize;
-    }
-    for bit in [8, 16] {
-        if flags & bit != 0 {
-            at += data[at..].iter().position(|&b| b == 0).unwrap() + 1;
-        }
-    }
-    if flags & 2 != 0 {
-        at += 2;
-    }
-    miniz_oxide::inflate::decompress_to_vec(&data[at..]).expect("bad gzip data")
 }
 
 /// The package index, checked against the pinned `Release`.
@@ -236,7 +218,7 @@ fn configure(root: &Path, links: &mut BTreeMap<String, String>) {
         }
         match std::process::Command::new(tool).arg(&dir).status() {
             Ok(s) if s.success() => {}
-            _ => eprintln!("warning: {tool} failed or is missing (install shared-mime-info and libglib2.0-bin): GTK programs may not work"),
+            _ => eprintln!("warning: {tool} failed or is missing (install shared-mime-info and libglib2.0-bin, or on macOS: brew install shared-mime-info glib): GTK programs may not work"),
         }
     }
 }
