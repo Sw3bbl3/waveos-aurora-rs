@@ -376,7 +376,13 @@ impl Folder {
         self.items = fs::read_dir(&cwd)
             .unwrap_or_default()
             .into_iter()
-            .filter(|e| !e.name.starts_with('.'))
+            .filter(|e| {
+                if cwd == TRASH {
+                    e.name != ".trashinfo" && !e.name.starts_with(".wave-save-") && !e.name.starts_with(".wave-trash-")
+                } else {
+                    !e.name.starts_with('.')
+                }
+            })
             .map(|e| Item {
                 path: fs::join(&cwd, &e.name),
                 name: e.name,

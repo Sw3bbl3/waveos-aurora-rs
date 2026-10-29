@@ -163,7 +163,7 @@ pub fn move_to_trash(path: &str) -> FsResult<String> {
         super::mkdir(DIR)?;
     }
     let name = path.rsplit('/').next().ok_or(EINVAL)?;
-    let safe_name = if reserved(name) { format!("Recovered {name}") } else { name.into() };
+    let safe_name = if name.starts_with('.') { format!("Recovered {name}") } else { name.into() };
     let target_name = unique_in(DIR, &safe_name);
     if target_name.is_empty() {
         return Err(super::EEXIST);

@@ -245,6 +245,7 @@ fn production_trash_fault_matrix() {
     reset();
     put("/Documents/.hidden");
     let n = trash::move_to_trash("/Documents/.hidden").unwrap();
+    assert_eq!(n, "Recovered .hidden");
     assert_eq!(trash::count(), 1);
     put("/Documents/.hidden");
     let restored = trash::put_back(&n).unwrap();
