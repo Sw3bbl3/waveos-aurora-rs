@@ -172,7 +172,9 @@ pub mod nr {
     /// or to process group `-target`. WaveOS programs end on the usual
     /// ending signals (INT, TERM, HUP, QUIT, KILL) and ignore the rest.
     pub const SIGNAL: usize = 79;
-    pub const COUNT: usize = 80;
+    /// Flush the filesystem containing this path.
+    pub const SYNC_PATH: usize = 80;
+    pub const COUNT: usize = 81;
 }
 
 #[repr(C)]

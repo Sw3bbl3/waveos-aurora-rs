@@ -118,8 +118,8 @@ impl aurora_desktop::save::Storage for Adapter {
         }
         result.map_err(|e| e.0.abs())
     }
-    fn sync(&mut self, _: &str) -> core::result::Result<(), isize> {
-        try_sync().map_err(|e| e.0.abs())
+    fn sync(&mut self, path: &str) -> core::result::Result<(), isize> {
+        try_sync_path(path).map_err(|e| e.0.abs())
     }
     fn rename(&mut self, a: &str, b: &str) -> core::result::Result<(), isize> {
         rename(a, b).map_err(|e| e.0.abs())
@@ -242,6 +242,15 @@ pub fn sync() {
 /// Flush pending writes and report device/filesystem failures to the caller.
 pub fn try_sync() -> Result<()> {
     call(nr::SYNC, &[]).map(|_| ())
+}
+
+/// Flush only the volume containing `path`; older kernels fall back to sync-all.
+pub fn try_sync_path(path: &str) -> Result<()> {
+    let [p, l] = str_args(path);
+    match call(nr::SYNC_PATH, &[p, l]) {
+        Err(e) if e.is(abi::err::ENOSYS) => try_sync(),
+        r => r.map(|_| ()),
+    }
 }
 
 pub fn chdir(path: &str) -> Result<()> {
