@@ -170,6 +170,10 @@ pub fn programs() -> Vec<Program> {
     };
     all.extend(test_programs(&cc));
     all.extend(doom(&cc));
+    match super::netsurf::build(&cc) {
+        Some(files) => all.extend(files),
+        None => eprintln!("warning: NetSurf's sources could not be downloaded: the browser is left out of the image"),
+    }
     all
 }
 
@@ -201,55 +205,61 @@ impl Cc {
     /// options `flags` (defines, include folders, warnings).
     fn build(&self, exe: &Path, sources: &[PathBuf], flags: &[&OsStr]) {
         let name = exe.file_name().unwrap().to_string_lossy().into_owned();
-        match self {
+        let objs_dir = root().join("target/linux/obj").join(&name);
+        let _ = fs::remove_dir_all(&objs_dir);
+        fs::create_dir_all(&objs_dir).unwrap();
+        let mut objs = Vec::new();
+        for src in sources {
+            let obj = objs_dir.join(src.file_stem().unwrap()).with_extension("o");
+            assert!(self.compile(src, &obj, flags), "could not compile {}", src.display());
+            objs.push(obj);
+        }
+        assert!(self.link(exe, &objs), "could not link {name}");
+    }
+
+    /// Compiles `src` into the object file `obj`.
+    pub fn compile(&self, src: &Path, obj: &Path, flags: &[&OsStr]) -> bool {
+        let mut cmd = match self {
             Cc::MuslGcc => {
-                let status = Command::new("musl-gcc")
-                    .args(["-static", "-no-pie", "-O2", "-pthread", "-s"])
-                    .args(flags)
-                    .arg("-o")
-                    .arg(exe)
-                    .args(sources)
-                    .arg("-lm")
-                    .status()
-                    .expect("run musl-gcc");
-                assert!(status.success(), "could not build {name}");
+                let mut c = Command::new("musl-gcc");
+                c.args(["-O2", "-pthread"]);
+                c
             }
-            Cc::Clang { musl, builtins, lld } => {
-                let objs_dir = root().join("target/linux/obj").join(&name);
-                let _ = fs::remove_dir_all(&objs_dir);
-                fs::create_dir_all(&objs_dir).unwrap();
-                let mut objs = Vec::new();
-                for src in sources {
-                    let obj = objs_dir.join(src.file_stem().unwrap()).with_extension("o");
-                    let status = Command::new("clang")
-                        .args(["--target=x86_64-linux-musl", "-nostdinc", "-fno-pic", "-O2", "-isystem"])
-                        .arg(musl.join("include/x86_64-linux-musl"))
-                        .arg("-isystem")
-                        .arg(builtins)
-                        .args(flags)
-                        .arg("-c")
-                        .arg(src)
-                        .arg("-o")
-                        .arg(&obj)
-                        .status()
-                        .expect("run clang");
-                    assert!(status.success(), "could not compile {}", src.display());
-                    objs.push(obj);
-                }
+            Cc::Clang { musl, builtins, .. } => {
+                let mut c = Command::new("clang");
+                c.args(["--target=x86_64-linux-musl", "-nostdinc", "-fno-pic", "-O2", "-isystem"])
+                    .arg(musl.join("include/x86_64-linux-musl"))
+                    .arg("-isystem")
+                    .arg(builtins);
+                c
+            }
+        };
+        cmd.args(flags).arg("-c").arg(src).arg("-o").arg(obj).status().is_ok_and(|s| s.success())
+    }
+
+    /// Links `objs` into the static program `exe`.
+    pub fn link(&self, exe: &Path, objs: &[PathBuf]) -> bool {
+        let status = match self {
+            Cc::MuslGcc => Command::new("musl-gcc")
+                .args(["-static", "-no-pie", "-s", "-pthread", "-Wl,--gc-sections", "-o"])
+                .arg(exe)
+                .args(objs)
+                .arg("-lm")
+                .status(),
+            Cc::Clang { musl, lld, .. } => {
                 let lib = musl.join("lib/x86_64-linux-musl");
-                let status = Command::new(lld)
+                Command::new(lld)
                     .args(["-flavor", "gnu", "-static", "--gc-sections", "-s", "-o"])
                     .arg(exe)
                     .arg(lib.join("crt1.o"))
                     .arg(lib.join("crti.o"))
-                    .args(&objs)
+                    .args(objs)
                     .arg(lib.join("libc.a"))
                     .arg(lib.join("crtn.o"))
                     .status()
-                    .expect("run rust-lld");
-                assert!(status.success(), "could not link {name}");
             }
-        }
+        };
+        status.is_ok_and(|s| s.success())
     }
 }
 

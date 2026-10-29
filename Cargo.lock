@@ -2085,6 +2085,7 @@ dependencies = [
  "gina",
  "lzma-rs",
  "miniz_oxide 0.8.9",
+ "png",
  "pulldown-cmark",
  "serde_json",
  "sha2",

@@ -23,7 +23,7 @@ This document is for someone about to read or change the code. It follows the ma
 | `libs/surf/` | `nebula-engine` | user + host | The browser engine: HTML, CSS, style and layout to a display list |
 | `userland/corekit/` | `aurora` | user | Runtime: entry point, heap, `print!`, files, processes, threads, clipboard, drag and drop, preferences |
 | `userland/aurorakit/` | `aurorakit` | user | UI toolkit: windows, event loop, the `App` trait, the `text` editing engine |
-| `userland/apps/*` | `app-*` | user | Nebula, Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About, Welcome, Learn, Studio, Installer |
+| `userland/apps/*` | `app-*` | user | Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About, Welcome, Learn, Studio, Installer |
 | `userland/bin/*` | — | user | Command-line tools (`coreutils`), `usertest`, `crashtest` |
 | `xtask/` | `xtask` | host | Build, run, image and test orchestration; system sounds, Mozilla's root CAs (from `webpki-roots`), a test SSDT (battery, lid) and a USB-stick image |
 | `assets/fonts/` | — | — | Manrope and JetBrains Mono, shipped in `/System/Fonts` |
@@ -298,7 +298,7 @@ All three libraries are `no_std` and make no system calls. Programs supply conne
   - `html.rs` tokenizes and builds a tree the forgiving way: implied `html`/`head`/`body`, implied end tags, raw-text elements and character references.
   - `css.rs` parses stylesheets (with `@media` and `@supports`) and matches selectors right to left. `style.rs` runs the cascade: the user-agent sheet, presentational attributes, author sheets and `style` attributes, with `!important`, inheritance, custom properties, `calc()`/`min()`/`max()`, and `::before`/`::after` content. Rules are bucketed by id, class and tag, and each element carries a 256-bit filter of its ancestors' ids, classes and tags, so most descendant selectors are rejected without walking the tree.
   - `layout.rs` produces a display list of rectangles, text runs, images and bullets, plus link and form-field areas and `#fragment` anchors. It covers block flow with margin collapsing; inline formatting measured in 1/64 px, breaking only at break opportunities; lists; tables (automatic column widths, spans); flex rows; grid (tracks, areas, spans, auto-placement); floats as rows; and form controls.
-- **Nebula** (`userland/apps/surf`) loads a page and its stylesheets on a worker thread and pictures on three more, runs layout and paints on the main thread, and keeps the computed styles so pictures arriving later only redo layout.
+- **Learn** lays out the handbook with the engine. The web browser is NetSurf, a separate Linux program in `/System/NetSurf` ([NETSURF.md](NETSURF.md)).
 
 ## 9. Telemetry and the System Explorer (`telemetry.rs`, `xtask/src/monitor.rs`)
 

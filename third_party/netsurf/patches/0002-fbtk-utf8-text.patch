@@ -1,0 +1,112 @@
+--- a/netsurf/frontends/framebuffer/fbtk/text.c
++++ b/netsurf/frontends/framebuffer/fbtk/text.c
+@@ -28,6 +28,7 @@
+ #include <libnsfb_event.h>
+ 
+ #include "utils/log.h"
++#include "utils/utf8.h"
+ #include "netsurf/browser_window.h"
+ #include "netsurf/plotters.h"
+ 
+@@ -346,14 +347,18 @@
+ 	}
+ 
+ 	switch (value) {
+-	case NSFB_KEY_BACKSPACE:
++	case NSFB_KEY_BACKSPACE: {
++		size_t prev;
++
+ 		if (widget->u.text.idx <= 0)
+ 			break;
+-		memmove(widget->u.text.text + widget->u.text.idx - 1,
++		/* the text is UTF-8: remove the whole character */
++		prev = utf8_prev(widget->u.text.text, widget->u.text.idx);
++		memmove(widget->u.text.text + prev,
+ 				widget->u.text.text + widget->u.text.idx,
+ 				widget->u.text.len - widget->u.text.idx);
+-		widget->u.text.idx--;
+-		widget->u.text.len--;
++		widget->u.text.len -= widget->u.text.idx - prev;
++		widget->u.text.idx = prev;
+ 		widget->u.text.text[widget->u.text.len] = 0;
+ 
+ 		fb_font_width(&font_style, widget->u.text.text,
+@@ -361,6 +366,7 @@
+ 
+ 		caret_moved = true;
+ 		break;
++	}
+ 
+ 	case NSFB_KEY_RETURN:
+ 		widget->u.text.enter(widget->u.text.pw, widget->u.text.text);
+@@ -369,7 +375,10 @@
+ 	case NSFB_KEY_RIGHT:
+ 		if (widget->u.text.idx < widget->u.text.len) {
+ 			if (modifier == FBTK_MOD_CLEAR)
+-				widget->u.text.idx++;
++				widget->u.text.idx = utf8_next(
++						widget->u.text.text,
++						widget->u.text.len,
++						widget->u.text.idx);
+ 			else
+ 				widget->u.text.idx = widget->u.text.len;
+ 
+@@ -380,7 +389,9 @@
+ 	case NSFB_KEY_LEFT:
+ 		if (widget->u.text.idx > 0) {
+ 			if (modifier == FBTK_MOD_CLEAR)
+-				widget->u.text.idx--;
++				widget->u.text.idx = utf8_prev(
++						widget->u.text.text,
++						widget->u.text.idx);
+ 			else
+ 				widget->u.text.idx = 0;
+ 
+@@ -442,21 +453,33 @@
+ 			break;
+ 		}
+ 
+-		/* allow for new character and null */
+-		temp = realloc(widget->u.text.text, widget->u.text.len + 2);
+-		if (temp == NULL) {
+-			break;
+-		}
++		{
++			/* store the character as UTF-8 */
++			uint32_t ucs4 = fbtk_keycode_to_ucs4(value, modifier);
++			char utf8[6];
++			size_t n;
++
++			if (ucs4 == (uint32_t)-1 || ucs4 == 0)
++				break;
++			n = utf8_from_ucs4(ucs4, utf8);
++
++			/* allow for new character and null */
++			temp = realloc(widget->u.text.text,
++					widget->u.text.len + n + 1);
++			if (temp == NULL) {
++				break;
++			}
+ 
+-		widget->u.text.text = temp;
+-		memmove(widget->u.text.text + widget->u.text.idx + 1,
+-				widget->u.text.text + widget->u.text.idx,
+-				widget->u.text.len - widget->u.text.idx);
+-		widget->u.text.text[widget->u.text.idx] =
+-				fbtk_keycode_to_ucs4(value, modifier);
+-		widget->u.text.idx++;
+-		widget->u.text.len++;
+-		widget->u.text.text[widget->u.text.len] = '\0';
++			widget->u.text.text = temp;
++			memmove(widget->u.text.text + widget->u.text.idx + n,
++					widget->u.text.text + widget->u.text.idx,
++					widget->u.text.len - widget->u.text.idx);
++			memcpy(widget->u.text.text + widget->u.text.idx,
++					utf8, n);
++			widget->u.text.idx += n;
++			widget->u.text.len += n;
++			widget->u.text.text[widget->u.text.len] = '\0';
++		}
+ 
+ 		fb_font_width(&font_style, widget->u.text.text,
+ 				widget->u.text.len, &widget->u.text.width);

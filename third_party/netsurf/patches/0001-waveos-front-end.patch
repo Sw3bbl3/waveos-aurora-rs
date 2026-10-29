@@ -1,0 +1,418 @@
+diff -ruN a/libnsfb/include/libnsfb.h b/libnsfb/include/libnsfb.h
+--- a/libnsfb/include/libnsfb.h
++++ b/libnsfb/include/libnsfb.h
+@@ -42,6 +42,7 @@
+     NSFB_SURFACE_LINUX, /**< Linux framebuffer surface */
+     NSFB_SURFACE_ABLE, /**< ABLE framebuffer surface */
+     NSFB_SURFACE_RAM, /**< RAM surface */
++    NSFB_SURFACE_WAVEOS, /**< WaveOS window */
+     NSFB_SURFACE_COUNT, /**< The number of surface kinds */
+ };
+ 
+diff -ruN a/netsurf/frontends/framebuffer/clipboard.c b/netsurf/frontends/framebuffer/clipboard.c
+--- a/netsurf/frontends/framebuffer/clipboard.c
++++ b/netsurf/frontends/framebuffer/clipboard.c
+@@ -31,6 +31,7 @@
+ 
+ #include "framebuffer/gui.h"
+ #include "framebuffer/clipboard.h"
++#include "framebuffer/waveos.h"
+ 
+ 
+ static struct gui_clipboard {
+@@ -48,6 +49,10 @@
+  */
+ static void gui_get_clipboard(char **buffer, size_t *length)
+ {
++	/* WaveOS's clipboard, shared with other apps. */
++	waveos_clipboard_get(buffer, length);
++	return;
++
+ 	*buffer = NULL;
+ 	*length = 0;
+ 
+@@ -90,6 +95,8 @@
+ 		gui_clipboard.buffer_len = length + 1;
+ 	}
+ 
++	waveos_clipboard_set(buffer, length);
++
+ 	gui_clipboard.length = 0;
+ 
+ 	memcpy(gui_clipboard.buffer, buffer, length);
+diff -ruN a/netsurf/frontends/framebuffer/fbtk/event.c b/netsurf/frontends/framebuffer/fbtk/event.c
+--- a/netsurf/frontends/framebuffer/fbtk/event.c
++++ b/netsurf/frontends/framebuffer/fbtk/event.c
+@@ -302,6 +302,10 @@
+ {
+ 	int ucs4 = -1;
+ 
++	/* A character typed on WaveOS, whatever the keyboard layout. */
++	if (code & 0x40000000)
++		return code & 0x1fffff;
++
+ 	if (mods & FBTK_MOD_LSHIFT || mods & FBTK_MOD_RSHIFT) {
+ 		if ((code >= 0) && (code < (int) NOF_ELEMENTS(sh_keymap)))
+ 			ucs4 = sh_keymap[code];
+diff -ruN a/netsurf/frontends/framebuffer/font_freetype.c b/netsurf/frontends/framebuffer/font_freetype.c
+--- a/netsurf/frontends/framebuffer/font_freetype.c
++++ b/netsurf/frontends/framebuffer/font_freetype.c
+@@ -34,6 +34,7 @@
+ 
+ #include "framebuffer/gui.h"
+ #include "framebuffer/font.h"
++#include "framebuffer/waveos.h"
+ #include "framebuffer/findfile.h"
+ 
+ /* glyph cache minimum size */
+@@ -553,10 +554,73 @@
+ 	return NSERROR_OK;
+ }
+ 
++/*
++ * Pages are drawn zoomed (twice the size on a WaveOS screen at 2x), and
++ * hinted glyphs don't grow in proportion. Layout measures text at the size
++ * it is drawn (as html redraw sizes it) and converts back, so laid-out
++ * lines fit what is drawn.
++ */
++static float
++waveos_text_scale(void)
++{
++	return waveos_zoom > 0 ? waveos_zoom : waveos_scale();
++}
++
++static plot_font_style_t
++waveos_drawn_style(const plot_font_style_t *fstyle, float s)
++{
++	plot_font_style_t drawn = *fstyle;
++	drawn.size *= s;
++	return drawn;
++}
++
++static int
++waveos_layout_units(int drawn, float s)
++{
++	return (int)(drawn / s + 0.999f);
++}
++
++static nserror
++waveos_font_width(const plot_font_style_t *fstyle,
++		const char *string, size_t length, int *width)
++{
++	float s = waveos_text_scale();
++	plot_font_style_t drawn = waveos_drawn_style(fstyle, s);
++	nserror res = fb_font_width(&drawn, string, length, width);
++	*width = waveos_layout_units(*width, s);
++	return res;
++}
++
++static nserror
++waveos_font_position(const plot_font_style_t *fstyle,
++		const char *string, size_t length,
++		int x, size_t *char_offset, int *actual_x)
++{
++	float s = waveos_text_scale();
++	plot_font_style_t drawn = waveos_drawn_style(fstyle, s);
++	nserror res = fb_font_position(&drawn, string, length, (int)(x * s),
++			char_offset, actual_x);
++	*actual_x = waveos_layout_units(*actual_x, s);
++	return res;
++}
++
++static nserror
++waveos_font_split(const plot_font_style_t *fstyle,
++		const char *string, size_t length,
++		int x, size_t *char_offset, int *actual_x)
++{
++	float s = waveos_text_scale();
++	plot_font_style_t drawn = waveos_drawn_style(fstyle, s);
++	nserror res = fb_font_split(&drawn, string, length, (int)(x * s),
++			char_offset, actual_x);
++	*actual_x = waveos_layout_units(*actual_x, s);
++	return res;
++}
++
+ static struct gui_layout_table layout_table = {
+-	.width = fb_font_width,
+-	.position = fb_font_position,
+-	.split = fb_font_split,
++	.width = waveos_font_width,
++	.position = waveos_font_position,
++	.split = waveos_font_split,
+ };
+ 
+ struct gui_layout_table *framebuffer_layout_table = &layout_table;
+diff -ruN a/netsurf/frontends/framebuffer/gui.c b/netsurf/frontends/framebuffer/gui.c
+--- a/netsurf/frontends/framebuffer/gui.c
++++ b/netsurf/frontends/framebuffer/gui.c
+@@ -45,6 +45,7 @@
+ #include "content/fetch.h"
+ 
+ #include "framebuffer/gui.h"
++#include "framebuffer/waveos.h"
+ #include "framebuffer/fbtk.h"
+ #include "framebuffer/framebuffer.h"
+ #include "framebuffer/schedule.h"
+@@ -532,7 +533,7 @@
+ 	}
+ 
+ 	if (optind < argc) {
+-		feurl = argv[optind];
++		feurl = waveos_url(argv[optind]);
+ 	}
+ 
+ 	if (nsfb_type_from_name(fename) == NSFB_SURFACE_NONE) {
+@@ -556,6 +557,8 @@
+  */
+ static nserror set_defaults(struct nsoption_s *defaults)
+ {
++	waveos_set_defaults();
++
+ 	/* Set defaults for absent option strings */
+ 	nsoption_setnull_charp(cookie_file, strdup("~/.netsurf/Cookies"));
+ 	nsoption_setnull_charp(cookie_jar, strdup("~/.netsurf/Cookies"));
+@@ -846,6 +849,8 @@
+ }
+ 
+ 
++static void fb_update_back_forward(struct gui_window *gw);
++
+ static int
+ fb_browser_window_input(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+ {
+@@ -859,6 +864,18 @@
+ 	case NSFB_EVENT_KEY_DOWN:
+ 		switch (cbi->event->value.keycode) {
+ 
++		case WAVEOS_KEY_BACK:
++			if (browser_window_back_available(gw->bw))
++				browser_window_history_back(gw->bw, false);
++			fb_update_back_forward(gw);
++			break;
++
++		case WAVEOS_KEY_FORWARD:
++			if (browser_window_forward_available(gw->bw))
++				browser_window_history_forward(gw->bw, false);
++			fb_update_back_forward(gw);
++			break;
++
+ 		case NSFB_KEY_DELETE:
+ 			browser_window_key_press(gw->bw, NS_KEY_DELETE_RIGHT);
+ 			break;
+@@ -941,6 +958,7 @@
+ 			if (modifier & FBTK_MOD_RCTRL ||
+ 					modifier & FBTK_MOD_LCTRL) {
+ 				browser_window_set_scale(gw->bw, -0.1, false);
++				waveos_zoom = browser_window_get_scale(gw->bw);
+ 			}
+ 			break;
+ 
+@@ -948,13 +966,16 @@
+ 			if (modifier & FBTK_MOD_RCTRL ||
+ 					modifier & FBTK_MOD_LCTRL) {
+ 				browser_window_set_scale(gw->bw, 0.1, false);
++				waveos_zoom = browser_window_get_scale(gw->bw);
+ 			}
+ 			break;
+ 
+ 		case NSFB_KEY_0:
+ 			if (modifier & FBTK_MOD_RCTRL ||
+ 					modifier & FBTK_MOD_LCTRL) {
+-				browser_window_set_scale(gw->bw, 1.0, true);
++				/* the display's scale is 100% */
++				browser_window_set_scale(gw->bw, waveos_scale(), true);
++				waveos_zoom = browser_window_get_scale(gw->bw);
+ 			}
+ 			break;
+ 
+@@ -1207,6 +1228,10 @@
+ }
+ 
+ 
++/* Toolbar pictures are 1x: at 2x their buttons are twice as wide, as the
++   toolbar is twice as tall, and fbtk scales the pictures to fit. */
++#define TOOLBAR_W(image) ((image).width * waveos_scale())
++
+ /** Create a toolbar window and populate it with buttons. 
+  *
+  * The toolbar layout uses a character to define buttons type and position:
+@@ -1292,9 +1317,9 @@
+ 		case 'b': /* back */
+ 			widget = fbtk_create_button(toolbar, 
+ 						    (xdir == 1) ? xpos : 
+-						     xpos - left_arrow.width, 
++						     xpos - TOOLBAR_W(left_arrow), 
+ 						    padding, 
+-						    left_arrow.width, 
++						    TOOLBAR_W(left_arrow), 
+ 						    -padding, 
+ 						    frame_col, 
+ 						    &left_arrow, 
+@@ -1306,9 +1331,9 @@
+ 		case 'l': /* local history */
+ 			widget = fbtk_create_button(toolbar,
+ 						    (xdir == 1) ? xpos : 
+-						     xpos - history_image.width,
++						     xpos - TOOLBAR_W(history_image),
+ 						    padding,
+-						    history_image.width,
++						    TOOLBAR_W(history_image),
+ 						    -padding,
+ 						    frame_col,
+ 						    &history_image,
+@@ -1320,9 +1345,9 @@
+ 		case 'f': /* forward */
+ 			widget = fbtk_create_button(toolbar,
+ 						    (xdir == 1)?xpos : 
+-						     xpos - right_arrow.width,
++						     xpos - TOOLBAR_W(right_arrow),
+ 						    padding,
+-						    right_arrow.width,
++						    TOOLBAR_W(right_arrow),
+ 						    -padding,
+ 						    frame_col,
+ 						    &right_arrow,
+@@ -1334,9 +1359,9 @@
+ 		case 'c': /* close the current window */
+ 			widget = fbtk_create_button(toolbar,
+ 						    (xdir == 1)?xpos : 
+-						     xpos - stop_image_g.width,
++						     xpos - TOOLBAR_W(stop_image_g),
+ 						    padding,
+-						    stop_image_g.width,
++						    TOOLBAR_W(stop_image_g),
+ 						    -padding,
+ 						    frame_col,
+ 						    &stop_image_g,
+@@ -1348,9 +1373,9 @@
+ 		case 's': /* stop  */
+ 			widget = fbtk_create_button(toolbar,
+ 						    (xdir == 1)?xpos : 
+-						     xpos - stop_image.width,
++						     xpos - TOOLBAR_W(stop_image),
+ 						    padding,
+-						    stop_image.width,
++						    TOOLBAR_W(stop_image),
+ 						    -padding,
+ 						    frame_col,
+ 						    &stop_image,
+@@ -1362,9 +1387,9 @@
+ 		case 'r': /* reload */
+ 			widget = fbtk_create_button(toolbar,
+ 						    (xdir == 1)?xpos : 
+-						     xpos - reload.width,
++						     xpos - TOOLBAR_W(reload),
+ 						    padding,
+-						    reload.width,
++						    TOOLBAR_W(reload),
+ 						    -padding,
+ 						    frame_col,
+ 						    &reload,
+@@ -1376,9 +1401,9 @@
+ 		case 't': /* throbber/activity indicator */
+ 			widget = fbtk_create_bitmap(toolbar,
+ 						    (xdir == 1)?xpos : 
+-						     xpos - throbber0.width,
++						     xpos - TOOLBAR_W(throbber0),
+ 						    padding,
+-						    throbber0.width,
++						    TOOLBAR_W(throbber0),
+ 						    -padding,
+ 						    frame_col, 
+ 						    &throbber0);
+@@ -1499,57 +1524,57 @@
+ 		switch (*itmtype) {
+ 		case 'b': /* back */
+ 			widget = gw->back;
+-			x = (xdir == 1) ? xpos : xpos - left_arrow.width;
++			x = (xdir == 1) ? xpos : xpos - TOOLBAR_W(left_arrow);
+ 			y = padding;
+-			w = left_arrow.width;
++			w = TOOLBAR_W(left_arrow);
+ 			h = -padding;
+ 			break;
+ 
+ 		case 'l': /* local history */
+ 			widget = gw->history;
+-			x = (xdir == 1) ? xpos : xpos - history_image.width;
++			x = (xdir == 1) ? xpos : xpos - TOOLBAR_W(history_image);
+ 			y = padding;
+-			w = history_image.width;
++			w = TOOLBAR_W(history_image);
+ 			h = -padding;
+ 			break;
+ 
+ 		case 'f': /* forward */
+ 			widget = gw->forward;
+-			x = (xdir == 1) ? xpos : xpos - right_arrow.width;
++			x = (xdir == 1) ? xpos : xpos - TOOLBAR_W(right_arrow);
+ 			y = padding;
+-			w = right_arrow.width;
++			w = TOOLBAR_W(right_arrow);
+ 			h = -padding;
+ 			break;
+ 
+ 		case 'c': /* close the current window */
+ 			widget = gw->close;
+-			x = (xdir == 1) ? xpos : xpos - stop_image_g.width;
++			x = (xdir == 1) ? xpos : xpos - TOOLBAR_W(stop_image_g);
+ 			y = padding;
+-			w = stop_image_g.width;
++			w = TOOLBAR_W(stop_image_g);
+ 			h = -padding;
+ 			break;
+ 
+ 		case 's': /* stop  */
+ 			widget = gw->stop;
+-			x = (xdir == 1) ? xpos : xpos - stop_image.width;
++			x = (xdir == 1) ? xpos : xpos - TOOLBAR_W(stop_image);
+ 			y = padding;
+-			w = stop_image.width;
++			w = TOOLBAR_W(stop_image);
+ 			h = -padding;
+ 			break;
+ 
+ 		case 'r': /* reload */
+ 			widget = gw->reload;
+-			x = (xdir == 1) ? xpos : xpos - reload.width;
++			x = (xdir == 1) ? xpos : xpos - TOOLBAR_W(reload);
+ 			y = padding;
+-			w = reload.width;
++			w = TOOLBAR_W(reload);
+ 			h = -padding;
+ 			break;
+ 
+ 		case 't': /* throbber/activity indicator */
+ 			widget = gw->throbber;
+-			x = (xdir == 1) ? xpos : xpos - throbber0.width;
++			x = (xdir == 1) ? xpos : xpos - TOOLBAR_W(throbber0);
+ 			y = padding;
+-			w = throbber0.width;
++			w = TOOLBAR_W(throbber0);
+ 			h = -padding;
+ 			break;
+ 
+diff -ruN a/netsurf/frontends/framebuffer/waveos.h b/netsurf/frontends/framebuffer/waveos.h
+--- a/netsurf/frontends/framebuffer/waveos.h
++++ b/netsurf/frontends/framebuffer/waveos.h
+@@ -0,0 +1,20 @@
++/* WaveOS's part of NetSurf's framebuffer front end (waveos/netsurf.c). */
++#ifndef NETSURF_FB_WAVEOS_H
++#define NETSURF_FB_WAVEOS_H
++
++#include <stddef.h>
++
++/* Keys the WaveOS surface sends for going back and forward (mouse side
++ * buttons, browser keys, Alt+Left and Alt+Right). */
++#define WAVEOS_KEY_BACK 0x20000001
++#define WAVEOS_KEY_FORWARD 0x20000002
++
++int waveos_scale(void);
++/* The page zoom when changed from the keyboard (0: the display scale). */
++extern float waveos_zoom;
++void waveos_set_defaults(void);
++const char *waveos_url(const char *arg);
++void waveos_clipboard_get(char **buffer, size_t *length);
++void waveos_clipboard_set(const char *buffer, size_t length);
++
++#endif

@@ -31,7 +31,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - **Shoal** (all apps, full screen, with search and groups), **Seek** (apps, files, settings and sums), **Drift** (calendar, Calm and notifications) and **Glide** (Alt+Tab with window pictures)
   - Manrope throughout, light and dark everywhere, broadcast live to every app, and an accent colour that can follow the wallpaper
   - the Tide, Aurora and Dunes wallpapers, each with a day and a night picture
-- **Apps:** Nebula, Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About This Computer, Welcome, Learn, Studio, Installer and Doom.
+- **Apps:** NetSurf, Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About This Computer, Welcome, Learn, Studio, Installer and Doom.
 - **Networking**, all our own:
   - **drivers** for virtio-net and Intel e1000/e1000e, interrupt-driven where MSI allows
   - an **IPv4 and IPv6 stack** in the kernel: ARP and neighbor discovery, ICMP and ICMPv6, UDP and **TCP** over both (retransmission timers, fast retransmit, congestion control, window scaling), **DHCP** and IPv6 **autoconfiguration** (SLAAC, RDNSS), and BSD-like sockets for programs
@@ -39,17 +39,19 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - **TLS 1.3** (and 1.2 for older servers) with our own handshake, record layer and X.509 certificate checks against Mozilla's root CAs. Cryptographic primitives come from RustCrypto.
   - the network in **Current**, **Settings → Network**, and network graphs in Pulse
   - **Wi-Fi**: open and WPA2-Personal networks, with our own supplicant (4-way and group key handshakes) and CCMP encryption, a Wi-Fi section in Settings → Network and wlanN interfaces. Intel adapters (7265 to AX211) are recognized but their radio can't be started yet; simulated networks for testing (`cargo xtask run --wifi-sim`)
-- **Nebula**, the web browser, on our own engine:
+- **NetSurf**, the web browser ([details](NETSURF.md)): NetSurf 3.11, a small, fast open-source browser, built as a Linux program that draws straight into its WaveOS window:
+  - HTML and CSS with tables, floats and positioning; PNG, JPEG, GIF and BMP pictures; cookies
+  - HTTP and HTTPS (curl with mbed TLS) against Mozilla's root certificates; sharp at 2×
+  - the WaveOS clipboard, typing in any keyboard layout, and back and forward from Alt+←/→ and a mouse's side buttons
+  - no JavaScript
+- **Nebula Engine**, our own HTML and CSS engine, lays out Learn's handbook:
   - an HTML parser, and CSS with selectors, the cascade, custom properties, `calc()`, media queries and generated content
   - layout: blocks, inline text with line breaking, lists, tables, flexbox and grid rows, floats, form controls
   - PNG, **JPEG** (baseline and progressive) and GIF images, from our own decoders
-  - history, find in page (Ctrl+F), zoom, search forms and downloads; up to eight **tabs**, which keep loading in the background
-  - fast loading: stylesheets and scripts download side by side, the page shows as soon as its styles are in, scripts run in slices so the window stays responsive, and an in-memory **HTTP cache** revalidates with ETags
-  - a 2D **canvas** with paths, gradients, transforms, clipping, text and images
 - **Pulsar**, our JavaScript engine ([details](PULSAR.md)):
   - the language through ES2023: classes with private fields, generators, `async`/`await`, destructuring, modules aside
   - the standard library, our own regular-expression engine, and `Date` in the local time zone
-  - in Nebula: the DOM (with comments, TreeWalker and a live MutationObserver), events with capture and bubbling, timers, animation frames, `fetch` and `XMLHttpRequest`, `localStorage` per site shared across tabs, `getComputedStyle` from the cascade, and scripts that load more scripts; jQuery runs
+  - a DOM, events, timers, `fetch` and storage for the Nebula engine, tested on the host
   - `js` in Terminal: a prompt with multi-line input, files, or `-e`
 - **aurora-sh**, the Terminal shell. It runs about 35 programs from `/System/Bin` as separate processes (`ls`, `cat`, `grep`, `wc`, `ps`, `kill`, `cp`, `mv`, `neofetch`, `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play`, `ping`, `ifconfig`, `nslookup`, `fetch`…). It supports pipelines (`ls -l | grep txt`), redirection (`>`, `>>`), lists (`a && b || c; d`), Ctrl+C and Tab completion.
 - **Storage:**
@@ -104,7 +106,7 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
   - in text: `Ctrl+A/C/X/V`, `Ctrl+Z` / `Ctrl+Shift+Z`, `Ctrl+F` to find, `Ctrl+S` to save
 - **WayV menu** (the mark at top-left): About This Computer, Settings, Learn, Shoal, Lock Screen, Sleep, Restart, Shut Down.
 - **Super+L** locks the screen. The volume keys work anywhere; Crest shows the level.
-- **Nebula**: type an address or a search in the address bar (Ctrl+L). Alt+←/→ go back and forward, Ctrl+R reloads, Ctrl+F finds on the page, Ctrl +/−/0 zoom, Space and Page Up/Down scroll. `.html` files open in Nebula too.
+- **NetSurf**: click the address bar (to either side of the window handle), type an address and press Enter; Ctrl+U clears it. Alt+←/→ go back and forward, Ctrl +/−/0 zoom, the arrow keys and Page Up/Down scroll. `.html` files open in NetSurf too.
 - **Files**: drag items onto folders, the sidebar, another Files window, a dock app or the Trash (hold Ctrl to copy). Right-click for more; Space opens Quick Look, F2 renames, Delete moves to the Trash, Ctrl+1/2 switch views, Ctrl+F searches.
 - **Terminal**: try `help`, `ps`, `df`, `neofetch`, `cpuinfo`, `lsusb`, `play --tone 440 500`, `ls -l | grep txt`, `echo hi > hi.txt`, `cat hi.txt | wc`, `ls /Boot`, `open notes`, `theme dark`, `ping example.com`, `ifconfig`, `fetch -i https://example.com`.
 
@@ -131,6 +133,7 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
                   ↕ syscalls, shared-memory surfaces
  User space (userland/)     corekit runtime · AuroraKit · WaveUI · apps · /System/Bin tools
    libs/web · libs/tls · libs/surf   HTTP, TLS 1.3/1.2 and the Nebula engine (no_std, tested on the host)
+   /System/NetSurf            NetSurf, the web browser (a Linux program, see NETSURF.md)
 ```
 
 The full tour, covering the boot handoff, memory layout, processes and syscalls, storage and AuroraFS's on-disk format, and rendering, is in [ARCHITECTURE.md](ARCHITECTURE.md).

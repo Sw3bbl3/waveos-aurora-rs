@@ -30,6 +30,7 @@ mod help;
 mod image;
 mod linux;
 mod monitor;
+mod netsurf;
 mod package;
 mod sounds;
 mod tar;
@@ -623,21 +624,12 @@ fn system_image(programs: &[Program], out: &Path) {
     }
     t.dir("Certificates");
     t.file("Certificates/roots.bin", &trust_anchors());
-    // Pages Nebula ships with (its start page links the JavaScript demo).
     t.dir("Library");
-    t.dir("Library/Nebula");
     t.dir("Licenses");
     for (name, path) in
         [("rusty-h264.txt", "vendor/rusty_h264-decoder/LICENSE"), ("rusty-aac.txt", "vendor/rusty_aac/LICENSE")]
     {
         t.file(&format!("Licenses/{name}"), &fs::read(root().join(path)).unwrap());
-    }
-    let pages = root().join("assets/nebula");
-    let mut page_files: Vec<_> = fs::read_dir(&pages).unwrap().map(|e| e.unwrap().path()).collect();
-    page_files.sort();
-    for f in page_files {
-        let name = f.file_name().unwrap().to_string_lossy().into_owned();
-        t.file(&format!("Library/Nebula/{name}"), &fs::read(&f).unwrap());
     }
     t.file("Linux/.links", linux::links(programs).as_bytes());
     for (dest, src) in programs {

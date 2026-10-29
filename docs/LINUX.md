@@ -183,6 +183,12 @@ shows a notice that some security features offer less protection. It
 draws in software. Starting takes a while in QEMU without hardware
 acceleration (libxul is read in full when it loads).
 
+## NetSurf
+
+The web browser, **NetSurf**, is a Linux program too: NetSurf 3.11 built
+static with musl, with a libnsfb surface that is a WaveOS window, in
+`/System/NetSurf`. It needs nothing on the disk. See [NETSURF.md](NETSURF.md).
+
 ## Doom
 
 **Doom** in Shoal (under Play) starts the game: [doomgeneric][dg] (GPL-2.0),

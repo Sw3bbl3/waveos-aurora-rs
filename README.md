@@ -31,22 +31,19 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 | ![The desktop in the light appearance](docs/screenshots/0.8/desktop-light.png) | ![Settings, Bar & Crest, with a live preview of the top bar](docs/screenshots/0.8/settings-bar-crest.png) |
 | **Light, too.** Every surface, every app. | **Settings.** Turn Crest off, show the battery level, log in automatically. |
 
-## The web, on an engine of our own.
+## The web, small and quick.
 
-**Nebula** loads real websites through a stack we wrote ourselves: the network drivers, TCP/IP, TLS 1.3, HTTP, and an HTML and CSS engine with flexbox, grid and tables.
+**NetSurf** is the browser: a small, fast open-source engine with HTML, CSS, HTTPS, cookies and pictures, drawing straight into its WaveOS window. It reaches the web through our own network drivers and TCP/IP.
 
 | | |
 |---|---|
-| ![Nebula showing Wikipedia's main page, with photos](docs/screenshots/surf-wikipedia.png) | ![Nebula showing Hacker News](docs/screenshots/surf-hacker-news.png) |
+| ![NetSurf showing Wikipedia's main page, with photos](docs/screenshots/netsurf-wikipedia.png) | ![NetSurf's welcome page](docs/screenshots/netsurf-welcome.png) |
 
 ## JavaScript, written from scratch too.
 
-**Pulsar** is our own JavaScript engine: a compiler, a virtual machine, a garbage collector, and core standard-library facilities, from classes and generators to `async`/`await` and regular expressions. It passes more than 34,000 of the official conformance tests. In Nebula it brings pages to life: the DOM, events, timers, `fetch`, storage, and libraries like jQuery. In Terminal, type `js` and start writing.
+**Pulsar** is our own JavaScript engine: a compiler, a virtual machine, a garbage collector, and core standard-library facilities, from classes and generators to `async`/`await` and regular expressions. It passes more than 34,000 of the official conformance tests. In Terminal, type `js` and start writing: `js` for a prompt, `js file.js` to run a file.
 
-| | |
-|---|---|
-| ![The Pulsar demo page in Nebula: a counter, a to-do list and a live clock](docs/screenshots/pulsar-demo.png) | ![The js prompt in Terminal, with a class, JSON and a loop](docs/screenshots/pulsar-repl.png) |
-| **In Nebula.** Open *Pulsar demo* from the start page. | **In Terminal.** `js` for a prompt, `js file.js` to run a file. |
+![The js prompt in Terminal, with a class, JSON and a loop](docs/screenshots/pulsar-repl.png)
 
 ## Every app in its own world.
 
@@ -97,10 +94,10 @@ A minute later, you're at the desktop. Add `--monitor` to open the System Explor
 | **WaveUI** | Declarative interface framework every app is built with ([WaveSDK](docs/WAVESDK.md)) |
 | **AuroraKit** | Windowing toolkit WaveUI runs on |
 | **Lyra** | TrueType font engine |
-| **Nebula** | Web browser: HTTP, TLS, HTML, CSS and layout |
+| **Nebula Engine** | HTML, CSS and layout for Learn; HTTP and TLS for `fetch` and apps |
 | **Pulsar** | JavaScript engine: compiler, VM, collector, DOM — [status](docs/PULSAR.md) |
 
-Nearly everything is our own. Where we stand on others' shoulders, we say so: cryptographic primitives come from [RustCrypto](https://github.com/RustCrypto), ACPI's AML interpreter from the [`acpi`](https://crates.io/crates/acpi) crate, and maths functions from [`libm`](https://crates.io/crates/libm).
+Nearly everything is our own. Where we stand on others' shoulders, we say so: cryptographic primitives come from [RustCrypto](https://github.com/RustCrypto), ACPI's AML interpreter from the [`acpi`](https://crates.io/crates/acpi) crate, and maths functions from [`libm`](https://crates.io/crates/libm). The browser is [NetSurf](https://www.netsurf-browser.org/) (GPL-2.0), shipped as a separate program ([how it is built](docs/NETSURF.md)).
 
 Go deeper: [Architecture](docs/ARCHITECTURE.md) · [Every feature](docs/FEATURES.md) · [Roadmap](docs/ROADMAP.md) · [Building and debugging](docs/BUILDING.md) · [Validation](docs/VALIDATION-2026-09-30.md) · [Contributing](CONTRIBUTING.md)
 
