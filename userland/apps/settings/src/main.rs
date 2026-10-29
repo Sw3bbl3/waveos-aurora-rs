@@ -493,6 +493,8 @@ impl Settings {
                 Section::titled("Mode", HStack::new().push(mode(false)).push(mode(true)).spacing(20)),
                 Section::titled("Accent colour", accents),
                 Section::titled("Wallpaper", walls.id("appearance/wallpaper").fill_width()),
+                card(vec![pref_toggle("appearance/water", "Desktop water effects", pref::DESKTOP_WATER)]),
+                footer("Click empty desktop space to make waves. Reduce Motion disables water effects."),
                 footer("Tip: choose Set as Wallpaper in Lens or Files to use any picture."),
             ],
         )

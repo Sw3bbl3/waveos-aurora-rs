@@ -139,6 +139,7 @@ impl Desktop {
 
     /// Locks the screen (nothing happens before an account exists).
     pub(super) fn lock(&mut self) {
+        self.water.clear();
         if self.account.is_none() || self.shore.is_some() {
             return;
         }

@@ -14,7 +14,7 @@ fn valid_key(k: &str) -> bool {
 /// Defaults for preferences that have one.
 fn default(key: &str) -> Option<&'static str> {
     Some(match key {
-        pref::DARK | pref::CREST => "1",
+        pref::DARK | pref::CREST | pref::DESKTOP_WATER => "1",
         pref::BATTERY_LEVEL | pref::AUTO_LOGIN => "0",
         pref::CLOCK_24H
         | pref::CLOCK_SECONDS
@@ -61,7 +61,8 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
     match key {
         pref::GLASS if !value.parse::<u8>().is_ok_and(|v| v <= 100) => return Err(EINVAL),
         pref::DOCK_SIZE if !value.parse::<u8>().is_ok_and(|v| (32..=64).contains(&v)) => return Err(EINVAL),
-        pref::REDUCE_TRANSPARENCY
+        pref::DESKTOP_WATER
+        | pref::REDUCE_TRANSPARENCY
         | pref::REDUCE_MOTION
         | pref::HIGH_CONTRAST
         | pref::DOCK_AUTOHIDE

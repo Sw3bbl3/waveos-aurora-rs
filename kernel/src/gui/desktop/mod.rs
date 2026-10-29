@@ -119,6 +119,8 @@ pub enum PowerAction {
 pub struct Desktop {
     pub w: i32,
     pub h: i32,
+    water: lumen::water::Water,
+    water_coarse: bool,
     items: items::Items,
     wallpaper: Vec<u32>,
     blurred: Vec<u32>,
@@ -203,6 +205,8 @@ impl Desktop {
         let mut d = Self {
             w,
             h,
+            water: lumen::water::Water::new(),
+            water_coarse: false,
             items: items::Items::new(),
             wallpaper,
             blurred,
@@ -637,6 +641,7 @@ impl Desktop {
 
     /// Adapts the desktop to a new screen size.
     pub fn resize(&mut self, w: i32, h: i32) {
+        self.water.clear();
         self.w = w;
         self.h = h;
         let (wp, bl) = Self::make_wallpaper(w, h);
@@ -685,6 +690,7 @@ impl Desktop {
     }
 
     pub fn set_dark(&mut self, dark: bool) {
+        self.water.clear();
         self.shoal_backdrop = None;
         theme::set_dark(dark);
         super::save_settings();
@@ -699,6 +705,7 @@ impl Desktop {
     }
 
     pub fn set_wallpaper(&mut self, index: u8) {
+        self.water.clear();
         self.shoal_backdrop = None;
         theme::set_wallpaper(index);
         super::save_settings();
@@ -812,6 +819,7 @@ impl Desktop {
     /// True when the compositor should draw at full frame rate.
     pub fn wants_frames(&self) -> bool {
         self.animating()
+            || self.water.active()
             || self.notifications_moving()
             || self.crest_moving()
             || self.shore_moving()
@@ -1284,7 +1292,26 @@ impl Desktop {
         }
     }
 
-    fn water_click(&mut self, _x: i32, _y: i32) {}
+    fn water_click(&mut self, x: i32, y: i32) {
+        if !theme::reduce_motion() && super::prefs::get_bool(aurora_abi::pref::DESKTOP_WATER) {
+            self.water.impulse(x, y, self.w, self.h, self.now_ms);
+        }
+    }
+    fn step_water(&mut self) -> bool {
+        if self.shore.is_some() || theme::reduce_motion() || !super::prefs::get_bool(aurora_abi::pref::DESKTOP_WATER) {
+            if self.water.active() {
+                self.water.clear();
+                self.damage_all();
+            }
+            return false;
+        }
+        let old = self.water.bounds();
+        if self.water.advance(self.now_ms, self.w, self.h) {
+            self.damage(old);
+            self.damage(self.water.bounds());
+        }
+        self.water.active()
+    }
 
     // ------------------------------------------------------------------ time
 
@@ -1337,6 +1364,7 @@ impl Desktop {
             self.reveal_window(id);
         }
         let mut busy = self.step_animations();
+        busy |= self.step_water();
         busy |= self.step_notifications();
         busy |= self.step_bar();
         busy |= self.shore_moving();
@@ -1465,6 +1493,11 @@ impl Desktop {
             self.save_scene(cv);
             cursor::draw(cv, self.cursor.0, self.cursor.1);
             return;
+        }
+        let water_start = crate::time::now_ns();
+        self.water.paint(cv, &self.wallpaper, self.water_coarse);
+        if self.water.active() {
+            self.water_coarse = crate::time::now_ns().saturating_sub(water_start) > 8_000_000;
         }
         self.paint_items(cv);
         let focused = self.focused_id();
