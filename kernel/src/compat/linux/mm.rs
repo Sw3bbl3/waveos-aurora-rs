@@ -299,8 +299,8 @@ pub fn madvise(p: &Process, addr: u64, len: u64, advice: u64) -> Result<u64, isi
     if advice == MADV_DONTNEED && len > 0 && user_range(addr, len) {
         // The pages read as zero afterwards.
         let zero = alloc::vec![0u8; PAGE_SIZE as usize];
-        let guard = p.mem();
-        let aspace = guard.as_ref().ok_or(ESRCH)?;
+        let mut guard = p.mem();
+        let aspace = guard.as_mut().ok_or(ESRCH)?;
         for i in 0..pages(len) {
             let _ = aspace.write_bytes(addr + i * PAGE_SIZE, &zero);
         }

@@ -25,7 +25,7 @@ use crate::sync::IrqMutex;
 use crate::syscall::user;
 use alloc::collections::BTreeMap;
 use aurora_abi::err::*;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub const SIGKILL: u32 = 9;
 pub const SIGSEGV: u32 = 11;
@@ -115,6 +115,8 @@ pub struct Signals {
     state: IrqMutex<State>,
     /// Something is pending somewhere (a quick check before taking the lock).
     any: AtomicBool,
+    /// Threads with a mask to put back on the way out (`suspended`).
+    saved_masks: AtomicU32,
 }
 
 impl Signals {
@@ -129,6 +131,7 @@ impl Signals {
                 initial_mask: 0,
             }),
             any: AtomicBool::new(false),
+            saved_masks: AtomicU32::new(0),
         }
     }
 
@@ -296,16 +299,21 @@ const EINTR_RET: u64 = (-(EINTR as i64)) as u64;
 
 /// On the way back to user mode from system call `nr` (its result is in
 /// `f.rax`): restarts it, or enters the handler of a pending signal.
-pub fn on_return(f: &mut SyscallFrame, nr: u64) {
-    let Some(p) = proc::current() else { return };
+pub fn on_return(f: &mut SyscallFrame, nr: u64, p: &alloc::sync::Arc<Process>) {
     let Some(l) = &p.linux else { return };
     let me = sched::current_id();
     let interrupted = f.rax == EINTR_RET && nr != nr::RT_SIGRETURN;
+    // Nearly always nothing to do: say so without the lock, which every
+    // thread of the process would otherwise take on every system call.
+    if !interrupted && !l.signals.any.load(Ordering::Acquire) && l.signals.saved_masks.load(Ordering::Acquire) == 0 {
+        return;
+    }
     loop {
         let mut s = l.signals.state.lock();
         let Some((sig, info)) = take(&mut s, me) else {
             if let Some(mask) = s.thread(me).suspended.take() {
                 s.thread(me).blocked = mask;
+                l.signals.saved_masks.fetch_sub(1, Ordering::AcqRel);
             }
             l.signals.refresh_any(&s);
             drop(s);
@@ -322,7 +330,7 @@ pub fn on_return(f: &mut SyscallFrame, nr: u64) {
         }
         if action.handler == SIG_DFL {
             drop(s);
-            proc::terminate_by_signal(&p, sig);
+            proc::terminate_by_signal(p, sig);
             return;
         }
         if interrupted && action.flags & SA_RESTART != 0 && restartable(nr) {
@@ -330,6 +338,9 @@ pub fn on_return(f: &mut SyscallFrame, nr: u64) {
         }
         let t = *s.thread(me);
         let old_mask = t.suspended.unwrap_or(t.blocked);
+        if t.suspended.is_some() {
+            l.signals.saved_masks.fetch_sub(1, Ordering::AcqRel);
+        }
         {
             let t = s.thread(me);
             t.suspended = None;
@@ -344,7 +355,7 @@ pub fn on_return(f: &mut SyscallFrame, nr: u64) {
         drop(s);
         if enter_handler(f, sig, info, &action, old_mask, &t).is_err() {
             // No room for the frame: the process ends as if it had crashed.
-            proc::terminate_by_signal(&p, SIGSEGV);
+            proc::terminate_by_signal(p, SIGSEGV);
         }
         return;
     }
@@ -586,6 +597,9 @@ pub fn suspend(p: &Process, mask_ptr: Option<u64>) -> Result<u64, isize> {
         let mask: u64 = user::get(ptr)?;
         let mut s = l.signals.state.lock();
         let t = s.thread(me);
+        if t.suspended.is_none() {
+            l.signals.saved_masks.fetch_add(1, Ordering::AcqRel);
+        }
         t.suspended = Some(t.blocked);
         t.blocked = mask & !UNBLOCKABLE;
     }
@@ -604,6 +618,7 @@ pub fn wait_with_mask(p: &Process, mask_ptr: u64) -> Result<(), isize> {
     let t = s.thread(sched::current_id());
     if t.suspended.is_none() {
         t.suspended = Some(t.blocked);
+        l.signals.saved_masks.fetch_add(1, Ordering::AcqRel);
     }
     t.blocked = mask & !UNBLOCKABLE;
     Ok(())

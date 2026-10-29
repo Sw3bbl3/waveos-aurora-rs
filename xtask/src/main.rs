@@ -837,6 +837,34 @@ fn host_audio() -> String {
     String::from(if cfg!(target_os = "macos") { "coreaudio" } else { "none" })
 }
 
+/// How QEMU runs the virtual CPUs, best first (QEMU takes the first that
+/// works). On an x86-64 host the processor's own virtualization runs
+/// WaveOS at close to native speed (KVM on Linux, HVF on macOS, WHPX on
+/// Windows), many times faster than emulating it; otherwise, and as the
+/// fallback, software emulation with one translation thread per CPU and a
+/// large translation cache. `AURORA_ACCEL` picks one instead (e.g. "tcg"
+/// or "tcg,thread=single").
+fn accelerators() -> Vec<String> {
+    if let Ok(a) = env::var("AURORA_ACCEL") {
+        return vec![a];
+    }
+    let mut list = Vec::new();
+    if cfg!(target_arch = "x86_64") {
+        if cfg!(target_os = "linux") {
+            // Only when this user may use it; otherwise QEMU would stop with an error.
+            if fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok() {
+                list.push(String::from("kvm"));
+            }
+        } else if cfg!(target_os = "macos") {
+            list.push(String::from("hvf"));
+        } else if cfg!(target_os = "windows") {
+            list.push(String::from("whpx"));
+        }
+    }
+    list.push(String::from("tcg,thread=multi,tb-size=1024"));
+    list
+}
+
 fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let code = find_ovmf();
     let vars = ovmf_vars(&code);
@@ -857,11 +885,9 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         // 64 MiB of video memory: room for 4K modes.
         cmd.args(["-vga", "std", "-global", "VGA.vgamem_mb=64"]);
     }
-    // Software emulation on non-x86 hosts: one translation thread per CPU and
-    // a large translation cache. AURORA_ACCEL overrides it
-    // (e.g. "tcg,thread=single").
-    let accel = env::var("AURORA_ACCEL").unwrap_or_else(|_| String::from("tcg,thread=multi,tb-size=1024"));
-    cmd.args(["-accel", &accel]);
+    for accel in accelerators() {
+        cmd.args(["-accel", &accel]);
+    }
     cmd.arg("-m").arg(opts.memory_mib.to_string());
     cmd.arg("-smp").arg(opts.smp.to_string());
     if !opts.allow_reboot {

@@ -30,6 +30,10 @@ const COPY_ON_WRITE: u64 = 1 << 10;
 /// (window surfaces) are their owners' to free: a stale entry for one must
 /// never touch the count of whatever the frame has become since.
 const COUNTED: u64 = 1 << 11;
+/// Software bit, with `COPY_ON_WRITE`: the page is writable, and was made
+/// read-only only to be shared after `fork`. A write fault gives the
+/// writer the page to itself (see [`AddressSpace::resolve_write`]).
+const FORK_WRITE: u64 = 1 << 52;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -80,6 +84,19 @@ pub fn shm_alloc_with(data: &[u8]) -> Option<u64> {
 /// Another holder for a counted frame (`shm_alloc`).
 pub fn shm_hold(frame: u64) {
     shm_retain(frame);
+}
+
+/// Counts private frames as shared by `holders` (a `fork`: parent and child).
+fn shm_adopt(frames: &[u64], holders: u32) {
+    let mut refs = SHM_REFS.lock();
+    for &f in frames {
+        *refs.entry(f).or_insert(0) += holders;
+    }
+}
+
+/// How many hold a counted frame (0: it isn't one).
+fn shm_holders(frame: u64) -> u32 {
+    SHM_REFS.lock().get(&frame).copied().unwrap_or(0)
 }
 
 /// A holder lets go of a counted frame; the last one frees it.
@@ -218,6 +235,34 @@ pub fn kmap_wc(phys: u64, size: u64) -> Option<u64> {
         x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
     }
     Some(base + (phys - start))
+}
+
+/// True if `[addr, addr+len)` is entirely mapped for user access (and
+/// writable if `write`) in the address space the CPU runs on.
+pub fn check_current(addr: u64, len: u64, write: bool) -> bool {
+    check_range(Cr3::read().0.start_address().as_u64(), addr, len, write)
+}
+
+/// [`AddressSpace::check`] for the tables at `pml4`.
+fn check_range(pml4: u64, addr: u64, len: u64, write: bool) -> bool {
+    if len == 0 {
+        return addr <= layout::USER_END;
+    }
+    let Some(end) = addr.checked_add(len) else { return false };
+    if end > layout::USER_END {
+        return false;
+    }
+    let mut page = addr & !(PAGE_SIZE - 1);
+    while page < end {
+        match walk(pml4, page, false, false) {
+            // (A page shared since `fork` counts as writable: writing to it
+            // faults, and the fault gives the writer a page of its own.)
+            Some(e) if *e & (PRESENT | USER) == PRESENT | USER && (!write || *e & (WRITABLE | FORK_WRITE) != 0) => {}
+            _ => return false,
+        }
+        page += PAGE_SIZE;
+    }
+    true
 }
 
 /// The page-table entries on the way to `va` in the current address space,
@@ -568,26 +613,39 @@ impl AddressSpace {
         }
     }
 
-    /// A copy of this address space (Linux `fork`): every private page is
-    /// duplicated; shared mappings (window surfaces) are left out.
-    pub fn fork_copy(&self) -> Option<AddressSpace> {
+    /// A copy of this address space (Linux `fork`), made without copying
+    /// memory: private pages become shared by both, read-only and
+    /// copy-on-write, and whoever writes to one first gets a copy (or, if
+    /// the other let go of it, the page itself). Shared memory stays
+    /// shared; other shared frames (window surfaces) are left out.
+    ///
+    /// (Copying it all took Firefox a second per process it started, for a
+    /// child that replaces it all at once with `exec`.)
+    pub fn fork_copy(&mut self) -> Option<AddressSpace> {
         let mut child = AddressSpace::new()?;
         child.mmap_next = self.mmap_next;
-        let mut resident = 0;
-        let ok = Self::copy_level(self.pml4, child.pml4, 3, &mut resident);
-        child.resident = resident;
-        // On failure, dropping the partial copy frees what it holds.
+        let mut shared = 0;
+        let ok = Self::copy_level(self.pml4, child.pml4, 3, &mut shared);
+        self.resident = self.resident.saturating_sub(shared);
+        // The parent's pages are read-only now: no CPU may keep writing
+        // through what it remembers of them.
+        if Cr3::read().0.start_address().as_u64() == self.pml4 {
+            x86_64::instructions::tlb::flush_all();
+        }
+        shootdown(0, u64::MAX, Some(self.pml4));
+        // On failure, dropping the partial copy lets go of what it holds.
         ok.then_some(child)
     }
 
-    fn copy_level(src: u64, dst: u64, level: u32, resident: &mut u64) -> bool {
+    fn copy_level(src: u64, dst: u64, level: u32, shared: &mut u64) -> bool {
         let limit = if level == 3 { 256 } else { 512 };
-        for i in 0..limit {
-            let e = table(src)[i];
-            if e & PRESENT == 0 {
-                continue;
-            }
-            if level == 0 {
+        if level == 0 {
+            let mut adopted = Vec::new();
+            for i in 0..limit {
+                let e = table(src)[i];
+                if e & PRESENT == 0 {
+                    continue;
+                }
                 if e & SHARED != 0 {
                     // Shared memory stays shared with the child; other
                     // shared frames (window surfaces) stay with the parent.
@@ -597,24 +655,71 @@ impl AddressSpace {
                     }
                     continue;
                 }
-                let Some(f) = frame::alloc() else { return false };
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        phys_to_virt(e & ADDR) as *const u8,
-                        phys_to_virt(f) as *mut u8,
-                        PAGE_SIZE as usize,
-                    );
-                }
-                table(dst)[i] = f | (e & !ADDR);
-                *resident += PAGE_SIZE;
-            } else {
-                let Some(t) = zeroed_frame() else { return false };
-                table(dst)[i] = t | (e & !ADDR);
-                if !Self::copy_level(e & ADDR, t, level - 1, resident) {
-                    return false;
-                }
+                let writable = if e & WRITABLE != 0 { FORK_WRITE } else { 0 };
+                let both = e & !WRITABLE | SHARED | COUNTED | COPY_ON_WRITE | writable;
+                table(src)[i] = both;
+                table(dst)[i] = both;
+                adopted.push(e & ADDR);
+                *shared += PAGE_SIZE;
+            }
+            shm_adopt(&adopted, 2);
+            return true;
+        }
+        for i in 0..limit {
+            let e = table(src)[i];
+            if e & PRESENT == 0 {
+                continue;
+            }
+            let Some(t) = zeroed_frame() else { return false };
+            table(dst)[i] = t | (e & !ADDR);
+            if !Self::copy_level(e & ADDR, t, level - 1, shared) {
+                return false;
             }
         }
+        true
+    }
+
+    /// A write to `va` faulted: if the page is one shared since `fork`, it
+    /// becomes this address space's own (the frame itself when nobody else
+    /// holds it any more, a copy otherwise) and the write can go again.
+    /// Also true when another thread already did that.
+    pub fn resolve_write(&mut self, va: u64) -> bool {
+        let page = va & !(PAGE_SIZE - 1);
+        let Some(e) = walk(self.pml4, page, false, false) else { return false };
+        let old = *e;
+        if old & (PRESENT | USER) != PRESENT | USER {
+            return false;
+        }
+        if old & WRITABLE != 0 {
+            return true;
+        }
+        if old & (COPY_ON_WRITE | FORK_WRITE) != COPY_ON_WRITE | FORK_WRITE {
+            return false;
+        }
+        let flags = old & !(ADDR | SHARED | COUNTED | COPY_ON_WRITE | FORK_WRITE) | WRITABLE;
+        let frame = old & ADDR;
+        if shm_holders(frame) == 1 {
+            // The last holder: no copy needed.
+            SHM_REFS.lock().remove(&frame);
+            *e = frame | flags;
+            self.resident += PAGE_SIZE;
+            self.invalidate(page);
+            return true;
+        }
+        let Some(copy) = frame::alloc() else { return false };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                phys_to_virt(frame) as *const u8,
+                phys_to_virt(copy) as *mut u8,
+                PAGE_SIZE as usize,
+            );
+        }
+        *e = copy | flags;
+        self.resident += PAGE_SIZE;
+        self.invalidate(page);
+        // Other threads must stop reading the shared page before this one writes its own.
+        shootdown(page, 1, Some(self.pml4));
+        shm_release(frame);
         true
     }
 
@@ -645,7 +750,7 @@ impl AddressSpace {
                             continue;
                         }
                         let va = (i4 as u64) << 39 | (i3 as u64) << 30 | (i2 as u64) << 21 | (i1 as u64) << 12;
-                        let (w, x) = (e & WRITABLE != 0, e & NO_EXECUTE == 0);
+                        let (w, x) = (e & (WRITABLE | FORK_WRITE) != 0, e & NO_EXECUTE == 0);
                         match out.last_mut() {
                             Some(last) if last.1 == va && (last.2, last.3) == (w, x) => last.1 += PAGE_SIZE,
                             _ => out.push((va, va + PAGE_SIZE, w, x)),
@@ -669,34 +774,23 @@ impl AddressSpace {
         Some((*e & ADDR, *e & WRITABLE != 0))
     }
 
-    /// True if `[addr, addr+len)` is entirely mapped for user access (and writable if `write`).
+    /// True if `[addr, addr+len)` is entirely mapped for user access (and
+    /// writable if `write`). (System calls check the running process with
+    /// [`check_current`]; this is for the self-tests.)
+    #[cfg(feature = "ktest")]
     pub fn check(&self, addr: u64, len: u64, write: bool) -> bool {
-        if len == 0 {
-            return addr <= layout::USER_END;
-        }
-        let Some(end) = addr.checked_add(len) else { return false };
-        if end > layout::USER_END {
-            return false;
-        }
-        let mut page = addr & !(PAGE_SIZE - 1);
-        while page < end {
-            match self.user_page(page) {
-                Some((_, w)) if w || !write => {}
-                _ => return false,
-            }
-            page += PAGE_SIZE;
-        }
-        true
+        check_range(self.pml4, addr, len, write)
     }
 
     /// Copies `data` into user memory at `va` through the physical window (works
-    /// even when this address space is not the active one). Pages of cached
+    /// even when this address space is not the active one). Pages shared
+    /// since `fork` become this address space's own first; pages of cached
     /// files are refused: everyone mapping the file shares them.
-    pub fn write_bytes(&self, va: u64, data: &[u8]) -> Result<(), isize> {
+    pub fn write_bytes(&mut self, va: u64, data: &[u8]) -> Result<(), isize> {
         let mut done = 0usize;
         while done < data.len() {
             let cur = va + done as u64;
-            if walk(self.pml4, cur, false, false).is_some_and(|e| *e & COPY_ON_WRITE != 0) {
+            if walk(self.pml4, cur, false, false).is_some_and(|e| *e & COPY_ON_WRITE != 0) && !self.resolve_write(cur) {
                 return Err(aurora_abi::err::EFAULT);
             }
             let (phys, _) = self.user_page(cur).ok_or(aurora_abi::err::EFAULT)?;

@@ -18,18 +18,23 @@ type SysResult = Result<u64, isize>;
 pub extern "sysv64" fn dispatch(f: &mut SyscallFrame) {
     let a = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
     crate::telemetry::syscall(f.rax as usize);
-    // Linux programs use Linux's numbers and meanings.
-    let linux = proc::current().is_some_and(|p| p.linux.is_some());
+    // Linux programs use Linux's numbers and meanings. (The process is
+    // looked up once, here, for all the steps of the call.)
+    let p = proc::current();
+    let linux = p.as_ref().filter(|p| p.linux.is_some());
     let nr = f.rax;
-    let result = if linux { crate::compat::linux::dispatch(f) } else { handle(f.rax as usize, a) };
+    let result = match linux {
+        Some(p) => crate::compat::linux::dispatch(f, p),
+        None => handle(f.rax as usize, a),
+    };
     f.rax = match result {
         Ok(v) => v,
         Err(e) => (-e.abs()) as u64,
     };
-    if linux {
-        crate::compat::linux::signal::on_return(f, nr);
+    if let Some(p) = linux {
+        crate::compat::linux::signal::on_return(f, nr, p);
     }
-    proc::check_killed();
+    proc::check_killed_of(p.as_deref());
 }
 
 pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {

@@ -49,7 +49,7 @@ impl EventFd {
                     *v -= n;
                     drop(v);
                     out[..8].copy_from_slice(&n.to_le_bytes());
-                    readiness::notify();
+                    readiness::notify(readiness::key(self));
                     return Ok(8);
                 }
             }
@@ -59,7 +59,7 @@ impl EventFd {
             if crate::proc::interrupted() {
                 return Err(EINTR);
             }
-            readiness::wait(gen, 1000);
+            readiness::wait(gen, &[readiness::key(self)], 1000);
         }
     }
 
@@ -75,7 +75,7 @@ impl EventFd {
                 if EVENT_MAX - *v >= add {
                     *v += add;
                     drop(v);
-                    readiness::notify();
+                    readiness::notify(readiness::key(self));
                     return Ok(8);
                 }
             }
@@ -85,7 +85,7 @@ impl EventFd {
             if crate::proc::interrupted() {
                 return Err(EINTR);
             }
-            readiness::wait(gen, 1000);
+            readiness::wait(gen, &[readiness::key(self)], 1000);
         }
     }
 }
@@ -234,7 +234,7 @@ pub fn timerfd_settime(p: &Process, fd: u64, flags: u64, new: u64, old: u64) -> 
         *t = Timer { next, interval, count: 0 };
         prev
     };
-    readiness::notify();
+    readiness::notify(readiness::key(&*tf));
     if old != 0 {
         put_itimerspec(old, &prev)?;
     }
@@ -305,7 +305,7 @@ pub fn epoll_ctl(p: &Process, epfd: u64, op: u64, fd: u64, event: u64) -> Result
         _ => return Err(EINVAL),
     }
     drop(set);
-    readiness::notify();
+    readiness::notify(readiness::key(&*ep));
     Ok(0)
 }
 
@@ -368,6 +368,15 @@ impl Epoll {
     }
 
     /// The soonest a watched timer expires (ms), to bound the sleep.
+    /// What to wait on for a change: this set (`epoll_ctl`) and what it watches.
+    fn wait_keys(&self, p: &Process) -> Vec<usize> {
+        let mut keys = alloc::vec![readiness::key(self)];
+        for &fd in self.interest.lock().keys() {
+            super::fs::wait_keys(p, fd as usize, &mut keys);
+        }
+        keys
+    }
+
     fn next_timer(&self, p: &Process) -> Option<u64> {
         let set = self.interest.lock();
         set.keys()
@@ -415,6 +424,6 @@ pub fn epoll_wait(p: &Process, epfd: u64, events: u64, max: u64, timeout_ms: i64
         if let Some(t) = ep.next_timer(p) {
             wait = wait.min(t.max(1));
         }
-        readiness::wait(gen, wait.max(1));
+        readiness::wait(gen, &ep.wait_keys(p), wait.max(1));
     }
 }

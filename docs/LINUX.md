@@ -215,9 +215,23 @@ These are defaults: what you change in Firefox's settings wins.
 Firefox's sandboxes rely on Linux features WaveOS doesn't have yet
 (seccomp filters, namespaces), so the launcher turns them off; with site
 isolation off too, a page that broke into its content process could read
-other sites' pages there. Firefox draws in software. In QEMU, which
-emulates the processor, it takes about a minute to start and longer for
-its first page.
+other sites' pages there. Firefox draws in software. In QEMU emulating
+the processor it takes 25 to 31 seconds to show its new tab page (at
+1920 × 1080, on four virtual processors); `cargo xtask run` uses the
+host's virtualization instead when it has some (KVM, HVF, WHPX), which is
+many times faster.
+
+What made it start faster, for anyone working on the layer: the kernel
+heap gives small blocks from per-size free lists; `fork` shares pages
+copy-on-write (`mm::vmm`, resolved in the page fault handler); `poll`,
+`select` and `epoll` wait on keys of the objects they watch
+(`proc::readiness`) instead of waking on every change in the system;
+checking user pointers, the signal check on return and finding the
+current process take no lock shared by the process's threads; and
+`link` fails with `EPERM`, as on file systems without hard links, so that
+fontconfig can save its cache. Sampling the virtual processors through
+QEMU's monitor (`info registers -a`, then following frame pointers) found
+each of these.
 
 ## NetSurf
 

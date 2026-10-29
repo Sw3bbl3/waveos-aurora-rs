@@ -37,8 +37,12 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt.simd_floating_point.set_handler_fn(simd_fp);
     unsafe {
         idt.double_fault.set_handler_fn(double_fault).set_stack_index(gdt::DOUBLE_FAULT_IST);
-        idt.page_fault.set_handler_fn(page_fault).set_stack_index(gdt::PAGE_FAULT_IST);
     }
+    // On the faulting task's own stack, not a stack of the CPU's: resolving
+    // a write to a page shared since `fork` may wait (and the CPU run other
+    // tasks, which may fault too). A kernel stack overflowing still ends in
+    // a double fault, on its own stack.
+    idt.page_fault.set_handler_fn(page_fault);
     idt.machine_check.set_handler_fn(machine_check);
 
     idt[TIMER_VECTOR].set_handler_fn(timer);
@@ -153,6 +157,24 @@ extern "x86-interrupt" fn machine_check(frame: InterruptStackFrame) -> ! {
 
 extern "x86-interrupt" fn page_fault(mut frame: InterruptStackFrame, code: PageFaultErrorCode) {
     let addr = Cr2::read_raw();
+    // A write to a page shared since `fork` (by the program, or by a system
+    // call copying out to it): the page becomes the writer's own and the
+    // write goes again. Only where interrupts were on (a program, or a
+    // system call holding no spinning lock): this may wait for the process's
+    // memory lock and for other CPUs.
+    let write_protected = PageFaultErrorCode::CAUSED_BY_WRITE | PageFaultErrorCode::PROTECTION_VIOLATION;
+    if code.contains(write_protected)
+        && addr < aurora_abi::layout::USER_END
+        && frame.cpu_flags.contains(x86_64::registers::rflags::RFlags::INTERRUPT_FLAG)
+        && (from_user(&frame) || crate::syscall::user::fixup(frame.instruction_pointer.as_u64(), addr).is_some())
+    {
+        x86_64::instructions::interrupts::enable();
+        let resolved = crate::proc::resolve_write(addr);
+        x86_64::instructions::interrupts::disable();
+        if resolved {
+            return;
+        }
+    }
     if !from_user(&frame) {
         // A user copy hitting memory another thread just unmapped: resume
         // at the copy routine's fault exit, which reports EFAULT.

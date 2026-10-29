@@ -210,11 +210,40 @@ pub fn get(pid: Pid) -> Option<Arc<Process>> {
     TABLE.lock().get(&pid).cloned()
 }
 
+/// A write to user address `addr` faulted: makes a page the process shares
+/// since `fork` its own (see `AddressSpace::resolve_write`). True if the
+/// write can go again.
+pub fn resolve_write(addr: u64) -> bool {
+    let Some(p) = current() else { return false };
+    let mut guard = p.mem();
+    guard.as_mut().is_some_and(|a| a.resolve_write(addr))
+}
+
+/// Each CPU's last answer to [`current`]: (pid, process). Process ids are
+/// never reused, so a matching pid is the same process.
+static CURRENT: [IrqMutex<(Pid, Option<Arc<Process>>)>; crate::arch::percpu::MAX_CPUS] =
+    [const { IrqMutex::new((0, None)) }; crate::arch::percpu::MAX_CPUS];
+
+/// The process of the running task. Asked several times in every system
+/// call, so each CPU remembers its last answer rather than looking in the
+/// table, whose lock every CPU would otherwise queue for.
 pub fn current() -> Option<Arc<Process>> {
-    match sched::current_pid() {
-        0 => None,
-        pid => get(pid),
-    }
+    let (found, old) = x86_64::instructions::interrupts::without_interrupts(|| {
+        let pid = sched::current_pid();
+        if pid == 0 {
+            return (None, None);
+        }
+        let mut slot = CURRENT[crate::arch::percpu::cpu_id()].lock();
+        if slot.0 == pid {
+            return (slot.1.clone(), None);
+        }
+        let p = get(pid);
+        let old = core::mem::replace(&mut *slot, (pid, p.clone()));
+        (p, old.1)
+    });
+    // The one replaced may be the last reference: let it go with interrupts on.
+    drop(old);
+    found
 }
 
 pub fn all() -> Vec<Arc<Process>> {
@@ -549,8 +578,12 @@ fn leaving_for_exec(p: &Process) -> bool {
 /// Ends the current thread if its process is terminating (or another thread
 /// is replacing the program). Call only at safe points.
 pub fn check_killed() {
-    let pid = sched::current_pid();
-    if pid != 0 && get(pid).is_some_and(|p| p.killed.load(Ordering::Acquire) || leaving_for_exec(&p)) {
+    check_killed_of(current().as_deref());
+}
+
+/// [`check_killed`] for the running task's process `p` (already looked up).
+pub fn check_killed_of(p: Option<&Process>) {
+    if p.is_some_and(|p| p.killed.load(Ordering::Acquire) || leaving_for_exec(p)) {
         sched::exit();
     }
 }
@@ -644,11 +677,13 @@ pub fn fork(
     linux: crate::compat::linux::Linux,
 ) -> Result<Arc<Process>, isize> {
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let started = crate::time::uptime_ms();
     let (aspace, cr3, owner, resident) = if share_vm {
         (None, parent.cr3(), parent.vm_owner.load(Ordering::Acquire), 0)
     } else {
-        let mem = parent.mem();
-        let copy = mem.as_ref().ok_or(ESRCH)?.fork_copy().ok_or(ENOMEM)?;
+        let mut mem = parent.mem();
+        let copy = mem.as_mut().ok_or(ESRCH)?.fork_copy().ok_or(ENOMEM)?;
+        parent.resident_kib.store(mem.as_ref().map_or(0, |a| a.resident / 1024), Ordering::Relaxed);
         let (cr3, resident) = (copy.cr3(), copy.resident);
         (Some(copy), cr3, pid, resident)
     };
@@ -684,7 +719,12 @@ pub fn fork(
     let mut fpu = alloc::boxed::Box::new(crate::arch::fpu::FpuState::new());
     fpu.save();
     let raw = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(frame)) as u64;
-    log!("proc", "pid {} forked pid {}{}", parent.pid, pid, if share_vm { " (sharing memory)" } else { "" });
+    if share_vm {
+        log!("proc", "pid {} forked pid {} (sharing memory)", parent.pid, pid);
+    } else {
+        let ms = crate::time::uptime_ms() - started;
+        log!("proc", "pid {} forked pid {} ({} MiB copied in {} ms)", parent.pid, pid, resident >> 20, ms);
+    }
     let task = sched::spawn_user(&name, fork_main, raw, pid, cr3, fs_base, fpu);
     process.main_task.store(task, Ordering::Release);
     crate::telemetry::process("start", pid, &name, &parent.path());

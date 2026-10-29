@@ -56,7 +56,7 @@ pub fn clone(
     }
     if flags & CLONE_CHILD_SETTID != 0 {
         // In the child's memory (the same as ours when it is shared).
-        if let Some(a) = child.mem().as_ref() {
+        if let Some(a) = child.mem().as_mut() {
             let _ = a.write_bytes(ctid, &(pid as u32).to_le_bytes());
         }
     }

@@ -8,7 +8,7 @@ Naviguez sur le Web avec JavaScript au complet.
 4. Les téléchargements vont dans votre dossier Downloads, où Files les affiche.
 
 ## Résultat attendu et dépannage
-Firefox est le Firefox ESR de Mozilla, fourni par Debian, qui fonctionne sur la couche Linux de WaveOS : il affiche les sites comme Firefox ailleurs, avec JavaScript, la vidéo et la mise en page moderne. Il suit l’apparence claire ou sombre de WaveOS à son démarrage. Il met environ une minute à démarrer dans une machine virtuelle qui émule le processeur, et sa première page prend plus de temps; les pages et onglets suivants sont plus rapides.
+Firefox est le Firefox ESR de Mozilla, fourni par Debian, qui fonctionne sur la couche Linux de WaveOS : il affiche les sites comme Firefox ailleurs, avec JavaScript, la vidéo et la mise en page moderne. Il suit l’apparence claire ou sombre de WaveOS à son démarrage. Il met environ une demi-minute à démarrer dans une machine virtuelle qui émule le processeur (comme sur les Mac à puce Apple), bien moins là où la machine virtuelle utilise la virtualisation du processeur lui-même; les pages et onglets suivants sont plus rapides.
 
 Firefox vient avec les paquets Linux sur le disque. S’ils n’y sont pas (le disque a été créé sans eux, ou ils n’ont pas pu être téléchargés), NetSurf s’ouvre à la place; voir [NetSurf](apps-netsurf.md). Les bacs à sable de Firefox sont désactivés sur WaveOS, qui n’a pas encore les fonctions Linux qu’ils demandent : naviguez sur des sites de confiance.
 
