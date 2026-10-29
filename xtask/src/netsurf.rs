@@ -28,6 +28,11 @@ const NETSURF: (&str, &str) = (
     "4dea880ff3c2f698bfd62c982b259340f9abcd7f67e6c8eb2b32c61f71644b7b",
 );
 
+/// mbed TLS's options, for it and the code using its headers: big-number
+/// division without 128-bit division, which the Clang build (linked
+/// without a compiler runtime) can't call.
+const TLS_CONFIG: &[&str] = &["-DMBEDTLS_NO_UDBL_DIVISION"];
+
 const SNAPSHOT: &str = "https://snapshot.debian.org/archive/debian/20261001T000000Z";
 
 /// A library's upstream source from Debian, Debian's patches, and the
@@ -357,7 +362,10 @@ pub fn build(cc: &Cc) -> Option<Vec<Program>> {
     }
 
     let mut all = Vec::new();
-    let quiet = flags(&["-w", "-DNDEBUG"]);
+    // Warnings are only shown when a file fails, but what newer compilers
+    // refuse (and what truncates pointers on 64-bit) fails everywhere.
+    let quiet =
+        flags(&["-DNDEBUG", "-Werror=implicit-function-declaration", "-Werror=implicit-int", "-Werror=int-conversion"]);
     let with =
         |base: &[OsString], extra: Vec<OsString>| -> Vec<OsString> { base.iter().cloned().chain(extra).collect() };
 
@@ -401,7 +409,7 @@ pub fn build(cc: &Cc) -> Option<Vec<Program>> {
         "mbedtls",
         tls,
         &c_files(tls, "library"),
-        with(&quiet, include(&[&tls.join("include"), &tls.join("library")])),
+        with(&quiet, [flags(TLS_CONFIG), include(&[&tls.join("include"), &tls.join("library")])].concat()),
         &mut all,
     );
     let mut curl_src = c_files(curl, "lib");
@@ -416,6 +424,7 @@ pub fn build(cc: &Cc) -> Option<Vec<Program>> {
             &quiet,
             [
                 flags(&["-DHAVE_CONFIG_H", "-DBUILDING_LIBCURL", "-DCURL_STATICLIB", "-include", "curl_config.h"]),
+                flags(TLS_CONFIG),
                 include(&[&cfg, &curl.join("include"), &curl.join("lib"), &tls.join("include"), z]),
             ]
             .concat(),

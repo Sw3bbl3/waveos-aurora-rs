@@ -4,6 +4,12 @@
 #ifndef WAVEOS_CURL_CONFIG_H
 #define WAVEOS_CURL_CONFIG_H
 
+/* As curl's configure sets it on Linux: musl declares memrchr (which
+ * HAVE_MEMRCHR uses) and the other GNU extensions only with it. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #define CURL_OS "x86_64-pc-linux-musl"
 #define CURL_CA_BUNDLE "/System/NetSurf/ca-bundle.pem"
 
