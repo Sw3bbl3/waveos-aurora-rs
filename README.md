@@ -31,13 +31,14 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 | ![The desktop in the light appearance](docs/screenshots/0.8/desktop-light.png) | ![Settings, Bar & Crest, with a live preview of the top bar](docs/screenshots/0.8/settings-bar-crest.png) |
 | **Light, too.** Every surface, every app. | **Settings.** Turn Crest off, show the battery level, log in automatically. |
 
-## The web, small and quick.
+## The whole web.
 
-**NetSurf** is the browser: a small, fast open-source engine with HTML, CSS, HTTPS, cookies and pictures, drawing straight into its WaveOS window. It reaches the web through our own network drivers and TCP/IP.
+**Firefox** is the browser: Mozilla's Firefox ESR, with full JavaScript, running unchanged on WaveOS's Linux layer and showing its window through our Wayland bridge. It starts clean (no welcome tour, no extra buttons, the dark theme when WaveOS is dark) and reaches the web through our own network drivers and TCP/IP. **NetSurf**, a small browser that starts in seconds, comes in the system image too.
 
 | | |
 |---|---|
-| ![NetSurf showing Wikipedia's main page, with photos](docs/screenshots/netsurf-wikipedia.png) | ![NetSurf's welcome page](docs/screenshots/netsurf-welcome.png) |
+| ![Firefox on WaveOS in the dark theme, showing example.com in several languages](docs/screenshots/firefox.png) | ![NetSurf showing Wikipedia's main page, with photos](docs/screenshots/netsurf-wikipedia.png) |
+| **Firefox.** The web, JavaScript and all. | **NetSurf.** Small and quick, no JavaScript. |
 
 ## JavaScript, written from scratch too.
 
@@ -97,7 +98,7 @@ A minute later, you're at the desktop. Add `--monitor` to open the System Explor
 | **Nebula Engine** | HTML, CSS and layout for Learn; HTTP and TLS for `fetch` and apps |
 | **Pulsar** | JavaScript engine: compiler, VM, collector, DOM — [status](docs/PULSAR.md) |
 
-Nearly everything is our own. Where we stand on others' shoulders, we say so: cryptographic primitives come from [RustCrypto](https://github.com/RustCrypto), ACPI's AML interpreter from the [`acpi`](https://crates.io/crates/acpi) crate, and maths functions from [`libm`](https://crates.io/crates/libm). The browser is [NetSurf](https://www.netsurf-browser.org/) (GPL-2.0), shipped as a separate program ([how it is built](docs/NETSURF.md)).
+Nearly everything is our own. Where we stand on others' shoulders, we say so: cryptographic primitives come from [RustCrypto](https://github.com/RustCrypto), ACPI's AML interpreter from the [`acpi`](https://crates.io/crates/acpi) crate, and maths functions from [`libm`](https://crates.io/crates/libm). The browsers are [Firefox ESR](https://www.mozilla.org/firefox/enterprise/) (MPL-2.0, Debian's build, on the disk with the [Linux programs](docs/LINUX.md)) and [NetSurf](https://www.netsurf-browser.org/) (GPL-2.0, [how it is built](docs/NETSURF.md)), shipped as separate programs.
 
 Go deeper: [Architecture](docs/ARCHITECTURE.md) · [Every feature](docs/FEATURES.md) · [Roadmap](docs/ROADMAP.md) · [Building and debugging](docs/BUILDING.md) · [Validation](docs/VALIDATION-2026-09-30.md) · [Contributing](CONTRIBUTING.md)
 

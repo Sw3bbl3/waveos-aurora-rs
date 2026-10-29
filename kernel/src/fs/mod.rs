@@ -12,6 +12,7 @@ pub mod aurorafs;
 pub mod cache;
 pub mod fat;
 pub mod index;
+pub mod mapcache;
 pub mod ramfs;
 pub mod tarfs;
 pub mod trash;
@@ -305,6 +306,9 @@ pub fn unlink(path: &str) -> FsResult<()> {
     if fs.read_only() {
         return Err(EROFS);
     }
+    if let Ok(ino) = fs.lookup(dir, &name) {
+        mapcache::forget(&fs, ino);
+    }
     fs.unlink(dir, &name)?;
     index::removed(&resolve("/", path));
     Ok(())
@@ -342,6 +346,10 @@ pub fn rename(from: &str, to: &str) -> FsResult<()> {
     let to_n = resolve("/", to);
     if to_n.starts_with(&from_n) && to_n.as_bytes().get(from_n.len()) == Some(&b'/') {
         return Err(EINVAL);
+    }
+    // A file this replaces is gone.
+    if let Ok(ino) = fs_b.lookup(dir_b, &name_b) {
+        mapcache::forget(&fs_b, ino);
     }
     fs_a.rename(dir_a, &name_a, dir_b, &name_b)?;
     index::renamed(&from_n, &to_n);
@@ -403,6 +411,7 @@ pub fn open(path: &str, flags: usize) -> FsResult<OpenFile> {
         return Err(EISDIR);
     }
     if flags & TRUNCATE != 0 {
+        mapcache::forget(&fs, ino);
         fs.truncate(ino, 0)?;
     }
     Ok(OpenFile { fs, ino, pos: 0, readable: flags & READ != 0 || !writable, writable, append: flags & APPEND != 0 })
@@ -428,6 +437,7 @@ impl OpenFile {
         if self.append {
             self.pos = self.fs.metadata(self.ino)?.size;
         }
+        mapcache::forget(&self.fs, self.ino);
         let n = self.fs.write(self.ino, self.pos, data)?;
         self.pos += n as u64;
         Ok(n)
@@ -456,6 +466,7 @@ impl OpenFile {
         if !self.writable {
             return Err(EBADF);
         }
+        mapcache::forget(&self.fs, self.ino);
         self.fs.truncate(self.ino, size)
     }
 }

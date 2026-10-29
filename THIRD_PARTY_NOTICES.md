@@ -16,6 +16,12 @@ Programs downloaded at build time (pinned by SHA-256) and shipped as separate pr
 |---|---|---|---|
 | BusyBox (Debian's `busybox-static`) | 1.35.0 | GPL-2.0; Debian's copyright file is in `/System/Licenses/busybox.txt`, the source is in Debian's archive | `/System/Linux/bin/busybox`, run as a Linux program |
 
+Debian packages that `cargo xtask run` and `cargo xtask image` put on the disk (unless `--no-linux-root` is given), unchanged, from a fixed snapshot of Debian 12 checked against the archive's signed checksums:
+
+| Packages | Version | License | Where |
+|---|---|---|---|
+| Firefox ESR (`firefox-esr`), bash, coreutils, Python 3, the DejaVu and WenQuanYi Micro Hei fonts and their dependencies (GTK, glibc and about 140 more) | Firefox 140.12.0esr, the rest as in Debian 12 | Each package's own: MPL-2.0 for Firefox, Apache-2.0 or GPL-3+ with the font exception for WenQuanYi Micro Hei, GPL, LGPL, MIT, BSD and others; each package's Debian copyright file is in `/Linux/usr/share/doc/<package>/copyright`, the sources are in Debian's archive | `/Linux`, run as Linux programs; WaveOS adds only Firefox's settings files ([linux-programs/firefox](linux-programs/firefox)) |
+
 Built from source in this repository and shipped as a separate program:
 
 | Program | Version | License | Where |

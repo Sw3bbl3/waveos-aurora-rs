@@ -66,19 +66,24 @@ pub fn clone_thread(
     // The thread must not run before its bookkeeping is in place, so its
     // clear-tid word is recorded under the lock it takes when it exits.
     let mut clear = linux.clear_tid.lock();
-    let task = proc::spawn_linux_thread(child, fs)?;
+    let set_tid = [
+        if flags & CLONE_PARENT_SETTID != 0 { ptid } else { 0 },
+        if flags & CLONE_CHILD_SETTID != 0 { ctid } else { 0 },
+    ];
+    let task = proc::spawn_linux_thread(child, fs, set_tid)?;
     linux.signals.thread_started(sched::current_id(), task);
     let tid_ = task + 0x10_0000;
     if flags & CLONE_CHILD_CLEARTID != 0 {
         clear.insert(task, ctid);
     }
+    // The thread wrote its id already (before running); written here too so
+    // it is there when we return, still under the lock, so that it can't
+    // land after the thread has exited and cleared it (glibc uses one word
+    // for both).
+    for addr in set_tid.into_iter().filter(|&a| a != 0) {
+        let _ = user::write_u32(addr, tid_ as u32);
+    }
     drop(clear);
-    if flags & CLONE_PARENT_SETTID != 0 {
-        user::put(ptid, &(tid_ as u32))?;
-    }
-    if flags & CLONE_CHILD_SETTID != 0 {
-        user::put(ctid, &(tid_ as u32))?;
-    }
     Ok(tid_)
 }
 

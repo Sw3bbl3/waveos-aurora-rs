@@ -5,7 +5,7 @@ WaveOS supports wired/emulated virtio-net and selected Intel e1000/e1000e adapte
 1. Start QEMU with its default network or `--net e1000e`.
 2. Open Settings → Network or run `ifconfig`.
 3. Try `nslookup example.com`, `ping example.com`, and `fetch -i https://example.com`.
-4. Open a simple page in NetSurf.
+4. Open a page in Firefox.
 
 A failed ping alone does not prove HTTP is unavailable. Check DHCP and DNS separately. `--net none` intentionally disables the guest network; Learn still works.
 

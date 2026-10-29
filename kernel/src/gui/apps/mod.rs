@@ -106,12 +106,24 @@ pub static CATALOG: &[AppInfo] = &[
         also: &[],
     },
     AppInfo {
+        kind: AppKind::Firefox,
+        name: "Firefox",
+        icon: Icon::Firefox,
+        pinned: true,
+        listed: true,
+        // Starts Firefox ESR from the disk's Linux packages, or NetSurf
+        // when they aren't there (see docs/LINUX.md).
+        path: "/System/Apps/Firefox.elf",
+        single: false,
+        also: &[],
+    },
+    AppInfo {
         kind: AppKind::NetSurf,
         name: "NetSurf",
         icon: Icon::Nebula,
-        pinned: true,
+        pinned: false,
         listed: true,
-        // The browser is a Linux program (see docs/NETSURF.md).
+        // The small browser, a Linux program in the system image (see docs/NETSURF.md).
         path: "/System/NetSurf/netsurf",
         single: false,
         also: &[],
@@ -206,16 +218,6 @@ pub static CATALOG: &[AppInfo] = &[
         single: true,
         // The game itself, which the app starts.
         also: &["/System/Games/Doom/doom"],
-    },
-    AppInfo {
-        kind: AppKind::Firefox,
-        name: "Firefox ESR",
-        icon: Icon::Firefox,
-        pinned: false,
-        listed: true,
-        path: "/System/Apps/Firefox.elf",
-        single: false,
-        also: &[],
     },
     AppInfo {
         kind: AppKind::Welcome,

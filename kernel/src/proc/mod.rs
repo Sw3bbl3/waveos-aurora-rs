@@ -397,22 +397,37 @@ pub fn spawn_thread(entry: u64, stack: u64, arg: u64) -> Result<u64, isize> {
 
 /// Starts a Linux thread in the calling process: it begins as a copy of
 /// `frame` (the caller's registers at `clone`), with thread pointer `fs_base`.
-pub fn spawn_linux_thread(frame: crate::arch::syscall::SyscallFrame, fs_base: u64) -> Result<u64, isize> {
+/// Its thread id goes into each nonzero address of `set_tid` before it
+/// runs (`CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`).
+pub fn spawn_linux_thread(
+    frame: crate::arch::syscall::SyscallFrame,
+    fs_base: u64,
+    set_tid: [u64; 2],
+) -> Result<u64, isize> {
     let p = current().ok_or(EPERM)?;
     if p.threads.load(Ordering::Acquire) >= 512 {
         return Err(EAGAIN);
     }
     p.threads.fetch_add(1, Ordering::AcqRel);
-    let raw = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(frame)) as u64;
+    let raw = alloc::boxed::Box::into_raw(alloc::boxed::Box::new((frame, set_tid))) as u64;
     Ok(sched::spawn_task_tls(&p.name(), linux_thread, raw, p.pid, p.cr3(), fs_base))
 }
 
 fn linux_thread(raw: u64) {
-    let frame = unsafe { alloc::boxed::Box::from_raw(raw as *mut crate::arch::syscall::SyscallFrame) };
-    let f = *frame;
-    drop(frame);
+    let start = unsafe { alloc::boxed::Box::from_raw(raw as *mut (crate::arch::syscall::SyscallFrame, [u64; 2])) };
+    let (f, set_tid) = *start;
+    drop(start);
     if interrupted() {
         return;
+    }
+    // glibc keeps the thread id that `clone` sets and takes locks with it
+    // (a write lock whose writer is "us" is a deadlock to it), so it must
+    // be there before the thread's first instruction, as on Linux.
+    // (Its id as Linux programs see it: not the main thread's, so its task id
+    // kept clear of process ids, as `compat::linux` gives it.)
+    let tid = (sched::current_id() + 0x10_0000) as u32;
+    for addr in set_tid.into_iter().filter(|&a| a != 0) {
+        let _ = crate::syscall::user::write_u32(addr, tid);
     }
     crate::arch::syscall::enter_user_frame(&f);
 }

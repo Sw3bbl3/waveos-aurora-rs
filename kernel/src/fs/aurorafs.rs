@@ -20,6 +20,9 @@ impl Disk for CachedDisk {
     fn read(&mut self, block: u64, buf: &mut ::aurorafs::Block) -> ::aurorafs::Result<()> {
         io(self.0.read(block, buf))
     }
+    fn read_run(&mut self, block: u64, buf: &mut [u8]) -> ::aurorafs::Result<()> {
+        io(self.0.read_run(block, buf))
+    }
     fn write(&mut self, block: u64, buf: &::aurorafs::Block) -> ::aurorafs::Result<()> {
         io(self.0.write(block, buf))
     }

@@ -60,6 +60,31 @@ pub fn init() {
     IDT.load();
 }
 
+/// Return addresses up the interrupted kernel code's frame-pointer chain
+/// (the kernel is built with frame pointers). The walk starts where it is
+/// printed, goes up through the panic and the handler (on this stack), and
+/// prints the frames of the interrupted stack, near its stack pointer.
+struct Callers(u64);
+
+impl core::fmt::Display for Callers {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        let (mut rbp, here): (u64, u64);
+        unsafe { core::arch::asm!("mov {}, rbp", "mov {}, rsp", out(reg) rbp, out(reg) here) };
+        let near = |p: u64, base: u64| p >= base && p < base.saturating_add(64 * 1024) && p.is_multiple_of(8);
+        let interrupted = self.0;
+        for _ in 0..48 {
+            if near(rbp, interrupted) {
+                let ret = unsafe { *((rbp + 8) as *const u64) };
+                write!(f, " {ret:#x}")?;
+            } else if !near(rbp, here) {
+                break;
+            }
+            rbp = unsafe { *(rbp as *const u64) };
+        }
+        Ok(())
+    }
+}
+
 fn fatal(name: &str, frame: &InterruptStackFrame, detail: core::fmt::Arguments) -> ! {
     if from_user(frame) {
         crate::proc::crash_current(format_args!(
@@ -71,13 +96,14 @@ fn fatal(name: &str, frame: &InterruptStackFrame, detail: core::fmt::Arguments) 
         ));
     }
     panic!(
-        "CPU exception: {}\n{}\nRIP={:#x} CS={:#x} RFLAGS={:#x} RSP={:#x}",
+        "CPU exception: {}\n{}\nRIP={:#x} CS={:#x} RFLAGS={:#x} RSP={:#x}\ncalled from:{}",
         name,
         detail,
         frame.instruction_pointer.as_u64(),
         frame.code_segment.0,
         frame.cpu_flags.bits(),
-        frame.stack_pointer.as_u64()
+        frame.stack_pointer.as_u64(),
+        Callers(frame.stack_pointer.as_u64())
     );
 }
 
@@ -135,7 +161,11 @@ extern "x86-interrupt" fn page_fault(mut frame: InterruptStackFrame, code: PageF
             return;
         }
     }
-    fatal("Page Fault (#PF)", &frame, format_args!("address {:#x}, {:?}", addr, code));
+    if from_user(&frame) {
+        fatal("Page Fault (#PF)", &frame, format_args!("address {:#x}, {:?}", addr, code));
+    }
+    let walk = crate::mm::vmm::entries_for(addr);
+    fatal("Page Fault (#PF)", &frame, format_args!("address {:#x}, {:?}, page tables {:x?}", addr, code, walk));
 }
 
 extern "x86-interrupt" fn timer(frame: InterruptStackFrame) {

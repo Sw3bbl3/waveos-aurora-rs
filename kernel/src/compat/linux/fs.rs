@@ -1064,8 +1064,14 @@ pub fn fcntl(p: &Process, fd: u64, cmd: u64, arg: u64) -> Result<u64, isize> {
             }
             Ok(0)
         }
-        // Locks, pipe sizes: accepted.
-        5..=7 | 1031 | 1032 => Ok(0),
+        // F_GETLK, F_OFD_GETLK: record locks aren't kept, so none is ever in
+        // the way (`l_type`, the first field of `struct flock`, becomes
+        // F_UNLCK). Left as it was, the asker would read back its own
+        // request as someone else's lock (SQLite then can't open a database
+        // in WAL mode).
+        5 | 36 => user::put(arg, &2u16).map(|_| 0),
+        // Setting locks (F_SETLK, F_SETLKW and the OFD ones), pipe sizes: accepted.
+        6 | 7 | 37 | 38 | 1031 | 1032 => Ok(0),
         // Seals on memory files: accepted, none reported.
         1033 | 1034 if shm_of(p, fd).is_some() => Ok(0),
         _ => Err(EINVAL),

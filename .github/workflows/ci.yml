@@ -100,13 +100,13 @@ jobs:
         run: cargo xtask build
       - name: Boot to desktop (headless smoke test)
         run: |
-          timeout 180 cargo xtask run --no-build --headless > serial.log 2>&1 || true
+          timeout 180 cargo xtask run --no-build --headless --no-linux-root > serial.log 2>&1 || true
           sed 's/\x1b\[[0-9;]*[A-Za-z]//g' serial.log | grep -v '^\s*$' | tail -40
           grep -q "Aurora desktop ready" serial.log
           grep -q "mounted AuroraFS" serial.log
       - name: Boot to desktop on virtio-gpu (the ported Linux DRM driver)
         run: |
-          timeout 180 cargo xtask run --no-build --headless --gpu virtio > serial-gpu.log 2>&1 || true
+          timeout 180 cargo xtask run --no-build --headless --no-linux-root --gpu virtio > serial-gpu.log 2>&1 || true
           sed 's/\x1b\[[0-9;]*[A-Za-z]//g' serial-gpu.log | grep -E 'linux|virtio-gpu|desktop ready' | tail -20
           grep -q "Linux virtio-gpu driver bound" serial-gpu.log
           grep -q "WaveOS display:" serial-gpu.log

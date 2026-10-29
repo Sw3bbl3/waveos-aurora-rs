@@ -21,6 +21,15 @@ const HUGE: u64 = 1 << 7;
 const PAT_4K: u64 = 1 << 7;
 /// Software bit: the frame is owned elsewhere (e.g. a shared surface); don't free it.
 const SHARED: u64 = 1 << 9;
+/// Software bit, with `SHARED`: a page of a cached file, shared read-only
+/// by every mapping of it (see `fs::mapcache`). Making it
+/// writable gives the address space a copy of its own.
+const COPY_ON_WRITE: u64 = 1 << 10;
+/// Software bit, with `SHARED`: the entry holds a count on the frame (see
+/// `SHM_REFS`), which it gives back when it goes. Shared frames without it
+/// (window surfaces) are their owners' to free: a stale entry for one must
+/// never touch the count of whatever the frame has become since.
+const COUNTED: u64 = 1 << 11;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -55,6 +64,22 @@ fn shm_retain(frame: u64) -> bool {
         }
         None => false,
     }
+}
+
+/// A counted frame holding `data` (a page at most; the rest zeroed), held
+/// once (by its caller).
+pub fn shm_alloc_with(data: &[u8]) -> Option<u64> {
+    let f = frame::alloc()?;
+    let page = unsafe { core::slice::from_raw_parts_mut(phys_to_virt(f) as *mut u8, PAGE_SIZE as usize) };
+    page[..data.len()].copy_from_slice(data);
+    page[data.len()..].fill(0);
+    SHM_REFS.lock().insert(f, 1);
+    Some(f)
+}
+
+/// Another holder for a counted frame (`shm_alloc`).
+pub fn shm_hold(frame: u64) {
+    shm_retain(frame);
 }
 
 /// A holder lets go of a counted frame; the last one frees it.
@@ -139,24 +164,26 @@ struct Kva {
     free: Vec<(u64, u64)>, // (base, pages)
 }
 
+/// The kernel virtual area's free space. Its lock is also held while the
+/// area's page table entries change: two CPUs mapping neighbouring ranges
+/// at once would otherwise each add a page table for the same 2 MiB, and
+/// one of the mappings would be lost.
 static KVA: IrqMutex<Kva> = IrqMutex::new(Kva { next: KVA_BASE, free: Vec::new() });
 
 /// Maps `frames` contiguously into the kernel virtual area; returns the address.
 pub fn kmap(frames: &[u64]) -> Option<u64> {
     let pages = frames.len() as u64;
-    let base = {
-        let mut k = KVA.lock();
-        if let Some(i) = k.free.iter().position(|&(_, p)| p == pages) {
-            k.free.swap_remove(i).0
-        } else {
-            let b = k.next;
-            // One unmapped guard page between allocations.
-            k.next += (pages + 1) * PAGE_SIZE;
-            if k.next > KVA_BASE + KVA_SIZE {
-                return None;
-            }
-            b
+    let mut k = KVA.lock();
+    let base = if let Some(i) = k.free.iter().position(|&(_, p)| p == pages) {
+        k.free.swap_remove(i).0
+    } else {
+        let b = k.next;
+        // One unmapped guard page between allocations.
+        k.next += (pages + 1) * PAGE_SIZE;
+        if k.next > KVA_BASE + KVA_SIZE {
+            return None;
         }
+        b
     };
     let pml4 = kernel_pml4();
     for (i, &f) in frames.iter().enumerate() {
@@ -176,15 +203,12 @@ pub fn kmap_wc(phys: u64, size: u64) -> Option<u64> {
     }
     let start = phys & !(PAGE_SIZE - 1);
     let pages = (phys + size - start).div_ceil(PAGE_SIZE);
-    let base = {
-        let mut k = KVA.lock();
-        let b = k.next;
-        k.next += (pages + 1) * PAGE_SIZE;
-        if k.next > KVA_BASE + KVA_SIZE {
-            return None;
-        }
-        b
-    };
+    let mut k = KVA.lock();
+    let base = k.next;
+    k.next += (pages + 1) * PAGE_SIZE;
+    if k.next > KVA_BASE + KVA_SIZE {
+        return None;
+    }
     let pml4 = kernel_pml4();
     for i in 0..pages {
         let va = base + i * PAGE_SIZE;
@@ -194,6 +218,23 @@ pub fn kmap_wc(phys: u64, size: u64) -> Option<u64> {
         x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
     }
     Some(base + (phys - start))
+}
+
+/// The page-table entries on the way to `va` in the current address space,
+/// top level first, as far as they are present (0 after; for fault
+/// reports, so nothing is allocated).
+pub fn entries_for(va: u64) -> [u64; 4] {
+    let mut out = [0; 4];
+    let mut t = Cr3::read().0.start_address().as_u64();
+    for (i, level) in (0..=3u32).rev().enumerate() {
+        let e = table(t)[idx(va, level)];
+        out[i] = e;
+        if e & PRESENT == 0 || (e & HUGE != 0 && level > 0) {
+            break;
+        }
+        t = e & ADDR;
+    }
+    out
 }
 
 /// The physical address behind kernel address `va`, if it is mapped
@@ -225,13 +266,17 @@ pub fn kernel_entry(va: u64) -> Option<u64> {
 /// `IrqMutex` (other CPUs have to take the shootdown IPI).
 pub fn kunmap(base: u64, pages: u64) {
     let pml4 = kernel_pml4();
-    for i in 0..pages {
-        let va = base + i * PAGE_SIZE;
-        if let Some(e) = walk(pml4, va, false, false) {
-            *e = 0;
-            x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+    {
+        let _tables = KVA.lock();
+        for i in 0..pages {
+            let va = base + i * PAGE_SIZE;
+            if let Some(e) = walk(pml4, va, false, false) {
+                *e = 0;
+                x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+            }
         }
     }
+    // Outside the lock: the other CPUs must be free to take the IPI.
     shootdown(base, pages, None);
     KVA.lock().free.push((base, pages));
 }
@@ -359,6 +404,11 @@ impl AddressSpace {
         for i in 0..pages {
             let page = va + i * PAGE_SIZE;
             let e = walk(self.pml4, page, true, true).ok_or(ENOMEM)?;
+            if *e & COPY_ON_WRITE != 0 && Self::flags(prot) & WRITABLE != 0 {
+                // A cached file's page: writable means a copy of its own.
+                self.protect(page, 1, Some(prot))?;
+                continue;
+            }
             if *e & PRESENT != 0 {
                 let mut f = *e | Self::flags(prot) & (WRITABLE | USER);
                 if matches!(prot, Prot::ReadExec | Prot::ReadWriteExec) {
@@ -386,11 +436,26 @@ impl AddressSpace {
             self.unmap(va, pages);
             return Ok(());
         };
+        let writable = Self::flags(prot) & WRITABLE != 0;
+        // Cached file pages this replaces with copies, let go of once no CPU can see them.
+        let mut copied = Vec::new();
         for i in 0..pages {
             let page = va + i * PAGE_SIZE;
             let e = walk(self.pml4, page, true, true).ok_or(ENOMEM)?;
-            if *e & PRESENT != 0 {
-                *e = (*e & (ADDR | SHARED)) | Self::flags(prot);
+            if *e & (PRESENT | COPY_ON_WRITE) == PRESENT | COPY_ON_WRITE && writable {
+                let f = frame::alloc().ok_or(ENOMEM)?;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        phys_to_virt(*e & ADDR) as *const u8,
+                        phys_to_virt(f) as *mut u8,
+                        PAGE_SIZE as usize,
+                    );
+                }
+                copied.push(*e);
+                *e = f | Self::flags(prot);
+                self.resident += PAGE_SIZE;
+            } else if *e & PRESENT != 0 {
+                *e = (*e & (ADDR | SHARED | COUNTED | COPY_ON_WRITE)) | Self::flags(prot);
             } else {
                 *e = zeroed_frame().ok_or(ENOMEM)? | Self::flags(prot);
                 self.resident += PAGE_SIZE;
@@ -399,6 +464,9 @@ impl AddressSpace {
         }
         // Permissions shrank too: every CPU running this process must see it.
         shootdown(va, pages, Some(self.pml4));
+        for e in copied {
+            Self::release_shared(e);
+        }
         Ok(())
     }
 
@@ -409,14 +477,29 @@ impl AddressSpace {
 
     /// Maps externally owned frames (shared memory) at `va`.
     pub fn map_shared(&mut self, va: u64, frames: &[u64], prot: Prot) -> Result<(), isize> {
+        self.map_counted(va, frames, Self::flags(prot) | SHARED)
+    }
+
+    /// Maps pages of a cached file (counted frames) at `va`, read-only for
+    /// everyone: a protection that allows writing gives this address space
+    /// its own copies.
+    pub fn map_cached(&mut self, va: u64, frames: &[u64], prot: Prot) -> Result<(), isize> {
+        self.map_counted(va, frames, Self::flags(prot) & !WRITABLE | SHARED | COPY_ON_WRITE)?;
+        if Self::flags(prot) & WRITABLE != 0 {
+            self.protect(va, frames.len() as u64, Some(prot))?;
+        }
+        Ok(())
+    }
+
+    fn map_counted(&mut self, va: u64, frames: &[u64], flags: u64) -> Result<(), isize> {
         for (i, &f) in frames.iter().enumerate() {
             let page = va + i as u64 * PAGE_SIZE;
             let e = walk(self.pml4, page, true, true).ok_or(aurora_abi::err::ENOMEM)?;
             if *e & PRESENT != 0 {
                 Self::drop_entry(*e, &mut self.resident);
             }
-            shm_retain(f);
-            *e = f | Self::flags(prot) | SHARED;
+            let counted = if shm_retain(f) { COUNTED } else { 0 };
+            *e = f | flags | counted;
             self.invalidate(page);
         }
         Ok(())
@@ -428,6 +511,13 @@ impl AddressSpace {
             frame::free(e & ADDR);
             *resident = resident.saturating_sub(PAGE_SIZE);
         } else {
+            Self::release_shared(e);
+        }
+    }
+
+    /// Gives back a shared entry's count on its frame, if it holds one.
+    fn release_shared(e: u64) {
+        if e & COUNTED != 0 {
             shm_release(e & ADDR);
         }
     }
@@ -473,7 +563,7 @@ impl AddressSpace {
             if e & SHARED == 0 {
                 frame::free(e & ADDR);
             } else {
-                shm_release(e & ADDR);
+                Self::release_shared(e);
             }
         }
     }
@@ -501,7 +591,8 @@ impl AddressSpace {
                 if e & SHARED != 0 {
                     // Shared memory stays shared with the child; other
                     // shared frames (window surfaces) stay with the parent.
-                    if shm_retain(e & ADDR) {
+                    if e & COUNTED != 0 {
+                        shm_retain(e & ADDR);
                         table(dst)[i] = e;
                     }
                     continue;
@@ -599,11 +690,15 @@ impl AddressSpace {
     }
 
     /// Copies `data` into user memory at `va` through the physical window (works
-    /// even when this address space is not the active one).
+    /// even when this address space is not the active one). Pages of cached
+    /// files are refused: everyone mapping the file shares them.
     pub fn write_bytes(&self, va: u64, data: &[u8]) -> Result<(), isize> {
         let mut done = 0usize;
         while done < data.len() {
             let cur = va + done as u64;
+            if walk(self.pml4, cur, false, false).is_some_and(|e| *e & COPY_ON_WRITE != 0) {
+                return Err(aurora_abi::err::EFAULT);
+            }
             let (phys, _) = self.user_page(cur).ok_or(aurora_abi::err::EFAULT)?;
             let off = cur % PAGE_SIZE;
             let n = ((PAGE_SIZE - off) as usize).min(data.len() - done);
@@ -626,7 +721,7 @@ impl AddressSpace {
                 if *e & SHARED == 0 {
                     frame::free(*e & ADDR);
                 } else {
-                    shm_release(*e & ADDR);
+                    Self::release_shared(*e);
                 }
             } else {
                 Self::free_level(*e & ADDR, level - 1, false);

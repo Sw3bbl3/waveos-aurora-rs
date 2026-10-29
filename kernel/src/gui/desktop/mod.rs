@@ -372,7 +372,7 @@ impl Desktop {
         }
     }
 
-    /// Opens a document in the app for its type (pictures in Preview, web pages in NetSurf, the rest in Notes).
+    /// Opens a document in the app for its type (pictures in Preview, web pages in Firefox, the rest in Notes).
     pub fn open_file(&mut self, path: &str) {
         self.open_file_background(path);
     }
