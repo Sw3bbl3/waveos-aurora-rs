@@ -254,6 +254,7 @@ impl Paint {
             Ok(publication) => {
                 self.path = Some(path.clone());
                 if let Some(e) = publication.sync_error {
+                    self.dirty = true;
                     self.flash(format!("Saved; disk sync failed: {}. Save again to retry.", corekit::Error(e)));
                     return false;
                 }

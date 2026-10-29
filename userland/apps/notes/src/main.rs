@@ -275,10 +275,6 @@ impl Notes {
             return true;
         }
         let outside = self.is_outside();
-        if self.path.is_none() && self.title.trim().is_empty() && self.body.trim().is_empty() {
-            self.saved_rev = self.rev;
-            return true;
-        }
         let content = if outside { self.body.clone() } else { format!("{}\n{}", self.title, self.body) };
         let stem = file_stem(&self.title);
         // Save at the current path first. A failed write cannot strand a renamed note.
