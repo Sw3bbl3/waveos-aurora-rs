@@ -85,6 +85,7 @@ version = "0.8.0"
 dependencies = [
  "acpi",
  "aurora-abi",
+ "aurora-desktop",
  "aurora-elf",
  "aurora-hid",
  "aurora-image",
@@ -106,6 +107,13 @@ dependencies = [
 [[package]]
 name = "aurora-abi"
 version = "0.8.0"
+
+[[package]]
+name = "aurora-desktop"
+version = "0.8.0"
+dependencies = [
+ "aurora-abi",
+]
 
 [[package]]
 name = "aurora-elf"

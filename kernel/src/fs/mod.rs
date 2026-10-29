@@ -320,24 +320,6 @@ pub fn remove_tree(path: &str) -> FsResult<()> {
     unlink(path)
 }
 
-/// Copies a file or a whole directory tree (works across volumes).
-pub fn copy_tree(from: &str, to: &str) -> FsResult<()> {
-    let from_n = resolve("/", from);
-    let to_n = resolve("/", to);
-    if to_n.starts_with(&from_n) && to_n.as_bytes().get(from_n.len()) == Some(&b'/') {
-        return Err(EINVAL);
-    }
-    if is_dir(from) {
-        mkdir(to)?;
-        for e in readdir(from)? {
-            copy_tree(&join(from, &e.name), &join(to, &e.name))?;
-        }
-        Ok(())
-    } else {
-        write_all(to, &read_all(from)?)
-    }
-}
-
 pub fn join(dir: &str, name: &str) -> String {
     if dir.ends_with('/') {
         alloc::format!("{dir}{name}")
@@ -501,9 +483,52 @@ pub fn write_all(path: &str, data: &[u8]) -> FsResult<()> {
     let mut f = open(path, WRITE | CREATE | TRUNCATE)?;
     let mut done = 0;
     while done < data.len() {
-        done += f.write(&data[done..])?;
+        let n = f.write(&data[done..])?;
+        if n == 0 {
+            return Err(EIO);
+        }
+        done += n;
     }
     Ok(())
+}
+
+/// Safe same-volume replacement. Publication can succeed while final sync fails.
+pub fn write_atomic(path: &str, data: &[u8]) -> FsResult<aurora_desktop::save::Published> {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    struct Adapter;
+    impl aurora_desktop::save::Storage for Adapter {
+        fn create_new(&mut self, p: &str, data: &[u8]) -> FsResult<()> {
+            use aurora_abi::open::*;
+            let mut f = open(p, WRITE | CREATE | EXCLUSIVE)?;
+            let result = (|| {
+                let mut at = 0;
+                while at < data.len() {
+                    let n = f.write(&data[at..])?;
+                    if n == 0 {
+                        return Err(EIO);
+                    }
+                    at += n;
+                }
+                Ok(())
+            })();
+            drop(f);
+            if result.is_err() {
+                let _ = unlink(p);
+            }
+            result
+        }
+        fn sync(&mut self, p: &str) -> FsResult<()> {
+            lookup(p)?.0.sync()
+        }
+        fn rename(&mut self, a: &str, b: &str) -> FsResult<()> {
+            rename(a, b)
+        }
+        fn remove(&mut self, p: &str) -> FsResult<()> {
+            unlink(p)
+        }
+    }
+    aurora_desktop::save::write(&mut Adapter, path, data, NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 pub fn is_dir(path: &str) -> bool {

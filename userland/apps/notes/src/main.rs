@@ -259,6 +259,9 @@ impl Notes {
     }
 
     fn flash(&mut self, cx: &mut Context<Msg>, s: String) {
+        if self.dirty() && self.status.is_some() {
+            return;
+        }
         self.status = Some(s);
         cx.cancel(|m| matches!(m, Msg::ClearStatus));
         cx.after(3000, Msg::ClearStatus);
@@ -267,33 +270,45 @@ impl Notes {
     /// Writes the note if it changed. A library note is renamed after its
     /// title when that name is free.
     fn save(&mut self, cx: &mut Context<Msg>) -> bool {
-        cx.cancel(|m| matches!(m, Msg::Autosave));
+        cx.cancel(|m| matches!(m, Msg::Autosave | Msg::ClearStatus));
         if !self.dirty() {
             return true;
         }
         let outside = self.is_outside();
-        if self.path.is_none() && self.title.trim().is_empty() && self.body.trim().is_empty() {
-            self.saved_rev = self.rev;
-            return true;
-        }
         let content = if outside { self.body.clone() } else { format!("{}\n{}", self.title, self.body) };
         let stem = file_stem(&self.title);
-        let target = match &self.path {
-            Some(p) if outside => p.clone(),
-            Some(p) => {
-                let wanted = fs::join(LIBRARY, &format!("{stem}.txt"));
-                if *p != wanted && !fs::exists(&wanted) && fs::rename(p, &wanted).is_ok() {
-                    wanted
-                } else {
-                    p.clone()
-                }
-            }
-            None => fs::unique_name(LIBRARY, &stem, ".txt"),
-        };
-        match fs::write(&target, content.as_bytes()) {
-            Ok(()) => {
+        // Save at the current path first. A failed write cannot strand a renamed note.
+        let target = self.path.clone().unwrap_or_else(|| fs::unique_name(LIBRARY, &stem, ".txt"));
+        match fs::write_atomic(&target, content.as_bytes()) {
+            Ok(published) => {
                 self.path = Some(target.clone());
+                if let Some(e) = published.sync_error {
+                    self.status =
+                        Some(format!("Saved, but disk sync failed: {}. Save again to retry.", corekit::Error(e)));
+                    return false;
+                }
+                if !outside {
+                    let wanted = fs::join(LIBRARY, &format!("{stem}.txt"));
+                    if target != wanted && !fs::exists(&wanted) {
+                        match fs::rename_durable(self.path.as_mut().unwrap(), &wanted) {
+                            Err(e) => {
+                                self.status = Some(format!("Content saved; couldn't rename: {e}"));
+                                return false;
+                            }
+                            Ok(p) if p.sync_error.is_some() => {
+                                self.status = Some(format!(
+                                    "Renamed; disk sync failed: {}. Save again to retry.",
+                                    corekit::Error(p.sync_error.unwrap())
+                                ));
+                                return false;
+                            }
+                            Ok(_) => {}
+                        }
+                    }
+                }
+                let target = self.path.clone().unwrap();
                 self.saved_rev = self.rev;
+                self.status = None;
                 self.mtime = fs::stat(&target).map(|s| s.mtime).unwrap_or_else(|_| now_secs());
                 if outside {
                     self.outside = Some(entry(target, self.mtime, true));
@@ -303,7 +318,7 @@ impl Notes {
                 true
             }
             Err(e) => {
-                self.flash(cx, format!("Couldn't save: {e}"));
+                self.status = Some(format!("Couldn't save: {e}. Your changes are still open."));
                 false
             }
         }
@@ -690,13 +705,14 @@ impl App for Notes {
                 self.flash(cx, String::from("Copied"));
             }
             Msg::Trash(p) => {
-                if self.path.as_deref() == Some(p.as_str()) {
-                    // Nothing left to save: the note is going away.
-                    self.saved_rev = self.rev;
-                    cx.cancel(|m| matches!(m, Msg::Autosave));
-                }
+                cx.cancel(|m| matches!(m, Msg::ClearStatus));
                 match desktop::trash(&p) {
                     Ok(()) => {
+                        self.status = None;
+                        if self.path.as_deref() == Some(p.as_str()) {
+                            self.saved_rev = self.rev;
+                            cx.cancel(|m| matches!(m, Msg::Autosave));
+                        }
                         if self.outside.as_ref().is_some_and(|e| e.path == p) {
                             self.outside = None;
                         }
@@ -708,7 +724,7 @@ impl App for Notes {
                             }
                         }
                     }
-                    Err(e) => self.flash(cx, format!("Couldn't move to Trash: {e}")),
+                    Err(e) => self.status = Some(format!("Couldn't move to Trash: {e}")),
                 }
             }
             Msg::Smaller => self.size = self.size.saturating_sub(1),

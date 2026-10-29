@@ -109,6 +109,7 @@ pub fn blend_row(row: &mut [u32], c: u32, a: u32) {
 /// Blends black at a per-pixel opacity (`shade[i]`, 0..=255) over `row`.
 #[inline]
 pub fn shade_row(row: &mut [u32], shade: &[u32]) {
+    #[allow(unused_mut)] // Only the x86 SIMD path advances this cursor.
     let mut i = 0;
     #[cfg(target_arch = "x86_64")]
     if row.len() >= 8 && crate::simd::enabled() {

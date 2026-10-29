@@ -64,8 +64,13 @@ pub fn run() {
     // `cargo xtask test --filter NAME` runs only matching tests (and the
     // persistence check the harness relies on).
     let filter = crate::gui::prefs::boot_option("test_filter");
+    let skip_virtual_hid = crate::gui::prefs::boot_option("skip_virtual_hid").as_deref() == Some("1");
+    if skip_virtual_hid {
+        crate::kprintln!("SKIP virtual USB HID tests: QEMU has no usb-redir device");
+    }
     let chosen: Vec<&Test> = TESTS
         .iter()
+        .filter(|(name, _)| !skip_virtual_hid || !name.starts_with("USB HID:"))
         .filter(|(name, _)| filter.as_deref().is_none_or(|f| name.contains(f) || name.starts_with("persistence")))
         .collect();
     crate::kprintln!("\nrunning {} kernel tests", chosen.len());

@@ -6,6 +6,7 @@
 
 mod anim;
 mod bar;
+mod items;
 mod switcher;
 use lumen::windowing::{self, Placement, Switcher};
 mod dragdrop;
@@ -118,6 +119,9 @@ pub enum PowerAction {
 pub struct Desktop {
     pub w: i32,
     pub h: i32,
+    water: lumen::water::Water,
+    water_coarse: bool,
+    items: items::Items,
     wallpaper: Vec<u32>,
     blurred: Vec<u32>,
     scene: Vec<u32>,
@@ -201,6 +205,9 @@ impl Desktop {
         let mut d = Self {
             w,
             h,
+            water: lumen::water::Water::new(),
+            water_coarse: false,
+            items: items::Items::new(),
             wallpaper,
             blurred,
             scene: alloc::vec![0; (w*h) as usize],
@@ -234,7 +241,7 @@ impl Desktop {
             last_focus: None,
             grab: None,
             dnd: None,
-            trash_full: crate::fs::trash::count() > 0,
+            trash_full: false,
             ghosts: Vec::new(),
             glide: Vec::new(),
             history: Vec::new(),
@@ -313,6 +320,9 @@ impl Desktop {
     // ---------------------------------------------------------------- windows
 
     fn focused(&self) -> Option<&Window> {
+        if self.items.focused {
+            return None;
+        }
         self.windows.iter().rev().find(|w| !w.minimized)
     }
 
@@ -364,30 +374,11 @@ impl Desktop {
 
     /// Opens a document in the app for its type (pictures in Preview, web pages in NetSurf, the rest in Notes).
     pub fn open_file(&mut self, path: &str) {
-        let lower = path.to_ascii_lowercase();
-        if lower.ends_with(".gina") {
-            self.spawn_program("/System/Apps/Installer.elf", &[path]);
-            return;
-        }
-        if let Some((_, extension)) = lower.rsplit_once('.') {
-            if let Some(app) =
-                super::installed::list().into_iter().find(|a| a.manifest.extensions.iter().any(|e| e == extension))
-            {
-                self.spawn_program(&app.path, &[path]);
-                return;
-            }
-        }
-        let kind = if aurora_image::is_image_name(path) {
-            AppKind::Preview
-        } else if lower.ends_with(".html") || lower.ends_with(".htm") {
-            AppKind::NetSurf
-        } else {
-            AppKind::Notes
-        };
-        self.spawn_program(apps::info(kind).path, &[path]);
+        self.open_file_background(path);
     }
 
     fn add_window(&mut self, app: Box<dyn App>) {
+        self.items.focused = false;
         let (cw, ch) = app.size();
         let wa = self.work_area();
         let w = cw.min(wa.w);
@@ -450,6 +441,7 @@ impl Desktop {
     }
 
     pub fn raise(&mut self, id: u32) {
+        self.items.focused = false;
         let Some(i) = self.index_of(id) else { return };
         self.touch_mru(id);
         self.damage_all();
@@ -649,6 +641,7 @@ impl Desktop {
 
     /// Adapts the desktop to a new screen size.
     pub fn resize(&mut self, w: i32, h: i32) {
+        self.water.clear();
         self.w = w;
         self.h = h;
         let (wp, bl) = Self::make_wallpaper(w, h);
@@ -697,6 +690,7 @@ impl Desktop {
     }
 
     pub fn set_dark(&mut self, dark: bool) {
+        self.water.clear();
         self.shoal_backdrop = None;
         theme::set_dark(dark);
         super::save_settings();
@@ -711,6 +705,7 @@ impl Desktop {
     }
 
     pub fn set_wallpaper(&mut self, index: u8) {
+        self.water.clear();
         self.shoal_backdrop = None;
         theme::set_wallpaper(index);
         super::save_settings();
@@ -824,6 +819,7 @@ impl Desktop {
     /// True when the compositor should draw at full frame rate.
     pub fn wants_frames(&self) -> bool {
         self.animating()
+            || self.water.active()
             || self.notifications_moving()
             || self.crest_moving()
             || self.shore_moving()
@@ -924,6 +920,7 @@ impl Desktop {
         } else if released & BUTTON_LEFT != 0 && self.dnd.is_some() {
             self.grab = None;
             self.drop_drag(x, y);
+        } else if released & BUTTON_LEFT != 0 && self.items_release(x, y) {
         } else if released & BUTTON_LEFT != 0 {
             self.grab = None;
             let drag = self.drag.take();
@@ -959,6 +956,7 @@ impl Desktop {
         }
         let (x, y) = self.cursor;
         let Some(w) = self.window_at(x, y) else {
+            self.items_scroll(dy);
             self.scroll = (None, 0, 0);
             return;
         };
@@ -987,6 +985,9 @@ impl Desktop {
         }
         if self.dnd.is_some() {
             self.drag_moved(x, y);
+            return;
+        }
+        if self.items_motion(x, y) {
             return;
         }
         if let Some(d) = self.drag {
@@ -1060,6 +1061,9 @@ impl Desktop {
     }
 
     fn press(&mut self, x: i32, y: i32) {
+        if self.items_overlay_press(x, y) {
+            return;
+        }
         if self.switcher_press(x, y) {
             return;
         }
@@ -1081,7 +1085,10 @@ impl Desktop {
             return;
         }
 
-        let Some(i) = self.window_at(x, y) else { return };
+        let Some(i) = self.window_at(x, y) else {
+            self.items_press(x, y, double);
+            return;
+        };
         // Super + drag moves a window from anywhere in it.
         if self.super_down {
             let id = self.windows[i].id;
@@ -1133,13 +1140,19 @@ impl Desktop {
 
     /// Right-click: focuses the window under the pointer and forwards the click to its content.
     fn right_press(&mut self, x: i32, y: i32) {
+        if self.shoal_context(x, y) {
+            return;
+        }
         if self.switcher.is_some() {
             return;
         }
         if self.menu.is_some() || self.launcher.is_some() || y < MENUBAR_H || self.dock_rect().contains(x, y) {
             return;
         }
-        let Some(i) = self.window_at(x, y) else { return };
+        let Some(i) = self.window_at(x, y) else {
+            self.items_context(x, y);
+            return;
+        };
         let id = self.windows[i].id;
         if self.focused_id() != Some(id) {
             self.raise(id);
@@ -1153,6 +1166,10 @@ impl Desktop {
     fn key(&mut self, k: KeyEvent) {
         if self.shore.is_some() {
             self.shore_key(&k);
+            return;
+        }
+        if self.items.menu.is_some() || self.items.rename.is_some() {
+            self.items_key(&k);
             return;
         }
         if self.switcher_key(&k) {
@@ -1266,9 +1283,34 @@ impl Desktop {
             self.launcher_key(&k);
             return;
         }
+        if self.items.focused {
+            self.items_key(&k);
+            return;
+        }
         if let Some(id) = self.focused_id() {
             self.with_app(id, |app, _, env| app.key(&k, env));
         }
+    }
+
+    fn water_click(&mut self, x: i32, y: i32) {
+        if !theme::reduce_motion() && super::prefs::get_bool(aurora_abi::pref::DESKTOP_WATER) {
+            self.water.impulse(x, y, self.w, self.h, self.now_ms);
+        }
+    }
+    fn step_water(&mut self) -> bool {
+        if self.shore.is_some() || theme::reduce_motion() || !super::prefs::get_bool(aurora_abi::pref::DESKTOP_WATER) {
+            if self.water.active() {
+                self.water.clear();
+                self.damage_all();
+            }
+            return false;
+        }
+        let old = self.water.bounds();
+        if self.water.advance(self.now_ms, self.w, self.h) {
+            self.damage(old);
+            self.damage(self.water.bounds());
+        }
+        self.water.active()
     }
 
     // ------------------------------------------------------------------ time
@@ -1276,6 +1318,7 @@ impl Desktop {
     /// Periodic work: clock, caret blink, live app data. Returns ms until the next tick.
     pub fn tick(&mut self, now_ms: u64) -> u64 {
         self.now_ms = now_ms;
+        self.step_items();
         self.last_tick = now_ms;
         let clock = bar::time_text();
         if clock != self.clock {
@@ -1321,6 +1364,7 @@ impl Desktop {
             self.reveal_window(id);
         }
         let mut busy = self.step_animations();
+        busy |= self.step_water();
         busy |= self.step_notifications();
         busy |= self.step_bar();
         busy |= self.shore_moving();
@@ -1399,6 +1443,8 @@ impl Desktop {
             || self.animating()
             || self.launcher.is_some() && self.shoal_backdrop.is_none()
             || self.menu.is_some()
+            || self.items.menu.is_some()
+            || self.items.rename.is_some()
             || self.center.is_some()
             || self.spotlight.is_some()
             || self.current.is_some()
@@ -1448,6 +1494,18 @@ impl Desktop {
             cursor::draw(cv, self.cursor.0, self.cursor.1);
             return;
         }
+        let water_start = crate::time::now_ns();
+        self.water.paint(cv, &self.wallpaper, self.water_coarse);
+        if self.water.active() {
+            let elapsed = crate::time::now_ns().saturating_sub(water_start);
+            // Hysteresis avoids alternating between expensive and cheap frames.
+            if elapsed > 8_000_000 {
+                self.water_coarse = true;
+            } else if elapsed < 4_000_000 {
+                self.water_coarse = false;
+            }
+        }
+        self.paint_items(cv);
         let focused = self.focused_id();
         let clip = cv.clip;
         for i in 0..self.windows.len() {
@@ -1470,6 +1528,7 @@ impl Desktop {
         self.paint_spotlight(cv);
         self.paint_drag(cv);
         self.paint_switcher(cv);
+        self.paint_item_overlay(cv);
         if let Some(p) = self.power {
             self.paint_power_overlay(cv, p);
         }

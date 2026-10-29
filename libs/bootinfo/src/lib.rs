@@ -134,4 +134,8 @@ impl BootInfo {
 }
 
 /// Signature of the kernel entry point (`_start`), System V ABI.
+#[cfg(target_arch = "x86_64")]
 pub type KernelEntry = extern "sysv64" fn(&'static BootInfo) -> !;
+
+#[cfg(not(target_arch = "x86_64"))]
+pub type KernelEntry = extern "C" fn(&'static BootInfo) -> !;

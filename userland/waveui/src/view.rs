@@ -1495,8 +1495,8 @@ impl<M: Clone> Alert<M> {
             buttons = buttons.push(btn.min_width(84));
         }
         VStack::new()
-            .push(Text::paragraph(self.title.clone()).style(TextStyle::Title2))
-            .push(Text::paragraph(self.message.clone()).foreground(Color::SecondaryLabel))
+            .push(Text::paragraph(self.title.clone()).style(TextStyle::Title2).fill_width())
+            .push(Text::paragraph(self.message.clone()).foreground(Color::SecondaryLabel).fill_width())
             .push(buttons.padding_insets(Insets { top: 8, ..Default::default() }).fill_width())
             .spacing(10)
             .alignment(Align::Start)

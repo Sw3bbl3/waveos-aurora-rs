@@ -81,3 +81,5 @@ macro_rules! entry {
         }
     };
 }
+
+pub use aurora_desktop as desktop_model;

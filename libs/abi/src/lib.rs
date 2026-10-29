@@ -172,7 +172,9 @@ pub mod nr {
     /// or to process group `-target`. WaveOS programs end on the usual
     /// ending signals (INT, TERM, HUP, QUIT, KILL) and ignore the rest.
     pub const SIGNAL: usize = 79;
-    pub const COUNT: usize = 80;
+    /// Flush the filesystem containing this path.
+    pub const SYNC_PATH: usize = 80;
+    pub const COUNT: usize = 81;
 }
 
 #[repr(C)]
@@ -757,6 +759,10 @@ pub mod clip {
     pub const TEXT: usize = 1;
     /// Absolute paths, one per line (copied files).
     pub const FILES: usize = 2;
+    /// File paths marked for moving. FILES readers remain compatible.
+    pub const CUT_FILES: usize = 3;
+    /// Atomically remove confirmed moved paths from a cut clipboard.
+    pub const COMPLETE_MOVES: usize = 4;
     /// Largest clipboard content accepted.
     pub const MAX_LEN: usize = 4 << 20;
 }
@@ -766,6 +772,7 @@ pub mod pref {
     pub const GLASS: &str = "glass_intensity";
     pub const REDUCE_TRANSPARENCY: &str = "reduce_transparency";
     pub const REDUCE_MOTION: &str = "reduce_motion";
+    pub const DESKTOP_WATER: &str = "desktop_water";
     pub const HIGH_CONTRAST: &str = "high_contrast";
     pub const DOCK_SIZE: &str = "dock_size";
     pub const DOCK_AUTOHIDE: &str = "dock_autohide";

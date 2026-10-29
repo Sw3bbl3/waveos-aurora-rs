@@ -20,6 +20,7 @@ pub enum Target {
     Window(u32),
     DockApp(AppKind),
     Trash,
+    Desktop,
 }
 
 pub struct Session {
@@ -76,6 +77,7 @@ impl Desktop {
             Some(i) if self.windows[i].content().contains(x, y) && self.windows[i].app.client_id().is_some() => {
                 Target::Window(self.windows[i].id)
             }
+            None if s.payload.kind == clip::FILES => Target::Desktop,
             _ => Target::Nothing,
         }
     }
@@ -174,18 +176,24 @@ impl Desktop {
                 !paths.is_empty()
             }
             Target::Trash => {
-                let mut moved = 0;
-                for p in &paths {
-                    match crate::fs::trash::move_to_trash(p) {
-                        Ok(_) => moved += 1,
-                        Err(e) => log!("gui", "could not move {} to the Trash: {}", p, aurora_abi::err::name(e)),
-                    }
+                self.file_operation("/Desktop", "trash", &paths);
+                !paths.is_empty()
+            }
+            Target::Desktop => {
+                let dir = self.desktop_target(x, y).unwrap_or_else(|| String::from("/Desktop"));
+                let mode = if dir == "/Trash" {
+                    "trash"
+                } else if crate::drivers::input::modifiers().ctrl {
+                    "copy"
+                } else {
+                    "drop"
+                };
+                if paths.iter().all(|p| crate::fs::parent_path(p) == dir) {
+                    false
+                } else {
+                    self.file_operation(&dir, mode, &paths);
+                    !paths.is_empty()
                 }
-                self.refresh_trash();
-                if moved > 0 {
-                    crate::drivers::audio::play_sound("trash");
-                }
-                moved > 0
             }
             Target::Nothing => false,
         };
@@ -201,12 +209,8 @@ impl Desktop {
     }
 
     pub(super) fn refresh_trash(&mut self) {
-        let full = crate::fs::trash::count() > 0;
-        if full != self.trash_full {
-            self.trash_full = full;
-            let d = self.dock_rect();
-            self.damage(d.inset(-44));
-        }
+        // The background desktop scanner publishes the current Trash state.
+        self.step_items();
     }
 
     /// The translucent icon, count badge and label following the pointer.

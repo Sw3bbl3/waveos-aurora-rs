@@ -25,7 +25,7 @@ jobs:
       - name: Validate bilingual handbook
         run: cargo xtask docs
       - name: Filesystem library tests
-        run: cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-zip -p aurora-wifi -p aurora-hid -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask
+        run: cargo test -p aurora-desktop -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-zip -p aurora-wifi -p aurora-hid -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask
 
       - name: File transfer worker fault tests
         run: |

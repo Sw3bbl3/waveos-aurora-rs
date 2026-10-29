@@ -83,6 +83,7 @@ pub enum Action {
     Cut,
     Paste,
     Duplicate,
+    DesktopShortcut,
     Trash,
     PutBack,
     DeleteForever,
@@ -375,7 +376,13 @@ impl Folder {
         self.items = fs::read_dir(&cwd)
             .unwrap_or_default()
             .into_iter()
-            .filter(|e| !e.name.starts_with('.'))
+            .filter(|e| {
+                if cwd == TRASH {
+                    e.name != ".trashinfo" && !e.name.starts_with(".wave-save-") && !e.name.starts_with(".wave-trash-")
+                } else {
+                    !e.name.starts_with('.')
+                }
+            })
             .map(|e| Item {
                 path: fs::join(&cwd, &e.name),
                 name: e.name,
@@ -627,7 +634,11 @@ impl Folder {
                 if paths.is_empty() {
                     return;
                 }
-                corekit::clipboard::set_files(&paths);
+                if action == Action::Cut {
+                    corekit::clipboard::cut_files(&paths);
+                } else {
+                    corekit::clipboard::set_files(&paths);
+                }
                 *self.cut.lock() = if action == Action::Cut { paths.clone() } else { Vec::new() };
                 let what = if paths.len() == 1 {
                     format!("“{}”", fs::file_name(&paths[0]))
@@ -637,6 +648,30 @@ impl Folder {
                 self.flash(format!("{} {what}", if action == Action::Cut { "Cut" } else { "Copied" }));
             }
             Action::Paste => self.paste(),
+            Action::DesktopShortcut => {
+                use corekit::desktop_model::shortcut::{builtin_for_path, Shortcut, Target};
+                if !fs::exists("/Desktop") {
+                    let _ = fs::mkdir("/Desktop");
+                }
+                let installed = corekit::apps::list();
+                for path in paths {
+                    let dest = fs::unique_name("/Desktop", fs::file_name(&path), ".wave-link");
+                    let target = if let Some(id) = builtin_for_path(&path) {
+                        Target::Builtin(id.into())
+                    } else if let Some(app) = installed.iter().find(|a| a.executable == path) {
+                        Target::Package(app.manifest.id.clone())
+                    } else {
+                        Target::Path(path)
+                    };
+                    if let Some(text) = (Shortcut { target }).encode() {
+                        match fs::write_atomic(&dest, text.as_bytes()) {
+                            Ok(p) if p.durable() => self.flash(String::from("Shortcut added to Desktop")),
+                            Ok(_) => self.flash(String::from("Shortcut created; disk synchronization failed")),
+                            Err(e) => self.flash(format!("Couldn't create shortcut: {e}")),
+                        }
+                    }
+                }
+            }
             Action::Duplicate => {
                 let sources = paths
                     .into_iter()
@@ -786,10 +821,7 @@ impl Folder {
             self.flash(String::from("Nothing to paste"));
             return;
         };
-        let moving = {
-            let cut = self.cut.lock();
-            !cut.is_empty() && *cut == paths
-        };
+        let moving = corekit::clipboard::files_are_cut();
         let cwd = self.cwd.clone();
         self.transfer(&paths, &cwd, moving);
     }
@@ -872,6 +904,7 @@ impl Folder {
             if one && !read_only(&paths[0]) {
                 items.push(Some((Action::Rename, "Rename")));
             }
+            items.push(Some((Action::DesktopShortcut, "Create Desktop Shortcut")));
             items.push(Some((Action::Copy, "Copy")));
             if !paths.iter().any(|p| read_only(p)) {
                 items.push(Some((Action::Cut, "Cut")));
@@ -1066,6 +1099,11 @@ fn main(args: corekit::Args) -> i32 {
     }
     if args.get(1).is_some_and(|s| s == "--self-check") {
         return Files::self_check();
+    }
+    if args.get(1).is_some_and(|s| s == "--desktop-operation") {
+        let Some(dir) = args.get(2) else { return 1 };
+        let Some(mode) = args.get(3) else { return 1 };
+        return waveui::run(Files::operation(dir, mode, args.iter().skip(4).cloned().collect()));
     }
     let start = args.get(1).map(|p| fs::resolve(&fs::cwd(), p)).unwrap_or_else(|| String::from("/Documents"));
     waveui::run(Files::new(&start))

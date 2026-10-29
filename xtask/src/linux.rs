@@ -59,7 +59,7 @@ pub fn fetch(url: &str, sha256: &str) -> Option<PathBuf> {
 pub fn unpack_deb(deb: &PathBuf) -> Option<PathBuf> {
     let name = deb.file_stem().unwrap().to_string_lossy().into_owned();
     let out = root().join("target/linux/deb").join(&name);
-    if out.is_dir() {
+    if extracted_cache_complete(&out) {
         return Some(out);
     }
     let tmp = out.with_extension("tmp");
@@ -69,8 +69,42 @@ pub fn unpack_deb(deb: &PathBuf) -> Option<PathBuf> {
         eprintln!("warning: could not unpack {}: {e}", deb.display());
         return None;
     }
-    fs::rename(&tmp, &out).unwrap();
+    let manifest = extracted_manifest(&tmp).ok()?;
+    fs::write(tmp.join(".wave-extracted"), manifest).ok()?;
+    if out.exists() {
+        fs::remove_dir_all(&out).ok()?;
+    }
+    fs::rename(&tmp, &out).ok()?;
     Some(out)
+}
+
+// CI caches may retain directories while pruning extracted executables. A
+// directory's existence is not evidence that its package is still complete.
+fn extracted_manifest(root: &Path) -> std::io::Result<String> {
+    fn visit(root: &Path, dir: &Path, lines: &mut Vec<String>) -> std::io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                visit(root, &path, lines)?;
+            } else {
+                lines.push(format!("{}\t{}", metadata.len(), path.strip_prefix(root).unwrap().display()));
+            }
+        }
+        Ok(())
+    }
+    let mut lines = Vec::new();
+    visit(root, root, &mut lines)?;
+    lines.sort();
+    Ok(lines.join("\n"))
+}
+fn extracted_cache_complete(root: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(root.join(".wave-extracted")) else { return false };
+    !text.is_empty()
+        && text.lines().all(|line| {
+            let Some((size, path)) = line.split_once('\t') else { return false };
+            fs::symlink_metadata(root.join(path)).is_ok_and(|m| Some(m.len()) == size.parse().ok())
+        })
 }
 
 fn unpack_into(deb: &PathBuf, dir: &PathBuf) -> Result<(), String> {
@@ -376,4 +410,21 @@ fn test_programs(cc: &Cc) -> Vec<Program> {
         programs.push((format!("Linux/bin/{name}"), exe));
     }
     programs
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[test]
+    fn pruned_executable_invalidates_extraction() {
+        let root = std::env::temp_dir().join(format!("wave-package-cache-{}", std::process::id()));
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("bin/busybox"), b"executable").unwrap();
+        let manifest = extracted_manifest(&root).unwrap();
+        fs::write(root.join(".wave-extracted"), manifest).unwrap();
+        assert!(extracted_cache_complete(&root));
+        fs::remove_file(root.join("bin/busybox")).unwrap();
+        assert!(!extracted_cache_complete(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
 }

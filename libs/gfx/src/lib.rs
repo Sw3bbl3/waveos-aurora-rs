@@ -22,3 +22,5 @@ pub mod wallpaper;
 pub mod widgets;
 
 pub mod windowing;
+
+pub mod water;

@@ -146,6 +146,10 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             user::put(a[0], &dt).map(|_| 0)
         }
         nr::SYNC => fs::try_sync_all().map(|_| 0),
+        nr::SYNC_PATH => {
+            let path = user::path(a[0], a[1])?;
+            fs::lookup(&path)?.0.sync().map(|_| 0)
+        }
         nr::CHDIR => {
             let path = user::path(a[0], a[1])?;
             if !fs::is_dir(&path) {

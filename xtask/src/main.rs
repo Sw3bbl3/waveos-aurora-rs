@@ -633,7 +633,7 @@ fn system_image(programs: &[Program], out: &Path) {
     }
     t.file("Linux/.links", linux::links(programs).as_bytes());
     for (dest, src) in programs {
-        t.file(dest, &fs::read(src).unwrap());
+        t.file(dest, &fs::read(src).unwrap_or_else(|e| panic!("cannot package {} as {dest}: {e}", src.display())));
     }
     bundle_sdk(&mut t);
     help::bundle(&mut t, &root());
@@ -1035,6 +1035,10 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
         if let Ok(filter) = env::var("AURORA_TEST_FILTER") {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
         }
+        if env::var("AURORA_TEST_NO_USBREDIR").as_deref() == Ok("1") {
+            println!("warning: skipping virtual USB HID checks (usb-redir unavailable)");
+            image::set_boot_option(&img, "skip_virtual_hid", "1").expect("write boot.conf");
+        }
         if !sleep {
             image::set_boot_option(&img, "sleep", "off").expect("write boot.conf");
         }
@@ -1131,7 +1135,11 @@ fn run_tests_once(
         gpu,
         resolution: None,
         usb,
-        virtual_hid: usbredir::ALL.iter().map(|&k| (k, usbredir::start(k, &root().join("target")))).collect(),
+        virtual_hid: if env::var("AURORA_TEST_NO_USBREDIR").as_deref() == Ok("1") {
+            Vec::new()
+        } else {
+            usbredir::ALL.iter().map(|&k| (k, usbredir::start(k, &root().join("target")))).collect()
+        },
         battery: true,
         host_battery: None,
         usb_stick: Some({
