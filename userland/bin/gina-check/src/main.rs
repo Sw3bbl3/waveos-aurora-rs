@@ -11,7 +11,7 @@ corekit::entry!(main);
 fn main(_: corekit::Args) -> i32 {
     match run() {
         Ok(()) => {
-            println!("GINA CHECK: all 8 lifecycle checks passed");
+            println!("GINA CHECK: all 9 lifecycle checks passed");
             0
         }
         Err(e) => {
@@ -52,6 +52,8 @@ fn run() -> Result<(), String> {
         return Err("failed update changed active app".into());
     }
     println!("PASS malformed update preserves active app");
+    use corekit::desktop_model::shortcut::{Shortcut, Target};
+    let link = Shortcut { target: Target::Package(id.clone()) }.encode().ok_or("shortcut encoding")?;
     manifest.version = "2.0.0".into();
     let update = gina::pack(&manifest, &files).map_err(ToString::to_string)?;
     let b = apps::install(&update, |_, _| {})?;
@@ -59,6 +61,13 @@ fn run() -> Result<(), String> {
         return Err("update not selected".into());
     }
     println!("PASS versioned update");
+    let Some(Shortcut { target: Target::Package(target) }) = Shortcut::parse(link.as_bytes()) else {
+        return Err("shortcut changed identity".into());
+    };
+    if apps::installed(&target)?.executable != b.executable || b.executable == a.executable {
+        return Err("shortcut did not follow active upgrade".into());
+    }
+    println!("PASS package shortcut follows upgraded registration");
     if fs::read(&probe).map_err(io)? != b"keep my data" {
         return Err("update lost app data".into());
     }

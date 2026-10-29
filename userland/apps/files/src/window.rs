@@ -85,6 +85,18 @@ impl Files {
         }
     }
 
+    pub fn operation(dir: &str, mode: &str, paths: Vec<String>) -> Self {
+        // Trash is the destination, never the source view: opening a Trash
+        // folder first would turn this into permanent deletion.
+        let mut app = Self::new(if mode == "trash" { "/Desktop" } else { dir });
+        match mode {
+            "trash" => app.tabs[0].trash(paths),
+            "copy" | "move" => app.tabs[0].transfer(&paths, dir, mode == "move"),
+            _ => app.tabs[0].dropped(dir, corekit::dnd::Dropped::Files(paths), false),
+        }
+        app
+    }
+
     fn tab(&mut self) -> &mut Folder {
         &mut self.tabs[self.active]
     }
@@ -200,11 +212,8 @@ impl Files {
             let s = manager.state.lock();
             {
                 let mut cut = self.cut.lock();
-                let owns_clipboard = corekit::clipboard::files().is_some_and(|paths| paths == *cut);
                 cut.retain(|p| !s.moved.contains(p));
-                if owns_clipboard {
-                    corekit::clipboard::set_files(&cut);
-                }
+                corekit::clipboard::complete_moves(&s.moved);
             }
             for e in &s.errors {
                 corekit::eprintln!("Files transfer: {}", e);

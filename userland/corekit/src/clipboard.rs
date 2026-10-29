@@ -37,3 +37,17 @@ pub fn files() -> Option<Vec<String>> {
     let b = get(clip::FILES)?;
     Some(String::from_utf8_lossy(&b).lines().filter(|l| !l.is_empty()).map(String::from).collect())
 }
+
+/// Mark files for moving across every Files window and the desktop.
+pub fn cut_files(paths: &[String]) {
+    let joined = paths.join("\n");
+    let _ = call(nr::CLIPBOARD_SET, &[clip::CUT_FILES as u64, joined.as_ptr() as u64, joined.len() as u64]);
+}
+pub fn files_are_cut() -> bool {
+    get(clip::CUT_FILES).is_some()
+}
+/// Call only for paths whose move has completed successfully.
+pub fn complete_moves(paths: &[String]) {
+    let joined = paths.join("\n");
+    let _ = call(nr::CLIPBOARD_SET, &[clip::COMPLETE_MOVES as u64, joined.as_ptr() as u64, joined.len() as u64]);
+}

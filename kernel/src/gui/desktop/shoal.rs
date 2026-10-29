@@ -69,6 +69,7 @@ struct Entry {
     name: String,
     path: String,
     icon: Icon,
+    package: Option<String>,
 }
 
 pub struct Launcher {
@@ -150,11 +151,13 @@ impl Desktop {
                     name: String::from(if a.kind == AppKind::About { "About" } else { a.name }),
                     path: String::from(a.path),
                     icon: a.icon,
+                    package: None,
                 })
                 .collect();
             apps.sort_by(|a, b| a.name.cmp(&b.name));
             apps.extend(crate::gui::installed::list().into_iter().map(|a| Entry {
                 kind: None,
+                package: Some(a.manifest.id.clone()),
                 name: a.manifest.name,
                 path: a.path,
                 icon: Icon::Aurora,
@@ -259,6 +262,22 @@ impl Desktop {
         y >= MENUBAR_H
     }
 
+    pub(super) fn shoal_context(&mut self, x: i32, y: i32) -> bool {
+        let Some(l) = &self.launcher else { return false };
+        let results = l.results();
+        if let Some(i) = self.shoal_tiles(results.len()).iter().position(|r| r.contains(x, y)) {
+            let e = results[i].clone();
+            let target = if let Some(id) = e.package {
+                aurora_desktop::shortcut::Target::Package(id)
+            } else if let Some(kind) = e.kind {
+                aurora_desktop::shortcut::Target::Builtin(super::items::builtin_id(crate::gui::apps::info(kind)))
+            } else {
+                return true;
+            };
+            self.shortcut_menu(x, y, e.name, target);
+        }
+        true
+    }
     pub(super) fn shoal_hover(&mut self, x: i32, y: i32) {
         let Some(l) = self.launcher.as_ref() else { return };
         let n = l.results().len();
