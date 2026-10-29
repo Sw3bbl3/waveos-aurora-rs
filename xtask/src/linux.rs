@@ -234,7 +234,12 @@ impl Cc {
                 c
             }
         };
-        cmd.args(flags).arg("-c").arg(src).arg("-o").arg(obj).status().is_ok_and(|s| s.success())
+        // Quiet unless it fails: then the compiler's messages, warnings included.
+        let Ok(out) = cmd.args(flags).arg("-c").arg(src).arg("-o").arg(obj).output() else { return false };
+        if !out.status.success() {
+            eprint!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        }
+        out.status.success()
     }
 
     /// Links `objs` into the static program `exe`.
