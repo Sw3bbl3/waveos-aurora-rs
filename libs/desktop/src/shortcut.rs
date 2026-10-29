@@ -51,6 +51,30 @@ impl Shortcut {
         name.strip_suffix(".wave-link").unwrap_or(name).to_string()
     }
 }
+/// Recognize catalog executables without treating arbitrary executables as apps.
+pub fn builtin_for_path(path: &str) -> Option<&'static str> {
+    Some(match path {
+        "/System/Apps/Learn.elf" => "learn",
+        "/System/Apps/Studio.elf" => "studio",
+        "/System/Apps/Installer.elf" => "installer",
+        "/System/Apps/Files.elf" => "files",
+        "/System/NetSurf/netsurf" => "netsurf",
+        "/System/Apps/Terminal.elf" => "terminal",
+        "/System/Apps/Notes.elf" => "notes",
+        "/System/Apps/Calculator.elf" => "calculator",
+        "/System/Apps/Settings.elf" => "settings",
+        "/System/Apps/Preview.elf" => "preview",
+        "/System/Apps/Paint.elf" => "paint",
+        "/System/Apps/Clock.elf" => "clock",
+        "/System/Apps/Activity.elf" => "activity",
+        "/System/Apps/Doom.elf" => "doom",
+        "/System/Apps/Firefox.elf" => "firefox",
+        "/System/Apps/Welcome.elf" => "welcome",
+        "/System/Apps/About.elf" => "about",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

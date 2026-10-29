@@ -85,6 +85,9 @@ fn classify_document(path: String) -> Resolved {
         return Resolved::Document(apps::info(AppKind::Files).path.into(), path);
     }
     let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".elf") || path.starts_with("/System/Bin/") {
+        return Resolved::Program(path);
+    }
     if lower.ends_with(".gina") {
         return Resolved::Document("/System/Apps/Installer.elf".into(), path);
     }

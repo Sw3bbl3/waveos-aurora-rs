@@ -643,13 +643,21 @@ impl Folder {
             }
             Action::Paste => self.paste(),
             Action::DesktopShortcut => {
-                use corekit::desktop_model::shortcut::{Shortcut, Target};
+                use corekit::desktop_model::shortcut::{builtin_for_path, Shortcut, Target};
                 if !fs::exists("/Desktop") {
                     let _ = fs::mkdir("/Desktop");
                 }
+                let installed = corekit::apps::list();
                 for path in paths {
                     let dest = fs::unique_name("/Desktop", fs::file_name(&path), ".wave-link");
-                    if let Some(text) = (Shortcut { target: Target::Path(path) }).encode() {
+                    let target = if let Some(id) = builtin_for_path(&path) {
+                        Target::Builtin(id.into())
+                    } else if let Some(app) = installed.iter().find(|a| a.executable == path) {
+                        Target::Package(app.manifest.id.clone())
+                    } else {
+                        Target::Path(path)
+                    };
+                    if let Some(text) = (Shortcut { target }).encode() {
                         match fs::write_atomic(&dest, text.as_bytes()) {
                             Ok(p) if p.durable() => self.flash(String::from("Shortcut added to Desktop")),
                             Ok(_) => self.flash(String::from("Shortcut created; disk synchronization failed")),
