@@ -1497,7 +1497,13 @@ impl Desktop {
         let water_start = crate::time::now_ns();
         self.water.paint(cv, &self.wallpaper, self.water_coarse);
         if self.water.active() {
-            self.water_coarse = crate::time::now_ns().saturating_sub(water_start) > 8_000_000;
+            let elapsed = crate::time::now_ns().saturating_sub(water_start);
+            // Hysteresis avoids alternating between expensive and cheap frames.
+            if elapsed > 8_000_000 {
+                self.water_coarse = true;
+            } else if elapsed < 4_000_000 {
+                self.water_coarse = false;
+            }
         }
         self.paint_items(cv);
         let focused = self.focused_id();
