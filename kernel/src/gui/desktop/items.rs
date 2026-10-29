@@ -78,7 +78,8 @@ fn resolve(path: &str) -> Resolved {
     Resolved::Missing
 }
 static JOBS: Mutex<Vec<Job>> = Mutex::new(Vec::new());
-static SNAPSHOT: Mutex<Option<(Vec<Item>, Option<String>, bool)>> = Mutex::new(None);
+type DesktopSnapshot = (Vec<Item>, Option<String>, bool);
+static SNAPSHOT: Mutex<Option<DesktopSnapshot>> = Mutex::new(None);
 fn classify_document(path: String) -> Resolved {
     if fs::is_dir(&path) {
         return Resolved::Document(apps::info(AppKind::Files).path.into(), path);
@@ -715,6 +716,31 @@ impl Desktop {
         JOBS.lock().push(Job::Resolve(path.into()));
     }
 }
+/// Persistent catalog IDs are independent of executable paths and display names.
 pub(super) fn builtin_id(a: &apps::AppInfo) -> String {
-    a.path.rsplit('/').next().unwrap_or(a.name).trim_end_matches(".elf").to_ascii_lowercase()
+    use AppKind::*;
+    let id = match a.kind {
+        Welcome => "welcome",
+        Learn => "learn",
+        About => "about",
+        Files => "files",
+        Terminal => "terminal",
+        Notes => "notes",
+        Calculator => "calculator",
+        Settings => "settings",
+        Preview => "preview",
+        Paint => "paint",
+        Clock => "clock",
+        Activity => "activity",
+        NetSurf => "netsurf",
+        Power => "power",
+        Crash => "crash",
+        DisplayConfirm => "display-confirm",
+        Other => "other",
+        Installer => "installer",
+        Studio => "studio",
+        Doom => "doom",
+        Firefox => "firefox",
+    };
+    id.into()
 }
