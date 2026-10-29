@@ -1,0 +1,34 @@
+# Living desktop implementation and validation
+
+Work is in progress on `codex/living-desktop`, based on main `bcacf684`.
+No release or merge is authorized by this change. Claude's original checkout and its disk images are untouched.
+
+## Implemented
+
+- Destination-volume staged saves, distinct publication/durability results, Notes rename retry and Trash dirty-state fixes.
+- Staged cross-volume Trash moves/restores with original-path metadata persisted before removal and streaming copies.
+- Paint workspace, adaptive inspector (a sheet in narrow windows), hexadecimal colour entry, tool-specific controls, panning, anchored zoom, and Save/Discard/Cancel and replacement prompts.
+- `/Desktop` background snapshots and operations, automatic right-to-left column layout, sorting, scrolling, selection, keyboard operations, context menus, Files transfer launches, file/app shortcuts, and shared cut clipboard metadata.
+- Bounded interacting water heights, wallpaper refraction/lighting, active-only updates and damage, reduced render detail under pressure, Appearance switch and Reduce Motion support.
+- Required build support: Claude's macOS Linux compiler fix, extracted Debian cache completeness validation, and two ARM host lint fixes.
+
+## Verified so far (2026-10-29)
+
+- `cargo xtask build`: kernel, userland and Linux programs built and packaged; QEMU booted at 1280×800 on a disposable image.
+- Shared model tests: safe-save fault injection, read-only/full destinations, rename failure/retry, final flush identity, temp-name collisions, shortcut validation, layout/sorting/overflow.
+- Production kernel Trash host adapter: successful cross-volume round trip, each publication/flush failure, source deletion failure, full disk, hidden file restoration, replacement conflicts, emptying.
+- Production kernel clipboard host adapter: compatible readers, cut metadata, failed/cancelled operation retention, confirmed-move removal, unrelated copied/text clipboard preservation.
+- `cargo xtask lint` passed before the latest small desktop/test edits; rerun required at final head.
+- Host tests for AuroraFS, FAT32, Lumen, images and xtask passed.
+- QEMU: Paint brush/line/rectangle/ellipse, undo/redo, Fit/100%, space-drag pan, PNG save, close Cancel, desktop folder creation/rename, launcher Add to Desktop and opening its Paint shortcut; narrow inspector inspected.
+- QEMU Files `--self-check`: cross-volume transfer, tab isolation and cancel-on-close PASS; final `FILES CHECK PASS` in serial log.
+- User-created desktop folder and shortcut survived restart of the disposable image.
+- Both light and dark Paint/desktop screenshots captured at 1280×800; first ripple APNG captured with overlapping clicks.
+- Existing host frame benchmark: five interleaved matched runs; baseline median 2.543 ms, updated 2.553 ms (+0.393%). This benchmark models rendering primitives, not the running OS or physical hardware.
+- Optimized water host benchmark: 1280×800 median 3.023 ms / p95 5.464 ms; 1920×1080 5.049 / 9.900 ms; 2560×1600 scale 2: 11.671 / 21.852 ms. Simulation ~0.049 ms. No per-click/frame allocations; stops advancing after settling. Recheck on final head without concurrent builds.
+
+## Outstanding validation / review
+
+Final formatting/lint/build; kernel two-boot suite and host transfer fault suite; QEMU cut/copy/paste/drag/conflicts/Trash/Put Back and focus routing; Paint remaining unsaved-work paths and overwrite; installed-app upgrade link check; 1920×1080 and HiDPI captures; effect toggle/Reduce Motion and measured return to idle; final visual review and PR.
+
+Physical hardware has not been tested. Raw logs, screenshots, disposable images and recordings are under the isolated checkout's `target/validation` or task-local `/tmp/waveos-*`; selected evidence will be linked below at delivery.
