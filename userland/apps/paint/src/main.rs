@@ -76,6 +76,12 @@ struct Stroke {
     dirty: Option<Rect>,
 }
 
+#[derive(Clone)]
+enum Pending {
+    Close,
+    Open(String),
+}
+
 pub struct Paint {
     img: Picture,
     path: Option<String>,
@@ -97,11 +103,31 @@ pub struct Paint {
     status: Option<String>,
     /// The size of the picture area.
     view: (i32, i32),
+    pan: (i32, i32),
+    pan_grab: Option<(i32, i32, i32, i32)>,
+    space: bool,
+    inspector: bool,
+    inspector_popup: bool,
+    hex: String,
+    pending: Option<Pending>,
+    confirm: bool,
+    overwrite: Option<String>,
 }
 
 #[derive(Clone)]
 pub enum Msg {
     Tool(usize),
+    ToggleInspector(bool),
+    CloseInspector,
+    Hex(String),
+    ApplyHex,
+    Space(bool),
+    SaveAs,
+    PendingSave,
+    PendingDiscard,
+    PendingCancel,
+    Replace,
+    CancelReplace,
     Size(f32),
     FillShapes(bool),
     Swatch(usize),
@@ -179,6 +205,15 @@ impl Paint {
             cursor: None,
             status: None,
             view: (1000, 600),
+            pan: (0, 0),
+            pan_grab: None,
+            space: false,
+            inspector: true,
+            inspector_popup: false,
+            hex: format!("{:06X}", PALETTE[9] & 0xFFFFFF),
+            pending: None,
+            confirm: false,
+            overwrite: None,
         };
         if let Some(path) = path {
             p.open(&path);
@@ -199,6 +234,7 @@ impl Paint {
                 self.undo.clear();
                 self.redo.clear();
                 self.zoom = None;
+                self.pan = (0, 0);
             }
             None => self.flash(format!("Couldn't open {}", fs::file_name(path))),
         }
@@ -212,23 +248,64 @@ impl Paint {
         self.path.as_deref().map(|p| String::from(fs::file_name(p))).unwrap_or_else(|| String::from("Untitled"))
     }
 
-    fn save_to(&mut self, path: String) {
+    fn save_to(&mut self, path: String) -> bool {
         let png = aurora_image::png::encode(&self.img);
-        match fs::write(&path, &png) {
-            Ok(()) => {
-                self.flash(format!("Saved {}", fs::file_name(&path)));
-                self.path = Some(path);
+        match fs::write_atomic(&path, &png) {
+            Ok(publication) => {
+                self.path = Some(path.clone());
+                if let Some(e) = publication.sync_error {
+                    self.flash(format!("Saved; disk sync failed: {}. Save again to retry.", corekit::Error(e)));
+                    return false;
+                }
                 self.dirty = false;
+                self.flash(format!("Saved {}", fs::file_name(&path)));
+                true
             }
-            Err(e) => self.flash(format!("Couldn't save: {e}")),
+            Err(e) => {
+                self.flash(format!("Couldn't save: {e}. Your drawing is still open."));
+                false
+            }
         }
     }
 
-    fn save(&mut self) {
+    fn save(&mut self, cx: &mut Context<Msg>) {
         match self.path.clone() {
-            Some(p) if p.to_lowercase().ends_with(".png") => self.save_to(p),
-            _ => self.sheet = Some(String::from("Untitled.png")),
+            Some(p) if p.to_lowercase().ends_with(".png") => {
+                if self.save_to(p) {
+                    self.finish_pending(cx);
+                }
+            }
+            _ => {
+                self.sheet = Some(String::from("Untitled.png"));
+                cx.focus("save-name");
+            }
         }
+    }
+
+    fn finish_pending(&mut self, cx: &mut Context<Msg>) {
+        self.confirm = false;
+        match self.pending.take() {
+            Some(Pending::Close) => cx.close(),
+            Some(Pending::Open(path)) => self.open(&path),
+            None => {}
+        }
+    }
+
+    fn zoom_at(&mut self, percent: i32, x: i32, y: i32) {
+        let (ix, iy) = self.to_image(x, y);
+        self.zoom = Some(percent.clamp(5, 800));
+        self.pan = (0, 0);
+        let r = self.image_rect();
+        self.pan = (
+            x - r.x - (ix * r.w as f32 / self.img.width as f32) as i32,
+            y - r.y - (iy * r.h as f32 / self.img.height as f32) as i32,
+        );
+        self.clamp_pan();
+    }
+    fn clamp_pan(&mut self) {
+        let r = self.image_rect();
+        self.pan.0 += (32 - r.right()).max(0) - (r.x - self.view.0 + 32).max(0);
+        self.pan.1 += (32 - r.bottom()).max(0) - (r.y - self.view.1 + 32).max(0);
     }
 
     fn push_undo(&mut self, snapshot: Vec<u32>) {
@@ -252,6 +329,7 @@ impl Paint {
         if let Some(next) = self.redo.pop() {
             let cur = core::mem::replace(&mut self.img.pixels, next);
             self.undo.push(cur);
+            self.dirty = true;
         }
     }
 
@@ -268,7 +346,7 @@ impl Paint {
     fn image_rect(&self) -> Rect {
         let z = self.zoom_pct();
         let (w, h) = (self.img.width as i32 * z / 100, self.img.height as i32 * z / 100);
-        Rect::new((self.view.0 - w) / 2, (self.view.1 - h) / 2, w, h)
+        Rect::new((self.view.0 - w) / 2 + self.pan.0, (self.view.1 - h) / 2 + self.pan.1, w.max(1), h.max(1))
     }
 
     /// Image coordinates (fractional) of a point in the picture area.
@@ -433,6 +511,13 @@ impl Paint {
     }
 
     fn begin(&mut self, x: i32, y: i32) {
+        if self.space {
+            self.pan_grab = Some((x, y, self.pan.0, self.pan.1));
+            return;
+        }
+        if !self.image_rect().contains(x, y) {
+            return;
+        }
         let p = self.to_image(x, y);
         match self.tool {
             Tool::Fill => self.flood_fill(p.0 as i32, p.1 as i32),
@@ -440,6 +525,8 @@ impl Paint {
                 let (ix, iy) = (p.0 as i32, p.1 as i32);
                 if ix >= 0 && iy >= 0 && (ix as u32) < self.img.width && (iy as u32) < self.img.height {
                     self.color = self.img.pixels[(iy as u32 * self.img.width + ix as u32) as usize];
+                    self.hex = format!("{:06X}", self.color & 0xFFFFFF);
+                    self.picker = Some(rgb_to_hsv(self.color));
                     self.tool = Tool::Brush;
                 }
             }
@@ -491,28 +578,13 @@ impl Paint {
 
     fn paint_picture(&self, cv: &mut Surface, view: Rect, dark: bool) {
         let t = theme::current();
-        cv.fill_rect(view, if dark { 0xFF1A_1E2D } else { 0xFFEE_F1F8 });
-        // A dotted mat around the picture.
-        let dot = with_alpha(t.text_secondary, 0x40);
-        let clip = cv.clip.intersect(&view);
-        let mut y = view.y + 12;
-        while y < clip.bottom() {
-            let mut x = view.x + 12;
-            if y >= clip.y {
-                while x < clip.right() {
-                    if x >= clip.x {
-                        cv.fill_rect(Rect::new(x, y, 1, 1), dot);
-                    }
-                    x += 16;
-                }
-            }
-            y += 16;
-        }
+        cv.fill_rect(view, if dark { 0xFF20_2125 } else { 0xFFE7_E8EC });
         let r = self.image_rect().offset(view.x, view.y);
         cv.shadow(r, 4, 24, 8, t.shadow);
         if r.w as u32 >= self.img.width {
             // Nearest neighbour at 100% and above: crisp pixels.
-            let clip = cv.clip.intersect(&r);
+            let r = cv.to_px(r);
+            let clip = cv.pclip().intersect(&r);
             let (iw, ih) = (self.img.width as i32, self.img.height as i32);
             for y in clip.y..clip.bottom() {
                 let iy = ((y - r.y) * ih / r.h).min(ih - 1);
@@ -525,11 +597,11 @@ impl Paint {
             cv.draw_image(&self.img.pixels, self.img.width, self.img.height, r, 255);
         }
         // Brush outline under the pointer.
-        if let (Some((x, y)), true) = (self.cursor, matches!(self.tool, Tool::Brush | Tool::Eraser)) {
+        if let (Some((x, y)), true) = (self.cursor, !self.space && matches!(self.tool, Tool::Brush | Tool::Eraser)) {
             let rad = (self.size * r.w / self.img.width as i32 / 2).max(2);
             let (x, y) = (view.x + x, view.y + y);
-            cv.fill_circle(x, y, rad + 1, 0x60FF_FFFF);
-            cv.fill_circle(x, y, rad, with_alpha(if self.tool == Tool::Eraser { WHITE } else { self.color }, 0x90));
+            cv.stroke_round_rect(Rect::new(x - rad - 1, y - rad - 1, 2 * rad + 2, 2 * rad + 2), rad + 1, 0xB0000000);
+            cv.stroke_round_rect(Rect::new(x - rad, y - rad, 2 * rad, 2 * rad), rad, 0xD0FFFFFF);
         }
     }
 
@@ -576,7 +648,7 @@ impl Paint {
                     let ss = (x - sq.x) as f32 / (sq.w - 1) as f32;
                     let vv = 1.0 - (y - sq.y) as f32 / (sq.h - 1) as f32;
                     if cv.clip.contains(x, y) {
-                        cv.buf[(y * cv.width + x) as usize] = hsv_to_rgb(hue, ss, vv);
+                        cv.fill_rect(Rect::new(x, y, 1, 1), hsv_to_rgb(hue, ss, vv));
                     }
                 }
             }
@@ -606,19 +678,58 @@ impl Paint {
                     .foreground(Color::SecondaryLabel),
             )
             .spacing(10);
-        VStack::new()
-            .push(Text::label("Colour"))
-            .push(swatches)
-            .push(bar)
-            .push(square)
-            .push(current)
-            .push(Text::label("Shapes").padding_insets(Insets { top: 10, leading: 0, bottom: 0, trailing: 0 }))
-            .push(Toggle::checkbox("Fill shapes", self.fill_shapes).on_change(Msg::FillShapes))
-            .push(Spacer::new())
+        let name = match self.tool {
+            Tool::Brush => "Brush",
+            Tool::Eraser => "Eraser",
+            Tool::Line => "Line",
+            Tool::Rect => "Rectangle",
+            Tool::Ellipse => "Ellipse",
+            Tool::Fill => "Fill",
+            Tool::Picker => "Eyedropper",
+        };
+        let mut panel = VStack::new()
+            .push(Text::new(name).style(TextStyle::Title))
+            .push(Text::new("TOOL OPTIONS").style(TextStyle::Caption).foreground(Color::TertiaryLabel))
             .spacing(12)
-            .alignment(Align::Start)
-            .padding_insets(Insets { top: 18, leading: 16, bottom: 16, trailing: 16 })
-            .fill_height()
+            .alignment(Align::Stretch);
+        if matches!(self.tool, Tool::Brush | Tool::Eraser | Tool::Line | Tool::Rect | Tool::Ellipse) {
+            panel = panel
+                .push(
+                    HStack::new()
+                        .push(Text::new("Size").style(TextStyle::Callout))
+                        .push(Spacer::new())
+                        .push(Text::new(format!("{} px", self.size)).style(TextStyle::Callout)),
+                )
+                .push(Slider::new(self.size as f32, 1.0..=64.0).step(1.0).on_change(Msg::Size).fill_width());
+        }
+        if matches!(self.tool, Tool::Rect | Tool::Ellipse) {
+            panel = panel.push(Toggle::checkbox("Fill shape", self.fill_shapes).on_change(Msg::FillShapes));
+        }
+        if self.tool != Tool::Eraser {
+            panel = panel
+                .push(Divider::new())
+                .push(Text::label("Colour"))
+                .push(square)
+                .push(bar)
+                .push(
+                    HStack::new()
+                        .push(Text::new("#").foreground(Color::SecondaryLabel))
+                        .push(
+                            TextField::new("RRGGBB", self.hex.clone())
+                                .on_change(Msg::Hex)
+                                .on_submit(Msg::ApplyHex)
+                                .id("colour-hex")
+                                .grow(1),
+                        )
+                        .push(Button::symbol(Symbol::Check).action(Msg::ApplyHex).help("Apply hex colour"))
+                        .spacing(6),
+                )
+                .push(current)
+                .push(Divider::new())
+                .push(Text::label("Swatches"))
+                .push(swatches);
+        }
+        ScrollView::new(panel.padding(16).fill_width()).fill_height()
     }
 
     /// The tools, down the left edge.
@@ -635,38 +746,54 @@ impl Paint {
             let mut b = Button::with(icon)
                 .action(Msg::Tool(i))
                 .button_style(ButtonStyle::Toolbar)
-                .corner_radius(12)
-                .size(40, 40)
+                .corner_radius(9)
+                .size(36, 36)
                 .help(*tip);
             if active {
-                b = b.background_rounded(Color::Custom(accent), 12);
+                b = b.background_rounded(Color::Custom(accent), 9);
             }
             tools = tools.push(b);
         }
-        tools.padding_insets(Insets { top: 12, leading: 12, bottom: 12, trailing: 12 }).fill_height()
+        tools.padding_insets(Insets { top: 12, leading: 10, bottom: 12, trailing: 10 }).fill_height()
     }
 
-    fn toolbar(&self) -> View<'_, Msg> {
-        let info = match &self.status {
-            Some(s) => s.clone(),
-            None => format!("{} × {} · {}%", self.img.width, self.img.height, self.zoom_pct()),
-        };
+    fn toolbar(&self, narrow: bool) -> View<'_, Msg> {
         toolbar(vec![
-            Text::new(self.name().trim_end_matches(".png").to_string())
-                .style(TextStyle::Sized(15, waveui::style::Weight::Bold)),
-            Text::new(info).style(TextStyle::Sized(12, waveui::style::Weight::Bold)).foreground(Color::TertiaryLabel),
+            Text::new(self.name()).style(TextStyle::Sized(14, waveui::style::Weight::Bold)),
+            Text::new(if self.dirty { "Edited" } else { "" })
+                .style(TextStyle::Caption)
+                .foreground(Color::SecondaryLabel),
             Spacer::new(),
             Button::symbol(Symbol::Undo).action(Msg::Undo).disabled(self.undo.is_empty()).help("Undo (Ctrl+Z)"),
             Button::symbol(Symbol::Redo).action(Msg::Redo).disabled(self.redo.is_empty()).help("Redo (Ctrl+Shift+Z)"),
-            Text::new("Size").style(TextStyle::Callout).foreground(Color::SecondaryLabel),
-            Slider::new(self.size as f32, 1.0..=64.0)
-                .step(1.0)
-                .on_change(Msg::Size)
-                .width(120)
-                .help("Brush size ([ and ])"),
-            Text::new(format!("{}", self.size)).style(TextStyle::Sized(12, waveui::style::Weight::Bold)).width(22),
-            Button::new("Save").action(Msg::Save).button_style(ButtonStyle::Prominent).shortcut(Shortcut::ctrl('s')),
+            Button::symbol(Symbol::Sidebar).action(Msg::ToggleInspector(narrow)).help("Show or hide inspector"),
+            Button::new("Save").action(Msg::Save).button_style(ButtonStyle::Tinted).shortcut(Shortcut::ctrl('s')),
+            Button::symbol(Symbol::More)
+                .menu(vec![MenuItem::new("Save As…", Msg::SaveAs).shortcut(Shortcut::ctrl_shift('s'))])
+                .help("Document actions"),
         ])
+    }
+
+    fn statusbar(&self) -> View<'_, Msg> {
+        HStack::new()
+            .push(
+                Text::new(
+                    self.status.clone().unwrap_or_else(|| {
+                        format!("{} × {} px  ·  Space-drag to pan", self.img.width, self.img.height)
+                    }),
+                )
+                .style(TextStyle::Caption)
+                .foreground(Color::SecondaryLabel)
+                .grow(1),
+            )
+            .push(Button::symbol(Symbol::Minus).action(Msg::Zoom(1)).size(24, 24).help("Zoom out"))
+            .push(Text::new(format!("{}%", self.zoom_pct())).style(TextStyle::Caption).width(42))
+            .push(Button::symbol(Symbol::Plus).action(Msg::Zoom(-1)).size(24, 24).help("Zoom in"))
+            .push(Button::new("Fit").action(Msg::ZoomTo(None)).help("Fit canvas (Ctrl+0)"))
+            .push(Button::new("100%").action(Msg::ZoomTo(Some(100))).help("Actual size (Ctrl+1)"))
+            .spacing(6)
+            .padding_xy(12, 5)
+            .fill_width()
     }
 
     fn pick(&mut self, hue: Option<f32>, sv: Option<(f32, f32)>) {
@@ -691,12 +818,72 @@ impl App for Paint {
 
     fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
         match msg {
-            Msg::Tool(i) => self.tool = TOOLS[i].0,
+            Msg::Tool(i) => {
+                self.tool = TOOLS[i].0;
+                cx.focus("paint-canvas");
+            }
+            Msg::ToggleInspector(narrow) => {
+                if narrow {
+                    self.inspector_popup = true;
+                } else {
+                    self.inspector = !self.inspector;
+                }
+            }
+            Msg::CloseInspector => self.inspector_popup = false,
+            Msg::Hex(s) => self.hex = s,
+            Msg::ApplyHex => {
+                let h = self.hex.trim().trim_start_matches('#');
+                if h.len() == 6 {
+                    if let Ok(v) = u32::from_str_radix(h, 16) {
+                        self.color = 0xFF000000 | v;
+                        self.picker = Some(rgb_to_hsv(self.color));
+                        self.hex = format!("{v:06X}");
+                        self.status = None;
+                    } else {
+                        self.flash(String::from("Use six hexadecimal digits, such as 2563EB."));
+                    }
+                } else {
+                    self.flash(String::from("Use six hexadecimal digits, such as 2563EB."));
+                }
+            }
+            Msg::Space(on) => {
+                self.space = on;
+                if !on {
+                    self.pan_grab = None;
+                }
+                cx.focus("paint-canvas");
+            }
+            Msg::SaveAs => {
+                self.sheet = Some(self.name());
+                cx.focus("save-name");
+            }
+            Msg::PendingSave => {
+                self.confirm = false;
+                self.save(cx);
+            }
+            Msg::PendingDiscard => self.finish_pending(cx),
+            Msg::PendingCancel => {
+                self.pending = None;
+                self.confirm = false;
+            }
+            Msg::Replace => {
+                if let Some(p) = self.overwrite.take() {
+                    if self.save_to(p) {
+                        self.finish_pending(cx);
+                    }
+                }
+            }
+            Msg::CancelReplace => {
+                self.overwrite = None;
+                self.pending = None;
+            }
+
             Msg::Size(v) => self.size = (v as i32).clamp(1, 64),
             Msg::FillShapes(on) => self.fill_shapes = on,
             Msg::Swatch(i) => {
                 self.color = PALETTE[i];
                 self.picker = Some(rgb_to_hsv(self.color));
+                self.hex = format!("{:06X}", self.color & 0xFFFFFF);
             }
             Msg::TogglePicker => {
                 self.picker = if self.picker.is_some() { None } else { Some(rgb_to_hsv(self.color)) };
@@ -717,31 +904,47 @@ impl App for Paint {
             }
             Msg::Undo => self.undo(),
             Msg::Redo => self.redo(),
-            Msg::Save => {
-                self.save();
-                if self.sheet.is_some() {
-                    cx.focus("save-name");
-                }
-            }
+            Msg::Save => self.save(cx),
             Msg::SheetName(n) => self.sheet = Some(n),
             Msg::SheetSave => {
-                if let Some(name) = self.sheet.take() {
+                if let Some(name) = self.sheet.clone() {
                     let mut name = String::from(name.trim());
                     if name.is_empty() {
                         name = String::from("Untitled.png");
                     }
+                    if name.contains(['/', '\\', '\0']) || name == "." || name == ".." {
+                        self.flash(String::from("Choose a file name without slashes."));
+                        return;
+                    }
                     if !name.to_lowercase().ends_with(".png") {
                         name.push_str(".png");
                     }
-                    let _ = fs::mkdir("/Pictures");
-                    self.save_to(fs::join("/Pictures", &name));
+                    if !fs::is_dir("/Pictures") {
+                        if let Err(e) = fs::mkdir("/Pictures") {
+                            self.flash(format!("Couldn't create Pictures: {e}"));
+                            return;
+                        }
+                    }
+                    let path = fs::join("/Pictures", &name);
+                    self.sheet = None;
+                    if fs::exists(&path) && self.path.as_ref() != Some(&path) {
+                        self.overwrite = Some(path);
+                    } else if self.save_to(path) {
+                        self.finish_pending(cx);
+                    }
                 }
             }
-            Msg::SheetCancel => self.sheet = None,
+            Msg::SheetCancel => {
+                self.sheet = None;
+                self.pending = None;
+            }
             Msg::Begin(x, y) => self.begin(x, y),
             Msg::Move(x, y) => {
                 self.cursor = Some((x, y));
-                if self.stroke.is_some() {
+                if let Some((sx, sy, px, py)) = self.pan_grab {
+                    self.pan = (px + x - sx, py + y - sy);
+                    self.clamp_pan();
+                } else if self.stroke.is_some() {
                     let p = self.to_image(x, y);
                     match self.tool {
                         Tool::Brush | Tool::Eraser => self.stroke_to(p),
@@ -750,25 +953,53 @@ impl App for Paint {
                     }
                 }
             }
-            Msg::End => self.stroke = None,
+            Msg::End => {
+                self.stroke = None;
+                self.pan_grab = None;
+            }
             Msg::Cursor(c) => self.cursor = c,
             Msg::Zoom(d) => {
                 let z = self.zoom_pct();
                 let next = if d < 0 { z * 5 / 4 + 1 } else { z * 4 / 5 };
-                self.zoom = Some(next.clamp(5, 800));
+                let (x, y) = self.cursor.unwrap_or((self.view.0 / 2, self.view.1 / 2));
+                self.zoom_at(next, x, y);
             }
-            Msg::ZoomTo(z) => self.zoom = z,
-            Msg::Resize(w, h) => self.view = (w, h),
-            Msg::Open(p) => self.open(&p),
+            Msg::ZoomTo(z) => {
+                self.zoom = z;
+                self.pan = (0, 0);
+            }
+            Msg::Resize(w, h) => {
+                self.view = (w, h);
+                self.clamp_pan();
+            }
+            Msg::Open(p) => {
+                if self.dirty {
+                    self.pending = Some(Pending::Open(p));
+                    self.confirm = true;
+                } else {
+                    self.open(&p);
+                }
+            }
             Msg::ClearStatus => self.status = None,
-        }
-        if self.status.is_some() {
-            cx.cancel(|m| matches!(m, Msg::ClearStatus));
-            cx.after(3000, Msg::ClearStatus);
         }
     }
 
+    fn close_requested(&mut self, _cx: &mut Context<Msg>) -> bool {
+        if !self.dirty {
+            return true;
+        }
+        self.pending = Some(Pending::Close);
+        self.confirm = true;
+        false
+    }
+
     fn key(&self, ev: &KeyEvent) -> Option<Msg> {
+        if ev.ch == Some(' ') {
+            return Some(Msg::Space(ev.pressed));
+        }
+        if !ev.pressed {
+            return None;
+        }
         let ctrl = ev.mods.ctrl || ev.mods.super_key;
         let tool = |t: Tool| TOOLS.iter().position(|x| x.0 == t).map(Msg::Tool);
         match (ctrl, ev.ch.map(|c| c.to_ascii_lowercase())) {
@@ -790,7 +1021,36 @@ impl App for Paint {
         }
     }
 
-    fn sheet(&self, _env: &Env) -> Option<View<'_, Msg>> {
+    fn sheet(&self, env: &Env) -> Option<View<'_, Msg>> {
+        if self.confirm {
+            return Some(
+                Alert::new("Save your drawing?", "Your changes have not been saved.")
+                    .button("Discard", Msg::PendingDiscard, AlertRole::Destructive)
+                    .button("Cancel", Msg::PendingCancel, AlertRole::Cancel)
+                    .button("Save", Msg::PendingSave, AlertRole::Default)
+                    .view(),
+            );
+        }
+        if let Some(path) = &self.overwrite {
+            return Some(
+                Alert::new(
+                    "Replace this file?",
+                    format!("{} already exists. Replacing it will overwrite its contents.", fs::file_name(path)),
+                )
+                .button("Cancel", Msg::CancelReplace, AlertRole::Cancel)
+                .button("Replace", Msg::Replace, AlertRole::Destructive)
+                .view(),
+            );
+        }
+        if self.inspector_popup {
+            return Some(
+                VStack::new()
+                    .push(self.colour_panel().height((env.size.1 - 180).max(180)))
+                    .push(Button::new("Done").action(Msg::CloseInspector).shortcut(Shortcut::cancel()))
+                    .spacing(12)
+                    .width(PANEL_W + 32),
+            );
+        }
         let name = self.sheet.as_ref()?;
         Some(
             VStack::new()
@@ -825,6 +1085,7 @@ impl App for Paint {
         let dark = env.dark;
         let picture = Canvas::new(move |cv, r| self.paint_picture(cv, r, dark))
             .on_input(|e| match e {
+                CanvasEvent::Key(k) if k.ch == Some(' ') => Some(Msg::Space(k.pressed)),
                 CanvasEvent::Press { x, y, button: 1, .. } => Some(Msg::Begin(x, y)),
                 CanvasEvent::Drag { x, y } => Some(Msg::Move(x, y)),
                 CanvasEvent::Release { .. } => Some(Msg::End),
@@ -834,6 +1095,8 @@ impl App for Paint {
                 CanvasEvent::Resize { w, h } => Some(Msg::Resize(w, h)),
                 _ => None,
             })
+            .focusable()
+            .id("paint-canvas")
             .on_drop(|d| match d.items {
                 corekit::dnd::Dropped::Files(paths) => {
                     paths.into_iter().find(|p| aurora_image::is_image_name(p)).map(Msg::Open)
@@ -841,12 +1104,17 @@ impl App for Paint {
                 _ => None,
             })
             .fill();
-        HStack::new()
-            .push(self.rail())
+        let mut workspace =
+            HStack::new().push(self.rail()).push(Divider::new()).push(picture.grow(1)).spacing(0).grow(1);
+        if self.inspector && env.size.0 >= 900 {
+            workspace = workspace.push(Divider::new()).push(self.colour_panel().width(PANEL_W + 32));
+        }
+        VStack::new()
+            .push(self.toolbar(env.size.0 < 900))
             .push(Divider::new())
-            .push(VStack::new().push(self.toolbar()).push(picture).spacing(0).grow(1).fill_height())
+            .push(workspace)
             .push(Divider::new())
-            .push(self.colour_panel().width(PANEL_W + 32))
+            .push(self.statusbar())
             .spacing(0)
             .fill()
     }
