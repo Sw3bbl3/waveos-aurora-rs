@@ -633,7 +633,7 @@ fn system_image(programs: &[Program], out: &Path) {
     }
     t.file("Linux/.links", linux::links(programs).as_bytes());
     for (dest, src) in programs {
-        t.file(dest, &fs::read(src).unwrap());
+        t.file(dest, &fs::read(src).unwrap_or_else(|e| panic!("cannot package {} as {dest}: {e}", src.display())));
     }
     bundle_sdk(&mut t);
     help::bundle(&mut t, &root());
