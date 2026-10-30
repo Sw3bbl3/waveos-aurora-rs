@@ -45,7 +45,7 @@ cargo xtask iso                     # target/waveos-aurora.iso for UEFI virtual 
 cargo xtask iso --no-build          # package an existing target/esp without rebuilding
 ```
 
-`cargo xtask run` boots `target/waveos-aurora.img`, a 256 MiB GPT disk:
+`cargo xtask run` boots `target/waveos-aurora.img`, a GPT disk of 256 MiB, or the size of the Linux packages plus 512 MiB (about 1.7 GiB) when they are on it:
 - **Partition 1** is a FAT32 EFI System Partition with the bootloader, the kernel and `system.tar`. Each build rewrites it.
 - **Partition 2** is **"Aurora HD"**, a AuroraFS volume that holds your files. It is created once from `assets/home/` and then kept, so notes, folders and settings survive rebuilds.
 

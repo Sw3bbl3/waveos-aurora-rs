@@ -4,13 +4,31 @@ For the versioned 0.7 user and developer guides, see the [bilingual handbook](ha
 
 WaveOS is developed and tested in QEMU. Milestone 5 adds the drivers a real PC needs: multicore, USB, sound, ACPI power management and sleep. None of it has yet been verified on physical machines. This page explains how to try it and what to check, and gives you a table to record the results.
 
+## What you need
+
+| | Desktop, WaveOS apps and NetSurf | Voyage or Firefox too | Recommended |
+|---|---|---|---|
+| Processor | Any 64-bit Intel or AMD (x86-64), 1 core | 2 or more cores | 4 or more cores with AVX2 (Intel from 2013, AMD Ryzen) |
+| Memory | 512 MiB (it boots on 256 MiB) | **2 GiB** | 4 to 8 GiB |
+| USB stick or disk | 512 MiB (`cargo xtask image --no-linux-root`) | 2 GiB; 4 GiB leaves room for your files | 8 GiB or more, USB 3 or an SSD in AHCI mode |
+| Network | Optional | Intel e1000/e1000e (see Known limits) | Intel 82574L, for example an Intel Gigabit CT PCIe card |
+| Screen | 1280 × 800 | 1920 × 1080 | 1920 × 1080; larger screens work, but the processor draws everything |
+
+- **Firmware:** 64-bit UEFI with Secure Boot off. Legacy BIOS (CSM) can't start WaveOS.
+- **Processor:** WaveOS uses up to 16 cores and parks the rest. AVX is used when the processor has it (WebKit's JavaScript compiler benefits) but isn't required.
+- **Memory:** WaveOS has no swap, so a program that runs out of memory fails. The desktop uses about 230 MiB; with Voyage showing a Wikipedia article, about 850 MiB in all. With 1 GiB, Voyage can't load WebKit and doesn't open. These figures come from QEMU at 1920 × 1080.
+- **Apple computers:** Macs with Apple silicon can't start WaveOS (it's built for x86-64); run it in a virtual machine there.
+
+The machines most likely to work are desktop PCs from about 2012 to 2020 with the disk in AHCI mode, a USB keyboard and mouse, and an Intel 82574L network card. Laptops are a harder fit: their touchpads, Wi-Fi and sleep are often the kinds WaveOS doesn't drive yet.
+
 ## Make a boot stick
 
 1. Build the image:
    ```sh
-   cargo xtask image          # writes target/waveos-aurora-usb.img (256 MiB)
+   cargo xtask image          # writes target/waveos-aurora-usb.img (about 1.7 GiB)
    ```
-2. Write it to a USB stick. **This erases the stick.**
+   The image holds the Linux packages Voyage and Firefox need. `cargo xtask image --no-linux-root` leaves them out and makes a 256 MiB image, with NetSurf as the browser.
+2. Write it to a USB stick of at least 2 GiB (512 MiB without the Linux packages). **This erases the stick.**
    - macOS:
      ```sh
      diskutil list                       # find the stick, e.g. /dev/disk4
