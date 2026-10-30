@@ -28,6 +28,10 @@ fn main(args: corekit::Args) -> i32 {
     let pages: Vec<&str> = args.iter().skip(1).map(|a| a.as_str()).collect();
     if !fs::exists(VOYAGE) {
         if fs::exists(FIREFOX) && process::spawn(FIREFOX_APP, &pages, process::Stdio::default()).is_ok() {
+            notify::post(
+                "Voyage isn't on this disk yet",
+                "Firefox opened in its place. Starting WaveOS with cargo xtask run puts Voyage on the disk.",
+            );
             return 0;
         }
         // NetSurf takes one page.

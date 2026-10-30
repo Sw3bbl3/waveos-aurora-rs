@@ -56,8 +56,9 @@ shared-mime-info glib` on macOS).
 
 `cargo xtask run` puts that root on the disk as `/Linux`, fetching the
 packages the first time: a new disk is made large enough for them, and an
-older disk gets them when its volume has room (otherwise xtask says so and
-`--fresh-disk` makes a new one). `--no-linux-root` leaves them off, and
+older disk gets the ones it lacks; when its volume has no room for them,
+xtask makes the disk bigger first, copying every file on it to the bigger
+one and checking the copy before it takes the old disk's place. `--no-linux-root` leaves them off, and
 when they can't be fetched (offline) WaveOS runs without them. `cargo
 xtask image` does the same for the USB image. WaveOS's own settings for the
 programs (Firefox's preferences and policies, GTK's settings; see

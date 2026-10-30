@@ -383,15 +383,34 @@ fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64, linux: Option<&P
             Err(e) => panic!("could not update {}: {e}; disk preserved", img.display()),
         }
         let Some(linux) = linux else { return };
-        match image::add_linux(img, linux, &debian::waveos_settings(linux)) {
+        let settings = debian::waveos_settings(linux);
+        let mut added = image::add_linux(img, linux, &settings);
+        // Too little room (a disk made for fewer packages): make the disk
+        // bigger, keeping its files, so the browsers are on it.
+        if let Ok(image::LinuxOnDisk::NoRoom { need, free }) = added {
+            let old = fs::metadata(img).map(|m| m.len()).unwrap_or(0);
+            let size = (old + need - free + 512 * 1024 * 1024).next_multiple_of(1024 * 1024);
+            println!(
+                "making {} {} MiB bigger ({} MiB) for the Linux packages (Voyage); its files are kept",
+                img.display(),
+                (size - old) >> 20,
+                size >> 20
+            );
+            match image::grow(img, size) {
+                Ok(()) => added = image::add_linux(img, linux, &settings),
+                Err(e) => eprintln!("warning: could not make {} bigger: {e}", img.display()),
+            }
+        }
+        match added {
             Ok(image::LinuxOnDisk::Added) => {
                 println!("added the Linux packages (Voyage, Firefox) to {}", img.display())
             }
             Ok(image::LinuxOnDisk::Updated) => {}
             Ok(image::LinuxOnDisk::Upgraded) => println!("updated the Linux packages on {}", img.display()),
             Ok(image::LinuxOnDisk::NoRoom { need, free }) => eprintln!(
-                "warning: {} has {} MiB free and the Linux packages (Voyage, Firefox) need {} MiB, so NetSurf \
-                 stands in; run with --fresh-disk for a disk with them (this erases files saved inside WaveOS)",
+                "warning: {} has {} MiB free and the Linux packages (Voyage, Firefox) need {} MiB, so Voyage \
+                 isn't on it (Firefox or NetSurf stands in); run with --fresh-disk for a disk with them (this \
+                 erases files saved inside WaveOS)",
                 img.display(),
                 free >> 20,
                 need >> 20
