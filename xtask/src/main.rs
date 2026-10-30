@@ -896,7 +896,17 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let _ = fs::remove_file(&qmp);
 
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-cpu", "max"]);
+    // Emulated, `max` says it is an AMD family 6 chip, which LLVM takes for
+    // a 32-bit Athlon XP: Mesa's software GL (llvmpipe, used by WebKit) then
+    // can't generate code. A Haswell's identity matches what QEMU emulates.
+    // With hardware virtualization, `max` is the host's own processor.
+    let accels = accelerators();
+    let cpu = if accels.iter().all(|a| a.starts_with("tcg")) {
+        "max,vendor=GenuineIntel,family=6,model=60,stepping=3"
+    } else {
+        "max"
+    };
+    cmd.args(["-machine", "q35", "-cpu", cpu]);
     if opts.gpu == "virtio" {
         let device = match opts.resolution {
             Some((w, h)) => format!("virtio-vga,edid=on,xres={w},yres={h}"),
@@ -907,7 +917,7 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         // 64 MiB of video memory: room for 4K modes.
         cmd.args(["-vga", "std", "-global", "VGA.vgamem_mb=64"]);
     }
-    for accel in accelerators() {
+    for accel in accels {
         cmd.args(["-accel", &accel]);
     }
     cmd.arg("-m").arg(opts.memory_mib.to_string());

@@ -32,6 +32,10 @@ pub const DEFAULT_PACKAGES: &[&str] = &[
     "python3",
     "firefox-esr",
     "libwebkit2gtk-4.1-0",
+    // Video and sound codecs WebKit plays through GStreamer: Opus and AAC
+    // for streaming sites (YouTube's audio), H.264 and AV1.
+    "gstreamer1.0-plugins-bad",
+    "gstreamer1.0-libav",
     "ca-certificates",
     "fonts-dejavu-core",
     "fonts-wqy-microhei",
@@ -286,7 +290,16 @@ pub const GENERATED: &[(&str, &str)] =
 fn configure(root: &Path, links: &mut BTreeMap<String, String>) {
     // Debian 12 keeps libraries in /lib and /usr/lib side by side (with
     // /lib a link on installed systems); the loader looks in both.
-    let _ = links;
+    // Libraries that `update-alternatives` links into place when a package
+    // is installed (FFmpeg, in GStreamer's libav plugin, needs BLAS and
+    // LAPACK): linked to the one implementation in the root.
+    for (lib, dir) in [("libblas.so.3", "blas"), ("liblapack.so.3", "lapack")] {
+        let from = root.join("usr/lib/x86_64-linux-gnu").join(dir);
+        let real = fs::read_dir(&from).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
+        if let Some(file) = real.filter(|f| f.starts_with(lib)).min() {
+            links.insert(format!("/usr/lib/x86_64-linux-gnu/{lib}"), format!("{dir}/{file}"));
+        }
+    }
     // An empty loader cache: the loader then searches the usual folders.
     let etc = root.join("etc");
     fs::create_dir_all(&etc).unwrap();

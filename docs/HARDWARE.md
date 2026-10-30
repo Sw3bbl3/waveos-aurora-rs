@@ -10,7 +10,7 @@ WaveOS is developed and tested in QEMU. Milestone 5 adds the drivers a real PC n
 |---|---|---|---|
 | Processor | Any 64-bit Intel or AMD (x86-64), 1 core | 2 or more cores | 4 or more cores with AVX2 (Intel from 2013, AMD Ryzen) |
 | Memory | 512 MiB (it boots on 256 MiB) | **2 GiB** | 4 to 8 GiB |
-| USB stick or disk | 512 MiB (`cargo xtask image --no-linux-root`) | 2 GiB; 4 GiB leaves room for your files | 8 GiB or more, USB 3 or an SSD in AHCI mode |
+| USB stick or disk | 512 MiB (`cargo xtask image --no-linux-root`) | 4 GiB | 8 GiB or more, USB 3 or an SSD in AHCI mode |
 | Network | Optional | Intel e1000/e1000e (see Known limits) | Intel 82574L, for example an Intel Gigabit CT PCIe card |
 | Screen | 1280 × 800 | 1920 × 1080 | 1920 × 1080; larger screens work, but the processor draws everything |
 
@@ -25,10 +25,10 @@ The machines most likely to work are desktop PCs from about 2012 to 2020 with th
 
 1. Build the image:
    ```sh
-   cargo xtask image          # writes target/waveos-aurora-usb.img (about 1.7 GiB)
+   cargo xtask image          # writes target/waveos-aurora-usb.img (about 1.8 GiB)
    ```
    The image holds the Linux packages Voyage and Firefox need. `cargo xtask image --no-linux-root` leaves them out and makes a 256 MiB image, with NetSurf as the browser.
-2. Write it to a USB stick of at least 2 GiB (512 MiB without the Linux packages). **This erases the stick.**
+2. Write it to a USB stick of at least 4 GB (512 MiB without the Linux packages). **This erases the stick.**
    - macOS:
      ```sh
      diskutil list                       # find the stick, e.g. /dev/disk4

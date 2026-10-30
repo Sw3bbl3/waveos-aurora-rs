@@ -3,7 +3,8 @@
 # Wayland bridge if it isn't running, then Voyage (WebKit) from the Linux
 # packages on the disk. WebKit's sandbox needs Linux features WaveOS
 # doesn't have yet (namespaces, seccomp), so it is off; pages draw in
-# software. `--waveos-dark` (from the Voyage app, when WaveOS is dark) gives
+# software, composited as WebKit expects (with Mesa's llvmpipe), and sound goes
+# to WaveOS through OSS (/dev/dsp). `--waveos-dark` (from the Voyage app, when WaveOS is dark) gives
 # it the dark theme, which pages see as prefers-color-scheme: dark.
 if [ ! -e /usr/lib/voyage/voyage ]; then
     echo "voyage: Voyage isn't on this disk (cargo xtask run --fresh-disk adds it)" >&2
@@ -25,5 +26,11 @@ if ! grep -q org.gnome.system.proxy "$schemas/gschemas.compiled" 2>/dev/null; th
     export GSETTINGS_SCHEMA_DIR="$own"
 fi
 wl-bridge --background || exit 1
-export GDK_BACKEND=wayland WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 WEBKIT_DISABLE_COMPOSITING_MODE=1
+export GDK_BACKEND=wayland WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+# Skia draws pages on the processor: its GL path, on Mesa's software
+# renderer, loses glyphs (whole tiles of text show as blocks).
+export WEBKIT_SKIA_ENABLE_CPU_RENDERING=1
+# Straight to the OSS sink: PulseAudio and JACK aren't there, and the media
+# clock only runs once an audio sink plays.
+export GST_PLUGIN_FEATURE_RANK=osssink:MAX,pulsesink:NONE,jackaudiosink:NONE,oss4sink:NONE
 exec /usr/lib/voyage/voyage "$@"

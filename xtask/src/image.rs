@@ -106,11 +106,11 @@ pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io
             for (_, dir) in super::debian::GENERATED {
                 seed(&mut vol, &linux.join(dir), &format!("/Linux/{dir}")).map_err(err)?;
             }
-            // The links and the package list describe the root as it is now.
-            vol.write_file("/Linux/.links", &fs::read(linux.join(".links"))?).map_err(err)?;
             vol.write_file("/Linux/packages.txt", &packages).map_err(err)?;
             done = LinuxOnDisk::Upgraded;
         }
+        // The table of links describes the root as xtask makes it now.
+        vol.write_file("/Linux/.links", &fs::read(linux.join(".links"))?).map_err(err)?;
         for (path, from) in settings {
             let path = format!("/Linux{path}");
             vol.mkdir_all(&path[..path.rfind('/').unwrap()]).map_err(err)?;

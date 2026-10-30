@@ -165,6 +165,13 @@ Only these WaveOS calls are open to Linux programs: windows, events, sound
 (`wave_audio_open`, then `write` 48 kHz stereo 16-bit samples), the
 clipboard, notifications, reading preferences, and the uptime clock.
 
+Programs written for Linux's own sound interfaces reach the same streams
+through OSS: `/dev/dsp` is a WaveOS sound stream, and its `ioctl`s (format,
+channels, rate, buffer space, delay, sync, reset) describe it as it is,
+48 kHz 16-bit stereo, so a program that asks for another rate is told the
+one it gets and converts (GStreamer's `osssink` does, and with it WebKit's
+media). There is no PulseAudio or ALSA.
+
 ## Wayland programs (GTK and others)
 
 Programs that draw with GTK, Qt, SDL or their own Wayland code show their
@@ -224,7 +231,15 @@ into `/etc/ssl/certs/ca-certificates.crt` on every run, with the root
 
 WebKit's sandbox relies on Linux features WaveOS doesn't have yet
 (namespaces, seccomp), so the launcher turns it off: browse sites you
-trust. Pages draw in software. WebKit's disk cache stores some entries as
+trust. Pages draw in software: Skia paints them on the processor, and
+WebKit composites them with Mesa's software OpenGL (llvmpipe). Video and
+sound go through GStreamer, with the codecs of `gstreamer1.0-plugins-good`,
+`-bad` and `-libav` (VP8, VP9, AV1, H.264, Opus, AAC, so streaming sites'
+Media Source Extensions work), and sound plays through `/dev/dsp` (the
+launcher points GStreamer at `osssink`). In QEMU emulating the processor,
+`cargo xtask run` presents it as a Haswell: QEMU's own `max` model reports
+an AMD family 6 processor, which LLVM takes for a 32-bit Athlon XP, and
+llvmpipe then can't generate code. WebKit's disk cache stores some entries as
 hard links, which WaveOS's file systems don't have, so fewer pages come
 from the cache.
 

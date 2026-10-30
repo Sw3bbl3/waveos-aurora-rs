@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -287,6 +288,32 @@ static void wave(void) {
     printf("PASS WaveOS calls\n");
 }
 
+// OSS sound: /dev/dsp plays 48 kHz 16-bit stereo through a WaveOS sound
+// stream (GStreamer's osssink, so WebKit's media, uses it).
+static void sound(void) {
+    int dsp = open("/dev/dsp", O_WRONLY);
+    if (dsp < 0) {
+        printf("SKIP sound (no /dev/dsp, errno %d)\n", errno);
+        return;
+    }
+    int v = 0x10; // AFMT_S16_LE
+    CHECK(ioctl(dsp, 0xC0045005, &v) == 0 && v == 0x10, "OSS: 16-bit samples");
+    v = 2;
+    CHECK(ioctl(dsp, 0xC0045006, &v) == 0 && v == 2, "OSS: stereo");
+    v = 44100;
+    CHECK(ioctl(dsp, 0xC0045002, &v) == 0 && v == 48000, "OSS: the rate it plays (48 kHz)");
+    int space[4]; // fragments, fragstotal, fragsize, bytes
+    CHECK(ioctl(dsp, 0x8010500C, space) == 0 && space[2] > 0 && space[3] > 0, "OSS: room to write");
+    static short silence[4800 * 2]; // 100 ms
+    CHECK(write(dsp, silence, sizeof silence) == (ssize_t)sizeof silence, "OSS: write");
+    int delay = -1;
+    CHECK(ioctl(dsp, 0x80045017, &delay) == 0 && delay >= 0 && delay <= (int)sizeof silence, "OSS: delay");
+    CHECK(ioctl(dsp, 0x5001, 0) == 0, "OSS: sync");
+    CHECK(ioctl(dsp, 0x80045017, &delay) == 0 && delay == 0, "OSS: everything played");
+    close(dsp);
+    printf("PASS sound (OSS)\n");
+}
+
 int main(int argc, char **argv) {
     start(argc, argv);
     files();
@@ -298,6 +325,7 @@ int main(int argc, char **argv) {
     clocks();
     machine();
     wave();
+    sound();
     if (failures) {
         printf("linux-test: %d failures\n", failures);
         return 1;

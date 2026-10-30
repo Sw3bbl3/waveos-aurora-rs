@@ -107,6 +107,28 @@ impl Stream {
         Ok(done * 2)
     }
 
+    /// Samples queued and not yet mixed.
+    pub fn queued(&self) -> usize {
+        self.inner.lock().buf.len()
+    }
+
+    /// Samples that can be written without blocking.
+    pub fn room(&self) -> usize {
+        STREAM_CAPACITY.saturating_sub(self.queued())
+    }
+
+    /// Waits until everything queued has been mixed (or a signal arrives).
+    pub fn drain(&self) -> Result<(), isize> {
+        while self.queued() > 0 {
+            if crate::proc::interrupted() {
+                return Err(EINTR);
+            }
+            self.inner.lock().writer = Some(sched::current_id());
+            sched::wait_until(50, || self.queued() == 0);
+        }
+        Ok(())
+    }
+
     /// The stream plays out what it has queued, then goes away.
     pub fn close(&self) {
         let mut g = self.inner.lock();
