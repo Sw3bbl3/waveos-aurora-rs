@@ -52,7 +52,10 @@ scripts don't run. What their triggers would generate for GTK programs (the
 MIME database and compiled GSettings schemas) is made with the build
 machine's `update-mime-database` and `glib-compile-schemas`
 (`shared-mime-info` and `libglib2.0-bin` on Debian and Ubuntu; `brew install
-shared-mime-info glib` on macOS).
+shared-mime-info glib` on macOS). A disk that gets new packages gets these
+files again too. Without that tool the schemas are missing, so Voyage
+compiles its own copy the first time it starts (WebKit's network process
+needs them).
 
 `cargo xtask run` puts that root on the disk as `/Linux`, fetching the
 packages the first time: a new disk is made large enough for them, and an

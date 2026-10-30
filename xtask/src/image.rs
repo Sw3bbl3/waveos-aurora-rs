@@ -102,6 +102,10 @@ pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io
                 return Ok(LinuxOnDisk::NoRoom { need, free });
             }
             seed_missing(&mut vol, linux, "/Linux").map_err(err)?;
+            // What was made from the old package set is out of date: take it again.
+            for (_, dir) in super::debian::GENERATED {
+                seed(&mut vol, &linux.join(dir), &format!("/Linux/{dir}")).map_err(err)?;
+            }
             // The links and the package list describe the root as it is now.
             vol.write_file("/Linux/.links", &fs::read(linux.join(".links"))?).map_err(err)?;
             vol.write_file("/Linux/packages.txt", &packages).map_err(err)?;

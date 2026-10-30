@@ -275,6 +275,14 @@ fn skipped(path: &str) -> bool {
 }
 
 /// What maintainer scripts would have done that programs rely on.
+/// What data package triggers generate from every package's files, with the
+/// host's tools (the files are the same on every machine): the MIME database
+/// (GTK finds image loaders through it) and the compiled GSettings schemas
+/// (WebKit's network process reads its proxy settings from them). As (tool,
+/// folder in the root).
+pub const GENERATED: &[(&str, &str)] =
+    &[("update-mime-database", "usr/share/mime"), ("glib-compile-schemas", "usr/share/glib-2.0/schemas")];
+
 fn configure(root: &Path, links: &mut BTreeMap<String, String>) {
     // Debian 12 keeps libraries in /lib and /usr/lib side by side (with
     // /lib a link on installed systems); the loader looks in both.
@@ -284,12 +292,7 @@ fn configure(root: &Path, links: &mut BTreeMap<String, String>) {
     fs::create_dir_all(&etc).unwrap();
     fs::write(etc.join("ld.so.conf"), "/usr/local/lib\n/lib/x86_64-linux-gnu\n/usr/lib/x86_64-linux-gnu\n").unwrap();
     fs::write(etc.join("machine-id"), "5761766553797374656d4c696e757830\n").unwrap();
-    // Data package triggers generate, with the host's tools (the files are
-    // the same on every machine): the MIME database (GTK finds image
-    // loaders through it) and the compiled GSettings schemas.
-    for (tool, dir) in
-        [("update-mime-database", "usr/share/mime"), ("glib-compile-schemas", "usr/share/glib-2.0/schemas")]
-    {
+    for (tool, dir) in GENERATED {
         let dir = root.join(dir);
         if !dir.exists() {
             continue;

@@ -13,6 +13,17 @@ if [ "$1" = "--waveos-dark" ]; then
     export GTK_THEME=Adwaita:dark
     shift
 fi
+# WebKit's network process stops without GLib's compiled settings schemas.
+# When the disk's are missing or older than its packages (the build machine
+# had no glib-compile-schemas), Voyage makes its own copy once.
+schemas=/usr/share/glib-2.0/schemas
+if ! grep -q org.gnome.system.proxy "$schemas/gschemas.compiled" 2>/dev/null; then
+    own="$HOME/.cache/voyage/schemas"
+    if ! grep -q org.gnome.system.proxy "$own/gschemas.compiled" 2>/dev/null; then
+        mkdir -p "$own" && /usr/lib/x86_64-linux-gnu/glib-2.0/glib-compile-schemas --targetdir="$own" "$schemas"
+    fi
+    export GSETTINGS_SCHEMA_DIR="$own"
+fi
 wl-bridge --background || exit 1
 export GDK_BACKEND=wayland WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 WEBKIT_DISABLE_COMPOSITING_MODE=1
 exec /usr/lib/voyage/voyage "$@"

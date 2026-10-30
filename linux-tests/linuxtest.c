@@ -44,6 +44,9 @@ static void files(void) {
     unlink("/tmp/lt/b.txt");
     rmdir("/tmp/lt");
     CHECK(mkdir("/tmp/lt", 0755) == 0, "mkdir");
+    CHECK(mkdir("/tmp/lt", 0755) == -1 && errno == EEXIST, "mkdir of a folder that exists");
+    // mkdir -p starts at the root.
+    CHECK(mkdir("/", 0755) == -1 && errno == EEXIST, "mkdir /");
     FILE *f = fopen("/tmp/lt/a.txt", "w");
     CHECK(f, "fopen for writing");
     for (int i = 0; i < 1000; i++) fprintf(f, "line %d\n", i);
