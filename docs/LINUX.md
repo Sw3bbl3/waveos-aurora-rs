@@ -85,20 +85,26 @@ Writing to the file, or deleting it, drops it from the cache.
   `/root`, `/run`, `/srv`, `/mnt` and `/media` are the writable `/Linux`.
   WaveOS folders (`/Documents`, `/Downloads`, `/System`…) are where they
   always are.
-- **Made-up files:** `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/fd/*`;
+- **Made-up files:** `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/fd/*`,
+  `/dev/kmsg` (the system log: `2>/dev/kmsg` keeps a program's messages);
   `/proc/self/exe`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/mounts`; and
   `/etc/passwd`, `/etc/group`, `/etc/hostname`, `/etc/hosts` and
   `/etc/resolv.conf` built from the computer's settings.
 - **Memory:** `brk`, `mmap` (anonymous and private file mappings, hints,
-  `MAP_FIXED`), `mprotect`, `mremap`, `munmap` and `madvise`. `PROT_NONE`
-  reservations take no memory until made accessible.
+  `MAP_FIXED`), `mprotect`, `mremap`, `munmap` and `madvise`. Anonymous
+  memory gets its pages when they are first touched, so a program can
+  reserve gigabytes (WebKit's JavaScript engine maps 8 GiB) and pay only
+  for what it uses; `MADV_DONTNEED` gives pages back. `PROT_NONE`
+  reservations take no memory at all.
+- **The processor:** x87, SSE and AVX, with the kernel saving each thread's
+  registers (XSAVE) across switches and in signal frames, as on Linux.
 - **Shared memory:** `memfd_create`, `shm_open` (`/dev/shm`) and
   `MAP_SHARED` mappings of them, or anonymous ones: every process mapping
   the object sees the same memory, across `fork` and when the descriptor is
   passed over a local socket. `ftruncate` and `fallocate` size them.
 - **Threads:** `clone` for threads with thread-local storage (`arch_prctl`),
   `futex`, and the child-tid handshake `pthread_join` uses.
-- **Processes:** `fork` copies the program's memory; `vfork` and
+- **Processes:** `fork` shares the program's memory copy-on-write; `vfork` and
   `posix_spawn` run the child in the parent's memory until it calls `exec`.
   `execve` runs Linux programs and `#!` scripts in place (descriptors marked
   close-on-exec close); `exec` of a WaveOS program runs it as a process of
@@ -119,8 +125,9 @@ Writing to the file, or deleting it, drops it from the cache.
   after a non-blocking `connect`, timeouts), so name lookups through
   `/etc/resolv.conf` and HTTP work. Local sockets (`AF_UNIX`): stream,
   datagram and sequenced-packet, named by a path or in the abstract
-  namespace, `socketpair`, `SO_PEERCRED`, and descriptors passed with
-  `SCM_RIGHTS`. `sendmmsg`/`recvmmsg` and `FIONREAD` too.
+  namespace, `socketpair`, `SO_PEERCRED`, descriptors passed with
+  `SCM_RIGHTS`, and the sender's credentials with `SO_PASSCRED`
+  (`SCM_CREDENTIALS`). `sendmmsg`/`recvmmsg` and `FIONREAD` too.
 - **Symbolic links:** the read-only tree's links come with the system image
   (`/bin/sh` and every other BusyBox command are links to `/bin/busybox`,
   where Debian puts them); `symlink` makes new ones in the writable tree.
@@ -179,11 +186,48 @@ What isn't there yet: pop-up menus stay inside their window, drag and drop
 between programs, GPU buffers (`linux-dmabuf`: programs draw in software),
 input methods, and touch.
 
+## Voyage
+
+**Voyage** is WaveOS's web browser: our own, a small C program
+(`linux-programs/voyage`) around WebKitGTK 2.50, Debian's build of WebKit,
+the engine of Safari, from the Linux packages on the disk. WebKit brings
+JavaScriptCore (with its JIT compilers), CSS, web fonts and media; Voyage
+is the browser around it, in GTK 3: a toolbar that is the window's title
+bar (back, forward, reload, an address field that also searches, with
+DuckDuckGo, and a new tab), tabs, a start page, find in page, zoom,
+downloads to WaveOS's Downloads folder, and cookies and site data kept in
+`~/.local/share/voyage`. It's in the dock, Shoal and Seek (in Terminal:
+`voyage`), and web links and `.html` files open in it.
+
+The Voyage app (`userland/apps/voyage`) runs `/System/Linux/bin/voyage`,
+which starts `wl-bridge` and then the browser, with the dark GTK theme when
+WaveOS is dark (pages see `prefers-color-scheme: dark`). Without WebKit on
+the disk, the app opens Firefox, or else NetSurf. All tabs share one web
+process (WebKit's network process is another), since each process starts
+WebKit from scratch; in QEMU emulating the processor, Voyage shows a page
+in about 15 seconds where Firefox takes about 30.
+
+`cargo xtask` builds Voyage with clang and the Rust toolchain's lld
+against the libraries in the Linux packages (`xtask/src/voyage.rs`):
+`linux-programs/voyage/webkit.h` declares the parts of GLib, GTK and
+WebKitGTK it calls, so only Debian's C library headers and start files
+(`libc6-dev`, `linux-libc-dev`) are needed, not those libraries'
+development packages. The program goes onto the disk with WaveOS's
+settings on every run, so a disk always has the current build. HTTPS is
+checked against Mozilla's roots (the `ca-certificates` package, gathered
+into `/etc/ssl/certs/ca-certificates.crt` on every run, with the root
+`WAVEOS_EXTRA_CA` names, if any).
+
+WebKit's sandbox relies on Linux features WaveOS doesn't have yet
+(namespaces, seccomp), so the launcher turns it off: browse sites you
+trust. Pages draw in software. WebKit's disk cache stores some entries as
+hard links, which WaveOS's file systems don't have, so fewer pages come
+from the cache.
+
 ## Firefox
 
-**Firefox** is WaveOS's web browser: Debian's Firefox ESR 140, unchanged,
-from the Linux packages on the disk. It's in the dock, Shoal and Seek (in
-Terminal: `firefox`), and web links and `.html` files open in it. The
+**Firefox** is Debian's Firefox ESR 140, unchanged, from the Linux
+packages on the disk. It's in Shoal and Seek (in Terminal: `firefox`). The
 Firefox app (`userland/apps/firefox`) runs `/System/Linux/bin/firefox`
 with the addresses or files it was given, which starts `wl-bridge
 --background` (it returns once the bridge is listening, or at once if it

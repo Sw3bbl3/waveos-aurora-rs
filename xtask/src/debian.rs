@@ -24,9 +24,19 @@ const INDEX: &str = "main/binary-amd64/Packages.gz";
 
 /// What `cargo xtask linux-root` installs without arguments.
 /// (WenQuanYi Micro Hei: Chinese, Japanese and Korean text, which DejaVu
-/// doesn't have, in 4 MiB.)
-pub const DEFAULT_PACKAGES: &[&str] =
-    &["bash", "coreutils", "python3", "firefox-esr", "fonts-dejavu-core", "fonts-wqy-microhei", "libc-bin"];
+/// doesn't have, in 4 MiB. WebKitGTK: the engine of Voyage, the web
+/// browser; ca-certificates: the roots HTTPS is checked against.)
+pub const DEFAULT_PACKAGES: &[&str] = &[
+    "bash",
+    "coreutils",
+    "python3",
+    "firefox-esr",
+    "libwebkit2gtk-4.1-0",
+    "ca-certificates",
+    "fonts-dejavu-core",
+    "fonts-wqy-microhei",
+    "libc-bin",
+];
 
 /// Packages never installed: they only matter to a running Debian system
 /// (package management, init, the system bus).
@@ -56,6 +66,16 @@ impl Package {
     fn get(&self, k: &str) -> &str {
         self.fields.get(k).map(String::as_str).unwrap_or("")
     }
+}
+
+/// The files of package `name` alone (no dependencies), unpacked: for
+/// building against the packages (headers, start files). `None` if it
+/// can't be fetched.
+pub fn package_files(name: &str) -> Option<PathBuf> {
+    let idx = std::panic::catch_unwind(index).ok()?;
+    let p = idx.get(name)?;
+    let deb = fetch(&format!("{SNAPSHOT}/{}", p.get("Filename")), p.get("SHA256"))?;
+    unpack_deb(&deb)
 }
 
 /// The package index, checked against the pinned `Release`.
@@ -171,11 +191,18 @@ pub fn build(packages: &[String]) -> PathBuf {
 /// Returns the files, as (path in the root, source).
 pub fn waveos_settings(dir: &Path) -> Vec<(String, PathBuf)> {
     let src = root().join("linux-programs/firefox");
-    let files = [
+    let mut files = vec![
         ("/etc/firefox-esr/waveos.js", src.join("waveos.js")),
         ("/usr/share/firefox-esr/distribution/policies.json", src.join("policies.json")),
         ("/etc/xdg/gtk-3.0/settings.ini", src.join("gtk-settings.ini")),
     ];
+    // Voyage, the web browser, built for these packages.
+    if let Some(voyage) = super::voyage::build(dir) {
+        files.push((super::voyage::PATH_IN_ROOT, voyage));
+    }
+    if let Some(bundle) = ca_bundle(dir) {
+        files.push(("/etc/ssl/certs/ca-certificates.crt", bundle));
+    }
     for (path, from) in &files {
         let to = dir.join(&path[1..]);
         fs::create_dir_all(to.parent().unwrap()).unwrap();
@@ -184,6 +211,31 @@ pub fn waveos_settings(dir: &Path) -> Vec<(String, PathBuf)> {
         fs::copy(from, &to).unwrap_or_else(|e| panic!("{}: {e}", from.display()));
     }
     files.into_iter().map(|(p, f)| (String::from(p), f)).collect()
+}
+
+/// The roots HTTPS is checked against, in one file as programs expect
+/// (Debian's `update-ca-certificates` makes it when the package is
+/// installed): Mozilla's, from the `ca-certificates` package, and the PEM
+/// file `WAVEOS_EXTRA_CA` names, for networks that re-sign HTTPS with a
+/// root of their own (as for NetSurf, docs/NETSURF.md).
+fn ca_bundle(dir: &Path) -> Option<PathBuf> {
+    let certs = dir.join("usr/share/ca-certificates/mozilla");
+    let mut names: Vec<PathBuf> = fs::read_dir(&certs).ok()?.flatten().map(|e| e.path()).collect();
+    names.sort();
+    let mut bundle = String::new();
+    for cert in names.iter().filter(|p| p.extension().is_some_and(|e| e == "crt")) {
+        bundle.push_str(&fs::read_to_string(cert).ok()?);
+        if !bundle.ends_with('\n') {
+            bundle.push('\n');
+        }
+    }
+    if let Some(extra) = std::env::var_os("WAVEOS_EXTRA_CA") {
+        bundle.push_str(&fs::read_to_string(&extra).unwrap_or_else(|e| panic!("WAVEOS_EXTRA_CA: {e}")));
+    }
+    let out = root().join("target/linux/ca-certificates.crt");
+    fs::create_dir_all(out.parent()?).ok()?;
+    fs::write(&out, bundle).ok()?;
+    Some(out)
 }
 
 /// Copies a package's files into the root (hard links, to save space);

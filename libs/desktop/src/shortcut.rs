@@ -69,6 +69,7 @@ pub fn builtin_for_path(path: &str) -> Option<&'static str> {
         "/System/Apps/Activity.elf" => "activity",
         "/System/Apps/Doom.elf" => "doom",
         "/System/Apps/Firefox.elf" => "firefox",
+        "/System/Apps/Voyage.elf" => "voyage",
         "/System/Apps/Welcome.elf" => "welcome",
         "/System/Apps/About.elf" => "about",
         _ => return None,

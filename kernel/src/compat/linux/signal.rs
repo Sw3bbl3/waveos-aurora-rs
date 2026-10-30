@@ -296,6 +296,9 @@ fn restartable(nr: u64) -> bool {
 }
 
 const EINTR_RET: u64 = (-(EINTR as i64)) as u64;
+/// Markers of XSAVE data in a signal frame's SIMD state (Linux's).
+const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
+const FP_XSTATE_MAGIC2: u32 = 0x4650_5845;
 
 /// On the way back to user mode from system call `nr` (its result is in
 /// `f.rax`): restarts it, or enters the handler of a pending signal.
@@ -388,14 +391,24 @@ fn enter_handler(
     let on_alt = t.alt_size != 0 && (t.alt_sp..t.alt_sp + t.alt_size).contains(&f.rsp);
     let use_alt = a.flags & SA_ONSTACK != 0 && t.alt_size != 0 && !on_alt;
     let mut sp = if use_alt { t.alt_sp + t.alt_size } else { f.rsp - 128 };
-    // The SIMD state, then the frame; the handler starts as if called.
-    sp = (sp - 512) & !63;
+    // The SIMD state (XSAVE's, with the markers Linux puts around it, or
+    // FXSAVE's), then the frame; the handler starts as if called.
+    let size = crate::arch::fpu::size() as u64;
+    sp = (sp - size - 4) & !63;
     let fpstate = sp;
     sp = ((sp - FRAME) & !15) - 8;
 
     let mut fpu = FpuState::new();
     fpu.save();
     user::put_bytes(fpstate, fpu.as_bytes())?;
+    let xfeatures = crate::arch::fpu::xfeatures();
+    if xfeatures != 0 {
+        // struct _fpx_sw_bytes, in the FXSAVE area's spare bytes.
+        user::put(fpstate + 464, &[FP_XSTATE_MAGIC1, size as u32 + 4])?;
+        user::put(fpstate + 472, &xfeatures)?;
+        user::put(fpstate + 480, &(size as u32))?;
+        user::put(fpstate + size, &FP_XSTATE_MAGIC2)?;
+    }
 
     let mut uc = [0u8; 304];
     let mut w = |off: u64, v: u64| uc[off as usize..off as usize + 8].copy_from_slice(&v.to_le_bytes());
@@ -484,7 +497,10 @@ pub fn sigreturn(p: &Process, f: &mut SyscallFrame) -> Result<u64, isize> {
     }
     let fpstate = r(UC_MCONTEXT + 184);
     if fpstate != 0 {
-        let mut bytes = [0u8; 512];
+        // XSAVE data when the frame says so, else the FXSAVE part.
+        let magic: u32 = user::get(fpstate + 464)?;
+        let len = if magic == FP_XSTATE_MAGIC1 { crate::arch::fpu::size() } else { 512 };
+        let mut bytes = alloc::vec![0u8; len];
         user::get_bytes(fpstate, &mut bytes)?;
         FpuState::from_bytes(&bytes).restore();
     }

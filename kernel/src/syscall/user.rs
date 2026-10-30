@@ -56,12 +56,16 @@ pub fn fixup(rip: u64, addr: u64) -> Option<u64> {
 /// thread may change the mapping right after: the copy then faults
 /// (`EFAULT`), and CR0.WP keeps it from writing through a page that became
 /// read-only.
-fn check(ptr: u64, len: u64, write: bool) -> Result<(), isize> {
+pub fn check(ptr: u64, len: u64, write: bool) -> Result<(), isize> {
     if crate::mm::vmm::check_current(ptr, len, write) {
-        Ok(())
-    } else {
-        Err(EFAULT)
+        return Ok(());
     }
+    // Memory not touched yet (lazy) is made now, under the process's memory
+    // lock: only where interrupts are on (no spinning lock is held).
+    if x86_64::instructions::interrupts::are_enabled() && proc::prefault(ptr, len, write) {
+        return Ok(());
+    }
+    Err(EFAULT)
 }
 
 fn copy_in(dst: &mut [u8], ptr: u64) -> Result<(), isize> {

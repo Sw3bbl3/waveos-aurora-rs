@@ -15,11 +15,11 @@
 //!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
 //!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
 //!       --headless --no-build --debug --gdb --int
-//!       --no-linux-root                   leave the Linux packages (Firefox, bash, Python) off the disk; by
+//!       --no-linux-root                   leave the Linux packages (Voyage, Firefox, bash, Python) off the disk; by
 //!                                         default they're fetched into target/linux-root and put on new disks
 //!                                         as /Linux, and on older disks when there's room
 //!       --linux-root                      a fresh disk with the Linux packages (stops if they can't be fetched)
-//!   cargo xtask linux-root [PKG...]     fetch Debian packages (default: Firefox ESR, bash, coreutils,
+//!   cargo xtask linux-root [PKG...]     fetch Debian packages (default: WebKitGTK, Firefox ESR, bash, coreutils,
 //!                                         Python) and their dependencies into target/linux-root
 //!   cargo xtask image [--no-linux-root] build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
@@ -38,6 +38,7 @@ mod package;
 mod sounds;
 mod tar;
 mod usbredir;
+mod voyage;
 
 use std::env;
 use std::fs;
@@ -123,7 +124,7 @@ fn main() {
                 });
             let size = number("--disk-size-mib", if developer { 8192 } else { 256 }, 128, 65536) * 1024 * 1024;
             if !flag("--no-refresh") {
-                // Firefox and the other Linux programs live on the disk, in /Linux.
+                // Voyage, Firefox and the other Linux programs live on the disk, in /Linux.
                 let linux = if flag("--linux-root") {
                     Some(linux_root())
                 } else if flag("--no-linux-root") {
@@ -343,11 +344,11 @@ fn linux_root() -> PathBuf {
 }
 
 /// [`linux_root`], or nothing (with a warning) when the packages can't be
-/// fetched, say offline: WaveOS then runs without Firefox.
+/// fetched, say offline: WaveOS then runs without Voyage and Firefox.
 fn optional_linux_root() -> Option<PathBuf> {
     std::panic::catch_unwind(linux_root)
         .map_err(|_| {
-            eprintln!("warning: no Linux packages, so no Firefox on the disk (NetSurf stands in); see above");
+            eprintln!("warning: no Linux packages, so no Voyage or Firefox on the disk (NetSurf stands in); see above");
         })
         .ok()
 }
@@ -383,12 +384,14 @@ fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64, linux: Option<&P
         }
         let Some(linux) = linux else { return };
         match image::add_linux(img, linux, &debian::waveos_settings(linux)) {
-            Ok(image::LinuxOnDisk::Added) => println!("added the Linux packages (Firefox) to {}", img.display()),
+            Ok(image::LinuxOnDisk::Added) => {
+                println!("added the Linux packages (Voyage, Firefox) to {}", img.display())
+            }
             Ok(image::LinuxOnDisk::Updated) => {}
             Ok(image::LinuxOnDisk::Upgraded) => println!("updated the Linux packages on {}", img.display()),
             Ok(image::LinuxOnDisk::NoRoom { need, free }) => eprintln!(
-                "warning: {} has {} MiB free and Firefox needs {} MiB, so NetSurf stands in for it; \
-                 run with --fresh-disk for a disk with Firefox (this erases files saved inside WaveOS)",
+                "warning: {} has {} MiB free and the Linux packages (Voyage, Firefox) need {} MiB, so NetSurf \
+                 stands in; run with --fresh-disk for a disk with them (this erases files saved inside WaveOS)",
                 img.display(),
                 free >> 20,
                 need >> 20

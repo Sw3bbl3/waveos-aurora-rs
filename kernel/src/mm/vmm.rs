@@ -406,6 +406,11 @@ pub struct AddressSpace {
     mmap_next: u64,
     /// Bytes of private memory mapped (for accounting).
     pub resident: u64,
+    /// Memory mapped but not made yet: start -> (end, protection), not
+    /// overlapping. A page in one gets a zeroed frame when first touched
+    /// (see [`AddressSpace::resolve_fault`]), so reserving gigabytes costs
+    /// nothing (WebKit's JavaScript engine asks for 8 GiB at a time).
+    lazy: alloc::collections::BTreeMap<u64, (u64, Prot)>,
 }
 
 impl AddressSpace {
@@ -414,7 +419,7 @@ impl AddressSpace {
         let k = table(kernel_pml4());
         let t = table(pml4);
         t[256..].copy_from_slice(&k[256..]);
-        Some(AddressSpace { pml4, mmap_next: layout::MMAP_BASE, resident: 0 })
+        Some(AddressSpace { pml4, mmap_next: layout::MMAP_BASE, resident: 0, lazy: Default::default() })
     }
 
     pub fn cr3(&self) -> u64 {
@@ -436,6 +441,114 @@ impl AddressSpace {
         if Cr3::read().0.start_address().as_u64() == self.pml4 {
             x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
         }
+    }
+
+    /// Calls `f` with the address and entry of each present page in
+    /// `[start, end)`, skipping missing page tables whole.
+    fn each_present(&self, start: u64, end: u64, f: &mut dyn FnMut(u64, &mut u64)) {
+        fn visit(t: u64, level: u32, base: u64, start: u64, end: u64, f: &mut dyn FnMut(u64, &mut u64)) {
+            let span = 1u64 << (12 + 9 * level);
+            let first = ((start.max(base) - base) / span) as usize;
+            for i in first..512 {
+                let lo = base + i as u64 * span;
+                if lo >= end {
+                    break;
+                }
+                let e = &mut table(t)[i];
+                if *e & PRESENT == 0 || (level > 0 && *e & HUGE != 0) {
+                    continue;
+                }
+                if level == 0 {
+                    f(lo, e);
+                } else {
+                    visit(*e & ADDR, level - 1, lo, start, end, f);
+                }
+            }
+        }
+        if start < end {
+            visit(self.pml4, 3, 0, start, end.min(layout::USER_END), f);
+        }
+    }
+
+    /// The protection of the lazy range holding `va`, if any.
+    fn lazy_at(&self, va: u64) -> Option<Prot> {
+        self.lazy.range(..=va).next_back().filter(|(_, &(end, _))| va < end).map(|(_, &(_, p))| p)
+    }
+
+    /// Takes `[start, end)` out of the lazy ranges (splitting them).
+    fn lazy_remove(&mut self, start: u64, end: u64) {
+        let hit: Vec<(u64, u64, Prot)> =
+            self.lazy.range(..end).rev().take_while(|(_, &(e, _))| e > start).map(|(&s, &(e, p))| (s, e, p)).collect();
+        for (s, e, p) in hit {
+            self.lazy.remove(&s);
+            if s < start {
+                self.lazy.insert(s, (start, p));
+            }
+            if e > end {
+                self.lazy.insert(end, (e, p));
+            }
+        }
+    }
+
+    /// Makes `[va, va + pages*4K)` memory that is zero until touched, with
+    /// protection `prot` (pages there already are kept).
+    pub fn map_lazy(&mut self, va: u64, pages: u64, prot: Prot) -> Result<(), isize> {
+        let end = va.checked_add(pages * PAGE_SIZE).filter(|&e| e <= layout::USER_END);
+        let Some(end) = end.filter(|_| va.is_multiple_of(PAGE_SIZE)) else { return Err(aurora_abi::err::EINVAL) };
+        self.lazy_remove(va, end);
+        self.lazy.insert(va, (end, prot));
+        Ok(())
+    }
+
+    /// True if `[va, va + pages*4K)` has no lazy memory.
+    fn lazy_free(&self, va: u64, end: u64) -> bool {
+        self.lazy.range(..end).next_back().is_none_or(|(_, &(e, _))| e <= va)
+    }
+
+    /// A fault at `va` (a write if `write`): a lazy page gets its zeroed
+    /// frame, a page shared since `fork` becomes this address space's own
+    /// (see [`AddressSpace::resolve_write`]). True if the access can go
+    /// again; false if it is a real fault.
+    pub fn resolve_fault(&mut self, va: u64, write: bool) -> bool {
+        let page = va & !(PAGE_SIZE - 1);
+        if page >= layout::USER_END {
+            return false;
+        }
+        if let Some(e) = walk(self.pml4, page, false, false) {
+            if *e & PRESENT != 0 {
+                return !write || *e & WRITABLE != 0 || self.resolve_write(page);
+            }
+        }
+        let Some(prot) = self.lazy_at(page) else { return false };
+        if write && Self::flags(prot) & WRITABLE == 0 {
+            return false;
+        }
+        let Some(e) = walk(self.pml4, page, true, true) else { return false };
+        let Some(f) = zeroed_frame() else { return false };
+        *e = f | Self::flags(prot);
+        self.resident += PAGE_SIZE;
+        self.invalidate(page);
+        true
+    }
+
+    /// Makes sure `[va, va + len)` is there to read (or write) now, the way
+    /// faults would: for system calls about to copy to or from it.
+    pub fn prefault(&mut self, va: u64, len: u64, write: bool) -> bool {
+        let Some(end) = va.checked_add(len) else { return false };
+        let mut page = va & !(PAGE_SIZE - 1);
+        while page < end {
+            let ok = match walk(self.pml4, page, false, false) {
+                Some(e) if *e & (PRESENT | USER) == PRESENT | USER => {
+                    !write || *e & WRITABLE != 0 || self.resolve_write(page)
+                }
+                _ => self.resolve_fault(page, write),
+            };
+            if !ok {
+                return false;
+            }
+            page += PAGE_SIZE;
+        }
+        true
     }
 
     /// Maps fresh zeroed pages over `[va, va + pages*4K)`. Already-mapped pages
@@ -482,13 +595,18 @@ impl AddressSpace {
             return Ok(());
         };
         let writable = Self::flags(prot) & WRITABLE != 0;
+        let end = va + pages * PAGE_SIZE;
         // Cached file pages this replaces with copies, let go of once no CPU can see them.
         let mut copied = Vec::new();
-        for i in 0..pages {
-            let page = va + i * PAGE_SIZE;
-            let e = walk(self.pml4, page, true, true).ok_or(ENOMEM)?;
-            if *e & (PRESENT | COPY_ON_WRITE) == PRESENT | COPY_ON_WRITE && writable {
-                let f = frame::alloc().ok_or(ENOMEM)?;
+        let mut failed = false;
+        let mut resident = 0;
+        let flags = Self::flags(prot);
+        self.each_present(va, end, &mut |_, e| {
+            if *e & COPY_ON_WRITE != 0 && writable {
+                let Some(f) = frame::alloc() else {
+                    failed = true;
+                    return;
+                };
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         phys_to_virt(*e & ADDR) as *const u8,
@@ -497,27 +615,35 @@ impl AddressSpace {
                     );
                 }
                 copied.push(*e);
-                *e = f | Self::flags(prot);
-                self.resident += PAGE_SIZE;
-            } else if *e & PRESENT != 0 {
-                *e = (*e & (ADDR | SHARED | COUNTED | COPY_ON_WRITE)) | Self::flags(prot);
+                *e = f | flags;
+                resident += PAGE_SIZE;
             } else {
-                *e = zeroed_frame().ok_or(ENOMEM)? | Self::flags(prot);
-                self.resident += PAGE_SIZE;
+                *e = (*e & (ADDR | SHARED | COUNTED | COPY_ON_WRITE)) | flags;
             }
-            self.invalidate(page);
-        }
+        });
+        self.resident += resident;
+        // Pages not there yet come when touched, with this protection.
+        self.map_lazy(va, pages, prot)?;
         // Permissions shrank too: every CPU running this process must see it.
+        if Cr3::read().0.start_address().as_u64() == self.pml4 {
+            x86_64::instructions::tlb::flush_all();
+        }
         shootdown(va, pages, Some(self.pml4));
         for e in copied {
             Self::release_shared(e);
+        }
+        if failed {
+            return Err(ENOMEM);
         }
         Ok(())
     }
 
     /// True if no page of `[va, va + pages*4K)` is mapped.
     pub fn is_free(&self, va: u64, pages: u64) -> bool {
-        (0..pages).all(|i| self.user_page(va + i * PAGE_SIZE).is_none())
+        let end = va.saturating_add(pages * PAGE_SIZE);
+        let mut used = false;
+        self.each_present(va, end, &mut |_, e| used |= *e & USER != 0);
+        !used && self.lazy_free(va, end)
     }
 
     /// Maps externally owned frames (shared memory) at `va`.
@@ -582,24 +708,37 @@ impl AddressSpace {
             self.invalidate(dst);
         }
         shootdown(from, pages, Some(self.pml4));
+        // Lazy memory there moves too.
+        let (end, shift) = (from + pages * PAGE_SIZE, to.wrapping_sub(from));
+        let parts: Vec<(u64, u64, Prot)> = self
+            .lazy
+            .range(..end)
+            .filter(|(_, &(e, _))| e > from)
+            .map(|(&s, &(e, p))| (s.max(from), e.min(end), p))
+            .collect();
+        self.lazy_remove(from, end);
+        for (s, e, p) in parts {
+            self.lazy.insert(s.wrapping_add(shift), (e.wrapping_add(shift), p));
+        }
         Ok(())
     }
 
     /// Unmaps pages, freeing private frames.
     pub fn unmap(&mut self, va: u64, pages: u64) {
+        let end = va.saturating_add(pages * PAGE_SIZE);
+        self.lazy_remove(va, end);
         let mut freed = Vec::new();
-        for i in 0..pages {
-            let page = va + i * PAGE_SIZE;
-            if let Some(e) = walk(self.pml4, page, false, true) {
-                if *e & PRESENT != 0 {
-                    if *e & SHARED == 0 {
-                        self.resident = self.resident.saturating_sub(PAGE_SIZE);
-                    }
-                    freed.push(*e);
-                    *e = 0;
-                    self.invalidate(page);
-                }
+        let mut private = 0;
+        self.each_present(va, end, &mut |_, e| {
+            if *e & SHARED == 0 {
+                private += PAGE_SIZE;
             }
+            freed.push(*e);
+            *e = 0;
+        });
+        self.resident = self.resident.saturating_sub(private);
+        if !freed.is_empty() && Cr3::read().0.start_address().as_u64() == self.pml4 {
+            x86_64::instructions::tlb::flush_all();
         }
         // Other threads of this process may run on other CPUs: they must
         // forget the pages before the frames can be reused.
@@ -624,6 +763,7 @@ impl AddressSpace {
     pub fn fork_copy(&mut self) -> Option<AddressSpace> {
         let mut child = AddressSpace::new()?;
         child.mmap_next = self.mmap_next;
+        child.lazy = self.lazy.clone();
         let mut shared = 0;
         let ok = Self::copy_level(self.pml4, child.pml4, 3, &mut shared);
         self.resident = self.resident.saturating_sub(shared);
@@ -723,6 +863,51 @@ impl AddressSpace {
         true
     }
 
+    /// Linux `MADV_DONTNEED`: lazy memory in `[va, va + pages*4K)` lets go
+    /// of its pages (they read as zero again); other private pages there
+    /// are zeroed.
+    pub fn discard(&mut self, va: u64, pages: u64) {
+        let end = va + pages * PAGE_SIZE;
+        let mut lazy_pages = Vec::new();
+        let mut other = Vec::new();
+        self.each_present(va, end, &mut |page, e| {
+            if *e & COPY_ON_WRITE == 0 || *e & FORK_WRITE != 0 {
+                (if *e & SHARED == 0 || *e & FORK_WRITE != 0 { &mut lazy_pages } else { &mut other }).push(page);
+            }
+        });
+        let mut freed = Vec::new();
+        for page in lazy_pages {
+            if self.lazy_at(page).is_none() {
+                other.push(page);
+                continue;
+            }
+            if let Some(e) = walk(self.pml4, page, false, false) {
+                freed.push(*e);
+                if *e & SHARED == 0 {
+                    self.resident = self.resident.saturating_sub(PAGE_SIZE);
+                }
+                *e = 0;
+            }
+        }
+        if !freed.is_empty() {
+            if Cr3::read().0.start_address().as_u64() == self.pml4 {
+                x86_64::instructions::tlb::flush_all();
+            }
+            shootdown(va, pages, Some(self.pml4));
+            for e in freed {
+                if e & SHARED == 0 {
+                    frame::free(e & ADDR);
+                } else {
+                    Self::release_shared(e);
+                }
+            }
+        }
+        let zero = [0u8; PAGE_SIZE as usize];
+        for page in other {
+            let _ = self.write_bytes(page, &zero);
+        }
+    }
+
     /// Reserves `pages` of address space in the mmap region (with a guard page after).
     pub fn reserve(&mut self, pages: u64) -> Option<u64> {
         let va = self.mmap_next;
@@ -759,7 +944,20 @@ impl AddressSpace {
                 }
             }
         }
-        out
+        // Lazy memory is mapped too, touched or not.
+        for (&start, &(end, prot)) in &self.lazy {
+            let f = Self::flags(prot);
+            out.push((start, end, f & WRITABLE != 0, f & NO_EXECUTE == 0));
+        }
+        out.sort_unstable_by_key(|r| r.0);
+        let mut merged: Vec<(u64, u64, bool, bool)> = Vec::new();
+        for r in out {
+            match merged.last_mut() {
+                Some(last) if r.0 <= last.1 && (last.2, last.3) == (r.2, r.3) => last.1 = last.1.max(r.1),
+                _ => merged.push(r),
+            }
+        }
+        merged
     }
 
     /// Physical address and writability of the page containing `va`, if it is user-accessible.
@@ -792,6 +990,9 @@ impl AddressSpace {
             let cur = va + done as u64;
             if walk(self.pml4, cur, false, false).is_some_and(|e| *e & COPY_ON_WRITE != 0) && !self.resolve_write(cur) {
                 return Err(aurora_abi::err::EFAULT);
+            }
+            if walk(self.pml4, cur, false, false).is_none_or(|e| *e & PRESENT == 0) {
+                self.resolve_fault(cur, true);
             }
             let (phys, _) = self.user_page(cur).ok_or(aurora_abi::err::EFAULT)?;
             let off = cur % PAGE_SIZE;

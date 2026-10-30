@@ -8,7 +8,7 @@ Consultez tous les guides sans connexion réseau.
 4. Choisissez Français (Canada) ou English. Utilisez A−/A+ pour ajuster la taille du texte.
 
 ## Résultat attendu et dépannage
-La langue et la taille du texte sont conservées. Les liens externes indiquent qu’une connexion est requise et s’ouvrent dans Firefox. Cette version ne comprend pas de leçons guidées ni de listes de progression.
+La langue et la taille du texte sont conservées. Les liens externes indiquent qu’une connexion est requise et s’ouvrent dans Voyage. Cette version ne comprend pas de leçons guidées ni de listes de progression.
 
 Voir [Bureau et fenêtres](desktop-windows.md) pour les raccourcis communs et [Récupération](reference-recovery.md) si l’application ne s’ouvre pas.
 

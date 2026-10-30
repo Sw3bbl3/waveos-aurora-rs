@@ -31,7 +31,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - **Shoal** (all apps, full screen, with search and groups), **Seek** (apps, files, settings and sums), **Drift** (calendar, Calm and notifications) and **Glide** (Alt+Tab with window pictures)
   - Manrope throughout, light and dark everywhere, broadcast live to every app, and an accent colour that can follow the wallpaper
   - the Tide, Aurora and Dunes wallpapers, each with a day and a night picture
-- **Apps:** Firefox, NetSurf, Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About This Computer, Welcome, Learn, Studio, Installer and Doom.
+- **Apps:** Voyage, Firefox, NetSurf, Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About This Computer, Welcome, Learn, Studio, Installer and Doom.
 - **Networking**, all our own:
   - **drivers** for virtio-net and Intel e1000/e1000e, interrupt-driven where MSI allows
   - an **IPv4 and IPv6 stack** in the kernel: ARP and neighbor discovery, ICMP and ICMPv6, UDP and **TCP** over both (retransmission timers, fast retransmit, congestion control, window scaling), **DHCP** and IPv6 **autoconfiguration** (SLAAC, RDNSS), and BSD-like sockets for programs
@@ -39,11 +39,14 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - **TLS 1.3** (and 1.2 for older servers) with our own handshake, record layer and X.509 certificate checks against Mozilla's root CAs. Cryptographic primitives come from RustCrypto.
   - the network in **Current**, **Settings → Network**, and network graphs in Pulse
   - **Wi-Fi**: open and WPA2-Personal networks, with our own supplicant (4-way and group key handshakes) and CCMP encryption, a Wi-Fi section in Settings → Network and wlanN interfaces. Intel adapters (7265 to AX211) are recognized but their radio can't be started yet; simulated networks for testing (`cargo xtask run --wifi-sim`)
-- **Firefox**, the web browser: Debian's Firefox ESR 140, unchanged, with full JavaScript, through the Wayland bridge ([details](LINUX.md#firefox)):
-  - in the dock; web links and `.html` files open in it
+- **Voyage**, the web browser ([details](LINUX.md#voyage)): our own browser around WebKitGTK 2.50 (WebKit, the engine of Safari: JavaScriptCore with its JIT, CSS, web fonts, media), through the Wayland bridge:
+  - in the dock; web links and `.html` files open in it; ready to browse in about half the time Firefox takes
+  - tabs (dragged into order, shared web process), an address field that also searches (DuckDuckGo), find in page, zoom, downloads to Downloads, cookies and site data kept, a start page with a search box
+  - light and dark like WaveOS (pages see `prefers-color-scheme`), its toolbar as the window's title bar, the mouse's back and forward buttons
+- **Firefox**: Debian's Firefox ESR 140, unchanged, with full JavaScript, through the Wayland bridge, from the launcher or Seek ([details](LINUX.md#firefox)):
   - a clean start: no welcome tour, no window buttons of its own (WaveOS's handle has them), a compact toolbar, a new tab page with just a search box, nothing sent to Mozilla, downloads in Downloads; Chinese, Japanese and Korean text shows too
   - the dark theme when WaveOS is dark; the mouse's back and forward buttons work
-- **NetSurf**, the small browser ([details](NETSURF.md)): NetSurf 3.11, built as a Linux program that draws straight into its WaveOS window, in the system image; it opens when Firefox isn't on the disk:
+- **NetSurf**, the small browser ([details](NETSURF.md)): NetSurf 3.11, built as a Linux program that draws straight into its WaveOS window, in the system image; it opens when neither Voyage nor Firefox is on the disk:
   - HTML and CSS with tables, floats and positioning; PNG, JPEG, GIF and BMP pictures; cookies
   - HTTP and HTTPS (curl with mbed TLS) against Mozilla's root certificates; sharp at 2×
   - the WaveOS clipboard, typing in any keyboard layout, and back and forward from Alt+←/→ and a mouse's side buttons
@@ -110,7 +113,7 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
   - in text: `Ctrl+A/C/X/V`, `Ctrl+Z` / `Ctrl+Shift+Z`, `Ctrl+F` to find, `Ctrl+S` to save
 - **WayV menu** (the mark at top-left): About This Computer, Settings, Learn, Shoal, Lock Screen, Sleep, Restart, Shut Down.
 - **Super+L** locks the screen. The volume keys work anywhere; Crest shows the level.
-- **Firefox**: Ctrl+L for the address bar, Ctrl+T for a tab, Ctrl+W to close it, Alt+←/→ back and forward, Ctrl+F to find, Ctrl +/−/0 zoom.
+- **Voyage** and **Firefox**: Ctrl+L for the address bar, Ctrl+T for a tab, Ctrl+W to close it, Ctrl+Tab to the next, Alt+←/→ back and forward, Ctrl+R to reload, Ctrl+F to find, Ctrl +/−/0 zoom.
 - **NetSurf**: click the address bar (to either side of the window handle), type an address and press Enter; Ctrl+U clears it. Alt+←/→ go back and forward, Ctrl +/−/0 zoom, the arrow keys and Page Up/Down scroll.
 - **Files**: drag items onto folders, the sidebar, another Files window, a dock app or the Trash (hold Ctrl to copy). Right-click for more; Space opens Quick Look, F2 renames, Delete moves to the Trash, Ctrl+1/2 switch views, Ctrl+F searches.
 - **Terminal**: try `help`, `ps`, `df`, `neofetch`, `cpuinfo`, `lsusb`, `play --tone 440 500`, `ls -l | grep txt`, `echo hi > hi.txt`, `cat hi.txt | wc`, `ls /Boot`, `open notes`, `theme dark`, `ping example.com`, `ifconfig`, `fetch -i https://example.com`.
@@ -139,7 +142,7 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
  User space (userland/)     corekit runtime · AuroraKit · WaveUI · apps · /System/Bin tools
    libs/web · libs/tls · libs/surf   HTTP, TLS 1.3/1.2 and the Nebula engine (no_std, tested on the host)
    /System/NetSurf            NetSurf, the small browser (a Linux program, see NETSURF.md)
-   /Linux (on the disk)       Debian's packages: Firefox ESR, bash, Python (see LINUX.md)
+   /Linux (on the disk)       Debian's packages: WebKitGTK (for Voyage), Firefox ESR, bash, Python (see LINUX.md)
 ```
 
 The full tour, covering the boot handoff, memory layout, processes and syscalls, storage and AuroraFS's on-disk format, and rendering, is in [ARCHITECTURE.md](ARCHITECTURE.md).

@@ -24,6 +24,8 @@ const SOCK_NONBLOCK: u64 = 0o4000;
 const SOCK_CLOEXEC: u64 = 0o2000000;
 const SOL_SOCKET: u64 = 1;
 const SCM_RIGHTS: i32 = 1;
+const SCM_CREDENTIALS: i32 = 2;
+const SO_PASSCRED: u64 = 16;
 const MSG_PEEK: u64 = 2;
 const MSG_TRUNC: u64 = 0x20;
 const MSG_CTRUNC: u64 = 0x8;
@@ -364,6 +366,8 @@ struct Got {
     from: Option<Addr>,
     fds: Vec<Arc<Handle>>,
     truncated: bool,
+    /// The sender, for a local socket that asked for it (`SO_PASSCRED`).
+    cred: Option<u32>,
 }
 
 fn recv_bytes(p: &Process, fd: u64, cap: usize, flags: u64) -> Result<(Got, bool), isize> {
@@ -373,7 +377,8 @@ fn recv_bytes(p: &Process, fd: u64, cap: usize, flags: u64) -> Result<(Got, bool
             let mut buf = alloc::vec![0u8; cap];
             let r = u.recv(&mut buf, flags & MSG_PEEK != 0, nb)?;
             buf.truncate(r.len);
-            Ok((Got { data: buf, from: r.from.map(Addr::Local), fds: r.fds, truncated: r.truncated }, false))
+            let cred = u.passcred.load(core::sync::atomic::Ordering::Relaxed).then_some(r.pid);
+            Ok((Got { data: buf, from: r.from.map(Addr::Local), fds: r.fds, truncated: r.truncated, cred }, false))
         }
         s => {
             let net = s.net();
@@ -387,7 +392,7 @@ fn recv_bytes(p: &Process, fd: u64, cap: usize, flags: u64) -> Result<(Got, bool
                 }
             })?;
             buf.truncate(n);
-            Ok((Got { data: buf, from: from.map(Addr::Net), fds: Vec::new(), truncated: false }, v6))
+            Ok((Got { data: buf, from: from.map(Addr::Net), fds: Vec::new(), truncated: false, cred: None }, v6))
         }
     }
 }
@@ -475,6 +480,18 @@ pub fn recvmsg(p: &Process, fd: u64, msg_ptr: u64, flags: u64) -> Result<u64, is
             let bytes: Vec<u8> = nums.iter().flat_map(|n| n.to_le_bytes()).collect();
             user::put_bytes(m.control + 16, &bytes)?;
             used = (len + 7) & !7;
+        }
+    }
+    // The sender's credentials: struct ucred { pid, uid, gid } (WebKit's
+    // process launcher checks them on the socket its children report on).
+    if let Some(pid) = got.cred {
+        if m.controllen >= used + 32 {
+            user::put(m.control + used, &[28u64, SOL_SOCKET | ((SCM_CREDENTIALS as u64) << 32)])?;
+            let uid = super::UID as u32;
+            user::put(m.control + used + 16, &[pid, uid, uid])?;
+            used += 32;
+        } else {
+            out_flags |= MSG_CTRUNC;
         }
     }
     // msg_namelen, msg_controllen and msg_flags.
@@ -574,6 +591,12 @@ pub fn setsockopt(p: &Process, fd: u64, level: u64, name: u64, val: u64, len: u6
         if let Sock::Net(_) = s {
             let ms = sec.max(0) as u64 * 1000 + usec.max(0) as u64 / 1000;
             s.net().option(aurora_abi::net::OPT_TIMEOUT, ms)?;
+        }
+    }
+    if level == SOL_SOCKET && name == SO_PASSCRED && len >= 4 {
+        if let Sock::Local(u) = &s {
+            let on: i32 = user::get(val)?;
+            u.passcred.store(on != 0, core::sync::atomic::Ordering::Relaxed);
         }
     }
     // Everything else (reuse, keep-alive, buffer sizes, no-delay…) is accepted.

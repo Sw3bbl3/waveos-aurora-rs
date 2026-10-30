@@ -210,13 +210,22 @@ pub fn get(pid: Pid) -> Option<Arc<Process>> {
     TABLE.lock().get(&pid).cloned()
 }
 
-/// A write to user address `addr` faulted: makes a page the process shares
-/// since `fork` its own (see `AddressSpace::resolve_write`). True if the
-/// write can go again.
-pub fn resolve_write(addr: u64) -> bool {
+/// An access to user address `addr` faulted (a write if `write`): makes
+/// the page there if it is lazy memory, or the process's own if it shares
+/// it since `fork` (see `AddressSpace::resolve_fault`). True if the access
+/// can go again.
+pub fn resolve_fault(addr: u64, write: bool) -> bool {
     let Some(p) = current() else { return false };
     let mut guard = p.mem();
-    guard.as_mut().is_some_and(|a| a.resolve_write(addr))
+    guard.as_mut().is_some_and(|a| a.resolve_fault(addr, write))
+}
+
+/// Makes `[addr, addr + len)` of the running process there to read (or
+/// write) now, as faults would; false if some of it isn't mapped so.
+pub fn prefault(addr: u64, len: u64, write: bool) -> bool {
+    let Some(p) = current() else { return false };
+    let mut guard = p.mem();
+    guard.as_mut().is_some_and(|a| a.prefault(addr, len, write))
 }
 
 /// Each CPU's last answer to [`current`]: (pid, process). Process ids are

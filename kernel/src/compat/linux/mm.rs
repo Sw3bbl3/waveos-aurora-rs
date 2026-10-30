@@ -1,9 +1,10 @@
 //! Memory for Linux programs: `mmap`, `munmap`, `mprotect`, `brk`,
 //! `mremap`, `madvise`.
 //!
-//! Pages are allocated when mapped; a `PROT_NONE` mapping only reserves its
-//! addresses (allocators and JITs reserve large ranges this way and make
-//! parts accessible with `mprotect`). New ranges come from the address
+//! Anonymous memory gets its pages when they are first touched (see
+//! `AddressSpace::map_lazy`): programs reserve gigabytes they never fill
+//! (WebKit's JavaScript engine, allocators, thread stacks). A `PROT_NONE`
+//! mapping only reserves its addresses. New ranges come from the address
 //! space's mmap region, which never hands the same addresses out twice.
 
 use crate::mm::vmm::{AddressSpace, Prot};
@@ -196,9 +197,11 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
         return Ok(va);
     }
     // Contents go in through a writable mapping; the protection comes after.
+    // Anonymous memory comes when touched.
     let initial = if file_data.is_some() { Some(Prot::ReadWrite) } else { target };
     if let Some(pr) = initial {
-        if let Err(e) = aspace.map_anon(va, n, pr) {
+        let mapped = if file_data.is_some() { aspace.map_anon(va, n, pr) } else { aspace.map_lazy(va, n, pr) };
+        if let Err(e) = mapped {
             aspace.unmap(va, n);
             return Err(e);
         }
@@ -250,7 +253,7 @@ pub fn brk(p: &Process, want: u64) -> Result<u64, isize> {
     let aspace = guard.as_mut().ok_or(ESRCH)?;
     if new_end > old_end {
         let n = (new_end - old_end) / PAGE_SIZE;
-        if !aspace.is_free(old_end, n) || aspace.map_anon(old_end, n, Prot::ReadWrite).is_err() {
+        if !aspace.is_free(old_end, n) || aspace.map_lazy(old_end, n, Prot::ReadWrite).is_err() {
             return Ok(m.brk);
         }
     } else if new_end < old_end {
@@ -276,7 +279,7 @@ pub fn mremap(p: &Process, addr: u64, old_len: u64, new_len: u64, flags: u64) ->
     // Grow in place if the pages after it are free.
     let tail = addr + old_n * PAGE_SIZE;
     if aspace.is_free(tail, new_n - old_n) && user_range(tail, (new_n - old_n) * PAGE_SIZE) {
-        aspace.map_anon(tail, new_n - old_n, Prot::ReadWrite)?;
+        aspace.map_lazy(tail, new_n - old_n, Prot::ReadWrite)?;
         update_resident(p, aspace);
         return Ok(addr);
     }
@@ -287,7 +290,7 @@ pub fn mremap(p: &Process, addr: u64, old_len: u64, new_len: u64, flags: u64) ->
     // rest is new memory.
     let to = place(aspace, 0, new_n)?;
     aspace.move_pages(addr, to, old_n)?;
-    aspace.map_anon(to + old_n * PAGE_SIZE, new_n - old_n, Prot::ReadWrite)?;
+    aspace.map_lazy(to + old_n * PAGE_SIZE, new_n - old_n, Prot::ReadWrite)?;
     update_resident(p, aspace);
     Ok(to)
 }
@@ -297,13 +300,11 @@ pub fn madvise(p: &Process, addr: u64, len: u64, advice: u64) -> Result<u64, isi
         return Err(EINVAL);
     }
     if advice == MADV_DONTNEED && len > 0 && user_range(addr, len) {
-        // The pages read as zero afterwards.
-        let zero = alloc::vec![0u8; PAGE_SIZE as usize];
+        // The pages read as zero afterwards (anonymous memory lets them go).
         let mut guard = p.mem();
         let aspace = guard.as_mut().ok_or(ESRCH)?;
-        for i in 0..pages(len) {
-            let _ = aspace.write_bytes(addr + i * PAGE_SIZE, &zero);
-        }
+        aspace.discard(addr, pages(len));
+        update_resident(p, aspace);
     }
     Ok(0)
 }

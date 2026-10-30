@@ -46,6 +46,7 @@ pub enum AppKind {
     Studio,
     Doom,
     Firefox,
+    Voyage,
 }
 
 pub struct AppInfo {
@@ -106,10 +107,22 @@ pub static CATALOG: &[AppInfo] = &[
         also: &[],
     },
     AppInfo {
+        kind: AppKind::Voyage,
+        name: "Voyage",
+        icon: Icon::Voyage,
+        pinned: true,
+        listed: true,
+        // The web browser, on WebKit, from the disk's Linux packages (or
+        // Firefox, or NetSurf, when it isn't there; see docs/LINUX.md).
+        path: "/System/Apps/Voyage.elf",
+        single: false,
+        also: &[],
+    },
+    AppInfo {
         kind: AppKind::Firefox,
         name: "Firefox",
         icon: Icon::Firefox,
-        pinned: true,
+        pinned: false,
         listed: true,
         // Starts Firefox ESR from the disk's Linux packages, or NetSurf
         // when they aren't there (see docs/LINUX.md).

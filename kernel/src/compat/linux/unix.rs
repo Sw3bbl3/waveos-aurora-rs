@@ -31,6 +31,8 @@ pub struct Segment {
     pub from: Option<String>,
     /// Bytes of `data` already read (streams).
     read: usize,
+    /// The sending process (`SCM_CREDENTIALS`).
+    pid: u32,
 }
 
 #[derive(Default)]
@@ -66,6 +68,8 @@ pub struct Socket {
     pub ty: Type,
     rx: QueueRef,
     st: Mutex<State>,
+    /// `SO_PASSCRED`: messages read come with the sender's credentials.
+    pub passcred: core::sync::atomic::AtomicBool,
 }
 
 /// Bound names: paths and abstract names (`@name`).
@@ -86,6 +90,7 @@ impl Socket {
                 dest: None,
                 connected: false,
             }),
+            passcred: core::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -251,6 +256,7 @@ impl Socket {
                         fds: fds.take().unwrap_or_default(),
                         from: from.clone(),
                         read: 0,
+                        pid: crate::sched::current_pid(),
                     });
                     done += n;
                     drop(q);
@@ -302,6 +308,7 @@ impl Socket {
             r.len = n;
             r.truncated = s.data.len() > n;
             r.from = s.from.clone();
+            r.pid = s.pid;
             if let Some(s) = seg {
                 q.bytes -= s.data.len();
                 r.fds = s.fds;
@@ -316,6 +323,9 @@ impl Socket {
                 break;
             }
             let avail = &seg.data[seg.read..];
+            if r.len == 0 {
+                r.pid = seg.pid;
+            }
             let n = avail.len().min(out.len() - r.len);
             out[r.len..r.len + n].copy_from_slice(&avail[..n]);
             r.len += n;
@@ -429,6 +439,8 @@ pub struct Received {
     pub fds: Vec<Arc<Handle>>,
     pub from: Option<String>,
     pub truncated: bool,
+    /// Who sent it.
+    pub pid: u32,
 }
 
 /// Waits for the next change to `keys` (or fails at once without blocking).

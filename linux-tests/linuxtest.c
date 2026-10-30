@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
@@ -96,7 +97,84 @@ static void memory(void) {
     CHECK(q, "realloc grows");
     q[(8 << 20) - 1] = 1;
     free(q);
+    // Memory comes when touched: 8 GiB can be mapped (WebKit's JavaScript
+    // engine asks for that), and pages read as zero again after
+    // MADV_DONTNEED.
+    size_t huge = (size_t)8 << 30;
+    char *h = mmap(0, huge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    CHECK(h != MAP_FAILED, "map 8 GiB");
+    CHECK(h[0] == 0 && h[huge - 1] == 0, "untouched memory reads zero");
+    h[4096] = 42;
+    h[huge / 2] = 43;
+    CHECK(h[4096] == 42 && h[huge / 2] == 43, "touched pages keep what was written");
+    CHECK(madvise(h, 2 * 4096, MADV_DONTNEED) == 0 && h[4096] == 0, "MADV_DONTNEED gives zeros back");
+    CHECK(munmap(h, huge) == 0, "unmap 8 GiB");
     printf("PASS memory\n");
+}
+
+// A process's credentials along with what it sends (SO_PASSCRED and
+// SCM_CREDENTIALS), as WebKit's process launcher checks them.
+static void credentials(void) {
+    int sv[2];
+    CHECK(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0, "socketpair");
+    int on = 1;
+    CHECK(setsockopt(sv[0], SOL_SOCKET, SO_PASSCRED, &on, sizeof on) == 0, "SO_PASSCRED");
+    CHECK(write(sv[1], "x", 1) == 1, "send");
+    char byte;
+    struct iovec iov = {&byte, 1};
+    union {
+        struct cmsghdr h;
+        char buf[CMSG_SPACE(sizeof(struct ucred))];
+    } control;
+    struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control.buf, .msg_controllen = sizeof control.buf};
+    CHECK(recvmsg(sv[0], &msg, 0) == 1, "recvmsg");
+    struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+    CHECK(c && c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_CREDENTIALS, "credentials come along");
+    struct ucred cred;
+    memcpy(&cred, CMSG_DATA(c), sizeof cred);
+    CHECK(cred.pid == getpid() && cred.uid == getuid(), "the sender's");
+    close(sv[0]);
+    close(sv[1]);
+    printf("PASS credentials\n");
+}
+
+// AVX, where the processor has it: the kernel enables it (XSAVE) and keeps
+// each thread's YMM registers across switches.
+static atomic_int avx_go;
+
+static void *avx_other(void *arg) {
+    (void)arg;
+    static const unsigned char ones[32] = {[0 ... 31] = 0xEE};
+    while (!atomic_load(&avx_go)) sched_yield();
+    for (int i = 0; i < 200; i++) {
+        __asm__ volatile("vmovdqu %0, %%ymm1" ::"m"(ones) : "xmm1");
+        sched_yield();
+    }
+    return 0;
+}
+
+static void avx(void) {
+    unsigned a, b, c, d;
+    __asm__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (!(c & (1u << 28))) {
+        printf("PASS avx (none on this processor)\n");
+        return;
+    }
+    CHECK(c & (1u << 27), "the kernel enables XSAVE (OSXSAVE)");
+    unsigned lo, hi;
+    __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+    CHECK((lo & 6) == 6, "XCR0 has SSE and AVX");
+    unsigned char mine[32], back[32];
+    for (int i = 0; i < 32; i++) mine[i] = (unsigned char)(i * 7 + 1);
+    pthread_t t;
+    CHECK(pthread_create(&t, 0, avx_other, 0) == 0, "thread");
+    __asm__ volatile("vmovdqu %0, %%ymm1" ::"m"(mine) : "xmm1");
+    atomic_store(&avx_go, 1);
+    for (int i = 0; i < 200; i++) sched_yield();
+    __asm__ volatile("vmovdqu %%ymm1, %0" : "=m"(back));
+    pthread_join(t, 0);
+    CHECK(memcmp(mine, back, 32) == 0, "YMM registers survive switches");
+    printf("PASS avx\n");
 }
 
 static __thread int local = 5;
@@ -200,6 +278,9 @@ static void wave(void) {
     CHECK(wave_call(0, 3, 0, 0, 0, 0) == -ENOSYS, "WaveOS exit is not reachable");
     struct wave_event e;
     CHECK(wave_next_event(&e, 0) == 0, "no events without a window");
+    int log = open("/dev/kmsg", O_WRONLY);
+    CHECK(log >= 0 && write(log, "linuxtest: /dev/kmsg\n", 21) == 21, "/dev/kmsg is the kernel log");
+    close(log);
     printf("PASS WaveOS calls\n");
 }
 
@@ -208,6 +289,8 @@ int main(int argc, char **argv) {
     files();
     memory();
     threads();
+    credentials();
+    avx();
     clone_ids();
     clocks();
     machine();

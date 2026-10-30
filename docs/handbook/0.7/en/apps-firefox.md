@@ -2,7 +2,7 @@
 Browse the web with full JavaScript.
 
 ## Use the app
-1. Open Firefox from the dock, the launcher or Seek. Web links in Learn and About and `.html` files open in it too.
+1. Open Firefox from the launcher or Seek. (The dock's browser is [Voyage](apps-voyage.md), which starts in half the time; web links and `.html` files open there.)
 2. Press Ctrl+L, type an address or a search and press Enter. Ctrl+T opens a tab and Ctrl+W closes it.
 3. Use Alt+Left/Right or a mouse's side buttons to go back and forward, Ctrl+R to reload and Ctrl+F to find on the page. Ctrl+plus/minus/0 change the zoom.
 4. Downloads go to your Downloads folder, where Files shows them.

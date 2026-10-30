@@ -2,7 +2,7 @@
 Naviguez sur le Web avec JavaScript au complet.
 
 ## Utiliser l’application
-1. Ouvrez Firefox depuis le dock, le lanceur ou Seek. Les liens Web de Learn et d’About et les fichiers `.html` s’y ouvrent aussi.
+1. Ouvrez Firefox depuis le lanceur ou Seek. (Le navigateur du dock est [Voyage](apps-voyage.md), qui démarre en deux fois moins de temps; les liens Web et les fichiers `.html` s’y ouvrent.)
 2. Appuyez sur Ctrl+L, tapez une adresse ou une recherche et appuyez sur Entrée. Ctrl+T ouvre un onglet et Ctrl+W le ferme.
 3. Utilisez Alt+Gauche/Droite ou les boutons latéraux de la souris pour reculer et avancer, Ctrl+R pour recharger et Ctrl+F pour chercher dans la page. Ctrl+plus/moins/0 règle le zoom.
 4. Les téléchargements vont dans votre dossier Downloads, où Files les affiche.
