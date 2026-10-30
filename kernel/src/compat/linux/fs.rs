@@ -117,6 +117,8 @@ pub enum Special {
     Event(Arc<super::events::EventFd>),
     Timer(Arc<super::events::TimerFd>),
     Epoll(Arc<super::events::Epoll>),
+    /// The process's WaveOS window events (`WAVE_EVENT_FD`), by pid.
+    WaveEvents(u32),
     /// A local (`AF_UNIX`) socket.
     Unix(Arc<super::unix::Socket>),
     /// Shared memory (`memfd_create`, `/dev/shm`), and where reads are.
@@ -131,6 +133,7 @@ impl Special {
         match self {
             Special::Event(e) => e.read(out),
             Special::Timer(t) => t.read(out),
+            Special::WaveEvents(pid) => super::events::wave_events_read(*pid, out),
             Special::Epoll(_) => Err(EINVAL),
             Special::Unix(u) => u.recv(out, false, false).map(|r| r.len),
             Special::Shm { file, pos } => {
@@ -162,7 +165,7 @@ impl Special {
             Special::Dir { .. } => Err(EISDIR),
             Special::Mem { .. } => Err(EACCES),
             Special::Event(e) => e.write(data),
-            Special::Timer(_) | Special::Epoll(_) => Err(EINVAL),
+            Special::Timer(_) | Special::Epoll(_) | Special::WaveEvents(_) => Err(EINVAL),
             Special::Unix(u) => u.send(data, Vec::new(), None, false),
             Special::Shm { file, pos } => {
                 let n = file.write_at(*pos, data)?;
@@ -182,7 +185,7 @@ impl Special {
             Special::Zero => (S_IFCHR | 0o666, makedev(1, 5)),
             Special::Random => (S_IFCHR | 0o666, makedev(1, 9)),
             // Anonymous inodes on Linux.
-            Special::Event(_) | Special::Timer(_) | Special::Epoll(_) => (0o600, 0),
+            Special::Event(_) | Special::Timer(_) | Special::Epoll(_) | Special::WaveEvents(_) => (0o600, 0),
             Special::Unix(_) => (S_IFSOCK | 0o777, 0),
             Special::Shm { .. } => (S_IFREG | 0o600, 0),
         }
@@ -463,6 +466,7 @@ pub fn readiness_of(p: &Process, fd: usize, depth: u32) -> Option<(bool, bool, b
             let inner = match &*s.lock() {
                 Special::Event(e) => Inner::Ready(e.readable(), e.writable()),
                 Special::Timer(t) => Inner::Ready(t.readable(), false),
+                Special::WaveEvents(pid) => Inner::Ready(crate::gui::server::has_events(*pid), false),
                 Special::Epoll(e) => Inner::Epoll(e.clone()),
                 Special::Unix(u) => Inner::Unix(u.clone()),
                 _ => Inner::Ready(true, true),
@@ -488,6 +492,7 @@ pub fn wait_keys(p: &Process, fd: usize, keys: &mut Vec<usize>) {
         Handle::Special(s) => match &*s.lock() {
             Special::Event(e) => keys.push(key(Arc::as_ptr(e))),
             Special::Timer(t) => keys.push(key(Arc::as_ptr(t))),
+            Special::WaveEvents(pid) => keys.push(crate::gui::server::event_key(*pid)),
             // A set inside the set: any change.
             Special::Epoll(_) => keys.push(ANY),
             Special::Unix(u) => u.wait_keys(keys),
@@ -556,6 +561,11 @@ pub fn open_guest(p: &Process, guest: &str, flags: u64) -> Result<Arc<Handle>, i
     // on Linux: `2>/dev/kmsg` keeps a program's messages.
     if guest == "/dev/kmsg" {
         return Ok(Arc::new(Handle::Log));
+    }
+    // OSS sound, which GStreamer and SDL can play through: a WaveOS sound
+    // stream (`ENODEV` without a sound device).
+    if guest == "/dev/dsp" {
+        return crate::drivers::audio::open().map(|s| Arc::new(Handle::Audio(s)));
     }
     if let Some(name) = guest.strip_prefix("/dev/shm/") {
         let file = super::shm::open(name, flags & O_CREAT != 0, flags & O_EXCL != 0, flags & O_TRUNC != 0)?;
@@ -1009,7 +1019,11 @@ pub fn access(p: &Process, dirfd: u64, ptr: u64, mode: u64) -> Result<u64, isize
 // ------------------------------------------------------------------ fds
 
 pub fn ioctl(p: &Process, fd: u64, request: u64, arg: u64) -> Result<u64, isize> {
-    p.fd(fd as usize)?;
+    // The request is 32 bits, as on Linux (musl passes it sign-extended).
+    let request = request as u32 as u64;
+    if let Handle::Audio(stream) = &*p.fd(fd as usize)? {
+        return oss(stream, request, arg);
+    }
     match request {
         // Terminal queries: no file is a terminal yet.
         0x5401 | 0x5413 | 0x540F | 0x5410 | 0x5402..=0x5404 => Err(ENOTTY),
@@ -1034,6 +1048,50 @@ pub fn ioctl(p: &Process, fd: u64, request: u64, arg: u64) -> Result<u64, isize>
             user::put(arg, &(n.min(i32::MAX as u64) as i32)).map(|_| 0)
         }
         _ => Err(ENOTTY),
+    }
+}
+
+/// OSS's `/dev/dsp` requests. The stream plays 48 kHz, 16-bit little-endian
+/// stereo; a program that asks for something else is told so (as OSS
+/// drivers do) and converts.
+fn oss(stream: &crate::drivers::audio::Stream, request: u64, arg: u64) -> Result<u64, isize> {
+    use crate::drivers::audio::RATE;
+    const AFMT_S16_LE: i32 = 0x10;
+    // Fragments as programs see them: 4 KiB, 23 ms of sound.
+    const FRAGMENT: usize = 4096;
+    let put = |v: i32| user::put(arg, &v).map(|_| 0);
+    match request {
+        // SNDCTL_DSP_RESET: drop what is queued.
+        0x5000 => stream.control(aurora_abi::audio::FLUSH),
+        // SNDCTL_DSP_SYNC, SNDCTL_DSP_POST: play what is queued.
+        0x5001 => stream.drain().map(|_| 0),
+        0x5008 | 0x500E => Ok(0),
+        // SNDCTL_DSP_SPEED, _STEREO, _GETBLKSIZE, _SETFMT, _CHANNELS, _GETFMTS.
+        0xC004_5002 => put(RATE as i32),
+        0xC004_5003 => put(1),
+        0xC004_5004 => put(FRAGMENT as i32),
+        0xC004_5005 | 0x8004_500B => put(AFMT_S16_LE),
+        0xC004_5006 => put(2),
+        // SNDCTL_DSP_SETFRAGMENT, _SUBDIVIDE, _SETTRIGGER: accepted.
+        0xC004_500A | 0xC004_5009 | 0x4004_5010 => Ok(0),
+        // SNDCTL_DSP_GETCAPS (none of the optional ones), _GETTRIGGER (output on).
+        0x8004_500F => put(0),
+        0x8004_5010 => put(2),
+        // SNDCTL_DSP_GETOSPACE: audio_buf_info { fragments, fragstotal, fragsize, bytes }.
+        0x8010_500C => {
+            let free = stream.room() * 2;
+            let total = (stream.room() + stream.queued()) * 2;
+            let info = [(free / FRAGMENT) as i32, (total / FRAGMENT) as i32, FRAGMENT as i32, free as i32];
+            user::put(arg, &info).map(|_| 0)
+        }
+        // SNDCTL_DSP_GETODELAY: bytes written but not played yet.
+        0x8004_5017 => put((stream.queued() * 2) as i32),
+        // SNDCTL_DSP_GETOPTR: count_info { bytes played, blocks, ptr }.
+        0x800C_5012 => {
+            let played = stream.control(aurora_abi::audio::POSITION)? * 4;
+            user::put(arg, &[played as i32, 0, 0]).map(|_| 0)
+        }
+        _ => Err(EINVAL),
     }
 }
 

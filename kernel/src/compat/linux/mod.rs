@@ -28,6 +28,7 @@ mod process;
 mod shm;
 pub mod signal;
 pub mod unix;
+pub mod vdso;
 
 use crate::arch::syscall::SyscallFrame;
 use crate::proc;
@@ -311,13 +312,15 @@ pub const WAVE_BASE: u64 = 0x5741_0000;
 
 /// The WaveOS calls Linux programs may make: windows, events, sound,
 /// the clipboard, notifications, preferences and the screen's size.
-fn wave_call(n: u64, a: [u64; 6]) -> Result<u64, isize> {
+fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
     use aurora_abi::nr as w;
     match n as usize {
+        w::EVENT_FD => events::wave_event_fd(p, a[0]),
         w::WIN_CREATE
         | w::WIN_SURFACE
         | w::WIN_PRESENT
         | w::WIN_SET_TITLE
+        | w::WIN_SET_CURSOR
         | w::WIN_CLOSE
         | w::WIN_RESIZE
         | w::NEXT_EVENT
@@ -512,7 +515,7 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::RSEQ | nr::CLONE3 => Err(ENOSYS),
         nr::ARCH_PRCTL => misc::arch_prctl(a[0], a[1]),
         nr::PRCTL => misc::prctl(&p, a[0], a[1]),
-        nr::FUTEX => misc::futex(a[0], a[1], a[2], a[3]),
+        nr::FUTEX => misc::futex(a[0], a[1], a[2], a[3], a[4], a[5]),
         nr::SCHED_YIELD => {
             crate::sched::yield_now();
             Ok(0)
@@ -547,7 +550,7 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::TIME => misc::time(a[0]),
         nr::NANOSLEEP => misc::nanosleep(a[0], a[1], false, 0),
         nr::CLOCK_NANOSLEEP => misc::nanosleep(a[2], a[3], a[1] & 1 != 0, a[0]),
-        n if (WAVE_BASE..WAVE_BASE + 0x1000).contains(&n) => wave_call(n - WAVE_BASE, a),
+        n if (WAVE_BASE..WAVE_BASE + 0x1000).contains(&n) => wave_call(&p, n - WAVE_BASE, a),
         n => {
             unimplemented(n);
             Err(ENOSYS)

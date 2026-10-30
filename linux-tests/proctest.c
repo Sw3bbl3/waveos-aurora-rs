@@ -1,6 +1,7 @@
 // proctest: checks processes and signals in the Linux compatibility layer
 // from a real Linux program (built static with musl): fork, exec, wait,
-// vfork/posix_spawn, scripts, signals and their handlers, poll and select,
+// vfork/posix_spawn, scripts, signals and their handlers (for faults too,
+// and for threads busy in user code), poll and select,
 // close-on-exec and symbolic links. The kernel self-tests run it; it exits 0
 // when everything passed.
 
@@ -8,6 +9,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -15,6 +18,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <sys/epoll.h>
+#include <sys/mman.h>
+#include <sys/ucontext.h>
 #include <sys/eventfd.h>
 #include <sys/select.h>
 #include <sys/timerfd.h>
@@ -218,6 +223,138 @@ static void signals(void) {
     printf("PASS signals\n");
 }
 
+static sigjmp_buf fault_jump;
+static volatile sig_atomic_t fault_sig, fault_code;
+static void *volatile fault_addr;
+static char *volatile guarded;
+
+// Records the fault and jumps back out of the faulting code.
+static void on_fault_jump(int sig, siginfo_t *si, void *uc) {
+    (void)uc;
+    fault_sig = sig;
+    fault_code = si->si_code;
+    fault_addr = si->si_addr;
+    siglongjmp(fault_jump, 1);
+}
+
+// Makes the guarded page writable, so the faulting write goes again.
+static void on_fault_fix(int sig, siginfo_t *si, void *uc) {
+    (void)uc;
+    fault_sig = sig;
+    fault_addr = si->si_addr;
+    mprotect(guarded, 4096, PROT_READ | PROT_WRITE);
+}
+
+// Steps over the faulting instruction (ud2 is two bytes).
+static void on_fault_skip(int sig, siginfo_t *si, void *ucv) {
+    (void)si;
+    ucontext_t *uc = ucv;
+    fault_sig = sig;
+    if (sig == SIGILL) uc->uc_mcontext.gregs[REG_RIP] += 2;
+}
+
+static void catch_with(int sig, void (*handler)(int, siginfo_t *, void *)) {
+    struct sigaction sa = {0};
+    sa.sa_sigaction = handler;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigaction(sig, &sa, NULL);
+}
+
+static void faults(void) {
+    catch_with(SIGSEGV, on_fault_jump);
+    fault_sig = 0;
+    if (sigsetjmp(fault_jump, 1) == 0) {
+        *(volatile int *)16 = 1;
+    }
+    CHECK(fault_sig == SIGSEGV && fault_addr == (void *)16 && fault_code == SEGV_MAPERR, "SIGSEGV with its address");
+
+    guarded = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(guarded != MAP_FAILED, "mmap a read-only page");
+    fault_sig = 0;
+    if (sigsetjmp(fault_jump, 1) == 0) {
+        guarded[5] = 1;
+    }
+    CHECK(fault_sig == SIGSEGV && fault_code == SEGV_ACCERR, "a write to a read-only page is SEGV_ACCERR");
+    catch_with(SIGSEGV, on_fault_fix);
+    fault_sig = 0;
+    guarded[100] = 42;
+    CHECK(fault_sig == SIGSEGV && fault_addr == guarded + 100 && guarded[100] == 42,
+          "a handler fixes the fault and the write goes again");
+    munmap(guarded, 4096);
+
+    catch_with(SIGILL, on_fault_skip);
+    fault_sig = 0;
+    uint64_t rcx, r11;
+    // rcx and r11 come back too (they are lost by `sysret`, so this needs
+    // the kernel's full return after rt_sigreturn).
+    __asm__ volatile("mov $0x1234, %%rcx\n\tmov $0x5678, %%r11\n\tud2\n\tmov %%rcx, %0\n\tmov %%r11, %1"
+                     : "=r"(rcx), "=r"(r11)
+                     :
+                     : "rcx", "r11", "memory");
+    CHECK(fault_sig == SIGILL, "SIGILL from ud2");
+    CHECK(rcx == 0x1234 && r11 == 0x5678, "every register survives the handler");
+
+    catch_with(SIGFPE, on_fault_jump);
+    fault_sig = 0;
+    volatile int zero = 0, x = 1;
+    if (sigsetjmp(fault_jump, 1) == 0) {
+        x = x / zero;
+    }
+    CHECK(fault_sig == SIGFPE && fault_code == FPE_INTDIV, "SIGFPE from division by zero");
+
+    catch_with(SIGTRAP, on_fault_skip);
+    fault_sig = 0;
+    __asm__ volatile("int3");
+    CHECK(fault_sig == SIGTRAP, "SIGTRAP from int3");
+
+    signal(SIGSEGV, SIG_DFL);
+    signal(SIGILL, SIG_DFL);
+    signal(SIGFPE, SIG_DFL);
+    signal(SIGTRAP, SIG_DFL);
+    int status;
+    pid_t pid = fork();
+    if (pid == 0) {
+        *(volatile int *)16 = 1;
+        _exit(0);
+    }
+    CHECK(waitpid(pid, &status, 0) == pid && WIFSIGNALED(status), "without a handler, the fault ends the process");
+    printf("PASS faults\n");
+}
+
+static volatile int spinning, spun_out;
+
+static void on_usr2(int sig) {
+    (void)sig;
+    spun_out = 1;
+}
+
+// Spins without a system call until its signal handler runs.
+static void *spin(void *arg) {
+    (void)arg;
+    spinning = 1;
+    while (!spun_out) {
+    }
+    return NULL;
+}
+
+static void busy_threads(void) {
+    signal(SIGUSR2, on_usr2);
+    spun_out = 0;
+    spinning = 0;
+    pthread_t t;
+    CHECK(pthread_create(&t, NULL, spin, NULL) == 0, "pthread_create");
+    while (!spinning) usleep(1000);
+    usleep(10000);
+    CHECK(pthread_kill(t, SIGUSR2) == 0, "pthread_kill");
+    for (int i = 0; i < 2000 && !spun_out; i++) usleep(1000);
+    int ok = spun_out;
+    spun_out = 1;
+    pthread_join(t, NULL);
+    CHECK(ok, "a thread busy in user code takes a signal");
+    signal(SIGUSR2, SIG_DFL);
+    printf("PASS signals to busy threads\n");
+}
+
 static void interruptions(void) {
     int fds[2];
     CHECK(pipe(fds) == 0, "pipe");
@@ -282,14 +419,15 @@ static void event_loops(void) {
     int tf = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
     CHECK(tf >= 0, "timerfd");
     struct itimerspec its = {{0, 20 * 1000000}, {0, 30 * 1000000}};
+    // Timed from arming: the epoll set-up below may take a few milliseconds.
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     CHECK(timerfd_settime(tf, 0, &its, NULL) == 0, "arm the timer");
     int ep = epoll_create1(EPOLL_CLOEXEC);
     CHECK(ep >= 0, "epoll_create1");
     struct epoll_event e1 = {EPOLLIN, {.u32 = 1}}, e2 = {EPOLLIN, {.u32 = 2}};
     CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, tf, &e1) == 0 && epoll_ctl(ep, EPOLL_CTL_ADD, ev, &e2) == 0, "epoll_ctl");
     struct epoll_event out[4];
-    struct timespec t0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
     int n = epoll_wait(ep, out, 4, 1000);
     long ms = ms_since(&t0);
     CHECK(n == 1 && out[0].data.u32 == 1, "epoll reports the timer");
@@ -374,6 +512,8 @@ int main(int argc, char **argv) {
     scripts();
     spawning();
     signals();
+    faults();
+    busy_threads();
     interruptions();
     event_loops();
     close_on_exec();

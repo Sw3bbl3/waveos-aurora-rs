@@ -133,6 +133,9 @@ pub struct Desktop {
     scroll: (Option<u32>, i32, i32),
     next_id: u32,
     cursor: (i32, i32),
+    /// Client windows that presented since the last frame (each gets a
+    /// `FRAME` event once it is on screen).
+    presented: Vec<u32>,
     buttons: u8,
     drag: Option<Drag>,
     damage: Vec<Rect>,
@@ -218,6 +221,7 @@ impl Desktop {
             scroll: (None, 0, 0),
             next_id: 1,
             cursor: (w / 2, h / 2),
+            presented: Vec::new(),
             buttons: 0,
             drag: None,
             damage: Vec::new(),
@@ -752,6 +756,9 @@ impl Desktop {
                     }
                 }
                 Command::Present(id, r) => {
+                    if !self.presented.contains(&id) {
+                        self.presented.push(id);
+                    }
                     if let Some(w) = self.window_of_client(id) {
                         self.reveal_window(w);
                     }
@@ -761,6 +768,10 @@ impl Desktop {
                             self.damage(Rect::new(c.x + r.x, c.y + r.y, r.w, r.h).intersect(&c));
                         }
                     }
+                }
+                Command::Cursor => {
+                    let (x, y) = self.cursor;
+                    self.damage.push(cursor::bounds(x, y).intersect(&self.screen()));
                 }
                 Command::Title(id) => {
                     if let Some(w) = self.window_of_client(id) {
@@ -970,6 +981,24 @@ impl Desktop {
         self.scroll.1 %= NOTCH;
         self.scroll.2 %= NOTCH;
         self.with_app(id, |app, area, _| app.scroll(notches, (dx, dy), area));
+    }
+
+    /// The pointer's shape: what the client window under it asked for.
+    fn cursor_shape(&self) -> u32 {
+        let (x, y) = self.cursor;
+        if self.shore.is_some() || self.drag.is_some() || self.dnd.is_some() {
+            return aurora_abi::cursor::ARROW;
+        }
+        self.window_at(x, y)
+            .map(|i| &self.windows[i])
+            .filter(|w| w.content().contains(x, y))
+            .and_then(|w| w.app.client_id())
+            .map_or(aurora_abi::cursor::ARROW, crate::gui::server::cursor_of)
+    }
+
+    /// The client windows that presented since this was last asked.
+    pub fn take_presented(&mut self) -> Vec<u32> {
+        core::mem::take(&mut self.presented)
     }
 
     fn window_at(&self, x: i32, y: i32) -> Option<usize> {
@@ -1478,7 +1507,7 @@ impl Desktop {
         }
         if !self.scene_dirty && self.scene.len() == cv.buf.len() {
             cv.blit_same(&self.scene, cv.clip);
-            cursor::draw(cv, self.cursor.0, self.cursor.1);
+            cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape());
             return;
         }
         cv.blit_same(&self.wallpaper, cv.clip);
@@ -1491,7 +1520,7 @@ impl Desktop {
                 self.paint_power_overlay(cv, p);
             }
             self.save_scene(cv);
-            cursor::draw(cv, self.cursor.0, self.cursor.1);
+            cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape());
             return;
         }
         let water_start = crate::time::now_ns();
@@ -1533,7 +1562,7 @@ impl Desktop {
             self.paint_power_overlay(cv, p);
         }
         self.save_scene(cv);
-        cursor::draw(cv, self.cursor.0, self.cursor.1);
+        cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape());
     }
 
     /// Keeps the composed scene (without the pointer) under the clip, to

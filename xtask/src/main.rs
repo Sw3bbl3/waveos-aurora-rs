@@ -383,15 +383,34 @@ fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64, linux: Option<&P
             Err(e) => panic!("could not update {}: {e}; disk preserved", img.display()),
         }
         let Some(linux) = linux else { return };
-        match image::add_linux(img, linux, &debian::waveos_settings(linux)) {
+        let settings = debian::waveos_settings(linux);
+        let mut added = image::add_linux(img, linux, &settings);
+        // Too little room (a disk made for fewer packages): make the disk
+        // bigger, keeping its files, so the browsers are on it.
+        if let Ok(image::LinuxOnDisk::NoRoom { need, free }) = added {
+            let old = fs::metadata(img).map(|m| m.len()).unwrap_or(0);
+            let size = (old + need - free + 512 * 1024 * 1024).next_multiple_of(1024 * 1024);
+            println!(
+                "making {} {} MiB bigger ({} MiB) for the Linux packages (Voyage); its files are kept",
+                img.display(),
+                (size - old) >> 20,
+                size >> 20
+            );
+            match image::grow(img, size) {
+                Ok(()) => added = image::add_linux(img, linux, &settings),
+                Err(e) => eprintln!("warning: could not make {} bigger: {e}", img.display()),
+            }
+        }
+        match added {
             Ok(image::LinuxOnDisk::Added) => {
                 println!("added the Linux packages (Voyage, Firefox) to {}", img.display())
             }
             Ok(image::LinuxOnDisk::Updated) => {}
             Ok(image::LinuxOnDisk::Upgraded) => println!("updated the Linux packages on {}", img.display()),
             Ok(image::LinuxOnDisk::NoRoom { need, free }) => eprintln!(
-                "warning: {} has {} MiB free and the Linux packages (Voyage, Firefox) need {} MiB, so NetSurf \
-                 stands in; run with --fresh-disk for a disk with them (this erases files saved inside WaveOS)",
+                "warning: {} has {} MiB free and the Linux packages (Voyage, Firefox) need {} MiB, so Voyage \
+                 isn't on it (Firefox or NetSurf stands in); run with --fresh-disk for a disk with them (this \
+                 erases files saved inside WaveOS)",
                 img.display(),
                 free >> 20,
                 need >> 20
@@ -877,7 +896,17 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let _ = fs::remove_file(&qmp);
 
     let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(["-machine", "q35", "-cpu", "max"]);
+    // Emulated, `max` says it is an AMD family 6 chip, which LLVM takes for
+    // a 32-bit Athlon XP: Mesa's software GL (llvmpipe, used by WebKit) then
+    // can't generate code. A Haswell's identity matches what QEMU emulates.
+    // With hardware virtualization, `max` is the host's own processor.
+    let accels = accelerators();
+    let cpu = if accels.iter().all(|a| a.starts_with("tcg")) {
+        "max,vendor=GenuineIntel,family=6,model=60,stepping=3"
+    } else {
+        "max"
+    };
+    cmd.args(["-machine", "q35", "-cpu", cpu]);
     if opts.gpu == "virtio" {
         let device = match opts.resolution {
             Some((w, h)) => format!("virtio-vga,edid=on,xres={w},yres={h}"),
@@ -888,7 +917,7 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         // 64 MiB of video memory: room for 4K modes.
         cmd.args(["-vga", "std", "-global", "VGA.vgamem_mb=64"]);
     }
-    for accel in accelerators() {
+    for accel in accels {
         cmd.args(["-accel", &accel]);
     }
     cmd.arg("-m").arg(opts.memory_mib.to_string());

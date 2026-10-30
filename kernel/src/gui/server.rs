@@ -49,6 +49,8 @@ pub struct Client {
     pub initial: (i32, i32),
     surface: Surface,
     events: VecDeque<Event>,
+    /// The pointer's shape over the window (`aurora_abi::cursor`).
+    cursor: u32,
 }
 
 /// Changes the compositor must apply on its next frame.
@@ -57,6 +59,8 @@ pub enum Command {
     Closed(u32),
     Present(u32, Rect),
     Title(u32),
+    /// A window's pointer shape changed.
+    Cursor,
     OpenApp(String),
     OpenFile(String),
     SetDark(bool),
@@ -249,6 +253,36 @@ fn wake_pid(pid: u32) {
     if let Some(&t) = WAITERS.lock().get(&pid) {
         sched::wake(t);
     }
+    crate::proc::readiness::notify(event_key(pid));
+}
+
+/// The readiness key of process `pid`'s window events (Linux `event_fd`).
+pub fn event_key(pid: u32) -> usize {
+    1 << 60 | pid as usize
+}
+
+/// True if process `pid` has window events waiting.
+pub fn has_events(pid: u32) -> bool {
+    CLIENTS.lock().values().any(|c| c.pid == pid && !c.events.is_empty())
+}
+
+/// How many window events process `pid` has waiting.
+pub fn events_waiting(pid: u32) -> usize {
+    CLIENTS.lock().values().filter(|c| c.pid == pid).map(|c| c.events.len()).sum()
+}
+
+/// The compositor has shown window `id`'s last present: a `FRAME` event,
+/// unless one is already waiting.
+pub fn frame_done(id: u32) {
+    let pending = CLIENTS.lock().get(&id).is_none_or(|c| c.events.iter().any(|e| e.kind == aurora_abi::event::FRAME));
+    if !pending {
+        push_event(id, Event { kind: aurora_abi::event::FRAME, ..Default::default() });
+    }
+}
+
+/// The pointer shape window `id` asked for.
+pub fn cursor_of(id: u32) -> u32 {
+    CLIENTS.lock().get(&id).map_or(aurora_abi::cursor::ARROW, |c| c.cursor)
 }
 
 /// Called by the reaper when a process exits: closes all of its windows.
@@ -320,6 +354,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
                     initial: (w as i32, h as i32),
                     surface,
                     events: VecDeque::new(),
+                    cursor: aurora_abi::cursor::ARROW,
                 },
             );
             send(Command::Created(id));
@@ -393,6 +428,18 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             let (x0, y0) = (a[1] as i32 / k, a[2] as i32 / k);
             let (x1, y1) = ((a[1] as i32 + a[3] as i32 + k - 1) / k, (a[2] as i32 + a[4] as i32 + k - 1) / k);
             send(Command::Present(id, Rect::new(x0, y0, x1 - x0, y1 - y0)));
+            Ok(0)
+        }
+        nr::WIN_SET_CURSOR => {
+            let id = a[0] as u32;
+            owned(id, pid)?;
+            if a[1] > aurora_abi::cursor::HIDDEN as u64 {
+                return Err(EINVAL);
+            }
+            if let Some(c) = CLIENTS.lock().get_mut(&id) {
+                c.cursor = a[1] as u32;
+            }
+            send(Command::Cursor);
             Ok(0)
         }
         nr::WIN_SET_TITLE => {

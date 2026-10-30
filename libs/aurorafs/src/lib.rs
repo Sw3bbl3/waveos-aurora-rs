@@ -1088,6 +1088,15 @@ impl<D: Disk> Volume<D> {
         self.maybe_commit()
     }
 
+    /// Sets a file's or folder's times, as when copying it from another volume.
+    pub fn set_times(&mut self, ino: u64, ctime: u64, mtime: u64) -> Result<()> {
+        let mut inode = self.read_inode(ino)?;
+        inode.ctime = ctime;
+        inode.mtime = mtime;
+        self.write_inode(ino, &inode)?;
+        self.maybe_commit()
+    }
+
     /// Commits early when a transaction grows large.
     fn maybe_commit(&mut self) -> Result<()> {
         let limit = ((self.sb.journal_blocks as usize).saturating_sub(64)).min(DESC_CAPACITY - 64);

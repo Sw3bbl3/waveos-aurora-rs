@@ -120,14 +120,19 @@ pub fn prctl(p: &Process, option: u64, arg: u64) -> Result<u64, isize> {
     }
 }
 
-/// `futex`: waiting and waking (the bit-set forms behave like the plain ones).
-pub fn futex(addr: u64, op: u64, val: u64, timeout: u64) -> Result<u64, isize> {
+/// `futex`: waiting and waking (the bit-set forms behave like the plain
+/// ones), requeueing and `WAKE_OP`. Without `FUTEX_PRIVATE_FLAG` a futex in
+/// shared memory is the same for every process mapping it.
+pub fn futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u64) -> Result<u64, isize> {
     const WAIT: u64 = 0;
     const WAKE: u64 = 1;
     const REQUEUE: u64 = 3;
     const CMP_REQUEUE: u64 = 4;
+    const WAKE_OP: u64 = 5;
     const WAIT_BITSET: u64 = 9;
     const WAKE_BITSET: u64 = 10;
+    const PRIVATE: u64 = 128;
+    let shared = op & PRIVATE == 0;
     match op & 0x7F {
         WAIT | WAIT_BITSET => {
             let ms = if timeout == 0 {
@@ -143,14 +148,16 @@ pub fn futex(addr: u64, op: u64, val: u64, timeout: u64) -> Result<u64, isize> {
                     rel
                 }
             };
-            match proc::futex::wait(addr, val as u32, ms) {
+            match proc::futex::wait_shared(addr, val as u32, ms, shared) {
                 Err(EAGAIN) if proc::interrupted() => Err(EINTR),
                 r => r,
             }
         }
-        WAKE | WAKE_BITSET => proc::futex::wake(addr, val),
-        // Requeueing as waking everyone: correct, if less efficient.
-        REQUEUE | CMP_REQUEUE => proc::futex::wake(addr, u64::MAX),
+        WAKE | WAKE_BITSET => proc::futex::wake_shared(addr, val, shared),
+        // `timeout` holds the number to move, as Linux reads it.
+        REQUEUE => proc::futex::requeue(addr, val, addr2, timeout, None, shared),
+        CMP_REQUEUE => proc::futex::requeue(addr, val, addr2, timeout, Some(val3 as u32), shared),
+        WAKE_OP => proc::futex::wake_op(addr, val, addr2, timeout, val3 as u32, shared),
         _ => Err(ENOSYS),
     }
 }

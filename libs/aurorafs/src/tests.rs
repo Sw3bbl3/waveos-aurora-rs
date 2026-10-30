@@ -63,6 +63,19 @@ fn format_and_mount() {
 }
 
 #[test]
+fn times_can_be_set_and_survive_a_remount() {
+    let mut v = fresh(4096);
+    let f = v.write_file("/Documents/old.txt", b"from another volume").unwrap();
+    v.set_times(f, 42, 4_242).unwrap();
+    v.commit().unwrap();
+    let mut v = Volume::mount(v.into_disk(), now).unwrap();
+    let ino = v.resolve("/Documents/old.txt").unwrap();
+    let m = v.stat(ino).unwrap();
+    assert_eq!((m.ctime, m.mtime, m.size), (42, 4_242, 19));
+    v.fsck().unwrap();
+}
+
+#[test]
 fn files_and_directories() {
     let mut v = fresh(4096);
     let docs = v.create(ROOT, "Documents", Kind::Dir).unwrap();

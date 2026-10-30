@@ -382,6 +382,13 @@ fn run_linux_test(name: &str, passed: &str) {
         } else {
             sched::sleep_ms(10);
         }
+        // No compositor runs during the tests: answer windows' presents as
+        // it would, once they are "on screen".
+        for cmd in crate::gui::server::take_commands() {
+            if let crate::gui::server::Command::Present(id, _) = cmd {
+                crate::gui::server::frame_done(id);
+            }
+        }
     }
     let text = String::from_utf8_lossy(&out);
     for line in text.lines() {

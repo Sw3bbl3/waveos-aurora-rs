@@ -4,7 +4,7 @@ L’architecture prise en charge est x86-64 avec UEFI. Les pilotes comprennent A
 ## Ce qu’il faut à un PC
 - Un processeur Intel ou AMD 64 bits et un micrologiciel UEFI avec le démarrage sécurisé (Secure Boot) désactivé; l’ancien BIOS ne peut pas démarrer WaveOS.
 - 512 Mio de mémoire pour le bureau et les applications de WaveOS, **2 Gio pour Voyage ou Firefox**, de 4 à 8 Gio recommandés. Il n’y a pas d’échange sur disque : un programme qui manque de mémoire échoue.
-- Une clé USB ou un disque de 2 Gio avec les paquets Linux (512 Mio sans eux); 8 Gio ou plus sont recommandés.
+- Une clé USB ou un disque de 4 Go avec les paquets Linux (512 Mio sans eux); 8 Gio ou plus sont recommandés.
 - Pour le réseau, un adaptateur filaire Intel e1000 ou e1000e.
 
 Le tableau complet se trouve dans `docs/HARDWARE.md`, dans les sources de WaveOS.

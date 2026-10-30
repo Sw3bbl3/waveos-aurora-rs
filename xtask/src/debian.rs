@@ -32,6 +32,10 @@ pub const DEFAULT_PACKAGES: &[&str] = &[
     "python3",
     "firefox-esr",
     "libwebkit2gtk-4.1-0",
+    // Video and sound codecs WebKit plays through GStreamer: Opus and AAC
+    // for streaming sites (YouTube's audio), H.264 and AV1.
+    "gstreamer1.0-plugins-bad",
+    "gstreamer1.0-libav",
     "ca-certificates",
     "fonts-dejavu-core",
     "fonts-wqy-microhei",
@@ -275,21 +279,34 @@ fn skipped(path: &str) -> bool {
 }
 
 /// What maintainer scripts would have done that programs rely on.
+/// What data package triggers generate from every package's files, with the
+/// host's tools (the files are the same on every machine): the MIME database
+/// (GTK finds image loaders through it) and the compiled GSettings schemas
+/// (WebKit's network process reads its proxy settings from them). As (tool,
+/// folder in the root).
+pub const GENERATED: &[(&str, &str)] =
+    &[("update-mime-database", "usr/share/mime"), ("glib-compile-schemas", "usr/share/glib-2.0/schemas")];
+
 fn configure(root: &Path, links: &mut BTreeMap<String, String>) {
     // Debian 12 keeps libraries in /lib and /usr/lib side by side (with
     // /lib a link on installed systems); the loader looks in both.
-    let _ = links;
+    // Libraries that `update-alternatives` links into place when a package
+    // is installed (FFmpeg, in GStreamer's libav plugin, needs BLAS and
+    // LAPACK): linked to the one implementation in the root.
+    for (lib, dir) in [("libblas.so.3", "blas"), ("liblapack.so.3", "lapack")] {
+        let from = root.join("usr/lib/x86_64-linux-gnu").join(dir);
+        let real =
+            fs::read_dir(&from).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
+        if let Some(file) = real.filter(|f| f.starts_with(lib)).min() {
+            links.insert(format!("/usr/lib/x86_64-linux-gnu/{lib}"), format!("{dir}/{file}"));
+        }
+    }
     // An empty loader cache: the loader then searches the usual folders.
     let etc = root.join("etc");
     fs::create_dir_all(&etc).unwrap();
     fs::write(etc.join("ld.so.conf"), "/usr/local/lib\n/lib/x86_64-linux-gnu\n/usr/lib/x86_64-linux-gnu\n").unwrap();
     fs::write(etc.join("machine-id"), "5761766553797374656d4c696e757830\n").unwrap();
-    // Data package triggers generate, with the host's tools (the files are
-    // the same on every machine): the MIME database (GTK finds image
-    // loaders through it) and the compiled GSettings schemas.
-    for (tool, dir) in
-        [("update-mime-database", "usr/share/mime"), ("glib-compile-schemas", "usr/share/glib-2.0/schemas")]
-    {
+    for (tool, dir) in GENERATED {
         let dir = root.join(dir);
         if !dir.exists() {
             continue;

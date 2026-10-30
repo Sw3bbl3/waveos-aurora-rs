@@ -52,12 +52,16 @@ scripts don't run. What their triggers would generate for GTK programs (the
 MIME database and compiled GSettings schemas) is made with the build
 machine's `update-mime-database` and `glib-compile-schemas`
 (`shared-mime-info` and `libglib2.0-bin` on Debian and Ubuntu; `brew install
-shared-mime-info glib` on macOS).
+shared-mime-info glib` on macOS). A disk that gets new packages gets these
+files again too. Without that tool the schemas are missing, so Voyage
+compiles its own copy the first time it starts (WebKit's network process
+needs them).
 
 `cargo xtask run` puts that root on the disk as `/Linux`, fetching the
 packages the first time: a new disk is made large enough for them, and an
-older disk gets them when its volume has room (otherwise xtask says so and
-`--fresh-disk` makes a new one). `--no-linux-root` leaves them off, and
+older disk gets the ones it lacks; when its volume has no room for them,
+xtask makes the disk bigger first, copying every file on it to the bigger
+one and checking the copy before it takes the old disk's place. `--no-linux-root` leaves them off, and
 when they can't be fetched (offline) WaveOS runs without them. `cargo
 xtask image` does the same for the USB image. WaveOS's own settings for the
 programs (Firefox's preferences and policies, GTK's settings; see
@@ -103,7 +107,17 @@ Writing to the file, or deleting it, drops it from the cache.
   the object sees the same memory, across `fork` and when the descriptor is
   passed over a local socket. `ftruncate` and `fallocate` size them.
 - **Threads:** `clone` for threads with thread-local storage (`arch_prctl`),
-  `futex`, and the child-tid handshake `pthread_join` uses.
+  and the child-tid handshake `pthread_join` uses. `futex` waits and wakes
+  (with deadlines and bit sets), moves waiters from one futex to another
+  (`FUTEX_REQUEUE`, `FUTEX_CMP_REQUEUE`, which `pthread_cond_broadcast`
+  uses so it wakes one thread instead of all) and does `FUTEX_WAKE_OP`. A
+  futex in shared memory without `FUTEX_PRIVATE_FLAG` is the same futex
+  in every process that maps it.
+- **Time:** every program gets a vDSO (`AT_SYSINFO_EHDR`, built from
+  `kernel/vdso/vdso.c`): `clock_gettime`, `gettimeofday` and `time` read
+  the processor's time-stamp counter and a page the kernel keeps up to
+  date, without a system call, and give the same time the kernel would.
+  Where the TSC isn't the clock they ask the kernel.
 - **Processes:** `fork` shares the program's memory copy-on-write; `vfork` and
   `posix_spawn` run the child in the parent's memory until it calls `exec`.
   `execve` runs Linux programs and `#!` scripts in place (descriptors marked
@@ -115,8 +129,16 @@ Writing to the file, or deleting it, drops it from the cache.
   and return with `rt_sigreturn`; masks, `kill`, `tgkill`, `sigsuspend`,
   `sigtimedwait`, `SIGCHLD` when a child ends and `SIGPIPE` on a closed pipe.
   Blocking calls return `EINTR`, or start again with `SA_RESTART`. A signal
-  reaches a thread when it returns from a system call; a program that never
-  makes one only notices signals that end it.
+  reaches a thread when it returns from a system call, or at once if it is
+  busy in its own code: the sender interrupts the processor running it.
+  (JavaScript engines stop their threads this way, for garbage collection
+  among other things.) Faults become signals a program can handle: a bad
+  memory access is `SIGSEGV` (`SEGV_MAPERR` or `SEGV_ACCERR`, with the
+  address), an invalid instruction `SIGILL`, a division by zero `SIGFPE`,
+  a misaligned access `SIGBUS`, `int3` `SIGTRAP`. The handler gets every
+  register in its `ucontext` and may change them before it returns. A
+  program without a handler crashes as before, with the report in the
+  system log.
 - **Waiting:** `poll`, `ppoll`, `select`, `pselect6`, `epoll`, `eventfd` and
   `timerfd` (all level-triggered), woken as soon as a pipe, event, timer or
   the network changes.
@@ -160,6 +182,25 @@ while (wave_next_event(&e, 16) == 1) { /* keys, pointer, resize, close */ }
 Only these WaveOS calls are open to Linux programs: windows, events, sound
 (`wave_audio_open`, then `write` 48 kHz stereo 16-bit samples), the
 clipboard, notifications, reading preferences, and the uptime clock.
+
+Three calls fit windows into a program's own main loop:
+
+- `wave_event_fd(O_CLOEXEC)` gives a descriptor that `poll` and `epoll`
+  report readable while the program has events waiting; `read` gives how
+  many, and `wave_next_event(e, 0)` takes them.
+- After the compositor has put a window's present on screen, the window
+  gets a `WAVE_EV_FRAME` event (one at a time), so a program can draw its
+  next frame at the screen's pace instead of guessing.
+- `wave_win_set_cursor(window, shape)` sets the pointer over the window:
+  the arrow, a text I-beam, a pointing hand, a crosshair, busy, not
+  allowed, resize left–right or up–down, move, or none.
+
+Programs written for Linux's own sound interfaces reach the same streams
+through OSS: `/dev/dsp` is a WaveOS sound stream, and its `ioctl`s (format,
+channels, rate, buffer space, delay, sync, reset) describe it as it is,
+48 kHz 16-bit stereo, so a program that asks for another rate is told the
+one it gets and converts (GStreamer's `osssink` does, and with it WebKit's
+media). There is no PulseAudio or ALSA.
 
 ## Wayland programs (GTK and others)
 
@@ -220,7 +261,15 @@ into `/etc/ssl/certs/ca-certificates.crt` on every run, with the root
 
 WebKit's sandbox relies on Linux features WaveOS doesn't have yet
 (namespaces, seccomp), so the launcher turns it off: browse sites you
-trust. Pages draw in software. WebKit's disk cache stores some entries as
+trust. Pages draw in software: Skia paints them on the processor, and
+WebKit composites them with Mesa's software OpenGL (llvmpipe). Video and
+sound go through GStreamer, with the codecs of `gstreamer1.0-plugins-good`,
+`-bad` and `-libav` (VP8, VP9, AV1, H.264, Opus, AAC, so streaming sites'
+Media Source Extensions work), and sound plays through `/dev/dsp` (the
+launcher points GStreamer at `osssink`). In QEMU emulating the processor,
+`cargo xtask run` presents it as a Haswell: QEMU's own `max` model reports
+an AMD family 6 processor, which LLVM takes for a 32-bit Athlon XP, and
+llvmpipe then can't generate code. WebKit's disk cache stores some entries as
 hard links, which WaveOS's file systems don't have, so fewer pages come
 from the cache.
 
@@ -322,9 +371,11 @@ kernel's Linux self-tests are skipped. `wl-bridge` is built with Cargo for
 Debian packages are unpacked by `xtask` itself; no Debian tools are needed.
 
 Two self-tests run inside WaveOS as part of `cargo xtask test`:
-`linux-tests/linuxtest.c` (files, memory, threads, clocks, `/proc` and
-`/dev`, the WaveOS calls) and `linux-tests/proctest.c` (fork, exec, wait,
-scripts and the shell, `posix_spawn` and `vfork`, signals and handlers,
+`linux-tests/linuxtest.c` (files, memory, threads, clocks and the vDSO,
+futexes, `/proc` and `/dev`, the WaveOS calls, the window event descriptor
+and `FRAME`) and `linux-tests/proctest.c` (fork, exec, wait, scripts and
+the shell, `posix_spawn` and `vfork`, signals and handlers, faults handled
+as signals, signals to a thread busy in its own code,
 interrupted calls, `poll`, `select`, `epoll`, `eventfd`, `timerfd`,
 close-on-exec and symbolic links), and `linux-tests/nettest.c` (local
 sockets with descriptor passing, TCP and UDP over loopback, name lookup).

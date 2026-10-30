@@ -13,12 +13,17 @@
 //! by a signal whose handler has `SA_RESTART` (or by one that turned out to
 //! need no handler) starts again.
 //!
-//! Signals reach a thread when it returns from a system call; a thread that
-//! never makes one only notices those that end the process.
+//! Signals reach a thread when it returns from a system call, or from an
+//! interrupt (the timer, or the reschedule IPI a sender raises on the CPU
+//! the thread runs on), so a thread busy in user code takes them too. A
+//! fault in a thread (a bad memory access, an invalid instruction, a
+//! division by zero, `int3`) becomes a signal for a handler the program set
+//! (`force`); without one the process crashes, reported as before.
 
 use super::nr;
 use crate::arch::fpu::FpuState;
 use crate::arch::syscall::{user_rflags, SyscallFrame};
+use crate::arch::trap::TrapFrame;
 use crate::proc::{self, Process};
 use crate::sched::{self, TaskId};
 use crate::sync::IrqMutex;
@@ -249,9 +254,17 @@ pub fn send(p: &Process, sig: u32, info: Info, thread: Option<TaskId>) {
     }
     l.signals.any.store(true, Ordering::Release);
     drop(s);
+    // Sleeping threads wake up; running ones are interrupted, so the
+    // signal arrives even in a thread busy in user code.
     match thread {
-        Some(t) => sched::wake(t),
-        None => sched::wake_process(p.pid),
+        Some(t) => {
+            sched::wake(t);
+            sched::interrupt(t);
+        }
+        None => {
+            sched::wake_process(p.pid);
+            sched::interrupt_process(p.pid);
+        }
     }
 }
 
@@ -300,6 +313,179 @@ const EINTR_RET: u64 = (-(EINTR as i64)) as u64;
 const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
 const FP_XSTATE_MAGIC2: u32 = 0x4650_5845;
 
+/// A thread's registers, in the order of Linux's `sigcontext`: r8–r15, rdi,
+/// rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, rflags; and the trap's error code
+/// and number.
+#[derive(Clone, Copy, Default)]
+pub struct Regs {
+    g: [u64; 18],
+    err: u64,
+    trapno: u64,
+}
+
+const R_R11: usize = 3;
+const R_RDI: usize = 8;
+const R_RSI: usize = 9;
+const R_RDX: usize = 12;
+const R_RAX: usize = 13;
+const R_RCX: usize = 14;
+const R_RSP: usize = 15;
+const R_RIP: usize = 16;
+const R_RFLAGS: usize = 17;
+
+impl Regs {
+    fn from_syscall(f: &SyscallFrame) -> Regs {
+        // `syscall` keeps rip in rcx and rflags in r11, unless the frame
+        // holds the real ones (`full`, after `rt_sigreturn`).
+        let (rcx, r11) = if f.full != 0 { (f.rcx, f.r11) } else { (f.rip, f.rflags) };
+        Regs {
+            g: [
+                f.r8, f.r9, f.r10, r11, f.r12, f.r13, f.r14, f.r15, f.rdi, f.rsi, f.rbp, f.rbx, f.rdx, f.rax, rcx,
+                f.rsp, f.rip, f.rflags,
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn write_syscall(&self, f: &mut SyscallFrame) {
+        let g = &self.g;
+        [f.r8, f.r9, f.r10] = [g[0], g[1], g[2]];
+        [f.r12, f.r13, f.r14, f.r15, f.rdi, f.rsi, f.rbp, f.rbx, f.rdx, f.rax] =
+            [g[4], g[5], g[6], g[7], g[8], g[9], g[10], g[11], g[12], g[13]];
+        f.rsp = g[R_RSP];
+        f.rip = g[R_RIP];
+        f.rflags = user_rflags(g[R_RFLAGS]);
+        f.rcx = g[R_RCX];
+        f.r11 = g[R_R11];
+    }
+
+    fn from_trap(f: &TrapFrame) -> Regs {
+        Regs {
+            g: [
+                f.r8, f.r9, f.r10, f.r11, f.r12, f.r13, f.r14, f.r15, f.rdi, f.rsi, f.rbp, f.rbx, f.rdx, f.rax, f.rcx,
+                f.rsp, f.rip, f.rflags,
+            ],
+            err: f.error,
+            trapno: f.vector,
+        }
+    }
+
+    fn write_trap(&self, f: &mut TrapFrame) {
+        let g = &self.g;
+        [f.r8, f.r9, f.r10, f.r11, f.r12, f.r13, f.r14, f.r15] = [g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]];
+        [f.rdi, f.rsi, f.rbp, f.rbx, f.rdx, f.rax, f.rcx] = [g[8], g[9], g[10], g[11], g[12], g[13], g[14]];
+        f.rsp = g[R_RSP];
+        f.rip = g[R_RIP];
+        f.rflags = user_rflags(g[R_RFLAGS]);
+    }
+}
+
+/// What to do about the signals pending for thread `me`.
+enum Next {
+    Nothing,
+    /// The process ended (a signal's default action).
+    Ended,
+    /// Enter this handler (the thread's mask is already updated).
+    Handler {
+        sig: u32,
+        info: Info,
+        action: Action,
+        old_mask: u64,
+        thread: Thread,
+    },
+}
+
+/// Takes the next signal thread `me` should act on.
+fn next(p: &Process, l: &super::Linux, me: TaskId) -> Next {
+    loop {
+        let mut s = l.signals.state.lock();
+        let Some((sig, info)) = take(&mut s, me) else {
+            if let Some(mask) = s.thread(me).suspended.take() {
+                s.thread(me).blocked = mask;
+                l.signals.saved_masks.fetch_sub(1, Ordering::AcqRel);
+            }
+            l.signals.refresh_any(&s);
+            return Next::Nothing;
+        };
+        let action = s.actions[sig as usize - 1];
+        l.signals.refresh_any(&s);
+        if action.handler == SIG_IGN || (action.handler == SIG_DFL && !ends_process(sig)) {
+            continue;
+        }
+        if action.handler == SIG_DFL {
+            drop(s);
+            proc::terminate_by_signal(p, sig);
+            return Next::Ended;
+        }
+        let (old_mask, thread) = handler_mask(&mut s, l, me, sig, &action);
+        return Next::Handler { sig, info, action, old_mask, thread };
+    }
+}
+
+/// Blocks what a handler for `sig` blocks while it runs; returns the mask
+/// to put back afterwards, and the thread's state.
+fn handler_mask(s: &mut State, l: &super::Linux, me: TaskId, sig: u32, action: &Action) -> (u64, Thread) {
+    let t = *s.thread(me);
+    let old_mask = t.suspended.unwrap_or(t.blocked);
+    if t.suspended.is_some() {
+        l.signals.saved_masks.fetch_sub(1, Ordering::AcqRel);
+    }
+    let th = s.thread(me);
+    th.suspended = None;
+    th.blocked |= action.mask & !UNBLOCKABLE;
+    if action.flags & SA_NODEFER == 0 {
+        th.blocked |= bit(sig);
+    }
+    if action.flags & SA_RESETHAND != 0 {
+        s.actions[sig as usize - 1] = Action::default();
+    }
+    (old_mask, t)
+}
+
+/// On the way back to user mode from an interrupt or a fault: enters the
+/// handler of a pending signal.
+pub fn on_trap_return(f: &mut TrapFrame) {
+    let pid = sched::current_pid();
+    if pid == 0 {
+        return;
+    }
+    let Some(p) = proc::get(pid) else { return };
+    let Some(l) = &p.linux else { return };
+    if !l.signals.any.load(Ordering::Acquire) && l.signals.saved_masks.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    if let Next::Handler { sig, info, action, old_mask, thread } = next(&p, l, sched::current_id()) {
+        let mut regs = Regs::from_trap(f);
+        if enter_handler(&mut regs, sig, info, &action, old_mask, &thread).is_err() {
+            proc::terminate_by_signal(&p, SIGSEGV);
+            return;
+        }
+        regs.write_trap(f);
+    }
+}
+
+/// A fault in the running thread: `sig` goes straight to its handler, if
+/// the program set one and the thread doesn't block it (true: the frame now
+/// enters the handler). Otherwise false, and the process crashes.
+pub fn force(p: &Process, sig: u32, info: Info, f: &mut TrapFrame) -> bool {
+    let Some(l) = &p.linux else { return false };
+    let me = sched::current_id();
+    let mut s = l.signals.state.lock();
+    let action = s.actions[sig as usize - 1];
+    if action.handler == SIG_DFL || action.handler == SIG_IGN || s.thread(me).blocked & bit(sig) != 0 {
+        return false;
+    }
+    let (old_mask, thread) = handler_mask(&mut s, l, me, sig, &action);
+    l.signals.refresh_any(&s);
+    drop(s);
+    let mut regs = Regs::from_trap(f);
+    if enter_handler(&mut regs, sig, info, &action, old_mask, &thread).is_err() {
+        return false;
+    }
+    regs.write_trap(f);
+    true
+}
+
 /// On the way back to user mode from system call `nr` (its result is in
 /// `f.rax`): restarts it, or enters the handler of a pending signal.
 pub fn on_return(f: &mut SyscallFrame, nr: u64, p: &alloc::sync::Arc<Process>) {
@@ -311,56 +497,26 @@ pub fn on_return(f: &mut SyscallFrame, nr: u64, p: &alloc::sync::Arc<Process>) {
     if !interrupted && !l.signals.any.load(Ordering::Acquire) && l.signals.saved_masks.load(Ordering::Acquire) == 0 {
         return;
     }
-    loop {
-        let mut s = l.signals.state.lock();
-        let Some((sig, info)) = take(&mut s, me) else {
-            if let Some(mask) = s.thread(me).suspended.take() {
-                s.thread(me).blocked = mask;
-                l.signals.saved_masks.fetch_sub(1, Ordering::AcqRel);
-            }
-            l.signals.refresh_any(&s);
-            drop(s);
+    match next(p, l, me) {
+        Next::Nothing => {
             // Woken for a signal another thread took: carry on as if nothing happened.
             if interrupted && restartable(nr) {
                 restart(f, nr);
             }
-            return;
-        };
-        let action = s.actions[sig as usize - 1];
-        l.signals.refresh_any(&s);
-        if action.handler == SIG_IGN || (action.handler == SIG_DFL && !ends_process(sig)) {
-            continue;
         }
-        if action.handler == SIG_DFL {
-            drop(s);
-            proc::terminate_by_signal(p, sig);
-            return;
-        }
-        if interrupted && action.flags & SA_RESTART != 0 && restartable(nr) {
-            restart(f, nr);
-        }
-        let t = *s.thread(me);
-        let old_mask = t.suspended.unwrap_or(t.blocked);
-        if t.suspended.is_some() {
-            l.signals.saved_masks.fetch_sub(1, Ordering::AcqRel);
-        }
-        {
-            let t = s.thread(me);
-            t.suspended = None;
-            t.blocked |= action.mask & !UNBLOCKABLE;
-            if action.flags & SA_NODEFER == 0 {
-                t.blocked |= bit(sig);
+        Next::Ended => {}
+        Next::Handler { sig, info, action, old_mask, thread } => {
+            if interrupted && action.flags & SA_RESTART != 0 && restartable(nr) {
+                restart(f, nr);
             }
+            let mut regs = Regs::from_syscall(f);
+            if enter_handler(&mut regs, sig, info, &action, old_mask, &thread).is_err() {
+                // No room for the frame: the process ends as if it had crashed.
+                proc::terminate_by_signal(p, SIGSEGV);
+                return;
+            }
+            regs.write_syscall(f);
         }
-        if action.flags & SA_RESETHAND != 0 {
-            s.actions[sig as usize - 1] = Action::default();
-        }
-        drop(s);
-        if enter_handler(f, sig, info, &action, old_mask, &t).is_err() {
-            // No room for the frame: the process ends as if it had crashed.
-            proc::terminate_by_signal(p, SIGSEGV);
-        }
-        return;
     }
 }
 
@@ -380,17 +536,11 @@ const UC_MCONTEXT: u64 = 40;
 const UC_SIGMASK: u64 = 296;
 
 /// Builds the signal frame on the user stack and points `f` at the handler.
-fn enter_handler(
-    f: &mut SyscallFrame,
-    sig: u32,
-    info: Info,
-    a: &Action,
-    old_mask: u64,
-    t: &Thread,
-) -> Result<(), isize> {
-    let on_alt = t.alt_size != 0 && (t.alt_sp..t.alt_sp + t.alt_size).contains(&f.rsp);
+fn enter_handler(r: &mut Regs, sig: u32, info: Info, a: &Action, old_mask: u64, t: &Thread) -> Result<(), isize> {
+    let rsp = r.g[R_RSP];
+    let on_alt = t.alt_size != 0 && (t.alt_sp..t.alt_sp + t.alt_size).contains(&rsp);
     let use_alt = a.flags & SA_ONSTACK != 0 && t.alt_size != 0 && !on_alt;
-    let mut sp = if use_alt { t.alt_sp + t.alt_size } else { f.rsp - 128 };
+    let mut sp = if use_alt { t.alt_sp + t.alt_size } else { rsp - 128 };
     // The SIMD state (XSAVE's, with the markers Linux puts around it, or
     // FXSAVE's), then the frame; the handler starts as if called.
     let size = crate::arch::fpu::size() as u64;
@@ -424,18 +574,13 @@ fn enter_handler(
         } as u64,
     );
     w(UC_STACK + 16, t.alt_size);
-    let regs = [
-        f.r8, f.r9, f.r10, f.rflags, // r11 held rflags at `syscall`
-        f.r12, f.r13, f.r14, f.r15, f.rdi, f.rsi, f.rbp, f.rbx, f.rdx, f.rax, f.rip, // rcx held rip
-        f.rsp, f.rip, f.rflags,
-    ];
-    for (i, v) in regs.iter().enumerate() {
+    for (i, v) in r.g.iter().enumerate() {
         w(UC_MCONTEXT + i as u64 * 8, *v);
     }
     // cs, gs, fs, ss
     w(UC_MCONTEXT + 144, crate::arch::gdt::USER_CS as u64 | (crate::arch::gdt::USER_SS as u64) << 48);
-    w(UC_MCONTEXT + 152, 0); // err
-    w(UC_MCONTEXT + 160, 0); // trapno
+    w(UC_MCONTEXT + 152, r.err);
+    w(UC_MCONTEXT + 160, r.trapno);
     w(UC_MCONTEXT + 168, old_mask); // oldmask
     w(UC_MCONTEXT + 176, info.addr); // cr2
     w(UC_MCONTEXT + 184, fpstate);
@@ -444,7 +589,8 @@ fn enter_handler(
     let mut si = [0u8; 128];
     si[0..4].copy_from_slice(&sig.to_le_bytes());
     si[8..12].copy_from_slice(&info.code.to_le_bytes());
-    if sig == SIGSEGV || sig == 7 {
+    if matches!(sig, 4 | 5 | 7 | 8 | SIGSEGV) && info.pid == 0 {
+        // A fault's address (`si_addr`).
         si[16..24].copy_from_slice(&info.addr.to_le_bytes());
     } else {
         si[16..20].copy_from_slice(&info.pid.to_le_bytes());
@@ -456,13 +602,13 @@ fn enter_handler(
     user::put_bytes(sp + UC, &uc)?;
     user::put_bytes(sp + INFO, &si)?;
 
-    f.rip = a.handler;
-    f.rsp = sp;
-    f.rdi = sig as u64;
-    f.rsi = sp + INFO;
-    f.rdx = sp + UC;
-    f.rax = 0;
-    f.rflags &= !0x500; // TF, DF
+    r.g[R_RIP] = a.handler;
+    r.g[R_RSP] = sp;
+    r.g[R_RDI] = sig as u64;
+    r.g[R_RSI] = sp + INFO;
+    r.g[R_RDX] = sp + UC;
+    r.g[R_RAX] = 0;
+    r.g[R_RFLAGS] &= !0x500; // TF, DF
     let _ = a.flags & SA_SIGINFO; // the arguments are passed either way
     Ok(())
 }
@@ -478,6 +624,11 @@ pub fn sigreturn(p: &Process, f: &mut SyscallFrame) -> Result<u64, isize> {
     f.r8 = m(0);
     f.r9 = m(1);
     f.r10 = m(2);
+    // rcx and r11 too: the thread may have been interrupted anywhere, so
+    // this call leaves with every register as the frame holds it.
+    f.r11 = m(3);
+    f.rcx = m(14);
+    f.full = 1;
     f.r12 = m(4);
     f.r13 = m(5);
     f.r14 = m(6);

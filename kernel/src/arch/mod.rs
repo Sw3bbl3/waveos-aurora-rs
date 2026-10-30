@@ -11,3 +11,4 @@ pub mod percpu;
 pub mod smp;
 pub mod switch;
 pub mod syscall;
+pub mod trap;

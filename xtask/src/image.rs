@@ -102,11 +102,15 @@ pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io
                 return Ok(LinuxOnDisk::NoRoom { need, free });
             }
             seed_missing(&mut vol, linux, "/Linux").map_err(err)?;
-            // The links and the package list describe the root as it is now.
-            vol.write_file("/Linux/.links", &fs::read(linux.join(".links"))?).map_err(err)?;
+            // What was made from the old package set is out of date: take it again.
+            for (_, dir) in super::debian::GENERATED {
+                seed(&mut vol, &linux.join(dir), &format!("/Linux/{dir}")).map_err(err)?;
+            }
             vol.write_file("/Linux/packages.txt", &packages).map_err(err)?;
             done = LinuxOnDisk::Upgraded;
         }
+        // The table of links describes the root as xtask makes it now.
+        vol.write_file("/Linux/.links", &fs::read(linux.join(".links"))?).map_err(err)?;
         for (path, from) in settings {
             let path = format!("/Linux{path}");
             vol.mkdir_all(&path[..path.rfind('/').unwrap()]).map_err(err)?;
@@ -127,6 +131,143 @@ pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io
     vol.commit().map_err(err)?;
     vol.fsck().map_err(io::Error::other)?;
     Ok(done)
+}
+
+/// Makes `img` `size` bytes, keeping everything on it: a new image gets the
+/// same ESP and a bigger home volume holding a copy of every file and folder
+/// (with their times), and takes the old one's place once the copy is
+/// checked against it. Nothing changes if any step fails.
+pub fn grow(img: &Path, size: u64) -> io::Result<()> {
+    let mut old = OpenOptions::new().read(true).write(true).open(img)?;
+    let esp = partition(&mut old, 0)?;
+    let home = partition(&mut old, 1)?;
+    let l = layout(size);
+    if esp != (ESP_START, ESP_START + ESP_SECTORS - 1) || home.0 != l.home_start || size <= old.metadata()?.len() {
+        return Err(io::Error::other("the disk isn't laid out the way WaveOS makes it"));
+    }
+    let tmp = img.with_extension("img.growing");
+    let copied = (|| {
+        let mut new = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&tmp)?;
+        new.set_len(size)?;
+        write_gpt(&mut new, &l)?;
+        // The ESP as it is, boot options included.
+        let mut buf = vec![0u8; 1 << 20];
+        for at in (0..ESP_SECTORS * SECTOR).step_by(buf.len()) {
+            old.seek(SeekFrom::Start(ESP_START * SECTOR + at))?;
+            old.read_exact(&mut buf)?;
+            write_at(&mut new, ESP_START * SECTOR + at, &buf)?;
+        }
+        let err = |e: aurorafs::Error| io::Error::other(format!("AuroraFS: {e:?}"));
+        {
+            let mut from = home_volume(&mut old, home).map_err(err)?;
+            let bytes = (l.home_end - l.home_start + 1) * SECTOR;
+            let disk = WaveDisk {
+                region: Region { file: &mut new, start: l.home_start * SECTOR, len: bytes, pos: 0 },
+                blocks: bytes / 4096,
+            };
+            let mut to = aurorafs::Volume::format(disk, &from.label(), pseudo_guid(3), now).map_err(err)?;
+            copy_tree(&mut from, &mut to, aurorafs::ROOT, "").map_err(err)?;
+            let root = from.stat(aurorafs::ROOT).map_err(err)?;
+            to.set_times(aurorafs::ROOT, root.ctime, root.mtime).map_err(err)?;
+            to.commit().map_err(err)?;
+            to.fsck().map_err(io::Error::other)?;
+            if !same_tree(&mut from, &mut to, aurorafs::ROOT, aurorafs::ROOT).map_err(err)? {
+                return Err(io::Error::other("the copy differs from the disk"));
+            }
+        }
+        new.sync_all()
+    })();
+    match copied {
+        Ok(()) => fs::rename(&tmp, img),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// The first and last sector of partition `index` in the GPT.
+fn partition(file: &mut File, index: u64) -> io::Result<(u64, u64)> {
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    file.seek(SeekFrom::Start(2 * SECTOR + index * ENTRY_SIZE))?;
+    file.read_exact(&mut entry)?;
+    Ok((u64::from_le_bytes(entry[32..40].try_into().unwrap()), u64::from_le_bytes(entry[40..48].try_into().unwrap())))
+}
+
+fn home_volume(file: &mut File, (start, end): (u64, u64)) -> aurorafs::Result<aurorafs::Volume<WaveDisk<'_>>> {
+    let bytes = (end - start + 1) * SECTOR;
+    let region = Region { file, start: start * SECTOR, len: bytes, pos: 0 };
+    aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now)
+}
+
+/// Copies the folder `dir` of `from` to `path` on `to`, times included.
+fn copy_tree<A: aurorafs::Disk, B: aurorafs::Disk>(
+    from: &mut aurorafs::Volume<A>,
+    to: &mut aurorafs::Volume<B>,
+    dir: u64,
+    path: &str,
+) -> aurorafs::Result<()> {
+    let parent = to.resolve(path)?;
+    let mut buf = vec![0u8; 1 << 20];
+    for e in from.readdir(dir)? {
+        let meta = from.stat(e.ino)?;
+        let ino = to.create(parent, &e.name, e.kind)?;
+        if e.kind == aurorafs::Kind::Dir {
+            copy_tree(from, to, e.ino, &format!("{path}/{}", e.name))?;
+        } else {
+            let mut at = 0;
+            while at < meta.size {
+                let n = from.read(e.ino, at, &mut buf)?;
+                if n == 0 {
+                    return Err(aurorafs::Error::Io);
+                }
+                to.write(ino, at, &buf[..n])?;
+                at += n as u64;
+            }
+        }
+        // After the contents, which change a folder's times.
+        to.set_times(ino, meta.ctime, meta.mtime)?;
+    }
+    Ok(())
+}
+
+/// Whether folders `a` and `b` hold the same names, kinds, times and contents.
+fn same_tree<A: aurorafs::Disk, B: aurorafs::Disk>(
+    from: &mut aurorafs::Volume<A>,
+    to: &mut aurorafs::Volume<B>,
+    a: u64,
+    b: u64,
+) -> aurorafs::Result<bool> {
+    let mut left = from.readdir(a)?;
+    let mut right = to.readdir(b)?;
+    left.sort_by(|x, y| x.name.cmp(&y.name));
+    right.sort_by(|x, y| x.name.cmp(&y.name));
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    let (mut x, mut y) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    for (l, r) in left.iter().zip(&right) {
+        let (ml, mr) = (from.stat(l.ino)?, to.stat(r.ino)?);
+        if l.name != r.name || ml.kind != mr.kind || ml.size != mr.size || (ml.ctime, ml.mtime) != (mr.ctime, mr.mtime)
+        {
+            return Ok(false);
+        }
+        if ml.kind == aurorafs::Kind::Dir {
+            if !same_tree(from, to, l.ino, r.ino)? {
+                return Ok(false);
+            }
+            continue;
+        }
+        let mut at = 0;
+        while at < ml.size {
+            let n = from.read(l.ino, at, &mut x)?;
+            if n == 0 || to.read(r.ino, at, &mut y[..n])? != n || x[..n] != y[..n] {
+                return Ok(false);
+            }
+            at += n as u64;
+        }
+    }
+    Ok(true)
 }
 
 /// A file's contents on the volume (empty if it isn't there).

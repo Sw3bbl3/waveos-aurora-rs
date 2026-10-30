@@ -289,6 +289,11 @@ pub fn parent_path(path: &str) -> String {
 }
 
 pub fn mkdir(path: &str) -> FsResult<()> {
+    // `/` and mount points have no parent to look in, but exist all the
+    // same (`mkdir -p` starts at `/` and expects EEXIST there).
+    if stat(path).is_ok() {
+        return Err(EEXIST);
+    }
     let (fs, dir, name) = parent_of(path)?;
     if fs.read_only() {
         return Err(EROFS);

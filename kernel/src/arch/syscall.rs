@@ -18,7 +18,7 @@ use x86_64::{PrivilegeLevel, VirtAddr};
 /// Register state saved on entry; the dispatcher writes the result into `rax`.
 /// It holds every general register (`rcx` and `r11` carry `rip` and
 /// `rflags`), so a new Linux thread, a forked child or a signal handler can
-/// start from a copy of it.
+/// start from a copy of it. The four words after `rsp` are zero on entry.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct SyscallFrame {
@@ -38,6 +38,13 @@ pub struct SyscallFrame {
     pub rip: u64,
     pub rflags: u64,
     pub rsp: u64,
+    /// Set (to 1) to leave with `iretq`, putting back `rcx` and `r11` from
+    /// the next two fields instead of letting `sysret` use them: after
+    /// `rt_sigreturn` to a thread interrupted at any instruction.
+    pub full: u64,
+    pub rcx: u64,
+    pub r11: u64,
+    pub pad: u64,
 }
 
 global_asm!(
@@ -46,6 +53,10 @@ global_asm!(
     "swapgs",
     "mov gs:[8], rsp",
     "mov rsp, gs:[0]",
+    "push 0",
+    "push 0",
+    "push 0",
+    "push 0",
     "push qword ptr gs:[8]",
     "swapgs",
     "push r11",
@@ -67,6 +78,8 @@ global_asm!(
     "sti",
     "call {dispatch}",
     "cli",
+    "cmp qword ptr [rsp + 128], 0",
+    "jne 2f",
     "pop rbx",
     "pop rbp",
     "pop r12",
@@ -84,6 +97,35 @@ global_asm!(
     "pop r11",
     "pop rsp",
     "sysretq",
+    // Every register back, with `iretq`: the frame's top five words become
+    // the interrupt frame (rip, cs, rflags, rsp, ss) once rcx and r11 are
+    // loaded from theirs.
+    "2:",
+    "mov rcx, [rsp + 136]",
+    "mov r11, [rsp + 144]",
+    "mov rax, [rsp + 120]",
+    "mov [rsp + 144], rax",
+    "mov rax, [rsp + 112]",
+    "mov [rsp + 136], rax",
+    "mov rax, [rsp + 104]",
+    "mov [rsp + 120], rax",
+    "mov qword ptr [rsp + 128], {user_cs}",
+    "mov qword ptr [rsp + 152], {user_ss}",
+    "pop rbx",
+    "pop rbp",
+    "pop r12",
+    "pop r13",
+    "pop r14",
+    "pop r15",
+    "pop rax",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop r10",
+    "pop r8",
+    "pop r9",
+    "add rsp, 16",
+    "iretq",
     "",
     // Enters ring 3 for the first time: rdi = entry, rsi = user stack, rdx = argument.
     ".global aurora_enter_user",

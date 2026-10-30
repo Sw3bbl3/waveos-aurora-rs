@@ -31,6 +31,8 @@
 #define WAVE_DISPLAY_MODES 49
 #define WAVE_AUDIO_OPEN 52
 #define WAVE_AUDIO_CONTROL 71
+#define WAVE_WIN_SET_CURSOR 81
+#define WAVE_EVENT_FD 82
 
 /* Window flags for wave_win_create. */
 #define WAVE_WIN_RESIZABLE 1
@@ -44,6 +46,22 @@
 #define WAVE_EV_RESIZE 6
 #define WAVE_EV_CLOSE_REQUESTED 7
 #define WAVE_EV_FOCUS 8
+#define WAVE_EV_THEME 9
+#define WAVE_EV_SCREEN 14
+/* The compositor has shown the window's last present: draw the next frame. */
+#define WAVE_EV_FRAME 15
+
+/* Pointer shapes for wave_win_set_cursor. */
+#define WAVE_CURSOR_ARROW 0
+#define WAVE_CURSOR_TEXT 1
+#define WAVE_CURSOR_POINTER 2
+#define WAVE_CURSOR_CROSSHAIR 3
+#define WAVE_CURSOR_WAIT 4
+#define WAVE_CURSOR_NOT_ALLOWED 5
+#define WAVE_CURSOR_RESIZE_EW 6
+#define WAVE_CURSOR_RESIZE_NS 7
+#define WAVE_CURSOR_MOVE 8
+#define WAVE_CURSOR_HIDDEN 9
 
 /* Key codes (wave_event.a for WAVE_EV_KEY). */
 enum wave_key {
@@ -116,6 +134,19 @@ static inline long wave_win_close(long window) {
 /* Waits up to `timeout_ms` for an event: 1 if one was written, 0 if not. */
 static inline long wave_next_event(struct wave_event *e, long timeout_ms) {
     return wave_call(WAVE_NEXT_EVENT, (long)e, timeout_ms, 0, 0, 0);
+}
+/* The pointer's shape over the window (WAVE_CURSOR_*). */
+static inline long wave_win_set_cursor(long window, int shape) {
+    return wave_call(WAVE_WIN_SET_CURSOR, window, shape, 0, 0, 0);
+}
+/*
+ * A file descriptor that poll() and epoll report readable while the
+ * program has events waiting (read() gives their number, 8 bytes, without
+ * taking them): wait on it with the rest of a main loop, then take the
+ * events with wave_next_event(e, 0). `flags` takes O_CLOEXEC.
+ */
+static inline long wave_event_fd(int flags) {
+    return wave_call(WAVE_EVENT_FD, flags, 0, 0, 0, 0);
 }
 /* A sound stream: write() samples to the returned file descriptor. */
 static inline long wave_audio_open(void) {
