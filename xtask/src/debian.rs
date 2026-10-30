@@ -295,7 +295,8 @@ fn configure(root: &Path, links: &mut BTreeMap<String, String>) {
     // LAPACK): linked to the one implementation in the root.
     for (lib, dir) in [("libblas.so.3", "blas"), ("liblapack.so.3", "lapack")] {
         let from = root.join("usr/lib/x86_64-linux-gnu").join(dir);
-        let real = fs::read_dir(&from).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
+        let real =
+            fs::read_dir(&from).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
         if let Some(file) = real.filter(|f| f.starts_with(lib)).min() {
             links.insert(format!("/usr/lib/x86_64-linux-gnu/{lib}"), format!("{dir}/{file}"));
         }
