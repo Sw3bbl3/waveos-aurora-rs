@@ -456,6 +456,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         | nr::WIN_SURFACE
         | nr::WIN_PRESENT
         | nr::WIN_SET_TITLE
+        | nr::WIN_SET_CURSOR
         | nr::WIN_CLOSE
         | nr::WIN_RESIZE
         | nr::NEXT_EVENT => crate::gui::server::syscall(nr, a),

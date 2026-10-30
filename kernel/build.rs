@@ -2,8 +2,12 @@
 //! the kernel — the Linux compatibility layer in `linux/` and the Linux
 //! drivers built on it — and hands the objects to the linker.
 //!
+//! It also builds the vDSO mapped into Linux programs (`vdso/`), a small
+//! shared object linked with the Rust toolchain's `rust-lld`.
+//!
 //! The C code needs clang (any recent version). Without it the kernel still
-//! builds, minus the ported drivers; `cfg(linuxkpi)` tells the Rust side.
+//! builds, minus the ported drivers and the vDSO; `cfg(linuxkpi)` and
+//! `cfg(vdso)` tell the Rust side.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,6 +24,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=linux");
     println!("cargo::rustc-check-cfg=cfg(linuxkpi)");
+    println!("cargo::rustc-check-cfg=cfg(vdso)");
+    println!("cargo:rerun-if-changed=vdso");
     println!("cargo:rerun-if-env-changed=WAVEOS_CC");
 
     let cc = std::env::var("WAVEOS_CC").unwrap_or_else(|_| "clang".into());
@@ -29,6 +35,7 @@ fn main() {
     }
     let linux = Path::new(&dir).join("linux");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    build_vdso(&cc, &Path::new(&dir).join("vdso"), &out);
     let mut files = Vec::new();
     for sub in SOURCES {
         let mut found: Vec<PathBuf> = std::fs::read_dir(linux.join(sub))
@@ -46,6 +53,57 @@ fn main() {
         println!("cargo:rustc-link-arg-bins={}", obj.display());
     }
     println!("cargo:rustc-cfg=linuxkpi");
+}
+
+/// Compiles and links `vdso/vdso.c` into `vdso.so`, which the kernel
+/// includes (`WAVEOS_VDSO`). Leaves it out, with a warning, if `rust-lld`
+/// can't be found.
+fn build_vdso(cc: &str, src: &Path, out: &Path) {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let sysroot = Command::new(rustc).args(["--print", "sysroot"]).output().ok().filter(|o| o.status.success());
+    let lld = sysroot.and_then(|o| {
+        let root = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim());
+        std::fs::read_dir(root.join("lib/rustlib"))
+            .ok()?
+            .flatten()
+            .map(|e| e.path().join("bin/rust-lld"))
+            .find(|p| p.exists())
+    });
+    let Some(lld) = lld else {
+        println!("cargo:warning=rust-lld not found: Linux programs get no vDSO");
+        return;
+    };
+    let obj = out.join("vdso.o");
+    let so = out.join("vdso.so");
+    let run = |cmd: &mut Command| {
+        let o = cmd.output().unwrap_or_else(|e| panic!("vdso: {e}"));
+        if !o.status.success() {
+            panic!("vdso build failed:\n{}", String::from_utf8_lossy(&o.stderr));
+        }
+    };
+    run(Command::new(cc)
+        .args([
+            "--target=x86_64-unknown-linux-gnu",
+            "-fPIC",
+            "-O2",
+            "-ffreestanding",
+            "-fno-stack-protector",
+            "-fno-asynchronous-unwind-tables",
+            "-mgeneral-regs-only",
+            "-c",
+        ])
+        .arg(src.join("vdso.c"))
+        .arg("-o")
+        .arg(&obj));
+    run(Command::new(&lld)
+        .args(["-flavor", "gnu", "-shared", "-soname=linux-vdso.so.1", "--hash-style=both"])
+        .args(["-z", "max-page-size=4096", "--build-id=none", "-Bsymbolic", "-nostdlib", "-T"])
+        .arg(src.join("vdso.lds"))
+        .arg(&obj)
+        .arg("-o")
+        .arg(&so));
+    println!("cargo:rustc-env=WAVEOS_VDSO={}", so.display());
+    println!("cargo:rustc-cfg=vdso");
 }
 
 /// Flags matching the Rust side: kernel code model, no red zone, no SIMD

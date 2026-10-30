@@ -157,7 +157,7 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
 
 **Exit and crashes:**
 - **Termination is cooperative for every thread.** `exit`, a crash or `kill` records the exit code (the first one wins) and flags the process; each thread leaves at its next safe point (syscall return, a timer tick in ring 3, or a blocking wait), so none dies while holding a kernel lock.
-- **CPU faults in ring 3** end only the faulting process (`proc::crash_current`), and the desktop shows a Problem Report.
+- **CPU faults in ring 3** end only the faulting process (`proc::crash_current`), and the desktop shows a Problem Report — unless it is a Linux program with a handler for the signal the fault becomes (`SIGSEGV`, `SIGILL`, `SIGFPE`, `SIGBUS`, `SIGTRAP`): then the handler runs. Those exceptions, the timer and the reschedule IPI enter through `arch::trap`, which saves every register in a `TrapFrame` the handler can change, so a signal is also delivered to a thread interrupted in user code (a sender raises a reschedule IPI on the CPU running it).
 - **The `reaper` kernel task** frees a process once the scheduler has retired its last thread: it closes handles (so pipe peers see EOF), closes windows, and drops the address space.
 
 ### corekit and AuroraKit

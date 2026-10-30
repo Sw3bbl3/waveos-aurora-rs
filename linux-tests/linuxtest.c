@@ -6,12 +6,14 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/auxv.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -243,7 +245,61 @@ static void clocks(void) {
     long ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
     CHECK(ms >= 25 && ms < 2000, "slept about 30 ms");
     CHECK(time(0) > 1700000000, "wall clock");
+    // The vDSO answers without a system call, and agrees with the kernel.
+    CHECK(getauxval(AT_SYSINFO_EHDR) != 0, "a vDSO");
+    struct timespec k1, v, k2;
+    for (int clock = CLOCK_REALTIME; clock <= CLOCK_MONOTONIC; clock++) {
+        syscall(SYS_clock_gettime, clock, &k1);
+        clock_gettime(clock, &v);
+        syscall(SYS_clock_gettime, clock, &k2);
+        long long n1 = k1.tv_sec * 1000000000LL + k1.tv_nsec, nv = v.tv_sec * 1000000000LL + v.tv_nsec,
+                  n2 = k2.tv_sec * 1000000000LL + k2.tv_nsec;
+        CHECK(n1 <= nv && nv <= n2, "the vDSO's time lies between the kernel's");
+    }
     printf("PASS clocks (slept %ld ms)\n", ms);
+}
+
+// From <linux/futex.h> (musl ships no kernel headers).
+#define FUTEX_WAIT_PRIVATE 128
+#define FUTEX_WAKE_PRIVATE 129
+#define FUTEX_CMP_REQUEUE_PRIVATE 132
+#define FUTEX_WAKE_OP_PRIVATE 133
+#define FUTEX_OP(op, oparg, cmp, cmparg) (((op & 0xf) << 28) | ((cmp & 0xf) << 24) | ((oparg & 0xfff) << 12) | (cmparg & 0xfff))
+#define FUTEX_OP_SET 0
+#define FUTEX_OP_CMP_EQ 0
+
+static atomic_int futex_a, futex_b, futex_ready;
+
+static void *futex_waiter(void *arg) {
+    (void)arg;
+    atomic_fetch_add(&futex_ready, 1);
+    while (syscall(SYS_futex, &futex_a, FUTEX_WAIT_PRIVATE, 0, NULL) != 0 && errno == EINTR) {
+    }
+    return NULL;
+}
+
+static void futexes(void) {
+    pthread_t t[2];
+    for (int i = 0; i < 2; i++) CHECK(pthread_create(&t[i], NULL, futex_waiter, NULL) == 0, "pthread_create");
+    while (futex_ready < 2) usleep(1000);
+    // Moves both waiters from A to B (waking none), then wakes them on B.
+    long moved = 0;
+    for (int i = 0; i < 200 && moved < 2; i++) {
+        usleep(5000);
+        moved += syscall(SYS_futex, &futex_a, FUTEX_CMP_REQUEUE_PRIVATE, 0, (void *)2L, &futex_b, 0);
+    }
+    CHECK(moved == 2, "FUTEX_CMP_REQUEUE moves the waiters");
+    CHECK(syscall(SYS_futex, &futex_a, FUTEX_WAKE_PRIVATE, 2, NULL) == 0, "none left on A");
+    CHECK(syscall(SYS_futex, &futex_b, FUTEX_WAKE_PRIVATE, 2, NULL) == 2, "both woken on B");
+    for (int i = 0; i < 2; i++) pthread_join(t[i], NULL);
+    CHECK(syscall(SYS_futex, &futex_a, FUTEX_CMP_REQUEUE_PRIVATE, 0, (void *)1L, &futex_b, 7) == -1 &&
+              errno == EAGAIN,
+          "FUTEX_CMP_REQUEUE checks the value");
+    // WAKE_OP: B = 5 (it was 0, so the comparison "== 0" holds).
+    int op = FUTEX_OP(FUTEX_OP_SET, 5, FUTEX_OP_CMP_EQ, 0);
+    CHECK(syscall(SYS_futex, &futex_a, FUTEX_WAKE_OP_PRIVATE, 1, (void *)1L, &futex_b, op) == 0 && futex_b == 5,
+          "FUTEX_WAKE_OP");
+    printf("PASS futexes\n");
 }
 
 static void machine(void) {
@@ -285,6 +341,33 @@ static void wave(void) {
     int log = open("/dev/kmsg", O_WRONLY);
     CHECK(log >= 0 && write(log, "linuxtest: /dev/kmsg\n", 21) == 21, "/dev/kmsg is the kernel log");
     close(log);
+
+    // A window's events through a descriptor poll() can wait on, and the
+    // FRAME event once a present is on screen.
+    int ev = wave_event_fd(O_CLOEXEC);
+    CHECK(ev >= 0, "wave_event_fd");
+    struct pollfd pfd = {ev, POLLIN, 0};
+    CHECK(poll(&pfd, 1, 0) == 0, "no window events yet");
+    long win = wave_win_create(120, 80, "linuxtest", 9, 0);
+    CHECK(win > 0, "a window");
+    struct wave_surface s;
+    CHECK(wave_win_surface(win, &s) == 0 && s.addr, "its surface");
+    for (uint32_t i = 0; i < s.stride * s.height; i++) ((uint32_t *)s.addr)[i] = 0xFF2060A0;
+    CHECK(wave_win_set_cursor(win, WAVE_CURSOR_TEXT) == 0, "a pointer shape");
+    CHECK(wave_win_set_cursor(win, 99) == -EINVAL, "an unknown pointer shape");
+    CHECK(wave_win_present(win, 0, 0, s.width, s.height) == 0, "present");
+    int framed = 0;
+    for (int i = 0; i < 50 && !framed; i++) {
+        pfd.revents = 0;
+        if (poll(&pfd, 1, 100) == 1 && (pfd.revents & POLLIN)) {
+            uint64_t n = 0;
+            CHECK(read(ev, &n, 8) == 8 && n >= 1, "read counts the events");
+            while (wave_next_event(&e, 0) == 1) framed |= e.kind == WAVE_EV_FRAME;
+        }
+    }
+    CHECK(framed, "a FRAME event after the present, through poll");
+    CHECK(wave_win_close(win) == 0, "close the window");
+    close(ev);
     printf("PASS WaveOS calls\n");
 }
 
@@ -323,6 +406,7 @@ int main(int argc, char **argv) {
     avx();
     clone_ids();
     clocks();
+    futexes();
     machine();
     wave();
     sound();

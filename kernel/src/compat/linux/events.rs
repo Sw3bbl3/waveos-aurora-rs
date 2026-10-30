@@ -95,6 +95,29 @@ pub fn eventfd(p: &Process, initial: u64, flags: u64) -> Result<u64, isize> {
     super::fs::install_special(p, Special::Event(Arc::new(e)), flags & O_CLOEXEC != 0)
 }
 
+// ------------------------------------------------------- WaveOS window events
+
+/// `WAVE_EVENT_FD(flags)`: a descriptor that is readable while the process
+/// has window events waiting (reading gives how many, as 8 bytes, without
+/// taking them: `next_event` does), so a program's `poll` or `epoll` loop
+/// can wait for them with everything else. `flags` takes `O_CLOEXEC`.
+pub fn wave_event_fd(p: &Process, flags: u64) -> Result<u64, isize> {
+    super::fs::install_special(p, Special::WaveEvents(p.pid), flags & O_CLOEXEC != 0)
+}
+
+/// Reading a [`wave_event_fd`] descriptor.
+pub fn wave_events_read(pid: u32, out: &mut [u8]) -> Result<usize, isize> {
+    if out.len() < 8 {
+        return Err(EINVAL);
+    }
+    let n = crate::gui::server::events_waiting(pid) as u64;
+    if n == 0 {
+        return Err(EAGAIN);
+    }
+    out[..8].copy_from_slice(&n.to_le_bytes());
+    Ok(8)
+}
+
 // ------------------------------------------------------------------ timerfd
 
 pub struct TimerFd {

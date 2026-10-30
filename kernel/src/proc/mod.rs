@@ -220,6 +220,14 @@ pub fn resolve_fault(addr: u64, write: bool) -> bool {
     guard.as_mut().is_some_and(|a| a.resolve_fault(addr, write))
 }
 
+/// True if the running process has `addr` mapped (or reserved), whatever
+/// the access it allows.
+pub fn is_mapped(addr: u64) -> bool {
+    let Some(p) = current() else { return false };
+    let guard = p.mem();
+    guard.as_ref().is_some_and(|a| !a.is_free(addr & !0xFFF, 1))
+}
+
 /// Makes `[addr, addr + len)` of the running process there to read (or
 /// write) now, as faults would; false if some of it isn't mapped so.
 pub fn prefault(addr: u64, len: u64, write: bool) -> bool {

@@ -348,6 +348,9 @@ fn run() {
             }
         }
         desktop.finish_frame();
+        for id in desktop.take_presented() {
+            server::frame_done(id);
+        }
         if batch_pixels > 0 {
             log!(
                 "frame",

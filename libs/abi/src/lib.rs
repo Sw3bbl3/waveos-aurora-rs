@@ -174,7 +174,14 @@ pub mod nr {
     pub const SIGNAL: usize = 79;
     /// Flush the filesystem containing this path.
     pub const SYNC_PATH: usize = 80;
-    pub const COUNT: usize = 81;
+    /// `win_set_cursor(win, shape)` — the pointer's shape over the window
+    /// (`cursor::*`).
+    pub const WIN_SET_CURSOR: usize = 81;
+    /// `event_fd()` — Linux programs only: a descriptor that `poll`/`epoll`
+    /// report readable while the program has window events waiting (read
+    /// gives their number); `next_event` takes them.
+    pub const EVENT_FD: usize = 82;
+    pub const COUNT: usize = 83;
 }
 
 #[repr(C)]
@@ -848,6 +855,26 @@ pub mod win {
 }
 
 /// Event kinds delivered by `next_event`.
+/// Pointer shapes for `win_set_cursor`.
+pub mod cursor {
+    pub const ARROW: u32 = 0;
+    /// Text can be selected (an I-beam).
+    pub const TEXT: u32 = 1;
+    /// A link or button (a pointing hand).
+    pub const POINTER: u32 = 2;
+    pub const CROSSHAIR: u32 = 3;
+    /// Busy.
+    pub const WAIT: u32 = 4;
+    pub const NOT_ALLOWED: u32 = 5;
+    /// Resizing left–right and up–down.
+    pub const RESIZE_EW: u32 = 6;
+    pub const RESIZE_NS: u32 = 7;
+    /// Something can be moved (an open hand) and is being moved.
+    pub const MOVE: u32 = 8;
+    /// No pointer over the window (a video playing full screen).
+    pub const HIDDEN: u32 = 9;
+}
+
 pub mod event {
     pub const KEY: u32 = 1;
     pub const POINTER_MOVE: u32 = 2;
@@ -871,6 +898,10 @@ pub mod event {
     pub const DRAG_END: u32 = 13;
     /// The screen changed size: `x` = width, `y` = height.
     pub const SCREEN: u32 = 14;
+    /// The compositor has shown what the window presented last (a window
+    /// presents again after this to draw at the screen's pace). At most
+    /// one is queued per window.
+    pub const FRAME: u32 = 15;
 }
 
 /// A single input/window event. Field meaning depends on `kind`:

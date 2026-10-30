@@ -646,6 +646,37 @@ impl AddressSpace {
         !used && self.lazy_free(va, end)
     }
 
+    /// The physical address of user address `va`, if it is in a page of
+    /// shared memory (a memfd, `/dev/shm`, a shared anonymous mapping),
+    /// where other processes may see it too.
+    pub fn shared_frame(&self, va: u64) -> Option<u64> {
+        let e = *walk(self.pml4, va & !(PAGE_SIZE - 1), false, false)?;
+        (e & PRESENT != 0 && e & SHARED != 0 && e & COPY_ON_WRITE == 0).then_some((e & ADDR) | (va & (PAGE_SIZE - 1)))
+    }
+
+    /// Changes the aligned user word at `va` atomically with `f`; returns
+    /// its old value. The page is made present and writable first.
+    pub fn atomic_update_u32(&mut self, va: u64, f: impl Fn(u32) -> u32) -> Result<u32, isize> {
+        if !va.is_multiple_of(4) || !self.prefault(va, 4, true) {
+            return Err(aurora_abi::err::EFAULT);
+        }
+        let e = *walk(self.pml4, va & !(PAGE_SIZE - 1), false, false).ok_or(aurora_abi::err::EFAULT)?;
+        if e & PRESENT == 0 || e & WRITABLE == 0 {
+            return Err(aurora_abi::err::EFAULT);
+        }
+        let word = super::phys_to_virt((e & ADDR) | (va & (PAGE_SIZE - 1)));
+        // SAFETY: the frame is mapped writable in this address space, whose
+        // lock the caller holds, so it stays allocated meanwhile.
+        let atomic = unsafe { &*(word as *const core::sync::atomic::AtomicU32) };
+        let mut old = atomic.load(Ordering::Relaxed);
+        loop {
+            match atomic.compare_exchange_weak(old, f(old), Ordering::SeqCst, Ordering::Relaxed) {
+                Ok(_) => return Ok(old),
+                Err(now) => old = now,
+            }
+        }
+    }
+
     /// Maps externally owned frames (shared memory) at `va`.
     pub fn map_shared(&mut self, va: u64, frames: &[u64], prot: Prot) -> Result<(), isize> {
         self.map_counted(va, frames, Self::flags(prot) | SHARED)

@@ -1,4 +1,5 @@
-//! The mouse pointer.
+//! The mouse pointer: the arrow, and the shapes a window can ask for over
+//! it (`aurora_abi::cursor`).
 
 use super::canvas::Canvas;
 use super::geom::Rect;
@@ -25,14 +26,160 @@ const ARROW: [&str; 19] = [
     "       XX   ",
 ];
 
-pub const W: i32 = 14;
-pub const H: i32 = 21;
+/// An I-beam, over text.
+const TEXT: [&str; 17] = [
+    "XXX XXX", "X..X..X", "XXX.XXX", "  X.X  ", "  X.X  ", "  X.X  ", "  X.X  ", "  X.X  ", "  X.X  ", "  X.X  ",
+    "  X.X  ", "  X.X  ", "  X.X  ", "  X.X  ", "XXX.XXX", "X..X..X", "XXX XXX",
+];
 
+/// A pointing hand, over links and buttons.
+const HAND: [&str; 19] = [
+    "     XX          ",
+    "    X..X         ",
+    "    X..X         ",
+    "    X..X         ",
+    "    X..XXX       ",
+    "    X..X..XXX    ",
+    "    X..X..X..XX  ",
+    "XXX X..X..X..X.X ",
+    "X..XX........X..X",
+    "X...X...........X",
+    " X..............X",
+    "  X.............X",
+    "  X............X ",
+    "   X...........X ",
+    "   X..........X  ",
+    "    X.........X  ",
+    "    X........X   ",
+    "     X.......X   ",
+    "     XXXXXXXXX   ",
+];
+
+const CROSS: [&str; 17] = [
+    "       X.X       ",
+    "       X.X       ",
+    "       X.X       ",
+    "       X.X       ",
+    "       X.X       ",
+    "       X.X       ",
+    "       X.X       ",
+    "XXXXXXXX.XXXXXXXX",
+    ".................",
+    "XXXXXXXX.XXXXXXXX",
+    "       X.X       ",
+    "       X.X       ",
+    "       X.X       ",
+    "       X.X       ",
+    "       X.X       ",
+    "       X.X       ",
+    "       X.X       ",
+];
+
+/// An hourglass, while busy.
+const WAIT: [&str; 17] = [
+    "XXXXXXXXXXX",
+    "X.........X",
+    "XXXXXXXXXXX",
+    " X.......X ",
+    " X.......X ",
+    "  X.....X  ",
+    "   X...X   ",
+    "    X.X    ",
+    "    X.X    ",
+    "    X.X    ",
+    "   X...X   ",
+    "  X.....X  ",
+    " X.......X ",
+    " X.......X ",
+    "XXXXXXXXXXX",
+    "X.........X",
+    "XXXXXXXXXXX",
+];
+
+/// A double arrow, left and right (drawn turned for up and down).
+const RESIZE: [&str; 9] = [
+    "    X         X    ",
+    "   X.X       X.X   ",
+    "  X..X       X..X  ",
+    " X...XXXXXXXXX...X ",
+    "X.................X",
+    " X...XXXXXXXXX...X ",
+    "  X..X       X..X  ",
+    "   X.X       X.X   ",
+    "    X         X    ",
+];
+
+/// Room around the hot spot that every shape fits in.
 pub fn bounds(x: i32, y: i32) -> Rect {
-    Rect::new(x - 1, y - 1, W + 2, H + 2)
+    Rect::new(x - 12, y - 12, 34, 36)
 }
 
-pub fn draw(cv: &mut Canvas, x: i32, y: i32) {
+/// Draws the pointer of shape `shape` with its hot spot at (`x`, `y`).
+pub fn draw(cv: &mut Canvas, x: i32, y: i32, shape: u32) {
+    use aurora_abi::cursor as c;
+    match shape {
+        c::TEXT => art(cv, &TEXT, x - 3, y - 8, false),
+        c::POINTER => art(cv, &HAND, x - 5, y, false),
+        c::CROSSHAIR => art(cv, &CROSS, x - 8, y - 8, false),
+        c::WAIT => art(cv, &WAIT, x - 5, y - 8, false),
+        c::NOT_ALLOWED => not_allowed(cv, x, y),
+        c::RESIZE_EW => art(cv, &RESIZE, x - 9, y - 4, false),
+        c::RESIZE_NS => art(cv, &RESIZE, x - 4, y - 9, true),
+        c::MOVE => {
+            art(cv, &RESIZE, x - 9, y - 4, false);
+            art(cv, &RESIZE, x - 4, y - 9, true);
+            // The two arrows' bodies meet in the middle.
+            art(cv, &["."], x, y, false);
+        }
+        c::HIDDEN => {}
+        _ => arrow(cv, x, y),
+    }
+}
+
+/// Pixel art: `X` white outline, `.` black body, with a soft shadow; each
+/// art pixel is a point (a square of device pixels on HiDPI screens).
+/// `turned` swaps rows and columns.
+fn art(cv: &mut Canvas, rows: &[&str], x: i32, y: i32, turned: bool) {
+    for pass in 0..2 {
+        for (r, line) in rows.iter().enumerate() {
+            for (col, ch) in line.bytes().enumerate() {
+                if ch == b' ' {
+                    continue;
+                }
+                let (dx, dy) = if turned { (r as i32, col as i32) } else { (col as i32, r as i32) };
+                let (px, py, color) = match pass {
+                    0 => (x + dx + 1, y + dy + 1, 0x5000_0000),
+                    _ => (x + dx, y + dy, if ch == b'X' { 0xFFFF_FFFF } else { 0xFF10_1014 }),
+                };
+                cv.fill_rect(Rect::new(px, py, 1, 1), color);
+            }
+        }
+    }
+}
+
+/// A circle with a bar across it.
+fn not_allowed(cv: &mut Canvas, x: i32, y: i32) {
+    for pass in 0..2 {
+        for dy in -8i32..=8 {
+            for dx in -8i32..=8 {
+                let d2 = dx * dx + dy * dy;
+                let bar = (dx + dy).abs() <= 1 && d2 <= 25;
+                let color = if (25..=49).contains(&d2) || bar {
+                    0xFF10_1014
+                } else if (16..25).contains(&d2) || (50..=64).contains(&d2) || ((dx + dy).abs() == 2 && d2 < 25) {
+                    0xFFFF_FFFF
+                } else {
+                    continue;
+                };
+                let (px, py, color) =
+                    if pass == 0 { (x + dx + 1, y + dy + 1, 0x5000_0000) } else { (x + dx, y + dy, color) };
+                cv.fill_rect(Rect::new(px, py, 1, 1), color);
+            }
+        }
+    }
+}
+
+fn arrow(cv: &mut Canvas, x: i32, y: i32) {
     if cv.scale > 1 {
         return draw_vector(cv, x, y);
     }

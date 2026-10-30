@@ -417,6 +417,30 @@ pub fn wake_process(pid: u32) {
     }
 }
 
+/// Makes task `id`, if it is running on another CPU, leave user mode
+/// briefly (a reschedule IPI), so it notices a signal at once.
+pub fn interrupt(id: TaskId) {
+    let cpu = SCHED.lock().as_ref().and_then(|s| s.tasks.get(&id).and_then(|t| t.running_on));
+    interrupt_cpus(cpu.into_iter());
+}
+
+/// [`interrupt`] for every task of process `pid`.
+pub fn interrupt_process(pid: u32) {
+    let cpus: Vec<usize> = SCHED
+        .lock()
+        .as_ref()
+        .map(|s| s.tasks.values().filter(|t| t.pid == pid).filter_map(|t| t.running_on).collect())
+        .unwrap_or_default();
+    interrupt_cpus(cpus.into_iter());
+}
+
+fn interrupt_cpus(cpus: impl Iterator<Item = usize>) {
+    let me = percpu::cpu_id();
+    for c in cpus.filter(|&c| c != me) {
+        kick(Some(c));
+    }
+}
+
 /// Takes the next task for `cpu`: its own queue first, then the busiest other queue.
 fn pick_next(s: &mut Scheduler, cpu: usize) -> Option<TaskId> {
     if cpu != 0 && PARKING.load(Ordering::Acquire) {

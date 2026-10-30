@@ -14,6 +14,8 @@ pub const HZ: u64 = 1000;
 static TICKS: AtomicU64 = AtomicU64::new(0);
 /// TSC frequency in Hz (0 = not used as the clock).
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+/// Nanoseconds per TSC tick, times 2^32 (the vDSO computes time the same way).
+static TSC_MULT: AtomicU64 = AtomicU64::new(0);
 static TSC_BASE: AtomicU64 = AtomicU64::new(0);
 /// Added to the hardware clock, so time continues across sleep (the TSC or
 /// HPET may restart from zero when the machine wakes).
@@ -50,6 +52,7 @@ pub fn init_clock() {
     };
     let hz = (t1 - t0) * 1000 / MS;
     TSC_BASE.store(unsafe { _rdtsc() }, Ordering::Relaxed);
+    TSC_MULT.store(((1_000_000_000u128 << 32) / hz as u128) as u64, Ordering::Relaxed);
     TSC_HZ.store(hz, Ordering::Release);
     log!("time", "TSC at {}.{:02} GHz is the clock", hz / 1_000_000_000, hz / 10_000_000 % 100);
 }
@@ -108,13 +111,25 @@ pub fn resume() {
     OFFSET_NS.store(at - raw_ns() as i64, Ordering::Release);
     // The date moved on while asleep.
     init_wall_clock_at(uptime_ms());
+    crate::compat::linux::vdso::publish();
+}
+
+/// What the vDSO needs to compute `now_ns` itself: whether the TSC is the
+/// clock, where it started, nanoseconds per tick (times 2^32) and the offset.
+pub fn tsc_params() -> (bool, u64, u64, i64) {
+    (
+        TSC_HZ.load(Ordering::Acquire) != 0,
+        TSC_BASE.load(Ordering::Relaxed),
+        TSC_MULT.load(Ordering::Relaxed),
+        OFFSET_NS.load(Ordering::Relaxed),
+    )
 }
 
 fn raw_ns() -> u64 {
     let hz = TSC_HZ.load(Ordering::Relaxed);
     if hz != 0 {
         let d = unsafe { _rdtsc() }.wrapping_sub(TSC_BASE.load(Ordering::Relaxed));
-        return (d as u128 * 1_000_000_000 / hz as u128) as u64;
+        return ((d as u128 * TSC_MULT.load(Ordering::Relaxed) as u128) >> 32) as u64;
     }
     if crate::drivers::hpet::present() {
         return crate::drivers::hpet::nanos();

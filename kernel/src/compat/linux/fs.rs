@@ -117,6 +117,8 @@ pub enum Special {
     Event(Arc<super::events::EventFd>),
     Timer(Arc<super::events::TimerFd>),
     Epoll(Arc<super::events::Epoll>),
+    /// The process's WaveOS window events (`WAVE_EVENT_FD`), by pid.
+    WaveEvents(u32),
     /// A local (`AF_UNIX`) socket.
     Unix(Arc<super::unix::Socket>),
     /// Shared memory (`memfd_create`, `/dev/shm`), and where reads are.
@@ -131,6 +133,7 @@ impl Special {
         match self {
             Special::Event(e) => e.read(out),
             Special::Timer(t) => t.read(out),
+            Special::WaveEvents(pid) => super::events::wave_events_read(*pid, out),
             Special::Epoll(_) => Err(EINVAL),
             Special::Unix(u) => u.recv(out, false, false).map(|r| r.len),
             Special::Shm { file, pos } => {
@@ -162,7 +165,7 @@ impl Special {
             Special::Dir { .. } => Err(EISDIR),
             Special::Mem { .. } => Err(EACCES),
             Special::Event(e) => e.write(data),
-            Special::Timer(_) | Special::Epoll(_) => Err(EINVAL),
+            Special::Timer(_) | Special::Epoll(_) | Special::WaveEvents(_) => Err(EINVAL),
             Special::Unix(u) => u.send(data, Vec::new(), None, false),
             Special::Shm { file, pos } => {
                 let n = file.write_at(*pos, data)?;
@@ -182,7 +185,7 @@ impl Special {
             Special::Zero => (S_IFCHR | 0o666, makedev(1, 5)),
             Special::Random => (S_IFCHR | 0o666, makedev(1, 9)),
             // Anonymous inodes on Linux.
-            Special::Event(_) | Special::Timer(_) | Special::Epoll(_) => (0o600, 0),
+            Special::Event(_) | Special::Timer(_) | Special::Epoll(_) | Special::WaveEvents(_) => (0o600, 0),
             Special::Unix(_) => (S_IFSOCK | 0o777, 0),
             Special::Shm { .. } => (S_IFREG | 0o600, 0),
         }
@@ -463,6 +466,7 @@ pub fn readiness_of(p: &Process, fd: usize, depth: u32) -> Option<(bool, bool, b
             let inner = match &*s.lock() {
                 Special::Event(e) => Inner::Ready(e.readable(), e.writable()),
                 Special::Timer(t) => Inner::Ready(t.readable(), false),
+                Special::WaveEvents(pid) => Inner::Ready(crate::gui::server::has_events(*pid), false),
                 Special::Epoll(e) => Inner::Epoll(e.clone()),
                 Special::Unix(u) => Inner::Unix(u.clone()),
                 _ => Inner::Ready(true, true),
@@ -488,6 +492,7 @@ pub fn wait_keys(p: &Process, fd: usize, keys: &mut Vec<usize>) {
         Handle::Special(s) => match &*s.lock() {
             Special::Event(e) => keys.push(key(Arc::as_ptr(e))),
             Special::Timer(t) => keys.push(key(Arc::as_ptr(t))),
+            Special::WaveEvents(pid) => keys.push(crate::gui::server::event_key(*pid)),
             // A set inside the set: any change.
             Special::Epoll(_) => keys.push(ANY),
             Special::Unix(u) => u.wait_keys(keys),

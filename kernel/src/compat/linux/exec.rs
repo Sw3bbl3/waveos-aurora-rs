@@ -113,6 +113,7 @@ pub fn load(
 
     let stack_bottom = layout::STACK_TOP - STACK_SIZE;
     aspace.map_anon(stack_bottom, STACK_SIZE / PAGE_SIZE, Prot::ReadWrite)?;
+    let vdso = super::vdso::map(aspace, stack_bottom - 64 * 1024);
 
     // Strings at the top: 16 random bytes, the platform, the program path,
     // then the arguments and the environment.
@@ -135,7 +136,7 @@ pub fn load(
     let addr = |off: usize| strings_at + off as u64;
 
     let hwcap = core::arch::x86_64::__cpuid(1).edx as u64;
-    let auxv: [(u64, u64); 17] = [
+    let auxv: [(u64, u64); 18] = [
         (3, phdr_address(image, bias)), // AT_PHDR
         (4, image.phentsize as u64),    // AT_PHENT
         (5, image.phnum as u64),        // AT_PHNUM
@@ -153,6 +154,7 @@ pub fn load(
         (23, 0),                        // AT_SECURE
         (25, random_at),                // AT_RANDOM
         (31, addr(execfn)),             // AT_EXECFN
+        (33, vdso),                     // AT_SYSINFO_EHDR (0: none)
     ];
     let mut words: Vec<u64> = Vec::new();
     words.push(argv.len() as u64);
@@ -160,7 +162,7 @@ pub fn load(
     words.push(0);
     words.extend(envs.iter().map(|&o| addr(o)));
     words.push(0);
-    for (k, v) in auxv {
+    for (k, v) in auxv.into_iter().filter(|&(k, v)| k != 33 || v != 0) {
         words.push(k);
         words.push(v);
     }
