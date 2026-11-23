@@ -251,7 +251,8 @@ fn main() {
             let port = number("--port", 8000, 1, 65535) as u16;
             let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind the repository server");
             println!("serving {} at http://127.0.0.1:{port}/ — in WaveOS: http://10.0.2.2:{port}/", dir.display());
-            serve_files(listener, dir);
+            // --slow sends packages slowly, to watch (and pause) downloads.
+            serve_files(listener, dir, if flag("--slow") { 60 } else { 0 });
             loop {
                 std::thread::sleep(Duration::from_secs(3600));
             }
@@ -1489,7 +1490,7 @@ fn file_reply(req: &str, dir: &Path, rest: &str) -> Reply {
 }
 
 /// Serves a folder over HTTP until the program ends (`cargo xtask serve-repo`).
-fn serve_files(listener: std::net::TcpListener, dir: PathBuf) {
+fn serve_files(listener: std::net::TcpListener, dir: PathBuf, trickle_ms: u64) {
     std::thread::spawn(move || {
         for conn in listener.incoming().map_while(Result::ok) {
             let dir = dir.clone();
@@ -1499,7 +1500,11 @@ fn serve_files(listener: std::net::TcpListener, dir: PathBuf) {
                 let text = String::from_utf8_lossy(&req).into_owned();
                 let path = text.strip_prefix("GET /").and_then(|r| r.split(' ').next()).unwrap_or("");
                 println!("{}", text.lines().next().unwrap_or(""));
-                file_reply(&text, &dir, path).send(&mut conn);
+                let mut reply = file_reply(&text, &dir, path);
+                if path.starts_with("packages/") {
+                    reply.trickle_ms = trickle_ms;
+                }
+                reply.send(&mut conn);
             });
         }
     });

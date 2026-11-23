@@ -190,6 +190,19 @@ const FIRST_CHECK_MS: u64 = 3 * 60 * 1000;
 /// Then this often (the Store itself checks at most once a day).
 const CHECK_EVERY_MS: u64 = 6 * 60 * 60 * 1000;
 
+/// Sleeps `ms` in full: a sleeping task is also woken early (when a program
+/// it started ends, for one), and that must not start another check.
+fn rest(ms: u64) {
+    let until = crate::time::uptime_ms() + ms;
+    loop {
+        let now = crate::time::uptime_ms();
+        if now >= until {
+            return;
+        }
+        crate::sched::sleep_ms(until - now);
+    }
+}
+
 /// Starts the background checks for app and system updates: the Store,
 /// run as `Store.elf --check` for the logged-in account, looks at the
 /// configured repositories and posts a notification when there is
@@ -200,7 +213,7 @@ fn start_checks() {
         return;
     }
     crate::sched::spawn("update-check", || {
-        crate::sched::sleep_ms(FIRST_CHECK_MS);
+        rest(FIRST_CHECK_MS);
         loop {
             if super::prefs::get("software_update_check").as_deref() != Some("0") {
                 let path = "/System/Apps/Store.elf";
@@ -208,7 +221,7 @@ fn start_checks() {
                     log!("update", "could not start the update check: {}", aurora_abi::err::name(e));
                 }
             }
-            crate::sched::sleep_ms(CHECK_EVERY_MS);
+            rest(CHECK_EVERY_MS);
         }
     });
 }

@@ -267,8 +267,13 @@ menu's Restart becomes Update and Restart while an update is ready.
   on the second start, marked good; and an update whose kernel faults at its
   first instruction, armed with one try, which the bootloader abandons on a
   third start, going back to slot a.
-- `tools/smoke_store.py` drives the Store in a running guest (open, search,
-  install, launch, remove) and takes screenshots.
+- `tools/smoke_store.py` drives the Store in a running guest on a
+  throwaway disk, against `cargo xtask serve-repo --slow` (packages sent
+  slowly, so downloads can be watched): first-start setup, the empty state,
+  adding the repository, Discover, search, an app's page, Get (downloading,
+  installed), Open, the Library, Remove, Updates and Software Update, with
+  a screenshot at each step. Pictures from it are in
+  [docs/screenshots/store](../screenshots/store/).
 
 ## Not done
 

@@ -64,6 +64,22 @@ impl UpdateState {
         self.sources = corekit::apps::repo::sources();
     }
 
+    /// Opening the pane looks for an update at once (once per visit).
+    pub fn check_on_open(&mut self) {
+        if matches!(*self.shared.lock(), Phase::Idle) && self.status.ready.is_none() && !self.sources.is_empty() {
+            self.set(Phase::Checking);
+            self.spawn(|shared, _| {
+                let p = match update::check(None) {
+                    Ok(Some(av)) if av.download_size() == 0 => Phase::Downloaded(Box::new(av)),
+                    Ok(Some(av)) => Phase::Available(Box::new(av)),
+                    Ok(None) => Phase::UpToDate,
+                    Err(e) => Phase::Failed(e),
+                };
+                *shared.lock() = p;
+            });
+        }
+    }
+
     pub fn busy(&self) -> bool {
         matches!(*self.shared.lock(), Phase::Checking | Phase::Downloading(..) | Phase::Installing(..))
     }
@@ -81,10 +97,12 @@ impl UpdateState {
             Phase::Installing(_, n, _) => (7, *n),
             Phase::Failed(_) => (8, 0),
         };
-        if now.0 == 2 || now.0 == 8 || now.0 == 6 {
+        let changed = core::mem::replace(&mut self.shown, now) != now;
+        if changed && now.0 != 4 && now.0 != 7 {
+            // A step ended (an install makes an update ready): look again.
             self.refresh();
         }
-        core::mem::replace(&mut self.shown, now) != now
+        changed
     }
 
     fn set(&self, p: Phase) {
@@ -303,11 +321,10 @@ impl Settings {
         fn detail<'a>(a: &Available, body: View<'a, Msg>) -> View<'a, Msg> {
             let mut v = VStack::new()
                 .push(
-                    Text::new(format!(
-                        "{} to download · {} installed",
-                        human(a.download_size()),
-                        human(a.installed_size())
-                    ))
+                    Text::new(match a.download_size() {
+                        0 => format!("Downloaded · {} installed", human(a.installed_size())),
+                        n => format!("{} to download · {} installed", human(n), human(a.installed_size())),
+                    })
                     .style(TextStyle::Subheadline)
                     .foreground(Color::SecondaryLabel),
                 )

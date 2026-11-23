@@ -41,12 +41,13 @@ const COMMANDS: [(Command, &str, &str); 8] = [
 ];
 
 /// Settings panes Spotlight can open (the argument Settings understands).
-const PANES: [(&str, &str); 14] = [
+const PANES: [(&str, &str); 15] = [
     ("Appearance", "appearance"),
     ("Desktop & Harbor", "desktop"),
     ("Bar & Crest", "bar"),
     ("Login", "login"),
     ("Apps", "apps"),
+    ("Software Update", "update"),
     ("Liquid Glass", "desktop"),
     ("Accessibility", "accessibility"),
     ("Wallpaper", "appearance"),

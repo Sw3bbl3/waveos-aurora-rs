@@ -425,7 +425,11 @@ impl Store {
     fn heading<'a>(title: &str, subtitle: Option<String>) -> View<'a, Msg> {
         VStack::new()
             .push(Text::new(title).style(TextStyle::Sized(30, Weight::Display)))
-            .push_if(subtitle.map(|s| Text::paragraph(s).style(TextStyle::Callout).foreground(Color::SecondaryLabel)))
+            .push_if(
+                subtitle.map(|s| {
+                    Text::paragraph(s).style(TextStyle::Callout).foreground(Color::SecondaryLabel).fill_width()
+                }),
+            )
             .spacing(4)
             .alignment(Align::Start)
             .fill_width()
@@ -451,7 +455,7 @@ impl Store {
             // Soft rings, like light on water.
             for i in 0..3 {
                 let rr = r.h / 2 + i * 46;
-                cv.stroke_arc(r.right() - 120, r.y + r.h / 2, rr, 2, 0, 360, 0x22FF_FFFF);
+                arc(cv, r.right() - 120, r.y + r.h / 2, rr, 2, 0, 360, 0x22FF_FFFF);
             }
         });
         self.targets.borrow_mut().push(Target { key: String::from("hero"), open: Msg::Open(e.id.clone()) });
@@ -569,7 +573,6 @@ impl Store {
                     .push(Text::new(e.name.clone()).style(TextStyle::Sized(30, Weight::Display)))
                     .push(Text::new(e.author.clone()).style(TextStyle::Callout).foreground(Color::AccentText))
                     .push(Text::new(cats.join(" · ")).style(TextStyle::Footnote).foreground(Color::SecondaryLabel))
-                    .push(Spacer::min(6))
                     .push(
                         HStack::new()
                             .push(self.action(id, true))
@@ -616,7 +619,16 @@ impl Store {
             .fill_width()
             .background_rounded(Color::Fill, 14);
         let mut page = VStack::new()
-            .push(Button::with(label(Symbol::ChevronLeft, "Back")).action(Msg::Back).button_style(ButtonStyle::Plain))
+            .push(
+                HStack::new()
+                    .push(
+                        Button::with(label(Symbol::ChevronLeft, "Back"))
+                            .action(Msg::Back)
+                            .button_style(ButtonStyle::Plain),
+                    )
+                    .push(Spacer::new())
+                    .fill_width(),
+            )
             .push(header)
             .push(facts)
             .spacing(22)
@@ -653,15 +665,21 @@ impl Store {
                     .alignment(Align::Start),
             ));
         }
-        let mut perms = Section::new();
+        let mut perms = VStack::new().spacing(0).alignment(Align::Stretch);
         if e.permissions.is_empty() {
-            perms = perms.push(row(
-                "It asks for no special permissions",
-                Image::symbol(Symbol::Check).symbol_size(14).foreground(Color::Green),
-            ));
+            perms = perms.push(
+                row(
+                    "It asks for no special permissions",
+                    Image::symbol(Symbol::Check).symbol_size(14).foreground(Color::Green),
+                )
+                .height(size::ROW),
+            );
         }
-        for p in &e.permissions {
+        for (i, p) in e.permissions.iter().enumerate() {
             let sensitive = gina::sensitive_permission(p);
+            if i > 0 {
+                perms = perms.push(Divider::new());
+            }
             perms = perms.push(
                 HStack::new()
                     .push(
@@ -673,10 +691,11 @@ impl Store {
                     .push(Text::new(gina::describe_permission(p)).grow(1))
                     .push(Text::new(p.clone()).style(TextStyle::Footnote).foreground(Color::TertiaryLabel))
                     .spacing(10)
-                    .min_height(size::ROW)
+                    .height(size::ROW)
                     .fill_width(),
             );
         }
+        let perms = perms.padding_xy(16, 2).fill_width().background_rounded(Color::Fill, 14);
         page = page.push(Self::section("Permissions", perms));
         let mut info = Section::new()
             .push(row("Developer", Text::new(e.author.clone()).foreground(Color::SecondaryLabel)))
@@ -822,7 +841,8 @@ impl Store {
         }
         v = v.push_if(system);
         if ups.is_empty() {
-            v = v.push(empty(
+            v = v.push(empty_with(
+                Symbol::Check,
                 "Everything is up to date",
                 "New versions of your apps appear here as their repositories publish them.",
             ));
@@ -983,10 +1003,11 @@ impl Store {
             .push(
                 TextField::search("Search apps and games", self.query.clone())
                     .on_change(Msg::Search)
+                    .shortcut(Shortcut::ctrl('f'))
                     .id("search")
-                    .fill_width(),
+                    .fill_width()
+                    .padding_insets(Insets { top: 0, leading: 0, bottom: 8, trailing: 0 }),
             )
-            .push(Spacer::min(6))
             .push(item(Symbol::Star, String::from("Discover"), Page::Discover, 0))
             .spacing(2)
             .alignment(Align::Stretch);
@@ -1091,6 +1112,7 @@ impl Store {
                             TextField::new("https://example.com/apps/", self.new_source.clone())
                                 .on_change(Msg::NewSource)
                                 .on_submit(Msg::AddSource)
+                                .focused()
                                 .width(320),
                         )
                         .push(Button::new("Add Repository").action(Msg::AddSource).button_style(ButtonStyle::Prominent))
@@ -1213,8 +1235,12 @@ fn first_line(s: &str) -> String {
 }
 
 fn empty<'a>(title: &str, body: &str) -> View<'a, Msg> {
+    empty_with(Symbol::Search, title, body)
+}
+
+fn empty_with<'a>(symbol: Symbol, title: &str, body: &str) -> View<'a, Msg> {
     VStack::new()
-        .push(Image::symbol(Symbol::Search).symbol_size(34).foreground(Color::TertiaryLabel))
+        .push(Image::symbol(symbol).symbol_size(34).foreground(Color::TertiaryLabel))
         .push(Text::new(String::from(title)).style(TextStyle::Sized(18, Weight::Bold)))
         .push(
             Text::paragraph(String::from(body))
@@ -1260,6 +1286,13 @@ fn shimmer<'a>(w: i32, h: i32) -> View<'a, Msg> {
     .size(w, h)
 }
 
+/// An arc in points and degrees (`stroke_arc` takes 1/16 points and
+/// 1024ths of a turn, from 3 o'clock, clockwise).
+#[allow(clippy::too_many_arguments)]
+fn arc(cv: &mut waveui::lumen::canvas::Canvas, cx: i32, cy: i32, r: i32, w: i32, start: i32, sweep: i32, c: u32) {
+    cv.stroke_arc(cx * 16, cy * 16, r * 16, w * 16, start * 1024 / 360, sweep * 1024 / 360, c);
+}
+
 /// A ring that fills as a download goes (spins while the amount is unknown).
 fn progress_ring<'a>(fraction: Option<f32>, size: i32) -> View<'a, Msg> {
     let spin = (now() % 1000) as i32 * 360 / 1000;
@@ -1267,18 +1300,12 @@ fn progress_ring<'a>(fraction: Option<f32>, size: i32) -> View<'a, Msg> {
         let theme = waveui::lumen::theme::current();
         let (cx, cy) = r.center();
         let radius = r.w.min(r.h) / 2 - 2;
-        cv.stroke_arc(cx, cy, radius, 3, 0, 360, waveui::lumen::canvas::with_alpha(theme.text_secondary, 0x40));
+        arc(cv, cx, cy, radius, 3, 0, 360, waveui::lumen::canvas::with_alpha(theme.text_secondary, 0x40));
         match fraction {
-            Some(f) => cv.stroke_arc(
-                cx,
-                cy,
-                radius,
-                3,
-                -90,
-                (f.clamp(0.0, 1.0) * 360.0) as i32,
-                waveui::lumen::theme::accent(),
-            ),
-            None => cv.stroke_arc(cx, cy, radius, 3, spin, 90, waveui::lumen::theme::accent()),
+            Some(f) => {
+                arc(cv, cx, cy, radius, 3, -90, (f.clamp(0.0, 1.0) * 360.0) as i32, waveui::lumen::theme::accent())
+            }
+            None => arc(cv, cx, cy, radius, 3, spin, 90, waveui::lumen::theme::accent()),
         }
     })
     .size(size, size)
@@ -1394,6 +1421,7 @@ impl App for Store {
                     Ok(()) => {
                         self.new_source.clear();
                         model::refresh(&self.state);
+                        model::check_system(&self.state);
                     }
                     Err(e) => self.flash(e, cx),
                 }
@@ -1415,6 +1443,8 @@ impl App for Store {
             KeyCode::Down => Some(Msg::Move(0, 1)),
             KeyCode::Enter => Some(Msg::Activate),
             KeyCode::Escape | KeyCode::Backspace => Some(Msg::Back),
+            KeyCode::PageDown => Some(Msg::Section(1)),
+            KeyCode::PageUp => Some(Msg::Section(-1)),
             _ => None,
         }
     }
@@ -1445,7 +1475,7 @@ impl App for Store {
         redraw |= self.hero_t.advance(t);
         // Downloads and pictures still arriving keep their spinners turning.
         redraw |= self.jobs.iter().any(|j| j.active());
-        redraw |= self.pictures.len() < self.state.lock().pictures.len();
+        redraw |= self.state.lock().pictures.values().any(|p| matches!(p, Pic::Loading));
         // A game controller (when this window is in front and not in Wave Play,
         // which turns the d-pad into arrow keys itself).
         if self.active.get() {

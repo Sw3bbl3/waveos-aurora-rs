@@ -260,7 +260,10 @@ impl Settings {
             Pane::About => self.info = corekit::process::sys_info(),
             Pane::Login => self.users.refresh(),
             Pane::Apps => self.apps.refresh(),
-            Pane::Update => self.update.refresh(),
+            Pane::Update => {
+                self.update.refresh();
+                self.update.check_on_open();
+            }
             _ => {}
         }
     }
@@ -1706,8 +1709,9 @@ fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
         }
         Pane::Update => {
             // Two arrows chasing round.
-            cv.stroke_arc(cx, cy, 6, 2, 20, 140, w);
-            cv.stroke_arc(cx, cy, 6, 2, 200, 140, w);
+            // stroke_arc takes 1/16 points and 1024ths of a turn.
+            cv.stroke_arc(cx * 16, cy * 16, 6 * 16, 2 * 16, 57, 398, w);
+            cv.stroke_arc(cx * 16, cy * 16, 6 * 16, 2 * 16, 569, 398, w);
             cv.fill_circle(cx + 6, cy - 3, 2, w);
             cv.fill_circle(cx - 6, cy + 3, 2, w);
         }
