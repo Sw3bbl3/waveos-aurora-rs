@@ -334,7 +334,10 @@ pub enum Request {
 pub struct Env {
     pub now_ms: u64,
     pub focused: bool,
+    /// The main display's size in points.
     pub screen: (i32, i32),
+    /// The scale of the display the window is on.
+    pub scale: i32,
     pub requests: Vec<Request>,
 }
 
