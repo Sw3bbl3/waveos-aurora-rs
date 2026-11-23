@@ -176,3 +176,60 @@ pub unsafe fn shade_row(row: &mut [u32], shade: &[u32]) -> usize {
     );
     done * 4
 }
+
+/// `dst[i] = mix(a[i], b[i], t)` (see [`crate::canvas::mix`]) with the alpha
+/// byte set, four pixels at a time, for the first `n / 4 * 4` pixels; `t` is
+/// 0..=256. `dst` may be `a`. Returns how many pixels it wrote.
+///
+/// # Safety
+/// SSE2 must be usable (see [`enabled`]); all three hold `n` pixels.
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn mix_rows(dst: *mut u32, a: *const u32, b: *const u32, n: usize, t: u32) -> usize {
+    let t = t.min(256) as u16;
+    let u = 256 - t;
+    let weights: [u16; 16] = [u, u, u, u, u, u, u, u, t, t, t, t, t, t, t, t];
+    let groups = n / 4;
+    let mut done: usize = 0;
+    sse!(
+        "movdqu xmm6, [{w}]",
+        "movdqu xmm5, [{w} + 16]",
+        "pcmpeqd xmm7, xmm7",
+        "pslld xmm7, 24",
+        "pxor xmm4, xmm4",
+        "2:",
+        "cmp {done}, {groups}",
+        "jae 3f",
+        "movdqu xmm0, [{a}]",
+        "movdqu xmm2, [{b}]",
+        "movdqa xmm1, xmm0",
+        "punpcklbw xmm0, xmm4",
+        "punpckhbw xmm1, xmm4",
+        "movdqa xmm3, xmm2",
+        "punpcklbw xmm2, xmm4",
+        "punpckhbw xmm3, xmm4",
+        "pmullw xmm0, xmm6",
+        "pmullw xmm1, xmm6",
+        "pmullw xmm2, xmm5",
+        "pmullw xmm3, xmm5",
+        "paddw xmm0, xmm2",
+        "paddw xmm1, xmm3",
+        "psrlw xmm0, 8",
+        "psrlw xmm1, 8",
+        "packuswb xmm0, xmm1",
+        "por xmm0, xmm7",
+        "movdqu [{d}], xmm0",
+        "add {a}, 16",
+        "add {b}, 16",
+        "add {d}, 16",
+        "inc {done}",
+        "jmp 2b",
+        "3:",
+        w = in(reg) weights.as_ptr(),
+        groups = in(reg) groups,
+        a = inout(reg) a => _,
+        b = inout(reg) b => _,
+        d = inout(reg) dst => _,
+        done = inout(reg) done
+    );
+    done * 4
+}

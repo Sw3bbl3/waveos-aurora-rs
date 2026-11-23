@@ -181,7 +181,10 @@ while (wave_next_event(&e, 16) == 1) { /* keys, pointer, resize, close */ }
 
 Only these WaveOS calls are open to Linux programs: windows, events, sound
 (`wave_audio_open`, then `write` 48 kHz stereo 16-bit samples), the
-clipboard, notifications, reading preferences, and the uptime clock.
+clipboard, notifications, reading preferences, the uptime clock, and game
+controllers (`wave_gamepads`, `wave_gamepad_state`, `wave_gamepad_rumble`:
+one standard layout for every controller; Doom uses them). A program reads
+a neutral controller while it isn't the one in front.
 
 Three calls fit windows into a program's own main loop:
 

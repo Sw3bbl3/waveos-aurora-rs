@@ -417,7 +417,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             Ok(list.len() as u64)
         }
         nr::GAMEPAD_STATE => {
-            let st = crate::drivers::gamepad::state(a[0] as u32).ok_or(ENODEV)?;
+            let st = crate::drivers::gamepad::state_for(crate::sched::current_pid(), a[0] as u32).ok_or(ENODEV)?;
             let size = core::mem::size_of::<aurora_abi::GamepadState>();
             let mut out = user::slice_mut(a[1], size as u64)?;
             out.copy_from_slice(unsafe { core::slice::from_raw_parts(&st as *const _ as *const u8, size) });

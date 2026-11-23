@@ -33,6 +33,24 @@ Settings includes search, Desktop & Dock, and Accessibility pages. Glass intensi
 
 WaveUI provides text, images and system symbols, buttons, toggles, sliders, steppers, pickers, text fields and editors, stacks, grids, lazy lists, scroll views, split views, sections, toolbars, menus, alerts, sheets and canvases. App glass regions opt in through a validated compositor API; existing apps remain opaque by default.
 
+## Game controllers and Wave Play
+
+`corekit::gamepad` lists controllers and reads them in one standard layout (face buttons by position, sticks −32768…32767 with right and down positive, triggers 0…65535), with rumble where the controller has motors. Linux programs use the same calls through `waveos.h` (`wave_gamepads`, `wave_gamepad_state`, `wave_gamepad_rumble`). A program reads a neutral controller (nothing pressed) while it isn't the one in front, or while Wave Play's own screens have the controllers, so a game never acts on presses meant for a menu. Programs that don't read controllers still work in Wave Play: the d-pad, A and B arrive as arrow keys, Enter and Escape.
+
+Wave Play's library gathers games and apps from the desktop's catalog, installed GINA apps, Linux packages whose `.desktop` entry lists the `Game` category, and Steam's library when it is installed. A package manager or store adds tiles by writing one file per entry to `/Settings/Play/Library/<name>.play`:
+
+```text
+id=org.example.game
+title=Example Game
+kind=game
+exec=/Linux/usr/games/example
+args=--fullscreen
+art=/Linux/usr/share/example/cover.png
+detail=Installed with the package manager
+```
+
+`kind` is `game`, `app` or `setting`; `art` is an optional PNG, JPEG, GIF or BMP (cover art fills the tile); `exec` must be an absolute path. Without a controller, `cargo xtask run --virtual-gamepad` (or Super+G) connects one played on the keyboard, through the same code as a USB controller; Super+Shift+G slows Wave Play's motion eightfold for inspection, and `tools/smoke_play.py` drives the whole flow over QMP and collects screenshots and frame timings.
+
 ## GINA packages
 
 GINA uses restricted, uncompressed ustar archives. The root `manifest.toml` uses this supported subset of TOML (flat strings, integers and string arrays):

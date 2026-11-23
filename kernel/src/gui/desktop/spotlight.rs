@@ -26,9 +26,11 @@ enum Command {
     Sleep,
     EmptyTrash,
     Screenshot,
+    Play,
 }
 
-const COMMANDS: [(Command, &str, &str); 7] = [
+const COMMANDS: [(Command, &str, &str); 8] = [
+    (Command::Play, "Wave Play", "Play with a controller: games and apps, full screen"),
     (Command::DarkMode, "Dark Mode", "Switch the appearance to dark"),
     (Command::LightMode, "Light Mode", "Switch the appearance to light"),
     (Command::Screenshot, "Take Screenshot", "Save the screen to Pictures"),
@@ -324,6 +326,7 @@ impl Desktop {
                     self.refresh_trash();
                 }
                 Command::Screenshot => self.screenshot = true,
+                Command::Play => self.play_enter(false),
             },
         }
     }

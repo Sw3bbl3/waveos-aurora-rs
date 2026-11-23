@@ -97,6 +97,11 @@ pub mod desktop {
         call(nr::DESKTOP, &[abi::desktop::START_TOUR as u64, 0, 0]).map(|_| ())
     }
 
+    /// Enters Wave Play, the controller layout (`false`: back to the desktop).
+    pub fn play(enter: bool) -> Result<()> {
+        call(nr::DESKTOP, &[abi::desktop::PLAY as u64, 0, enter as u64]).map(|_| ())
+    }
+
     fn req(r: usize, arg: &str) -> Result<u64> {
         let [p, l] = str_args(arg);
         call(nr::DESKTOP, &[r as u64, p, l])

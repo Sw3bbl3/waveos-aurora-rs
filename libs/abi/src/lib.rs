@@ -1018,6 +1018,10 @@ pub mod pref {
     /// that device is present).
     pub const AUDIO_OUTPUT: &str = "audio_output";
     pub const AUDIO_INPUT: &str = "audio_input";
+    /// "1" (default): connecting a game controller enters Wave Play.
+    pub const PLAY_AUTO_ENTER: &str = "play_auto_enter";
+    /// "1" (default): Wave Play's navigation sounds and controller vibration.
+    pub const PLAY_SOUNDS: &str = "play_sounds";
 }
 
 /// A screen resolution.
@@ -1114,6 +1118,12 @@ pub mod event {
     /// presents again after this to draw at the screen's pace). At most
     /// one is queued per window.
     pub const FRAME: u32 = 15;
+    /// A game controller changed: `a` = its id, `b` = its buttons (the
+    /// [`super::gamepad`] bits), `c` = 1 connected, 2 disconnected, 0 a
+    /// button or stick direction changed. Changes go to the window in front
+    /// (while it may read the controllers), connections to every window;
+    /// `gamepad_state` has the rest (sticks, triggers).
+    pub const GAMEPAD: u32 = 16;
 }
 
 /// A single input/window event. Field meaning depends on `kind`:
@@ -1166,6 +1176,9 @@ pub mod desktop {
     pub const EJECT: usize = 13;
     /// Starts the optional shell-owned interactive introduction. No arguments.
     pub const START_TOUR: usize = 15;
+    /// Wave Play, the controller layout: arg_len = 1 enters it, 0 goes back
+    /// to the desktop (no argument pointer).
+    pub const PLAY: usize = 16;
 }
 
 /// Where user programs are linked and where the kernel places things.

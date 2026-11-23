@@ -20,6 +20,8 @@
 //!                                         displays, one size each (std: the extra displays' EDID size)
 //!       --displays N                      simulate N displays (1-4), each in its own window (see displays.rs)
 //!       --wifi-sim                        simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
+//!       --virtual-gamepad                 a game controller played on the keyboard, connected at start-up
+//!                                         (Super+G connects and disconnects it at any time; see Wave Play)
 //!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
 //!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
 //!       --headless --no-build --debug --gdb --int
@@ -157,6 +159,15 @@ fn main() {
             image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
                 .expect("write boot.conf");
             image::set_boot_option(&img, "gpu", gpu_driver(gpu)).expect("write boot.conf");
+            // A keyboard-driven game controller, for Wave Play without one.
+            image::set_boot_option(&img, "virtual_gamepad", if flag("--virtual-gamepad") { "1" } else { "0" })
+                .expect("write boot.conf");
+            // On the standard display, --resolution is the bootloader's choice (as Settings makes it).
+            if !gpu.starts_with("virtio") {
+                if let Some(r) = args.iter().position(|a| a == "--resolution").and_then(|i| args.get(i + 1)) {
+                    image::set_boot_option(&img, "resolution", r.split(',').next().unwrap_or(r)).expect("write boot.conf");
+                }
+            }
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
             let displays = displays::from_args(&args, flag("--headless"));
             let opts = RunOpts {

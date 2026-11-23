@@ -80,6 +80,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
 - **Threads** in user space, with futex-based locks, and SSE for apps.
 - **USB:** xHCI (USB 3), EHCI (USB 2), OHCI and UHCI (USB 1.1) controllers, with hubs and storage plugged in at any time.
 - **Input:** keyboards in any rollover format with media keys and a shared Caps Lock light; mice with side buttons and two wheels; touchpads with tap to click, tap-and-drag, two-finger click and smooth two-finger scrolling; game controllers (Xbox, PlayStation, Switch Pro, generic) in one standard layout with rumble, for apps through `corekit::gamepad`.
+- **Wave Play:** connect a controller and the desktop transforms into a console-style layout: the windows recede, the bar and Harbor slide away, the wallpaper blurs into a backdrop lit by the focused tile, and rows of games, apps and settings rise in. Everything is reachable with the controller alone (focus memory per row, repeat that speeds up, search with an on-screen strip of letters, navigation sounds and light vibration). Games open full screen from their tile; the home button brings a quick overlay (resume, home, close, volume, battery, frame rate, power) over anything. Unplug, or press View, and every window returns exactly where it was. All motion uses interruptible springs; Reduce Motion switches without it.
 - **Sound:** an Intel HD Audio driver, USB Audio Class 1 and 2 speakers, headsets and microphones (over isochronous xHCI transfers), and a mixer that follows the chosen output. System sounds, a menu-bar volume control with an output switcher, volume keys (driving a USB device's own volume control), headphone detection; programs can play audio and record (`record`).
 - **Laptop-ready:** a battery indicator with time remaining, low-battery warnings, the power button, and sleep from the menu, Spotlight or the lid.
 
@@ -115,7 +116,8 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
   - `Ctrl+W` or `Alt+F4` closes the front window
   - `Print Screen` or `Super+Shift+3` saves a screenshot to Pictures
   - in text: `Ctrl+A/C/X/V`, `Ctrl+Z` / `Ctrl+Shift+Z`, `Ctrl+F` to find, `Ctrl+S` to save
-- **WayV menu** (the mark at top-left): About This Computer, Settings, Learn, Shoal, Lock Screen, Sleep, Restart, Shut Down.
+- **WayV menu** (the mark at top-left): About This Computer, Settings, Learn, Shoal, Wave Play, Lock Screen, Sleep, Restart, Shut Down.
+- **Wave Play**: plug in a controller (or choose Wave Play in the WayV menu or Seek). The d-pad or left stick moves, A opens, Y searches, LB/RB change rows, Menu or the home button opens the quick overlay, View returns to the desktop. On a keyboard: arrows, Enter, Escape, Tab, Super+Escape. Without a controller at hand, Super+G connects a keyboard-played one (arrows, Enter = A, Escape = B, Home = home button; `cargo xtask run --virtual-gamepad` connects it at start-up).
 - **Super+L** locks the screen. The volume keys work anywhere; Crest shows the level.
 - **Voyage** and **Firefox**: Ctrl+L for the address bar, Ctrl+T for a tab, Ctrl+W to close it, Ctrl+Tab to the next, Alt+←/→ back and forward, Ctrl+R to reload, Ctrl+F to find, Ctrl +/−/0 zoom.
 - **NetSurf**: click the address bar (to either side of the window handle), type an address and press Enter; Ctrl+U clears it. Alt+←/→ go back and forward, Ctrl +/−/0 zoom, the arrow keys and Page Up/Down scroll.

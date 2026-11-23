@@ -93,6 +93,8 @@ pub enum Command {
     Elevate,
     /// Accounts were added, removed or changed (`users::db`).
     AccountsChanged,
+    /// Enter (true) or leave Wave Play.
+    Play(bool),
 }
 
 /// Queues a command for the compositor.
@@ -534,6 +536,13 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
                 return Err(EINVAL);
             }
             send(Command::StartTour);
+            Ok(0)
+        }
+        PLAY => {
+            if ptr != 0 || len > 1 {
+                return Err(EINVAL);
+            }
+            send(Command::Play(len == 1));
             Ok(0)
         }
         OPEN_APP | OPEN_FILE => {

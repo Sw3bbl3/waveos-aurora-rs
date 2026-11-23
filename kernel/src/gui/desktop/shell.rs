@@ -16,6 +16,7 @@ enum MenuAction {
     Tour,
     Settings,
     Launcher,
+    Play,
     Power,
     Sleep,
     Lock,
@@ -100,6 +101,7 @@ impl Desktop {
                 item("Take a Tour…", "", MenuAction::Tour),
                 SEPARATOR,
                 item("Apps — Shoal", "Super", MenuAction::Launcher),
+                item("Wave Play", "", MenuAction::Play),
                 SEPARATOR,
                 item("Lock Screen", "Super L", MenuAction::Lock),
                 if self.several_accounts() {
@@ -147,6 +149,7 @@ impl Desktop {
             MenuAction::About => self.open(AppKind::About),
             MenuAction::Settings => self.open(AppKind::Settings),
             MenuAction::Launcher => self.toggle_launcher(),
+            MenuAction::Play => self.play_enter(false),
             MenuAction::Power => self.open(AppKind::Power),
             MenuAction::Sleep => crate::power::sleep(),
             MenuAction::Lock => self.lock(),

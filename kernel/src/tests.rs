@@ -36,6 +36,7 @@ const TESTS: &[Test] = &[
     ("wallpaper + blur", wallpaper),
     ("TrueType text", truetype),
     ("Spotlight: calculator and file index", spotlight),
+    ("Wave Play: library, controller navigation, input ownership", crate::gui::desktop::play_self_test),
     ("clipboard and Trash", clipboard_and_trash),
     ("SMP: work on every CPU, lock stress", smp_work),
     ("SMP: TLB shootdown", smp_shootdown),
