@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WaveOS Launcher</title>
+<link rel="icon" href="{{WAYV_MARK}}">
+<style>
+/* Served by `cargo xtask launch` (xtask/src/launcher.rs), which inlines the
+   WayV mark and the Tide wallpaper; the page loads nothing from anywhere else.
+   The look follows the WaveOS desktop: a calm photograph under slate glass. */
+:root {
+  color-scheme: light;
+  --veil: rgba(236, 241, 248, 0.55);
+  --glass: rgba(250, 251, 253, 0.80);
+  --glass-strong: rgba(255, 255, 255, 0.92);
+  --glass-edge: rgba(255, 255, 255, 0.75);
+  --well: rgba(30, 40, 60, 0.055);
+  --ink: #161A22;
+  --ink-2: #5B6474;
+  --ink-3: #8D95A3;
+  --hairline: rgba(30, 40, 60, 0.10);
+  --hairline-strong: rgba(30, 40, 60, 0.18);
+  --accent: #3478F0;
+  --accent-ink: #FFFFFF;
+  --accent-soft: rgba(52, 120, 240, 0.13);
+  --good: #1F9D58;
+  --warn: #B86E00;
+  --bad: #D63B3B;
+  --bad-soft: rgba(214, 59, 59, 0.10);
+  --console: rgba(20, 23, 30, 0.94);
+  --console-ink: #DDE3EC;
+  --console-dim: #8E98A8;
+  --shadow: 0 1px 2px rgba(10, 20, 40, .08), 0 14px 36px rgba(10, 20, 40, .14);
+  --radius: 18px;
+  --font: "Manrope", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --veil: rgba(8, 12, 20, 0.55);
+    --glass: rgba(27, 30, 38, 0.84); --glass-strong: rgba(36, 40, 50, 0.94); --glass-edge: rgba(255, 255, 255, 0.07);
+    --well: rgba(255, 255, 255, 0.06);
+    --ink: #EEF1F6; --ink-2: #A4ACBA; --ink-3: #6F7889;
+    --hairline: rgba(225, 232, 245, 0.09); --hairline-strong: rgba(225, 232, 245, 0.17);
+    --accent: #5C95F6; --accent-ink: #FFFFFF; --accent-soft: rgba(92, 149, 246, 0.18);
+    --good: #4CCB86; --warn: #EDB04E; --bad: #FF6B6B; --bad-soft: rgba(255, 107, 107, 0.12);
+    --console: rgba(12, 14, 19, 0.92);
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 14px 36px rgba(0, 0, 0, .4);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --veil: rgba(8, 12, 20, 0.55);
+  --glass: rgba(27, 30, 38, 0.84); --glass-strong: rgba(36, 40, 50, 0.94); --glass-edge: rgba(255, 255, 255, 0.07);
+  --well: rgba(255, 255, 255, 0.06);
+  --ink: #EEF1F6; --ink-2: #A4ACBA; --ink-3: #6F7889;
+  --hairline: rgba(225, 232, 245, 0.09); --hairline-strong: rgba(225, 232, 245, 0.17);
+  --accent: #5C95F6; --accent-ink: #FFFFFF; --accent-soft: rgba(92, 149, 246, 0.18);
+  --good: #4CCB86; --warn: #EDB04E; --bad: #FF6B6B; --bad-soft: rgba(255, 107, 107, 0.12);
+  --console: rgba(12, 14, 19, 0.92);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 14px 36px rgba(0, 0, 0, .4);
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { background: #5E7CA8; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  font: 14px/1.5 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+/* The wallpaper, softened so the panels stay calm to read over. */
+body::before {
+  content: ""; position: fixed; inset: -40px; z-index: -1;
+  background: linear-gradient(var(--veil), var(--veil)), url("{{WALLPAPER}}") center / cover no-repeat;
+  filter: blur(14px) saturate(115%);
+}
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.glass {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  backdrop-filter: blur(28px) saturate(150%);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* A floating bar, like the desktop's top bubbles. */
+header {
+  position: sticky; top: 10px; z-index: 5;
+  display: flex; align-items: center; gap: 12px;
+  margin: 10px auto 0; max-width: calc(1400px - 32px); width: calc(100% - 32px);
+  padding: 8px 10px 8px 12px; border-radius: 999px;
+  background: var(--glass-strong);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  backdrop-filter: blur(28px) saturate(150%);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--shadow);
+}
+header img { width: 32px; height: 32px; border-radius: 9px; }
+header h1 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+header .sub { color: var(--ink-2); font-size: 12px; }
+header .spacer { flex: 1; }
+@media (max-width: 520px) { header .sub, #qemu-chip { display: none; } }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--well); color: var(--ink-2); font-size: 12px; white-space: nowrap;
+}
+.icon-btn {
+  border: 1px solid var(--hairline); background: var(--glass); border-radius: 999px;
+  width: 34px; height: 34px; display: grid; place-items: center; cursor: pointer;
+}
+.icon-btn svg { width: 18px; height: 18px; }
+
+main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 440px);
+  gap: 18px;
+  padding: 18px max(16px, env(safe-area-inset-left)) 40px;
+  max-width: 1400px; margin: 0 auto;
+}
+@media (max-width: 980px) { main { grid-template-columns: minmax(0, 1fr); } }
+
+.stack { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+section.card { padding: 18px 18px 8px; }
+section.card > h2 {
+  margin: 0 0 2px; font-size: 13px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-2);
+}
+section.card > p.lede { margin: 0 0 10px; color: var(--ink-2); font-size: 13px; }
+
+.row {
+  display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); gap: 6px 16px; align-items: start;
+  padding: 12px 0; border-top: 1px solid var(--hairline);
+}
+.row:first-of-type { border-top: 0; }
+.row .label { font-weight: 600; padding-top: 6px; }
+.row .help { grid-column: 2; color: var(--ink-2); font-size: 12.5px; }
+.row.off { opacity: 0.45; }
+.row.off .control { pointer-events: none; }
+@media (max-width: 620px) {
+  .row { grid-template-columns: minmax(0, 1fr); }
+  .row .help { grid-column: 1; }
+  .row .label { padding-top: 0; }
+}
+
+.seg { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 3px; background: var(--well); border-radius: 12px; }
+.seg button {
+  border: 0; background: transparent; padding: 6px 12px; border-radius: 9px; cursor: pointer; color: var(--ink-2);
+  font-weight: 600; min-width: 38px;
+}
+.seg button[aria-pressed="true"] { background: var(--glass-strong); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.seg button:disabled { cursor: not-allowed; opacity: .4; text-decoration: line-through; }
+
+select {
+  appearance: none; -webkit-appearance: none;
+  padding: 7px 34px 7px 12px; border-radius: 10px; border: 1px solid var(--hairline-strong);
+  background: var(--glass-strong) linear-gradient(45deg, transparent 50%, var(--ink-2) 50%) no-repeat calc(100% - 16px) 52% / 5px 5px,
+              var(--glass-strong) linear-gradient(-45deg, transparent 50%, var(--ink-2) 50%) no-repeat calc(100% - 11px) 52% / 5px 5px;
+  max-width: 100%;
+}
+select:disabled { opacity: .5; }
+
+.switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch .track {
+  width: 42px; height: 24px; border-radius: 999px; background: var(--hairline-strong); position: relative;
+  flex: none;
+}
+.switch .track::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25);
+}
+.switch input:checked + .track { background: var(--accent); }
+.switch input:checked + .track.danger { background: var(--bad); }
+.switch input:checked + .track::after { transform: translateX(18px); }
+.switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch input:disabled + .track { opacity: .4; }
+
+.displays { display: flex; flex-direction: column; gap: 8px; }
+.display-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.display-row .screen {
+  width: 44px; height: 28px; border-radius: 5px; border: 2px solid var(--ink-3); position: relative; flex: none;
+  display: grid; place-items: center; font-size: 11px; font-weight: 700; color: var(--ink-2);
+}
+.display-row .screen.primary { border-color: var(--accent); color: var(--accent); }
+.display-row .where { color: var(--ink-2); font-size: 12.5px; flex: 1 1 200px; }
+.note {
+  margin: 10px 0 4px; padding: 10px 12px; border-radius: 12px; background: var(--accent-soft); color: var(--ink); font-size: 12.5px;
+}
+.note.warn { background: rgba(199, 119, 0, 0.12); }
+.note.bad { background: var(--bad-soft); }
+
+/* Presets */
+.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; padding-bottom: 10px; }
+.preset {
+  position: relative; text-align: left; padding: 11px 12px; border-radius: 14px; cursor: pointer;
+  border: 1px solid var(--hairline); background: var(--glass-strong);
+}
+.preset b { display: block; font-size: 13.5px; }
+.preset span { display: block; color: var(--ink-2); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+.preset[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.preset .tools { position: absolute; top: 6px; right: 6px; display: flex; gap: 2px; }
+.preset .tools button {
+  border: 0; background: transparent; cursor: pointer; padding: 3px; border-radius: 6px; color: var(--ink-3); line-height: 0;
+}
+.preset .tools button:hover { background: var(--well); color: var(--ink); }
+.preset .tools svg { width: 14px; height: 14px; }
+.preset-actions { display: flex; gap: 8px; flex-wrap: wrap; padding-bottom: 12px; align-items: center; }
+.small { color: var(--ink-3); font-size: 12px; }
+
+.btn {
+  border: 1px solid var(--hairline-strong); background: var(--glass-strong); padding: 8px 14px; border-radius: 11px;
+  cursor: pointer; font-weight: 600; display: inline-flex; align-items: center; gap: 7px;
+}
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn.danger { color: var(--bad); }
+.btn.big { padding: 11px 20px; font-size: 15px; border-radius: 13px; }
+.btn svg { width: 16px; height: 16px; }
+
+/* Run panel */
+.run { position: sticky; top: 74px; padding: 16px; display: flex; flex-direction: column; gap: 12px; max-height: calc(100vh - 96px); }
+@media (max-width: 980px) { .run { position: static; max-height: none; } }
+.cmd {
+  display: flex; gap: 8px; align-items: flex-start; padding: 10px 10px 10px 12px; border-radius: 12px; background: var(--well);
+}
+.cmd code { flex: 1; font: 12.5px/1.5 var(--mono); }
+.cmd code span { white-space: nowrap; }
+.ready .switch .track { transition: background .15s; }
+.ready .switch .track::after { transition: transform .15s; }
+.cmd .btn { padding: 5px 10px; font-size: 12px; }
+.status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pill {
+  display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px; font-weight: 700; font-size: 13px;
+  background: var(--well); color: var(--ink-2);
+}
+.pill i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.pill.busy { color: var(--accent); }
+.pill.busy i { animation: pulse 1.2s ease-in-out infinite; }
+.pill.good { color: var(--good); }
+.pill.bad { color: var(--bad); }
+@keyframes pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .pill.busy i { animation: none; } }
+.buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.banner { padding: 10px 12px; border-radius: 12px; font-size: 13px; background: var(--bad-soft); color: var(--ink); border: 1px solid var(--bad); }
+.banner b { color: var(--bad); }
+.console-head { display: flex; align-items: center; gap: 8px; }
+.console-head .small { flex: 1; }
+.console {
+  flex: 1; min-height: 260px; overflow: auto; border-radius: 12px; padding: 10px 12px;
+  background: var(--console); color: var(--console-ink); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+@media (max-width: 980px) { .console { height: 50vh; } }
+.console .err { color: var(--console-dim); }
+.console .mark { color: #7FE0C8; font-weight: 700; }
+.console .empty { color: var(--console-dim); font-family: var(--font); }
+
+dialog {
+  border: 1px solid var(--glass-edge); border-radius: 20px; padding: 22px; max-width: min(440px, calc(100vw - 32px));
+  background: var(--glass-strong); color: var(--ink); box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px);
+}
+dialog::backdrop { background: rgba(5, 15, 25, 0.35); }
+dialog h3 { margin: 0 0 8px; font-size: 17px; }
+dialog p { margin: 0 0 14px; color: var(--ink-2); }
+dialog input[type=text] {
+  width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--hairline-strong); background: var(--glass-strong); margin-bottom: 14px;
+}
+dialog .buttons { justify-content: flex-end; }
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 9px 16px; border-radius: 12px;
+  background: var(--glass-strong); box-shadow: var(--shadow); border: 1px solid var(--hairline); font-weight: 600; z-index: 20;
+}
+</style>
+</head>
+<body>
+<header>
+  <img src="{{WAYV_MARK}}" alt="">
+  <div>
+    <h1>WaveOS Aurora</h1>
+    <div class="sub">Choose how to run it, then launch</div>
+  </div>
+  <div class="spacer"></div>
+  <span class="chip" id="qemu-chip" title="The QEMU this launcher found">QEMU</span>
+  <button class="icon-btn" id="theme" type="button" title="Light or dark" aria-label="Switch between light and dark">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+  </button>
+</header>
+
+<main>
+  <div class="stack">
+    <section class="card glass" aria-labelledby="h-presets">
+      <h2 id="h-presets">Presets</h2>
+      <p class="lede">Start from one of these, then change anything below.</p>
+      <div class="presets" id="presets"></div>
+      <div class="preset-actions">
+        <button class="btn" id="save-preset" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          Save as preset…
+        </button>
+        <span class="small" id="store-path"></span>
+      </div>
+    </section>
+
+    <section class="card glass" aria-labelledby="h-what">
+      <h2 id="h-what">What to boot</h2>
+      <div class="row">
+        <div class="label">Boot</div>
+        <div class="control"><div class="seg" id="action"></div></div>
+        <div class="help" id="action-help"></div>
+      </div>
+    </section>
+
+    <section class="card glass" aria-labelledby="h-displays" data-run-only>
+      <h2 id="h-displays">Displays</h2>
+      <div class="row">
+        <div class="label">How many</div>
+        <div class="control"><div class="seg" id="display-count"></div></div>
+        <div class="help">Each simulated display opens in a window of its own.</div>
+      </div>
+      <div class="row">
+        <div class="label">Sizes</div>
+        <div class="control displays" id="display-list"></div>
+        <div class="help" id="display-help"></div>
+      </div>
+      <div class="note warn" id="multi-note" hidden>
+        <b>The extra windows may stay blank for now.</b> WaveOS's compositor draws the desktop on the primary display
+        only. A native display core that finds every output is being written, and desktops that span several monitors
+        come after it. The guest already sees each display (with its own EDID), so this is ready when WaveOS is.
+      </div>
+    </section>
+
+    <section class="card glass" aria-labelledby="h-machine">
+      <h2 id="h-machine">Machine</h2>
+      <div class="row">
+        <div class="label">Display adapter</div>
+        <div class="control"><div class="seg" id="gpu"></div></div>
+        <div class="help" id="gpu-help"></div>
+      </div>
+      <div class="row">
+        <div class="label">Processors</div>
+        <div class="control"><div class="seg" id="smp"></div></div>
+        <div class="help">Virtual CPUs. More isn't always faster under emulation; 4 is a good balance.</div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">Memory</div>
+        <div class="control"><select id="memory" aria-label="Memory"></select></div>
+        <div class="help">Guest RAM. Voyage and Firefox like 2 GiB or more.</div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">Laptop battery</div>
+        <div class="control"><div class="seg" id="battery"></div></div>
+        <div class="help" id="battery-help"></div>
+      </div>
+    </section>
+
+    <section class="card glass" aria-labelledby="h-storage">
+      <h2 id="h-storage">Storage</h2>
+      <div class="row">
+        <div class="label">Disk controller</div>
+        <div class="control"><div class="seg" id="disk"></div></div>
+        <div class="help" id="disk-help"></div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">Linux packages</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="linux"><span class="track"></span><span>Voyage, Firefox, bash, Python</span></label></div>
+        <div class="help">Fetched once into target/linux-root and put on the disk as /Linux. Off: a smaller disk, NetSurf as the browser.</div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">Developer disk</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="developer_disk"><span class="track"></span><span>A separate 8 GiB disk</span></label></div>
+        <div class="help">Boots target/waveos-developer.img instead of your everyday disk, with room for WaveSDK work.</div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">Fresh disk</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="fresh_disk"><span class="track danger"></span><span>Start over with a new disk</span></label></div>
+        <div class="help"><b>This erases files saved inside WaveOS</b> (notes, documents, settings). You'll be asked to confirm. It's never remembered for Quick launch.</div>
+      </div>
+    </section>
+
+    <section class="card glass" aria-labelledby="h-devices">
+      <h2 id="h-devices">Devices</h2>
+      <div class="row">
+        <div class="label">Network adapter</div>
+        <div class="control"><select id="net" aria-label="Network adapter"></select></div>
+        <div class="help" id="net-help"></div>
+      </div>
+      <div class="row">
+        <div class="label">USB controller</div>
+        <div class="control"><select id="usb" aria-label="USB controller"></select></div>
+        <div class="help" id="usb-help"></div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">USB stick</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="usb_stick"><span class="track"></span><span>Plug in a 64 MiB stick</span></label></div>
+        <div class="help">A FAT32 stick (target/usb-stick.img) to copy files on and off.</div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">Simulated Wi-Fi</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="wifi_sim"><span class="track"></span><span>Nearby networks</span></label></div>
+        <div class="help">A software radio with a few networks to join ("Harbor Cafe", password "tide pools at dawn").</div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">Sound</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="sound"><span class="track"></span><span>Play through this computer</span></label></div>
+        <div class="help">Intel HD Audio, played through your speakers. Off: sound goes nowhere.</div>
+      </div>
+      <div class="row" data-run-only data-mac-only>
+        <div class="label">Keyboard capture</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="keyboard_capture"><span class="track"></span><span>Send ⌘ and system shortcuts to WaveOS</span></label></div>
+        <div class="help">Needs QEMU allowed under System Settings › Privacy &amp; Security › Accessibility. Control-Option-G lets go.</div>
+      </div>
+    </section>
+
+    <section class="card glass" aria-labelledby="h-dev">
+      <h2 id="h-dev">Developer</h2>
+      <div class="row" data-run-only>
+        <div class="label">System Explorer</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="monitor"><span class="track"></span><span>Live view of the kernel</span></label></div>
+        <div class="help">Opens another page with boot stages, CPUs, processes, memory and I/O as they happen.</div>
+      </div>
+      <div class="row">
+        <div class="label">Debug build</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="debug"><span class="track"></span><span>Unoptimised</span></label></div>
+        <div class="help">Slower, with better backtraces.</div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">GDB stub</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="gdb"><span class="track"></span><span>Wait for a debugger on :1234</span></label></div>
+        <div class="help">QEMU starts paused. Then: gdb target/x86_64-unknown-none/release/aster -ex 'target remote :1234'</div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">Headless</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="headless"><span class="track"></span><span>No window</span></label></div>
+        <div class="help">The serial log only (below), and no sound.</div>
+      </div>
+      <div class="row" data-run-only>
+        <div class="label">Skip the build</div>
+        <div class="control"><label class="switch"><input type="checkbox" id="nobuild"><span class="track"></span><span>Boot what's already built</span></label></div>
+        <div class="help">Saves a few seconds when nothing changed since the last build.</div>
+      </div>
+    </section>
+  </div>
+
+  <aside class="run glass" aria-labelledby="h-run">
+    <h2 id="h-run" hidden>Run</h2>
+    <div class="cmd">
+      <code id="command">cargo xtask run</code>
+      <button class="btn" id="copy" type="button" title="Copy the command">Copy</button>
+    </div>
+    <div class="status">
+      <span class="pill" id="pill"><i></i><span id="pill-text">Ready</span></span>
+      <span class="small" id="status-text"></span>
+    </div>
+    <div class="buttons">
+      <button class="btn primary big" id="launch" type="button" title="Launch (⌘ or Ctrl + Enter)">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5z"/></svg>
+        Launch
+      </button>
+      <button class="btn big" id="restart" type="button" disabled>Restart</button>
+      <button class="btn big danger" id="stop" type="button" disabled>Stop</button>
+    </div>
+    <div class="banner" id="banner" hidden></div>
+    <div class="console-head">
+      <span class="small" id="console-label">Build output and the serial console appear here.</span>
+      <label class="switch small"><input type="checkbox" id="follow" checked><span class="track"></span><span>Follow</span></label>
+    </div>
+    <div class="console" id="console" role="log" aria-live="off"><span class="empty">Nothing running yet.</span></div>
+    <div class="small">Closing this page leaves WaveOS running; Ctrl-C in the terminal stops it.
+      <button class="btn" id="quit" type="button" style="padding:3px 9px;font-size:12px;margin-left:4px">Quit launcher</button></div>
+  </aside>
+</main>
+
+<dialog id="erase-dialog">
+  <h3>Erase the WaveOS disk?</h3>
+  <p>A fresh disk replaces <code id="erase-path">target/waveos-aurora.img</code>. Everything saved inside WaveOS on it
+    (notes, documents, folders, settings) is erased. This can't be undone.</p>
+  <div class="buttons">
+    <button class="btn" value="cancel" id="erase-cancel" type="button">Cancel</button>
+    <button class="btn primary" id="erase-ok" type="button" style="background:var(--bad)">Erase and launch</button>
+  </div>
+</dialog>
+
+<dialog id="name-dialog">
+  <h3 id="name-title">Save as preset</h3>
+  <p id="name-text">Give these settings a name.</p>
+  <input type="text" id="name-input" maxlength="60" autocomplete="off" aria-label="Preset name">
+  <div class="buttons">
+    <button class="btn" id="name-cancel" type="button">Cancel</button>
+    <button class="btn primary" id="name-ok" type="button">Save</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let S = null;            // /api/state
+let config = null;       // the configuration being edited
+let running = false;
+let started = false;     // something was launched in this page's lifetime (or before it opened)
+const BUSY = new Set(["building", "preparing", "booting", "testing", "running", "stopping"]);
+const LABEL = {
+  idle: "Ready", building: "Building…", preparing: "Preparing the disk…", booting: "Booting…", testing: "Running tests…", running: "At the desktop",
+  stopping: "Stopping…", stopped: "Stopped", exited: "Shut down", passed: "Tests passed", failed: "Failed",
+};
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  };
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+function toast(text) {
+  const t = document.createElement("div");
+  t.className = "toast"; t.textContent = text; document.body.appendChild(t);
+  setTimeout(() => t.remove(), 1800);
+}
+
+function seg(el, items, current, pick) {
+  el.textContent = "";
+  for (const it of items) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = it.label;
+    b.setAttribute("aria-pressed", String(String(it.value) === String(current)));
+    if (it.available === false) { b.disabled = true; b.title = "Not in this QEMU"; }
+    else if (it.help) b.title = it.help;
+    b.onclick = () => pick(it.value);
+    el.appendChild(b);
+  }
+}
+
+function fillSelect(el, items, current) {
+  el.textContent = "";
+  for (const it of items) {
+    const o = document.createElement("option");
+    o.value = it.value;
+    o.textContent = it.label + (it.available === false ? " (not in this QEMU)" : "");
+    o.disabled = it.available === false;
+    el.appendChild(o);
+  }
+  el.value = current;
+}
+
+const help = (table, value) => (S.options[table].find((c) => c.value === value) || {}).help || "";
+const mib = (n) => n >= 1024 ? (n / 1024) + " GiB" : n + " MiB";
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const isTest = () => config.action === "test";
+
+function render() {
+  const O = S.options;
+  seg($("action"), [{ value: "run", label: "Desktop" }, { value: "test", label: "Kernel tests" }], config.action, (v) => set({ action: v }));
+  $("action-help").textContent = isTest()
+    ? "cargo xtask test: the kernel self-tests on a fresh test disk (512 MiB, no window), booted twice. Your own disk isn't touched."
+    : "cargo xtask run: WaveOS on your persistent disk, target/waveos-aurora.img. Files saved inside WaveOS are kept.";
+
+  // Displays
+  const n = config.displays.length;
+  seg($("display-count"), [1, 2, 3, 4].slice(0, O.max_displays).map((k) => ({ value: k, label: String(k) })), n, (k) => {
+    const d = config.displays.slice(0, k);
+    while (d.length < k) d.push(config.gpu === "virtio" ? d[0] : "1920x1080");
+    set({ displays: d });
+  });
+  const list = $("display-list");
+  list.textContent = "";
+  config.displays.forEach((size, i) => {
+    const row = document.createElement("div");
+    row.className = "display-row";
+    const scr = document.createElement("span");
+    scr.className = "screen" + (i === 0 ? " primary" : "");
+    scr.textContent = i + 1;
+    row.appendChild(scr);
+    const sel = document.createElement("select");
+    sel.setAttribute("aria-label", "Display " + (i + 1) + " size");
+    const sizes = O.sizes.includes(size) ? O.sizes : O.sizes.concat([size]);
+    for (const s of sizes) { const o = document.createElement("option"); o.value = s; o.textContent = s.replace("x", " × "); sel.appendChild(o); }
+    sel.value = size;
+    // Bochs VGA: WaveOS picks display 1's mode itself. virtio-gpu: one preferred size for every output.
+    sel.disabled = (config.gpu === "std" && i === 0) || (config.gpu === "virtio" && i > 0);
+    sel.onchange = () => {
+      const d = config.displays.slice();
+      if (config.gpu === "virtio") d.fill(sel.value); else d[i] = sel.value;
+      set({ displays: d });
+    };
+    row.appendChild(sel);
+    const where = document.createElement("span");
+    where.className = "where";
+    where.dataset.index = i;
+    row.appendChild(where);
+    list.appendChild(row);
+  });
+  $("display-help").textContent = config.gpu === "virtio"
+    ? "virtio-gpu starts every output at display 1's size; WaveOS then follows each window's size."
+    : "Standard VGA: WaveOS picks display 1's size (change it in Settings › Displays); each extra display offers the size chosen here.";
+  $("multi-note").hidden = n < 2;
+
+  seg($("gpu"), O.gpu, config.gpu, (v) => {
+    let d = config.displays.slice();
+    if (v === "virtio") d.fill(d[0]); else d[0] = "1920x1080";
+    set({ gpu: v, displays: d });
+  });
+  $("gpu-help").textContent = help("gpu", config.gpu);
+  seg($("smp"), O.smp.map((k) => ({ value: k, label: String(k) })), config.smp, (v) => set({ smp: v }));
+  const mem = O.memory_mib.includes(config.memory_mib) ? O.memory_mib : O.memory_mib.concat([config.memory_mib]).sort((a, b) => a - b);
+  fillSelect($("memory"), mem.map((m) => ({ value: m, label: mib(m) })), config.memory_mib);
+  seg($("battery"), O.battery, config.battery, (v) => set({ battery: v }));
+  $("battery-help").textContent = help("battery", config.battery);
+  seg($("disk"), O.disk, config.disk, (v) => set({ disk: v }));
+  $("disk-help").textContent = help("disk", config.disk);
+  fillSelect($("net"), O.net, config.net);
+  $("net-help").textContent = help("net", config.net);
+  fillSelect($("usb"), O.usb, config.usb);
+  $("usb-help").textContent = help("usb", config.usb);
+  for (const k of ["linux", "developer_disk", "fresh_disk", "usb_stick", "wifi_sim", "sound", "keyboard_capture", "monitor", "debug", "gdb", "headless"]) {
+    $(k).checked = !!config[k];
+  }
+  $("nobuild").checked = !config.build;
+  $("sound").disabled = config.headless;
+  $("keyboard_capture").disabled = config.headless;
+
+  for (const el of document.querySelectorAll("[data-run-only]")) {
+    el.classList.toggle("off", isTest());
+    el.setAttribute("aria-disabled", String(isTest()));
+  }
+  for (const el of document.querySelectorAll("[data-mac-only]")) el.hidden = S.host !== "macos";
+
+  // Presets
+  const box = $("presets");
+  box.textContent = "";
+  for (const p of S.presets) {
+    const b = document.createElement("div");
+    b.className = "preset";
+    b.tabIndex = 0;
+    b.setAttribute("role", "button");
+    b.setAttribute("aria-pressed", String(same(normal(p.config), normal(config))));
+    const t = document.createElement("b"); t.textContent = p.name; b.appendChild(t);
+    const d = document.createElement("span"); d.textContent = p.description; b.appendChild(d);
+    const choose = () => { config = Object.assign({}, p.config); changed(); };
+    b.onclick = choose;
+    b.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(); } };
+    if (!p.builtin) {
+      const tools = document.createElement("div");
+      tools.className = "tools";
+      tools.append(
+        tool("Rename", '<path d="M4 20h4L19 9l-4-4L4 16v4z"/>', () => renamePreset(p.name)),
+        tool("Delete", '<path d="M5 7h14M10 11v6M14 11v6M7 7l1 12h8l1-12M9 7V4h6v3"/>', () => deletePreset(p.name)),
+      );
+      b.appendChild(tools);
+    }
+    box.appendChild(b);
+  }
+}
+
+function tool(title, path, fn) {
+  const b = document.createElement("button");
+  b.type = "button"; b.title = title; b.setAttribute("aria-label", title);
+  b.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + path + "</svg>";
+  b.onclick = (e) => { e.stopPropagation(); fn(); };
+  return b;
+}
+
+// Presets compare without the one-off fresh disk.
+const normal = (c) => Object.assign({}, c, { fresh_disk: false, disk_image: c.disk_image || null });
+
+// One unbreakable span per word, so "--headless" never splits across lines.
+function showCommand(text) {
+  const code = $("command");
+  code.textContent = "";
+  (text.match(/'[^']*'|\S+/g) || []).forEach((w, i) => {
+    if (i) code.appendChild(document.createTextNode(" "));
+    const s = document.createElement("span");
+    s.textContent = w;
+    code.appendChild(s);
+  });
+}
+
+function set(patch) { Object.assign(config, patch); changed(); }
+
+let pending = 0;
+function changed() {
+  render();
+  const mine = ++pending;
+  api("/api/command", config).then((r) => {
+    if (mine !== pending) return;
+    showCommand(r.command);
+    for (const el of document.querySelectorAll(".display-row .where")) {
+      const line = r.displays[+el.dataset.index] || "";
+      el.textContent = line.replace(/^display \d+ of \d+ \([^)]*\): /, "");
+    }
+  }).catch((e) => { $("command").textContent = "⚠ " + e.message; });
+}
+
+function bind() {
+  $("memory").onchange = () => set({ memory_mib: +$("memory").value });
+  $("net").onchange = () => set({ net: $("net").value });
+  $("usb").onchange = () => set({ usb: $("usb").value });
+  for (const k of ["linux", "developer_disk", "fresh_disk", "usb_stick", "wifi_sim", "sound", "keyboard_capture", "monitor", "debug", "gdb"]) {
+    $(k).onchange = () => set({ [k]: $(k).checked });
+  }
+  $("headless").onchange = () => set({ headless: $("headless").checked });
+  $("nobuild").onchange = () => set({ build: !$("nobuild").checked });
+  $("copy").onclick = copyCommand;
+  $("launch").onclick = launch;
+  $("stop").onclick = () => api("/api/stop", {}).catch((e) => toast(e.message));
+  $("restart").onclick = () => { $("restart").disabled = true; api("/api/restart", {}).catch((e) => showError(e.message)); };
+  $("save-preset").onclick = savePreset;
+  $("quit").onclick = async () => {
+    if (running && !confirm("Quit the launcher? This stops WaveOS too.")) return;
+    await api("/api/quit", {}).catch(() => {});
+    document.body.innerHTML = '<div class="glass" style="margin:40px auto;max-width:420px;padding:24px;text-align:center">The launcher has quit. Run <code>make run</code> to start it again.</div>';
+  };
+  $("theme").onclick = () => {
+    const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    const now = document.documentElement.dataset.theme || (dark ? "dark" : "light");
+    const next = now === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem("waveos-launcher-theme", next); } catch (_) {}
+  };
+  $("console").addEventListener("scroll", () => {
+    const c = $("console");
+    const atEnd = c.scrollTop + c.clientHeight >= c.scrollHeight - 8;
+    if ($("follow").checked !== atEnd) $("follow").checked = atEnd;
+  });
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); if (!running) launch(); }
+  });
+}
+
+async function copyCommand() {
+  const text = $("command").textContent;
+  try { await navigator.clipboard.writeText(text); }
+  catch (_) {
+    const r = document.createRange(); r.selectNodeContents($("command"));
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand("copy"); s.removeAllRanges();
+  }
+  toast("Command copied");
+}
+
+function ask(dialog, okButton, cancelButton) {
+  return new Promise((resolve) => {
+    const done = (v) => { dialog.close(); okButton.onclick = cancelButton.onclick = dialog.oncancel = null; resolve(v); };
+    okButton.onclick = () => done(true);
+    cancelButton.onclick = () => done(false);
+    dialog.oncancel = () => done(false);
+    dialog.showModal();
+  });
+}
+
+async function launch() {
+  let confirmErase = false;
+  if (config.fresh_disk && !isTest()) {
+    $("erase-path").textContent = config.disk_image || (config.developer_disk ? "target/waveos-developer.img" : "target/waveos-aurora.img");
+    if (!await ask($("erase-dialog"), $("erase-ok"), $("erase-cancel"))) return;
+    confirmErase = true;
+  }
+  $("launch").disabled = true;
+  try {
+    await api("/api/launch", { config, confirm_erase: confirmErase });
+    if (config.fresh_disk) set({ fresh_disk: false });   // a one-off
+  } catch (e) {
+    showError(e.message);
+    $("launch").disabled = running;
+  }
+}
+
+async function nameDialog(title, text, value, ok) {
+  $("name-title").textContent = title; $("name-text").textContent = text;
+  $("name-input").value = value; $("name-ok").textContent = ok;
+  setTimeout(() => $("name-input").select(), 30);
+  $("name-input").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); $("name-ok").click(); } };
+  if (!await ask($("name-dialog"), $("name-ok"), $("name-cancel"))) return null;
+  return $("name-input").value.trim() || null;
+}
+
+async function savePreset() {
+  const name = await nameDialog("Save as preset", "Give these settings a name. Saving over one of your presets replaces it.", "", "Save");
+  if (!name) return;
+  try { S = await api("/api/presets/save", { name, config: Object.assign({}, config, { fresh_disk: false }) }); render(); toast("Saved “" + name + "”"); }
+  catch (e) { toast(e.message); }
+}
+async function renamePreset(from) {
+  const to = await nameDialog("Rename preset", "A new name for “" + from + "”.", from, "Rename");
+  if (!to || to === from) return;
+  try { S = await api("/api/presets/rename", { from, to }); render(); } catch (e) { toast(e.message); }
+}
+async function deletePreset(name) {
+  if (!confirm("Delete the preset “" + name + "”?")) return;
+  try { S = await api("/api/presets/delete", { name }); render(); } catch (e) { toast(e.message); }
+}
+
+// ---- The run ----
+const out = [];
+let flushQueued = false;
+function line(text, cls) {
+  out.push([text, cls]);
+  if (out.length > 20000) out.splice(0, out.length - 20000);
+  if (!flushQueued) { flushQueued = true; setTimeout(flush, 40); }
+}
+function flush() {
+  flushQueued = false;
+  const c = $("console");
+  const empty = c.querySelector(".empty"); if (empty) empty.remove();
+  const frag = document.createDocumentFragment();
+  for (const [text, cls] of out.splice(0)) {
+    const d = document.createElement("div");
+    if (cls) d.className = cls;
+    d.textContent = text;
+    frag.appendChild(d);
+  }
+  c.appendChild(frag);
+  while (c.childElementCount > 6000) c.firstElementChild.remove();
+  if ($("follow").checked) c.scrollTop = c.scrollHeight;
+}
+
+function showError(message) {
+  const b = $("banner");
+  b.hidden = false;
+  b.textContent = "";
+  const t = document.createElement("b"); t.textContent = "Something went wrong. "; b.appendChild(t);
+  b.appendChild(document.createTextNode(message));
+}
+
+function setState(state, message) {
+  running = BUSY.has(state);
+  const pill = $("pill");
+  pill.className = "pill " + (running ? "busy" : state === "failed" ? "bad" : (state === "running" || state === "passed") ? "good" : "");
+  if (state === "running") pill.className = "pill good";
+  $("pill-text").textContent = LABEL[state] || state;
+  $("status-text").textContent = state === "failed" ? "" : (message || "");
+  $("launch").disabled = running;
+  $("stop").disabled = !running || state === "stopping";
+  $("restart").disabled = !started || state === "stopping" || state === "building";
+  if (state === "failed") showError(message || "The run failed.");
+  else if (BUSY.has(state)) $("banner").hidden = true;
+  if (message && !BUSY.has(state)) line("— " + message, "mark");
+}
+
+function connect() {
+  const es = new EventSource("/events");
+  es.addEventListener("replay-start", () => { $("console").textContent = ""; out.length = 0; });
+  es.onmessage = (m) => {
+    let ev; try { ev = JSON.parse(m.data); } catch (_) { return; }
+    if (ev.ev === "line") line(ev.text, ev.src === "err" ? "err" : "");
+    else if (ev.ev === "state") setState(ev.state, ev.message);
+    else if (ev.ev === "run") {
+      started = true;
+      $("console").textContent = ""; out.length = 0;
+      $("banner").hidden = true;
+      $("console-label").textContent = ev.command;
+      line("$ " + ev.command, "mark");
+    }
+  };
+  es.onerror = () => { $("status-text").textContent = "Lost the launcher; reconnecting… (is the terminal still running it?)"; };
+  es.onopen = () => { if ($("status-text").textContent.startsWith("Lost")) $("status-text").textContent = ""; };
+}
+
+async function start() {
+  try { const t = localStorage.getItem("waveos-launcher-theme"); if (t) document.documentElement.dataset.theme = t; } catch (_) {}
+  S = await api("/api/state");
+  config = Object.assign({}, S.last || S.options.default);
+  $("store-path").textContent = "Yours are kept in " + S.store.replace(/^.*\//, "") + " (not in git).";
+  $("qemu-chip").textContent = S.qemu.found ? S.qemu.version.replace(/^QEMU emulator version /, "QEMU ") : "QEMU not found";
+  if (!S.qemu.found) showError("qemu-system-x86_64 isn't on the PATH. Install QEMU (brew install qemu, or apt install qemu-system-x86 ovmf), then run make run again.");
+  started = !!S.run.command;
+  bind();
+  changed();
+  setState(S.run.state || "idle", "");
+  setTimeout(() => document.body.classList.add("ready"), 300);
+  connect();
+}
+start().catch((e) => showError("Could not reach the launcher: " + e.message));
+</script>
+</body>
+</html>

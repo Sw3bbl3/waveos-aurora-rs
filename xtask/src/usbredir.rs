@@ -439,6 +439,18 @@ fn serve(kind: Kind, stream: UnixStream) -> std::io::Result<()> {
     }
 }
 
+/// Whether the local QEMU has `usb-redir` (Homebrew's macOS build doesn't:
+/// it's built without usbredir). `AURORA_TEST_NO_USBREDIR=1` says no
+/// without asking; `=0` says yes. Asked once per run.
+pub fn available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| match std::env::var("AURORA_TEST_NO_USBREDIR").as_deref() {
+        Ok("1") => false,
+        Ok("0") => true,
+        _ => crate::runconfig::QemuCaps::probe().has_device("usb-redir"),
+    })
+}
+
 /// QEMU arguments plugging the devices into `bus` behind hub port `hub`.
 pub fn qemu_args(sockets: &[(Kind, PathBuf)], bus: &str, hub: &str) -> Vec<String> {
     let mut args = Vec::new();
