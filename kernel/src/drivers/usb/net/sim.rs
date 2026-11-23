@@ -501,6 +501,11 @@ impl Hcd for SimHcd {
         (1..=PORTS).filter(|&p| self.changed[p as usize - 1].swap(false, Ordering::AcqRel)).collect()
     }
 
+    /// Plugging in raises a port change itself: no polling.
+    fn polls_ports(&self) -> bool {
+        false
+    }
+
     fn port_connected(&self, port: u8) -> bool {
         self.connected.get(port as usize - 1).is_some_and(|c| c.load(Ordering::Acquire))
     }

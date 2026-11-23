@@ -174,6 +174,9 @@ struct Pipe {
     buf: Arc<Dma>,
     stride: usize,
     size: usize,
+    count: usize,
+    /// Failed transfers in a row (the pipe is given up after a few).
+    errors: u32,
     /// Queued TRB → its buffer.
     trbs: BTreeMap<u64, usize>,
 }
@@ -211,6 +214,9 @@ pub struct Controller {
     done: WaitQueue,
     irq: WaitQueue,
     has_irq: AtomicBool,
+    /// The `xhci-events` task: commands it issues (recovering a pipe) must
+    /// drain the event ring themselves, as nobody else will.
+    event_task: AtomicU64,
     pipes: IrqMutex<BTreeMap<(u8, u8), Pipe>>,
     /// Isochronous streams by (slot, endpoint DCI).
     isos: IrqMutex<BTreeMap<(u8, u8), iso::Stream>>,
@@ -347,6 +353,7 @@ pub fn probe(dev: &pci::Device) {
         done: WaitQueue::new(),
         irq: WaitQueue::new(),
         has_irq: AtomicBool::new(false),
+        event_task: AtomicU64::new(u64::MAX),
         pipes: IrqMutex::new(BTreeMap::new()),
         isos: IrqMutex::new(BTreeMap::new()),
         interrupts: AtomicU64::new(0),
@@ -409,6 +416,7 @@ impl Controller {
     }
 
     fn event_task(&'static self) {
+        self.event_task.store(crate::sched::current_id(), Ordering::Release);
         loop {
             if self.has_irq.load(Ordering::Relaxed) {
                 self.irq.wait(1000, || self.event_pending());
@@ -484,22 +492,37 @@ impl Controller {
     }
 
     fn pipe_event(&self, slot: u8, ep: u8, trb: u64, code: u8, residual: u32) {
-        let (handler, buf, index, at, n) = {
+        let ok = code == CC_SUCCESS || code == CC_SHORT;
+        let (handler, buf, index, at, n, errors, count) = {
             let mut pipes = self.pipes.lock();
             let Some(p) = pipes.get_mut(&(slot, ep)) else { return };
             let Some(index) = p.trbs.remove(&trb) else { return };
+            p.errors = if ok { 0 } else { p.errors + 1 };
             let n = p.size.saturating_sub(residual as usize);
-            (p.handler.clone(), p.buf.clone(), index, index * p.stride, n)
+            (p.handler.clone(), p.buf.clone(), index, index * p.stride, n, p.errors, p.count)
         };
-        // Read in place: the controller is done with this buffer until it is queued again.
-        if code == CC_SUCCESS || code == CC_SHORT {
+        if ok {
+            // Read in place: the controller is done with this buffer until it is queued again.
             handler.data(&buf.bytes()[at..at + n]);
+            self.queue_pipe_buffer(slot, ep, index);
+            return;
         }
-        if code == CC_STALL {
-            self.recover(slot, ep);
+        // A STALL or a transaction error halted the endpoint: reset it, skip
+        // what was still queued, and queue every buffer again. A device that
+        // keeps failing (or has gone) is given up on.
+        if errors > 8 {
+            if errors == 9 {
+                log!("xhci", "slot {} endpoint {}: stopped polling after repeated errors ({})", slot, ep, code);
+            }
+            return;
         }
-        // Queue the buffer again (unless the device has gone).
-        self.queue_pipe_buffer(slot, ep, index);
+        self.recover(slot, ep);
+        if let Some(p) = self.pipes.lock().get_mut(&(slot, ep)) {
+            p.trbs.clear();
+        }
+        for i in 0..count {
+            self.queue_pipe_buffer(slot, ep, i);
+        }
     }
 
     fn queue_pipe_buffer(&self, slot: u8, ep: u8, index: usize) {
@@ -535,7 +558,9 @@ impl Controller {
         let n = count.max(1);
         let Some(buf) = Dma::new_aligned(stride * n) else { return false };
         let buf = Arc::new(buf);
-        self.pipes.lock().insert((slot, ep.dci()), Pipe { handler, buf, stride, size, trbs: BTreeMap::new() });
+        self.pipes
+            .lock()
+            .insert((slot, ep.dci()), Pipe { handler, buf, stride, size, count: n, errors: 0, trbs: BTreeMap::new() });
         for i in 0..n {
             self.queue_pipe_buffer(slot, ep.dci(), i);
         }
@@ -571,7 +596,8 @@ impl Controller {
             c.contains_key(&last)
                 || trbs.iter().any(|t| c.get(t).is_some_and(|e| e.code != CC_SUCCESS && e.code != CC_SHORT))
         };
-        let ok = if self.has_irq.load(Ordering::Relaxed) {
+        let from_events = crate::sched::current_id() == self.event_task.load(Ordering::Acquire);
+        let ok = if self.has_irq.load(Ordering::Relaxed) && !from_events {
             self.done.wait(timeout_ms, finished)
         } else {
             let end = crate::time::uptime_ms() + timeout_ms;

@@ -140,10 +140,13 @@ impl Events {
     }
 
     /// Waits until `done` holds or `timeout_ms` passes. With interrupts it
-    /// sleeps (and looks again every 20 ms, in case one went missing);
-    /// without, it polls between other tasks' turns.
+    /// sleeps, looking again after 20 ms in case one went missing, then less
+    /// and less often (a quarter of a second at most) while nothing happens:
+    /// a network adapter's receive may wait for seconds. Without interrupts
+    /// it polls between other tasks' turns.
     pub fn wait(&self, timeout_ms: u64, done: impl Fn() -> bool) -> bool {
         let deadline = crate::time::uptime_ms() + timeout_ms;
+        let mut slice = 20;
         loop {
             if done() {
                 return true;
@@ -153,7 +156,8 @@ impl Events {
                 return done();
             }
             if self.live() {
-                self.queue.wait((deadline - now).min(20), &done);
+                self.queue.wait((deadline - now).min(slice), &done);
+                slice = (slice * 2).min(250);
             } else {
                 crate::sched::yield_now();
             }

@@ -624,7 +624,7 @@ fn rx_task_entry(arg: u64) {
     let Some(buf) = nic.bus.dma(nic.rx_size) else { return };
     let mut failures = 0u32;
     while !nic.gone() {
-        match nic.bus.transfer(nic.dev, &nic.bulk_in, buf.phys, nic.rx_size, 1000) {
+        match nic.bus.transfer(nic.dev, &nic.bulk_in, buf.phys, nic.rx_size, 5000) {
             Ok(n) => {
                 failures = 0;
                 nic.received(&buf.bytes()[..n]);
