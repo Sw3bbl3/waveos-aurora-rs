@@ -15,7 +15,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - **Sleep** (S3 suspend to RAM) and resume
 - **Real user space.** Every app is its own **ring-3 process** with its own address space:
   - **Crash isolation:** an app that crashes gets a "quit unexpectedly" report, and everything else keeps running.
-  - **System calls:** about 55 of them, covering processes, threads, files, pipes, windows, events, the clipboard, drag and drop, notifications, preferences, sound and power. Every pointer is validated.
+  - **System calls:** covering processes, threads, files, pipes, windows, events, the clipboard, drag and drop, notifications, preferences, clocks, sound and power. Every pointer is validated.
   - **Libraries:** the `corekit` runtime, the **AuroraKit** windowing toolkit, and **WaveUI**, the declarative interface framework every app is written with. Together with Studio, the `wavesdk` command and GINA packages they make up the **WaveSDK**.
 - **Lumen Server window server**, in the kernel like Windows NT's:
   - apps draw into shared-memory surfaces that Lumen Server composites
@@ -27,22 +27,24 @@ Everything that works today, layer by layer. For the short tour, see the [README
 - **The living-water desktop:**
   - a top bar of glass bubbles: the WayV menu and the app on the left; **Crest** in the middle with the time (the date on pointing, activities such as volume and new notifications), which can be turned off; **Seek** and the status ring on the right, opening **Current** (network, Calm, appearance, lock, sound, battery)
   - **Harbor**, a floating dock in three bays (pinned apps, open apps, the Downloads and Documents stacks and Trash), with a waterline under open apps, window peeks, ripples while an app starts, and sinking away from a window that reaches it
-  - windows without title bars: a handle appears at the top edge and rises into a pill to shrink, expand or close; the focused window has a waterline; **Moorings** snaps windows into six layouts
+  - a permanent compact window strip reserves room for the title and smoothly revealed minimize, maximize and close controls; keyboard access with Alt+Space, dependable resize edges/corners, a focused waterline, and **Moorings** snapping into six layouts
   - **Shoal** (all apps, full screen, with search and groups), **Seek** (apps, files, settings and sums), **Drift** (calendar, Calm and notifications) and **Glide** (Alt+Tab with window pictures)
   - Manrope throughout, light and dark everywhere, broadcast live to every app, and an accent colour that can follow the wallpaper
-  - the Tide, Aurora and Dunes wallpapers, each with a day and a night picture
+  - six licensed natural photographs, shown faithfully in both appearances: Tide, Mist, Dunes, Ripple, Coast and Alpine
+  - an optional interactive tour in Welcome and Help, with anchored guidance and temporary practice content; reduced motion, reduced transparency and increased contrast throughout shared controls
 - **Apps:** Voyage, Firefox, NetSurf, Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About This Computer, Welcome, Learn, Studio, Installer and Doom.
 - **Networking**, all our own:
   - **drivers** for virtio-net, Intel e1000/e1000e and igb/igc, and Realtek RTL8139 and RTL8168/8111/8125, interrupt-driven where MSI allows (see [HARDWARE.md](HARDWARE.md#wired-network-adapters) for what is tested)
   - an **IPv4 and IPv6 stack** in the kernel: ARP and neighbor discovery, ICMP and ICMPv6, UDP and **TCP** over both (retransmission timers, fast retransmit, congestion control, window scaling), **DHCP** and IPv6 **autoconfiguration** (SLAAC, RDNSS), and BSD-like sockets for programs
-  - **DNS** asking for A and AAAA together, with a cache that honours TTLs; Happy Eyeballs connections that prefer IPv6 where it's routed; an **HTTP/1.1** client with keep-alive, chunked and gzip responses
+  - **DNS** asking for A and AAAA together, with bounded retries, TCP fallback for truncated replies and a cache that honours short/zero TTLs and invalidates on network changes; bounded IPv6/IPv4 connection fallback; an **HTTP/1.1** client with keep-alive, chunked and gzip responses
   - **TLS 1.3** (and 1.2 for older servers) with our own handshake, record layer and X.509 certificate checks against Mozilla's root CAs. Cryptographic primitives come from RustCrypto.
-  - the network in **Current**, **Settings → Network**, and network graphs in Pulse
+  - the network in **Current**, **Settings → Network**, and network graphs in Pulse; an on-demand **Check connection** action and `netcheck [URL]` distinguish configuration, DNS and verified HTTP/TLS access
   - **Wi-Fi**: open and WPA2-Personal networks, with our own supplicant (4-way and group key handshakes) and CCMP encryption, a Wi-Fi section in Settings → Network and wlanN interfaces. Intel adapters (7265 to AX211) are recognized but their radio can't be started yet; simulated networks for testing (`cargo xtask run --wifi-sim`)
 - **Voyage**, the web browser ([details](LINUX.md#voyage)): our own browser around WebKitGTK 2.50 (WebKit, the engine of Safari: JavaScriptCore with its JIT, CSS, web fonts, media), through the Wayland bridge:
-  - in the dock; web links and `.html` files open in it; ready to browse in about half the time Firefox takes
+  - in the dock; web links and `.html` files open in it
   - tabs (dragged into order, shared web process), an address field that also searches (DuckDuckGo), find in page, zoom, downloads to Downloads, cookies and site data kept, a start page with a search box
-  - light and dark like WaveOS (pages see `prefers-color-scheme`), its toolbar as the window's title bar, the mouse's back and forward buttons
+  - light and dark like WaveOS (pages see `prefers-color-scheme`), a toolbar below the system's reserved window strip, the mouse's back and forward buttons
+  - actionable navigation and certificate errors, Retry/Back/Stop, download progress and cancellation, unique download names, persistent cookies and site data; damage-aware Wayland buffer copying/presentation
 - **Firefox**: Debian's Firefox ESR 140, unchanged, with full JavaScript, through the Wayland bridge, from the launcher or Seek ([details](LINUX.md#firefox)):
   - a clean start: no welcome tour, no window buttons of its own (WaveOS's handle has them), a compact toolbar, a new tab page with just a search box, nothing sent to Mozilla, downloads in Downloads; Chinese, Japanese and Korean text shows too
   - the dark theme when WaveOS is dark; the mouse's back and forward buttons work
@@ -88,6 +90,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
 | `cargo xtask run --monitor` | Same as `run`, plus the live System Explorer in your browser |
 | `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB, network). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--net virtio\|e1000\|e1000e\|igb\|rtl8139\|none` the network card, `--usb xhci\|ehci\|ehci-ohci\|ohci\|uhci` the USB controller, `--smp N` the CPUs, `--battery` adds a laptop battery (`--battery=host` mirrors this computer's, `--battery=20,charging` fixes one), `--usb-stick` plugs in a USB stick, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
 | `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller, `--net` the network card, `--smp 1` for one CPU |
+| `cargo xtask web-check --output target/network-web/check` | Builds a disposable full guest and drives Voyage through local browser/transfer/TLS fixtures and a public site sample; `--local-only` omits public sites, `--connection-only` tests live link loss/recovery, `--benchmark-only` records new-process and revisit workloads |
 | `cargo xtask image` | Creates `target/waveos-aurora-usb.img` (ESP plus AuroraFS), ready to `dd` onto a USB stick |
 | `cargo xtask lint` | Clippy on the host libraries, kernel, bootloader and user space, each for its own target, with warnings as errors |
 | `cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask` | Host-side tests: filesystems (with crash recovery), the TrueType engine, the image and sound codecs, URLs and HTTP, TLS against rustls, the browser engine, the test ACPI table, and robustness tests that feed every parser thousands of corrupted inputs (`AURORA_MUTATIONS=N` runs them N times longer) |
@@ -102,10 +105,10 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
 - **Drift**: click Crest (the time at the top centre) for the calendar, Calm and notifications.
 - **Current**: click the status ring at top right for the network, Calm, appearance, sound and battery.
 - **Windows**:
-  - bring the pointer to a window's top edge: its handle rises into a pill; drag the pill to move the window, double-click it to expand, or use its buttons to shrink, expand or close
+  - hover over the permanently reserved top strip to reveal controls; drag its title area to move, double-click to maximize/restore, or use minimize, maximize and close; Alt+Space reaches the controls by keyboard
   - hold **Super** and drag anywhere in a window to move it
   - drag a window to the top of the screen to choose a Moorings layout (halves, thirds, quarters)
-  - drag the bottom-right corner to resize
+  - drag any edge or corner to resize; the cursor shows the direction
 - **Shortcuts**:
   - `Alt+Tab` cycles windows
   - `Ctrl+W` or `Alt+F4` closes the front window

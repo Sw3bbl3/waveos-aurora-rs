@@ -26,6 +26,7 @@ use lumen::theme;
 
 const ROOT: [u64; 2] = [0x5EED_0000, 0x5EED_0001];
 const SHEET_ANIM: u64 = 0x5EED_00A0;
+const MENU_ANIM: u64 = 0x5EED_00A1;
 /// One wheel notch, in pixels.
 const NOTCH_PX: i32 = 48;
 const BLINK_MS: u64 = 530;
@@ -100,6 +101,10 @@ impl ScrollState {
 
     /// One animation step; true while still moving.
     fn step(&mut self) -> bool {
+        if theme::reduce_motion() {
+            self.pos = self.target;
+            return false;
+        }
         let d = self.target - self.pos;
         if abs(d) < 0.5 {
             self.pos = self.target;
@@ -115,18 +120,19 @@ struct Anim {
     from: f32,
     to: f32,
     start: u64,
+    duration: u64,
 }
 
-const ANIM_MS: u64 = 180;
+const ANIM_MS: u64 = lumen::motion::REVEAL;
 
 impl Anim {
     fn value(&self, now: u64) -> (f32, bool) {
         let t = now.saturating_sub(self.start);
-        if t >= ANIM_MS {
+        if t >= self.duration {
             return (self.to, false);
         }
         // Ease out (cubic).
-        let k = 1.0 - t as f32 / ANIM_MS as f32;
+        let k = 1.0 - t as f32 / self.duration as f32;
         let e = 1.0 - k * k * k;
         (self.from + (self.to - self.from) * e, true)
     }
@@ -194,6 +200,7 @@ pub(crate) struct Hit {
     pub menu: bool,
     pub hover: bool,
     pub help: Option<String>,
+    pub cursor: Option<u32>,
     pub drop: bool,
     pub drag: bool,
     /// Takes focus when it first appears.
@@ -368,11 +375,29 @@ impl Rt {
 
     /// An animated value heading for `target`.
     pub fn anim(&mut self, key: u64, target: f32) -> f32 {
+        self.anim_duration(key, target, ANIM_MS)
+    }
+
+    pub fn feedback(&mut self, key: u64, target: f32) -> f32 {
+        if target == 0.0 && !self.anims.contains_key(&key) {
+            return 0.0;
+        }
+        self.anims.entry(key).or_insert(Anim {
+            from: 0.0,
+            to: 0.0,
+            start: self.now,
+            duration: lumen::motion::FEEDBACK,
+        });
+        self.anim_duration(key, target, lumen::motion::FEEDBACK)
+    }
+
+    fn anim_duration(&mut self, key: u64, target: f32, duration: u64) -> f32 {
+        self.seen.insert(key);
         let now = self.now;
-        let a = self.anims.entry(key).or_insert(Anim { from: target, to: target, start: 0 });
+        let a = self.anims.entry(key).or_insert(Anim { from: target, to: target, start: 0, duration });
         if a.to != target {
             let (cur, _) = a.value(now);
-            *a = Anim { from: cur, to: target, start: now };
+            *a = Anim { from: cur, to: target, start: now, duration };
         }
         if theme::reduce_motion() {
             return target;
@@ -384,7 +409,7 @@ impl Rt {
 
     fn anim_in(&mut self, key: u64) -> f32 {
         let now = self.now;
-        self.anims.entry(key).or_insert(Anim { from: 0.0, to: 1.0, start: now });
+        self.anims.entry(key).or_insert(Anim { from: 0.0, to: 1.0, start: now, duration: ANIM_MS });
         self.anim(key, 1.0)
     }
 
@@ -884,52 +909,59 @@ impl<A: App> Host<A> {
         true
     }
 
-    fn draw_menu(&self, cv: &mut Canvas) {
+    fn draw_menu(&mut self, cv: &mut Canvas) {
+        if self.rt.menu.is_none() {
+            return;
+        }
+        let progress = self.rt.anim_in(MENU_ANIM);
+        self.rt.seen.insert(MENU_ANIM);
         let Some(menu) = &self.rt.menu else { return };
         let t = theme::current();
         let r = menu.rect;
-        cv.shadow(r, 10, 22, 8, if t.dark { 170 } else { 80 });
-        let bg = if t.dark { lumen::canvas::mix(t.window_bg, 0xFFFF_FFFF, 30) } else { 0xFFFF_FFFF };
-        cv.fill_round_rect(r, 10, bg);
-        cv.stroke_round_rect(r, 10, with_alpha(t.text, if t.dark { 0x30 } else { 0x1C }));
-        let f = theme::ui(13);
-        let fs = theme::ui(12);
-        let check = menu.entries.iter().any(|e| e.checked) as i32 * 18;
-        for (i, e) in menu.entries.iter().enumerate() {
-            let row = menu.row_rect(i);
-            if e.separator {
-                cv.fill_rect(Rect::new(row.x + 6, row.y + MENU_SEP / 2, row.w - 12, 1), t.separator);
-                continue;
+        cv.with_clip(Rect::new(r.x - 24, r.y - 24, r.w + 48, ((r.h + 48) as f32 * progress) as i32), |cv| {
+            cv.shadow(r, 10, 22, 8, if t.dark { 170 } else { 80 });
+            let bg = if t.dark { lumen::canvas::mix(t.window_bg, 0xFFFF_FFFF, 30) } else { 0xFFFF_FFFF };
+            cv.fill_round_rect(r, 10, bg);
+            cv.stroke_round_rect(r, 10, with_alpha(t.text, if t.dark { 0x30 } else { 0x1C }));
+            let f = theme::ui(13);
+            let fs = theme::ui(12);
+            let check = menu.entries.iter().any(|e| e.checked) as i32 * 18;
+            for (i, e) in menu.entries.iter().enumerate() {
+                let row = menu.row_rect(i);
+                if e.separator {
+                    cv.fill_rect(Rect::new(row.x + 6, row.y + MENU_SEP / 2, row.w - 12, 1), t.separator);
+                    continue;
+                }
+                let hot = menu.hovered == Some(i);
+                if hot {
+                    cv.fill_round_rect(row, 5, theme::accent());
+                }
+                let c = if hot {
+                    0xFFFF_FFFF
+                } else if !e.enabled {
+                    Color::TertiaryLabel.argb()
+                } else if e.destructive {
+                    Color::Red.argb()
+                } else {
+                    t.text
+                };
+                if e.checked {
+                    crate::symbol::draw(cv, crate::view::Symbol::Check, Rect::new(row.x + 6, row.y + 7, 12, 12), c);
+                }
+                cv.text_clipped(
+                    row.x + 10 + check,
+                    crate::layout::baseline(f, row.y, row.h),
+                    &e.label,
+                    f,
+                    c,
+                    row.w - 20 - check,
+                );
+                if let Some(s) = &e.shortcut {
+                    let sc = if hot { with_alpha(0xFFFF_FFFF, 0xC0) } else { t.text_secondary };
+                    cv.text(row.right() - 10 - fs.width(s), crate::layout::baseline(fs, row.y, row.h), s, fs, sc);
+                }
             }
-            let hot = menu.hovered == Some(i);
-            if hot {
-                cv.fill_round_rect(row, 5, theme::accent());
-            }
-            let c = if hot {
-                0xFFFF_FFFF
-            } else if !e.enabled {
-                Color::TertiaryLabel.argb()
-            } else if e.destructive {
-                Color::Red.argb()
-            } else {
-                t.text
-            };
-            if e.checked {
-                crate::symbol::draw(cv, crate::view::Symbol::Check, Rect::new(row.x + 6, row.y + 7, 12, 12), c);
-            }
-            cv.text_clipped(
-                row.x + 10 + check,
-                crate::layout::baseline(f, row.y, row.h),
-                &e.label,
-                f,
-                c,
-                row.w - 20 - check,
-            );
-            if let Some(s) = &e.shortcut {
-                let sc = if hot { with_alpha(0xFFFF_FFFF, 0xC0) } else { t.text_secondary };
-                cv.text(row.right() - 10 - fs.width(s), crate::layout::baseline(fs, row.y, row.h), s, fs, sc);
-            }
-        }
+        });
     }
 
     fn draw_tooltip(&mut self, cv: &mut Canvas) {
@@ -1297,6 +1329,50 @@ pub(crate) fn shortcut_label(s: Shortcut) -> String {
 }
 
 impl<A: App> aurorakit::App for Host<A> {
+    fn cursor(&self) -> u32 {
+        use corekit::abi::cursor as c;
+        let (x, y) = self.rt.pointer;
+        if let Some(menu) = &self.rt.menu {
+            return if menu.at(x, y).is_some() { c::POINTER } else { c::ARROW };
+        }
+        if x < 0 {
+            return c::ARROW;
+        }
+        if let Some(shape) = self
+            .rt
+            .hits
+            .iter()
+            .rev()
+            .find(|h| h.layer == self.rt.top_layer && h.rect.contains(x, y) && h.cursor.is_some())
+            .and_then(|h| h.cursor)
+        {
+            return shape;
+        }
+        let hit = self.rt.top_hit(x, y, |_| true);
+        match hit.map(|h| &h.kind) {
+            Some(HitKind::Field | HitKind::Editor) => c::TEXT,
+            Some(HitKind::Slider { .. }) if self.press.is_some() => c::GRABBING,
+            Some(HitKind::Slider { .. }) => c::GRAB,
+            Some(
+                HitKind::Button { .. }
+                | HitKind::Toggle(_)
+                | HitKind::Stepper { .. }
+                | HitKind::Segmented { .. }
+                | HitKind::PickerMenu
+                | HitKind::PickerInline { .. },
+            ) => c::POINTER,
+            _ if hit.is_some_and(|h| h.drag) => {
+                if self.press.is_some() {
+                    c::GRABBING
+                } else {
+                    c::GRAB
+                }
+            }
+            _ if hit.is_some_and(|h| h.tap) => c::POINTER,
+            _ => c::ARROW,
+        }
+    }
+
     fn materials(&self, _area: Rect) -> Vec<corekit::abi::MaterialRegion> {
         self.materials
             .iter()
@@ -1314,6 +1390,9 @@ impl<A: App> aurorakit::App for Host<A> {
 
     fn resizable(&self) -> bool {
         self.app.resizable()
+    }
+    fn min_size(&self) -> (i32, i32) {
+        self.app.min_size()
     }
 
     fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &aurorakit::Env) {
@@ -1619,6 +1698,7 @@ impl<A: App> aurorakit::App for Host<A> {
                     menu: false,
                     hover: false,
                     help: None,
+                    cursor: None,
                     drop: false,
                     drag: false,
                     appear: false,
@@ -1707,6 +1787,7 @@ impl<A: App> aurorakit::App for Host<A> {
                 menu: false,
                 hover: false,
                 help: None,
+                cursor: None,
                 drop: false,
                 drag: false,
                 appear: false,

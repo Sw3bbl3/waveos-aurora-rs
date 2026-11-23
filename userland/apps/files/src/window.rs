@@ -301,16 +301,16 @@ impl Files {
         ScrollView::new(v.padding_insets(Insets { top: 10, leading: 10, bottom: 10, trailing: 10 }).fill_width())
     }
 
-    fn toolbar(&self) -> View<'_, Msg> {
+    fn toolbar(&self, width: i32) -> View<'_, Msg> {
         let tab = &self.tabs[self.active];
         let mut bar = vec![
             Button::symbol(Symbol::ChevronLeft).action(Msg::Back).disabled(!tab.can_go_back()).help("Back (Alt+Left)"),
-            Text::new(tab.title()).style(TextStyle::Headline),
+            Text::new(tab.title()).style(TextStyle::Headline).hidden(width < 520),
             Spacer::new(),
         ];
         if tab.in_trash() {
             bar.push(
-                Button::new("Empty Trash…")
+                Button::new(if width < 520 { "Empty…" } else { "Empty Trash…" })
                     .action(Msg::Action(Action::EmptyTrash))
                     .button_style(ButtonStyle::Destructive)
                     .control_size(ControlSize::Small)
@@ -323,11 +323,15 @@ impl Files {
                 .help("View as a grid or as a list"),
         );
         bar.push(
-            TextField::search(format!("Seek in {}", tab.title()), tab.query.clone())
+            TextField::search(format!("Search {}", tab.title()), tab.query.clone())
                 .on_change(Msg::Query)
                 .shortcut(Shortcut::ctrl('f'))
                 .id(("search", self.active))
-                .width(200),
+                .width(if width < 520 {
+                    (width - 220 - if tab.in_trash() { 70 } else { 0 }).clamp(100, 180)
+                } else {
+                    200
+                }),
         );
         toolbar(bar)
     }
@@ -798,6 +802,10 @@ impl App for Files {
         self.tabs[self.active].title()
     }
 
+    fn min_size(&self) -> (i32, i32) {
+        (580, 360)
+    }
+
     fn size(&self) -> (i32, i32) {
         (1140, 728)
     }
@@ -1058,9 +1066,17 @@ impl App for Files {
     }
 
     fn view(&self, env: &Env) -> View<'_, Msg> {
+        let content = self.content(env);
+        let content = if self.closing {
+            content.cursor(cursor::WAIT)
+        } else if self.transfers.lock().busy() || self.worker.lock().is_some() || self.tabs[self.active].busy() {
+            content.cursor(cursor::PROGRESS)
+        } else {
+            content
+        };
         let main = VStack::new()
-            .push(self.toolbar())
-            .push(self.content(env))
+            .push(self.toolbar(env.size.0 - SIDEBAR_W - self.info_width(env) - 1))
+            .push(content)
             .push(Divider::new())
             .push(self.status_bar())
             .spacing(0)

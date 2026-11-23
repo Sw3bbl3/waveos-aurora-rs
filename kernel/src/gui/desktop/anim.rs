@@ -22,6 +22,7 @@ pub enum Kind {
 }
 
 pub struct Ghost {
+    owner: u32,
     kind: Kind,
     start: u64,
     duration: u64,
@@ -105,8 +106,9 @@ impl Desktop {
             }
         }
         // Replace an animation already running for this window.
-        self.ghosts.retain(|g| g.window != Some(id));
+        self.ghosts.retain(|g| g.owner != id);
         self.ghosts.push(Ghost {
+            owner: id,
             kind,
             start: self.now_ms,
             duration,
@@ -127,7 +129,7 @@ impl Desktop {
     pub(super) fn animate_open(&mut self, id: u32) {
         let Some(i) = self.index_of(id) else { return };
         let r = self.windows[i].rect;
-        self.add_ghost(Kind::Open, id, scaled(r, 920), r, (0, 255), 210);
+        self.add_ghost(Kind::Open, id, scaled(r, 920), r, (0, 255), lumen::motion::TRANSITION);
     }
 
     /// Call before removing the window.
@@ -137,20 +139,20 @@ impl Desktop {
         if self.windows[i].minimized || self.windows[i].animating {
             return;
         }
-        self.add_ghost(Kind::Close, id, r, scaled(r, 930), (255, 0), 170);
+        self.add_ghost(Kind::Close, id, r, scaled(r, 930), (255, 0), lumen::motion::REVEAL);
     }
 
     /// Call before hiding the window; `target` is its dock icon.
     pub(super) fn animate_minimize(&mut self, id: u32, target: Rect) {
         let Some(i) = self.index_of(id) else { return };
         let r = self.windows[i].rect;
-        self.add_ghost(Kind::Minimize, id, r, target, (255, 40), 300);
+        self.add_ghost(Kind::Minimize, id, r, target, (255, 40), lumen::motion::TRANSITION);
     }
 
     pub(super) fn animate_restore(&mut self, id: u32, from: Rect) {
         let Some(i) = self.index_of(id) else { return };
         let r = self.windows[i].rect;
-        self.add_ghost(Kind::Restore, id, from, r, (60, 255), 280);
+        self.add_ghost(Kind::Restore, id, from, r, (60, 255), lumen::motion::TRANSITION);
     }
 
     /// Call after the window got its new rectangle; `old` is where it was.
@@ -167,11 +169,12 @@ impl Desktop {
         self.windows[i].rect = new;
         let Some((pixels, w, h)) = snap else { return };
         self.windows[i].animating = true;
-        self.ghosts.retain(|g| g.window != Some(id));
+        self.ghosts.retain(|g| g.owner != id);
         self.ghosts.push(Ghost {
+            owner: id,
             kind: Kind::Zoom,
             start: self.now_ms,
-            duration: 220,
+            duration: lumen::motion::TRANSITION,
             from: old,
             to: new,
             from_alpha: 255,
@@ -191,7 +194,11 @@ impl Desktop {
         let mut finished = Vec::new();
         let mut damage = Vec::new();
         for (k, g) in self.ghosts.iter_mut().enumerate() {
-            let t = ((now.saturating_sub(g.start)) * 1000 / g.duration.max(1)) as i64;
+            let t = if theme::reduce_motion() {
+                1000
+            } else {
+                ((now.saturating_sub(g.start)) * 1000 / g.duration.max(1)) as i64
+            };
             let r = lerp_rect(g.from, g.to, ease(g.kind, t));
             damage.push(halo(g.last.union(&r)));
             g.last = r;

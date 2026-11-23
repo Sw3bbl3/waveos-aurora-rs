@@ -63,11 +63,12 @@ impl Icon {
             Icon::Clock => "clock",
             Icon::Activity => "pulse",
             Icon::Nebula => "nebula",
+            Icon::Voyage => "voyage",
             Icon::Trash | Icon::TrashFull => "trash",
             Icon::Studio => "studio",
             Icon::Installer => "installer",
             Icon::Doom => "doom",
-            Icon::Folder | Icon::Document | Icon::Picture | Icon::Firefox | Icon::Voyage => return None,
+            Icon::Folder | Icon::Document | Icon::Picture | Icon::Firefox => return None,
         })
     }
 }

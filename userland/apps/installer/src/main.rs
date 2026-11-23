@@ -313,6 +313,10 @@ impl App for Installer {
     fn title(&self) -> String {
         "Installer".into()
     }
+    fn min_size(&self) -> (i32, i32) {
+        (560, 360)
+    }
+
     fn size(&self) -> (i32, i32) {
         (940, 620)
     }

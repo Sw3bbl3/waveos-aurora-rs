@@ -21,7 +21,10 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
+#include "../libs/linux/include/waveos.h"
 
 static int failures;
 
@@ -194,6 +197,25 @@ static void tcp(void) {
     printf("PASS TCP over loopback\n");
 }
 
+static void failed_connect(void) {
+    int c = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    struct sockaddr_in a = {AF_INET, htons(40125), {htonl(INADDR_LOOPBACK)}};
+    int rc = connect(c, (void *)&a, sizeof a);
+    CHECK(rc < 0 && (errno == EINPROGRESS || errno == ECONNREFUSED), "connect to a closed port");
+    struct pollfd fd = {c, 0, 0};
+    CHECK(poll(&fd, 1, 5000) == 1 && (fd.revents & POLLERR), "POLLERR without requested events");
+    int ep = epoll_create1(0);
+    struct epoll_event ev = {EPOLLIN, {.fd = c}}, out;
+    CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, c, &ev) == 0, "watch failed socket");
+    CHECK(epoll_wait(ep, &out, 1, 5000) == 1 && (out.events & EPOLLERR), "EPOLLERR on failed connect");
+    int error = 0; socklen_t size = sizeof error;
+    CHECK(getsockopt(c, SOL_SOCKET, SO_ERROR, &error, &size) == 0 && error == ECONNREFUSED, "pending refusal");
+    error = -1;
+    CHECK(getsockopt(c, SOL_SOCKET, SO_ERROR, &error, &size) == 0 && error == 0, "SO_ERROR clears after reading");
+    close(ep); close(c);
+    printf("PASS failed TCP connect, poll/epoll errors and SO_ERROR consumption\n");
+}
+
 static void udp(void) {
     int a = socket(AF_INET, SOCK_DGRAM, 0), b = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in addr = {AF_INET, htons(40124), {htonl(INADDR_LOOPBACK)}};
@@ -211,6 +233,18 @@ static void udp(void) {
     freeaddrinfo(res);
     close(a);
     close(b);
+    int dual = socket(AF_INET6, SOCK_DGRAM, 0);
+    CHECK(dual >= 0, "IPv6 UDP socket");
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    CHECK(connect(dual, (void *)&addr, sizeof addr) == 0, "dual-stack UDP connect to IPv4");
+    struct sockaddr_in6 source; socklen_t source_len = sizeof source;
+    CHECK(getsockname(dual, (void *)&source, &source_len) == 0 && source.sin6_family == AF_INET6
+          && IN6_IS_ADDR_V4MAPPED(&source.sin6_addr)
+          && memcmp(&source.sin6_addr.s6_addr[12], &addr.sin_addr, 4) == 0,
+          "UDP getsockname returns the selected mapped source (glibc address sorting)");
+    struct sockaddr unspec = {.sa_family = AF_UNSPEC};
+    CHECK(connect(dual, &unspec, sizeof unspec) == 0, "disconnect UDP with AF_UNSPEC");
+    close(dual);
     printf("PASS UDP and name lookup\n");
 }
 
@@ -289,14 +323,29 @@ static void shared_memory(void) {
     printf("PASS shared memory\n");
 }
 
+static void clocks_agree(void) {
+    struct timespec rt, raw;
+    CHECK(clock_gettime(CLOCK_REALTIME, &rt) == 0, "libc realtime");
+    CHECK(syscall(SYS_clock_gettime, CLOCK_REALTIME, &raw) == 0, "syscall realtime");
+    long native = wave_call(WAVE_UNIX_MS, 0, 0, 0, 0, 0);
+    long libc_ms = rt.tv_sec * 1000L + rt.tv_nsec / 1000000;
+    long raw_ms = raw.tv_sec * 1000L + raw.tv_nsec / 1000000;
+    CHECK(native > 1600000000000L, "native UTC available");
+    CHECK(labs(native - libc_ms) < 1000 && labs(native - raw_ms) < 1000,
+          "native, libc and syscall UTC agree");
+    printf("PASS UTC clocks\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     mkdir("/tmp", 0755);
     pairs_and_rights();
     named();
     tcp();
+    failed_connect();
     udp();
     shared_memory();
+    clocks_agree();
     if (failures) {
         printf("net-test: %d failures\n", failures);
         return 1;

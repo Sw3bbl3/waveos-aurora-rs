@@ -150,6 +150,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             };
             user::put(a[0], &dt).map(|_| 0)
         }
+        nr::UNIX_MS => Ok(crate::compat::linux::realtime_ns() / 1_000_000),
         nr::SYNC => fs::try_sync_all().map(|_| 0),
         nr::SYNC_PATH => {
             let path = user::path(a[0], a[1])?;
@@ -236,6 +237,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
                 second: d.second,
             };
             time::set_wall_clock(&rd);
+            crate::compat::linux::vdso::publish();
             Ok(0)
         }
         nr::DISPLAY_MODES => {

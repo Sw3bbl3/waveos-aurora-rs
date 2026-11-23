@@ -13,6 +13,7 @@ const MENU_ITEM_H: i32 = 26;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
     About,
+    Tour,
     Settings,
     Launcher,
     Power,
@@ -94,9 +95,10 @@ impl Desktop {
             MenuKind::Aurora => alloc::vec![
                 item("About This Computer", "", MenuAction::About),
                 item("Settings…", "", MenuAction::Settings),
-                item("Learn — WaveOS Guide", "", MenuAction::Open(AppKind::Learn)),
+                item("Help — WaveOS Guide", "", MenuAction::Open(AppKind::Learn)),
+                item("Take a Tour…", "", MenuAction::Tour),
                 SEPARATOR,
-                item("Shoal", "Super", MenuAction::Launcher),
+                item("Apps — Shoal", "Super", MenuAction::Launcher),
                 SEPARATOR,
                 item("Lock Screen", "Super L", MenuAction::Lock),
                 item("Sleep", "", MenuAction::Sleep),
@@ -104,8 +106,8 @@ impl Desktop {
                 item("Shut Down…", "", MenuAction::Power),
             ],
             MenuKind::App if self.focused().is_some() => alloc::vec![
-                item("Shrink", "Super ↓", MenuAction::Minimize),
-                item("Expand", "Super ↑", MenuAction::Zoom),
+                item("Minimize", "Super ↓", MenuAction::Minimize),
+                item("Maximize / Restore", "Super ↑", MenuAction::Zoom),
                 SEPARATOR,
                 item("Close Window", "Ctrl+W", MenuAction::Close),
             ],
@@ -117,11 +119,15 @@ impl Desktop {
         };
         self.menu = Some(Menu { kind, x, items, hover: None });
         let r = self.menu.as_ref().unwrap().rect();
+        self.begin_reveal(r.inset(-24));
         self.damage(r.inset(-24));
         self.damage(Rect::new(0, 0, self.w, MENUBAR_H));
     }
 
     pub(super) fn close_menu(&mut self) {
+        if let Some(m) = &self.menu {
+            self.begin_reveal(m.rect().inset(-24));
+        }
         if let Some(m) = self.menu.take() {
             self.damage(m.rect().inset(-24));
             self.damage(Rect::new(0, 0, self.w, MENUBAR_H));
@@ -131,6 +137,7 @@ impl Desktop {
     fn run_menu_action(&mut self, a: MenuAction) {
         let focused = self.focused_id();
         match a {
+            MenuAction::Tour => self.start_tour(),
             MenuAction::About => self.open(AppKind::About),
             MenuAction::Settings => self.open(AppKind::Settings),
             MenuAction::Launcher => self.toggle_launcher(),

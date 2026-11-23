@@ -47,6 +47,7 @@ pub struct Client {
     pub title: String,
     pub resizable: bool,
     pub initial: (i32, i32),
+    minimum: (i32, i32),
     surface: Surface,
     events: VecDeque<Event>,
     /// The pointer's shape over the window (`aurora_abi::cursor`).
@@ -66,6 +67,7 @@ pub enum Command {
     SetDark(bool),
     SetWallpaper(u8),
     SetWallpaperImage(String),
+    StartTour,
     Shutdown,
     Reboot,
     /// An app called `drag_start` (the payload waits in `dnd`).
@@ -208,6 +210,10 @@ pub fn info(id: u32) -> Option<(u32, String, bool, (i32, i32))> {
     CLIENTS.lock().get(&id).map(|c| (c.pid, c.title.clone(), c.resizable, c.initial))
 }
 
+pub fn minimum(id: u32) -> (i32, i32) {
+    CLIENTS.lock().get(&id).map_or((240, 160), |c| c.minimum)
+}
+
 /// (window id, owning pid, title) of every client window.
 pub fn windows() -> Vec<(u32, u32, String)> {
     CLIENTS.lock().iter().map(|(&id, c)| (id, c.pid, c.title.clone())).collect()
@@ -337,7 +343,16 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
     }
     match n {
         nr::WIN_CREATE => {
-            let (w, h) = clamp_size(a[0], a[1]);
+            let minimum = if a[4] as usize & aurora_abi::win::MINIMUM_SIZE != 0 {
+                let (w, h) = ((a[5] >> 32) as u32, a[5] as u32);
+                if !(120..=8192).contains(&w) || !(80..=8192).contains(&h) {
+                    return Err(EINVAL);
+                }
+                (w as i32, h as i32)
+            } else {
+                (240, 160)
+            };
+            let (w, h) = clamp_size(a[0].max(minimum.0 as u64), a[1].max(minimum.1 as u64));
             let title = user_str(a[2], a[3])?;
             if CLIENTS.lock().values().filter(|c| c.pid == pid).count() >= 8 {
                 return Err(EMFILE);
@@ -352,6 +367,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
                     title,
                     resizable: a[4] as usize & aurora_abi::win::RESIZABLE != 0,
                     initial: (w as i32, h as i32),
+                    minimum,
                     surface,
                     events: VecDeque::new(),
                     cursor: aurora_abi::cursor::ARROW,
@@ -433,7 +449,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
         nr::WIN_SET_CURSOR => {
             let id = a[0] as u32;
             owned(id, pid)?;
-            if a[1] > aurora_abi::cursor::HIDDEN as u64 {
+            if a[1] > aurora_abi::cursor::MAX as u64 {
                 return Err(EINVAL);
             }
             if let Some(c) = CLIENTS.lock().get_mut(&id) {
@@ -488,6 +504,13 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
 pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
     use aurora_abi::desktop::*;
     match req {
+        START_TOUR => {
+            if ptr != 0 || len != 0 {
+                return Err(EINVAL);
+            }
+            send(Command::StartTour);
+            Ok(0)
+        }
         OPEN_APP | OPEN_FILE => {
             let raw = user_str(ptr, len)?;
             let cwd = proc::current().map(|p| p.cwd.lock().clone()).unwrap_or_else(|| String::from("/"));

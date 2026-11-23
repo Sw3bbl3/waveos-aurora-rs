@@ -181,7 +181,7 @@ impl Desktop {
                 let card = self.setup_card();
                 let col = (card.w - 80 - 14) / 2;
                 let (x0, x1) = (card.x + 40, card.x + 40 + col + 14);
-                let y = card.y + 290;
+                let y = card.y + 290 - (624 - card.h).clamp(0, 64);
                 v.push((Hit::Field(0), Rect::new(x0, y, col, 36)));
                 v.push((Hit::Field(1), Rect::new(x1, y, col, 36)));
                 v.push((Hit::Field(2), Rect::new(x0, y + 70, col, 36)));
@@ -199,7 +199,12 @@ impl Desktop {
                 for i in 0..wallpaper::NAMES.len() as u8 {
                     v.push((
                         Hit::Wallpaper(i),
-                        Rect::new(card.x + 40 + i as i32 * (tw + 12), card.y + 296, tw, tw * 5 / 8),
+                        Rect::new(
+                            card.x + 40 + (i as i32 % 3) * (tw + 12),
+                            card.y + 270 + (i as i32 / 3) * (tw * 5 / 8 + 30),
+                            tw,
+                            tw * 5 / 8,
+                        ),
                     ));
                 }
                 v.push((Hit::Continue, Rect::new(card.right() - 40 - 112, card.bottom() - 30 - 34, 112, 34)));
@@ -219,7 +224,7 @@ impl Desktop {
 
     fn setup_card(&self) -> Rect {
         let step = self.shore.as_ref().map_or(0, |s| s.step);
-        let h = if step == 0 { 624 } else { 520 };
+        let h = if step == 0 { 624 } else { 600 };
         let h = h.min(self.h - 40);
         Rect::new((self.w - CARD_W) / 2, (self.h - h) / 2, CARD_W, h)
     }
@@ -401,7 +406,8 @@ impl Desktop {
 
     /// True while the password field shakes.
     pub(super) fn shore_moving(&self) -> bool {
-        self.shore.as_ref().is_some_and(|s| s.shake_at.is_some_and(|t| self.now_ms < t + SHAKE_MS))
+        !theme::reduce_motion()
+            && self.shore.as_ref().is_some_and(|s| s.shake_at.is_some_and(|t| self.now_ms < t + SHAKE_MS))
     }
 
     // --------------------------------------------------------- painting
@@ -416,6 +422,9 @@ impl Desktop {
     }
 
     fn shake(&self) -> i32 {
+        if theme::reduce_motion() {
+            return 0;
+        }
         let Some(t) = self.shore.as_ref().and_then(|s| s.shake_at) else { return 0 };
         let dt = self.now_ms.saturating_sub(t);
         if dt >= SHAKE_MS {
@@ -610,7 +619,9 @@ impl Desktop {
 
         if s.step == 0 {
             // Picture circle with the initials typed so far.
-            let av = Rect::new(card.x + card.w / 2 - 42, card.y + 66, 84, 84);
+            let lift = (624 - card.h).clamp(0, 64);
+            let diameter = if lift > 0 { 64 } else { 84 };
+            let av = Rect::new(card.x + card.w / 2 - diameter / 2, card.y + 66, diameter, diameter);
             cv.fill_round_rect_dgradient(av, 42, 0xFF4A_63FF, 0xFF8D_2CF0);
             let initials = account::initials(&s.fields[0].text);
             cv.text_centered(
@@ -619,13 +630,13 @@ impl Desktop {
                 theme::display(30),
                 0xFFFF_FFFF,
             );
-            center(cv, card.y + 190, "Make this computer yours", theme::display(22), t.text);
+            center(cv, card.y + 190 - lift / 2, "Make this computer yours", theme::display(22), t.text);
             let lines = [
                 "One account keeps your files, settings and wallpaper. You'll use",
                 "the password to log in and to approve changes.",
             ];
             for (i, l) in lines.iter().enumerate() {
-                center(cv, card.y + 216 + i as i32 * 19, l, theme::ui(13), t.text_secondary);
+                center(cv, card.y + 216 - lift / 2 + i as i32 * 19, l, theme::ui(13), t.text_secondary);
             }
             for i in 0..5 {
                 let r = rect(Hit::Field(i));
@@ -686,7 +697,7 @@ impl Desktop {
                 cv.text(
                     r.x + 18,
                     r.y + 72,
-                    if dark { "Navy glass, night pictures" } else { "Paper glass, day pictures" },
+                    if dark { "Quiet surfaces, deep contrast" } else { "Clear surfaces, bright appearance" },
                     theme::ui(11),
                     mix(ink, if dark { 0xFF11_1527 } else { 0xFFFB_FCFF }, 90),
                 );
@@ -698,7 +709,8 @@ impl Desktop {
                 s.thumbs = (0..wallpaper::NAMES.len() as u8)
                     .map(|i| {
                         wallpaper::file(i, dark)
-                            .and_then(|f| crate::fs::read_all(f).ok())
+                            .map(|f| f.replace("/System/Wallpapers/", "/System/Wallpapers/Thumbnails/"))
+                            .and_then(|f| crate::fs::read_all(&f).ok())
                             .and_then(|d| aurora_image::decode(&d).ok())
                             .map(|img| img.thumbnail(260, 160))
                     })

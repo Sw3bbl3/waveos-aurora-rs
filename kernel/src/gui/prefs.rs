@@ -59,6 +59,7 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         return Err(EINVAL);
     }
     match key {
+        "utc_offset" if !value.parse::<i64>().is_ok_and(|v| (-720..=840).contains(&v)) => return Err(EINVAL),
         pref::GLASS if !value.parse::<u8>().is_ok_and(|v| v <= 100) => return Err(EINVAL),
         pref::DOCK_SIZE if !value.parse::<u8>().is_ok_and(|v| (32..=64).contains(&v)) => return Err(EINVAL),
         pref::DESKTOP_WATER
@@ -80,7 +81,24 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         }
         _ => {}
     }
+    let previous_zone = (key == "utc_offset").then(|| settings::get_int("utc_offset", 0));
     settings::try_set(key, value)?;
+    if let Some(previous) = previous_zone {
+        // The RTC stores local time; changing its presentation zone must not
+        // change the UTC instant used by TLS, cookies or Linux applications.
+        let delta = (value.parse::<i64>().unwrap() - previous) * 60;
+        let current = crate::time::wall_seconds() as i64;
+        let d = aurora_abi::calendar::from_seconds_since_2000((current + delta).max(0) as u64);
+        crate::time::set_wall_clock(&crate::drivers::rtc::DateTime {
+            year: d.year,
+            month: d.month,
+            day: d.day,
+            hour: d.hour,
+            minute: d.minute,
+            second: d.second,
+        });
+        crate::compat::linux::vdso::publish();
+    }
     server::command(Command::Pref(String::from(key)));
     Ok(())
 }

@@ -29,7 +29,7 @@ WaveUI (`userland/waveui`) is a declarative framework in the style of SwiftUI an
 
 Lumen materials sample the scene already drawn beneath the surface, reuse downsampled blur and finished-material buffers, and invalidate when the backdrop changes. Moving windows use coarser sampling and restore stationary quality on release. Cursor-only frames reuse the completed scene. For correctness, other scene damage currently rebuilds the complete scene; fine-grained blur dependency regions remain optimization work.
 
-Settings includes search, Desktop & Dock, and Accessibility pages. Glass intensity, dock size/auto-hide, Reduce Transparency, Reduce Motion, and Increase Contrast persist and apply live. Settings, like every built-in app, is written with WaveUI. Windows support edge/corner resizing and left/right snapping. Control Center shares the preference service with Settings.
+Settings includes search, Desktop & Dock, and Accessibility pages. Glass intensity, dock size/auto-hide, Reduce Transparency, Reduce Motion, and Increase Contrast persist and apply live. Settings, like every built-in app, is written with WaveUI. Windows reserve a 34-point compositor control strip above the client content, with animated hover controls and keyboard access via Alt+Space. All edges and corners share resize hit-testing and directional pointers. Client content sizes, drawing coordinates, and input coordinates exclude the strip. Windows also support left/right snapping. Control Center shares the preference service with Settings.
 
 WaveUI provides text, images and system symbols, buttons, toggles, sliders, steppers, pickers, text fields and editors, stacks, grids, lazy lists, scroll views, split views, sections, toolbars, menus, alerts, sheets and canvases. App glass regions opt in through a validated compositor API; existing apps remain opaque by default.
 
@@ -93,3 +93,13 @@ Use `cargo xtask run --developer` for a **separate** persistent developer disk (
 Interactive macOS launches request `cocoa,full-grab=on,left-command-key=on,swap-opt-cmd=off`. Headless and Linux routing are retained. Use `--no-keyboard-capture` to disable full capture. QEMU needs macOS Accessibility permission for its event tap; capture errors remain visible on stderr. Click inside QEMU to capture, and press **Control+Option+G** to release.
 
 Grant permission in **System Settings → Privacy & Security → Accessibility** when macOS requests it, then restart QEMU. The launch flags alone do not prove host shortcuts are captured: verify Command+Space and Command+Tab through actual macOS input. QMP-generated guest keys bypass that host path. See the [QEMU Cocoa display documentation](https://qemu-project.gitlab.io/qemu/system/invocation.html).
+
+## UI assets and introduction
+
+`waveui::cursor` exposes additive pointer shapes and `.cursor(shape)` overrides feedback for a view. The runtime selects text, link, and drag shapes automatically and AuroraKit sends changed shapes through `WIN_SET_CURSOR`. `Request::StartTour` and `corekit::process::desktop::start_tour()` request the optional shell-owned introduction (desktop request 15; existing requests retain their values).
+
+Use `corekit::time::uptime_ms()` for durations and `unix_ms()` for UTC timestamps. Additive syscall `UNIX_MS` (83) supplies the corrected wall clock; changing the presentation UTC offset preserves the instant used by TLS and cookies. Existing syscall numbers remain unchanged. Linux C bindings expose the new clock and cursor values in `libs/linux/include/waveos.h`. Native network caches follow interface/address/router/resolver changes; `corekit::diagnostics::network(url)` performs an explicit layered check and does not start background Internet requests.
+
+The photographic masters and provenance are in `assets/wallpaper-sources`. Run `python tools/prepare_wallpapers.py` with Pillow installed to reproduce offline runtime images and thumbnails. Build does not download media. App icon SVG sources are in `assets/icon-sources`; `tools/design_icons.py` reproduces them, and resvg-py can render the committed PNGs.
+
+`App::min_size()` declares the minimum useful content size. AuroraKit advertises `win::MINIMUM_SIZE` in `WIN_CREATE` and packs width/height in its sixth argument. The compositor adds its own 34-point strip. Existing callers without the flag retain the legacy minimum and their sixth argument is ignored.

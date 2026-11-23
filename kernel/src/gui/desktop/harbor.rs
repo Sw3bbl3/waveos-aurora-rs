@@ -170,6 +170,9 @@ impl Desktop {
     }
 
     pub(super) fn harbor_moving(&self) -> bool {
+        if theme::reduce_motion() {
+            return false;
+        }
         self.now_ms < self.harbor.changed_at + SLIDE_MS + 16
             || self.launching.iter().any(|&(_, t)| self.now_ms < t + 3000)
     }
@@ -388,7 +391,7 @@ impl Desktop {
             };
             let base = items[idx].1;
             let launching = matches!(item, DockItem::App(k) if self.launching.iter().any(|&(lk, at)| lk == *k && self.now_ms < at + 3000));
-            if launching {
+            if launching && !theme::reduce_motion() {
                 // Two rings spread from the icon while the app starts.
                 let (cx, cy) = base.center();
                 for k in 0..2u64 {
@@ -451,7 +454,7 @@ impl Desktop {
                         external = self.windows.iter().find(|w| w.id == *id).map(|w| w.app.title()).unwrap_or_default();
                         external.as_str()
                     }
-                    DockItem::Launcher => "Shoal",
+                    DockItem::Launcher => "Apps — Shoal",
                     DockItem::App(k) => apps::info(*k).name,
                     DockItem::Stack(Stack::Downloads) => "Downloads",
                     DockItem::Stack(Stack::Documents) => "Documents",

@@ -695,6 +695,10 @@ impl App for Studio {
         format!("Studio{}", if self.dirty() { " — Edited" } else { "" })
     }
 
+    fn min_size(&self) -> (i32, i32) {
+        (600, 360)
+    }
+
     fn size(&self) -> (i32, i32) {
         (1180, 740)
     }

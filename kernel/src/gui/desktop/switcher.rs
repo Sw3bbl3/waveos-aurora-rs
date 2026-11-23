@@ -47,7 +47,15 @@ impl Desktop {
             })
             .collect();
         self.switcher = Some(Switcher::new(ids, reverse));
+        self.begin_reveal(self.switcher_rect().inset(-30));
         self.damage_all();
+    }
+
+    /// The switcher's panel with its shadow: what repaints when anything
+    /// near it changes.
+    pub(super) fn switcher_glass(&self) -> Rect {
+        let r = self.switcher_rect();
+        Rect::new(r.x - 34, r.y - 34, r.w + 68, r.h + 34 + 34 + 12)
     }
 
     fn switcher_rect(&self) -> Rect {
@@ -71,6 +79,7 @@ impl Desktop {
     }
 
     fn finish_switcher(&mut self, activate: bool) {
+        self.begin_reveal(self.switcher_rect().inset(-30));
         let selected = self.switcher.take().and_then(|s| s.current());
         self.glide.clear();
         if activate {

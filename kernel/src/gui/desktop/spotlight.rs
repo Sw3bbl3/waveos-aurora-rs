@@ -274,6 +274,7 @@ impl Desktop {
 
     pub(super) fn toggle_spotlight(&mut self) {
         let a = self.spotlight_area();
+        self.begin_reveal(a);
         self.damage(a);
         if self.spotlight.take().is_none() {
             if self.launcher.is_some() {
@@ -413,7 +414,7 @@ impl Desktop {
         let f = theme::ui(22);
         let base = r.y + (FIELD_H + f.ascent as i32 + f.descent as i32) / 2;
         if s.query.is_empty() {
-            cv.text(r.x + 56, base, "Seek apps, files and settings", f, t.text_secondary);
+            cv.text(r.x + 56, base, "Search apps, files, settings, or calculate", f, t.text_secondary);
         } else {
             let w = cv.text(r.x + 56, base, &s.query, f, t.text);
             cv.fill_rect(Rect::new(r.x + 58 + w, r.y + 14, 2, FIELD_H - 28), theme::accent());

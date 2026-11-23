@@ -23,7 +23,11 @@ typedef long gssize;
 typedef void (*GCallback)(void);
 typedef struct _GObject GObject;
 typedef struct _GParamSpec GParamSpec;
-typedef struct _GError GError;
+typedef struct _GError { guint domain; gint code; gchar *message; } GError;
+typedef long long gint64;
+typedef unsigned long long guint64;
+typedef struct _GAsyncResult GAsyncResult;
+typedef struct _JSCValue JSCValue;
 
 #define TRUE 1
 #define FALSE 0
@@ -32,8 +36,15 @@ typedef struct _GError GError;
 gulong g_signal_connect_data(gpointer instance, const gchar *signal, GCallback handler, gpointer data,
                              gpointer destroy, int flags);
 #define g_signal_connect(i, s, h, d) g_signal_connect_data((i), (s), G_CALLBACK(h), (d), NULL, 0)
+const gchar *g_param_spec_get_name(GParamSpec *spec);
 gpointer g_object_new(GType type, const gchar *first_property, ...);
 void g_object_set_data(gpointer object, const gchar *key, gpointer data);
+void g_object_set_data_full(gpointer object, const gchar *key, gpointer data, void (*destroy)(gpointer));
+guint g_signal_handlers_disconnect_matched(gpointer instance, guint mask, guint id, guint detail,
+                                         gpointer closure, gpointer func, gpointer data);
+gint64 g_get_monotonic_time(void);
+gchar *g_markup_escape_text(const gchar *text, gssize length);
+void g_error_free(GError *error);
 gpointer g_object_get_data(gpointer object, const gchar *key);
 gpointer g_object_ref(gpointer object);
 void g_object_unref(gpointer object);
@@ -101,6 +112,10 @@ void gtk_box_pack_start(GtkBox *box, GtkWidget *child, gboolean expand, gboolean
 void gtk_box_pack_end(GtkBox *box, GtkWidget *child, gboolean expand, gboolean fill, guint padding);
 GtkWidget *gtk_button_new_from_icon_name(const gchar *icon_name, int size);
 void gtk_button_set_relief(GtkButton *button, int relief);
+void gtk_button_set_label(GtkButton *button, const gchar *label);
+void gtk_button_set_image(GtkButton *button, GtkWidget *image);
+GtkWidget *gtk_button_new_with_label(const gchar *label);
+GtkWidget *gtk_image_new_from_icon_name(const gchar *icon, int size);
 GtkWidget *gtk_entry_new(void);
 const gchar *gtk_entry_get_text(GtkEntry *entry);
 void gtk_entry_set_text(GtkEntry *entry, const gchar *text);
@@ -170,6 +185,9 @@ GType webkit_web_view_get_type(void);
 WebKitWebsiteDataManager *webkit_website_data_manager_new(const gchar *first_option_name, ...);
 WebKitWebContext *webkit_web_context_new_with_website_data_manager(WebKitWebsiteDataManager *manager);
 void webkit_web_context_set_cache_model(WebKitWebContext *context, int cache_model);
+void webkit_web_context_set_tls_errors_policy(WebKitWebContext *context, int policy);
+guint webkit_network_error_quark(void);
+guint webkit_policy_error_quark(void);
 WebKitCookieManager *webkit_website_data_manager_get_cookie_manager(WebKitWebsiteDataManager *manager);
 void webkit_cookie_manager_set_persistent_storage(WebKitCookieManager *manager, const gchar *filename, int storage);
 WebKitSettings *webkit_settings_new(void);
@@ -184,6 +202,13 @@ gboolean webkit_web_view_can_go_back(WebKitWebView *web_view);
 gboolean webkit_web_view_can_go_forward(WebKitWebView *web_view);
 void webkit_web_view_reload(WebKitWebView *web_view);
 void webkit_web_view_stop_loading(WebKitWebView *web_view);
+void webkit_web_view_try_close(WebKitWebView *web_view);
+void webkit_web_view_load_alternate_html(WebKitWebView *view, const gchar *html, const gchar *uri, const gchar *base);
+void webkit_web_view_evaluate_javascript(WebKitWebView *view, const gchar *script, gssize length,
+                                       const gchar *world, const gchar *uri, gpointer cancellable,
+                                       void (*callback)(GObject *, GAsyncResult *, gpointer), gpointer data);
+JSCValue *webkit_web_view_evaluate_javascript_finish(WebKitWebView *view, GAsyncResult *result, GError **error);
+gchar *jsc_value_to_string(JSCValue *value);
 gboolean webkit_web_view_is_loading(WebKitWebView *web_view);
 const gchar *webkit_web_view_get_uri(WebKitWebView *web_view);
 const gchar *webkit_web_view_get_title(WebKitWebView *web_view);
@@ -197,5 +222,9 @@ void webkit_find_controller_search_next(WebKitFindController *find_controller);
 void webkit_find_controller_search_previous(WebKitFindController *find_controller);
 void webkit_find_controller_search_finish(WebKitFindController *find_controller);
 void webkit_download_set_destination(WebKitDownload *download, const gchar *destination);
+void webkit_download_set_allow_overwrite(WebKitDownload *download, gboolean allow);
+void webkit_download_cancel(WebKitDownload *download);
+gdouble webkit_download_get_estimated_progress(WebKitDownload *download);
+guint64 webkit_download_get_received_data_length(WebKitDownload *download);
 
 #endif

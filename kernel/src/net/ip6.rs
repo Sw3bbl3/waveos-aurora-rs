@@ -108,7 +108,7 @@ fn addr6(b: &[u8], o: usize) -> Ip6 {
 
 /// A packet waiting for its next hop's link-layer address.
 pub struct Pending {
-    iface: usize,
+    pub(super) iface: usize,
     hop: Ip6,
     packet: Vec<u8>,
     since: u64,
@@ -319,7 +319,7 @@ impl Stack {
         if *dst == LOOPBACK6 || self.ifaces.iter().any(|f| f.v6.owns(dst)) {
             return Some((0, *dst));
         }
-        let cards = || self.ifaces.iter().enumerate().filter(|(_, f)| !f.loopback());
+        let cards = || self.ifaces.iter().enumerate().filter(|(_, f)| !f.loopback() && f.link);
         if multicast(dst) || link_local(dst) {
             return cards().next().map(|(i, _)| (i, *dst));
         }

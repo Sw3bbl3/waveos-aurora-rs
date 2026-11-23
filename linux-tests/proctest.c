@@ -453,6 +453,19 @@ static void event_loops(void) {
     CHECK(epoll_wait(ep, out, 4, 0) == 1, "level-triggered: still readable");
     read(ev, &v, 8);
     CHECK(epoll_wait(ep, out, 4, 0) == 0, "nothing once read");
+
+    // A delivered one-shot timer must not stay in the sleep-deadline set.
+    e1.events = EPOLLIN | EPOLLONESHOT;
+    CHECK(epoll_ctl(ep, EPOLL_CTL_MOD, tf, &e1) == 0, "one-shot timer interest");
+    its = (struct itimerspec){{0, 0}, {0, 5 * 1000000}};
+    CHECK(timerfd_settime(tf, 0, &its, NULL) == 0, "arm one-shot timer");
+    CHECK(epoll_wait(ep, out, 4, 1000) == 1 && out[0].data.u32 == 1, "deliver one-shot timer");
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK(epoll_wait(ep, out, 4, 40) == 0, "disabled timer stays silent");
+    CHECK(ms_since(&t0) >= 35, "disabled timer respects wait timeout");
+    CHECK(epoll_ctl(ep, EPOLL_CTL_MOD, tf, &e1) == 0, "rearm one-shot interest");
+    CHECK(epoll_wait(ep, out, 4, 0) == 1 && out[0].data.u32 == 1, "rearmed timer still readable");
+    CHECK(read(tf, &expirations, 8) == 8, "consume one-shot timer");
     close(ep);
     close(tf);
     close(ev);

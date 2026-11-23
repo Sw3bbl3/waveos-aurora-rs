@@ -6,7 +6,7 @@
 
 The bootloader, kernel, drivers, filesystem, window server, network stack, web browser, and every app — designed together, built together, from the first instruction to the last pixel.
 
-![WaveOS Aurora in dark mode: Lens and Notes moored side by side, with Harbor risen to peek at Notes](docs/screenshots/0.8/desktop-dark.png)
+![WaveOS in dark mode: Notes and Files arranged side by side above a calm water photograph](docs/screenshots/ui-refresh/desktop-dark.png)
 
 [Get started](#get-started) · [Explore the system](docs/explorer/index.html) · [Read the handbook](docs/handbook/0.7/en/start-welcome.md) · [Every feature](docs/FEATURES.md)
 
@@ -16,7 +16,9 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 
 ## Beautiful by default.
 
-**Living water**, the WaveOS look: glass bubbles along the top, **Crest** in the middle with the time and whatever is happening now, and **Harbor** floating at the bottom with your apps in three bays. Windows have no title bars: bring the pointer to the top edge and a handle rises to move, shrink, expand or close them. Light and dark everywhere, an accent colour that can follow your wallpaper, and every word set in Manrope by **Lyra**, our own TrueType engine.
+**Living water**, the WaveOS look: calm light and dark surfaces, floating controls above, and **Harbor** below. A slim strip inside each window quietly reveals its controls when you point at it; every corner and edge resizes with a matching pointer. Six high-resolution photographs bring the desktop to life, with an accent that follows your wallpaper. Shared spacing, typography, rounded cursors, and short transitions carry across the native apps. Welcome’s optional interactive tour gives you a practice window to find your feet. Every word is set in Manrope by **Lyra**, our own TrueType engine.
+
+[See the UI refresh, before/after captures, and native validation](docs/validation/ui-refresh.md).
 
 | | |
 |---|---|
@@ -33,7 +35,7 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 
 ## The whole web.
 
-**Voyage** is the browser: our own, around WebKit, the engine of Safari, with JavaScriptCore and all of WebKit's CSS, running on WaveOS's Linux layer and showing its window through our Wayland bridge. It has tabs, find in page, zoom and downloads to your Downloads folder, follows WaveOS's light or dark look, and opens pages in half the time Firefox takes. Mozilla's **Firefox ESR**, unchanged, is a launcher away, and **NetSurf**, a small browser that starts in seconds, comes in the system image too.
+**Voyage** is the browser: our own, around WebKit, the engine of Safari, with JavaScriptCore and WebKit's CSS, running on WaveOS's Linux layer and showing its window through our Wayland bridge. It has tabs, find in page, zoom, persistent site data, useful error/retry controls, and downloads with progress and cancellation. It follows WaveOS's light or dark look. Settings' on-demand connection check separates network configuration from verified DNS and HTTPS access. Mozilla's **Firefox ESR**, unchanged, is a launcher away, and **NetSurf**, a small browser, comes in the system image too. See the [network/browser validation report](docs/validation/network-web.md) for measured results and limits.
 
 | | |
 |---|---|

@@ -348,14 +348,35 @@ fn mounts() -> String {
 
 fn resolv_conf() -> String {
     let mut s = String::new();
-    for i in crate::net::interfaces() {
+    let interfaces = crate::net::interfaces();
+    let ipv6 = crate::net::interfaces6();
+    let mut servers = Vec::new();
+    for (index, i) in interfaces.iter().enumerate() {
+        if i.flags & aurora_abi::net::IF_LINK == 0 || i.flags & aurora_abi::net::IF_LOOPBACK != 0 {
+            continue;
+        }
         for d in i.dns.iter().filter(|d| **d != [0; 4]) {
-            s.push_str(&format!("nameserver {}.{}.{}.{}\n", d[0], d[1], d[2], d[3]));
+            let address = format!("{}.{}.{}.{}", d[0], d[1], d[2], d[3]);
+            if !servers.contains(&address) {
+                servers.push(address);
+            }
+        }
+        if let Some(v6) = ipv6.get(index) {
+            for d in v6.dns.iter().take(v6.dns_count.min(2) as usize).filter(|d| **d != [0; 16]) {
+                let address = crate::net::wire::ip6_str(d);
+                if !servers.contains(&address) {
+                    servers.push(address);
+                }
+            }
         }
     }
-    if s.is_empty() {
-        s.push_str("nameserver 10.0.2.3\n");
+    for address in servers {
+        s.push_str(&format!("nameserver {address}\n"));
     }
+    if s.is_empty() {
+        s.push_str("# No DNS server has been supplied by an active interface.\n");
+    }
+    s.push_str("options timeout:1 attempts:2\n");
     s
 }
 
@@ -480,6 +501,11 @@ pub fn readiness_of(p: &Process, fd: usize, depth: u32) -> Option<(bool, bool, b
         Handle::Socket(sock) => sock.readiness(),
         _ => (true, true, false),
     })
+}
+
+/// Pending errors are reported even when the caller did not request read/write.
+pub fn descriptor_error(p: &Process, fd: usize) -> bool {
+    p.fd(fd).is_ok_and(|h| matches!(&*h, Handle::Socket(s) if s.error().is_some()))
 }
 
 /// Adds to `keys` what to wait on for a change in descriptor `fd`'s
@@ -1250,25 +1276,28 @@ fn wait_ready(
 ) -> Result<u64, isize> {
     use crate::proc::readiness;
     loop {
-        let gen = readiness::generation();
         let timed_out = deadline.is_some_and(|d| crate::time::uptime_ms() >= d);
-        let n = check(timed_out)?;
-        if n > 0 || timed_out {
+        if timed_out {
+            return check(true);
+        }
+        let fds = fds();
+        let mut keys = Vec::new();
+        for &fd in &fds {
+            wait_keys(p, fd, &mut keys);
+        }
+        let watch = readiness::Watch::new(&keys);
+        let n = check(false)?;
+        if n > 0 {
             return Ok(n);
         }
         if crate::proc::interrupted() {
             return Err(EINTR);
         }
-        let fds = fds();
         let mut wait = deadline.map_or(1000, |d| d.saturating_sub(crate::time::uptime_ms()));
         if let Some(t) = next_timer(p, fds.iter().copied()) {
             wait = wait.min(t);
         }
-        let mut keys = Vec::new();
-        for &fd in &fds {
-            wait_keys(p, fd, &mut keys);
-        }
-        readiness::wait(gen, &keys, wait.max(1));
+        watch.wait(wait.max(1));
     }
 }
 
@@ -1306,9 +1335,14 @@ fn poll_until(p: &Process, fds_ptr: u64, count: u64, deadline: Option<u64>) -> R
                 let revents: u16 = if fd < 0 {
                     0
                 } else {
-                    match readiness(p, fd as usize) {
+                    match readiness_of(p, fd as usize, 0) {
                         None => 0x20, // POLLNVAL
-                        Some((rd, wr)) => (if rd { events & 0x1 } else { 0 }) | (if wr { events & 0x4 } else { 0 }),
+                        Some((rd, wr, hup)) => {
+                            (if rd { events & 0x1 } else { 0 })
+                                | (if wr { events & 0x4 } else { 0 })
+                                | (if hup { 0x10 } else { 0 })
+                                | (if descriptor_error(p, fd as usize) { 0x8 } else { 0 })
+                        }
                     }
                 };
                 if revents != 0 {

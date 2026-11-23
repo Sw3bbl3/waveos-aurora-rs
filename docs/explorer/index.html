@@ -831,7 +831,7 @@ function activity(id) {
   const a = {
     apps: sat(r.userBusy, 25), tools: sat(S.procs.filter(p => p.alive && p.path.startsWith("/System/Bin")).length, 2),
     aurorakit: sat(r.winCalls, 400), corekit: sat(r.sys, 900), syscall: sat(r.sys, 900), proc: sat(r.procCalls, 5),
-    sched: sat(r.switches, 500), lumen-server: sat(r.frames, 20), vfs: sat(r.file, 40), mm: sat(r.mmap, 5),
+    sched: sat(r.switches, 500), "lumen-server": sat(r.frames, 20), vfs: sat(r.file, 40), mm: sat(r.mmap, 5),
     input: sat(r.input, 30), tarfs: sat(r.procCalls, 3), aurorafs: sat(r.homeIo, 20), fat32: sat(r.bootIo, 20),
     cache: sat(r.diskOps, 30), blockdrv: sat(r.diskOps, 30), irq: sat(r.timer, 1000) * 0.35, cpu: sat(r.busy, 100) * 0.5,
     "hw-cpu": sat(r.busy, 100), "hw-ram": 0.15, "hw-display": sat(r.frames, 20), "hw-input": sat(r.input, 30), "hw-disk": sat(r.diskOps, 30),
@@ -1318,7 +1318,7 @@ function taskBlurb(name) {
     reaper: "Frees the memory, files and windows of processes that have exited or crashed.",
     flusher: "Commits file-system changes to disk every five seconds.",
     telemetry: "Sends the snapshots this page is drawing, four times a second.",
-    lumen-server: "The window server: handles input, applies window requests from apps and repaints damaged parts of the screen.",
+    "lumen-server": "The window server: handles input, applies window requests from apps and repaints damaged parts of the screen.",
   }[name] || "A kernel thread.";
 }
 

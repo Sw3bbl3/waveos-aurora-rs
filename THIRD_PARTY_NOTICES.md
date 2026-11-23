@@ -43,3 +43,7 @@ The interface typefaces ship in `/System/Fonts` next to their licenses:
 The bootable system includes the decoder license texts under `/System/Licenses`. Cargo manifests and lockfiles identify registry dependencies, including `rusty_h264-common` 0.16.0 and the `regress` regular-expression engine. Their upstream copyright and licensing remain applicable.
 
 Media test fixtures have separate provenance and terms, documented in [the fixture README](libs/media/tests/fixtures/README.md). The MP4 sample is CC0; the AAC tone is generated test data. Downloaded third-party website scripts used during development are not redistributed in release assets.
+
+## Photographic wallpapers
+
+The six photographic wallpapers are copyright their respective photographers and are distributed under the [Unsplash License](https://unsplash.com/license), separately from the repository's MIT code license. [Wallpaper credits](assets/WALLPAPER-CREDITS.md) identify each photographer, original page, native dimensions, and processing. Source masters and verified metadata are in `assets/wallpaper-sources/manifest.json`; the bootable system includes `/System/Wallpapers/CREDITS.md`.

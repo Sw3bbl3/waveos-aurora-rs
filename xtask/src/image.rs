@@ -73,11 +73,29 @@ pub enum LinuxOnDisk {
     NoRoom { need: u64, free: u64 },
 }
 
-/// Puts the Linux root (`cargo xtask linux-root`) on an existing image's
-/// home volume as `/Linux`, keeping the files saved there: all of it when
-/// Firefox isn't on the disk yet and it fits; otherwise `settings` (paths
-/// in the root and their sources), which change with WaveOS, and, when the
-/// root has other packages than the disk, the files the disk doesn't have.
+/// Read a persisted guest preference before starting QEMU.
+pub fn preference(img: &Path, key: &str) -> Option<String> {
+    let mut file = OpenOptions::new().read(true).write(true).open(img).ok()?;
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    file.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE)).ok()?;
+    file.read_exact(&mut entry).ok()?;
+    if entry[0..16] != aurorafs::PARTITION_TYPE {
+        return None;
+    }
+    let start = u64::from_le_bytes(entry[32..40].try_into().ok()?);
+    let end = u64::from_le_bytes(entry[40..48].try_into().ok()?);
+    let bytes = end.checked_sub(start)?.checked_add(1)?.checked_mul(SECTOR)?;
+    let region = Region { file: &mut file, start: start * SECTOR, len: bytes, pos: 0 };
+    let mut volume = aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now).ok()?;
+    let data = read_file(&mut volume, "/Settings/aurora.conf");
+    core::str::from_utf8(&data).ok()?.lines().find_map(|line| {
+        let (k, v) = line.split_once('=')?;
+        (k.trim() == key).then(|| v.trim().to_owned())
+    })
+}
+
+/// Put the Linux root on the home volume as `/Linux`, preserving saved files.
+/// Existing installations receive updated settings and missing packages.
 pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io::Result<LinuxOnDisk> {
     let mut file = OpenOptions::new().read(true).write(true).open(img)?;
     let mut entry = [0u8; ENTRY_SIZE as usize];

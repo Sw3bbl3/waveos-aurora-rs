@@ -813,6 +813,10 @@ impl App for Paint {
         format!("{}{} — Paint", self.name(), if self.dirty { " •" } else { "" })
     }
 
+    fn min_size(&self) -> (i32, i32) {
+        (520, 340)
+    }
+
     fn size(&self) -> (i32, i32) {
         (1220, 728)
     }
@@ -1098,6 +1102,15 @@ impl App for Paint {
             })
             .focusable()
             .id("paint-canvas")
+            .cursor(if self.space {
+                if self.stroke.is_some() {
+                    cursor::GRABBING
+                } else {
+                    cursor::GRAB
+                }
+            } else {
+                cursor::CROSSHAIR
+            })
             .on_drop(|d| match d.items {
                 corekit::dnd::Dropped::Files(paths) => {
                     paths.into_iter().find(|p| aurora_image::is_image_name(p)).map(Msg::Open)

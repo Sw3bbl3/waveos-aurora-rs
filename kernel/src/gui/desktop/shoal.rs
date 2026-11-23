@@ -142,6 +142,7 @@ impl Desktop {
     }
 
     pub fn toggle_launcher(&mut self) {
+        self.begin_reveal(self.screen());
         if self.launcher.take().is_none() {
             let mut apps: Vec<Entry> = CATALOG
                 .iter()

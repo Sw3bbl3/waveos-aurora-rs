@@ -82,6 +82,7 @@ pub trait Nic: Send + Sync {
 pub struct Interface {
     pub name: String,
     nic: Option<Arc<dyn Nic>>,
+    link: bool,
     pub mac: [u8; 6],
     pub ip: Ip,
     pub mask: Ip,
@@ -157,6 +158,7 @@ pub fn init() {
     let lo = Interface {
         name: String::from("lo"),
         nic: None,
+        link: true,
         mac: [0; 6],
         ip: LOOPBACK,
         mask: [255, 0, 0, 0],
@@ -188,12 +190,14 @@ pub fn init() {
 pub fn register(nic: Arc<dyn Nic>) -> usize {
     let mac = nic.mac();
     let driver = nic.driver();
+    let link = nic.link_up();
     let prefix = if nic.wireless() { "wlan" } else { "eth" };
     let index = with(|s| {
         let n = s.ifaces.iter().filter(|i| i.name.starts_with(prefix)).count();
         s.ifaces.push(Interface {
             name: alloc::format!("{prefix}{n}"),
             nic: Some(nic),
+            link,
             mac,
             ip: ANY,
             mask: ANY,
@@ -216,16 +220,8 @@ pub fn register(nic: Arc<dyn Nic>) -> usize {
 /// A card's link came up or went down (Wi-Fi joined or left a network):
 /// forget the old address and start DHCP over.
 pub fn link_changed(iface: usize, up: bool) {
-    with(|s| {
-        if let Some(f) = s.ifaces.get_mut(iface) {
-            f.ip = ANY;
-            f.mask = ANY;
-            f.gateway = ANY;
-            f.dns.clear();
-            f.dhcp = Some(dhcp::Client::new());
-            log!("net", "{}: link {}", f.name, if up { "up" } else { "down" });
-        }
-    });
+    with(|s| s.update_link(iface, up));
+    notify_changed();
     WAKE.wake_all();
     // The status ring and Current show the connection.
     crate::gui::network_changed();
@@ -254,8 +250,9 @@ fn task() {
             n.poll();
         }
         let frames: Vec<Frame> = RX.lock().drain(..).collect();
+        let received = !frames.is_empty();
         let now = crate::time::uptime_ms();
-        with(|s| {
+        let changed = with(|s| {
             for f in frames {
                 match f {
                     Frame::Ether(i, data) => s.ether_input(i, &data),
@@ -263,15 +260,51 @@ fn task() {
                     Frame::Local(p) => s.ip_input(0, &p),
                 }
             }
-            s.timers(now);
+            s.timers(now)
         });
-        GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
-        CHANGED.wake_all();
-        crate::proc::readiness::notify(crate::proc::readiness::NET);
+        // Timer maintenance alone does not make a socket ready. Waking every
+        // network event loop at 100 Hz can monopolize an emulated CPU.
+        if received || changed {
+            notify_changed();
+        }
     }
 }
 
+fn notify_changed() {
+    GEN.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    CHANGED.wake_all();
+    crate::proc::readiness::notify(crate::proc::readiness::NET);
+}
+
 impl Stack {
+    fn update_link(&mut self, iface: usize, up: bool) {
+        let Some(f) = self.ifaces.get_mut(iface) else { return };
+        if f.loopback() {
+            return;
+        }
+        let mut old: Vec<Addr> = f.v6.addrs.iter().map(|a| a.0).collect();
+        if f.ip != ANY {
+            old.push(v4(f.ip));
+        }
+        f.link = up;
+        if f.dhcp.is_some() {
+            f.ip = ANY;
+            f.mask = ANY;
+            f.gateway = ANY;
+            f.dns.clear();
+            f.dhcp = Some(dhcp::Client::new());
+        }
+        f.v6 = ip6::Config::new(f.mac);
+        log!("net", "{}: link {}", f.name, if up { "up" } else { "down" });
+        // Connections from the old network must report failure immediately,
+        // rather than retaining a stale route until TCP's retry limit.
+        self.tcp.network_lost(&old);
+        self.pending.retain(|p| p.iface != iface);
+        self.pending6.retain(|p| p.iface != iface);
+        self.arp.clear();
+        self.neighbors.clear();
+    }
+
     // ---------------------------------------------------------------- input
 
     fn ether_input(&mut self, i: usize, f: &[u8]) {
@@ -403,12 +436,12 @@ impl Stack {
         if let Some(i) = self.ifaces.iter().position(|f| f.ip == dst) {
             return Some((i, dst));
         }
-        if let Some(i) = self.ifaces.iter().position(|f| !f.loopback() && f.in_subnet(dst)) {
+        if let Some(i) = self.ifaces.iter().position(|f| !f.loopback() && f.link && f.in_subnet(dst)) {
             return Some((i, dst));
         }
         self.ifaces
             .iter()
-            .position(|f| !f.loopback() && f.ip != ANY && f.gateway != ANY)
+            .position(|f| !f.loopback() && f.link && f.ip != ANY && f.gateway != ANY)
             .map(|i| (i, self.ifaces[i].gateway))
     }
 
@@ -531,7 +564,21 @@ impl Stack {
 
     // --------------------------------------------------------------- timers
 
-    fn timers(&mut self, now: u64) {
+    fn timers(&mut self, now: u64) -> bool {
+        let changes: Vec<_> = self
+            .ifaces
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                let link = f.nic.as_ref()?.link_up();
+                (link != f.link).then_some((i, link))
+            })
+            .collect();
+        let changed = !changes.is_empty();
+        for (i, up) in changes {
+            self.update_link(i, up);
+            crate::gui::network_changed();
+        }
         // ARP: ask again each second, give up after three tries.
         let mut ask = Vec::new();
         for p in &mut self.pending {
@@ -549,7 +596,7 @@ impl Stack {
         self.arp.retain(|_, (_, until)| *until > now);
         dhcp::tick(self, now);
         self.ip6_timers(now);
-        tcp::tick(self, now);
+        tcp::tick(self, now) || changed
     }
 }
 
@@ -622,7 +669,13 @@ pub fn interfaces6() -> Vec<aurora_abi::NetInterface6> {
     })
 }
 
-/// Whether some interface has an address (and so, probably, the internet).
+/// Whether a live interface is configured. This is not an Internet probe.
 pub fn online() -> bool {
-    STACK.lock().as_ref().is_some_and(|s| s.ifaces.iter().any(|f| !f.loopback() && f.ip != ANY))
+    STACK.lock().as_ref().is_some_and(|s| {
+        s.ifaces.iter().any(|f| {
+            !f.loopback()
+                && f.nic.as_ref().is_some_and(|d| d.link_up())
+                && (f.ip != ANY || f.v6.addrs.iter().any(|(a, _, _)| a[0] != 0xfe || a[1] & 0xc0 != 0x80))
+        })
+    })
 }

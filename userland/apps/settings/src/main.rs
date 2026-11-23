@@ -25,8 +25,8 @@ use waveui::Request;
 
 mod search;
 
-const THUMB_W: i32 = 132;
-const THUMB_H: i32 = 84;
+const THUMB_W: i32 = 208;
+const THUMB_H: i32 = 130;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Pane {
@@ -58,8 +58,8 @@ const PANES: [(Pane, &str, &str, u32); 15] = [
     (Pane::DateTime, "Date & Time", "datetime", 0xFFFF9F0A),
     (Pane::Sound, "Sound", "sound", 0xFFFF375F),
     (Pane::Notifications, "Notifications", "notifications", 0xFFFF453A),
-    (Pane::Desktop, "Desktop & Harbor", "desktop", 0xFF5856D6),
-    (Pane::Bar, "Bar & Crest", "bar", 0xFF2F62F5),
+    (Pane::Desktop, "Desktop & Dock", "desktop", 0xFF5856D6),
+    (Pane::Bar, "Top Bar & Clock", "bar", 0xFF2F62F5),
     (Pane::Login, "Login", "login", 0xFF8E5CF5),
     (Pane::Accessibility, "Accessibility", "accessibility", 0xFF147EFB),
     (Pane::About, "About", "about", 0xFF30B0C7),
@@ -93,6 +93,7 @@ pub enum Msg {
     WifiJoin,
     WifiCancel,
     WifiDisconnect,
+    CheckNetwork,
     Rumble(u32),
     OpenAbout,
     ClearNote,
@@ -122,6 +123,8 @@ pub struct Settings {
     wifi_password: String,
     pads: Vec<(Gamepad, Option<PadState>)>,
     now: corekit::abi::DateTime,
+    network_check: Option<corekit::thread::JoinHandle<corekit::diagnostics::NetworkCheck>>,
+    network_report: Option<corekit::diagnostics::NetworkCheck>,
 }
 
 fn days_in(y: i64, m: i64) -> i64 {
@@ -140,6 +143,8 @@ impl Settings {
             .collect();
         let mut s = Self {
             pane: Pane::Appearance,
+            network_check: None,
+            network_report: None,
             query: String::new(),
             selected: 0,
             target: None,
@@ -267,7 +272,7 @@ fn card<'a>(rows: Vec<View<'a, Msg>>) -> View<'a, Msg> {
 }
 
 fn footer<'a>(text: &str) -> View<'a, Msg> {
-    Text::paragraph(text).style(TextStyle::Callout).foreground(Color::SecondaryLabel).padding_xy(4, 0)
+    Text::paragraph(text).style(TextStyle::Callout).foreground(Color::SecondaryLabel).padding_xy(4, 0).fill_width()
 }
 
 /// A switch bound to a yes/no preference.
@@ -399,7 +404,7 @@ impl Settings {
                         mode_preview(cv, r.inset(3), dark);
                         ring(cv, r.inset(3), selected);
                     })
-                    .size(THUMB_W + 6, THUMB_H + 6),
+                    .size(138, 90),
                 )
                 .push(Text::new(if dark { "Dark" } else { "Light" }))
                 .spacing(6)
@@ -501,8 +506,11 @@ impl Settings {
     }
 
     fn display_pane(&self) -> View<'_, Msg> {
-        let live = self.modes.iter().any(|m| m.flags & display::LIVE != 0);
-        let follows = self.modes.iter().any(|m| m.flags & display::FOLLOWS_WINDOW != 0);
+        // A SCREEN event redraws this view after the asynchronous mode switch.
+        // Read the current flags then, rather than showing the previous mode.
+        let modes = prefs::display_modes();
+        let live = modes.iter().any(|m| m.flags & display::LIVE != 0);
+        let follows = modes.iter().any(|m| m.flags & display::FOLLOWS_WINDOW != 0);
         let sub = if follows {
             "Changes apply right away. In a virtual machine, WaveOS also follows the window: make it larger or full screen for more room."
         } else if live {
@@ -510,7 +518,7 @@ impl Settings {
         } else {
             "This display is set up by the firmware: changes apply when you restart."
         };
-        let current = self.modes.iter().find(|m| m.flags & display::CURRENT != 0);
+        let current = modes.iter().find(|m| m.flags & display::CURRENT != 0);
         let summary = current.map(|m| {
             card(vec![row_detail(
                 "Showing",
@@ -519,7 +527,7 @@ impl Settings {
             )])
         });
         // Largest first, as the screen's own list is.
-        let rows = self.modes.iter().enumerate().rev().map(|(i, m)| {
+        let rows = modes.iter().enumerate().rev().map(|(i, m)| {
             let mut tags = Vec::new();
             let current = m.flags & display::CURRENT != 0;
             if m.flags & display::PREFERRED != 0 {
@@ -801,24 +809,30 @@ impl Settings {
                 sections.push(titled("Networks", rows));
             }
         }
-        let ifaces: Vec<_> =
-            corekit::net::interfaces().into_iter().filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0).collect();
+        let all_ifaces = corekit::net::interfaces();
+        let ipv6 = corekit::net::interfaces6();
+        let ifaces: Vec<_> = all_ifaces.iter().filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0).collect();
         if ifaces.is_empty() && self.wifi.is_none() {
             sections.push(footer("No network adapter was found."));
         }
-        for i in &ifaces {
+        for i in ifaces {
+            let v6 = all_ifaces.iter().position(|a| a.name == i.name).and_then(|n| ipv6.get(n));
+            let has_v6 = v6.is_some_and(|v| v.router != [0; 16] && v.addr_count > 0);
             let ip = |a: [u8; 4]| if a == [0; 4] { String::from("—") } else { corekit::net::ip_string(a) };
             let wireless = corekit::net::name_of(i).starts_with("wlan");
-            let (status, color) = match (i.flags & corekit::abi::net::IF_LINK != 0, i.ip != [0; 4]) {
-                (true, true) => ("Connected", Color::Green),
+            let (status, color) = match (i.flags & corekit::abi::net::IF_LINK != 0, i.ip != [0; 4] || has_v6) {
+                (true, true) => ("Network configured", Color::Green),
                 (true, false) => ("Getting an address…", Color::Orange),
                 (false, _) if wireless => ("Not connected", Color::Gray),
                 (false, _) => ("Cable unplugged", Color::Red),
             };
             let kind = if wireless { "Wi-Fi" } else { "Ethernet" };
             let mac = i.mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
-            let dns: Vec<String> =
+            let mut dns: Vec<String> =
                 i.dns.iter().filter(|d| **d != [0; 4]).map(|d| corekit::net::ip_string(*d)).collect();
+            if let Some(v) = v6 {
+                dns.extend(v.dns.iter().take(v.dns_count.min(2) as usize).map(corekit::net::ip6_string));
+            }
             let lease = if i.lease_secs == 0 {
                 String::from("—")
             } else {
@@ -851,12 +865,39 @@ impl Settings {
             rows.extend(details.into_iter().map(|(k, v)| {
                 row(k, Text::new(v).foreground(Color::SecondaryLabel)).height(34).foreground(Color::Label)
             }));
+            if let Some(v) = v6 {
+                for a in v.addrs.iter().take(v.addr_count.min(4) as usize) {
+                    rows.push(
+                        row("IPv6 address", Text::new(corekit::net::ip6_string(a)).foreground(Color::SecondaryLabel))
+                            .min_height(34),
+                    );
+                }
+            }
             sections.push(card(rows));
         }
         sections.push(footer(
-            "Addresses come from the network's DHCP server. Test the connection with `ping` or `fetch` \
-             in Terminal, or browse with Voyage.",
+            "An address confirms network configuration, not Internet access. Check DNS and a verified HTTPS request on demand. Nothing is sent until you choose Check connection.",
         ));
+        let busy = self.network_check.is_some();
+        sections.push(
+            Button::new(if busy { "Checking DNS and HTTPS…" } else { "Check connection" })
+                .action(Msg::CheckNetwork)
+                .disabled(busy),
+        );
+        if let Some(report) = &self.network_report {
+            sections.push(Section::titled(
+                if report.ok { "Last check succeeded" } else { "Last check needs attention" },
+                card(
+                    report
+                        .lines
+                        .iter()
+                        .map(|line| {
+                            Text::paragraph(line.clone()).style(TextStyle::Callout).fill_width().padding_xy(0, 4)
+                        })
+                        .collect(),
+                ),
+            ));
+        }
         page("Network", sections)
     }
 
@@ -961,7 +1002,7 @@ impl Settings {
         let dock = prefs::get_int(pref::DOCK_SIZE, 48).clamp(32, 64);
         let glass = prefs::get_int(pref::GLASS, 70).clamp(0, 100);
         page(
-            "Desktop & Harbor",
+            "Desktop & Dock",
             vec![
                 titled(
                     "Harbor",
@@ -1001,7 +1042,7 @@ impl Settings {
         let crest = prefs::get_bool(pref::CREST);
         let battery = prefs::get_bool(pref::BATTERY_LEVEL);
         page(
-            "Bar & Crest",
+            "Top Bar & Clock",
             vec![
                 Canvas::new(move |cv, r| bar_preview(cv, r, crest, battery)).height(120).fill_width(),
                 card(vec![
@@ -1184,6 +1225,10 @@ impl App for Settings {
         "Settings".into()
     }
 
+    fn min_size(&self) -> (i32, i32) {
+        (560, 420)
+    }
+
     fn size(&self) -> (i32, i32) {
         (1140, 728)
     }
@@ -1320,6 +1365,23 @@ impl App for Settings {
                 corekit::net::wifi_disconnect();
                 self.wifi = corekit::net::wifi_status();
             }
+            Msg::CheckNetwork => {
+                if self.network_check.is_none() {
+                    self.network_report = None;
+                    let configuration = corekit::net::configuration_key();
+                    match corekit::thread::spawn(move || {
+                        let mut report = corekit::diagnostics::network("https://example.com/");
+                        if configuration != corekit::net::configuration_key() {
+                            report.ok = false;
+                            report.lines.push(String::from("Network configuration changed. Check again."));
+                        }
+                        report
+                    }) {
+                        Ok(worker) => self.network_check = Some(worker),
+                        Err(e) => self.flash(cx, format!("Couldn't start the connection check: {e}")),
+                    }
+                }
+            }
             Msg::Rumble(id) => {
                 if let Some((pad, _)) = self.pads.iter().find(|(p, _)| p.id == id) {
                     pad.rumble(0.8, 0.5, 400);
@@ -1343,6 +1405,9 @@ impl App for Settings {
     }
 
     fn poll_interval(&self) -> Option<u64> {
+        if self.network_check.is_some() {
+            return Some(100);
+        }
         match self.pane {
             Pane::Controllers => Some(50),
             Pane::DateTime | Pane::Network => Some(1000),
@@ -1352,6 +1417,13 @@ impl App for Settings {
     }
 
     fn poll(&mut self, _cx: &mut Context<Msg>) -> bool {
+        if self.network_check.as_ref().is_some_and(|worker| worker.is_finished()) {
+            self.network_report = Some(self.network_check.take().unwrap().join());
+            return true;
+        }
+        if self.network_check.is_some() {
+            return false;
+        }
         match self.pane {
             Pane::Controllers => {
                 let before: Vec<_> = self.pads.iter().map(|(p, s)| (p.id, s.map(|s| s.sequence()))).collect();
@@ -1574,14 +1646,16 @@ fn human(n: u64) -> String {
 
 fn mode_preview(cv: &mut Surface, r: Rect, dark: bool) {
     let t = if dark { &theme::DARK } else { &theme::LIGHT };
-    let bg = if dark { 0xFF10_1426 } else { 0xFFBF_D6F5 };
+    let bg = if dark { 0xFF26323F } else { 0xFFD6E4EF };
     cv.fill_round_rect(r, 10, bg);
     let win = Rect::new(r.x + 20, r.y + 14, r.w - 40, r.h - 26);
     cv.fill_round_rect(win, 6, t.window_bg);
     cv.fill_rect(Rect::new(win.x + 6, win.y + 16, win.w - 12, 1), t.separator);
-    for (i, c) in [theme::CLOSE, theme::MINIMIZE, theme::ZOOM].iter().enumerate() {
-        cv.fill_circle(win.x + 9 + i as i32 * 9, win.y + 8, 3, *c);
-    }
+    cv.fill_round_rect(Rect::new(win.x + 9, win.y + 7, (win.w - 40).max(8), 2), 1, with_alpha(t.text_secondary, 110));
+    cv.line(win.right() - 25, win.y + 9, win.right() - 21, win.y + 9, 1, t.text_secondary);
+    cv.stroke_round_rect(Rect::new(win.right() - 17, win.y + 6, 5, 5), 1, t.text_secondary);
+    cv.line(win.right() - 9, win.y + 6, win.right() - 5, win.y + 10, 1, t.text_secondary);
+    cv.line(win.right() - 5, win.y + 6, win.right() - 9, win.y + 10, 1, t.text_secondary);
     for i in 0..3 {
         cv.fill_round_rect(
             Rect::new(win.x + 10, win.y + 26 + i * 10, win.w - 30 - i * 14, 5),

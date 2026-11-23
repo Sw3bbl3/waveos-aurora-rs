@@ -233,8 +233,8 @@ input methods, and touch.
 (`linux-programs/voyage`) around WebKitGTK 2.50, Debian's build of WebKit,
 the engine of Safari, from the Linux packages on the disk. WebKit brings
 JavaScriptCore (with its JIT compilers), CSS, web fonts and media; Voyage
-is the browser around it, in GTK 3: a toolbar that is the window's title
-bar (back, forward, reload, an address field that also searches, with
+is the browser around it, in GTK 3: a toolbar below the reserved system
+window strip (back, forward, reload/stop, an address field that also searches, with
 DuckDuckGo, and a new tab), tabs, a start page, find in page, zoom,
 downloads to WaveOS's Downloads folder, and cookies and site data kept in
 `~/.local/share/voyage`. It's in the dock, Shoal and Seek (in Terminal:
@@ -245,8 +245,9 @@ which starts `wl-bridge` and then the browser, with the dark GTK theme when
 WaveOS is dark (pages see `prefers-color-scheme: dark`). Without WebKit on
 the disk, the app opens Firefox, or else NetSurf. All tabs share one web
 process (WebKit's network process is another), since each process starts
-WebKit from scratch; in QEMU emulating the processor, Voyage shows a page
-in about 15 seconds where Firefox takes about 30.
+WebKit from scratch. Startup and site compatibility depend on the page,
+the host, and whether QEMU is emulating the CPU; do not interpret load
+timings as physical-hardware performance.
 
 `cargo xtask` builds Voyage with clang and the Rust toolchain's lld
 against the libraries in the Linux packages (`xtask/src/voyage.rs`):
@@ -258,6 +259,24 @@ settings on every run, so a disk always has the current build. HTTPS is
 checked against Mozilla's roots (the `ca-certificates` package, gathered
 into `/etc/ssl/certs/ca-certificates.crt` on every run, with the root
 `WAVEOS_EXTRA_CA` names, if any).
+
+Navigation errors provide escaped explanations and Retry/Back. TLS uses
+WebKit's fail policy; a certificate error cannot silently become an
+unverified connection. Escape or the Stop button cancels a pending load.
+Closing a tab asks WebKit to apply its before-unload protection. Downloads
+show progress, Cancel, completion and failure, and select a unique filename
+without allowing overwrite. Local absolute paths are converted to file URIs.
+
+`cargo xtask web-check --output target/network-web/check` prepares a full
+disposable guest with WebKit, Firefox, schemas and certificate roots. It
+checks real browser interaction against local HTTP/HTTPS fixtures, then a
+public site sample. Its generated test CA is installed only in that guest;
+normal builds do not trust it. Use `--local-only`, `--net e1000|e1000e|none`,
+`--firefox`, or `--repetitions N` as needed. `--benchmark-only` compares
+new browser processes and same-process revisits without clearing disk
+caches. `--baseline-image PATH` clones an older image and preserves its
+kernel/bridge while updating the browser instrumentation. Never point it
+at a personal disk for validation.
 
 WebKit's sandbox relies on Linux features WaveOS doesn't have yet
 (namespaces, seccomp), so the launcher turns it off: browse sites you
@@ -305,6 +324,15 @@ window:
 
 These are defaults: what you change in Firefox's settings wins.
 
+Media decoding currently runs in the content process: the remote RDD/utility
+decoder configuration stalls before its first frame on the compatibility layer,
+even when YouTube has buffered data. `media.rdd-process.enabled` and
+`media.utility-process.enabled` default to false, with
+`media.allow-audio-non-utility` true. This trades decoder crash isolation for
+working playback; codecs and playback quality remain available. See the
+[Firefox validation report](validation/firefox-performance.md) for experiments,
+measurements and the limits of QEMU verification.
+
 Firefox's sandboxes rely on Linux features WaveOS doesn't have yet
 (seccomp filters, namespaces), so the launcher turns them off; with site
 isolation off too, a page that broke into its content process could read
@@ -319,6 +347,8 @@ heap gives small blocks from per-size free lists; `fork` shares pages
 copy-on-write (`mm::vmm`, resolved in the page fault handler); `poll`,
 `select` and `epoll` wait on keys of the objects they watch
 (`proc::readiness`) instead of waking on every change in the system;
+wait subscriptions remember matching notifications before checking readiness,
+and disabled one-shot epoll timers do not force repeated rescans;
 checking user pointers, the signal check on return and finding the
 current process take no lock shared by the process's threads; and
 `link` fails with `EPERM`, as on file systems without hard links, so that

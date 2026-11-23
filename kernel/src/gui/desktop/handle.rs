@@ -1,9 +1,7 @@
-//! Windows without title bars: the handle, the waterline and Moorings.
+//! Reserved window chrome, the waterline and Moorings.
 //!
-//! Apps get the whole window. Bring the pointer to a window's top edge and a
-//! small bar fades in there; touch it and it rises into a pill above the
-//! window with the title and three buttons (shrink, expand, close). Drag the
-//! bar or the pill — or hold Super and drag anywhere — to move the window.
+//! Apps draw below a stable strip containing the title and hover controls.
+//! Drag the strip — or hold Super and drag anywhere — to move the window.
 //! While a window is dragged, Moorings drops six layouts from the top of the
 //! screen; slide onto a zone (or push into a screen edge) and let go to moor
 //! the window there. The focused window glows along its lower edge: the
@@ -15,165 +13,171 @@ use crate::gui::geom::Rect;
 use crate::gui::theme::{self, MENUBAR_H};
 use lumen::windowing::{self, Placement, MOORINGS};
 
-/// How far above the top edge the pointer summons the handle.
-const REACH: i32 = 28;
-const PILL_H: i32 = 32;
-const BUTTON: i32 = 24;
+const BUTTON: i32 = 26;
 const TILE_W: i32 = 58;
 const TILE_H: i32 = 40;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Stage {
-    /// The thin bar on the top edge.
-    Bar,
-    /// Risen into the pill with the title and buttons.
-    Pill,
+fn strip(r: Rect) -> Rect {
+    Rect::new(r.x, r.y, r.w, windowing::CHROME_H)
+}
+/// Only this opaque portion changes during hover. Keeping damage away from
+/// app sidebars avoids rebuilding their backdrop while the controls fade.
+fn control_area(r: Rect) -> Rect {
+    Rect::new(r.right() - 112, r.y, 112, windowing::CHROME_H)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) struct Handle {
-    pub window: u32,
-    pub stage: Stage,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PillHit {
-    Shrink,
-    Expand,
-    Close,
-    Grab,
+fn buttons(r: Rect) -> [Rect; 3] {
+    core::array::from_fn(|n| Rect::new(r.right() - 104 + n as i32 * 30, r.y + 4, BUTTON, BUTTON))
 }
 
 impl Desktop {
-    /// The bar on window `i`'s top edge.
-    fn handle_bar(&self, i: usize) -> Rect {
-        let r = self.windows[i].rect;
-        Rect::new(r.x + r.w / 2 - 23, r.y + 7, 46, 5)
-    }
-
-    /// The pill for window `i`: above the window when there's room, else just inside its top.
-    fn handle_pill(&self, i: usize) -> Rect {
-        let r = self.windows[i].rect;
-        let title = self.windows[i].app.title();
-        let tw = theme::ui_bold(13).width(&title).min(r.w - 140).max(40);
-        let w = 14 + tw + 10 + 3 * (BUTTON + 4) + 2;
-        let y = if r.y - PILL_H - 8 >= MENUBAR_H { r.y - PILL_H - 8 } else { r.y + 6 };
-        Rect::new(r.x + r.w / 2 - w / 2, y, w, PILL_H)
-    }
-
-    fn pill_buttons(pill: Rect) -> [(PillHit, Rect); 3] {
-        let y = pill.y + (PILL_H - BUTTON) / 2;
-        let x = pill.right() - 5 - 3 * BUTTON - 2 * 4;
-        [
-            (PillHit::Shrink, Rect::new(x, y, BUTTON, BUTTON)),
-            (PillHit::Expand, Rect::new(x + BUTTON + 4, y, BUTTON, BUTTON)),
-            (PillHit::Close, Rect::new(x + 2 * (BUTTON + 4), y, BUTTON, BUTTON)),
-        ]
-    }
-
-    /// Everything the handle of window `i` may paint.
-    fn handle_area(&self, i: usize) -> Rect {
-        self.handle_bar(i).union(&self.handle_pill(i)).inset(-12)
-    }
-
     pub(super) fn damage_handle(&mut self, id: u32) {
         if let Some(i) = self.index_of(id) {
-            let a = self.handle_area(i);
-            self.damage(a);
+            self.damage(strip(self.windows[i].rect));
         }
     }
 
-    /// The window whose top edge the pointer is near (only one not covered there).
-    fn handle_target(&self, x: i32, y: i32) -> Option<(usize, Stage)> {
-        let under = self.window_at(x, y);
-        for i in (0..self.windows.len()).rev() {
-            let w = &self.windows[i];
-            if w.minimized || w.animating || w.awaiting_frame.is_some() {
-                continue;
-            }
-            let r = w.rect;
-            let showing = self.handle.filter(|h| h.window == w.id);
-            let pill = self.handle_pill(i);
-            if showing.is_some_and(|h| h.stage == Stage::Pill) && pill.inset(-6).contains(x, y) {
-                return Some((i, Stage::Pill));
-            }
-            let zone = Rect::new(r.x, r.y - REACH, r.w, REACH + 26);
-            if zone.contains(x, y) && (under.is_none() || under == Some(i) || y < r.y) {
-                let near_bar = self.handle_bar(i).inset_xy(-30, -6).contains(x, y);
-                let stage =
-                    if near_bar || showing.is_some_and(|h| h.stage == Stage::Pill) { Stage::Pill } else { Stage::Bar };
-                return Some((i, stage));
-            }
-            // A higher window covers what's below at this point.
-            if under == Some(i) {
-                return None;
-            }
+    pub(super) fn resize_press(&mut self, x: i32, y: i32) -> bool {
+        let Some(i) = self.window_at(x, y) else { return false };
+        let w = &self.windows[i];
+        let edges = if w.app.resizable() { windowing::resize_edges(w.rect, x, y) } else { 0 };
+        if edges == 0 {
+            return false;
         }
-        None
-    }
-
-    /// Pointer motion: shows, raises or hides the handle.
-    pub(super) fn handle_hover(&mut self, x: i32, y: i32) {
-        let next = if self.locked() || self.menu.is_some() || self.launcher.is_some() {
-            None
-        } else {
-            self.handle_target(x, y).map(|(i, stage)| Handle { window: self.windows[i].id, stage })
+        let d = Drag {
+            window: w.id,
+            kind: DragKind::Resize(edges),
+            start_x: x,
+            start_y: y,
+            start_rect: w.rect,
+            started: true,
         };
-        let hover_button = next
-            .filter(|h| h.stage == Stage::Pill)
-            .and_then(|h| self.index_of(h.window))
-            .and_then(|i| Self::pill_buttons(self.handle_pill(i)).into_iter().position(|(_, r)| r.contains(x, y)));
-        if next != self.handle || hover_button != self.handle_button {
-            for id in [self.handle.map(|h| h.window), next.map(|h| h.window)].into_iter().flatten() {
-                self.damage_handle(id);
-            }
-            self.handle = next;
-            self.handle_button = hover_button;
-        }
-    }
-
-    /// A press on the handle: its buttons, or a drag to move. True if handled.
-    pub(super) fn handle_press(&mut self, x: i32, y: i32, double: bool) -> bool {
-        let Some(h) = self.handle else { return false };
-        let Some(i) = self.index_of(h.window) else { return false };
-        let pill = self.handle_pill(i);
-        let hit = if h.stage == Stage::Pill && pill.contains(x, y) {
-            Some(Self::pill_buttons(pill).into_iter().find(|(_, r)| r.contains(x, y)).map_or(PillHit::Grab, |(b, _)| b))
-        } else if self.handle_bar(i).inset_xy(-30, -8).contains(x, y) {
-            Some(PillHit::Grab)
-        } else {
-            None
-        };
-        let Some(hit) = hit else { return false };
-        let id = h.window;
-        if self.focused_id() != Some(id) {
-            self.raise(id);
-        }
-        match hit {
-            PillHit::Shrink => self.minimize(id),
-            PillHit::Expand => self.toggle_zoom(id),
-            PillHit::Close => self.request_close(id),
-            PillHit::Grab if double => self.toggle_zoom(id),
-            PillHit::Grab => self.begin_move(id, x, y),
-        }
-        self.handle = None;
-        self.damage_all();
+        self.raise(d.window);
+        self.drag = Some(d);
+        self.damage_cursor();
         true
     }
 
-    /// Starts moving window `id` (restoring it first if it was moored or expanded).
+    pub(super) fn handle_hover(&mut self, x: i32, y: i32) {
+        let target = if self.locked()
+            || self.menu.is_some()
+            || self.launcher.is_some()
+            || self.spotlight_open()
+            || self.current_open()
+        {
+            None
+        } else {
+            self.window_at(x, y).filter(|&i| strip(self.windows[i].rect).contains(x, y))
+        };
+        let mut damage = alloc::vec::Vec::new();
+        for (i, w) in self.windows.iter_mut().enumerate() {
+            let visible = target == Some(i) || w.chrome_focus.is_some() || self.drag.is_some_and(|d| d.window == w.id);
+            let hover = (target == Some(i)).then(|| buttons(w.rect).iter().position(|r| r.contains(x, y))).flatten();
+            let before = w.chrome.value(self.now_ms, theme::reduce_motion());
+            w.chrome.set(visible, self.now_ms, theme::reduce_motion());
+            if hover != w.chrome_hover
+                || before != w.chrome.value(self.now_ms, theme::reduce_motion())
+                || w.chrome.moving(self.now_ms, theme::reduce_motion())
+            {
+                damage.push((w.id, control_area(w.rect)));
+            }
+            w.chrome_hover = hover;
+        }
+        for (id, r) in damage {
+            self.damage_chrome(id, r);
+        }
+    }
+
+    pub(super) fn step_handle(&mut self) -> bool {
+        let (x, y) = self.cursor;
+        self.handle_hover(x, y);
+        let damage: alloc::vec::Vec<(u32, Rect)> = self
+            .windows
+            .iter()
+            .filter(|w| w.chrome.moving(self.now_ms, theme::reduce_motion()))
+            .map(|w| (w.id, control_area(w.rect)))
+            .collect();
+        let busy = !damage.is_empty();
+        for (id, r) in damage {
+            self.damage_chrome(id, r);
+        }
+        busy
+    }
+
+    /// Damage from window `id`'s own controls. On a window being moved it is
+    /// drawn over the backdrop, so the scene below stays valid.
+    fn damage_chrome(&mut self, id: u32, r: Rect) {
+        self.drag_damage = self.drag.is_some_and(|d| d.window == id);
+        self.damage(r);
+        self.drag_damage = false;
+    }
+
+    fn control_action(&mut self, id: u32, button: usize) {
+        match button {
+            0 => self.minimize(id),
+            1 => self.toggle_zoom(id),
+            _ => self.request_close(id),
+        }
+    }
+
+    pub(super) fn handle_key(&mut self, k: &crate::drivers::input::KeyEvent) -> bool {
+        use crate::drivers::input::KeyCode;
+        if !k.pressed {
+            return false;
+        }
+        let Some(i) = self.focused_id().and_then(|id| self.index_of(id)) else {
+            return false;
+        };
+        if k.mods.alt && k.ch == Some(' ') {
+            self.windows[i].chrome_focus = Some(0);
+            self.damage_handle(self.windows[i].id);
+            return true;
+        }
+        let Some(n) = self.windows[i].chrome_focus else {
+            return false;
+        };
+        let id = self.windows[i].id;
+        match k.code {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Left => {
+                let backwards = k.mods.shift || k.code == KeyCode::Left;
+                self.windows[i].chrome_focus = Some((n + if backwards { 2 } else { 1 }) % 3);
+            }
+            KeyCode::Enter => self.control_action(id, n),
+            KeyCode::Escape => self.windows[i].chrome_focus = None,
+            _ if k.ch == Some(' ') => self.control_action(id, n),
+            _ => return false,
+        }
+        self.damage_handle(id);
+        true
+    }
+
+    pub(super) fn handle_press(&mut self, x: i32, y: i32, double: bool) -> bool {
+        let Some(i) = self.window_at(x, y) else {
+            return false;
+        };
+        let r = self.windows[i].rect;
+        if !strip(r).contains(x, y) {
+            return false;
+        }
+        let id = self.windows[i].id;
+        let action = buttons(r).iter().position(|r| r.contains(x, y));
+        self.raise(id);
+        if let Some(n) = action {
+            self.control_action(id, n);
+        } else if double {
+            self.toggle_zoom(id);
+        } else {
+            self.begin_move(id, x, y);
+        }
+        true
+    }
+
+    /// Arms a move. Moored windows restore only after actual pointer movement.
     pub(super) fn begin_move(&mut self, id: u32, x: i32, y: i32) {
         let Some(i) = self.index_of(id) else { return };
-        if let Some(saved) = self.windows[i].saved.take() {
-            let mut restored = saved;
-            restored.x = (x - saved.w / 2).clamp(0, (self.w - saved.w).max(0));
-            restored.y = y.max(MENUBAR_H + 8);
-            self.windows[i].rect = restored;
-            self.windows[i].placement = Placement::Floating;
-        }
         let start_rect = self.windows[i].rect;
-        self.drag = Some(Drag { window: id, kind: DragKind::Move, start_x: x, start_y: y, start_rect });
-        self.damage_all();
+        self.drag = Some(Drag { window: id, kind: DragKind::Move, start_x: x, start_y: y, start_rect, started: false });
+        self.damage_cursor();
     }
 
     // -------------------------------------------------------------- Moorings
@@ -208,7 +212,7 @@ impl Desktop {
     /// Dragging window `i` to (`x`, `y`): Moorings and the screen edges pick a target.
     pub(super) fn moorings_drag(&mut self, i: usize, x: i32, y: i32) {
         let area = self.work_area();
-        let (mw, mh) = self.windows[i].app.min_size();
+        let (mw, mh) = self.windows[i].minimum();
         let near_top = y < MENUBAR_H + 40 || (self.moorings_open && self.moorings_rect().inset(-24).contains(x, y));
         let mut zone = None;
         if self.windows[i].app.resizable() && near_top {
@@ -279,52 +283,66 @@ impl Desktop {
     }
 
     // ---------------------------------------------------------- painting
+}
 
-    /// The handle of the window the pointer is near (above all windows).
-    pub(super) fn paint_handle(&self, cv: &mut Canvas) {
-        let Some(h) = self.handle else { return };
-        let Some(i) = self.index_of(h.window) else { return };
-        if !self.handle_area(i).intersects(&cv.clip) {
-            return;
+/// Painted with each window so higher windows occlude both chrome and controls.
+pub(super) fn paint_chrome(cv: &mut Canvas, w: &super::Window, focused: bool, now: u64) {
+    let t = theme::current();
+    let r = strip(w.rect);
+    let reveal = w.chrome.value(now, theme::reduce_motion());
+    cv.with_clip(r, |cv| cv.fill_round_rect(w.rect, theme::WINDOW_RADIUS, t.titlebar));
+    cv.fill_rect(Rect::new(r.x, r.bottom() - 1, r.w, 1), t.separator);
+    let f = theme::ui(12);
+    cv.text_clipped(
+        r.x + 16,
+        r.y + 21,
+        &w.app.title(),
+        f,
+        if focused { t.text } else { t.text_secondary },
+        (r.w - 140).max(0),
+    );
+    let alpha = (255 * reveal / 1000) as u8;
+    if reveal < 1000 {
+        cv.fill_round_rect(
+            Rect::new(r.right() - 58, r.y + 15, 26, 3),
+            2,
+            with_alpha(t.text_secondary, (110 * (1000 - reveal) / 1000) as u8),
+        );
+    }
+    if reveal == 0 {
+        return;
+    }
+    for (n, b) in buttons(w.rect).into_iter().enumerate() {
+        let b = b.offset(0, (1000 - reveal) * -3 / 1000);
+        let (cx, cy) = b.center();
+        let hot = w.chrome_hover == Some(n) || w.chrome_focus == Some(n);
+        let ink = if n == 2 && hot { theme::CLOSE } else { t.text };
+        if hot {
+            cv.fill_round_rect(
+                b,
+                8,
+                with_alpha(if n == 2 { theme::CLOSE } else { t.text }, if n == 2 { 35 } else { 22 }),
+            );
         }
-        let t = theme::current();
-        match h.stage {
-            Stage::Bar => {
-                let bar = self.handle_bar(i);
-                cv.fill_round_rect(bar, 3, with_alpha(t.text, 0xA8));
+        if w.chrome_focus == Some(n) {
+            cv.stroke_round_rect(b, 8, theme::accent());
+        }
+        let ink = with_alpha(ink, alpha);
+        match n {
+            0 => cv.line(cx - 4, cy + 1, cx + 4, cy + 1, 1, ink),
+            1 if w.placement == Placement::Maximized => {
+                cv.stroke_round_rect(Rect::new(cx - 2, cy - 5, 8, 8), 2, ink);
+                cv.fill_round_rect(Rect::new(cx - 5, cy - 2, 8, 8), 2, t.titlebar);
+                cv.stroke_round_rect(Rect::new(cx - 5, cy - 2, 8, 8), 2, ink);
             }
-            Stage::Pill => {
-                let pill = self.handle_pill(i);
-                cv.shadow(pill, PILL_H / 2, 16, 4, t.shadow / 3);
-                cv.frosted(pill, PILL_H / 2, t.glass_tint);
-                let title = self.windows[i].app.title();
-                let f = theme::ui_bold(13);
-                let buttons = Self::pill_buttons(pill);
-                cv.text_clipped(pill.x + 14, pill.y + 21, &title, f, t.text_on_glass, buttons[0].1.x - pill.x - 22);
-                for (n, (b, r)) in buttons.into_iter().enumerate() {
-                    let hovered = self.handle_button == Some(n);
-                    let (cx, cy) = r.center();
-                    let ink = if b == PillHit::Close { theme::CLOSE } else { t.text_on_glass };
-                    if b == PillHit::Close {
-                        cv.fill_circle(cx, cy, BUTTON / 2, with_alpha(theme::CLOSE, if hovered { 0x58 } else { 0x2E }));
-                    } else if hovered {
-                        cv.fill_circle(cx, cy, BUTTON / 2, t.hover);
-                    }
-                    match b {
-                        PillHit::Shrink => cv.line(cx - 4, cy, cx + 4, cy, 2, ink),
-                        PillHit::Expand => {
-                            cv.line(cx + 1, cy - 4, cx + 4, cy - 4, 2, ink);
-                            cv.line(cx + 4, cy - 4, cx + 4, cy - 1, 2, ink);
-                            cv.line(cx - 1, cy + 4, cx - 4, cy + 4, 2, ink);
-                            cv.line(cx - 4, cy + 4, cx - 4, cy + 1, 2, ink);
-                        }
-                        PillHit::Close => {
-                            cv.line(cx - 3, cy - 3, cx + 3, cy + 3, 2, ink);
-                            cv.line(cx + 3, cy - 3, cx - 3, cy + 3, 2, ink);
-                        }
-                        PillHit::Grab => {}
-                    }
-                }
+            1 => cv.stroke_round_rect(
+                Rect::new(cx - 4, cy - 4, 9, 9),
+                2,
+                with_alpha(ink, if w.app.resizable() { alpha } else { alpha / 3 }),
+            ),
+            _ => {
+                cv.line(cx - 3, cy - 3, cx + 3, cy + 3, 1, ink);
+                cv.line(cx + 3, cy - 3, cx - 3, cy + 3, 1, ink);
             }
         }
     }

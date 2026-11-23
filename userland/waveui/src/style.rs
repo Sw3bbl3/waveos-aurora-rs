@@ -89,13 +89,13 @@ pub mod space {
 /// Corner radii. (Buttons, search fields and switches are capsules.)
 pub mod radius {
     /// Text fields.
-    pub const CONTROL: i32 = 11;
+    pub const CONTROL: i32 = 9;
     /// Sidebar items and selected rows.
     pub const ITEM: i32 = 10;
     /// Grouped lists, cards.
-    pub const CARD: i32 = 14;
+    pub const CARD: i32 = 12;
     /// Sheets, popovers and windows.
-    pub const SHEET: i32 = 18;
+    pub const SHEET: i32 = 16;
 }
 
 /// Standard control heights.

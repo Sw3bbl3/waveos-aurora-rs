@@ -108,7 +108,15 @@ impl MaterialCache {
             let key = (rect, visible, (tint & 0xffffff) | opacity << 24, dark);
             if changed || layer.render_key != Some(key) {
                 layer.rendered.resize((visible.w * visible.h) as usize, 0);
-                let at = |x: usize, y: i32| layer.blurred[(y.min(h - 1) * w) as usize + x.min(w as usize - 1)];
+                // Tint the coarse grid once instead of every pixel: blending
+                // over a colour is linear, so interpolating tinted cells
+                // gives the same result as tinting interpolated ones.
+                layer.temporary.resize(len, 0);
+                for (t, &b) in layer.temporary.iter_mut().zip(&layer.blurred) {
+                    *t = blend(b, tint, opacity);
+                }
+                let tinted = &layer.temporary;
+                let at = |x: usize, y: i32| tinted[(y.min(h - 1) * w) as usize + x.min(w as usize - 1)];
                 // A soft sheen fading down the top of the material gives it depth
                 // without obscuring content (over at most 40 px, never a hard edge).
                 let band = (rect.h / 4).clamp(1, 40 * s);
@@ -126,7 +134,7 @@ impl MaterialCache {
                     for (x, o) in (visible.x..visible.right()).zip(out) {
                         let fx = ((x - bounds.x) * (256 / step)).max(0);
                         let ix = ((fx / 256).min(w - 1)) as usize;
-                        let base = blend(mix(column[ix], column[ix + 1], fx % 256), tint, opacity);
+                        let base = mix(column[ix], column[ix + 1], fx % 256);
                         *o = if shine == 0 { base } else { blend(base, 0xffffffff, shine) };
                     }
                 }
