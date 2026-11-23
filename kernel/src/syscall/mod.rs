@@ -56,7 +56,11 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::GETPID => Ok(sched::current_pid() as u64),
         nr::SPAWN => spawn(a),
         nr::WAIT => proc::wait(a[0] as u32, a[1]).map(|c| c as i32 as u32 as u64),
-        nr::KILL => proc::kill(a[0] as u32).map(|_| 0),
+        nr::KILL => {
+            let target = proc::get(a[0] as u32).ok_or(ESRCH)?;
+            crate::users::ensure(crate::users::may_signal(&target))?;
+            proc::kill(a[0] as u32).map(|_| 0)
+        }
         nr::SIGNAL => {
             let me = proc::current().ok_or(EPERM)?;
             let target = a[0] as i64;
@@ -65,6 +69,8 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             if targets.is_empty() {
                 return Err(ESRCH);
             }
+            let targets: Vec<_> = targets.into_iter().filter(|t| crate::users::may_signal(t)).collect();
+            crate::users::ensure(!targets.is_empty())?;
             let info = crate::compat::linux::signal::Info { pid: me.pid, ..Default::default() };
             for t in targets {
                 crate::compat::linux::signal::send(&t, a[1] as u32, info, None);
@@ -215,6 +221,9 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::PREF_SET => {
             let key = user::str(a[0], a[1].min(64))?;
             let value = user::str(a[2], a[3].min(1024))?;
+            if crate::users::system_pref(&key) {
+                crate::users::require_admin("change how this computer starts up")?;
+            }
             crate::gui::prefs::set(&key, &value).map(|_| 0)
         }
         nr::SET_DATETIME => {
@@ -228,6 +237,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             if !ok {
                 return Err(EINVAL);
             }
+            crate::users::require_admin("set the date and time")?;
             let rd = crate::drivers::rtc::DateTime {
                 year: d.year,
                 month: d.month,
@@ -475,6 +485,9 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         | nr::WIN_CLOSE
         | nr::WIN_RESIZE
         | nr::NEXT_EVENT => crate::gui::server::syscall(nr, a),
+        nr::CRED_GET | nr::CRED_SET | nr::CHMOD | nr::CHOWN | nr::STAT_OWNER | nr::USERS | nr::ELEVATE => {
+            crate::users::syscall::handle(nr, a)
+        }
         _ => Err(ENOSYS),
     }
 }

@@ -184,8 +184,18 @@ pub fn grow(img: &Path, size: u64) -> io::Result<()> {
                 blocks: bytes / 4096,
             };
             let mut to = aurorafs::Volume::format(disk, &from.label(), pseudo_guid(3), now).map_err(err)?;
+            // Owners as they were: the same default owner (a volume from
+            // before owners gets the first account, as the kernel would
+            // give it), and each inode's own.
+            if from.features() & aurorafs::FEATURE_OWNERS != 0 {
+                let (uid, gid) = from.default_owner();
+                to.enable_owners(uid, gid).map_err(err)?;
+            }
             copy_tree(&mut from, &mut to, aurorafs::ROOT, "").map_err(err)?;
             let root = from.stat(aurorafs::ROOT).map_err(err)?;
+            if from.has_own_owner(aurorafs::ROOT).map_err(err)? {
+                to.set_owner(aurorafs::ROOT, root.owner).map_err(err)?;
+            }
             to.set_times(aurorafs::ROOT, root.ctime, root.mtime).map_err(err)?;
             to.commit().map_err(err)?;
             to.fsck().map_err(io::Error::other)?;
@@ -229,7 +239,8 @@ fn copy_tree<A: aurorafs::Disk, B: aurorafs::Disk>(
     let mut buf = vec![0u8; 1 << 20];
     for e in from.readdir(dir)? {
         let meta = from.stat(e.ino)?;
-        let ino = to.create(parent, &e.name, e.kind)?;
+        let owner = from.has_own_owner(e.ino)?.then_some(meta.owner);
+        let ino = to.create_owned(parent, &e.name, e.kind, owner)?;
         if e.kind == aurorafs::Kind::Dir {
             copy_tree(from, to, e.ino, &format!("{path}/{}", e.name))?;
         } else {
@@ -266,7 +277,11 @@ fn same_tree<A: aurorafs::Disk, B: aurorafs::Disk>(
     let (mut x, mut y) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
     for (l, r) in left.iter().zip(&right) {
         let (ml, mr) = (from.stat(l.ino)?, to.stat(r.ino)?);
-        if l.name != r.name || ml.kind != mr.kind || ml.size != mr.size || (ml.ctime, ml.mtime) != (mr.ctime, mr.mtime)
+        if l.name != r.name
+            || ml.kind != mr.kind
+            || ml.size != mr.size
+            || (ml.ctime, ml.mtime) != (mr.ctime, mr.mtime)
+            || own_owner(from, l.ino)? != own_owner(to, r.ino)?
         {
             return Ok(false);
         }
@@ -286,6 +301,11 @@ fn same_tree<A: aurorafs::Disk, B: aurorafs::Disk>(
         }
     }
     Ok(true)
+}
+
+/// The owner an inode carries itself (None: the volume's default).
+fn own_owner<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, ino: u64) -> aurorafs::Result<Option<aurorafs::Owner>> {
+    Ok(if vol.has_own_owner(ino)? { Some(vol.owner(ino)?) } else { None })
 }
 
 /// A file's contents on the volume (empty if it isn't there).
@@ -326,9 +346,28 @@ fn seed_missing<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, src: &Path, pr
             vol.mkdir_all(&path)?;
             seed_missing(vol, &entry.path(), &path)?;
         } else if vol.resolve(&path).is_err() {
-            vol.write_file(&path, &fs::read(entry.path()).map_err(|_| aurorafs::Error::Io)?)?;
+            let ino = vol.write_file(&path, &fs::read(entry.path()).map_err(|_| aurorafs::Error::Io)?)?;
+            keep_exec_bit(vol, ino, &entry.path())?;
         }
     }
+    Ok(())
+}
+
+/// Files the host marks executable (programs in the Linux tree) stay
+/// executable: `rwxr-xr-x`, owned by the first account. Others keep the
+/// volume's default owner and `rw-r--r--`.
+fn keep_exec_bit<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, ino: u64, host: &Path) -> aurorafs::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = fs::metadata(host).is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
+        if executable {
+            let (uid, gid) = vol.default_owner();
+            vol.set_owner(ino, aurorafs::Owner { uid, gid, mode: 0o755 })?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (vol, ino, host);
     Ok(())
 }
 
@@ -561,7 +600,8 @@ fn seed<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, src: &Path, prefix: &s
             vol.mkdir_all(&path)?;
             seed(vol, &entry.path(), &path)?;
         } else {
-            vol.write_file(&path, &fs::read(entry.path()).map_err(|_| aurorafs::Error::Io)?)?;
+            let ino = vol.write_file(&path, &fs::read(entry.path()).map_err(|_| aurorafs::Error::Io)?)?;
+            keep_exec_bit(vol, ino, &entry.path())?;
         }
     }
     Ok(())

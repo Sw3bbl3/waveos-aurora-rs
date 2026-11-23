@@ -4,6 +4,7 @@
 //! rectangles it affects, and `render` repaints only those, back to front:
 //! wallpaper → windows → Harbor → bar → Shoal → menus → cursor.
 
+mod accounts;
 mod anim;
 mod bar;
 mod items;
@@ -831,9 +832,11 @@ impl Desktop {
                 Command::PowerChanged => self.power_changed(),
                 // The screen lost its contents while asleep; waking asks for the password.
                 Command::Resumed => {
-                    self.lock();
+                    self.lock_after_sleep();
                     self.damage_all();
                 }
+                Command::Elevate => self.sync_elevation(),
+                Command::AccountsChanged => self.accounts_changed(),
                 Command::NetworkChanged => self.damage(Rect::new(0, 0, self.w, MENUBAR_H)),
                 // Follow the screen's new preferred size, without asking.
                 Command::DisplayChanged => self.resolution_request = Some((0, 0)),

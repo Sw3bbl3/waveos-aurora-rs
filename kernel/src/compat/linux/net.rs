@@ -496,8 +496,8 @@ pub fn recvmsg(p: &Process, fd: u64, msg_ptr: u64, flags: u64) -> Result<u64, is
     if let Some(pid) = got.cred {
         if m.controllen >= used + 32 {
             user::put(m.control + used, &[28u64, SOL_SOCKET | ((SCM_CREDENTIALS as u64) << 32)])?;
-            let uid = super::UID as u32;
-            user::put(m.control + used + 16, &[pid, uid, uid])?;
+            let (uid, gid) = super::ids_of(pid);
+            user::put(m.control + used + 16, &[pid, uid, gid])?;
             used += 32;
         } else {
             out_flags |= MSG_CTRUNC;
@@ -648,7 +648,8 @@ pub fn getsockopt(p: &Process, fd: u64, level: u64, name: u64, val: u64, len_ptr
                 Sock::Local(u) => u.peer_pid(),
                 Sock::Net(_) => 0,
             };
-            let creds = [pid, super::UID as u32, super::UID as u32];
+            let (uid, gid) = super::ids_of(pid);
+            let creds = [pid, uid, gid];
             let bytes: Vec<u8> = creds.iter().flat_map(|v| v.to_le_bytes()).collect();
             user::put_bytes(val, &bytes[..(room as usize).min(12)])?;
             user::put(len_ptr, &12u32).map(|_| 0)

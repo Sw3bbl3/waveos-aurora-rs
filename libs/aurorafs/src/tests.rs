@@ -4,19 +4,19 @@ use super::*;
 use std::vec::Vec as StdVec;
 
 #[derive(Clone)]
-struct MemDisk {
-    blocks: StdVec<Block>,
+pub(crate) struct MemDisk {
+    pub(crate) blocks: StdVec<Block>,
     /// Blocks written since the last flush (lost on a simulated power cut).
     unflushed: StdVec<(u64, Block)>,
-    durable: StdVec<Block>,
+    pub(crate) durable: StdVec<Block>,
 }
 
 impl MemDisk {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         MemDisk { blocks: vec![[0; BLOCK]; n], unflushed: StdVec::new(), durable: vec![[0; BLOCK]; n] }
     }
     /// The disk as it would look after a power cut: only flushed writes survive.
-    fn after_power_cut(&self) -> MemDisk {
+    pub(crate) fn after_power_cut(&self) -> MemDisk {
         MemDisk { blocks: self.durable.clone(), unflushed: StdVec::new(), durable: self.durable.clone() }
     }
 }

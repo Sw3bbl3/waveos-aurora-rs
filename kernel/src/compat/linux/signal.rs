@@ -594,7 +594,7 @@ fn enter_handler(r: &mut Regs, sig: u32, info: Info, a: &Action, old_mask: u64, 
         si[16..24].copy_from_slice(&info.addr.to_le_bytes());
     } else {
         si[16..20].copy_from_slice(&info.pid.to_le_bytes());
-        si[20..24].copy_from_slice(&(super::UID as u32).to_le_bytes());
+        si[20..24].copy_from_slice(&super::ids_of(info.pid).0.to_le_bytes());
         si[24..28].copy_from_slice(&info.status.to_le_bytes());
     }
 
@@ -870,6 +870,11 @@ pub fn kill(p: &Process, pid: i64, sig: u64) -> Result<u64, isize> {
     };
     if targets.is_empty() {
         return Err(ESRCH);
+    }
+    // Only the caller's own account's processes, unless it is an administrator.
+    let targets: alloc::vec::Vec<_> = targets.into_iter().filter(|q| crate::users::may_signal(q)).collect();
+    if targets.is_empty() {
+        return Err(EPERM);
     }
     for q in &targets {
         send(q, sig as u32, info, None);

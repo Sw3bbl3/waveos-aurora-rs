@@ -164,6 +164,15 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
 - **CPU faults in ring 3** end only the faulting process (`proc::crash_current`), and the desktop shows a Problem Report — unless it is a Linux program with a handler for the signal the fault becomes (`SIGSEGV`, `SIGILL`, `SIGFPE`, `SIGBUS`, `SIGTRAP`): then the handler runs. Those exceptions, the timer and the reschedule IPI enter through `arch::trap`, which saves every register in a `TrapFrame` the handler can change, so a signal is also delivered to a thread interrupted in user code (a sender raises a reschedule IPI on the CPU running it).
 - **The `reaper` kernel task** frees a process once the scheduler has retired its last thread: it closes handles (so pipe peers see EOF), closes windows, and drops the address space.
 
+### Accounts and permissions (`users/`, `fs/perm.rs`)
+
+- **Credentials.** Every process carries a `users::Cred`: uid, primary group, up to 16 supplementary groups, the *administrator capability* and a umask. Spawned and forked processes inherit their parent's (stdio handles change nothing); the desktop starts apps with the logged-in session's. Kernel tasks have none and act as the system. Ids: `0` system, `80` admin group, `100` users, accounts from `1000` (each with a private group of the same number). `cred_get`/`cred_set` read and narrow them (only the system may become another account); Linux programs see the same ids through `getuid`/`getgroups`/`stat`/`SO_PEERCRED`, and their `setuid` follows the same rule.
+- **File permissions.** `fs::perm` checks Unix mode bits for the calling process at every VFS entry point: search on each folder walked, read/write on open, write+search on the folder for create, unlink and rename (with the sticky bit), read to list, execute for Linux programs (WaveOS programs need read). `/System` belongs to the system and is read-only; `/Boot` is the system's and the admin group's; removable volumes belong to the session. `/Security`, `/Users` and `/Applications` on the home volume can be created, removed or renamed only by the system. Kernel code keeping the system's own files during a call (preferences, the account database) runs under `fs::perm::system`.
+- **Accounts** (`users::db`): `/Security/accounts.db` (`rw------- system` in `rwx------ system`, refused if not so), one section per account with a PBKDF2-HMAC-SHA256 hash, a 16-byte salt and the iteration count; failed checks wait longer after three. The first account's home is the volume root (the layout earlier versions made); others get `/Users/<name>`. `users` (list, add, remove, password, administrator, details) manages them.
+- **The administrator capability** is held by administrators' processes, and given to others for five minutes when an administrator approves the system prompt (`elevate`, `apps/elevate.rs`; the window server reads the password, the app never does). Privileged: managing accounts, changing other accounts, `chown`, the clock, who logs in automatically, writing to `/Applications`. Signals and `kill` reach only the caller's own account's processes without it.
+- **Shore** shows the first-run setup (password optional), the login screen with a row of accounts when needed, and the lock screen; the WayV menu logs out or switches accounts.
+- Per-app sandboxing is designed in [developer/sandboxing.md](developer/sandboxing.md).
+
 ### corekit and AuroraKit
 - **corekit:** the runtime. It provides `_start`, a heap that grows by `mmap`-ing new arenas, and `print!`, which formats into one buffer and writes it once. It also has file, process and time APIs.
 - **AuroraKit:** the UI toolkit. An app implements `aurorakit::App` (draw/key/click/drag/hover/scroll/tick, drop targets, close requests) and calls `aurorakit::run`. AuroraKit creates the window, draws the app with `lumen` into the shared surface, calls `win_present`, and turns window-server events into method calls.
@@ -230,7 +239,8 @@ block 0            superblock (magic WAVEFS01, geometry, counts, UUID, label, CR
 journal            1/16 of the volume, 32–1024 blocks
 block bitmap       1 bit per 4 KiB block
 inode bitmap       1 bit per inode (one inode per 16 KiB of disk)
-inode table        256-byte inodes: kind, links, size, times, 12 extents + 1 overflow extent block
+inode table        256-byte inodes: kind, links, size, times, 12 extents + 1 overflow extent block,
+                   owner, group and mode (bytes 240–251, with a flag)
 data               file contents; directories are files of (inode, kind, name) records
 ```
 
@@ -240,6 +250,8 @@ data               file contents; directories are files of (inode, kind, name) r
 3. Copies the images to their home locations.
 
 On mount, a complete, checksummed transaction left in the journal is replayed, and a torn one is ignored. Freed blocks are not reused until the transaction that freed them commits. Freeing a block also revokes any journaled image of it, so a replay can never overwrite file data that later reused the block.
+
+**Owners** are a compatible feature (`FEATURE_OWNERS`): a checksummed superblock extension (bytes 188–255) holds the feature bits and the volume's *default owner*, which every inode without its own owner belongs to. Older kernels ignore the extension and still mount the volume; inodes they rewrite fall back to the default owner. A volume from before owners gets them at its first boot with them: the default owner becomes the first account (uid 1000), its personal folders become private, and `/Security` and `/Applications` are made.
 
 The same crate formats volumes on the host (`xtask/src/image.rs`). Its tests (`cargo test -p aurorafs`) simulate power cuts by keeping only flushed writes, and check the result with `fsck`.
 

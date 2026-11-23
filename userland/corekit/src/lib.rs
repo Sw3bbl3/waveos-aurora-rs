@@ -36,6 +36,7 @@ pub mod sync;
 pub mod sys;
 pub mod thread;
 pub mod time;
+pub mod users;
 pub mod web;
 
 pub use aurora_abi as abi;

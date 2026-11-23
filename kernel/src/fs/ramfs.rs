@@ -11,6 +11,7 @@ struct Node {
     children: BTreeMap<String, Ino>,
     mtime: u64,
     ctime: u64,
+    owner: Option<Owner>,
 }
 
 struct Inner {
@@ -26,7 +27,10 @@ impl RamFs {
     pub fn new() -> Self {
         let now = crate::time::wall_seconds();
         let mut nodes = BTreeMap::new();
-        nodes.insert(1, Node { kind: Kind::Dir, data: Vec::new(), children: BTreeMap::new(), mtime: now, ctime: now });
+        nodes.insert(
+            1,
+            Node { kind: Kind::Dir, data: Vec::new(), children: BTreeMap::new(), mtime: now, ctime: now, owner: None },
+        );
         Self { inner: Mutex::new(Inner { nodes, next: 2 }) }
     }
 }
@@ -89,6 +93,23 @@ impl Filesystem for RamFs {
             .collect())
     }
     fn create(&self, dir: Ino, name: &str, kind: Kind) -> FsResult<Ino> {
+        self.create_owned(dir, name, kind, None)
+    }
+    fn owner(&self, ino: Ino) -> Option<(Owner, bool)> {
+        let g = self.inner.lock();
+        let n = g.nodes.get(&ino)?;
+        // Like a home volume: what has no owner of its own is the first account's.
+        let first = crate::users::FIRST_UID;
+        let mode = if n.kind == Kind::Dir { 0o755 } else { 0o644 };
+        Some(n.owner.map_or((Owner { uid: first, gid: first, mode }, false), |o| (o, true)))
+    }
+    fn set_owner(&self, ino: Ino, owner: Owner) -> FsResult<()> {
+        let mut g = self.inner.lock();
+        let n = g.nodes.get_mut(&ino).ok_or(ENOENT)?;
+        n.owner = Some(Owner { mode: owner.mode & 0o7777, ..owner });
+        Ok(())
+    }
+    fn create_owned(&self, dir: Ino, name: &str, kind: Kind, owner: Option<Owner>) -> FsResult<Ino> {
         let mut g = self.inner.lock();
         let ino = g.next;
         let d = g.nodes.get_mut(&dir).ok_or(ENOENT)?;
@@ -100,7 +121,7 @@ impl Filesystem for RamFs {
         }
         d.children.insert(String::from(name), ino);
         let now = crate::time::wall_seconds();
-        g.nodes.insert(ino, Node { kind, data: Vec::new(), children: BTreeMap::new(), mtime: now, ctime: now });
+        g.nodes.insert(ino, Node { kind, data: Vec::new(), children: BTreeMap::new(), mtime: now, ctime: now, owner });
         g.next += 1;
         Ok(ino)
     }

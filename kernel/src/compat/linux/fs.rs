@@ -82,18 +82,31 @@ pub fn to_guest(host: &str) -> String {
     String::from(host)
 }
 
-/// Makes the writable Linux folders (once per boot is enough; cheap after).
-pub fn prepare_root(user: &str) {
-    for dir in ["", "/home", "/tmp", "/var", "/var/tmp", "/run", "/root"] {
-        let path = format!("{WRITABLE_ROOT}{dir}");
-        if !fs::is_dir(&path) {
-            let _ = fs::mkdir(&path);
+/// Makes the writable Linux folders (once per boot is enough; cheap after):
+/// the system's, with `/tmp` and `/var/tmp` open to everyone (sticky), and
+/// `/home/<user>` for account `uid`.
+pub fn prepare_root(user: &str, uid: u32) {
+    use crate::fs::{perm, Owner};
+    perm::system(|| {
+        for dir in ["", "/home", "/tmp", "/var", "/var/tmp", "/run", "/root"] {
+            let path = format!("{WRITABLE_ROOT}{dir}");
+            if !fs::is_dir(&path) && fs::mkdir(&path).is_ok() {
+                let mode = match dir {
+                    "/tmp" | "/var/tmp" => Some(0o1777),
+                    "/run" => Some(0o777),
+                    "/root" => Some(0o700),
+                    _ => None,
+                };
+                if let Some(mode) = mode {
+                    let _ = perm::set_owner_path(&path, Owner::system(mode));
+                }
+            }
         }
-    }
-    let home = format!("{WRITABLE_ROOT}/home/{user}");
-    if !fs::is_dir(&home) {
-        let _ = fs::mkdir(&home);
-    }
+        let home = format!("{WRITABLE_ROOT}/home/{user}");
+        if !fs::is_dir(&home) && fs::mkdir(&home).is_ok() {
+            let _ = perm::set_owner_path(&home, Owner { uid, gid: uid, mode: 0o755 });
+        }
+    });
 }
 
 /// An open object only Linux programs have: a directory, a generated file,
@@ -291,11 +304,8 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/proc/mounts" | "/proc/self/mounts" | "/etc/mtab" => mem(mounts()),
         "/proc/version" => mem(String::from("Linux version 6.12.0-waveos (WaveOS Aurora)\n")),
         "/proc/sys/kernel/osrelease" => mem(String::from("6.12.0-waveos\n")),
-        "/etc/passwd" => mem(format!(
-            "root:x:0:0:root:/root:/bin/sh\n{user}:x:{uid}:{uid}:{user}:/home/{user}:/bin/sh\n",
-            uid = super::UID
-        )),
-        "/etc/group" => mem(format!("root:x:0:\n{user}:x:{uid}:\n", uid = super::UID)),
+        "/etc/passwd" => mem(passwd(&user)),
+        "/etc/group" => mem(group(&user)),
         "/etc/hostname" => mem(String::from("aurora\n")),
         "/etc/hosts" => mem(String::from("127.0.0.1 localhost aurora\n::1 localhost aurora\n")),
         "/etc/resolv.conf" => mem(resolv_conf()),
@@ -303,16 +313,50 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
     }))
 }
 
-/// The user name Linux programs see ("alex" for Alex Rivera).
+/// The user name Linux programs see: the calling process's account
+/// ("alex"), or the logged-in one's for the system.
 pub fn account_user() -> String {
-    let full = crate::gui::prefs::get("account_name").unwrap_or_default();
-    let first: String = full.split_whitespace().next().unwrap_or("user").to_lowercase();
-    let name: String = first.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    if name.is_empty() {
-        String::from("user")
-    } else {
-        name
+    let uid = crate::users::current().unwrap_or_else(crate::users::session).uid;
+    crate::users::db::get(uid).map(|u| u.name).unwrap_or_else(|| String::from("user"))
+}
+
+/// `/etc/passwd`: the system and every account (no password material: the
+/// `x` says it is kept elsewhere, as on Linux).
+fn passwd(user: &str) -> String {
+    let mut s = String::from("root:x:0:0:system:/root:/bin/sh\n");
+    let accounts = crate::users::db::all();
+    for u in &accounts {
+        let full = u.full.replace([':', '\n'], " ");
+        s.push_str(&format!("{}:x:{}:{}:{}:/home/{}:/bin/sh\n", u.name, u.uid, u.uid, full, u.name));
     }
+    if accounts.is_empty() {
+        s.push_str(&format!("{user}:x:{uid}:{uid}:{user}:/home/{user}:/bin/sh\n", uid = crate::users::FIRST_UID));
+    }
+    s.push_str("nobody:x:65534:65534:nobody:/:/bin/false\n");
+    s
+}
+
+/// `/etc/group`: the system's groups and one per account.
+fn group(user: &str) -> String {
+    let accounts = crate::users::db::all();
+    let names = |admins: bool| {
+        accounts.iter().filter(|u| !admins || u.admin).map(|u| u.name.as_str()).collect::<Vec<_>>().join(",")
+    };
+    let mut s = format!(
+        "root:x:0:\nadmin:x:{}:{}\nusers:x:{}:{}\n",
+        crate::users::ADMIN_GID,
+        names(true),
+        crate::users::USERS_GID,
+        names(false)
+    );
+    for u in &accounts {
+        s.push_str(&format!("{}:x:{}:\n", u.name, u.uid));
+    }
+    if accounts.is_empty() {
+        s.push_str(&format!("{user}:x:{}:\n", crate::users::FIRST_UID));
+    }
+    s.push_str("nogroup:x:65534:\n");
+    s
 }
 
 fn cpuinfo() -> String {
@@ -542,12 +586,12 @@ fn next_timer(p: &Process, fds: impl Iterator<Item = usize>) -> Option<u64> {
     .min()
 }
 
-pub fn openat(p: &Process, dirfd: u64, ptr: u64, flags: u64, _mode: u64) -> Result<u64, isize> {
+pub fn openat(p: &Process, dirfd: u64, ptr: u64, flags: u64, mode: u64) -> Result<u64, isize> {
     let guest = path_arg(p, dirfd, ptr)?;
     if super::links::target(&guest).is_some() && flags & O_NOFOLLOW != 0 {
         return Err(ELOOP);
     }
-    let handle = open_guest(p, &follow(&guest)?, flags)?;
+    let handle = open_guest_mode(p, &follow(&guest)?, flags, mode)?;
     install(p, handle, flags & O_CLOEXEC != 0)
 }
 
@@ -571,8 +615,8 @@ pub fn install_handle(p: &Process, h: Arc<Handle>, cloexec: bool) -> Result<u64,
     install(p, h, cloexec)
 }
 
-/// Opens a Linux path as a handle.
-pub fn open_guest(p: &Process, guest: &str, flags: u64) -> Result<Arc<Handle>, isize> {
+/// Opens a Linux path as a handle; a file it creates gets `mode` (before the umask).
+fn open_guest_mode(p: &Process, guest: &str, flags: u64, mode: u64) -> Result<Arc<Handle>, isize> {
     let fd_alias = guest.strip_prefix("/dev/fd/").or_else(|| guest.strip_prefix("/proc/self/fd/"));
     let std_alias = match guest {
         "/dev/stdin" => Some(0),
@@ -629,7 +673,7 @@ pub fn open_guest(p: &Process, guest: &str, flags: u64) -> Result<Arc<Handle>, i
     if flags & O_APPEND != 0 {
         f |= APPEND;
     }
-    let file = fs::open(&host, f)?;
+    let file = fs::open_mode(&host, f, Some((mode & 0o7777) as u16))?;
     Ok(Arc::new(Handle::File(Mutex::new(file))))
 }
 
@@ -879,6 +923,8 @@ fn fnv(s: &str) -> u64 {
 /// What `stat` reports, gathered from either a path or a handle.
 struct Info {
     mode: u32,
+    /// Owner and group (None: the process's own, for made-up files).
+    owner: Option<(u32, u32)>,
     size: u64,
     ino: u64,
     rdev: u64,
@@ -905,46 +951,101 @@ fn info_for_path(p: &Process, guest: &str, follow_link: bool) -> Result<Info, is
     if let Some(to) = super::links::target(guest) {
         if !follow_link {
             let mode = S_IFLNK | 0o777;
-            return Ok(Info { mode, size: to.len() as u64, ino: fnv(guest), rdev: 0, mtime: 0, ctime: 0 });
+            return Ok(Info { owner: None, mode, size: to.len() as u64, ino: fnv(guest), rdev: 0, mtime: 0, ctime: 0 });
         }
         return info_for_path(p, &follow(guest)?, false);
     }
     if let Some(shm) = guest.strip_prefix("/dev/shm/").filter(|n| !n.is_empty()) {
         let f = super::shm::lookup(shm).ok_or(ENOENT)?;
-        return Ok(Info { mode: S_IFREG | 0o600, size: f.size(), ino: fnv(guest), rdev: 0, mtime: 0, ctime: 0 });
+        return Ok(Info {
+            owner: None,
+            mode: S_IFREG | 0o600,
+            size: f.size(),
+            ino: fnv(guest),
+            rdev: 0,
+            mtime: 0,
+            ctime: 0,
+        });
     }
     if let Some(v) = virtual_file(p, guest) {
         let s = v?;
         let (mode, rdev) = s.mode();
         let size = if let Special::Mem { data, .. } = &s { data.len() as u64 } else { 0 };
-        return Ok(Info { mode, size, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
+        return Ok(Info { owner: None, mode, size, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
     }
     let host = to_host(guest);
     // The Linux tree's top folders exist even before anything is in them.
     let (md, _) = match fs::stat(&host) {
         Err(ENOENT) if guest.trim_end_matches('/').matches('/').count() == 1 && host != guest => {
-            return Ok(Info { mode: S_IFDIR | 0o755, size: 0, ino: fnv(guest), rdev: 0, mtime: 0, ctime: 0 });
+            return Ok(Info {
+                owner: None,
+                mode: S_IFDIR | 0o755,
+                size: 0,
+                ino: fnv(guest),
+                rdev: 0,
+                mtime: 0,
+                ctime: 0,
+            });
         }
         r => r?,
     };
     let ino = fs::lookup(&host).map(|(_, i)| i).unwrap_or_else(|_| fnv(&host));
-    let mode = if md.kind == Kind::Dir { S_IFDIR | 0o755 } else { file_mode(&host) };
-    Ok(Info { mode, size: md.size, ino, rdev: 0, mtime: unix_time(md.mtime), ctime: unix_time(md.ctime) })
+    let (mode, owner) = match fs::perm::stat_owner(&host) {
+        // Files that carry their own mode report it; others keep the
+        // old guess by folder (programs and libraries are executable).
+        Ok((o, explicit)) => {
+            let bits = if md.kind == Kind::Dir {
+                S_IFDIR | o.mode as u32
+            } else if explicit {
+                S_IFREG | o.mode as u32
+            } else {
+                file_mode(&host) | (o.mode as u32 & 0o7000)
+            };
+            (bits, Some((o.uid, o.gid)))
+        }
+        Err(_) => (if md.kind == Kind::Dir { S_IFDIR | 0o755 } else { file_mode(&host) }, None),
+    };
+    Ok(Info { mode, owner, size: md.size, ino, rdev: 0, mtime: unix_time(md.mtime), ctime: unix_time(md.ctime) })
 }
 
 fn info_for_handle(h: &Handle) -> Result<Info, isize> {
-    let fifo = |ino| Info { mode: S_IFIFO | 0o600, size: 0, ino, rdev: 0, mtime: 0, ctime: 0 };
+    let fifo = |ino| Info { owner: None, mode: S_IFIFO | 0o600, size: 0, ino, rdev: 0, mtime: 0, ctime: 0 };
     Ok(match h {
         Handle::File(f) => {
             let f = f.lock();
             let md = f.fs.metadata(f.ino)?;
-            let mode = if md.kind == Kind::Dir { S_IFDIR | 0o755 } else { S_IFREG | 0o755 };
-            Info { mode, size: md.size, ino: f.ino, rdev: 0, mtime: unix_time(md.mtime), ctime: unix_time(md.ctime) }
+            let (mut mode, owner) = match f.fs.owner(f.ino) {
+                // Without its own mode a file keeps reporting executable, as before.
+                Some((o, explicit)) => (o.mode as u32 | if explicit { 0 } else { 0o111 }, Some((o.uid, o.gid))),
+                None => (0o755, None),
+            };
+            if md.kind == Kind::Dir {
+                mode = S_IFDIR | (mode & 0o7777);
+            } else {
+                mode = S_IFREG | (mode & 0o7777);
+            }
+            Info {
+                mode,
+                owner,
+                size: md.size,
+                ino: f.ino,
+                rdev: 0,
+                mtime: unix_time(md.mtime),
+                ctime: unix_time(md.ctime),
+            }
         }
         Handle::Special(s) => {
             let s = s.lock();
             if let Special::Dir { host, .. } = &*s {
-                return Ok(Info { mode: S_IFDIR | 0o755, size: 0, ino: fnv(host), rdev: 0, mtime: 0, ctime: 0 });
+                return Ok(Info {
+                    owner: None,
+                    mode: S_IFDIR | 0o755,
+                    size: 0,
+                    ino: fnv(host),
+                    rdev: 0,
+                    mtime: 0,
+                    ctime: 0,
+                });
             }
             let (mode, rdev) = s.mode();
             let size = match &*s {
@@ -952,26 +1053,35 @@ fn info_for_handle(h: &Handle) -> Result<Info, isize> {
                 Special::Shm { file, .. } => file.size(),
                 _ => 0,
             };
-            Info { mode, size, ino: h as *const Handle as u64 >> 4, rdev, mtime: 0, ctime: 0 }
+            Info { owner: None, mode, size, ino: h as *const Handle as u64 >> 4, rdev, mtime: 0, ctime: 0 }
         }
         Handle::PipeRead { pipe, .. } => fifo(Arc::as_ptr(pipe) as u64 >> 4),
         Handle::PipeWrite(pipe) => fifo(Arc::as_ptr(pipe) as u64 >> 4),
-        Handle::Socket(_) => Info { mode: S_IFSOCK | 0o777, size: 0, ino: 1, rdev: 0, mtime: 0, ctime: 0 },
+        Handle::Socket(_) => Info { owner: None, mode: S_IFSOCK | 0o777, size: 0, ino: 1, rdev: 0, mtime: 0, ctime: 0 },
         Handle::Log | Handle::Audio(_) | Handle::AudioIn(_) => {
-            Info { mode: S_IFCHR | 0o620, size: 0, ino: 2, rdev: makedev(5, 1), mtime: 0, ctime: 0 }
+            Info { owner: None, mode: S_IFCHR | 0o620, size: 0, ino: 2, rdev: makedev(5, 1), mtime: 0, ctime: 0 }
         }
+    })
+}
+
+/// Owner and group to report: the file's, or the caller's for made-up files.
+fn ids(i: &Info) -> (u32, u32) {
+    i.owner.unwrap_or_else(|| {
+        let c = crate::users::current().unwrap_or_else(crate::users::session);
+        (c.uid, c.gid)
     })
 }
 
 /// Linux's `struct stat` (144 bytes on x86-64).
 fn put_stat(ptr: u64, i: &Info) -> Result<u64, isize> {
+    let (uid, gid) = ids(i);
     let mut b = [0u8; 144];
     let mut w = |off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
     w(0, 0x803); // st_dev
     w(8, i.ino);
     w(16, if i.mode & S_IFDIR != 0 { 2 } else { 1 }); // st_nlink
-    w(24, i.mode as u64 | (super::UID << 32)); // st_mode, st_uid
-    w(32, super::UID); // st_gid
+    w(24, i.mode as u64 | ((uid as u64) << 32)); // st_mode, st_uid
+    w(32, gid as u64); // st_gid
     w(40, i.rdev);
     w(48, i.size);
     w(56, 4096); // st_blksize
@@ -1010,8 +1120,9 @@ pub fn statx(p: &Process, dirfd: u64, ptr: u64, flags: u64, buf: u64) -> Result<
     put32(&mut b, 0, 0x7FF); // stx_mask: the basic fields
     put32(&mut b, 4, 4096);
     put32(&mut b, 16, if info.mode & S_IFDIR != 0 { 2 } else { 1 });
-    put32(&mut b, 20, super::UID as u32);
-    put32(&mut b, 24, super::UID as u32);
+    let (uid, gid) = ids(&info);
+    put32(&mut b, 20, uid);
+    put32(&mut b, 24, gid);
     b[28..30].copy_from_slice(&(info.mode as u16).to_le_bytes());
     put64(&mut b, 32, info.ino);
     put64(&mut b, 40, info.size);
@@ -1036,10 +1147,89 @@ pub fn access(p: &Process, dirfd: u64, ptr: u64, mode: u64) -> Result<u64, isize
             return Err(EROFS);
         }
     }
-    if mode & 1 != 0 && info.mode & 0o111 == 0 {
+    // The permission bits as stat reported them, for the caller's identity.
+    if let Some(c) = crate::users::current().filter(|c| !c.is_root()) {
+        let (uid, gid) = ids(&info);
+        let o = fs::Owner { uid, gid, mode: (info.mode & 0o7777) as u16 };
+        if !fs::perm::allowed(&c, &o, (mode & 7) as u16) {
+            return Err(EACCES);
+        }
+    } else if mode & 1 != 0 && info.mode & 0o111 == 0 {
         return Err(EACCES);
     }
     Ok(0)
+}
+
+/// `chmod`, `fchmodat`: the owner sets the permission bits. On volumes
+/// without owners (FAT, the system image) nothing changes, as before.
+pub fn chmod(p: &Process, dirfd: u64, ptr: u64, mode: u64) -> Result<u64, isize> {
+    let guest = follow(&path_arg(p, dirfd, ptr)?)?;
+    if virtual_file(p, &guest).is_some() {
+        return Err(EPERM);
+    }
+    match fs::perm::chmod(&to_host(&guest), mode as u16) {
+        Err(EPERM) if no_owners(&to_host(&guest)) => Ok(0),
+        r => r.map(|_| 0),
+    }
+}
+
+/// `chown`, `fchownat`, `lchown` (`-1` leaves an id as it is).
+pub fn chown(p: &Process, dirfd: u64, ptr: u64, uid: u64, gid: u64) -> Result<u64, isize> {
+    let guest = follow(&path_arg(p, dirfd, ptr)?)?;
+    if virtual_file(p, &guest).is_some() {
+        return Err(EPERM);
+    }
+    let id = |v: u64| if v as u32 == u32::MAX { u32::MAX } else { v as u32 };
+    match fs::perm::chown(&to_host(&guest), id(uid), id(gid)) {
+        Err(EPERM) if no_owners(&to_host(&guest)) => Ok(0),
+        r => r.map(|_| 0),
+    }
+}
+
+/// `fchmod`/`fchown` on an open file: by its path when it has one.
+pub fn fchmod(p: &Process, fd: u64, mode: Option<u64>, ids: (u64, u64)) -> Result<u64, isize> {
+    let h = p.fd(fd as usize)?;
+    let host = match &*h {
+        Handle::Special(s) => match &*s.lock() {
+            Special::Dir { host, .. } => Some(host.clone()),
+            _ => None,
+        },
+        Handle::File(f) => {
+            // Files opened by path: find the owner through the filesystem.
+            let f = f.lock();
+            let Some((o, _)) = f.fs.owner(f.ino) else { return Ok(0) };
+            if let Some(c) = crate::users::current() {
+                let owner_ok = c.uid == o.uid || c.is_admin();
+                if !owner_ok || (mode.is_none() && ids.0 as u32 != u32::MAX && ids.0 as u32 != o.uid && !c.is_admin()) {
+                    return Err(EPERM);
+                }
+            }
+            let new = match mode {
+                Some(m) => fs::Owner { mode: (m & 0o7777) as u16, ..o },
+                None => fs::Owner {
+                    uid: if ids.0 as u32 == u32::MAX { o.uid } else { ids.0 as u32 },
+                    gid: if ids.1 as u32 == u32::MAX { o.gid } else { ids.1 as u32 },
+                    mode: o.mode,
+                },
+            };
+            return f.fs.set_owner(f.ino, new).map(|_| 0);
+        }
+        _ => None,
+    };
+    let Some(host) = host else { return Ok(0) };
+    let r = match mode {
+        Some(m) => fs::perm::chmod(&host, m as u16),
+        None => fs::perm::chown(&host, ids.0 as u32, ids.1 as u32),
+    };
+    match r {
+        Err(EPERM) if no_owners(&host) => Ok(0),
+        r => r.map(|_| 0),
+    }
+}
+
+/// True if `host` is on a volume without owners.
+fn no_owners(host: &str) -> bool {
+    fs::lookup(host).is_ok_and(|(f, i)| f.owner(i).is_none())
 }
 
 // ------------------------------------------------------------------ fds
@@ -1460,9 +1650,18 @@ pub fn fchdir(p: &Process, fd: u64) -> Result<u64, isize> {
     set_cwd(p, &guest)
 }
 
-pub fn mkdirat(p: &Process, dirfd: u64, ptr: u64) -> Result<u64, isize> {
+pub fn mkdirat(p: &Process, dirfd: u64, ptr: u64, mode: u64) -> Result<u64, isize> {
     let guest = path_arg(p, dirfd, ptr)?;
-    fs::mkdir(&to_host(&guest)).map(|_| 0)
+    let host = to_host(&guest);
+    fs::mkdir(&host)?;
+    // The mode asked for, less the umask (the default is rwxr-xr-x).
+    if let Some(c) = crate::users::current() {
+        let mode = (mode & 0o7777) as u16 & !c.umask;
+        if mode != 0o755 && !no_owners(&host) {
+            let _ = fs::perm::chmod(&host, mode);
+        }
+    }
+    Ok(0)
 }
 
 pub fn unlinkat(p: &Process, dirfd: u64, ptr: u64, flags: u64) -> Result<u64, isize> {
@@ -1471,7 +1670,10 @@ pub fn unlinkat(p: &Process, dirfd: u64, ptr: u64, flags: u64) -> Result<u64, is
         return super::shm::unlink(name).map(|_| 0);
     }
     if super::links::target(&guest).is_some() {
-        return super::links::remove(&guest).map(|_| 0);
+        if crate::users::current().is_some_and(|c| !c.is_root()) {
+            fs::perm::access(&fs::parent_path(&to_host(&guest)), fs::perm::W | fs::perm::X)?;
+        }
+        return fs::perm::system(|| super::links::remove(&guest)).map(|_| 0);
     }
     let host = to_host(&guest);
     let dir = fs::is_dir(&host);
@@ -1529,7 +1731,12 @@ pub fn symlinkat(p: &Process, target: u64, dirfd: u64, ptr: u64) -> Result<u64, 
     if fs::stat(&host).is_ok() || virtual_file(p, &guest).is_some() {
         return Err(EEXIST);
     }
-    super::links::create(&guest, &to).map(|_| 0)
+    // Links are kept in one table of the system's, but may only be made
+    // where the caller could make a file.
+    if crate::users::current().is_some_and(|c| !c.is_root()) {
+        fs::perm::access(&fs::parent_path(&host), fs::perm::W | fs::perm::X)?;
+    }
+    fs::perm::system(|| super::links::create(&guest, &to)).map(|_| 0)
 }
 
 pub fn truncate(p: &Process, ptr: u64, len: u64) -> Result<u64, isize> {

@@ -750,13 +750,21 @@ impl<'a> Canvas<'a> {
 
     /// Like [`blit`](Self::blit) for a surface with transparency (glass regions).
     fn blit_alpha_px(&mut self, src: &[u32], sw: u32, sh: u32, dst: Rect, radius: i32) {
+        // Never read past the pixels given.
+        if sw == 0 {
+            return;
+        }
+        let sh = sh.min((src.len() / sw as usize) as u32);
         let img = Rect::new(dst.x, dst.y, (sw as i32).min(dst.w), (sh as i32).min(dst.h));
         let radius = radius.min(dst.w / 2).min(dst.h / 2).max(0);
         // Between the corner bands every pixel is its own opacity: copy the
         // solid ones, skip the clear ones, blend the rest.
         let straight = Rect::new(img.x, dst.y + radius, img.w, dst.h - 2 * radius);
         let area = img.intersect(&straight).intersect(&self.pclip());
-        for y in area.y..area.bottom() {
+        // A clip beside the image (no columns in common) leaves rows with
+        // zero width whose start lies past the source: nothing to copy.
+        let rows = if area.w > 0 { area.y..area.bottom() } else { 0..0 };
+        for y in rows {
             let s0 = ((y - dst.y) as u32 * sw + (area.x - dst.x) as u32) as usize;
             let d0 = (y * self.width + area.x) as usize;
             let n = area.w as usize;

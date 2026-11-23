@@ -93,6 +93,8 @@ pub struct Process {
     pub sid: AtomicU32,
     pub fds: Mutex<Vec<Option<Arc<Handle>>>>,
     pub cwd: Mutex<String>,
+    /// Who the process acts as (inherited from its parent; see `users`).
+    pub cred: IrqMutex<crate::users::Cred>,
     exit: AtomicI64,
     pub killed: AtomicBool,
     /// Set once a parent has collected the exit code with `wait`.
@@ -304,8 +306,11 @@ pub fn spawn_env(
     let image = aurora_elf::parse(&data).ok_or(ENOEXEC)?;
     let mut aspace = AddressSpace::new().ok_or(ENOMEM)?;
     let (entry, user_sp, arg, linux_state) = if linux::is_linux(&image, path) {
+        // Linux programs need the execute bit too (WaveOS programs only
+        // need to be readable, which `read_all` checked).
+        fs::perm::check_exec(path)?;
         let user = linux::fs::account_user();
-        linux::fs::prepare_root(&user);
+        linux::fs::prepare_root(&user, crate::users::for_child(parent).uid);
         let default_env;
         let env = match env {
             Some(e) => e,
@@ -344,6 +349,7 @@ pub fn spawn_env(
         aspace: Mutex::new(Some(aspace)),
         fds: Mutex::new(fds),
         cwd: Mutex::new(cwd.unwrap_or_else(|| String::from("/"))),
+        cred: IrqMutex::new(crate::users::for_child(parent)),
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
         waited: AtomicBool::new(false),
@@ -722,6 +728,7 @@ pub fn fork(
         aspace: Mutex::new(aspace),
         fds: Mutex::new(parent.fds.lock().clone()),
         cwd: Mutex::new(parent.cwd.lock().clone()),
+        cred: IrqMutex::new(*parent.cred.lock()),
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
         waited: AtomicBool::new(false),

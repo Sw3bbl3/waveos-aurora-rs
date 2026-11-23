@@ -8,11 +8,13 @@
 mod client;
 mod crash;
 mod display;
+mod elevate;
 mod power;
 
 pub use client::ClientApp;
 pub use crash::CrashDialog;
 pub use display::DisplayConfirm;
+pub use elevate::ElevateDialog;
 
 use super::canvas::Canvas;
 use super::geom::Rect;
@@ -47,6 +49,8 @@ pub enum AppKind {
     Doom,
     Firefox,
     Voyage,
+    /// The administrator prompt (`users::elevate`).
+    Elevate,
 }
 
 pub struct AppInfo {
@@ -283,6 +287,16 @@ pub static CATALOG: &[AppInfo] = &[
         also: &[],
     },
     AppInfo {
+        kind: AppKind::Elevate,
+        name: "Administrator Approval",
+        icon: Icon::Settings,
+        pinned: false,
+        listed: false,
+        path: "",
+        single: false,
+        also: &[],
+    },
+    AppInfo {
         kind: AppKind::Other,
         name: "App",
         icon: Icon::Aurora,
@@ -387,6 +401,10 @@ pub trait App {
     }
     /// The window-server id of a client window.
     fn client_id(&self) -> Option<u32> {
+        None
+    }
+    /// The administrator prompt: the request it answers.
+    fn elevation(&self) -> Option<u64> {
         None
     }
 }

@@ -343,8 +343,11 @@ pub fn tracing(env: &[alloc::string::String]) -> bool {
     env.iter().any(|e| e == "WAVEOS_STRACE=1")
 }
 
-/// The uid and gid every Linux program runs as.
-pub const UID: u64 = 1000;
+/// The uid and gid of process `pid` (the session's if it is gone).
+pub fn ids_of(pid: u32) -> (u32, u32) {
+    let c = proc::get(pid).map(|p| *p.cred.lock()).unwrap_or_else(crate::users::session);
+    (c.uid, c.gid)
+}
 
 /// Entry for a Linux process's system call (from `syscall::dispatch`).
 pub fn dispatch(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
@@ -402,8 +405,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::GETCWD => fs::getcwd(&p, a[0], a[1]),
         nr::CHDIR => fs::chdir(&p, a[0]),
         nr::FCHDIR => fs::fchdir(&p, a[0]),
-        nr::MKDIR => fs::mkdirat(&p, fs::AT_FDCWD, a[0]),
-        nr::MKDIRAT => fs::mkdirat(&p, a[0], a[1]),
+        nr::MKDIR => fs::mkdirat(&p, fs::AT_FDCWD, a[0], a[1]),
+        nr::MKDIRAT => fs::mkdirat(&p, a[0], a[1], a[2]),
         nr::RMDIR => fs::unlinkat(&p, fs::AT_FDCWD, a[0], fs::AT_REMOVEDIR),
         nr::UNLINK => fs::unlinkat(&p, fs::AT_FDCWD, a[0], 0),
         nr::UNLINKAT => fs::unlinkat(&p, a[0], a[1], a[2]),
@@ -424,10 +427,20 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
             crate::fs::sync_all();
             Ok(0)
         }
-        // Files have no owners or permission bits on WaveOS: accepted, and nothing changes.
-        nr::CHMOD | nr::FCHMOD | nr::CHOWN | nr::FCHOWN | nr::LCHOWN | nr::FCHOWNAT | nr::FCHMODAT => Ok(0),
+        // Owners and permission bits (volumes without them accept and keep nothing).
+        nr::CHMOD => fs::chmod(&p, fs::AT_FDCWD, a[0], a[1]),
+        nr::FCHMODAT => fs::chmod(&p, a[0], a[1], a[2]),
+        nr::FCHMOD => fs::fchmod(&p, a[0], Some(a[1]), (0, 0)),
+        nr::CHOWN | nr::LCHOWN => fs::chown(&p, fs::AT_FDCWD, a[0], a[1], a[2]),
+        nr::FCHOWNAT => fs::chown(&p, a[0], a[1], a[2], a[3]),
+        nr::FCHOWN => fs::fchmod(&p, a[0], None, (a[1], a[2])),
         nr::UTIMES | nr::UTIMENSAT => Ok(0),
-        nr::UMASK => Ok(0o022),
+        nr::UMASK => {
+            let mut c = p.cred.lock();
+            let old = c.umask;
+            c.umask = (a[0] & 0o777) as u16;
+            Ok(old as u64)
+        }
         nr::POLL => fs::poll(&p, a[0], a[1], a[2] as i64),
         nr::PPOLL => fs::ppoll(&p, a[0], a[1], a[2], a[3]),
         nr::SELECT => fs::select(&p, a[0], [a[1], a[2], a[3]], fs::Timeout::Timeval(a[4]), 0),
@@ -485,15 +498,49 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::GETPID => Ok(p.pid as u64),
         nr::GETTID => Ok(misc::tid(&p)),
         nr::GETPPID => Ok(p.parent as u64),
-        nr::GETUID | nr::GETEUID | nr::GETGID | nr::GETEGID => Ok(UID),
+        nr::GETUID | nr::GETEUID => Ok(p.cred.lock().uid as u64),
+        nr::GETGID | nr::GETEGID => Ok(p.cred.lock().gid as u64),
         nr::GETRESUID | nr::GETRESGID => {
+            let c = *p.cred.lock();
+            let id = if f.rax == nr::GETRESUID { c.uid } else { c.gid };
             for ptr in [a[0], a[1], a[2]] {
-                crate::syscall::user::put(ptr, &(UID as u32))?;
+                crate::syscall::user::put(ptr, &id)?;
             }
             Ok(0)
         }
-        nr::SETUID | nr::SETGID => Ok(0),
-        nr::GETGROUPS => Ok(0),
+        // Becoming someone else takes being the system (no account is);
+        // "becoming" who you already are is fine.
+        nr::SETUID | nr::SETGID => {
+            let mut c = p.cred.lock();
+            let id = a[0] as u32;
+            let same = if f.rax == nr::SETUID { c.uid == id } else { c.gid == id };
+            if same {
+                Ok(0)
+            } else if c.is_root() {
+                if f.rax == nr::SETUID {
+                    c.uid = id;
+                } else {
+                    c.gid = id;
+                }
+                Ok(0)
+            } else {
+                Err(EPERM)
+            }
+        }
+        nr::GETGROUPS => {
+            let c = *p.cred.lock();
+            let groups = c.groups();
+            if a[0] == 0 {
+                return Ok(groups.len() as u64);
+            }
+            if (a[0] as usize) < groups.len() {
+                return Err(EINVAL);
+            }
+            for (i, g) in groups.iter().enumerate() {
+                crate::syscall::user::put(a[1] + i as u64 * 4, g)?;
+            }
+            Ok(groups.len() as u64)
+        }
         nr::GETPGRP => process::getpgid(&p, 0),
         nr::GETPGID => process::getpgid(&p, a[0]),
         nr::GETSID => process::getsid(&p, a[0]),
