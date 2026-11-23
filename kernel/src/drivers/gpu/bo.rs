@@ -96,6 +96,31 @@ impl BufferObject {
         }))
     }
 
+    /// Like [`BufferObject::alloc_system`], but in one physically
+    /// contiguous run, or `None` (scanout buffers the panic screen can
+    /// write through the physical window).
+    pub fn alloc_contiguous(size: usize) -> Option<Arc<BufferObject>> {
+        let pages = (size as u64).div_ceil(PAGE_SIZE).max(1);
+        let phys = frame::alloc_contiguous(pages)?;
+        let frames: Vec<u64> = (0..pages).map(|i| phys + i * PAGE_SIZE).collect();
+        let Some(vaddr) = vmm::kmap(&frames) else {
+            for f in frames {
+                frame::free(f);
+            }
+            return None;
+        };
+        unsafe { core::ptr::write_bytes(vaddr as *mut u8, 0, (pages * PAGE_SIZE) as usize) };
+        Some(Arc::new(BufferObject {
+            id: new_id(),
+            size: (pages * PAGE_SIZE) as usize,
+            chunks: alloc::vec![(phys, (pages * PAGE_SIZE) as usize)],
+            vaddr,
+            pages,
+            handle: AtomicU32::new(0),
+            owner: spin::Mutex::new(None),
+        }))
+    }
+
     /// The kernel address of the first byte.
     pub fn vaddr(&self) -> u64 {
         self.vaddr

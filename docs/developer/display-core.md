@@ -28,6 +28,8 @@ EDID is parsed by `libs/edid` (`aurora-edid`, host-tested with `cargo test -p au
 - **Damage.** `dirty(fb, rects)` (DRM's DIRTYFB) shows changed rectangles of a framebuffer wherever it is scanned out. Devices that scan out of VRAM (GOP, Bochs) copy the rectangles there; virtio-gpu transfers and flushes them.
 - **Events.** `gpu::post(Event::Flip { crtc, seq, time_ns, user_data })` after a commit with `PAGE_FLIP_EVENT`; `Event::Hotplug` from `gpu::hotplug()`. `KmsDevice::vblank(crtc)` is the frame counter and timestamp. Devices without vblank interrupts (virtio-gpu) count a frame when the device has taken the picture. Commits are synchronous today; `NONBLOCK` is accepted and ignored.
 - **Sleep.** `resume()` restores the committed state; `gpu::resume_all()` runs from `drivers::resume`.
+- **Backlight.** A driver that controls the internal panel's backlight registers a `gpu::Backlight` with `gpu::set_backlight`; `gpu::brightness()`/`set_brightness()` (0–100) are what the brightness keys use.
+- **Contiguous buffers.** `BufferObject::alloc_contiguous` gives one physical run (or `None`); drivers that scan out of RAM use it for screen-sized dumb buffers so `panic_framebuffer` can point at them.
 
 ## Drivers today
 
@@ -37,6 +39,7 @@ EDID is parsed by `libs/edid` (`aurora-edid`, host-tested with `cargo test -p au
 | Bochs/QEMU std VGA | `bochs.rs` | DISPI registers, any listed mode at run time |
 | Ported Linux virtio-gpu | `linux.rs` | Only with `gpu=linux` in boot.conf (`cargo xtask run --gpu virtio-linux`) |
 | Native virtio-gpu | `virtio/` | Default for virtio GPUs |
+| Intel integrated graphics | `intel/` (over `libs/igfx`) | Display 9–13; takes over the firmware's mode; see [intel-display.md](intel-display.md). Untested on real hardware |
 
 The three simple ones share `simple.rs` (one CRTC, one primary plane, one connector; the backend sets modes and shows rectangles).
 

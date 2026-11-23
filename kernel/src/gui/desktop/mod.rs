@@ -1378,6 +1378,14 @@ impl Desktop {
         if k.pressed && self.volume_key(k.code) {
             return;
         }
+        // So do the brightness keys, when a display driver controls the panel.
+        if k.pressed && matches!(k.code, KeyCode::BrightnessUp | KeyCode::BrightnessDown) {
+            if let Some(b) = crate::drivers::gpu::brightness() {
+                let v = if k.code == KeyCode::BrightnessUp { (b + 10).min(100) } else { b.saturating_sub(10) };
+                crate::drivers::gpu::set_brightness(v);
+            }
+            return;
+        }
         // The Super key alone (pressed and released) opens the launcher; with
         // another key it is a modifier (Super+Space, Super+Shift+3, …).
         if k.code == KeyCode::Super {

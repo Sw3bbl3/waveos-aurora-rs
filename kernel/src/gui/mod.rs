@@ -625,4 +625,7 @@ pub fn panic_screen(details: &str) {
             *p = (*p & 0x00FF00) | (*p >> 16 & 0xFF) | (*p & 0xFF) << 16;
         }
     }
+    // A scanout buffer in ordinary RAM (Intel graphics) is read by a display
+    // engine that doesn't snoop the CPU caches: write the picture back.
+    unsafe { core::arch::asm!("wbinvd", options(nostack)) };
 }
