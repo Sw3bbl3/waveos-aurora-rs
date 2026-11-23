@@ -500,9 +500,9 @@ fn linux_modetest() {
     // Atomic: blocking commits in a loop that never ends; killed while it
     // holds the display, which the desktop then gets back.
     let argv = ["modetest", "-M", driver, "-a", "-s", &pipe, "-P", &plane, "-v"];
-    let (code, text) = run_linux_program(path, &argv, None, Some(4000), 60_000);
+    let (code, text) = run_linux_program(path, &argv, None, Some("freq:"), 60_000);
+    assert!(text.contains("freq:"), "modetest {} did not commit 60 frames", argv.join(" "));
     assert_eq!(code, Some(crate::proc::KILLED_CODE), "modetest {} ended by itself", argv.join(" "));
-    assert!(text.contains("freq:"), "modetest {} did not commit frames", argv.join(" "));
     assert!(eventually(5000, || gpu::owner::holder(&*dev).is_none()), "the desktop did not get the display back");
 }
 
@@ -715,13 +715,13 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
 
 /// Runs a Linux program to its end (or `timeout_ms`), shows its output and
 /// returns its exit code and output. With `stdin_ms`, its standard input is
-/// a pipe that closes (end of file) after that long; with `kill_ms`, it is
-/// killed after that long.
+/// a pipe that closes (end of file) after that long; with `kill_on`, it is
+/// killed once its output has that text.
 fn run_linux_program(
     path: &str,
     argv: &[&str],
     stdin_ms: Option<u64>,
-    kill_ms: Option<u64>,
+    kill_on: Option<&str>,
     timeout_ms: u64,
 ) -> (Option<i64>, String) {
     let (r, w) = crate::proc::new_pipe(false);
@@ -735,7 +735,6 @@ fn run_linux_program(
     let pid = crate::proc::spawn(path, argv, [stdin, Some(w.clone()), Some(w)], 0).expect("spawn Linux program");
     let p = crate::proc::get(pid).unwrap();
     let stdin_until = time::uptime_ms() + stdin_ms.unwrap_or(0);
-    let kill_at = kill_ms.map(|ms| time::uptime_ms() + ms);
     let mut out = alloc::vec::Vec::new();
     let deadline = time::uptime_ms() + timeout_ms;
     let mut buf = [0u8; 512];
@@ -749,7 +748,8 @@ fn run_linux_program(
         if stdin_writer.is_some() && time::uptime_ms() >= stdin_until {
             stdin_writer = None;
         }
-        if kill_at.is_some_and(|t| time::uptime_ms() >= t) && p.exit_code().is_none() {
+        let seen = |m: &str| out.windows(m.len()).any(|w| w == m.as_bytes());
+        if kill_on.is_some_and(seen) && p.exit_code().is_none() {
             let _ = crate::proc::kill(pid);
         }
         if reader.readable() {
