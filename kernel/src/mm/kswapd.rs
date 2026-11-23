@@ -170,19 +170,46 @@ fn reclaim_to(target: u64) {
             continue;
         } else {
             idle_scanned += round.scanned;
-            // Twice round everything (once to clear the accessed bits,
-            // once to find them still clear) without a page to show for it,
-            // or swap is full: nothing more will come of it.
-            if round.full || round.scanned == 0 || idle_scanned > 2 * total {
+            // Swap is full, or there is nothing it could take: nothing
+            // more will come of it (and a fault waiting for memory may go
+            // to the out-of-memory killer).
+            if round.full || round.scanned == 0 {
                 futile = !swap::writeback_pending();
                 if futile {
+                    note_futile(&round);
                     break;
                 }
+            } else if idle_scanned > 2 * total {
+                // Twice round everything without a page to show for it:
+                // every page is in use. No point going round again now,
+                // but that is no reason to give up: programs are running.
+                break;
             }
         }
         crate::sched::yield_now();
     }
     FUTILE.store(futile && free() < target, Ordering::Release);
+}
+
+/// Says why reclaim gave up (once every 10 s at most).
+fn note_futile(round: &super::vmm::Reclaimed) {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = crate::time::uptime_ms();
+    let last = LAST.load(Ordering::Relaxed);
+    if (last == 0 || now >= last + 10_000) && LAST.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        let s = swap::stats();
+        log!(
+            "mm",
+            "reclaim can't keep up: {} ({} pages looked at, {} could not be stored; {} of {} swap slots, {} of {} swap file pages free)",
+            if round.full { "swap is full" } else { "nothing left to swap out" },
+            round.scanned,
+            round.failed,
+            s.slots,
+            s.capacity,
+            swapfile::free_pages(),
+            swapfile::pages()
+        );
+    }
 }
 
 /// One pass over every address space, background programs (and bigger
