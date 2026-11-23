@@ -188,9 +188,7 @@ fn decoder_bounds() {
 fn reference_block() {
     // Token 0x6F: 6 literals "hello ", then a match 6 back of 15 + 4 + 4
     // bytes; token 0x70: the last 7 literals.
-    let block = [
-        0x6Fu8, b'h', b'e', b'l', b'l', b'o', b' ', 6, 0, 4, 0x70, b' ', b'w', b'o', b'r', b'l', b'd', b'\n',
-    ];
+    let block = [0x6Fu8, b'h', b'e', b'l', b'l', b'o', b' ', 6, 0, 4, 0x70, b' ', b'w', b'o', b'r', b'l', b'd', b'\n'];
     let mut out = [0u8; 64];
     let n = decompress(&block, &mut out).unwrap();
     assert_eq!(&out[..n], b"hello hello hello hello hello world\n");
@@ -203,7 +201,8 @@ fn fuzz_decoder() {
     let mut seed = 7;
     let mut seeds = Vec::new();
     for len in [0usize, 13, 100, 1000, 4096] {
-        let mut src: Vec<u8> = (0..len).map(|i| if i % 7 == 0 { rng(&mut seed) as u8 } else { (i / 7) as u8 }).collect();
+        let mut src: Vec<u8> =
+            (0..len).map(|i| if i % 7 == 0 { rng(&mut seed) as u8 } else { (i / 7) as u8 }).collect();
         seeds.push(pack(&src));
         src.iter_mut().for_each(|b| *b = rng(&mut seed) as u8);
         seeds.push(pack(&src));

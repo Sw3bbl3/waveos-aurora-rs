@@ -958,14 +958,9 @@ fn plain_entries(host: &str) -> Vec<(String, u8)> {
     let names: &[(&str, bool)] = match host {
         "/dev" => &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true)],
         "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false), ("pressure", true)],
-        "/proc/self" => &[
-            ("exe", false),
-            ("maps", false),
-            ("cmdline", false),
-            ("comm", false),
-            ("stat", false),
-            ("status", false),
-        ],
+        "/proc/self" => {
+            &[("exe", false), ("maps", false), ("cmdline", false), ("comm", false), ("stat", false), ("status", false)]
+        }
         "/proc/pressure" => &[("memory", false)],
         "/dev/shm" => return super::shm::names().into_iter().map(|n| (n, DT_REG)).collect(),
         _ => {

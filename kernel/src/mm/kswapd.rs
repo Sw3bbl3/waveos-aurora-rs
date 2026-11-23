@@ -340,7 +340,6 @@ pub fn oom_kills() -> u64 {
     OOM_KILLS.load(Ordering::Relaxed)
 }
 
-
 // ------------------------------------------------------------ out of memory
 
 /// The victim on its way out, and when it was chosen.

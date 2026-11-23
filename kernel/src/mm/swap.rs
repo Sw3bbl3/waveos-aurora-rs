@@ -71,8 +71,14 @@ pub enum Stored {
     Zero,
     Fill(u64),
     /// An object of the compressed pool, and its length.
-    Zram { obj: u64, len: u16 },
-    Disk { at: u32, nonce: u64 },
+    Zram {
+        obj: u64,
+        len: u16,
+    },
+    Disk {
+        at: u32,
+        nonce: u64,
+    },
 }
 
 enum State {
@@ -472,7 +478,6 @@ pub fn adopt(frames: &[u64], holders: u32) {
         p.counted.entry(f).or_insert(Counted { holders: 0, objects: 0, pins: 0, slot: NONE }).holders += holders;
     }
 }
-
 
 /// A holder (an object if `object`) lets go of `f`; the last one frees it.
 pub fn release(f: u64, object: bool) {

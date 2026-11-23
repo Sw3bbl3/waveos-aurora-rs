@@ -506,8 +506,10 @@ fn strip_debug(kernel: &Path) {
     let version = Command::new("rustc").arg("-vV").output().expect("rustc host");
     let version = String::from_utf8_lossy(&version.stdout);
     let host = version.lines().find_map(|line| line.strip_prefix("host: ")).expect("rustc host triple");
-    let objcopy =
-        PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim()).join("lib/rustlib").join(host).join("bin/llvm-objcopy");
+    let objcopy = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
+        .join("lib/rustlib")
+        .join(host)
+        .join("bin/llvm-objcopy");
     let status = Command::new(objcopy)
         .arg("--strip-debug")
         .arg(kernel)

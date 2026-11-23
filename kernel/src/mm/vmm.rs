@@ -66,11 +66,7 @@ fn slot_of(e: u64) -> u32 {
 }
 
 fn swap_entry(slot: u32, writable: bool, exec: bool) -> u64 {
-    SWAPPED
-        | USER
-        | (slot as u64) << 12
-        | if writable { WRITABLE } else { 0 }
-        | if exec { 0 } else { NO_EXECUTE }
+    SWAPPED | USER | (slot as u64) << 12 | if writable { WRITABLE } else { 0 } | if exec { 0 } else { NO_EXECUTE }
 }
 
 /// The CPU sets accessed and dirty bits in entries while the kernel looks
@@ -787,7 +783,14 @@ impl AddressSpace {
                 frame | PRESENT | ACCESSED | SHARED | COUNTED | prot | if writable { WRITABLE } else { 0 }
             }
             Map::Counted { frame, shared: false } => {
-                frame | PRESENT | ACCESSED | SHARED | COUNTED | COPY_ON_WRITE | prot | if writable { FORK_WRITE } else { 0 }
+                frame
+                    | PRESENT
+                    | ACCESSED
+                    | SHARED
+                    | COUNTED
+                    | COPY_ON_WRITE
+                    | prot
+                    | if writable { FORK_WRITE } else { 0 }
             }
         };
         // (Still the swap entry: changing it takes this address space's lock.)
@@ -824,7 +827,8 @@ impl AddressSpace {
             more[n] = (va, s, nonce, frame);
             n += 1;
         }
-        let page_of = |f: u64| unsafe { core::slice::from_raw_parts_mut(phys_to_virt(f) as *mut u8, PAGE_SIZE as usize) };
+        let page_of =
+            |f: u64| unsafe { core::slice::from_raw_parts_mut(phys_to_virt(f) as *mut u8, PAGE_SIZE as usize) };
         let mut nonces = [nonce; AHEAD];
         let mut pages: [&mut [u8]; AHEAD] = core::array::from_fn(|_| &mut [][..]);
         pages[0] = page_of(f);
@@ -1728,7 +1732,8 @@ impl AddressSpace {
     /// Whether the page at `va` is locked in memory (tests).
     #[cfg(feature = "ktest")]
     pub fn is_locked(&self, va: u64) -> bool {
-        walk(self.pml4, va & !(PAGE_SIZE - 1), false, false).is_some_and(|e| *e & (PRESENT | LOCKED) == PRESENT | LOCKED)
+        walk(self.pml4, va & !(PAGE_SIZE - 1), false, false)
+            .is_some_and(|e| *e & (PRESENT | LOCKED) == PRESENT | LOCKED)
     }
 
     /// Reads user memory at `va` into `out` through the physical window,
