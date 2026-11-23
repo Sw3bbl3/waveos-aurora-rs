@@ -200,11 +200,34 @@ pub fn semantics() {
         assert_eq!(a.reclaim(64, 64).evicted, 0);
         assert!((0..8).all(|p| !a.is_swapped(base + p * PAGE_SIZE)));
     }
+    let map_us = {
+        // What kmscube does every frame: map a 4 MiB buffer, unmap it.
+        // Holds and releases go under one lock per call, and the buffer
+        // outlives every mapping.
+        let frames: Vec<u64> = (0..1024).map(|_| frame::alloc().unwrap()).collect();
+        vmm::shm_count(&frames);
+        let mut a = AddressSpace::new().unwrap();
+        let rounds = 32;
+        let t0 = time::now_ns();
+        for _ in 0..rounds {
+            a.map_shared(base, &frames, Prot::ReadWrite).unwrap();
+            a.unmap(base, 1024);
+        }
+        let us = (time::now_ns() - t0) / 1000 / rounds;
+        a.map_shared(base, &frames, Prot::ReadWrite).unwrap();
+        assert_eq!(a.pageout(base, 1024), 0, "a GPU buffer's pages were swapped out");
+        drop(a);
+        for &f in &frames {
+            vmm::shm_release(f);
+        }
+        assert!(us < 50_000, "mapping and unmapping a 4 MiB GPU buffer took {us} us");
+        us
+    };
     slots_settle(slots_before, "after the address spaces went");
     let (_, frames_after) = super::leak_check_counts();
     assert!(frames_after + 8 >= frames_before, "swapping leaked {} frames", frames_before - frames_after);
     let s = swap::stats();
-    crate::kprint!("[{} out, {} in, {} written back] ", s.swapouts, s.swapins, s.writebacks);
+    crate::kprint!("[{} out, {} in, {} written back; 4 MiB GPU buffer mapped and unmapped in {map_us} us] ", s.swapouts, s.swapins, s.writebacks);
 }
 
 // ------------------------------------------------------- with programs

@@ -200,6 +200,11 @@ static void swapping(void) {
     CHECK(madvise(p, len, MADV_PAGEOUT) == 0, "MADV_PAGEOUT with some pages locked");
     s1 = status_kb("VmSwap:");
     CHECK(s1 - s0 >= 192 * 4 && s1 - s0 <= 192 * 4 + 64, "locked pages are not swapped out");
+    static unsigned char core[256];
+    CHECK(mincore(p, len, core) == 0, "mincore");
+    int in_memory = 0;
+    for (int i = 64; i < 256; i++) in_memory += core[i] & 1;
+    CHECK((core[0] & 1) && (core[63] & 1) && in_memory < 64, "mincore: locked pages resident, swapped-out ones not");
     CHECK(munlock(p, 64 * 4096) == 0 && status_kb("VmLck:") == 0, "munlock");
     CHECK(same(p, len, 1, 0), "after mlock and MADV_PAGEOUT");
     CHECK(madvise(p, len, MADV_COLD) == 0 && madvise(p, len, MADV_WILLNEED) == 0, "MADV_COLD and MADV_WILLNEED");
