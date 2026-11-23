@@ -325,8 +325,9 @@ impl Desktop {
     pub(super) fn harbor_hover(&mut self, x: i32, y: i32) {
         let (dock, items) = self.dock_layout();
         // The bottom edge (or Harbor itself) brings it up over a window.
-        let reveal = y >= self.h - 3
-            || (self.harbor.revealed && y >= dock.y - 24)
+        // (Only from the main display's bottom edge: a display below it continues there.)
+        let reveal = (y >= self.h - 3 && self.on_main(x, y))
+            || (self.harbor.revealed && y >= dock.y - 24 && self.on_main(x, y))
             || (!self.harbor.hidden && dock.contains(x, y));
         if reveal != self.harbor.revealed {
             self.harbor.revealed = reveal;

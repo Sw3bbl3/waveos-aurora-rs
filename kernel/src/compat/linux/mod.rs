@@ -18,6 +18,7 @@
 //! arguments (`libs/linux/include/waveos.h` describes them for C).
 
 pub mod chardev;
+pub mod drm;
 mod events;
 pub mod exec;
 pub mod fs;
@@ -31,6 +32,7 @@ mod net;
 mod process;
 mod shm;
 pub mod signal;
+mod sysfs;
 pub mod uevent;
 pub mod unix;
 pub mod vdso;

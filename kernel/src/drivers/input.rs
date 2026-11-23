@@ -81,6 +81,14 @@ pub fn pointer_moved(dx: i32, dy: i32, buttons: u8) {
     push(InputEvent::Pointer { x: (x + dx).clamp(0, w - 1), y: (y + dy).clamp(0, h - 1), buttons });
 }
 
+/// Puts the pointer at (`x`, `y`) without an event: the desktop stopped
+/// it at the edge of a display, so relative devices move it from there.
+pub fn warp(x: i32, y: i32) {
+    let (w, h) = screen_size();
+    let (x, y) = (x.clamp(0, (w - 1).max(0)), y.clamp(0, (h - 1).max(0)));
+    POINTER.store((x as u32 as u64) << 32 | y as u32 as u64 | 1 << 63, Ordering::Relaxed);
+}
+
 pub fn push(ev: InputEvent) {
     if let InputEvent::Pointer { x, y, .. } = ev {
         POINTER.store((x as u32 as u64) << 32 | y as u32 as u64 | 1 << 63, Ordering::Relaxed);

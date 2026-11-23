@@ -203,7 +203,7 @@ impl Desktop {
             self.open_menu(k, r.x);
             return true;
         }
-        if y < MENUBAR_H {
+        if y < MENUBAR_H && self.on_main(x, y) {
             return true;
         }
         self.harbor_press(x, y)

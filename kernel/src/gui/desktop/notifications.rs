@@ -262,7 +262,7 @@ impl Desktop {
         if !p.contains(x, y) {
             self.toggle_center();
             // Let a click on the clock only close (not reopen) the panel.
-            return y < MENUBAR_H;
+            return y < MENUBAR_H && self.on_main(x, y);
         }
         let hit = self.center_hits().into_iter().find(|(_, r)| r.contains(x, y)).map(|(h, _)| h);
         match hit {

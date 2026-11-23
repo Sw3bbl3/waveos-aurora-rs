@@ -29,8 +29,12 @@ aurora-wav = { path = "../libs/wav" }
 aurora-wifi = { path = "../libs/wifi" }
 aurora-hid = { path = "../libs/hid" }
 aurora-i2c = { path = "../libs/i2c" }
+aurora-sdmmc = { path = "../libs/sdmmc" }
 aurora-acpi-res = { path = "../libs/acpires" }
 aurora-edid = { path = "../libs/edid" }
+aurora-igfx = { path = "../libs/igfx" }
+aurora-amdgfx = { path = "../libs/amdgfx" }
+aurora-nvgfx = { path = "../libs/nvgfx" }
 x86_64 = "0.15"
 spin = "0.9"
 acpi = "6.1"

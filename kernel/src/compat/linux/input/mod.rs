@@ -74,8 +74,22 @@ pub fn lookup(guest: &str) -> Option<Found> {
             let (mode, owner) = node_owner(*dev);
             Found::Char { dev: *dev, mode, owner }
         }
+        // The rest of /sys is the display's (the DRM cards and their PCI
+        // devices, `super::sysfs`).
+        None if in_sys(guest) => match super::sysfs::link(guest) {
+            Some(to) => Found::Link(to),
+            None => match super::sysfs::open(guest) {
+                Ok(None) => Found::Dir,
+                Ok(Some(data)) => Found::File(data),
+                Err(()) => Found::Missing,
+            },
+        },
         None => Found::Missing,
     })
+}
+
+fn in_sys(guest: &str) -> bool {
+    guest.strip_prefix("/sys").is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// The target of the link at `guest`, if it is one of this module's.
@@ -96,6 +110,22 @@ pub fn entries(guest: &str) -> Option<Vec<(String, u8)>> {
         "/" => v.retain(|(n, _)| n == "sys"),
         "/run" => v.retain(|(n, _)| n == "udev"),
         "/dev" => v.retain(|(n, _)| n == "input" || n == "uinput" || n.starts_with("hidraw")),
+        // A folder of /sys: what the input devices put there and what the
+        // display does, as one listing.
+        g if in_sys(g) => {
+            let mine = matches!(t.get(g), Some(Node::Dir));
+            let drm = matches!(super::sysfs::open(g), Ok(None));
+            if !mine && !drm {
+                return None;
+            }
+            if drm {
+                for e in super::sysfs::entries(g) {
+                    if !v.iter().any(|(n, _)| *n == e.0) {
+                        v.push(e);
+                    }
+                }
+            }
+        }
         g if owns(g) && matches!(t.get(g), Some(Node::Dir)) => {}
         _ => return None,
     }

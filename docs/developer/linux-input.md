@@ -100,7 +100,13 @@ Effect delays and envelopes are ignored. A controller's joystick-API node
   interfaces and HID devices above (`idVendor`, `manufacturer`,
   `bInterfaceNumber`, `HID_ID` …, `report_descriptor`), and
   `/sys/class/input`, `/sys/class/hidraw`, `/sys/bus/{input,hid,usb}/devices`
-  links. Links are relative, as Linux's.
+  links, and `/sys/dev/char/MAJOR:MINOR` for every node. Links are
+  relative, as Linux's. `/sys` is shared with the display
+  (`compat/linux/sysfs.rs`: `/sys/class/drm`, the PCI devices): the file
+  layer asks `input::lookup`, `input::entries` and `input::link`, which
+  answer from the input tree first and then from the display's, and list
+  folders both have (`/sys`, `/sys/class`, `/sys/devices`,
+  `/sys/devices/pci0000:00`, `/sys/bus`, `/sys/dev/char`) as one.
 - udev without a daemon: `/run/udev/data/c13:N`, `+input:inputN` and
   `c245:N` hold the properties udev's rules would give (`ID_INPUT_*`,
   `ID_BUS`, `ID_VENDOR_ID`, `ID_SERIAL`, `ID_PATH`, links, `uaccess` and

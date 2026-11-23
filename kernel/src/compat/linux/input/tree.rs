@@ -387,6 +387,7 @@ fn build() -> Tree {
         "/sys/bus/input/devices",
         "/sys/bus/hid/devices",
         "/sys/bus/usb/devices",
+        "/sys/dev/char",
         "/sys/devices/virtual/misc",
         "/dev/input",
         "/run/udev/data",
@@ -400,6 +401,7 @@ fn build() -> Tree {
     b.file(&format!("{uinput}/dev"), format!("{MISC_MAJOR}:{UINPUT_MINOR}\n"));
     b.link(&format!("{uinput}/subsystem"), "/sys/class/misc");
     b.link("/sys/class/misc/uinput", uinput);
+    b.link(&format!("/sys/dev/char/{MISC_MAJOR}:{UINPUT_MINOR}"), uinput);
     b.char("/dev/uinput", Dev::Uinput);
 
     let mut usb_done: Vec<String> = Vec::new();
@@ -448,6 +450,7 @@ fn build() -> Tree {
             b.link(&format!("{ndir}/device"), &dir);
             let name = ndir.rsplit('/').next().unwrap_or("");
             b.link(&format!("/sys/class/input/{name}"), &ndir);
+            b.link(&format!("/sys/dev/char/{major}:{minor}"), &ndir);
             b.char(&format!("/dev/{}", devname(dev)), dev);
             b.file(&format!("/run/udev/data/c{major}:{minor}"), udev::db(&d, Some(dev)));
             for link in stable_names(&d, dev) {
@@ -467,6 +470,7 @@ fn build() -> Tree {
         b.link(&format!("{dir}/device"), &parent);
         b.file(&format!("{parent}/report_descriptor"), h.descriptor.clone());
         b.link(&format!("/sys/class/hidraw/hidraw{}", h.num), &dir);
+        b.link(&format!("/sys/dev/char/{major}:{minor}"), &dir);
         b.char(&format!("/dev/hidraw{}", h.num), dev);
         b.file(&format!("/run/udev/data/c{major}:{minor}"), udev::hidraw_db(&h));
     }

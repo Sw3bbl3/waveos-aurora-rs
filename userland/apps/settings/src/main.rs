@@ -23,6 +23,7 @@ use waveui::prelude::*;
 use waveui::style::Weight;
 use waveui::Request;
 
+mod displays;
 mod installed;
 mod search;
 mod users;
@@ -115,6 +116,8 @@ pub enum Msg {
     ClearNote,
     Users(users::UserMsg),
     Apps(installed::AppMsg),
+    /// Several displays: arrangement, main display, mirroring, each display's settings.
+    Displays(displays::DisplayMsg),
 }
 
 pub struct Settings {
@@ -147,6 +150,8 @@ pub struct Settings {
     users: users::UsersState,
     /// Apps installed from packages.
     apps: installed::AppsState,
+    /// Display, with several displays.
+    displays: displays::DisplaysState,
 }
 
 fn days_in(y: i64, m: i64) -> i64 {
@@ -186,6 +191,7 @@ impl Settings {
             now: corekit::time::now(),
             users: Default::default(),
             apps: Default::default(),
+            displays: Default::default(),
         };
         s.load_custom_thumb();
         s.sync_clock();
@@ -222,7 +228,7 @@ impl Settings {
     /// Re-reads what the open pane shows.
     fn refresh(&mut self) {
         match self.pane {
-            Pane::Display => self.modes = prefs::display_modes(),
+            Pane::Display => self.modes = self.display_modes_now(),
             Pane::DateTime => {
                 self.now = corekit::time::now();
                 if !self.clock_edited {
@@ -532,6 +538,11 @@ impl Settings {
     }
 
     fn display_pane(&self) -> View<'_, Msg> {
+        // Several displays: their arrangement, and settings for each.
+        let list = corekit::display::displays();
+        if list.len() > 1 {
+            return self.displays_pane(list);
+        }
         // A SCREEN event redraws this view after the asynchronous mode switch.
         // Read the current flags then, rather than showing the previous mode.
         let modes = prefs::display_modes();
@@ -1499,6 +1510,7 @@ impl App for Settings {
             Msg::OpenAbout => cx.open_app("About"),
             Msg::ClearNote => self.note = None,
             Msg::Users(m) => self.users_update(m, cx),
+            Msg::Displays(m) => self.displays_update(m, cx),
             Msg::Apps(m) => self.apps_update(m, cx),
         }
     }

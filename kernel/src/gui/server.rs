@@ -55,6 +55,10 @@ pub struct Client {
     /// The process whose drawing the window shows, for a bridge's window
     /// (`win_set_program`): it gets the window's input focus too.
     program: Option<u32>,
+    /// The scale of the display the window is on (its next surface's).
+    scale: u32,
+    /// The id of the display the window is on (0 until it appears).
+    display: u32,
 }
 
 /// Changes the compositor must apply on its next frame.
@@ -131,6 +135,8 @@ static COMMANDS: IrqMutex<VecDeque<Command>> = IrqMutex::new(VecDeque::new());
 static WAITERS: IrqMutex<BTreeMap<u32, u64>> = IrqMutex::new(BTreeMap::new());
 static NEXT_WINDOW: AtomicU32 = AtomicU32::new(1);
 static COMPOSITOR: AtomicU64 = AtomicU64::new(u64::MAX);
+/// The scale new windows get: the display with the pointer's (0: the main display's).
+static NEW_SCALE: AtomicU32 = AtomicU32::new(0);
 
 pub fn set_compositor(task: u64) {
     COMPOSITOR.store(task, Ordering::Relaxed);
@@ -167,9 +173,9 @@ pub fn pending() -> bool {
 
 // ------------------------------------------------------------ surfaces
 
-/// A surface for a `width`×`height`-point window at the screen's scale.
-fn alloc_surface(pid: u32, width: u32, height: u32) -> Result<Surface, isize> {
-    let scale = super::scale().max(1) as u32;
+/// A surface for a `width`×`height`-point window at `scale`.
+fn alloc_surface(pid: u32, width: u32, height: u32, scale: u32) -> Result<Surface, isize> {
+    let scale = scale.clamp(1, 2);
     let (width, height) = (width * scale, height * scale);
     let bytes = width as u64 * height as u64 * 4;
     let pages = bytes.div_ceil(PAGE_SIZE);
@@ -232,13 +238,40 @@ fn free_surface(s: Surface, pid: u32, unmap_user: bool) {
 
 /// Runs `f` with the window's pixels (row stride = width; both in device
 /// pixels). Holds the client lock, so the surface cannot be freed underneath
-/// the compositor.
-pub fn with_surface<R>(id: u32, f: impl FnOnce(&[u32], u32, u32) -> R) -> Option<R> {
+/// the compositor. `f` also gets the scale the surface was drawn at.
+pub fn with_surface_scaled<R>(id: u32, f: impl FnOnce(&[u32], u32, u32, u32) -> R) -> Option<R> {
     let clients = CLIENTS.lock();
     let c = clients.get(&id)?;
     let s = &c.surface;
     let px = unsafe { core::slice::from_raw_parts(s.kva as *const u32, (s.width * s.height) as usize) };
-    Some(f(px, s.width, s.height))
+    Some(f(px, s.width, s.height, s.scale))
+}
+
+/// The window is shown at scale `k` (it moved to a display with that
+/// scale): its next surface is drawn at it.
+pub fn set_window_scale(id: u32, k: i32) {
+    if let Some(c) = CLIENTS.lock().get_mut(&id) {
+        c.scale = k.clamp(1, 2) as u32;
+    }
+}
+
+/// New windows are drawn at scale `k` (that of the display with the pointer).
+pub fn set_new_window_scale(k: i32) {
+    NEW_SCALE.store(k.clamp(1, 2) as u32, Ordering::Relaxed);
+}
+
+fn new_window_scale() -> u32 {
+    match NEW_SCALE.load(Ordering::Relaxed) {
+        0 => super::scale().max(1) as u32,
+        k => k,
+    }
+}
+
+/// Window `id` is on display `display` (for `desktop::WINDOW_DISPLAY`).
+pub fn set_window_display(id: u32, display: u32) {
+    if let Some(c) = CLIENTS.lock().get_mut(&id) {
+        c.display = display;
+    }
 }
 
 pub fn info(id: u32) -> Option<(u32, String, bool, (i32, i32))> {
@@ -367,8 +400,9 @@ fn put<T: Copy>(ptr: u64, v: &T) -> Result<(), isize> {
 }
 
 fn clamp_size(w: u64, h: u64) -> (u32, u32) {
-    let (sw, sh) = super::screen_size();
-    ((w as i32).clamp(120, sw) as u32, (h as i32).clamp(80, sh) as u32)
+    // No larger than the largest display.
+    let (sw, sh) = super::screens::largest().unwrap_or_else(super::screen_size);
+    ((w as i32).clamp(120, sw.max(120)) as u32, (h as i32).clamp(80, sh.max(80)) as u32)
 }
 
 pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
@@ -392,7 +426,8 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             if CLIENTS.lock().values().filter(|c| c.pid == pid).count() >= 8 {
                 return Err(EMFILE);
             }
-            let surface = alloc_surface(pid, w, h)?;
+            let scale = new_window_scale();
+            let surface = alloc_surface(pid, w, h, scale)?;
             let id = NEXT_WINDOW.fetch_add(1, Ordering::Relaxed);
             CLIENTS.lock().insert(
                 id,
@@ -407,6 +442,8 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
                     events: VecDeque::new(),
                     cursor: aurora_abi::cursor::ARROW,
                     program: None,
+                    scale,
+                    display: 0,
                 },
             );
             send(Command::Created(id));
@@ -462,7 +499,8 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             let id = a[0] as u32;
             owned(id, pid)?;
             let (w, h) = clamp_size(a[1], a[2]);
-            let mut new = Some(alloc_surface(pid, w, h)?);
+            let scale = CLIENTS.lock().get(&id).map_or_else(new_window_scale, |c| c.scale);
+            let mut new = Some(alloc_surface(pid, w, h, scale)?);
             let old = CLIENTS.lock().get_mut(&id).map(|c| core::mem::replace(&mut c.surface, new.take().unwrap()));
             let Some(old) = old else {
                 // Another thread closed the window meanwhile: the new
@@ -576,6 +614,43 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
             send(Command::Play(len == 1));
             Ok(0)
         }
+        DISPLAYS => {
+            let list = super::screens::published();
+            let size = core::mem::size_of::<aurora_abi::DisplayInfo>();
+            let max = (len as usize).min(16).min(list.len());
+            if max > 0 {
+                let mut out = crate::syscall::user::slice_mut(ptr, (max * size) as u64)?;
+                for (i, d) in list.iter().take(max).enumerate() {
+                    let bytes = unsafe { core::slice::from_raw_parts(d as *const _ as *const u8, size) };
+                    out[i * size..(i + 1) * size].copy_from_slice(bytes);
+                }
+                out.commit(max * size)?;
+            }
+            Ok(list.len() as u64)
+        }
+        WINDOW_DISPLAY => {
+            let pid = sched::current_pid();
+            let clients = CLIENTS.lock();
+            match clients.get(&(len as u32)) {
+                Some(c) if c.pid == pid && c.display != 0 => Ok(c.display as u64),
+                Some(c) if c.pid == pid => Err(EAGAIN),
+                _ => Err(EBADF),
+            }
+        }
+        DISPLAY_MODES => {
+            let modes = super::screens::modes_of((len >> 32) as u32).ok_or(ENODEV)?;
+            let size = core::mem::size_of::<aurora_abi::DisplayMode>();
+            let max = ((len & 0xFFFF_FFFF) as usize).min(64).min(modes.len());
+            if max > 0 {
+                let mut out = crate::syscall::user::slice_mut(ptr, (max * size) as u64)?;
+                for (i, m) in modes.iter().take(max).enumerate() {
+                    let bytes = unsafe { core::slice::from_raw_parts(m as *const _ as *const u8, size) };
+                    out[i * size..(i + 1) * size].copy_from_slice(bytes);
+                }
+                out.commit(max * size)?;
+            }
+            Ok(modes.len() as u64)
+        }
         OPEN_APP | OPEN_FILE => {
             let raw = user_str(ptr, len)?;
             let cwd = proc::current().map(|p| p.cwd.lock().clone()).unwrap_or_else(|| String::from("/"));
@@ -608,7 +683,7 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
         }
         EJECT => {
             let path = crate::fs::resolve("/", &user_str(ptr, len)?);
-            crate::drivers::usb::msc::eject(&path)?;
+            crate::drivers::block::removable::eject(&path)?;
             super::notify::system("Safe to remove", path.trim_start_matches("/Volumes/"));
             Ok(0)
         }
