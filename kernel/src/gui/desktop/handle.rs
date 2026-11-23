@@ -182,10 +182,14 @@ impl Desktop {
 
     // -------------------------------------------------------------- Moorings
 
-    /// The layouts row that drops from the top while a window is dragged.
+    /// The layouts row that drops from the top of the display a window is
+    /// dragged on (below the bar on the main display).
     pub(super) fn moorings_rect(&self) -> Rect {
         let w = MOORINGS.len() as i32 * (TILE_W + 8) - 8 + 20;
-        Rect::new(self.w / 2 - w / 2, MENUBAR_H + 6, w, TILE_H + 20)
+        let on = self.moorings_on.min(self.display_rects().len() - 1);
+        let d = self.display_rects()[on];
+        let top = if on == self.main_index() { MENUBAR_H + 6 } else { d.y + 6 };
+        Rect::new(d.x + d.w / 2 - w / 2, top, w, TILE_H + 20)
     }
 
     fn tile(&self, n: usize) -> Rect {
@@ -211,9 +215,20 @@ impl Desktop {
 
     /// Dragging window `i` to (`x`, `y`): Moorings and the screen edges pick a target.
     pub(super) fn moorings_drag(&mut self, i: usize, x: i32, y: i32) {
-        let area = self.work_area();
+        // Moorings and the edges belong to the display under the pointer.
+        let on = self.display_at(x, y);
+        if on != self.moorings_on {
+            self.moorings_on = on;
+            self.moorings_open = false;
+        }
+        let rects = self.display_rects();
+        let d = rects[on];
+        let area = self.work_area_on(on);
         let (mw, mh) = self.windows[i].minimum();
-        let near_top = y < MENUBAR_H + 40 || (self.moorings_open && self.moorings_rect().inset(-24).contains(x, y));
+        // An edge another display continues is for crossing, not for mooring.
+        let outer = |ex: i32| lumen::displays::at(&rects, ex, y).is_none();
+        let near_top =
+            (y < area.y + 32 && y >= d.y) || (self.moorings_open && self.moorings_rect().inset(-24).contains(x, y));
         let mut zone = None;
         if self.windows[i].app.resizable() && near_top {
             for (n, layout) in MOORINGS.iter().enumerate() {
@@ -228,9 +243,9 @@ impl Desktop {
             None
         } else if let Some(z) = zone {
             Some(windowing::zone_placement(z))
-        } else if x < 18 {
+        } else if x < d.x + 18 && outer(d.x - 1) {
             Some(Placement::Left)
-        } else if x > self.w - 18 {
+        } else if x > d.right() - 18 && outer(d.right()) {
             Some(Placement::Right)
         } else {
             None
@@ -276,7 +291,7 @@ impl Desktop {
         if let Some(z) = self.mooring_zone {
             let label = alloc::format!("{} · drop to moor", zone_name(z));
             let f = theme::ui_bold(12);
-            let tag = Rect::new(self.w / 2 - (f.width(&label) + 20) / 2, m.bottom() + 8, f.width(&label) + 20, 26);
+            let tag = Rect::new(m.x + m.w / 2 - (f.width(&label) + 20) / 2, m.bottom() + 8, f.width(&label) + 20, 26);
             cv.frosted(tag, 13, t.glass_tint);
             cv.text(tag.x + 10, tag.y + 18, &label, f, t.text_on_glass);
         }

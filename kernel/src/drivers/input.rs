@@ -81,6 +81,14 @@ pub fn pointer_moved(dx: i32, dy: i32, buttons: u8) {
     push(InputEvent::Pointer { x: (x + dx).clamp(0, w - 1), y: (y + dy).clamp(0, h - 1), buttons });
 }
 
+/// Puts the pointer at (`x`, `y`) without an event: the desktop stopped
+/// it at the edge of a display, so relative devices move it from there.
+pub fn warp(x: i32, y: i32) {
+    let (w, h) = screen_size();
+    let (x, y) = (x.clamp(0, (w - 1).max(0)), y.clamp(0, (h - 1).max(0)));
+    POINTER.store((x as u32 as u64) << 32 | y as u32 as u64 | 1 << 63, Ordering::Relaxed);
+}
+
 pub fn push(ev: InputEvent) {
     if let InputEvent::Pointer { x, y, .. } = ev {
         POINTER.store((x as u32 as u64) << 32 | y as u32 as u64 | 1 << 63, Ordering::Relaxed);
@@ -231,8 +239,22 @@ pub fn caps() -> bool {
 /// updates every keyboard's light. Returns the new state.
 pub fn toggle_caps() -> bool {
     let on = !CAPS.fetch_xor(true, Ordering::AcqRel);
+    LIGHT.store(on, Ordering::Release);
     request_lights();
+    super::evdev::sources::caps_changed(on);
     on
+}
+
+/// The Caps Lock light as last set (it follows the lock, unless a program
+/// set it through a keyboard's `/dev/input` node).
+static LIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Lights (or puts out) every keyboard's Caps Lock light without changing
+/// the lock (Linux programs write `LED_CAPSL`).
+pub fn set_caps_light(on: bool) {
+    if LIGHT.swap(on, Ordering::AcqRel) != on {
+        request_lights();
+    }
 }
 
 /// Something that shows the lock state (a keyboard driver).
@@ -275,7 +297,7 @@ fn lights_task() {
         }
         let sinks = *SINKS.lock();
         for sink in sinks.into_iter().flatten() {
-            sink(caps());
+            sink(LIGHT.load(Ordering::Acquire));
         }
     }
 }

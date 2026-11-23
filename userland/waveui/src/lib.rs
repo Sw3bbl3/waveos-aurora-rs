@@ -88,8 +88,12 @@ pub struct Env {
     pub active: bool,
     /// The window's content size.
     pub size: (i32, i32),
-    /// The screen's size.
+    /// The screen's size (the main display's).
     pub screen: (i32, i32),
+    /// The display the window is on (see `corekit::display`; 0 until it
+    /// appears) and its size.
+    pub display: u32,
+    pub display_size: (i32, i32),
     /// Dark appearance.
     pub dark: bool,
     /// The person asked for less motion.
@@ -105,6 +109,8 @@ impl Env {
             active: env.focused,
             size: (area.w, area.h),
             screen: env.screen,
+            display: env.display,
+            display_size: env.display_size,
             dark: lumen::theme::current().dark,
             reduce_motion: lumen::theme::reduce_motion(),
             mods: env.mods,

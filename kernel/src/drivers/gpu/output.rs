@@ -3,7 +3,8 @@
 //! back buffer the CPU draws into, and the few operations a compositor
 //! needs — present damage, change size, follow the host window, move the
 //! cursor. Everything goes through atomic commits on the device, so the
-//! compositor is just another KMS client.
+//! compositor is just another KMS client — one that steps aside while a
+//! program drives the display itself (see [`super::owner`]).
 //!
 //! The back buffer is the framebuffer the primary plane scans out. On
 //! virtio-gpu that means no copy at all in the guest (the host reads the
@@ -50,9 +51,40 @@ impl Output {
         let dev = primary()?;
         let conns = dev.probe();
         let conn = conns.iter().find(|c| c.status == Status::Connected).or(conns.first())?.clone();
+        Self::open_connector(dev, &conn, wanted, &[])
+    }
+
+    /// Opens every connected display of every device (the primary device's
+    /// first), each on a CRTC of its own, in the size `wanted` gives for
+    /// its connector when it can show it.
+    pub fn open_all(wanted: impl Fn(&ConnectorInfo) -> Option<(u32, u32)>) -> Vec<Output> {
+        let mut out: Vec<Output> = Vec::new();
+        for dev in devices() {
+            let conns = dev.probe();
+            for conn in conns.iter().filter(|c| c.status == Status::Connected) {
+                let taken: Vec<ObjId> = out.iter().map(|o| o.crtc).collect();
+                if let Some(o) = Self::open_connector(dev.clone(), conn, wanted(conn), &taken) {
+                    out.push(o);
+                }
+            }
+        }
+        out
+    }
+
+    /// Opens connector `conn` of `dev` on a CRTC that can drive it and is
+    /// not in `taken`, in mode `wanted` if it has it, else the mode it is
+    /// in, else its preferred.
+    pub fn open_connector(
+        dev: Arc<dyn KmsDevice>,
+        conn: &ConnectorInfo,
+        wanted: Option<(u32, u32)>,
+        taken: &[ObjId],
+    ) -> Option<Output> {
+        let conn = conn.clone();
         let encoders = dev.encoders();
         let enc = encoders.iter().find(|e| conn.encoders.contains(&e.id))?;
-        let crtc = dev.crtcs().into_iter().find(|c| enc.possible_crtcs & (1 << c.index) != 0)?;
+        let crtc =
+            dev.crtcs().into_iter().find(|c| enc.possible_crtcs & (1 << c.index) != 0 && !taken.contains(&c.id))?;
         let planes = dev.planes();
         let on_crtc = |k: PlaneKind| {
             planes.iter().find(|p| p.kind == k && p.possible_crtcs & (1 << crtc.index) != 0).map(|p| p.id)
@@ -92,7 +124,7 @@ impl Output {
             flags: commit::ALLOW_MODESET,
             user_data: 0,
         };
-        dev.atomic_commit(&c)?;
+        owner::desktop_commit(dev, &c)?;
         Ok(fb)
     }
 
@@ -100,8 +132,33 @@ impl Output {
         (self.fb.width, self.fb.height)
     }
 
+    /// The connector as last probed (its status, modes and EDID).
+    pub fn connector_info(&self) -> Option<ConnectorInfo> {
+        self.dev.connectors().into_iter().find(|c| c.id == self.connector)
+    }
+
+    /// Turns the display off: its CRTC inactive, its planes empty (its
+    /// connector went away, or the desktop no longer uses it).
+    pub fn disable(&mut self) -> Result<()> {
+        let mut planes = alloc::vec![PlaneState::disabled(self.primary)];
+        planes.extend(self.cursor_plane.map(PlaneState::disabled));
+        self.cursor = None;
+        let c = Commit {
+            crtcs: alloc::vec![CrtcState { crtc: self.crtc, active: false, mode: None, connectors: Vec::new() }],
+            planes,
+            flags: commit::ALLOW_MODESET,
+            user_data: 0,
+        };
+        owner::desktop_commit(&*self.dev, &c)
+    }
+
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// The back buffer's framebuffer (what the primary plane shows).
+    pub fn framebuffer(&self) -> &Arc<Framebuffer> {
+        &self.fb
     }
 
     /// The back buffer: `width` pixels per row.
@@ -115,7 +172,7 @@ impl Output {
 
     /// Shows the damaged rectangles of the back buffer.
     pub fn present(&self, rects: &[Damage]) -> Result<()> {
-        self.dev.dirty(&self.fb, rects)
+        owner::desktop_dirty(&*self.dev, &self.fb, rects)
     }
 
     /// Switches to `w`×`h`. The old back buffer is gone afterwards.
@@ -174,7 +231,7 @@ impl Output {
 
     fn commit_cursor(&self) -> Result<()> {
         let c = Commit { planes: alloc::vec![self.cursor_state()], ..Commit::default() };
-        self.dev.atomic_commit(&c)
+        owner::desktop_commit(&*self.dev, &c)
     }
 
     /// Shows a `w`×`h` cursor image (0xAARRGGBB, straight alpha) with its

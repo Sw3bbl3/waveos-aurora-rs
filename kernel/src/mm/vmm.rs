@@ -132,6 +132,14 @@ pub fn shm_hold(frame: u64) {
     swap::hold(frame, true);
 }
 
+/// Starts counting frames another owner allocated (a GPU buffer a program
+/// maps), held once by that owner, which lets go with [`shm_release`].
+/// They are device memory: never swapped out, by any mapping, ever (a
+/// display may scan them out, another device may read them).
+pub fn shm_count(frames: &[u64]) {
+    swap::count_device(frames);
+}
+
 /// An object lets go of a counted frame; the last holder frees it.
 pub fn shm_release(frame: u64) {
     swap::release(frame, true);

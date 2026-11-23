@@ -91,10 +91,15 @@ Writing to the file, or deleting it, drops it from the cache.
   always are.
 - **Made-up files:** `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/fd/*`,
   `/dev/kmsg` (the system log: `2>/dev/kmsg` keeps a program's messages);
+  the input devices and what describes them (`/dev/input`, `/dev/hidraw*`,
+  `/dev/uinput`, `/sys`, `/run/udev`; see below);
   `/proc/self/exe`, `/proc/cpuinfo`, `/proc/meminfo` (with swap and the
   compressed store as `Zswap`), `/proc/pressure/memory`,
   `/proc/self/status` and `/proc/<pid>/status` (`VmRSS`, `VmSwap`,
-  `VmLck`), `/proc/mounts`; and
+  `VmLck`), `/proc/mounts`;
+  `/dev/dri/card0` (see [The display](#the-display-drm)) and the parts of
+  `/sys` that describe it (`/sys/class/drm`, `/sys/dev/char`, the PCI
+  device); and
   `/etc/passwd`, `/etc/group`, `/etc/hostname`, `/etc/hosts` and
   `/etc/resolv.conf` built from the computer's settings.
 - **Memory:** `brk`, `mmap` (anonymous and private file mappings, hints,
@@ -162,6 +167,12 @@ Writing to the file, or deleting it, drops it from the cache.
 - **Symbolic links:** the read-only tree's links come with the system image
   (`/bin/sh` and every other BusyBox command are links to `/bin/busybox`,
   where Debian puts them); `symlink` makes new ones in the writable tree.
+  `O_PATH | O_NOFOLLOW` opens a link itself, and `readlinkat(fd, "")`
+  reads it (systemd's libraries walk paths this way). `statfs` says
+  sysfs, procfs and tmpfs for `/sys`, `/proc`, `/dev` and `/run`.
+- **inotify:** folders are watched for files and folders created,
+  deleted and renamed (and device nodes in `/dev`); changes to a file's
+  contents aren't reported yet.
 - **Everything else:** calls that aren't there yet return `ENOSYS`, and the
   first use of each is written to the system log (`linux: … system call N
   is not supported yet`).
@@ -193,7 +204,37 @@ Only these WaveOS calls are open to Linux programs: windows, events, sound
 clipboard, notifications, reading preferences, the uptime clock, and game
 controllers (`wave_gamepads`, `wave_gamepad_state`, `wave_gamepad_rumble`:
 one standard layout for every controller; Doom uses them). A program reads
-a neutral controller while it isn't the one in front.
+a neutral controller while it isn't the one in front. Programs written for
+Linux don't need these for input: see below.
+
+## Keyboards, mice and game controllers the Linux way
+
+Linux programs find and read input devices as on Linux, so SDL, libinput,
+Steam's input layer and Wine work unchanged
+([developer/linux-input.md](developer/linux-input.md) has the details):
+
+- `/dev/input/event*` for every keyboard, mouse, tablet, touchpad and game
+  controller, with Linux's events, `ioctl`s, force feedback (rumble) and
+  Caps Lock light; `/dev/input/js*` (the old joystick API) for
+  controllers; `/dev/hidraw*` for USB HID devices (raw reports, feature
+  reports); `/dev/uinput` to make devices (they work in WaveOS too).
+- Controllers look exactly as Linux's drivers show them (Xbox pads as
+  `xpad`, PlayStation as `hid-playstation`, Switch Pro as `hid-nintendo`),
+  so SDL's built-in controller database knows them. The keyboard-played
+  controller (Super+G) is an Xbox 360 pad.
+- Finding them: sysfs (`/sys/class/input`, `/sys/class/hidraw`, the devices
+  under `/sys/devices`), `/dev/input/by-id` and `by-path`, udev's records in
+  `/run/udev/data`, device events over netlink for libudev's monitors (the
+  kernel sends udev's messages itself), and inotify on `/dev/input`.
+- Debian's SDL 2.26 finds the keyboard-played controller, plugged in
+  while it runs, and calls it a game controller with its built-in Xbox 360
+  mapping, through libudev and through inotify alike (`sdlprobe`, see the
+  developer page).
+- Who reads what: keyboards, mice and touchpads reach only the program
+  whose window has the focus; controllers, the program in front (Wave
+  Play's rule). A program without the focus sees its devices at rest. The
+  device files belong to the account logged in at the screen; raw HID
+  files of keyboards and mice belong to the system.
 
 Three calls fit windows into a program's own main loop:
 
@@ -213,6 +254,29 @@ channels, rate, buffer space, delay, sync, reset) describe it as it is,
 48 kHz 16-bit stereo, so a program that asks for another rate is told the
 one it gets and converts (GStreamer's `osssink` does, and with it WebKit's
 media). There is no PulseAudio or ALSA.
+
+## The display (DRM)
+
+Each display is a DRM card, `/dev/dri/card0`, with Linux's ioctls (libdrm
+and anything built on it work as they are): the mode-setting objects and
+their properties, mode sets, planes, the cursor, page flips and atomic
+commits with their events (read from the card, through `poll` or `epoll`),
+vblank waits, dumb buffers mapped through the card, and PRIME: a buffer as
+a dma-buf descriptor that can be mapped and passed to another program over
+a local socket. `drmGetDevices2` finds the card through `/sys`, as on Linux.
+The driver names are Linux's (`virtio_gpu`, `bochs-drm`, `simpledrm`).
+libdrm's test program is included: `modetest -M virtio_gpu` (or
+`bochs-drm`) lists the card, and `modetest -M virtio_gpu -s 9:1280x800 -v`
+sets a mode and page-flips until you press Return.
+
+The first program to open a card is its master, as on Linux when no
+display server runs. Looking costs nothing; its first mode set or page
+flip takes the screen from the desktop, which comes back as soon as the
+program drops master, closes the card or exits — also when it crashes or
+is killed. While it holds the screen, keys and the pointer still go to the
+desktop. No render nodes, syncobjs or format modifiers yet, and Mesa
+hasn't been run against it; see
+[display-core.md](developer/display-core.md#what-mesa-still-needs).
 
 ## Wayland programs (GTK and others)
 
@@ -419,8 +483,11 @@ and `FRAME`) and `linux-tests/proctest.c` (fork, exec, wait, scripts and
 the shell, `posix_spawn` and `vfork`, signals and handlers, faults handled
 as signals, signals to a thread busy in its own code,
 interrupted calls, `poll`, `select`, `epoll`, `eventfd`, `timerfd`,
-close-on-exec and symbolic links), and `linux-tests/nettest.c` (local
-sockets with descriptor passing, TCP and UDP over loopback, name lookup).
+close-on-exec and symbolic links), `linux-tests/nettest.c` (local
+sockets with descriptor passing, TCP and UDP over loopback, name lookup),
+and `linux-tests/inputtest.c` (input devices: evdev, the joystick API,
+hidraw, uinput, sysfs and udev records, hot-plug over netlink and inotify,
+focus, grabs and rumble, with the kernel test playing the user).
 
 To see what a Linux program asks of the kernel, put `WAVEOS_STRACE=1` in
 its environment: every system call it makes, with its arguments and

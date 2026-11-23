@@ -103,6 +103,8 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::display::init(boot_info);
     drivers::block::init();
     fs::mount_disks();
+    // boot.conf is readable now: SD options, and removable cards' volumes.
+    drivers::block::sdhci::start();
     // After the disks: boot.conf chooses the virtio-gpu driver.
     telemetry::stage("gpu", "GPU drivers");
     drivers::display::gpu_start();

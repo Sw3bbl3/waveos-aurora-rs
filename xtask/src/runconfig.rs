@@ -33,6 +33,18 @@ pub const DISKS: &[Choice] = &[
     choice("ahci", "AHCI (SATA)", "The SATA controller most PCs have. The default.", &["ich9-ahci"]),
     choice("virtio", "virtio-blk", "A paravirtual disk made for VMs: the quickest.", &["virtio-blk-pci"]),
     choice("nvme", "NVMe", "An NVMe SSD, as in recent laptops.", &["nvme"]),
+    choice(
+        "sd",
+        "SD card",
+        "An SD card in an SDHCI reader, as in laptops. A small disk only starts the bootloader.",
+        &["sdhci-pci", "sd-card"],
+    ),
+    choice(
+        "emmc",
+        "eMMC",
+        "Soldered eMMC on an SDHCI controller, as in low-cost laptops and tablets.",
+        &["sdhci-pci", "emmc"],
+    ),
 ];
 
 pub const NETS: &[Choice] = &[

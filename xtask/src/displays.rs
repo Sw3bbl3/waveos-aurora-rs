@@ -15,8 +15,9 @@
 //! - Otherwise (GTK only): display 1 in QEMU's window, the others on VNC,
 //!   opened with `remote-viewer` or `vncviewer` when one is installed.
 //!
-//! WaveOS's compositor draws only on the primary display today, so the
-//! other windows stay blank until multi-monitor desktop support lands.
+//! With `--gpu virtio` WaveOS extends its desktop over every display (see
+//! docs/developer/display-core.md); with `--gpu std` it drives the first
+//! VGA only, so the `secondary-vga` windows stay blank.
 
 use crate::runconfig::{shell_quote, QemuCaps};
 use std::hash::{BuildHasher, Hasher};
@@ -207,6 +208,57 @@ impl Displays {
         a
     }
 
+    /// virtio-gpu switches outputs 2 to N on only when a user interface
+    /// asks for a size, which Screen Sharing and most VNC viewers never do:
+    /// every extra head also gets a VNC server on a Unix socket in `dir`,
+    /// through which [`Displays::plug_in`] asks for its size.
+    pub fn plug_in_args(&self, gpu: &str, dir: &std::path::Path) -> Vec<String> {
+        if gpu.starts_with("virtio") && self.sizes.len() > 1 {
+            crate::testdisplays::qemu_args(dir, self.sizes.len())
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Once QEMU listens: asks each extra virtio head for its size (as a
+    /// viewer resizing its window would), which plugs it in. The
+    /// connections stay open while xtask runs.
+    pub fn plug_in(&self, gpu: &str, dir: &std::path::Path) {
+        if !gpu.starts_with("virtio") || self.sizes.len() < 2 {
+            return;
+        }
+        let (sizes, dir) = (self.sizes.clone(), dir.to_path_buf());
+        std::thread::spawn(move || {
+            let mut open = Vec::new();
+            for (head, &(w, h)) in sizes.iter().enumerate().skip(1) {
+                let sock = crate::testdisplays::vnc_socket(&dir, head);
+                let start = Instant::now();
+                let viewer = loop {
+                    match crate::testdisplays::vnc_connect(&sock) {
+                        Ok(s) => break Some(s),
+                        Err(_) if start.elapsed() < Duration::from_secs(60) => {
+                            std::thread::sleep(Duration::from_millis(250))
+                        }
+                        Err(e) => {
+                            eprintln!("display {}: could not plug it in ({e})", head + 1);
+                            break None;
+                        }
+                    }
+                };
+                if let Some(mut s) = viewer {
+                    let size = (w.min(u16::MAX as u32) as u16, h.min(u16::MAX as u32) as u16);
+                    if let Err(e) = crate::testdisplays::vnc_set_size(&mut s, size.0, size.1) {
+                        eprintln!("display {}: could not plug it in ({e})", head + 1);
+                    }
+                    open.push(s);
+                }
+            }
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        });
+    }
+
     /// Whether these arguments choose the display backend themselves.
     pub fn chooses_backend(&self) -> bool {
         self.windows == Windows::Sdl
@@ -233,8 +285,8 @@ impl Displays {
         }
         if n > 1 {
             out.push(String::from(
-                "WaveOS draws its desktop on display 1 only for now; the other displays stay blank until \
-                 multi-monitor support lands.",
+                "With --gpu virtio WaveOS extends its desktop over every display (arrange them in Settings → \
+                 Display); with --gpu std only display 1 is used.",
             ));
         }
         out

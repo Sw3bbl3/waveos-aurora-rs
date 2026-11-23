@@ -1,0 +1,8 @@
+[package]
+name = "aurora-nvgfx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Nvidia GPU identification (device ids, NV_PMC_BOOT_0); no_std, host-tested.
+[dependencies]

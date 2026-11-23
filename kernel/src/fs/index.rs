@@ -94,6 +94,7 @@ pub fn poke() {
 
 pub fn added(path: &str, dir: bool) {
     changed();
+    crate::compat::linux::inotify::host_changed(path, crate::compat::linux::inotify::IN_CREATE, dir);
     if !indexed(path) {
         return;
     }
@@ -105,12 +106,14 @@ pub fn added(path: &str, dir: bool) {
 
 pub fn removed(path: &str) {
     changed();
+    crate::compat::linux::inotify::host_changed(path, crate::compat::linux::inotify::IN_DELETE, false);
     let prefix = alloc::format!("{path}/");
     INDEX.lock().items.retain(|i| i.path != path && !i.path.starts_with(&prefix));
 }
 
 pub fn renamed(from: &str, to: &str) {
     changed();
+    crate::compat::linux::inotify::host_renamed(from, to);
     let prefix = alloc::format!("{from}/");
     let mut idx = INDEX.lock();
     let mut moved_dir = None;

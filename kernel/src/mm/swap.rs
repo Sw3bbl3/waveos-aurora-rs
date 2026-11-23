@@ -458,6 +458,17 @@ pub fn count(f: u64, holders: u32, objects: u32) {
     PAGES.lock().counted.insert(f, Counted { holders, objects, pins: 0, slot: NONE });
 }
 
+/// Starts counting device frames (a GPU buffer's, mapped into programs),
+/// each held once by its buffer, an object. They carry a pin that is never
+/// taken off, so no mapping of them is ever swapped out, even after the
+/// buffer is gone; the last holder still frees them.
+pub fn count_device(frames: &[u64]) {
+    let mut p = PAGES.lock();
+    for &f in frames {
+        p.counted.insert(f, Counted { holders: 1, objects: 1, pins: 1, slot: NONE });
+    }
+}
+
 /// Another holder for counted frame `f` (an object if `object`). False if
 /// it isn't counted.
 pub fn hold(f: u64, object: bool) -> bool {

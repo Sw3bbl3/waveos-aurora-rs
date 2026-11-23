@@ -26,6 +26,12 @@ const TESTS: &[Test] = &[
     ("write-combining mappings", crate::arch::pat::self_test),
     ("LinuxKPI: runtime, DRM and the GPU display", linux_kpi),
     ("display: EDID, connectors, mode sets, atomic commits, cursor plane", crate::drivers::gpu::selftest::display),
+    ("intel display: firmware takeover on a simulated engine", crate::drivers::gpu::intel::selftest::run),
+    ("amd display: firmware takeover on a simulated engine", crate::drivers::gpu::amd::selftest::run),
+    (
+        "displays: layout, pointer crossing, per-display damage, slow display, hotplug, arrangement, mirroring, screendumps",
+        displays,
+    ),
     ("rect math", rects),
     ("keyboard decoder", keyboard),
     ("ramfs + vfs", ramfs),
@@ -75,9 +81,17 @@ const TESTS: &[Test] = &[
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
     ("Linux programs: local and network sockets (nettest)", linux_sockets),
+    ("Linux programs: input devices — evdev, joystick, hidraw, uinput, hot-plug (inputtest)", linux_input),
+    ("Linux programs: the DRM device, mode setting, events, PRIME (drmtest)", linux_drm),
+    ("Linux programs: libdrm's modetest on the DRM device", linux_modetest),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
+    ("SD/eMMC: the card the system runs from, and the second reader's card", sd_cards),
+    ("SD card: data integrity by PIO, SDMA and ADMA2, across block and buffer boundaries", sd_integrity),
+    ("SD card: throughput by PIO, SDMA and ADMA2, against the system disk", sd_throughput),
+    ("SD card: pulled out and put back (QMP eject and change)", sd_hotplug),
+    ("SD/eMMC on a simulated controller: HS200, UHS-I, TRIM, cache, injected errors, hot-plug", sd_simulated),
     ("AuroraFS on RAM disk (kernel adapter)", wavefs_ramdisk),
     ("AuroraFS home volume", wavefs_home),
     ("FAT32 /Boot", fat_boot),
@@ -476,6 +490,367 @@ fn linux_sockets() {
     run_linux_test("nettest", "net-test passed");
 }
 
+/// Linux's input interfaces (`linux-tests/inputtest.c`): the program asks
+/// for what it needs as "@command" lines and this plays the user — the
+/// keyboard-played controller (Wave Play's Super+G one), the PS/2
+/// keyboard, a touchpad, a raw HID controller, the window focus — answering
+/// "ok …" on its standard input.
+fn linux_input() {
+    crate::drivers::evdev::self_test();
+    crate::compat::linux::input::self_test();
+    let path = "/System/Linux/bin/inputtest";
+    if crate::fs::stat(path).is_err() {
+        crate::kprint!("(skipped: built without musl-gcc) ");
+        return;
+    }
+    let (in_r, in_w) = crate::proc::new_pipe(false);
+    let (out_r, out_w) = crate::proc::new_pipe(false);
+    let pid = crate::proc::spawn(path, &["inputtest"], [Some(in_r), Some(out_w.clone()), Some(out_w)], 0)
+        .expect("spawn inputtest");
+    let p = crate::proc::get(pid).unwrap();
+    let (to_test, from_test) = match (&*in_w, &*out_r) {
+        (crate::proc::Handle::PipeWrite(w), crate::proc::Handle::PipeRead { pipe, .. }) => (w.clone(), pipe.clone()),
+        _ => unreachable!(),
+    };
+    let mut user = InputTestUser::new(pid);
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let deadline = time::uptime_ms() + 10 * 60_000;
+    let mut buf = [0u8; 512];
+    loop {
+        if from_test.readable() {
+            match from_test.read(&mut buf, true) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => {}
+            }
+        } else if p.exit_code().is_some() || time::uptime_ms() > deadline {
+            break;
+        } else {
+            sched::sleep_ms(5);
+        }
+        while let Some(end) = out.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = out.drain(..=end).collect();
+            let line = String::from_utf8_lossy(&line[..line.len() - 1]).into_owned();
+            match line.strip_prefix('@') {
+                Some(cmd) => {
+                    let reply = user.command(cmd);
+                    let _ = to_test.write(alloc::format!("{reply}\n").as_bytes());
+                }
+                None => {
+                    crate::kprintln!("    {line}");
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+            }
+        }
+    }
+    user.finish();
+    drop(in_w);
+    assert_eq!(p.exit_code(), Some(0), "inputtest failed");
+    assert!(text.contains("input-test passed"), "inputtest did not finish");
+}
+
+/// What `inputtest` asks for, done as a user would (or a device).
+struct InputTestUser {
+    pid: u32,
+    pad: crate::gui::desktop::KeyboardPad,
+    touchpad: Option<(Arc<crate::drivers::evdev::Device>, crate::drivers::evdev::sources::Touches)>,
+    raw: Option<Arc<crate::drivers::evdev::hidraw::Hidraw>>,
+    raw_io: Arc<MockHid>,
+    pointer_from: (i32, i32),
+}
+
+/// A raw HID controller that remembers what it was sent.
+struct MockHid {
+    output: crate::sync::IrqMutex<Vec<u8>>,
+    feature: crate::sync::IrqMutex<Vec<u8>>,
+}
+
+impl crate::drivers::evdev::hidraw::HidIo for MockHid {
+    fn output(&self, report: &[u8]) -> Result<usize, isize> {
+        *self.output.lock() = report.to_vec();
+        Ok(report.len())
+    }
+    fn get_report(&self, _kind: u8, buf: &mut [u8]) -> Result<usize, isize> {
+        buf[1..3].copy_from_slice(&[0x42, 0x43]);
+        Ok(3)
+    }
+    fn set_report(&self, kind: u8, report: &[u8]) -> Result<usize, isize> {
+        if kind == crate::drivers::evdev::hidraw::FEATURE {
+            *self.feature.lock() = report.to_vec();
+        }
+        Ok(report.len())
+    }
+}
+
+impl InputTestUser {
+    fn new(pid: u32) -> Self {
+        InputTestUser {
+            pid,
+            pad: crate::gui::desktop::KeyboardPad::new(),
+            touchpad: None,
+            raw: None,
+            raw_io: Arc::new(MockHid {
+                output: crate::sync::IrqMutex::new(Vec::new()),
+                feature: crate::sync::IrqMutex::new(Vec::new()),
+            }),
+            pointer_from: (0, 0),
+        }
+    }
+
+    fn command(&mut self, cmd: &str) -> String {
+        use crate::drivers::evdev::{self, InputId, Location};
+        use crate::drivers::gamepad;
+        use crate::drivers::input::{self, InputEvent, KeyEvent, Modifiers};
+        let mut words = cmd.split_whitespace();
+        let verb = words.next().unwrap_or("");
+        let args: Vec<&str> = words.collect();
+        let hex = |a: &[&str]| -> Vec<u8> { a.iter().filter_map(|h| u8::from_str_radix(h, 16).ok()).collect() };
+        let ok = String::from("ok");
+        match verb {
+            "focus-me" => {
+                evdev::set_focus(Some(self.pid), None);
+                gamepad::set_owners(self.pid as u64, None);
+                ok
+            }
+            "focus-none" => {
+                evdev::set_focus(None, None);
+                gamepad::set_owners(gamepad::SHELL, None);
+                ok
+            }
+            "pad-connect" | "pad-disconnect" => {
+                if self.pad.id.is_some() == (verb == "pad-disconnect") {
+                    self.pad.toggle();
+                }
+                ok
+            }
+            "pad-press" | "pad-release" | "pad-burst" => {
+                let (code, times) = match (verb, args.first().copied()) {
+                    ("pad-burst", n) => (KeyCode::Enter, n.and_then(|n| n.parse::<usize>().ok()).unwrap_or(1) * 2),
+                    (_, Some("Up")) => (KeyCode::Up, 1),
+                    _ => (KeyCode::Enter, 1),
+                };
+                for i in 0..times {
+                    let pressed = if verb == "pad-burst" { i % 2 == 0 } else { verb == "pad-press" };
+                    let k = KeyEvent { code, ch: None, pressed, mods: Modifiers::default() };
+                    self.pad.key(&k, true);
+                }
+                ok
+            }
+            "rumble?" => {
+                let felt = &gamepad::VIRTUAL_FELT;
+                let until = time::uptime_ms() + 3000;
+                while felt.load(Ordering::Acquire) == 0 && time::uptime_ms() < until {
+                    sched::sleep_ms(10);
+                }
+                let v = felt.swap(0, Ordering::AcqRel);
+                alloc::format!("ok {} {}", v >> 8, v & 0xFF)
+            }
+            "key" => {
+                for b in hex(&args) {
+                    crate::drivers::ps2::keyboard_byte(b);
+                }
+                ok
+            }
+            "touchpad-add" => {
+                let info = aurora_hid::touchpad::Info {
+                    x_min: 0,
+                    x_max: 4000,
+                    y_min: 0,
+                    y_max: 3000,
+                    width_hmm: Some(10_000),
+                    height_hmm: Some(7_500),
+                    max_contacts: 5,
+                };
+                let id = InputId { bustype: 0x18, vendor: 0x1209, product: 0x0002, version: 1 };
+                let d = evdev::sources::touchpad("WaveOS Test Touchpad", id, "", Location::Virtual, &info);
+                self.touchpad = Some((d, evdev::sources::Touches::new()));
+                ok
+            }
+            "touch" => {
+                let Some((d, touches)) = &mut self.touchpad else { return String::from("no touchpad") };
+                let num = |i: usize| args.get(i).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                let contacts = if args.first() == Some(&"down") {
+                    alloc::vec![aurora_hid::touchpad::Contact {
+                        id: 7,
+                        x: num(1),
+                        y: num(2),
+                        tip: true,
+                        confident: true
+                    }]
+                } else {
+                    Vec::new()
+                };
+                touches.frame(d, &aurora_hid::touchpad::Frame { contacts, button: false });
+                ok
+            }
+            "touchpad-remove" => {
+                if let Some((d, _)) = self.touchpad.take() {
+                    evdev::remove(&d);
+                }
+                ok
+            }
+            "hidraw-add" => {
+                let place = evdev::UsbPlace {
+                    bus: 9,
+                    ports: String::from("1"),
+                    interface: 0,
+                    vendor: 0x1209,
+                    product: 0x0003,
+                    version: 0x0100,
+                    maker: String::from("WaveOS"),
+                    model: String::from("Test Pad"),
+                    serial: String::new(),
+                    pci: String::from("0000:00:1f.7"),
+                    hid: 0x99,
+                };
+                self.raw = Some(evdev::hidraw::add(evdev::hidraw::Spec {
+                    name: String::from("WaveOS Test Pad"),
+                    phys: String::from("usb-0000:00:1f.7-1/input0"),
+                    uniq: String::new(),
+                    bustype: 3,
+                    vendor: 0x1209,
+                    product: 0x0003,
+                    descriptor: alloc::vec![0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0xC0],
+                    location: Location::Usb(place),
+                    class: evdev::Class::Joystick,
+                    io: self.raw_io.clone(),
+                }));
+                ok
+            }
+            "hidraw-report" => {
+                if let Some(r) = &self.raw {
+                    r.input(&hex(&args));
+                }
+                ok
+            }
+            "hidraw-check" => {
+                let h = |b: &[u8]| b.iter().map(|x| alloc::format!("{x:02x}")).collect::<String>();
+                alloc::format!("ok {} {}", h(&self.raw_io.output.lock()), h(&self.raw_io.feature.lock()))
+            }
+            "hidraw-remove" => {
+                if let Some(r) = self.raw.take() {
+                    evdev::hidraw::remove(&r);
+                }
+                ok
+            }
+            "native-pads" => {
+                let names: Vec<String> = gamepad::list()
+                    .iter()
+                    .map(|p| String::from_utf8_lossy(&p.name[..p.name_len as usize]).into_owned())
+                    .collect();
+                alloc::format!("ok {}", names.join("|"))
+            }
+            "drain-native" => {
+                while input::pop().is_some() {}
+                self.pointer_from = input::pointer_position();
+                ok
+            }
+            "native-key?" => {
+                let mut got = String::from("none");
+                while let Some(e) = input::pop() {
+                    if let InputEvent::Key(KeyEvent { pressed: true, ch: Some(c), .. }) = e {
+                        got = alloc::format!("{c}");
+                    }
+                }
+                alloc::format!("ok {got}")
+            }
+            "native-pointer?" => {
+                let mut at = None;
+                while let Some(e) = input::pop() {
+                    if let InputEvent::Pointer { x, y, .. } = e {
+                        at = Some((x, y));
+                    }
+                }
+                match at {
+                    Some((x, y)) => alloc::format!("ok {} {}", x - self.pointer_from.0, y - self.pointer_from.1),
+                    None => String::from("ok none"),
+                }
+            }
+            _ => alloc::format!("unknown command {cmd}"),
+        }
+    }
+
+    /// Puts things back as they were.
+    fn finish(&mut self) {
+        if self.pad.id.is_some() {
+            self.pad.toggle();
+        }
+        let _ = self.command("touchpad-remove");
+        let _ = self.command("hidraw-remove");
+        crate::drivers::evdev::set_focus(None, None);
+        crate::drivers::gamepad::set_owners(crate::drivers::gamepad::ANYONE, None);
+        let _ = crate::drivers::gamepad::take_changes();
+    }
+}
+
+/// A fourth drives the display through `/dev/dri/card0` while a stand-in
+/// desktop (an `Output` showing one colour) is on it: the program takes
+/// the display with its first mode set, and when it closes the card — and
+/// again when it is killed holding it — the desktop's picture is back.
+/// The harness checks screendumps of both (see `xtask`).
+fn linux_drm() {
+    use crate::drivers::gpu::{self, output::Output, Damage};
+    let desktop = Output::open(None).expect("no display");
+    let (w, h) = desktop.size();
+    unsafe { desktop.back_buffer() }.fill(0xFF33_6699);
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present");
+    run_linux_test_with("drmtest", &["drmtest"], "drm-test passed", 240_000);
+    let dev = gpu::primary().unwrap();
+    assert_eq!(gpu::owner::holder(&*dev), None, "a program still holds the display");
+    let (_, planes) = dev.state();
+    let shown = planes.iter().any(|p| p.fb.as_ref().is_some_and(|fb| Arc::ptr_eq(fb, desktop.framebuffer())));
+    assert!(shown, "the desktop's picture is not on the display");
+    // The desktop presents again (it was skipped while the program held the display).
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present after");
+}
+
+/// libdrm's own test program, `modetest`, built unmodified with libdrm
+/// (`xtask/src/libdrm.rs`), finds the card by its driver's name, lists its
+/// objects and properties, then sets a mode and page-flips on every flip
+/// event for a few seconds (`-v`, until its standard input ends) — with
+/// the legacy calls, and again with atomic commits.
+fn linux_modetest() {
+    use crate::drivers::gpu::{self, Status};
+    let path = "/System/Linux/bin/modetest";
+    if crate::fs::stat(path).is_err() {
+        crate::kprint!("(skipped: not built) ");
+        return;
+    }
+    let dev = gpu::primary().expect("no display");
+    let driver = crate::compat::linux::drm::driver_for(&*dev).name();
+    let conn = dev.connectors().into_iter().find(|c| c.status == Status::Connected).expect("no connected display");
+    let (crtcs, _) = dev.state();
+    let mode = crtcs.iter().find(|s| s.active).and_then(|s| s.mode).or(conn.preferred().copied()).unwrap();
+    let (code, text) = run_linux_program(path, &["modetest", "-M", driver], None, None, 60_000);
+    assert_eq!(code, Some(0), "modetest (listing) failed");
+    for part in ["Encoders:", "Connectors:", "CRTCs:", "Planes:", "Frame buffers:", "EDID", "DPMS"] {
+        assert!(text.contains(part), "modetest's listing has no {part}");
+    }
+    let pipe = alloc::format!("{}:{}", conn.id, mode.name());
+    // Atomic mode sets need the primary plane named (`-P`).
+    let crtc = dev.crtcs()[0].clone();
+    let primary = dev
+        .planes()
+        .into_iter()
+        .find(|p| p.kind == gpu::PlaneKind::Primary && p.possible_crtcs & (1 << crtc.index) != 0)
+        .unwrap();
+    let plane = alloc::format!("{}@{}:{}x{}", primary.id, crtc.id, mode.hdisplay, mode.vdisplay);
+    // Legacy: flips on each event until its input ends (6 s).
+    let argv = ["modetest", "-M", driver, "-s", &pipe, "-v"];
+    let (code, text) = run_linux_program(path, &argv, Some(6000), None, 60_000);
+    assert_eq!(code, Some(0), "modetest {} failed", argv.join(" "));
+    assert!(text.contains("freq:"), "modetest {} did not page-flip", argv.join(" "));
+    // Atomic: blocking commits in a loop that never ends; killed while it
+    // holds the display, which the desktop then gets back.
+    let argv = ["modetest", "-M", driver, "-a", "-s", &pipe, "-P", &plane, "-v"];
+    let (code, text) = run_linux_program(path, &argv, None, Some("freq:"), 60_000);
+    assert!(text.contains("freq:"), "modetest {} did not commit 60 frames", argv.join(" "));
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "modetest {} ended by itself", argv.join(" "));
+    assert!(eventually(5000, || gpu::owner::holder(&*dev).is_none()), "the desktop did not get the display back");
+}
+
 /// The vDSO's clocks (computed from its time page, as `kernel/vdso/vdso.c`
 /// does) lie between two readings of the kernel's, for both clocks, many
 /// times over a second boundary — after sleep (this runs after the S3
@@ -688,9 +1063,33 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
         crate::kprint!("(skipped: built without musl-gcc) ");
         return;
     }
+    let (code, text) = run_linux_program(&path, argv, None, None, timeout_ms);
+    assert_eq!(code, Some(0), "{name} failed");
+    assert!(text.contains(passed), "{name} did not finish");
+}
+
+/// Runs a Linux program to its end (or `timeout_ms`), shows its output and
+/// returns its exit code and output. With `stdin_ms`, its standard input is
+/// a pipe that closes (end of file) after that long; with `kill_on`, it is
+/// killed once its output has that text.
+fn run_linux_program(
+    path: &str,
+    argv: &[&str],
+    stdin_ms: Option<u64>,
+    kill_on: Option<&str>,
+    timeout_ms: u64,
+) -> (Option<i64>, String) {
     let (r, w) = crate::proc::new_pipe(false);
-    let pid = crate::proc::spawn(&path, argv, [None, Some(w.clone()), Some(w)], 0).expect("spawn Linux test");
+    let (stdin, mut stdin_writer) = match stdin_ms {
+        Some(_) => {
+            let (ir, iw) = crate::proc::new_pipe(false);
+            (Some(ir), Some(iw))
+        }
+        None => (None, None),
+    };
+    let pid = crate::proc::spawn(path, argv, [stdin, Some(w.clone()), Some(w)], 0).expect("spawn Linux program");
     let p = crate::proc::get(pid).unwrap();
+    let stdin_until = time::uptime_ms() + stdin_ms.unwrap_or(0);
     let mut out = alloc::vec::Vec::new();
     let deadline = time::uptime_ms() + timeout_ms;
     let mut buf = [0u8; 512];
@@ -701,6 +1100,13 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
     let mut report = MemReport::new();
     loop {
         report.tick();
+        if stdin_writer.is_some() && time::uptime_ms() >= stdin_until {
+            stdin_writer = None;
+        }
+        let seen = |m: &str| out.windows(m.len()).any(|w| w == m.as_bytes());
+        if kill_on.is_some_and(seen) && p.exit_code().is_none() {
+            let _ = crate::proc::kill(pid);
+        }
         if reader.readable() {
             match reader.read(&mut buf, true) {
                 Ok(0) => break,
@@ -720,20 +1126,28 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
             }
         }
     }
-    let text = String::from_utf8_lossy(&out);
+    let text = String::from(String::from_utf8_lossy(&out));
     for line in text.lines() {
         crate::kprintln!("    {line}");
     }
-    assert_eq!(p.exit_code(), Some(0), "{name} failed");
-    assert!(text.contains(passed), "{name} did not finish");
+    (p.exit_code(), text)
 }
 
 use crate::drivers::block::{self, BlockDevice, BlockResult};
 use alloc::string::String;
 use alloc::sync::Arc;
 
+/// The disk the system runs from (its "Aurora HD" is mounted), else the first.
 fn main_disk() -> Arc<dyn BlockDevice> {
-    block::devices().into_iter().find(|d| !d.name().contains('p')).expect("no disk found — is a disk attached?")
+    let disks: Vec<Arc<dyn BlockDevice>> = block::devices().into_iter().filter(|d| !d.name().contains('p')).collect();
+    let home_part = block::devices().into_iter().find(|p| {
+        block::partition_info(p).is_some_and(|i| i.type_guid == ::aurorafs::PARTITION_TYPE)
+            && fs::device_in_use(&p.name())
+    });
+    let home = home_part.and_then(|p| {
+        disks.iter().find(|d| p.name().strip_prefix(d.name().as_str()).is_some_and(|r| r.starts_with('p')))
+    });
+    home.or(disks.first()).cloned().expect("no disk found — is a disk attached?")
 }
 
 fn storage_devices() {
@@ -761,10 +1175,18 @@ fn block_round_trip() {
         "ahci"
     } else if name.starts_with("nvme") {
         "nvme"
+    } else if name.starts_with("mmc") {
+        // A shared INTx line: the driver counts its own.
+        "sdhci"
     } else {
         "virtio-blk"
     };
-    let interrupts = || -> u64 { crate::arch::irq::list().iter().filter(|v| v.1 == owner).map(|v| v.2).sum() };
+    let interrupts = || -> u64 {
+        if owner == "sdhci" {
+            return crate::drivers::block::sdhci::interrupts();
+        }
+        crate::arch::irq::list().iter().filter(|v| v.1 == owner).map(|v| v.2).sum()
+    };
     let before = interrupts();
     disk.write(scratch, &pattern).unwrap();
     disk.flush().unwrap();
@@ -774,6 +1196,321 @@ fn block_round_trip() {
     assert!(disk.read(disk.sectors(), &mut back[..ss as usize]).is_err(), "out-of-range read must fail");
     let after = interrupts();
     assert!(after > before, "no {} completion interrupts ({} → {})", owner, before, after);
+}
+
+/// The second SD reader's card: the block device whose volume is AURORA-SD.
+fn second_card() -> Arc<dyn BlockDevice> {
+    use crate::drivers::block::sdhci::test;
+    let found = || {
+        block::devices().into_iter().find(|d| {
+            let n = d.name();
+            n.starts_with("mmc") && !n.contains('p') && test::volumes(&n).iter().any(|v| v == "/Volumes/AURORA-SD")
+        })
+    };
+    assert!(
+        wait_for(|| found().is_some(), 10_000),
+        "no SD card with AURORA-SD; slots: {:?}",
+        crate::drivers::block::sdhci::list()
+    );
+    found().unwrap()
+}
+
+fn sd_cards() {
+    use crate::drivers::block::sdhci::{self, test};
+    use aurora_sdmmc::{CardKind, Timing};
+    for line in sdhci::list() {
+        crate::kprintln!("    {line}");
+    }
+    let card = second_card();
+    let info = test::card_info(&card.name()).expect("card info");
+    // QEMU's sd-card on a version 2 controller: 4 GiB SDHC, 4-bit, high speed.
+    assert_eq!(info.kind, CardKind::Sdhc);
+    assert!(info.block_addressed && info.width == 4 && info.timing == Timing::SdHs, "{info:?}");
+    assert!(test::removable(&card.name()));
+    assert_eq!(fs::read_all("/Volumes/AURORA-SD/Hello.txt").unwrap(), b"Hello from an SD card!\n");
+    // A file through FAT, flushed and read back.
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2_246_822_519) >> 20) as u8).collect();
+    fs::write_all("/Volumes/AURORA-SD/Written.bin", &data).unwrap();
+    fs::sync_all();
+    assert!(fs::read_all("/Volumes/AURORA-SD/Written.bin").unwrap() == data, "file read back from SD differs");
+    fs::unlink("/Volumes/AURORA-SD/Written.bin").unwrap();
+    // Running from a card: the system disk is it.
+    let disk = crate::gui::prefs::boot_option("test_disk");
+    if let Some(kind @ ("sd" | "emmc")) = disk.as_deref() {
+        let main = main_disk();
+        assert!(main.name().starts_with("mmc"), "the system disk is {}", main.name());
+        let info = test::card_info(&main.name()).unwrap();
+        crate::kprint!("[system on {}: {}] ", main.name(), info.summary());
+        if kind == "sd" {
+            // 128 MiB: standard capacity, byte-addressed.
+            assert_eq!(info.kind, CardKind::Sdsc);
+        } else {
+            assert_eq!(info.kind, CardKind::Mmc);
+            assert_eq!(info.width, 8);
+            assert_eq!(info.timing, Timing::MmcHs);
+            // The test image has 1 MiB boot partitions and 128 KiB of RPMB: seen, never exposed.
+            assert_eq!((info.boot_bytes, info.rpmb_bytes), (1 << 20, 128 << 10));
+        }
+        assert!(!block::devices().iter().any(|d| d.name().contains("boot") || d.name().contains("rpmb")));
+    }
+}
+
+/// Scratch space on the second card: past its FAT partition (the image
+/// leaves everything after 65 MiB unpartitioned).
+const SD_SCRATCH: u64 = 4 << 20; // sectors: 2 GiB in
+
+fn pattern(seed: u32, len: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(2_654_435_761) | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as u8
+        })
+        .collect()
+}
+
+fn sd_integrity() {
+    use crate::drivers::block::sdhci::{self, test};
+    use aurora_sdmmc::TransferMode;
+    let card = second_card();
+    let name = card.name();
+    let irq_before = sdhci::interrupts();
+    let modes = [TransferMode::Pio, TransferMode::Sdma, TransferMode::Adma32, TransferMode::Adma64];
+    // Runs that start and end on odd sectors, cross the 512-sector bounce
+    // buffer (several commands), and single blocks (CMD17/CMD24).
+    let runs: [(u64, usize); 9] =
+        [(0, 1), (1, 2), (7, 9), (63, 65), (130, 511), (700, 512), (1300, 513), (2000, 1100), (4095, 1)];
+    let mut used = Vec::new();
+    for (m, &mode) in modes.iter().enumerate() {
+        let got = test::set_mode(&name, mode).unwrap();
+        if got != mode {
+            // The reader can't (QEMU's has no 64-bit addressing): skip.
+            continue;
+        }
+        used.push(mode);
+        let base = SD_SCRATCH + m as u64 * 8192;
+        for (i, &(lba, n)) in runs.iter().enumerate() {
+            let data = pattern((m * 100 + i) as u32, n * 512);
+            card.write(base + lba, &data).unwrap();
+            let mut back = alloc::vec![0u8; n * 512];
+            card.read(base + lba, &mut back).unwrap();
+            if back != data {
+                let first = back.iter().zip(&data).position(|(a, b)| a != b).unwrap();
+                test::set_mode(&name, TransferMode::Pio);
+                let mut pio = alloc::vec![0u8; n * 512];
+                card.read(base + lba, &mut pio).unwrap();
+                let pfirst = pio.iter().zip(&data).position(|(a, b)| a != b);
+                panic!(
+                    "{}: {}+{} read back differs at byte {} ({:#x} vs {:#x}); by PIO: {:?}; phys {:#x}",
+                    mode.name(),
+                    lba,
+                    n,
+                    first,
+                    back[first],
+                    data[first],
+                    pfirst,
+                    test::buffer_phys(&name)
+                );
+            }
+        }
+    }
+    card.flush().unwrap();
+    // What one mode wrote, every other reads the same.
+    for (m, &writer) in modes.iter().enumerate().filter(|(_, m)| used.contains(m)) {
+        for &reader in &used {
+            test::set_mode(&name, reader);
+            let base = SD_SCRATCH + m as u64 * 8192;
+            let (lba, n) = runs[7];
+            let mut back = alloc::vec![0u8; n * 512];
+            card.read(base + lba, &mut back).unwrap();
+            assert!(
+                back == pattern((m * 100 + 7) as u32, n * 512),
+                "{} wrote, {} read: differs",
+                writer.name(),
+                reader.name()
+            );
+        }
+    }
+    // Discard (erase on SD): the sectors read back erased (all 0x00 or all 0xFF), the neighbours intact.
+    card.discard(SD_SCRATCH + 130, 100).unwrap();
+    let mut back = alloc::vec![0u8; 101 * 512];
+    card.read(SD_SCRATCH + 130, &mut back).unwrap();
+    let erased = &back[..100 * 512];
+    assert!(
+        erased.iter().all(|&b| b == erased[0]) && (erased[0] == 0 || erased[0] == 0xFF),
+        "discarded sectors not erased"
+    );
+    assert!(
+        back[100 * 512..] == pattern(4, 511 * 512)[100 * 512..101 * 512],
+        "the sector after the discarded ones changed"
+    );
+    // Out of range and unaligned requests fail cleanly.
+    assert!(card.read(card.sectors(), &mut back[..512]).is_err());
+    assert!(card.read(0, &mut back[..100]).is_err());
+    test::set_mode(&name, TransferMode::Adma64);
+    let irqs = sdhci::interrupts() - irq_before;
+    crate::kprint!("[{} modes, {} interrupts] ", used.len(), irqs);
+    assert!(used.len() >= 3, "PIO, SDMA and ADMA2 must all run: {:?}", used);
+    assert!(irqs > 0, "no SD host controller interrupts");
+}
+
+/// MB/s for `bytes` in `ns` (two decimals as an integer pair).
+fn rate(bytes: u64, ns: u64) -> (u64, u64) {
+    let x = bytes * 100_000 / ns.max(1) * 1_000_000_000 / 100_000 / 10_000;
+    (x / 100, x % 100)
+}
+
+/// Sequential and random throughput of `disk` in the `sectors` at `base`
+/// (writes only where `writes`).
+fn measure(disk: &Arc<dyn BlockDevice>, base: u64, sectors: u64, writes: bool) -> alloc::string::String {
+    let chunk = 256 * 1024;
+    let total = (sectors * 512).min(4 << 20) as usize;
+    let buf = pattern(9, chunk);
+    let mut back = alloc::vec![0u8; chunk];
+    let mut out = alloc::string::String::new();
+    let t = time::now_ns();
+    for i in 0..total / chunk {
+        disk.read(base + (i * chunk / 512) as u64, &mut back).unwrap();
+    }
+    let (a, b) = rate(total as u64, time::now_ns() - t);
+    out += &alloc::format!("seq read {a}.{b:02} MB/s");
+    if writes {
+        let t = time::now_ns();
+        for i in 0..total / chunk {
+            disk.write(base + (i * chunk / 512) as u64, &buf).unwrap();
+        }
+        disk.flush().unwrap();
+        let (a, b) = rate(total as u64, time::now_ns() - t);
+        out += &alloc::format!(", seq write {a}.{b:02} MB/s");
+    }
+    // Random 4 KiB reads (and writes) within the region.
+    let mut x = 12345u64;
+    let n = 200;
+    let span = sectors.min(total as u64 / 512) - 8;
+    let t = time::now_ns();
+    for _ in 0..n {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        disk.read(base + (x >> 33) % span, &mut back[..4096]).unwrap();
+    }
+    let ns = time::now_ns() - t;
+    out += &alloc::format!(", random 4K read {} IOPS", n as u64 * 1_000_000_000 / ns.max(1));
+    if writes {
+        let t = time::now_ns();
+        for _ in 0..n {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            disk.write(base + (x >> 33) % span, &buf[..4096]).unwrap();
+        }
+        disk.flush().unwrap();
+        let ns = time::now_ns() - t;
+        out += &alloc::format!(", random 4K write {} IOPS", n as u64 * 1_000_000_000 / ns.max(1));
+    }
+    out
+}
+
+fn sd_throughput() {
+    use crate::drivers::block::sdhci::test;
+    use aurora_sdmmc::TransferMode;
+    let card = second_card();
+    let name = card.name();
+    crate::kprintln!();
+    for mode in [TransferMode::Pio, TransferMode::Sdma, TransferMode::Adma32, TransferMode::Adma64] {
+        if test::set_mode(&name, mode) != Some(mode) {
+            continue;
+        }
+        crate::kprintln!("    sd-perf: {} {}: {}", name, mode.name(), measure(&card, SD_SCRATCH, 1 << 16, true));
+    }
+    test::set_mode(&name, TransferMode::Adma64);
+    // The system disk, for comparison: reads across its home volume, writes
+    // in the image's 1 MiB scratch area at the end.
+    let main = main_disk();
+    let ss = main.sector_size() as u64;
+    let scratch = main.sectors() - 33 - (1 << 20) / ss;
+    crate::kprintln!(
+        "    sd-perf: {} (system disk) {}",
+        main.name(),
+        measure(&main, 2048 + (64 << 20) / ss, 1 << 13, false)
+    );
+    crate::kprintln!(
+        "    sd-perf: {} (system disk, scratch) {}",
+        main.name(),
+        measure(&main, scratch, (1 << 20) / ss, true)
+    );
+    crate::kprint!("    ");
+}
+
+fn sd_hotplug() {
+    let file = "/Volumes/AURORA-SD/Hello.txt";
+    let card = second_card();
+    let name = card.name();
+    drop(card);
+    crate::kprintln!("\nharness: eject sd-card");
+    let gone = || fs::stat(file).is_err() && !block::devices().iter().any(|d| d.name() == name);
+    assert!(wait_for(gone, 15_000), "the SD card's volume and device stayed after it was pulled out");
+    crate::kprintln!("harness: insert sd-card");
+    let back = || fs::read_all(file).ok().as_deref() == Some(&b"Hello from an SD card!\n"[..]);
+    assert!(wait_for(back, 15_000), "the SD card did not come back; slots: {:?}", crate::drivers::block::sdhci::list());
+    crate::kprint!("    ");
+}
+
+fn sd_simulated() {
+    use crate::drivers::block::sdhci::test;
+    use aurora_sdmmc::mock::{CardSpec, Fault, CAPS_FULL};
+    use aurora_sdmmc::regs::version;
+    use aurora_sdmmc::{CardKind, Timing};
+    // An eMMC on a full version 3 controller: 8-bit HS200, cache, TRIM.
+    let mock = test::mock(CAPS_FULL, version::V3);
+    mock.insert(CardSpec::emmc(16 * 2048));
+    let name = test::attach_mock(&mock, false).expect("simulated slot");
+    let info = test::card_info(&name).expect("the simulated eMMC came up");
+    assert_eq!((info.kind, info.width, info.timing), (CardKind::MmcHc, 8, Timing::Hs200));
+    let disk = block::devices().into_iter().find(|d| d.name() == name).expect("registered");
+    let data = pattern(77, 700 * 512);
+    disk.write(100, &data).unwrap();
+    assert!(mock.card(|c| c.dirty).unwrap(), "writes sit in the eMMC cache");
+    disk.flush().unwrap();
+    assert!(!mock.card(|c| c.dirty).unwrap(), "flush empties the cache");
+    let mut back = alloc::vec![0u8; data.len()];
+    disk.read(100, &mut back).unwrap();
+    assert!(back == data);
+    // TRIM through the block layer.
+    disk.discard(200, 50).unwrap();
+    assert_eq!(mock.card(|c| c.erased.clone()).unwrap(), alloc::vec![(200, 249, 1)]);
+    // Injected errors: one-off CRC and timeout errors are retried.
+    let (retries, _) = test::recovery(&name).unwrap();
+    mock.inject(Some(18), Fault::DataCrc { after: 3 }, 1);
+    mock.inject(Some(25), Fault::CmdCrc, 1);
+    mock.inject(Some(18), Fault::Adma, 1);
+    disk.write(100, &data).unwrap();
+    disk.read(100, &mut back).unwrap();
+    disk.read(100, &mut back).unwrap();
+    assert!(back == data);
+    let (after, _) = test::recovery(&name).unwrap();
+    assert!(after >= retries + 3, "retries {retries} → {after}");
+    // A card that stops answering: the I/O fails, the kernel carries on.
+    mock.inject(Some(18), Fault::CmdTimeout, 1000);
+    assert!(disk.read(100, &mut back).is_err());
+    mock.clear_faults();
+    disk.read(100, &mut back).unwrap();
+    assert_eq!(mock.card(|c| c.hidden_touches).unwrap(), 0, "a boot or RPMB partition was touched");
+    let violations = mock.violations();
+    assert!(violations.is_empty(), "the driver broke the controller's rules: {violations:?}");
+    // A UHS-I card in a removable slot: 1.8 V, SDR104 and tuning, then hot-plug.
+    let mock = test::mock(CAPS_FULL, version::V3);
+    let name = test::attach_mock(&mock, true).expect("simulated slot");
+    mock.insert(CardSpec::uhs(8 * 2048));
+    test::poke(&name);
+    let present = || block::devices().iter().any(|d| d.name() == name);
+    assert!(wait_for(present, 5000), "the inserted card was not registered");
+    let info = test::card_info(&name).unwrap();
+    assert_eq!(info.timing, Timing::UhsSdr104);
+    assert!(info.signal_1v8);
+    mock.eject();
+    test::poke(&name);
+    assert!(wait_for(|| !present(), 5000), "the pulled card stayed registered");
+    let violations = mock.violations();
+    assert!(violations.is_empty(), "the driver broke the controller's rules: {violations:?}");
 }
 
 /// A block device in RAM.
@@ -1827,6 +2564,11 @@ fn sleep_and_wake() {
         wait_for(|| crate::fs::stat("/Volumes/AURORA-USB/Hello.txt").is_ok(), 10_000),
         "the USB stick did not come back after sleep"
     );
+    assert_eq!(
+        crate::fs::read_all("/Volumes/AURORA-SD/Hello.txt").as_deref().ok(),
+        Some(&b"Hello from an SD card!\n"[..]),
+        "the SD card did not come back after sleep"
+    );
     // Let USB finish re-enumerating (it allocates memory later tests count).
     assert!(wait_for(|| crate::drivers::usb::list().len() >= 4, 10_000), "USB devices missing after sleep");
     if crate::gui::prefs::boot_option("test_usb_audio").as_deref() == Some("1") {
@@ -2103,4 +2845,360 @@ fn network6() {
             Err(e) => log!("net-test", "host over IPv6 unavailable: {}", aurora_abi::err::name(e)),
         }
     }
+}
+
+/// A window that paints itself one colour (the multi-monitor test's marker).
+struct Card(u32);
+
+impl crate::gui::apps::App for Card {
+    fn kind(&self) -> crate::gui::apps::AppKind {
+        crate::gui::apps::AppKind::Other
+    }
+    fn title(&self) -> alloc::string::String {
+        "Card".into()
+    }
+    fn covers_window(&self) -> bool {
+        true
+    }
+    fn size(&self) -> (i32, i32) {
+        (360, 220)
+    }
+    fn draw(&mut self, cv: &mut crate::gui::canvas::Canvas, area: Rect, _env: &crate::gui::apps::Env) {
+        cv.fill_rect(area, self.0);
+    }
+}
+
+/// Asks the harness to check what every head shows: a few pixels of each
+/// display's back buffer, compared with a QMP screendump of its scanout.
+fn displays_screendump(c: &crate::gui::screens::Compositor) {
+    assert!(c.wait_presented(3000), "a display never took its picture");
+    for s in &c.screens {
+        let (w, h) = s.out.size();
+        let mut line = alloc::format!("\nharness: screendump {}", s.head());
+        for (fx, fy) in [(1, 1), (2, 1), (1, 2), (5, 6), (7, 3), (6, 7)] {
+            let (x, y) = (w * fx / 8, h * fy / 8);
+            line.push_str(&alloc::format!(" {x},{y}={:06x}", s.pixel(x, y) & 0xFF_FFFF));
+        }
+        crate::kprintln!("{line}");
+    }
+    // The harness takes them now; nothing is drawn meanwhile.
+    sched::sleep_ms(1500);
+}
+
+/// Median time (µs) of a frame that repaints every display: composing it,
+/// and until every display has taken it.
+fn displays_frame_cost(c: &mut crate::gui::screens::Compositor) -> (u64, u64) {
+    c.settle(2000);
+    let (mut compose, mut total) = (Vec::new(), Vec::new());
+    for _ in 0..11 {
+        c.desktop.damage_all();
+        let t = time::now_ns();
+        c.frame();
+        c.wait_presented(2000);
+        total.push((time::now_ns() - t) / 1000);
+        compose.push(c.last_frame_ns / 1000);
+        sched::sleep_ms(5);
+    }
+    compose.sort_unstable();
+    total.sort_unstable();
+    (compose[compose.len() / 2], total[total.len() / 2])
+}
+
+/// Several displays, on virtio-gpu with as many heads as `cargo xtask test
+/// --gpu virtio --displays N` gives (one elsewhere): the compositor's
+/// layout, a new window opening where the pointer is, the pointer crossing
+/// between displays and stopping at the outer edges, damage presented only
+/// where it falls, a slow display not holding up the others, windows
+/// leaving an unplugged display and coming back, the arrangement, main
+/// display and mirroring from preferences (and the arrangement found again
+/// by identity on the second boot), what each head shows (QMP
+/// screendumps), and the frame cost with 3, 2 and 1 displays.
+fn displays() {
+    use crate::drivers::gpu::{self, Status};
+    use crate::drivers::input::{self, InputEvent};
+    use crate::gui::screens::{self, Compositor};
+    use lumen::displays::{self as layout, Record, Side};
+    crate::gui::settings::load();
+    let heads: usize =
+        crate::gui::prefs::boot_option("test_displays").and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 4);
+    // The third display is HiDPI: drawn at 2x (1280x720 points).
+    const SIZES: [(u32, u32); 3] = [(1024, 768), (2560, 1440), (800, 600)];
+    let connected = || {
+        gpu::devices()
+            .iter()
+            .map(|d| d.connectors().iter().filter(|c| c.status == Status::Connected).count())
+            .sum::<usize>()
+    };
+    for head in 1..heads {
+        let (w, h) = SIZES[head - 1];
+        crate::kprintln!("\nharness: display set {head} {w}x{h}");
+    }
+    assert!(eventually(20_000, || connected() >= heads), "{} of {heads} displays connected", connected());
+    let _ = crate::gui::server::take_commands();
+
+    let mut c = Compositor::new();
+    c.desktop.dismiss_shore();
+    let n = c.screens.len();
+    assert_eq!(n, heads, "the compositor opened {n} of {heads} displays");
+    let rects = |c: &Compositor| c.screens.iter().map(|s| s.rect).collect::<Vec<Rect>>();
+    let r = rects(&c);
+    assert_eq!((r[c.main].x, r[c.main].y), (0, 0), "the main display is at the origin");
+    for (i, a) in r.iter().enumerate() {
+        let (pw, ph) = c.screens[i].out.size();
+        assert_eq!((a.w * c.screens[i].scale, a.h * c.screens[i].scale), (pw as i32, ph as i32));
+        assert!(r[i + 1..].iter().all(|b| !a.intersects(b)), "displays overlap: {r:?}");
+    }
+    assert!(layout::connected(&r), "displays don't touch: {r:?}");
+    let published = screens::published();
+    assert_eq!(published.len(), n);
+    assert!(published[0].is_primary() && published[0].id == c.screens[c.main].id);
+    assert_eq!(c.desktop.displays().len(), n);
+    let main_key = c.screens[c.main].key;
+    // The second boot: a display saved on the left of the main one is there again.
+    let restored = c.screens.iter().find(|s| s.key != main_key && screens::record(s.key).is_some_and(|r| r.x < 0));
+    if let Some(s) = restored {
+        assert!(s.rect.x < 0, "{} was saved on the left but is at {:?}", s.connector, s.rect);
+        crate::kprint!("(arrangement restored by identity) ");
+    }
+    c.settle(4000);
+    let (compose_all, total_all) = displays_frame_cost(&mut c);
+
+    // Point at a display next to the main one (or the main one alone).
+    let side = (0..n).find(|&i| i != c.main && layout::side_of(r[c.main], r[i]).is_some());
+    let b = c.desktop.bounds();
+    let at = |x: i32, y: i32| InputEvent::Pointer { x: x - b.x, y: y - b.y, buttons: 0 };
+    let (cx, cy) = r[c.main].center();
+    input::push(at(cx, cy));
+    c.frame();
+    assert_eq!(c.desktop.pointer_at(), (cx, cy));
+    let target = match side {
+        Some(i) => {
+            let dir = match layout::side_of(r[c.main], r[i]).unwrap() {
+                Side::Left => (-1, 0),
+                Side::Right => (1, 0),
+                Side::Above => (0, -1),
+                Side::Below => (0, 1),
+            };
+            // Across the shared edge…
+            for _ in 0..80 {
+                input::pointer_moved(dir.0 * 40, dir.1 * 40, 0);
+                c.frame();
+                if r[i].contains(c.desktop.pointer_at().0, c.desktop.pointer_at().1) {
+                    break;
+                }
+            }
+            let p = c.desktop.pointer_at();
+            assert!(r[i].contains(p.0, p.1), "the pointer did not cross to display {i}: {p:?}");
+            if c.screens.iter().all(|s| s.out.has_cursor()) {
+                assert!(c.screens[i].cursor_shown() && !c.screens[c.main].cursor_shown(), "cursor planes");
+            }
+            i
+        }
+        None => c.main,
+    };
+    // …and on to an outer edge, where it stops.
+    let p0 = c.desktop.pointer_at();
+    for _ in 0..80 {
+        input::pointer_moved(0, -60, 0);
+        c.frame();
+    }
+    let p = c.desktop.pointer_at();
+    assert!(layout::at(&r, p.0, p.1).is_some(), "the pointer left the displays: {p:?}");
+    assert_eq!(p.0, p0.0);
+    assert!(layout::at(&r, p.0, p.1 - 1).is_none(), "the pointer did not stop at the top edge: {p:?}");
+    let (tx, ty) = r[target].center();
+    input::push(at(tx, ty));
+    c.frame();
+
+    // A new window opens on the display with the pointer.
+    let card = c.desktop.add_test_window(Box::new(Card(0xFF1F_7A4C)));
+    c.settle(3000);
+    let card_rect = |c: &Compositor| c.desktop.window_rects().into_iter().find(|w| w.0 == card).map(|w| (w.1, w.2));
+    let (wr, _) = card_rect(&c).expect("the card window");
+    assert_eq!(layout::home(&r, wr), target, "the window opened at {wr:?}, not on display {target}");
+    // Maximised on the display it is on, and back.
+    c.desktop.toggle_zoom(card);
+    c.settle(2000);
+    let (zoomed, _) = card_rect(&c).unwrap();
+    let d = r[target];
+    let expect = if target == c.main { zoomed } else { Rect::new(d.x + 8, d.y + 8, d.w - 16, d.h - 16) };
+    assert!(layout::home(&r, zoomed) == target && zoomed == expect, "maximised to {zoomed:?} on {d:?}");
+    c.desktop.toggle_zoom(card);
+    c.settle(2000);
+    assert_eq!(card_rect(&c).unwrap().0, wr, "not restored after maximising");
+    // Out of the way of the screendumps' samples.
+    input::push(at(r[target].x + 2, r[target].bottom() - 2));
+    c.settle(2000);
+    displays_screendump(&c);
+    // Shore (setup, login, lock) holds the main display: nothing of the
+    // desktop shows on the others meanwhile.
+    let (s, (cx, cy)) = (&c.screens[target], wr.center());
+    let px = ((cx - s.rect.x) as u32 * s.scale as u32, (cy - s.rect.y) as u32 * s.scale as u32);
+    assert_eq!(s.pixel(px.0, px.1) & 0xFF_FFFF, 0x1F_7A4C, "the card isn't drawn");
+    if target != c.main {
+        c.desktop.show_shore();
+        c.settle(3000);
+        let s = &c.screens[target];
+        assert_ne!(s.pixel(px.0, px.1) & 0xFF_FFFF, 0x1F_7A4C, "a window shows beside the login screen");
+        c.desktop.dismiss_shore();
+        c.settle(3000);
+    }
+
+    let mut costs = alloc::vec![(n, compose_all, total_all)];
+    if n > 1 {
+        // Damage on one display is painted and presented there only.
+        let mut alone = false;
+        for _ in 0..4 {
+            c.settle(2000);
+            let before: Vec<u64> = c.screens.iter().map(|s| s.present_count()).collect();
+            let (x, y) = r[target].center();
+            c.desktop.damage(Rect::new(x - 30, y - 30, 60, 60));
+            c.frame();
+            c.wait_presented(2000);
+            let after: Vec<u64> = c.screens.iter().map(|s| s.present_count()).collect();
+            alone = (0..n).all(|i| (after[i] > before[i]) == (i == target));
+            if alone {
+                break;
+            }
+        }
+        assert!(alone, "damage on one display was presented elsewhere too");
+
+        // A slow display (each present takes 300 ms) holds up nobody else.
+        let slow = target;
+        let delay = &c.screens[slow].presenter().expect("a presenter per display").delay_ms;
+        delay.store(300, core::sync::atomic::Ordering::Relaxed);
+        let quick = c.main;
+        let (q0, s0) = (c.screens[quick].present_count(), c.screens[slow].present_count());
+        let (start, mut worst) = (time::uptime_ms(), 0);
+        while time::uptime_ms() - start < 2500 {
+            for i in [quick, slow] {
+                let (x, y) = r[i].center();
+                c.desktop.damage(Rect::new(x - 100, y + 120, 40, 20));
+            }
+            let t = time::uptime_ms();
+            c.frame();
+            worst = worst.max(time::uptime_ms() - t);
+            sched::sleep_ms(10);
+        }
+        let (q1, s1) = (c.screens[quick].present_count(), c.screens[slow].present_count());
+        c.screens[slow].presenter().unwrap().delay_ms.store(0, core::sync::atomic::Ordering::Relaxed);
+        assert!(
+            q1 - q0 >= 8 && q1 - q0 >= 2 * (s1 - s0),
+            "the slow display held up the others: {} vs {}",
+            q1 - q0,
+            s1 - s0
+        );
+        assert!(worst < 250, "a frame waited {worst} ms for the slow display");
+        crate::kprint!(
+            "(slow display: {} frames there, {} on the main one, longest frame {worst} ms) ",
+            s1 - s0,
+            q1 - q0
+        );
+        // Afterwards it catches up with everything it skipped.
+        c.settle(3000);
+        displays_screendump(&c);
+
+        // Dragged by its title bar onto the main display, and back.
+        let drag_to = |c: &mut Compositor, from: (i32, i32), to: (i32, i32)| {
+            let b = c.desktop.bounds();
+            let ev = |x: i32, y: i32, buttons: u8| InputEvent::Pointer { x: x - b.x, y: y - b.y, buttons };
+            input::push(ev(from.0, from.1, 1));
+            c.frame();
+            for k in 1..=12 {
+                let p = (from.0 + (to.0 - from.0) * k / 12, from.1 + (to.1 - from.1) * k / 12);
+                input::push(ev(p.0, p.1, 1));
+                c.frame();
+            }
+            input::push(ev(to.0, to.1, 0));
+            c.settle(2000);
+        };
+        let grip = (wr.x + 60, wr.y + 17);
+        let main_rect = r[c.main];
+        let to = (main_rect.center().0, grip.1.clamp(main_rect.y + 120, main_rect.bottom() - 60));
+        drag_to(&mut c, grip, to);
+        let (dragged, _) = card_rect(&c).unwrap();
+        assert_eq!(layout::home(&r, dragged), c.main, "the window did not cross to the main display: {dragged:?}");
+        drag_to(&mut c, (dragged.x + 60, dragged.y + 17), grip);
+        let (back, _) = card_rect(&c).unwrap();
+        assert_eq!(layout::home(&r, back), target, "the window did not cross back: {back:?}");
+        let wr = back;
+
+        // Unplugged: its windows move to the main display and remember where they were.
+        let (key, head) = (c.screens[target].key, c.screens[target].head());
+        let size = c.screens[target].out.size();
+        let rel = wr.offset(-r[target].x, -r[target].y);
+        crate::kprintln!("\nharness: display set {head} 0x0");
+        assert!(c.until(15_000, |c| c.screens.len() == n - 1), "the unplugged display stayed");
+        c.settle(2000);
+        let (moved, away) = card_rect(&c).unwrap();
+        let main_rect = c.screens[c.main].rect;
+        assert!(
+            main_rect.intersect(&moved) == moved && away,
+            "the window was not moved to the main display: {moved:?}"
+        );
+        assert_eq!(c.desktop.displays().len(), n - 1);
+        let (compose, total) = displays_frame_cost(&mut c);
+        costs.push((n - 1, compose, total));
+        // Down to the main display alone, for the frame cost.
+        let others: Vec<(u32, (u32, u32))> = (0..c.screens.len())
+            .filter(|&i| i != c.main)
+            .map(|i| (c.screens[i].head(), c.screens[i].out.size()))
+            .collect();
+        if !others.is_empty() {
+            for (h, _) in &others {
+                crate::kprintln!("\nharness: display set {h} 0x0");
+            }
+            assert!(c.until(15_000, |c| c.screens.len() == 1), "displays stayed plugged in");
+            let (compose, total) = displays_frame_cost(&mut c);
+            costs.push((1, compose, total));
+            for (h, (w, hh)) in &others {
+                crate::kprintln!("\nharness: display set {h} {w}x{hh}");
+            }
+            assert!(c.until(15_000, |c| c.screens.len() == 1 + others.len()), "displays did not come back");
+        }
+        // Plugged in again: the window goes back where it was.
+        crate::kprintln!("\nharness: display set {head} {}x{}", size.0, size.1);
+        assert!(c.until(15_000, |c| c.screens.len() == n), "the display did not come back");
+        c.settle(2000);
+        let back = c.screens.iter().find(|s| s.key == key).expect("the same display (by identity)").rect;
+        let (now, away) = card_rect(&c).unwrap();
+        assert_eq!(now.offset(-back.x, -back.y), rel, "the window did not return to its display");
+        assert!(!away);
+
+        // Arranged in Settings: on the left of the main display.
+        let i = c.screens.iter().position(|s| s.key == key).unwrap();
+        let rec = Record { x: -c.screens[i].rect.w, y: 0, ..c.screens[i].record };
+        crate::gui::prefs::set(&layout::pref_key(key), &rec.format()).expect("display preference");
+        let left = |c: &Compositor| {
+            let i = c.screens.iter().position(|s| s.key == key).unwrap();
+            layout::side_of(c.screens[c.main].rect, c.screens[i].rect) == Some(Side::Left)
+        };
+        assert!(c.until(10_000, left), "the display did not move to the left");
+        // Another main display: it goes to the origin, the bar with it.
+        crate::gui::prefs::set(layout::PRIMARY_PREF, &alloc::format!("{key:08x}")).unwrap();
+        assert!(c.until(10_000, |c| c.screens[c.main].key == key), "the main display did not change");
+        assert_eq!((c.screens[c.main].rect.x, c.screens[c.main].rect.y), (0, 0));
+        assert_eq!(screens::published()[0].key, key);
+        assert_eq!(c.desktop.w, c.screens[c.main].rect.w);
+        crate::gui::prefs::set(layout::PRIMARY_PREF, &alloc::format!("{main_key:08x}")).unwrap();
+        assert!(c.until(10_000, |c| c.screens[c.main].key == main_key));
+        // Mirroring: one desktop, the same picture everywhere.
+        crate::gui::prefs::set(layout::MIRROR_PREF, "1").unwrap();
+        assert!(c.until(10_000, |c| c.mirror && c.areas() == 1), "no mirroring");
+        let size = c.screens[c.main].out.size();
+        assert!(c.screens.iter().all(|s| s.out.size() == size), "mirrors at another resolution");
+        c.settle(3000);
+        for s in &c.screens {
+            for (x, y) in [(size.0 / 3, size.1 / 2), (size.0 - 20, size.1 - 20)] {
+                assert_eq!(s.pixel(x, y), c.screens[c.main].pixel(x, y), "{} doesn't mirror", s.connector);
+            }
+        }
+        displays_screendump(&c);
+        crate::gui::prefs::set(layout::MIRROR_PREF, "0").unwrap();
+        assert!(c.until(10_000, |c| !c.mirror && c.areas() == n), "still mirroring");
+        assert!(c.until(10_000, left), "the arrangement did not come back after mirroring");
+    }
+    c.close();
+    let cost = costs.iter().map(|(n, c, t)| alloc::format!("{n}: {c}/{t} us")).collect::<Vec<_>>().join(", ");
+    crate::kprint!("({n} display(s); full frame composed/shown by display count: {cost}) ");
 }

@@ -143,15 +143,35 @@ pub fn root_persistent() -> bool {
     PERSISTENT_ROOT.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// Block devices a mounted filesystem lives on (so removable-media code
+/// never mounts one twice).
+static IN_USE: IrqMutex<Vec<String>> = IrqMutex::new(Vec::new());
+
+pub fn note_device(name: &str) {
+    IN_USE.lock().push(String::from(name));
+}
+
+pub fn device_in_use(name: &str) -> bool {
+    IN_USE.lock().iter().any(|n| n == name)
+}
+
+/// A device and its partitions went away.
+pub fn forget_device(name: &str) {
+    let part_prefix = alloc::format!("{name}p");
+    IN_USE.lock().retain(|n| n != name && !n.starts_with(part_prefix.as_str()));
+}
+
 /// Mounts an EFI System Partition found later (on a USB disk) at `/Boot`
 /// when boot found none. Returns whether it did.
 pub fn adopt_boot(dev: Arc<dyn crate::drivers::block::BlockDevice>) -> bool {
     if MOUNTS.lock().iter().any(|m| m.path == "/Boot") {
         return false;
     }
+    let name = dev.name();
     match fat::FatFs::mount(dev) {
         Ok(fs) => {
             mount("/Boot", Arc::new(fs));
+            note_device(&name);
             true
         }
         Err(_) => false,
@@ -167,6 +187,7 @@ pub fn adopt_home(dev: Arc<dyn crate::drivers::block::BlockDevice>) -> bool {
     match aurorafs::AuroraFs::mount(dev.clone()) {
         Ok(fs) => {
             mount("/", Arc::new(fs));
+            note_device(&dev.name());
             PERSISTENT_ROOT.store(true, core::sync::atomic::Ordering::Release);
             log!("vfs", "home volume on {} ({})", dev.name(), dev.describe());
             true
@@ -675,6 +696,7 @@ pub fn mount_disks() {
             match fat::FatFs::mount(dev.clone()) {
                 Ok(fs) => {
                     mount("/Boot", Arc::new(fs));
+                    note_device(&dev.name());
                     boot_found = true;
                 }
                 Err(e) => log!("vfs", "{}: FAT32 mount failed: {}", dev.name(), aurora_abi::err::name(e)),
@@ -685,6 +707,7 @@ pub fn mount_disks() {
             match aurorafs::AuroraFs::mount(dev.clone()) {
                 Ok(fs) => {
                     mount("/", Arc::new(fs));
+                    note_device(&dev.name());
                     root_found = true;
                     PERSISTENT_ROOT.store(true, core::sync::atomic::Ordering::Release);
                 }

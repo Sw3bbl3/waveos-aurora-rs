@@ -6,6 +6,7 @@ use super::settings;
 use crate::drivers::{audio, display, keymap, ps2};
 use alloc::string::String;
 use aurora_abi::{err::*, pref};
+use lumen::displays;
 
 fn valid_key(k: &str) -> bool {
     !k.is_empty() && k.len() <= 32 && k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
@@ -79,6 +80,23 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         pref::KEYBOARD if !keymap::LAYOUTS.iter().any(|l| l.id == value) => return Err(EINVAL),
         pref::ACCENT if value.parse::<u8>().is_err() => return Err(EINVAL),
         pref::DISPLAY_SCALE if !matches!(value, "0" | "1" | "2") => return Err(EINVAL),
+        // Several displays (see `lumen::displays`): the main one, mirroring,
+        // and each display's place, resolution, scale and wallpaper.
+        displays::PRIMARY_PREF if !(value.len() == 8 && value.bytes().all(|b| b.is_ascii_hexdigit())) => {
+            return Err(EINVAL)
+        }
+        displays::MIRROR_PREF if value != "0" && value != "1" => return Err(EINVAL),
+        k if k.starts_with("display_")
+            && k != pref::DISPLAY_SCALE
+            && k != displays::PRIMARY_PREF
+            && k != displays::MIRROR_PREF =>
+        {
+            let hex = &k["display_".len()..];
+            if hex.len() != 8 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) || displays::Record::parse(value).is_none()
+            {
+                return Err(EINVAL);
+            }
+        }
         pref::ENERGY_MODE if !matches!(value, "saver" | "balanced" | "performance") => return Err(EINVAL),
         pref::TRACKING_SPEED | pref::POINTER_SPEED if !value.parse::<u8>().is_ok_and(|v| (1..=10).contains(&v)) => {
             return Err(EINVAL)

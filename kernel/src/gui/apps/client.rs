@@ -58,13 +58,15 @@ impl App for ClientApp {
     fn min_size(&self) -> (i32, i32) {
         server::minimum(self.id)
     }
-    fn draw(&mut self, cv: &mut Canvas, area: Rect, _env: &Env) {
-        // A new size, or a new scale: the client draws its surface again.
-        if (area.w, area.h, cv.scale) != self.reported {
-            self.reported = (area.w, area.h, cv.scale);
+    fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
+        // A new size, or a new scale (the window went to a display with
+        // another one): the client draws its surface again.
+        if (area.w, area.h, env.scale) != self.reported {
+            self.reported = (area.w, area.h, env.scale);
+            server::set_window_scale(self.id, env.scale);
             server::push_event(
                 self.id,
-                Event { kind: event::RESIZE, x: area.w, y: area.h, a: cv.scale as u32, ..Default::default() },
+                Event { kind: event::RESIZE, x: area.w, y: area.h, a: env.scale as u32, ..Default::default() },
             );
         }
         let bg = theme::current().window_bg;
@@ -72,7 +74,15 @@ impl App for ClientApp {
         // the surface: blend there, copy everywhere else.
         let glass: alloc::vec::Vec<Rect> =
             self.materials().into_iter().map(|r| r.offset(area.x, area.y).intersect(&area)).collect();
-        let drawn = server::with_surface(self.id, |px, w, h| {
+        let drawn = server::with_surface_scaled(self.id, |px, w, h, k| {
+            let k = k.max(1) as i32;
+            // Drawn for another scale (the window is on its way to a display
+            // with this one, or straddles two): scaled until it catches up.
+            if k != cv.scale {
+                let dst = Rect::new(area.x, area.y, w as i32 / k, h as i32 / k);
+                cv.with_clip(area, |cv| cv.draw_image(px, w, h, dst, 255));
+                return (w as i32 / k, h as i32 / k);
+            }
             // The top of the content joins the compositor strip squarely;
             // only the window's bottom corners belong to this surface.
             for (clip, radius) in [

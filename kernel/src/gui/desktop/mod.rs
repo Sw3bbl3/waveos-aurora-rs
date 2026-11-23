@@ -7,6 +7,7 @@
 mod accounts;
 mod anim;
 mod bar;
+mod displays;
 mod items;
 mod switcher;
 use lumen::windowing::{self, Placement, Switcher};
@@ -25,6 +26,8 @@ mod tour;
 #[cfg(feature = "ktest")]
 pub use play::self_test as play_self_test;
 #[cfg(feature = "ktest")]
+pub(crate) use play::KeyboardPad;
+#[cfg(feature = "ktest")]
 pub use spotlight::calc_for_test;
 
 use super::account::Account;
@@ -40,6 +43,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+pub use displays::DisplayArea;
 pub use shell::Menu;
 pub use shoal::Launcher;
 
@@ -84,6 +88,10 @@ pub struct Window {
     chrome: lumen::motion::Fade,
     chrome_hover: Option<usize>,
     chrome_focus: Option<usize>,
+    /// Taken off a display that went away: where to put it back.
+    away: lumen::displays::Away,
+    /// The display last reported to the window's client (0: none yet).
+    on_display: u32,
 }
 
 impl Window {
@@ -221,6 +229,27 @@ pub struct Desktop {
     shore: Option<shore::Shore>,
     /// Wave Play, the controller layout (see `play`).
     play: play::Play,
+    /// The displays (empty until the compositor sets them: then only the
+    /// main display, `w`×`h` at the origin, exists).
+    displays: Vec<DisplayArea>,
+    /// Index of the main display in `displays`.
+    main: usize,
+    /// Their rectangles, and the rectangle around them all.
+    rects: Vec<Rect>,
+    all_displays: Rect,
+    /// The other displays' pictures (None at the main display's index).
+    others: Vec<Option<displays::Caches>>,
+    /// Desktop point of the input devices' (0, 0).
+    input_origin: (i32, i32),
+    /// Displays were connected or removed, or their preferences changed:
+    /// the compositor sets them up again.
+    pub displays_request: bool,
+    /// Every client window hears which display it is on at the next frame.
+    displays_changed: bool,
+    /// Paint the scene even where nothing changed (see `paint_display`).
+    force_scene: bool,
+    /// The display a window is being dragged on (where Moorings shows).
+    moorings_on: usize,
 }
 
 impl Desktop {
@@ -291,6 +320,16 @@ impl Desktop {
             account: None,
             shore: None,
             play: play::Play::new(),
+            displays: Vec::new(),
+            main: 0,
+            rects: Vec::new(),
+            all_displays: Rect::default(),
+            others: Vec::new(),
+            input_origin: (0, 0),
+            displays_request: false,
+            displays_changed: false,
+            force_scene: false,
+            moorings_on: 0,
         };
         d.account = Account::load();
         d.shore = Self::startup_shore(d.account.as_ref());
@@ -306,14 +345,18 @@ impl Desktop {
     /// when no picture can be read — the procedural rendering.
     /// Both are in device pixels, for a `w`×`h`-point screen.
     fn make_wallpaper(w: i32, h: i32) -> (Vec<u32>, Vec<u32>) {
-        let k = super::scale();
+        Self::make_wallpaper_at(w, h, super::scale(), theme::wallpaper(), true)
+    }
+
+    /// Wallpaper `index` for a `w`×`h`-point display at scale `k`; with
+    /// `tones`, a custom picture's colours become the accent.
+    fn make_wallpaper_at(w: i32, h: i32, k: i32, index: u8, tones: bool) -> (Vec<u32>, Vec<u32>) {
         let (w, h) = (w * k, h * k);
-        let index = theme::wallpaper();
         let custom = (index == wallpaper::CUSTOM)
             .then(|| super::settings::get("wallpaper_image"))
             .flatten()
             .and_then(|p| picture_wallpaper(&p, w, h));
-        if let Some(px) = &custom {
+        if let (Some(px), true) = (&custom, tones) {
             theme::set_custom_tones(theme::tones_from_picture(px, w, h));
         }
         let wp = custom
@@ -332,10 +375,13 @@ impl Desktop {
     }
 
     pub fn damage(&mut self, r: Rect) {
-        let r = r.intersect(&self.screen());
+        let r = r.intersect(&self.bounds());
         if !r.is_empty() {
             self.scene_dirty = true;
             self.backdrop_ok &= self.drag_damage;
+            if !self.drag_damage {
+                self.invalidate_backdrops();
+            }
             self.damage.push(r);
         }
     }
@@ -343,12 +389,20 @@ impl Desktop {
     pub fn damage_all(&mut self) {
         self.scene_dirty = true;
         self.backdrop_ok &= self.drag_damage;
+        if !self.drag_damage {
+            self.invalidate_backdrops();
+        }
         self.damage.clear();
-        self.damage.push(self.screen());
+        self.damage.push(self.bounds());
     }
 
     fn env(&self, focused: bool) -> Env {
-        Env { now_ms: self.now_ms, focused, screen: (self.w, self.h), requests: Vec::new() }
+        Env { now_ms: self.now_ms, focused, screen: (self.w, self.h), scale: super::scale(), requests: Vec::new() }
+    }
+
+    /// The environment of a window with rectangle `r`: its display's scale.
+    fn env_at(&self, focused: bool, r: Rect) -> Env {
+        Env { scale: self.scale_of_rect(r), ..self.env(focused) }
     }
 
     // ---------------------------------------------------------------- windows
@@ -414,7 +468,8 @@ impl Desktop {
     fn add_window(&mut self, app: Box<dyn App>) {
         self.items.focused = false;
         let (cw, ch) = app.size();
-        let wa = self.work_area();
+        // New windows open on the display with the pointer.
+        let wa = self.work_area_on(self.display_at(self.cursor.0, self.cursor.1));
         let w = cw.min(wa.w);
         let h = (ch + windowing::CHROME_H).min(wa.h);
         let cascade = (self.windows.len() as i32 % 6) * 28;
@@ -442,6 +497,8 @@ impl Desktop {
             chrome: lumen::motion::Fade::default(),
             chrome_hover: None,
             chrome_focus: None,
+            away: None,
+            on_display: 0,
         });
         if let Some(p) = prev {
             self.damage_window(p);
@@ -558,8 +615,9 @@ impl Desktop {
     }
 
     fn place_window(&mut self, id: u32, placement: Placement) {
-        let area = self.work_area();
         let Some(i) = self.index_of(id) else { return };
+        // Relative to the display the window is on.
+        let area = self.work_area_of(self.windows[i].rect);
         if !self.windows[i].app.resizable() {
             return;
         }
@@ -610,7 +668,7 @@ impl Desktop {
                             self.resolution_request = Some(prev);
                         } else if let Err(e) = {
                             let (pw, ph) = super::screen_pixels();
-                            super::prefs::set_boot_resolution(pw as u32, ph as u32)
+                            super::screens::keep_main_resolution(pw as u32, ph as u32)
                         } {
                             // Kept for this session; the next start uses the firmware's choice.
                             log!("gui", "could not save the resolution: {}", aurora_abi::err::name(e));
@@ -647,8 +705,8 @@ impl Desktop {
                     self.reveal = None;
                 }
                 if matches!(key, pref::DOCK_SIZE | pref::DOCK_AUTOHIDE) {
-                    let wa = self.work_area();
-                    for win in &mut self.windows {
+                    let areas: Vec<Rect> = self.windows.iter().map(|w| self.work_area_of(w.rect)).collect();
+                    for (win, wa) in self.windows.iter_mut().zip(areas) {
                         let (mw, mh) = win.minimum();
                         if let Some(r) = windowing::target(win.placement, wa, (mw, mh)) {
                             win.rect = r;
@@ -680,40 +738,22 @@ impl Desktop {
                     self.damage(r);
                 }
             }
+            // A display's place, resolution, scale or wallpaper, the main display, mirroring.
+            k if k.starts_with("display_") => self.displays_request = true,
             other => super::prefs::apply_system(other),
         }
     }
 
-    /// Adapts the desktop to a new screen size.
-    pub fn resize(&mut self, w: i32, h: i32) {
+    /// Adapts the desktop to a new size (or scale) of the main display (see
+    /// `set_displays`, which then fits the windows to their displays).
+    fn main_resized(&mut self, w: i32, h: i32) {
         self.water.clear();
         self.w = w;
         self.h = h;
         let (wp, bl) = Self::make_wallpaper(w, h);
         self.wallpaper = wp;
         self.blurred = bl;
-        self.cursor = (self.cursor.0.min(w - 1), self.cursor.1.min(h - 1));
-        let wa = self.work_area();
-        for win in &mut self.windows {
-            let minimum = win.minimum();
-            let r = &mut win.rect;
-            r.w = r.w.min(wa.w);
-            r.h = r.h.min(wa.h);
-            r.x = r.x.clamp(wa.x, (wa.right() - r.w).max(wa.x));
-            r.y = r.y.clamp(wa.y, (wa.bottom() - r.h).max(wa.y));
-            if let Some(saved) = win.saved.as_mut() {
-                *saved = windowing::clamp(*saved, wa);
-            }
-            if win.placement != Placement::Floating {
-                let (mw, mh) = minimum;
-                if let Some(target) = windowing::target(win.placement, wa, (mw, mh)) {
-                    *r = target;
-                } else {
-                    *r = windowing::clamp(win.saved.take().unwrap_or(*r), wa);
-                    win.placement = Placement::Floating;
-                }
-            }
-        }
+        self.shoal_backdrop = None;
         self.reveal = None;
         self.ghosts.clear();
         for win in &mut self.windows {
@@ -748,6 +788,7 @@ impl Desktop {
             self.wallpaper = wp;
             self.blurred = bl;
         }
+        self.rebuild_wallpapers();
         self.broadcast_theme();
         self.damage_all();
     }
@@ -760,6 +801,7 @@ impl Desktop {
         let (wp, bl) = Self::make_wallpaper(self.w, self.h);
         self.wallpaper = wp;
         self.blurred = bl;
+        self.rebuild_wallpapers();
         self.broadcast_theme();
         self.damage_all();
     }
@@ -825,7 +867,7 @@ impl Desktop {
                 Command::Play(on) => self.play_command(on),
                 Command::Cursor if !cursor::hardware() => {
                     let (x, y) = self.cursor;
-                    self.damage.push(cursor::bounds(x, y).intersect(&self.screen()));
+                    self.damage.push(cursor::bounds(x, y).intersect(&self.bounds()));
                 }
                 // The compositor updates the cursor plane from `cursor_state`.
                 Command::Cursor => {}
@@ -863,8 +905,9 @@ impl Desktop {
                 Command::Elevate => self.sync_elevation(),
                 Command::AccountsChanged => self.accounts_changed(),
                 Command::NetworkChanged => self.damage(Rect::new(0, 0, self.w, MENUBAR_H)),
-                // Follow the screen's new preferred size, without asking.
-                Command::DisplayChanged => self.resolution_request = Some((0, 0)),
+                // A display was plugged in or out, or a host window resized:
+                // the compositor probes them all again.
+                Command::DisplayChanged => self.displays_request = true,
                 Command::SetResolution(w, h) => {
                     let (pw, ph) = super::screen_pixels();
                     if (w as i32, h as i32) != (pw, ph) {
@@ -972,16 +1015,17 @@ impl Desktop {
     }
 
     fn pointer(&mut self, x: i32, y: i32, buttons: u8) {
-        let x = x.clamp(0, self.w - 1);
-        let y = y.clamp(0, self.h - 1);
+        // Across the displays: it crosses where they touch.
+        let (x, y) = self.input_to_desktop(x, y);
         let moved = (x, y) != self.cursor;
         if moved && cursor::hardware() {
             self.cursor = (x, y);
         } else if moved {
             let (ox, oy) = self.cursor;
-            self.damage.push(cursor::bounds(ox, oy).intersect(&self.screen()));
+            let b = self.bounds();
+            self.damage.push(cursor::bounds(ox, oy).intersect(&b));
             self.cursor = (x, y);
-            self.damage.push(cursor::bounds(x, y).intersect(&self.screen()));
+            self.damage.push(cursor::bounds(x, y).intersect(&b));
         }
         let pressed = buttons & !self.buttons;
         let released = self.buttons & !buttons;
@@ -1014,6 +1058,10 @@ impl Desktop {
             self.grab = None;
             let drag = self.drag.take();
             if let Some(d) = drag {
+                // Moved by hand: it stays where it was put, whatever displays come back.
+                if let Some(i) = self.index_of(d.window) {
+                    self.windows[i].away = None;
+                }
                 self.damage_all(); // Restore stationary material sampling.
                 self.moorings_open = false;
                 self.mooring_zone = None;
@@ -1069,7 +1117,7 @@ impl Desktop {
             return;
         }
         let (x, y) = self.cursor;
-        self.damage.push(cursor::bounds(x, y).intersect(&self.screen()));
+        self.damage.push(cursor::bounds(x, y).intersect(&self.bounds()));
     }
 
     /// Where the pointer is (in points) and its shape, for a cursor plane.
@@ -1119,7 +1167,7 @@ impl Desktop {
             || self.current_open()
             || self.center_open()
             || self.switcher.is_some()
-            || y < MENUBAR_H
+            || (y < MENUBAR_H && self.on_main(x, y))
             || self.dock_rect().contains(x, y)
         {
             return c::ARROW;
@@ -1179,32 +1227,30 @@ impl Desktop {
                 }
                 d.started = true;
                 self.backdrop_ok = false;
+                self.invalidate_backdrops();
                 if let Some(mut restored) = self.windows[i].saved.take() {
                     let offset =
                         ((d.start_x - d.start_rect.x) as i64 * restored.w as i64 / d.start_rect.w.max(1) as i64) as i32;
-                    restored.x = (d.start_x - offset).clamp(8, (self.w - 8 - restored.w).max(8));
+                    let wa = self.work_area_on(self.display_at(d.start_x, d.start_y));
+                    restored.x = (d.start_x - offset).clamp(wa.x, (wa.right() - restored.w).max(wa.x));
                     restored.y = d.start_y - (d.start_y - d.start_rect.y).clamp(8, windowing::CHROME_H - 8);
                     d.start_rect = restored;
                 }
                 self.drag = Some(d);
             }
+            // A moved window may cross to any display (vertically it stays
+            // within the one under the pointer); a resized one stays on its own.
+            let (under, all, own) =
+                (self.work_area_on(self.display_at(x, y)), self.bounds(), self.work_area_of(d.start_rect));
             let w = &mut self.windows[i];
             match d.kind {
                 DragKind::Move => {
-                    let ny =
-                        (d.start_rect.y + dy).clamp(MENUBAR_H + 8, (self.h - 8 - d.start_rect.h).max(MENUBAR_H + 8));
-                    let nx = (d.start_rect.x + dx).clamp(8, (self.w - 8 - d.start_rect.w).max(8));
+                    let ny = (d.start_rect.y + dy).clamp(under.y, (under.bottom() - d.start_rect.h).max(under.y));
+                    let nx = (d.start_rect.x + dx).clamp(all.x + 8, (all.right() - 8 - d.start_rect.w).max(all.x + 8));
                     w.rect = Rect::new(nx, ny, d.start_rect.w, d.start_rect.h);
                 }
                 DragKind::Resize(edges) => {
-                    w.rect = windowing::resized(
-                        d.start_rect,
-                        edges,
-                        dx,
-                        dy,
-                        w.minimum(),
-                        Rect::new(8, MENUBAR_H + 8, self.w - 16, self.h - MENUBAR_H - 16),
-                    );
+                    w.rect = windowing::resized(d.start_rect, edges, dx, dy, w.minimum(), own);
                 }
             }
             w.saved = None;
@@ -1291,7 +1337,10 @@ impl Desktop {
         }
 
         let Some(i) = self.window_at(x, y) else {
-            self.items_press(x, y, double);
+            // Desktop items are on the main display.
+            if self.on_main(x, y) {
+                self.items_press(x, y, double);
+            }
             return;
         };
         // Super + drag moves a window from anywhere in it.
@@ -1323,11 +1372,14 @@ impl Desktop {
         if self.switcher.is_some() {
             return;
         }
-        if self.menu.is_some() || self.launcher.is_some() || y < MENUBAR_H || self.dock_rect().contains(x, y) {
+        let in_bar = y < MENUBAR_H && self.on_main(x, y);
+        if self.menu.is_some() || self.launcher.is_some() || in_bar || self.dock_rect().contains(x, y) {
             return;
         }
         let Some(i) = self.window_at(x, y) else {
-            self.items_context(x, y);
+            if self.on_main(x, y) {
+                self.items_context(x, y);
+            }
             return;
         };
         let id = self.windows[i].id;
@@ -1376,6 +1428,14 @@ impl Desktop {
         }
         // Volume keys work everywhere.
         if k.pressed && self.volume_key(k.code) {
+            return;
+        }
+        // So do the brightness keys, when a display driver controls the panel.
+        if k.pressed && matches!(k.code, KeyCode::BrightnessUp | KeyCode::BrightnessDown) {
+            if let Some(b) = crate::drivers::gpu::brightness() {
+                let v = if k.code == KeyCode::BrightnessUp { (b + 10).min(100) } else { b.saturating_sub(10) };
+                crate::drivers::gpu::set_brightness(v);
+            }
             return;
         }
         // The Super key alone (pressed and released) opens the launcher; with
@@ -1476,7 +1536,7 @@ impl Desktop {
     }
 
     fn water_click(&mut self, x: i32, y: i32) {
-        if !theme::reduce_motion() && super::prefs::get_bool(aurora_abi::pref::DESKTOP_WATER) {
+        if !theme::reduce_motion() && super::prefs::get_bool(aurora_abi::pref::DESKTOP_WATER) && self.on_main(x, y) {
             self.water.impulse(x, y, self.w, self.h, self.now_ms);
         }
     }
@@ -1577,13 +1637,13 @@ impl Desktop {
         // updates reuse the composited scene and never re-blur it.
         if self.scene_dirty && !self.partial_safe() {
             self.damage.clear();
-            return alloc::vec![self.screen()];
+            return alloc::vec![self.bounds()];
         }
         let mut rects: Vec<Rect> = core::mem::take(&mut self.damage);
         if self.scene_dirty {
             // Damage touching glass grows to take in the whole (padded) glass.
             windowing::grow_damage(&mut rects, &self.material_rects(), 40);
-            let screen = self.screen();
+            let screen = self.bounds();
             for r in rects.iter_mut() {
                 *r = r.intersect(&screen);
             }
@@ -1642,6 +1702,7 @@ impl Desktop {
     pub fn finish_frame(&mut self) {
         self.play_frame_end();
         self.scene_dirty = false;
+        self.report_displays();
     }
     /// Whether damage may be repainted piecemeal (`take_damage` grows it
     /// around glass). A dragged window damages exactly its old and new
@@ -1695,7 +1756,7 @@ impl Desktop {
             cache.set_moving(self.drag.is_some() || self.animating());
         }
         use crate::gui::stages::{time as staged, Stage};
-        if !self.scene_dirty && self.scene.len() == cv.buf.len() {
+        if !self.scene_dirty && !self.force_scene && self.scene.len() == cv.buf.len() {
             staged(Stage::Scene, || cv.blit_same(&self.scene, cv.clip));
             staged(Stage::Cursor, || cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape(), self.now_ms));
             return;
@@ -1805,14 +1866,14 @@ impl Desktop {
                 continue;
             }
             let is_focused = Some(self.windows[i].id) == focused;
-            let env = self.env(is_focused);
+            let env = self.env_at(is_focused, self.windows[i].rect);
             paint_window(cv, &mut self.windows[i], is_focused, &env, true);
         }
     }
 
     /// Keeps the composed scene (without the pointer) under the clip, to
     /// redraw the pointer alone over it.
-    fn save_scene(&mut self, cv: &Canvas) {
+    pub(super) fn save_scene(&mut self, cv: &Canvas) {
         self.scene.resize(cv.buf.len(), 0);
         let clip = cv.pclip();
         for y in clip.y..clip.bottom() {
