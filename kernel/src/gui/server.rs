@@ -95,6 +95,8 @@ pub enum Command {
     AccountsChanged,
     /// Enter (true) or leave Wave Play.
     Play(bool),
+    /// The Desktop folder's items changed, or a shortcut was resolved.
+    DesktopItems,
 }
 
 /// Queues a command for the compositor.

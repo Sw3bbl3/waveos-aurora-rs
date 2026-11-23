@@ -131,6 +131,7 @@ pub fn cpu() -> String {
         let total = (busy + idle).max(1);
         let _ = writeln!(s, "CPU {:<2}      {:>3}% busy since boot", i, busy * 100 / total);
     }
+    crate::power::report(&mut s);
     s
 }
 

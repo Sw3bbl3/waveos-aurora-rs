@@ -7,6 +7,7 @@
 pub mod devices;
 mod events;
 mod handler;
+pub mod processor;
 mod runtime;
 mod tables;
 

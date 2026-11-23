@@ -359,6 +359,7 @@ fn run_gpe(interp: &Interp, gpe: u32) {
 
 fn publish(info: PowerInfo) {
     let old = POWER.lock().replace(info);
+    crate::power::power_source(&info);
     let changed =
         old.is_none_or(|o| o.flags != info.flags || o.percent != info.percent || o.minutes / 5 != info.minutes / 5);
     if !changed {

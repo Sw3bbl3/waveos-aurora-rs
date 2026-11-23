@@ -73,6 +73,12 @@ pub trait Nic: Send + Sync {
     /// Called by the network task every few milliseconds: cards without an
     /// interrupt collect received frames here.
     fn poll(&self) {}
+    /// Whether received frames are only found by [`Nic::poll`] (no working
+    /// interrupt): then the network task polls every 10 ms, otherwise it
+    /// sleeps until a frame, a socket or one of the stack's timers needs it.
+    fn needs_polling(&self) -> bool {
+        true
+    }
     /// Wireless cards are named wlanN instead of ethN.
     fn wireless(&self) -> bool {
         false
@@ -243,8 +249,9 @@ pub fn poke() {
 }
 
 fn task() {
+    let mut wait = 10;
     loop {
-        WAKE.wait(10, || !RX.lock().is_empty());
+        WAKE.wait(wait, || !RX.lock().is_empty());
         let nics: Vec<Arc<dyn Nic>> = with(|s| s.ifaces.iter().filter_map(|f| f.nic.clone()).collect());
         for n in nics {
             n.poll();
@@ -260,7 +267,9 @@ fn task() {
                     Frame::Local(p) => s.ip_input(0, &p),
                 }
             }
-            s.timers(now)
+            let changed = s.timers(now);
+            wait = s.next_round(now);
+            changed
         });
         // Timer maintenance alone does not make a socket ready. Waking every
         // network event loop at 100 Hz can monopolize an emulated CPU.
@@ -597,6 +606,26 @@ impl Stack {
         dhcp::tick(self, now);
         self.ip6_timers(now);
         tcp::tick(self, now) || changed
+    }
+
+    /// How long the network task may sleep (ms) before [`Stack::timers`]
+    /// has work again. Frames that arrive, and programs that send, wake it
+    /// sooner. Cards without interrupts, and TCP with data to send, keep the
+    /// old 10 ms rounds; address negotiation and ARP/ND retries run at their
+    /// own pace; otherwise a round a second notices link changes.
+    fn next_round(&self, now: u64) -> u64 {
+        if self.ifaces.iter().any(|f| f.nic.as_ref().is_some_and(|n| n.needs_polling())) {
+            return 10;
+        }
+        let mut next = 1000;
+        if let Some(t) = tcp::next_timer(self) {
+            next = next.min(t.saturating_sub(now));
+        }
+        let negotiating = self.ifaces.iter().any(|f| f.link && f.dhcp.as_ref().is_some_and(|d| !d.bound()));
+        if negotiating || !self.pending.is_empty() || !self.pending6.is_empty() {
+            next = next.min(100);
+        }
+        next.clamp(1, 1000)
     }
 }
 

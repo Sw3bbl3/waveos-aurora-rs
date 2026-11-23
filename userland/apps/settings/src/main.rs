@@ -27,6 +27,9 @@ mod installed;
 mod search;
 mod users;
 
+/// The `energy_mode` values, in the order the picker shows them.
+const ENERGY_MODES: [&str; 3] = ["saver", "balanced", "performance"];
+
 const THUMB_W: i32 = 208;
 const THUMB_H: i32 = 130;
 
@@ -42,6 +45,7 @@ pub enum Pane {
     Network,
     DateTime,
     Sound,
+    Battery,
     Notifications,
     Desktop,
     Bar,
@@ -51,7 +55,7 @@ pub enum Pane {
     About,
 }
 
-const PANES: [(Pane, &str, &str, u32); 17] = [
+const PANES: [(Pane, &str, &str, u32); 18] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
@@ -62,6 +66,7 @@ const PANES: [(Pane, &str, &str, u32); 17] = [
     (Pane::Network, "Network", "network", 0xFF30D158),
     (Pane::DateTime, "Date & Time", "datetime", 0xFFFF9F0A),
     (Pane::Sound, "Sound", "sound", 0xFFFF375F),
+    (Pane::Battery, "Battery", "battery", 0xFF32D74B),
     (Pane::Notifications, "Notifications", "notifications", 0xFFFF453A),
     (Pane::Desktop, "Desktop & Dock", "desktop", 0xFF5856D6),
     (Pane::Bar, "Top Bar & Clock", "bar", 0xFF2F62F5),
@@ -87,6 +92,7 @@ pub enum Msg {
     CustomWallpaper,
     Mode(usize),
     Scale(usize),
+    Energy(usize),
     Layout(&'static str),
     Try(String),
     Toggle(&'static str, bool),
@@ -1090,6 +1096,31 @@ impl Settings {
         )
     }
 
+    fn battery(&self) -> View<'_, Msg> {
+        let current = prefs::get(pref::ENERGY_MODE).unwrap_or_default();
+        let mode = ENERGY_MODES.iter().position(|m| *m == current).unwrap_or(1);
+        page(
+            "Battery",
+            vec![
+                Section::titled(
+                    "Energy",
+                    card(vec![row(
+                        "Energy mode",
+                        Picker::new(["Battery saver", "Balanced", "Performance"], mode)
+                            .on_change(Msg::Energy)
+                            .picker_style(PickerStyle::Segmented),
+                    )])
+                    .id("battery/energy-mode"),
+                ),
+                footer(
+                    "Balanced lets the processor slow down and sleep deeply when there is little to do. Battery \
+                     saver also keeps it from boosting. Performance keeps it fast and quick to wake. On battery, \
+                     Balanced and Battery saver save a little more.",
+                ),
+            ],
+        )
+    }
+
     fn notifications(&self) -> View<'_, Msg> {
         page(
             "Notifications",
@@ -1365,6 +1396,7 @@ impl App for Settings {
                     self.modes = prefs::display_modes();
                 }
             }
+            Msg::Energy(i) => self.set(cx, pref::ENERGY_MODE, ENERGY_MODES[i.min(2)]),
             Msg::Layout(id) => self.set(cx, pref::KEYBOARD, id),
             Msg::Try(t) => self.try_text = t,
             Msg::Toggle(key, on) => self.set(cx, key, if on { "1" } else { "0" }),
@@ -1540,6 +1572,7 @@ impl App for Settings {
                 Pane::Network => self.network(),
                 Pane::DateTime => self.date_time(),
                 Pane::Sound => self.sound(),
+                Pane::Battery => self.battery(),
                 Pane::Notifications => self.notifications(),
                 Pane::Desktop => self.desktop(),
                 Pane::Bar => self.bar(),
@@ -1626,6 +1659,11 @@ fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
             cv.line(cx - 2, cy - 2, cx + 2, cy - 6, 2, w);
             cv.line(cx - 2, cy + 3, cx + 2, cy + 7, 2, w);
             cv.fill_rect(Rect::new(cx + 2, cy - 6, 2, 13), w);
+        }
+        Pane::Battery => {
+            cv.fill_round_rect(Rect::new(cx - 8, cy - 4, 14, 9), 2, w);
+            cv.fill_rect(Rect::new(cx + 6, cy - 2, 2, 5), w);
+            cv.fill_rect(Rect::new(cx - 6, cy - 2, 7, 5), tile);
         }
         Pane::Notifications => {
             cv.fill_round_rect(Rect::new(cx - 6, cy - 6, 12, 12), 3, w);

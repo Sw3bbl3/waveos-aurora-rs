@@ -936,6 +936,28 @@ pub fn tick(s: &mut Stack, now: u64) -> bool {
     changed
 }
 
+/// When [`tick`] next has work: the earliest retransmission, delayed ACK or
+/// TIME_WAIT end (ms of uptime), `Some(0)` if a connection has something to
+/// send now, `None` if no connection needs a timer.
+pub fn next_timer(s: &Stack) -> Option<u64> {
+    let mut next: Option<u64> = None;
+    for c in s.tcp.conns.values() {
+        let pending = !c.send_buf.is_empty()
+            || c.syn_pending
+            || c.ack_now
+            || (c.fin_queued && !c.fin_sent)
+            || (c.state == State::Closed && c.orphan);
+        if pending {
+            return Some(0);
+        }
+        let timewait = (c.state == State::TimeWait).then_some(c.timewait_until);
+        for t in [c.rexmit_at, c.ack_at, timewait].into_iter().flatten() {
+            next = Some(next.map_or(t, |n| n.min(t)));
+        }
+    }
+    next
+}
+
 /// Delayed cumulative ACKs remain valid after the retransmission cursor rewinds.
 #[cfg(feature = "ktest")]
 pub fn retransmission_ack_test() {

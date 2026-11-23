@@ -78,6 +78,14 @@ fn resolve(path: &str) -> Resolved {
     Resolved::Missing
 }
 static JOBS: Mutex<Vec<Job>> = Mutex::new(Vec::new());
+/// Jobs are waiting (the worker's wait checks this; it can't take `JOBS`).
+static JOBS_PENDING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn push_job(job: Job) {
+    JOBS.lock().push(job);
+    JOBS_PENDING.store(true, core::sync::atomic::Ordering::Release);
+    fs::index::poke();
+}
 type DesktopSnapshot = (Vec<Item>, Option<String>, bool);
 static SNAPSHOT: Mutex<Option<DesktopSnapshot>> = Mutex::new(None);
 fn classify_document(path: String) -> Resolved {
@@ -115,6 +123,8 @@ fn worker() {
     let mut previous = Vec::new();
     let mut previous_trash = false;
     loop {
+        JOBS_PENDING.store(false, core::sync::atomic::Ordering::Release);
+        let generation = fs::index::generation();
         let jobs = core::mem::take(&mut *JOBS.lock());
         let mut error = None;
         for job in jobs {
@@ -153,6 +163,7 @@ fn worker() {
                     Job::Sort(s) => settings::try_set("desktop_sort", &s)?,
                     Job::Resolve(path) => {
                         RESOLVED.lock().push(resolve(&path));
+                        crate::gui::server::command(crate::gui::server::Command::DesktopItems);
                         return Ok(());
                     }
                 }
@@ -204,6 +215,7 @@ fn worker() {
                     previous = items.clone();
                     previous_trash = trash_full;
                     *SNAPSHOT.lock() = Some((items, error, trash_full));
+                    crate::gui::server::command(crate::gui::server::Command::DesktopItems);
                 }
             }
             Err(e) => {
@@ -214,7 +226,9 @@ fn worker() {
                 ))
             }
         }
-        crate::sched::sleep_ms(750);
+        // Until a file is created, removed or renamed (the VFS reports it),
+        // or a job arrives; and every few seconds for files rewritten in place.
+        fs::index::wait_change(generation, 5000, || JOBS_PENDING.load(core::sync::atomic::Ordering::Acquire));
     }
 }
 #[derive(Default)]
@@ -546,7 +560,7 @@ impl Desktop {
                     self.open_file(p);
                 }
             }
-            1 => JOBS.lock().push(Job::Folder),
+            1 => push_job(Job::Folder),
             2 => {
                 if paths.len() == 1 {
                     self.items.rename_selected = true;
@@ -580,7 +594,7 @@ impl Desktop {
                 self.items.sort = a - 10;
                 self.items.offset = 0;
                 self.items.arrange();
-                JOBS.lock().push(Job::Sort(self.items.sort.to_string()));
+                push_job(Job::Sort(self.items.sort.to_string()));
             }
             _ => {}
         }
@@ -599,7 +613,7 @@ impl Desktop {
             match k.code {
                 KeyCode::Escape => self.items.rename = None,
                 KeyCode::Enter => {
-                    JOBS.lock().push(Job::Rename(path.clone(), name.clone()));
+                    push_job(Job::Rename(path.clone(), name.clone()));
                     self.items.rename = None;
                 }
                 KeyCode::Backspace => {
@@ -711,10 +725,10 @@ impl Desktop {
         self.damage_all();
     }
     pub(super) fn add_desktop_link(&mut self, name: &str, target: Target) {
-        JOBS.lock().push(Job::Link(name.into(), target));
+        push_job(Job::Link(name.into(), target));
     }
     pub(super) fn open_file_background(&mut self, path: &str) {
-        JOBS.lock().push(Job::Resolve(path.into()));
+        push_job(Job::Resolve(path.into()));
     }
 }
 /// Persistent catalog IDs are independent of executable paths and display names.

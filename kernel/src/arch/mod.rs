@@ -12,4 +12,5 @@ pub mod protect;
 pub mod smp;
 pub mod switch;
 pub mod syscall;
+pub mod timer;
 pub mod trap;

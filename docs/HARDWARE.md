@@ -56,6 +56,8 @@ Options go in `\aurora\boot.conf` on the EFI partition, one `key=value` per line
 | `i2c=off` | Leave the I²C controllers alone (no I²C touchpad or touch screen). The `i2c:` lines in the log still list what the firmware describes. |
 | `gpu=linux` | Drive a virtio GPU with the ported Linux driver instead of the native one (virtual machines) |
 | `cursor=software` | Draw the pointer into the picture instead of on the display's cursor plane |
+| `timer=periodic` | Go back to a 1 kHz tick on every CPU (instead of tickless timers). `timer=oneshot` avoids the TSC-deadline timer. Try these if the machine hangs or stutters once the desktop is up. |
+| `idle=halt` | Idle with `hlt` only (no `mwait` C-states). `idle=mwait` uses `mwait` even in a virtual machine; `idle=poll` never sleeps (for measurements). |
 
 ## What to check
 
@@ -94,6 +96,23 @@ How the driver knows a report is waiting:
 | `GpioInt` on an Intel GPIO controller (most Intel laptops) | **polls**: 125 reads a second while a finger is on the pad, 20 a second when idle. The first touch can take up to 50 ms to notice, and the touchpad and controller never sleep, which costs a little battery. |
 
 Please send back the lines starting with `i2c:` from the boot log (and the `== I2C ==` section near its top). They name each touchpad's ACPI path and ID, its controller, address and speed, the HID descriptor register, the interrupt resource and which of the three modes above was used, the controller's component version, FIFO depths and bus timings, and the touchpad's USB-style vendor and product id, report descriptor size and whether it accepted touchpad mode. Lines such as `not responding`, `the device stopped answering`, `not a DesignWare I2C controller` or `no driver for this controller` say where it stopped.
+
+## Power management
+
+Timers, idle states and processor frequency were written from the Intel SDM, AMD's manuals and the ACPI specification, and only the parts QEMU emulates have run: one-shot LAPIC timers, tickless idle with `hlt`, the ACPI paths finding no `_CST`/`_PSS`. **TSC-deadline timers, `mwait` C-states, Intel HWP, AMD CPPC and ACPI P-states have not run on real hardware.**
+
+In the boot log, look for:
+
+- `apic: timer: TSC-deadline LAPIC timer (tickless)` (most CPUs since 2013) or `one-shot`.
+- `power: idle states (CPUID): poll, C1 (mwait), C1E (mwait 0x01), C2 (mwait 0x10), …` or `(ACPI _CST)` with `acpi: _CST:` lines giving each state's register and latency; `(hlt)` means `mwait` wasn't used.
+- `power: frequency: Intel HWP …`, `AMD CPPC …`, `ACPI P-states …` or `no frequency control`, and `power: on battery` / `on AC power` when the charger is unplugged and replugged.
+
+Then check:
+
+- [ ] **Quiet when idle.** Leave the desktop alone for a minute and run `cpuinfo`. Each CPU's line counts its timer interrupts since boot: idle, they should grow by a few per second, not a thousand. The `idle:` line shows the time in each state: a laptop should spend most of it in the deepest one. `Wakers:` lists what woke the system most.
+- [ ] **Frequency.** With HWP or CPPC, `cpuinfo` shows `~N MHz` per CPU (the average while busy). Compare Battery saver and Performance in Settings → Battery under load (say, `fetch` a large file or play a video).
+- [ ] **Battery life and fan.** Compared with the same machine on another OS, idle and on battery.
+- [ ] **No stalls.** The clock ticks over each minute, typing and the pointer stay smooth, sleep and wake work. If the system stutters or hangs only after the desktop appears, try `timer=periodic`, then `idle=halt`, and report which helped.
 
 ## Reporting what happened
 

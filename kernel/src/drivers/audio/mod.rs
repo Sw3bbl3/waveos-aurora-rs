@@ -399,6 +399,7 @@ pub fn open() -> Result<Arc<Stream>, isize> {
     }
     let s = Stream::new();
     STREAMS.lock().push(s.clone());
+    MIXER_WAKE.wake_all(); // it may be resting
     Ok(s)
 }
 
@@ -414,6 +415,7 @@ pub fn play(samples: &[i16]) {
         g.closed = true;
     }
     STREAMS.lock().push(s);
+    MIXER_WAKE.wake_all(); // it may be resting
 }
 
 static SOUNDS: IrqMutex<BTreeMap<String, Arc<Vec<i16>>>> = IrqMutex::new(BTreeMap::new());
@@ -552,14 +554,28 @@ fn mixer() {
             continue;
         };
         out.activate();
-        play_to(id, &*out, &mut mix, &mut samples);
+        let rest = play_to(id, &*out, &mut mix, &mut samples);
         out.deactivate();
         HEADPHONES.store(false, Ordering::Relaxed);
+        if rest {
+            // Nothing to play for a while: the device is stopped (no DMA, no
+            // interrupts) until a stream opens or the devices change.
+            let gen = GENERATION.load(Ordering::Relaxed);
+            while STREAMS.lock().is_empty() && GENERATION.load(Ordering::Relaxed) == gen {
+                MIXER_WAKE.wait(60_000, || !STREAMS.lock().is_empty() || GENERATION.load(Ordering::Relaxed) != gen);
+            }
+        }
     }
 }
 
+/// How long the mixer plays silence, with no stream open, before it stops
+/// the device.
+const REST_AFTER_MS: u64 = 3000;
+
 /// Keeps `out`'s ring filled until another output becomes active.
-fn play_to(id: u32, out: &dyn Output, mix: &mut [i32], samples: &mut [i16]) {
+/// Plays to `out` while it is the active output. True if it stopped
+/// because nothing played for [`REST_AFTER_MS`].
+fn play_to(id: u32, out: &dyn Output, mix: &mut [i32], samples: &mut [i16]) -> bool {
     let ring = out.frames();
     let base = out.position();
     let mut last = base;
@@ -568,6 +584,7 @@ fn play_to(id: u32, out: &dyn Output, mix: &mut [i32], samples: &mut [i16]) {
     let mut next_jack = 0;
     let mut volume_gen = VOLUME_GEN.load(Ordering::Relaxed).wrapping_sub(1);
     let start = PLAYED.load(Ordering::Relaxed);
+    let mut quiet_since: Option<u64> = None;
     while REGISTRY.lock().active == id {
         let gen = VOLUME_GEN.load(Ordering::Relaxed);
         if gen != volume_gen {
@@ -598,6 +615,15 @@ fn play_to(id: u32, out: &dyn Output, mix: &mut [i32], samples: &mut [i16]) {
             written += n as u64;
         }
         let now = crate::time::uptime_ms();
+        if STREAMS.lock().is_empty() {
+            let since = *quiet_since.get_or_insert(now);
+            // Rest once what was written has played out.
+            if now >= since + REST_AFTER_MS && played >= written.saturating_sub(LEAD as u64) {
+                return true;
+            }
+        } else {
+            quiet_since = None;
+        }
         if now >= next_jack {
             next_jack = now + 500;
             if let Some(hp) = out.poll_jack() {
@@ -608,6 +634,7 @@ fn play_to(id: u32, out: &dyn Output, mix: &mut [i32], samples: &mut [i16]) {
         }
         out.wait(25);
     }
+    false
 }
 
 /// After sleep: built-in devices are restarted here; USB ones come back

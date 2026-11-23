@@ -803,6 +803,10 @@ impl Hcd for Controller {
         Vec::new()
     }
 
+    fn polls_ports(&self) -> bool {
+        false
+    }
+
     fn port_connected(&self, port: u8) -> bool {
         let sc = self.portsc(port);
         // Acknowledge the change bits.

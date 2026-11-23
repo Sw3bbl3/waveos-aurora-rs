@@ -1012,6 +1012,8 @@ pub mod pref {
     pub const CREST: &str = "crest";
     /// "1": the status ring is 28 points with the battery percentage beside it.
     pub const BATTERY_LEVEL: &str = "battery_level";
+    /// Processor energy policy: "saver", "balanced" (default) or "performance".
+    pub const ENERGY_MODE: &str = "energy_mode";
     /// "1": skip Shore at start-up (locking still asks for the password).
     pub const AUTO_LOGIN: &str = "auto_login";
     /// The preferred sound output and input, by device name (used whenever

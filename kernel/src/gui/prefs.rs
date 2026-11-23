@@ -34,6 +34,7 @@ fn default(key: &str) -> Option<&'static str> {
         pref::TAP_TO_CLICK | pref::NATURAL_SCROLLING => "1",
         pref::TRACKING_SPEED | pref::POINTER_SPEED => "5",
         pref::VOLUME => "70",
+        pref::ENERGY_MODE => "balanced",
         _ => return None,
     })
 }
@@ -78,6 +79,7 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         pref::KEYBOARD if !keymap::LAYOUTS.iter().any(|l| l.id == value) => return Err(EINVAL),
         pref::ACCENT if value.parse::<u8>().is_err() => return Err(EINVAL),
         pref::DISPLAY_SCALE if !matches!(value, "0" | "1" | "2") => return Err(EINVAL),
+        pref::ENERGY_MODE if !matches!(value, "saver" | "balanced" | "performance") => return Err(EINVAL),
         pref::TRACKING_SPEED | pref::POINTER_SPEED if !value.parse::<u8>().is_ok_and(|v| (1..=10).contains(&v)) => {
             return Err(EINVAL)
         }
@@ -131,6 +133,7 @@ pub fn apply_system(key: &str) {
             audio::set_volume(volume.min(100), get_bool(pref::MUTED));
         }
         pref::AUDIO_OUTPUT | pref::AUDIO_INPUT => audio::preference_changed(),
+        pref::ENERGY_MODE => crate::power::set_energy_mode(&get(pref::ENERGY_MODE).unwrap_or_default()),
         pref::POINTER_SPEED | pref::TRACKING_SPEED | pref::TAP_TO_CLICK | pref::NATURAL_SCROLLING => {
             let speed = |k| get(k).and_then(|v| v.parse().ok()).unwrap_or(5u8);
             crate::drivers::input::set_pointer_settings(
@@ -153,7 +156,9 @@ pub fn set_volume(volume: u32, muted: bool) {
 }
 
 pub fn apply_all_system() {
-    for k in [pref::KEYBOARD, pref::REPEAT_DELAY, pref::VOLUME, pref::POINTER_SPEED, pref::AUDIO_OUTPUT] {
+    for k in
+        [pref::KEYBOARD, pref::REPEAT_DELAY, pref::VOLUME, pref::POINTER_SPEED, pref::AUDIO_OUTPUT, pref::ENERGY_MODE]
+    {
         apply_system(k);
     }
 }
