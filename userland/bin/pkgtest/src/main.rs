@@ -82,7 +82,11 @@ fn install(base: &str) -> Result<u32, String> {
     check(&mut n, bad.as_ref().is_err_and(|e| e.contains("altered")), "a catalogue altered after signing is refused")?;
 
     let c = repo::catalog(&source)?;
-    check(&mut n, c.index.format == 2 && c.index.version == 10, "the repository serves a signed catalogue (version 10)")?;
+    check(
+        &mut n,
+        c.index.format == 2 && c.index.version == 10,
+        "the repository serves a signed catalogue (version 10)",
+    )?;
     let found = repo::search("gallery")?;
     check(
         &mut n,
@@ -226,13 +230,21 @@ fn store(base: &str) -> Result<u32, String> {
     copy_catalog(base, "expired", local, &[])?;
     let e = repo::catalog(&source).err().unwrap_or_default();
     check(&mut n, e.contains("expired"), "an expired catalogue is refused (freeze)")?;
-    check(&mut n, repo::cached(&source).is_some_and(|c| c.index.version == 10), "the last good catalogue stays cached")?;
+    check(
+        &mut n,
+        repo::cached(&source).is_some_and(|c| c.index.version == 10),
+        "the last good catalogue stays cached",
+    )?;
     let _ = fs::remove_all(local);
 
     // Key rotation: root 2 moves the catalogue to a key this computer
     // doesn't trust directly; without the root it is refused.
     let rotated = repo::catalog(&format!("{base}rotated/"))?;
-    check(&mut n, rotated.index.name == "WaveOS Rotated Repository", "a catalogue signed by a rotated key is accepted via the roots")?;
+    check(
+        &mut n,
+        rotated.index.name == "WaveOS Rotated Repository",
+        "a catalogue signed by a rotated key is accepted via the roots",
+    )?;
     let local2 = "/pkgtest-rotated/";
     let _ = fs::remove_all(local2);
     copy_catalog(base, "rotated", local2, &[1])?;
@@ -244,7 +256,8 @@ fn store(base: &str) -> Result<u32, String> {
     // unpacked; a dropped connection resumes.
     let opts = Options { scope: Scope::User, ..Options::default() };
     let control = Control::new();
-    for (path, what) in [("corrupt", "a damaged download is refused"), ("truncated", "a cut-short download is refused")] {
+    for (path, what) in [("corrupt", "a damaged download is refused"), ("truncated", "a cut-short download is refused")]
+    {
         let c = repo::catalog(&format!("{base}{path}/"))?;
         let e = c.index.latest(DOOM).cloned().ok_or("no Doom")?;
         let r = repo::install_entry(&c, &e, &opts, &control, |_| {});
@@ -260,7 +273,11 @@ fn store(base: &str) -> Result<u32, String> {
             ranged = ranged.max(got);
         }
     })?;
-    check(&mut n, r.is_some_and(|a| a.scope == Scope::User) && apps::verify(DOOM)?.is_empty(), "a broken-off download resumes with a range and installs for one account")?;
+    check(
+        &mut n,
+        r.is_some_and(|a| a.scope == Scope::User) && apps::verify(DOOM)?.is_empty(),
+        "a broken-off download resumes with a range and installs for one account",
+    )?;
     apps::uninstall(DOOM, true)?;
 
     // Pause, resume and cancel a slow download.
@@ -269,8 +286,9 @@ fn store(base: &str) -> Result<u32, String> {
     let part = format!("{}.part", repo::download_path(&e));
     let control = alloc::sync::Arc::new(Control::new());
     let (c2, e2, ctl) = (c.clone(), e.clone(), control.clone());
-    let worker = corekit::thread::spawn(move || repo::download_entry(&c2, &e2, &ctl, &mut |_, _| {}).map(|b| b.is_some()))
-        .map_err(|e| format!("{e}"))?;
+    let worker =
+        corekit::thread::spawn(move || repo::download_entry(&c2, &e2, &ctl, &mut |_, _| {}).map(|b| b.is_some()))
+            .map_err(|e| format!("{e}"))?;
     corekit::time::sleep_ms(600);
     control.pause();
     let paused = worker.join();
@@ -282,8 +300,9 @@ fn store(base: &str) -> Result<u32, String> {
     let _ = fs::remove(&repo::download_path(&e));
     let control = alloc::sync::Arc::new(Control::new());
     let (c2, e2, ctl) = (c.clone(), e.clone(), control.clone());
-    let worker = corekit::thread::spawn(move || repo::download_entry(&c2, &e2, &ctl, &mut |_, _| {}).map(|b| b.is_some()))
-        .map_err(|e| format!("{e}"))?;
+    let worker =
+        corekit::thread::spawn(move || repo::download_entry(&c2, &e2, &ctl, &mut |_, _| {}).map(|b| b.is_some()))
+            .map_err(|e| format!("{e}"))?;
     corekit::time::sleep_ms(400);
     control.cancel();
     let cancelled = worker.join();
@@ -326,8 +345,23 @@ fn recover() -> Result<u32, String> {
     let staged = fs::read_dir(&root).unwrap_or_default().iter().any(|e| e.name.starts_with(".pending-"));
     check(&mut n, staged, "the killed install's staging folder is there")?;
     apps::recover();
-    let staged = fs::read_dir(&root).unwrap_or_default().iter().any(|e| e.name.starts_with(".pending-"));
-    check(&mut n, !staged, "and recovery clears it")?;
+    let left: Vec<String> = fs::read_dir(&root)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|e| e.starts_with(".pending-"))
+        .collect();
+    if !left.is_empty() {
+        let live: Vec<(u32, u32)> = corekit::process::list().iter().map(|p| (p.pid, p.state)).collect();
+        println!(
+            "pkgtest: still there: {left:?}; processes (pid, state) {live:?}; this boot began at {}",
+            corekit::time::boot_file_time()
+        );
+        for l in &left {
+            println!("pkgtest: {l}: {:?}", fs::stat(&format!("{root}/{l}")).map(|s| s.mtime));
+        }
+    }
+    check(&mut n, left.is_empty(), "and recovery clears it")?;
     let a = repo::install(GALLERY, Some("1.0.0"), &Options::default(), |_, _| {})?;
     check(&mut n, a.manifest.version == "1.0.0" && apps::verify(GALLERY)?.is_empty(), "installing again works")?;
     apps::uninstall(GALLERY, true)?;
@@ -381,10 +415,14 @@ fn system_stage(base: &str, version: &str, tries: u32) -> Result<u32, String> {
     let objects = av.missing.len();
     check(
         &mut n,
-        objects >= 1 && objects <= 3 && av.download_size() < av.installed_size() / 4,
+        (1..=3).contains(&objects) && av.download_size() < av.installed_size() / 4,
         "only the changed files are downloaded",
     )?;
-    println!("pkgtest: {objects} objects, {} of {} to download", update::human(av.download_size()), update::human(av.installed_size()));
+    println!(
+        "pkgtest: {objects} objects, {} of {} to download",
+        update::human(av.download_size()),
+        update::human(av.installed_size())
+    );
     let got = update::download(&av, &Control::new(), |_, _| {})?;
     check(&mut n, got == Outcome::Done && av.download_size() == 0, "downloaded and verified")?;
     let slot = update::install(&av, |_, _| {})?;
@@ -400,7 +438,11 @@ fn system_stage(base: &str, version: &str, tries: u32) -> Result<u32, String> {
         v == version && opt("system").as_deref() == Some(want) && opt("system_tries") == Some(format!("{tries}")),
         "the next start uses it, on trial",
     )?;
-    check(&mut n, opt("system_previous").as_deref() == Some(before.slot.as_str()), "with the running system to go back to")?;
+    check(
+        &mut n,
+        opt("system_previous").as_deref() == Some(before.slot.as_str()),
+        "with the running system to go back to",
+    )?;
     Ok(n)
 }
 

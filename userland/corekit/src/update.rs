@@ -389,8 +389,9 @@ pub fn install(av: &Available, mut progress: impl FnMut(u64, u64)) -> Result<Str
         }
         // The system image, rebuilt entry by entry and hashed as it goes.
         let image = format!("{staging}/system.tar");
-        let mut f = fs::File::open(&image, crate::abi::open::WRITE | crate::abi::open::CREATE | crate::abi::open::TRUNCATE)
-            .map_err(io)?;
+        let mut f =
+            fs::File::open(&image, crate::abi::open::WRITE | crate::abi::open::CREATE | crate::abi::open::TRUNCATE)
+                .map_err(io)?;
         let mut hasher = Sha256::new();
         let put = |f: &mut fs::File, hasher: &mut Sha256, data: &[u8]| -> Result<()> {
             hasher.update(data);

@@ -253,8 +253,9 @@ impl Settings {
                     .grow(1),
             )
             .push_if(
-                (!matches!(phase, Phase::Checking | Phase::Downloading(..) | Phase::Installing(..)) && s.ready.is_none())
-                    .then(|| Button::new("Check Now").action(msg(UpdMsg::Check)).id("update/check")),
+                (!matches!(phase, Phase::Checking | Phase::Downloading(..) | Phase::Installing(..))
+                    && s.ready.is_none())
+                .then(|| Button::new("Check Now").action(msg(UpdMsg::Check)).id("update/check")),
             )
             .spacing(14)
             .padding_xy(0, 8)
@@ -315,7 +316,9 @@ impl Settings {
                 .padding_xy(0, 10)
                 .fill_width();
             if !a.update.notes.is_empty() {
-                v = v.push(Text::new("What's new").style(TextStyle::Headline)).push(Text::paragraph(a.update.notes.clone()));
+                v = v
+                    .push(Text::new("What's new").style(TextStyle::Headline))
+                    .push(Text::paragraph(a.update.notes.clone()));
             }
             card(alloc::vec![v.push(body)])
         }
@@ -368,10 +371,12 @@ impl Settings {
                 a,
                 HStack::new()
                     .push(
-                        Text::paragraph("Installing puts the new system beside this one; nothing changes until you restart.")
-                            .style(TextStyle::Subheadline)
-                            .foreground(Color::SecondaryLabel)
-                            .grow(1),
+                        Text::paragraph(
+                            "Installing puts the new system beside this one; nothing changes until you restart.",
+                        )
+                        .style(TextStyle::Subheadline)
+                        .foreground(Color::SecondaryLabel)
+                        .grow(1),
                     )
                     .push(
                         Button::new("Install")
@@ -386,7 +391,11 @@ impl Settings {
                 a,
                 VStack::new()
                     .push(ProgressView::new(Some(*n as f32 / (*t).max(1) as f32)).fill_width())
-                    .push(Text::new("Writing and checking every file…").style(TextStyle::Subheadline).foreground(Color::SecondaryLabel))
+                    .push(
+                        Text::new("Writing and checking every file…")
+                            .style(TextStyle::Subheadline)
+                            .foreground(Color::SecondaryLabel),
+                    )
                     .spacing(8)
                     .alignment(Align::Stretch),
             )),
@@ -405,7 +414,11 @@ impl Settings {
             "Automatic Updates",
             alloc::vec![
                 pref_toggle("update/auto-check", "Check for updates automatically", "software_update_check"),
-                pref_toggle("update/auto-download", "Download system updates automatically", "software_update_download"),
+                pref_toggle(
+                    "update/auto-download",
+                    "Download system updates automatically",
+                    "software_update_download"
+                ),
             ],
         ));
         sections.push(footer(

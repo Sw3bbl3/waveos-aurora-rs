@@ -332,9 +332,24 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
             let (cx, cy) = r.center();
             let t = u(3).max(2);
             let w = 0xFFFF_FFFF;
-            cv.polyline(&[(cx - u(13), cy - u(7)), (cx + u(13), cy - u(7)), (cx + u(11), cy + u(14)), (cx - u(11), cy + u(14))], t, w);
+            cv.polyline(
+                &[(cx - u(13), cy - u(7)), (cx + u(13), cy - u(7)), (cx + u(11), cy + u(14)), (cx - u(11), cy + u(14))],
+                t,
+                w,
+            );
             cv.line(cx - u(11), cy + u(14), cx - u(13), cy - u(7), t, w);
-            cv.polyline(&[(cx - u(6), cy - u(7)), (cx - u(6), cy - u(11)), (cx - u(3), cy - u(15)), (cx + u(3), cy - u(15)), (cx + u(6), cy - u(11)), (cx + u(6), cy - u(7))], t, w);
+            cv.polyline(
+                &[
+                    (cx - u(6), cy - u(7)),
+                    (cx - u(6), cy - u(11)),
+                    (cx - u(3), cy - u(15)),
+                    (cx + u(3), cy - u(15)),
+                    (cx + u(6), cy - u(11)),
+                    (cx + u(6), cy - u(7)),
+                ],
+                t,
+                w,
+            );
         }
         Icon::Doom => {
             cv.fill_round_rect_vgradient(r, rad, rgb(0xD0, 0x34, 0x2C), rgb(0x3A, 0x0A, 0x0C));

@@ -238,7 +238,11 @@ impl Index {
         let (mut named, mut dated, mut versioned, mut expiring) = (false, false, false, false);
         let mut seen = BTreeSet::new();
         let find = |index: &Index, id: &str, ver: &str| -> Result<usize> {
-            index.packages.iter().position(|e| e.id == id && e.version == ver).ok_or("Index line for an unknown package")
+            index
+                .packages
+                .iter()
+                .position(|e| e.id == id && e.version == ver)
+                .ok_or("Index line for an unknown package")
         };
         for line in lines {
             let fields: Vec<&str> = line.split('\t').collect();

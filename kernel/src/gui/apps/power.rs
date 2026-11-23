@@ -35,11 +35,7 @@ impl PowerDialog {
             Rect::new(area.right() - 256, y, 112, 34),
             Rect::new(area.x + 20, y, 96, 34),
             if self.can_sleep { Rect::new(area.right() - 380, y, 112, 34) } else { Rect::default() },
-            if self.update.is_some() {
-                Rect::new(area.right() - 188, area.y + 78, 168, 34)
-            } else {
-                Rect::default()
-            },
+            if self.update.is_some() { Rect::new(area.right() - 188, area.y + 78, 168, 34) } else { Rect::default() },
         ]
     }
 }

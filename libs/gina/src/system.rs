@@ -290,7 +290,14 @@ pub fn layout_of(tar: &[u8]) -> Result<Vec<(Item, core::ops::Range<usize>)>> {
 
 /// Builds the description of an update to the system image `tar` (the
 /// `kernel` and `bootloader` given by hash and size).
-pub fn describe(version: &str, min_from: &str, notes: &str, kernel: Part, bootloader: Part, tar: &[u8]) -> Result<Update> {
+pub fn describe(
+    version: &str,
+    min_from: &str,
+    notes: &str,
+    kernel: Part,
+    bootloader: Part,
+    tar: &[u8],
+) -> Result<Update> {
     let layout: Vec<Item> = layout_of(tar)?.into_iter().map(|(i, _)| i).collect();
     let u = Update {
         version: version.into(),

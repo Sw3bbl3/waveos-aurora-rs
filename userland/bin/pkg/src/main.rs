@@ -311,7 +311,11 @@ fn describe_repo(source: &str) -> Result<()> {
             println!("  mirror {m}");
         }
         for s in &i.system {
-            println!("  system update {} ({})", s.version, if s.min_from.is_empty() { "from any" } else { &s.min_from });
+            println!(
+                "  system update {} ({})",
+                s.version,
+                if s.min_from.is_empty() { "from any" } else { &s.min_from }
+            );
         }
         for (id, v) in &i.revoked {
             println!("  withdrawn {id} {v}");
@@ -372,7 +376,10 @@ fn system(args: &[String]) -> Result<()> {
             println!("Downloaded WaveOS {}.", av.update.version);
             if p.get(1) == Some(&"install") {
                 let slot = update::install(&av, |_, _| {})?;
-                println!("Installed WaveOS {} into slot {slot}. Restart to use it: pkg system restart", av.update.version);
+                println!(
+                    "Installed WaveOS {} into slot {slot}. Restart to use it: pkg system restart",
+                    av.update.version
+                );
             }
             Ok(())
         }

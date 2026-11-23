@@ -207,9 +207,16 @@ pub fn write(dir: &Path, spec: &Spec, apps: &[(Vec<u8>, Listing)]) -> Result<Ind
 }
 
 /// Writes trust root `version` to `dir/root/<version>.txt`, signed by `signers`.
-pub fn write_root(dir: &Path, version: u64, root_keys: &[&Key], catalog_keys: &[&Key], signers: &[&Key]) -> Result<(), String> {
+pub fn write_root(
+    dir: &Path,
+    version: u64,
+    root_keys: &[&Key],
+    catalog_keys: &[&Key],
+    signers: &[&Key],
+) -> Result<(), String> {
     let public = |k: &Key| gina::sign::public_key(&k.0);
-    let mut keys: Vec<(Role, [u8; 32], String)> = root_keys.iter().map(|k| (Role::Root, public(k), k.1.clone())).collect();
+    let mut keys: Vec<(Role, [u8; 32], String)> =
+        root_keys.iter().map(|k| (Role::Root, public(k), k.1.clone())).collect();
     keys.extend(catalog_keys.iter().map(|k| (Role::Catalog, public(k), k.1.clone())));
     let text = Root { version, expires: 0, keys }.encode();
     Root::parse(text.as_bytes()).map_err(str::to_string)?;
@@ -222,8 +229,11 @@ pub fn write_root(dir: &Path, version: u64, root_keys: &[&Key], catalog_keys: &[
 fn system_releases(dir: &Path) -> Result<Vec<SystemRelease>, String> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(dir.join("system")) else { return Ok(out) };
-    let mut versions: Vec<String> =
-        entries.flatten().filter(|e| e.path().join("update.txt").exists()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    let mut versions: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().join("update.txt").exists())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
     versions.sort_by(|a, b| gina::compare_versions(a, b));
     for v in versions {
         let path = format!("system/{v}/update.txt");
@@ -345,7 +355,8 @@ pub fn add_system_update(repo: &Path, b: &Build, key: &Key) -> Result<SystemRele
     }
     let boot = read("EFI/BOOT/BOOTX64.EFI")?;
     let tar = retag_image(&read("aurora/system.tar")?, b.version)?;
-    let mut u = system::describe(b.version, b.min_from, b.notes, part(&kernel), part(&boot), &tar).map_err(str::to_string)?;
+    let mut u =
+        system::describe(b.version, b.min_from, b.notes, part(&kernel), part(&boot), &tar).map_err(str::to_string)?;
     u.published = now();
     let objects = repo.join(system::OBJECTS);
     fs::create_dir_all(&objects).map_err(|e| e.to_string())?;

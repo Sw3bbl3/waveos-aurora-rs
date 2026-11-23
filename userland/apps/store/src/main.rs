@@ -255,7 +255,9 @@ impl Store {
         }
         if s.jobs_gen != self.jobs_gen {
             let finished = self.jobs.iter().any(|j| j.active())
-                && s.jobs.iter().any(|j| j.state == JobState::Done && self.jobs.iter().any(|o| o.id == j.id && o.active()));
+                && s.jobs
+                    .iter()
+                    .any(|j| j.state == JobState::Done && self.jobs.iter().any(|o| o.id == j.id && o.active()));
             self.jobs_gen = s.jobs_gen;
             self.jobs = s.jobs.clone();
             if finished {
@@ -329,21 +331,33 @@ impl Store {
             let downloading = matches!(j.state, JobState::Downloading(..) | JobState::Queued);
             let ring = progress_ring(fraction, if large { 30 } else { 24 });
             let mut row = HStack::new().push(ring).push(
-                Text::new(label).style(TextStyle::Sized(12, Weight::Regular)).foreground(Color::SecondaryLabel).lines(1),
+                Text::new(label)
+                    .style(TextStyle::Sized(12, Weight::Regular))
+                    .foreground(Color::SecondaryLabel)
+                    .lines(1),
             );
             if matches!(j.work, Work::Install(_)) {
                 if paused {
                     row = row.push(
-                        Button::symbol(Symbol::Play).action(Msg::Resume(id.into())).help("Resume").control_size(ControlSize::Small),
+                        Button::symbol(Symbol::Play)
+                            .action(Msg::Resume(id.into()))
+                            .help("Resume")
+                            .control_size(ControlSize::Small),
                     );
                 } else if downloading {
                     row = row.push(
-                        Button::symbol(Symbol::Pause).action(Msg::Pause(id.into())).help("Pause").control_size(ControlSize::Small),
+                        Button::symbol(Symbol::Pause)
+                            .action(Msg::Pause(id.into()))
+                            .help("Pause")
+                            .control_size(ControlSize::Small),
                     );
                 }
                 if paused || downloading {
                     row = row.push(
-                        Button::symbol(Symbol::Close).action(Msg::Cancel(id.into())).help("Cancel").control_size(ControlSize::Small),
+                        Button::symbol(Symbol::Close)
+                            .action(Msg::Cancel(id.into()))
+                            .help("Cancel")
+                            .control_size(ControlSize::Small),
                     );
                 }
             }
@@ -379,7 +393,12 @@ impl Store {
             .push(
                 VStack::new()
                     .push(Text::new(e.name.clone()).style(TextStyle::Sized(15, Weight::Bold)).lines(1))
-                    .push(Text::new(e.author.clone()).style(TextStyle::Footnote).foreground(Color::SecondaryLabel).lines(1))
+                    .push(
+                        Text::new(e.author.clone())
+                            .style(TextStyle::Footnote)
+                            .foreground(Color::SecondaryLabel)
+                            .lines(1),
+                    )
                     .push(Text::new(cat).style(TextStyle::Footnote).foreground(Color::TertiaryLabel).lines(1))
                     .spacing(2)
                     .alignment(Align::Start)
@@ -423,8 +442,7 @@ impl Store {
 
     /// The featured banner: one app at a time, cross-fading every few seconds.
     fn hero<'a>(&self) -> Option<View<'a, Msg>> {
-        let featured: Vec<&(usize, Entry)> =
-            self.shelf.featured.iter().filter_map(|id| self.shelf.app(id)).collect();
+        let featured: Vec<&(usize, Entry)> = self.shelf.featured.iter().filter_map(|id| self.shelf.app(id)).collect();
         let (ci, e) = *featured.get(self.hero % featured.len().max(1))?;
         let fade = (self.hero_t.value().clamp(0, 1000) * 255 / 1000) as u8;
         let (from, to) = (tint(&e.id), mix(tint(&e.id), 0xFF10_1828, 150));
@@ -438,17 +456,26 @@ impl Store {
         });
         self.targets.borrow_mut().push(Target { key: String::from("hero"), open: Msg::Open(e.id.clone()) });
         let text = VStack::new()
-            .push(Text::new("FEATURED").style(TextStyle::Sized(11, Weight::Bold)).foreground(Color::Custom(0xCCFF_FFFF)))
-            .push(Text::new(e.name.clone()).style(TextStyle::Sized(34, Weight::Display)).foreground(Color::Custom(0xFFFF_FFFF)))
+            .push(
+                Text::new("FEATURED").style(TextStyle::Sized(11, Weight::Bold)).foreground(Color::Custom(0xCCFF_FFFF)),
+            )
+            .push(
+                Text::new(e.name.clone())
+                    .style(TextStyle::Sized(34, Weight::Display))
+                    .foreground(Color::Custom(0xFFFF_FFFF)),
+            )
             .push(
                 Text::paragraph(if e.about.is_empty() { e.description.clone() } else { first_line(&e.about) })
                     .style(TextStyle::Callout)
                     .foreground(Color::Custom(0xE6FF_FFFF))
                     .lines(2),
             )
-            .push(HStack::new().push(self.action(&e.id, true)).push(
-                Text::new(e.author.clone()).style(TextStyle::Footnote).foreground(Color::Custom(0xCCFF_FFFF)),
-            ).spacing(14))
+            .push(
+                HStack::new()
+                    .push(self.action(&e.id, true))
+                    .push(Text::new(e.author.clone()).style(TextStyle::Footnote).foreground(Color::Custom(0xCCFF_FFFF)))
+                    .spacing(14),
+            )
             .spacing(8)
             .alignment(Align::Start)
             .grow(1);
@@ -470,14 +497,17 @@ impl Store {
 
     fn discover<'a>(&self) -> View<'a, Msg> {
         let mut v = VStack::new().spacing(28).alignment(Align::Stretch);
-        v = v.push(Self::heading("Discover", Some(String::from("Apps and games, checked against their publishers' signatures."))));
+        v = v.push(Self::heading(
+            "Discover",
+            Some(String::from("Apps and games, checked against their publishers' signatures.")),
+        ));
         v = v.push_if(self.hero());
         let mut games: Vec<(usize, Entry)> =
             self.shelf.apps.iter().filter(|(_, e)| e.categories.iter().any(|c| c == "game")).cloned().collect();
         let mut apps_: Vec<(usize, Entry)> =
             self.shelf.apps.iter().filter(|(_, e)| !e.categories.iter().any(|c| c == "game")).cloned().collect();
         let mut new: Vec<(usize, Entry)> = self.shelf.apps.clone();
-        new.sort_by(|a, b| b.1.published.cmp(&a.1.published));
+        new.sort_by_key(|e| core::cmp::Reverse(e.1.published));
         new.truncate(6);
         if !new.is_empty() {
             v = v.push(Self::section("New and Updated", self.grid(&new)));
@@ -502,7 +532,11 @@ impl Store {
         let n = list.len();
         VStack::new()
             .push(Self::heading(&category_name(c), Some(format!("{n} {}", if n == 1 { "app" } else { "apps" }))))
-            .push(if list.is_empty() { empty("Nothing here yet.", "No repository offers apps in this category.") } else { self.grid(&list) })
+            .push(if list.is_empty() {
+                empty("Nothing here yet.", "No repository offers apps in this category.")
+            } else {
+                self.grid(&list)
+            })
             .spacing(22)
             .alignment(Align::Stretch)
     }
@@ -536,11 +570,17 @@ impl Store {
                     .push(Text::new(e.author.clone()).style(TextStyle::Callout).foreground(Color::AccentText))
                     .push(Text::new(cats.join(" · ")).style(TextStyle::Footnote).foreground(Color::SecondaryLabel))
                     .push(Spacer::min(6))
-                    .push(HStack::new().push(self.action(id, true)).push_if(installed.is_none().then(|| {
-                        Picker::new(["For everyone", "Only for me"], self.scope)
-                            .on_change(Msg::Scope)
-                            .help("Everyone needs an administrator's approval")
-                    })).spacing(12).id("primary"))
+                    .push(
+                        HStack::new()
+                            .push(self.action(id, true))
+                            .push_if(installed.is_none().then(|| {
+                                Picker::new(["For everyone", "Only for me"], self.scope)
+                                    .on_change(Msg::Scope)
+                                    .help("Everyone needs an administrator's approval")
+                            }))
+                            .spacing(12)
+                            .id("primary"),
+                    )
                     .spacing(4)
                     .alignment(Align::Start)
                     .grow(1),
@@ -550,7 +590,11 @@ impl Store {
             .fill_width();
         let fact = |label: &str, value: String| {
             VStack::new()
-                .push(Text::new(String::from(label)).style(TextStyle::Sized(11, Weight::Bold)).foreground(Color::SecondaryLabel))
+                .push(
+                    Text::new(String::from(label))
+                        .style(TextStyle::Sized(11, Weight::Bold))
+                        .foreground(Color::SecondaryLabel),
+                )
                 .push(Text::new(value).style(TextStyle::Sized(15, Weight::Bold)).lines(1))
                 .spacing(4)
                 .alignment(Align::Center)
@@ -563,7 +607,10 @@ impl Store {
             .push(Divider::new().height(36).width(1))
             .push(fact("CATEGORY", cats.first().cloned().unwrap_or_else(|| String::from("App"))))
             .push(Divider::new().height(36).width(1))
-            .push(fact("REQUIRES", if e.min_os.is_empty() { String::from("Any WaveOS") } else { format!("WaveOS {}", e.min_os) }))
+            .push(fact(
+                "REQUIRES",
+                if e.min_os.is_empty() { String::from("Any WaveOS") } else { format!("WaveOS {}", e.min_os) },
+            ))
             .spacing(8)
             .padding_xy(8, 14)
             .fill_width()
@@ -596,7 +643,11 @@ impl Store {
             page = page.push(Self::section(
                 "What's New",
                 VStack::new()
-                    .push(Text::new(format!("Version {}", e.version)).style(TextStyle::Footnote).foreground(Color::SecondaryLabel))
+                    .push(
+                        Text::new(format!("Version {}", e.version))
+                            .style(TextStyle::Footnote)
+                            .foreground(Color::SecondaryLabel),
+                    )
                     .push(Text::paragraph(e.notes.clone()).fill_width())
                     .spacing(6)
                     .alignment(Align::Start),
@@ -604,9 +655,10 @@ impl Store {
         }
         let mut perms = Section::new();
         if e.permissions.is_empty() {
-            perms = perms.push(
-                row("It asks for no special permissions", Image::symbol(Symbol::Check).symbol_size(14).foreground(Color::Green)),
-            );
+            perms = perms.push(row(
+                "It asks for no special permissions",
+                Image::symbol(Symbol::Check).symbol_size(14).foreground(Color::Green),
+            ));
         }
         for p in &e.permissions {
             let sensitive = gina::sensitive_permission(p);
@@ -631,7 +683,8 @@ impl Store {
             .push(row("Identifier", Text::new(e.id.clone()).foreground(Color::SecondaryLabel)))
             .push(row(
                 "Download",
-                Text::new(format!("{} · installed {}", human(e.size), human(e.installed_size))).foreground(Color::SecondaryLabel),
+                Text::new(format!("{} · installed {}", human(e.size), human(e.installed_size)))
+                    .foreground(Color::SecondaryLabel),
             ));
         if let Some(c) = catalog {
             info = info.push(row(
@@ -695,14 +748,23 @@ impl Store {
         let ups = self.updates();
         let mut v = VStack::new().spacing(22).alignment(Align::Stretch);
         let head = HStack::new()
-            .push(Self::heading("Updates", Some(match ups.len() {
-                0 => String::from("Your apps are up to date."),
-                1 => String::from("1 update is available."),
-                n => format!("{n} updates are available."),
-            })).grow(1))
+            .push(
+                Self::heading(
+                    "Updates",
+                    Some(match ups.len() {
+                        0 => String::from("Your apps are up to date."),
+                        1 => String::from("1 update is available."),
+                        n => format!("{n} updates are available."),
+                    }),
+                )
+                .grow(1),
+            )
             .push(Button::symbol(Symbol::Refresh).action(Msg::Refresh).help("Check again"))
             .push_if((ups.len() > 1).then(|| {
-                Button::new("Update All").action(Msg::UpdateAll).button_style(ButtonStyle::Prominent).control_size(ControlSize::Large)
+                Button::new("Update All")
+                    .action(Msg::UpdateAll)
+                    .button_style(ButtonStyle::Prominent)
+                    .control_size(ControlSize::Large)
             }))
             .spacing(10)
             .fill_width();
@@ -716,16 +778,26 @@ impl Store {
                         VStack::new()
                             .push(Text::new(format!("WaveOS {version}")).style(TextStyle::Sized(15, Weight::Bold)))
                             .push(
-                                Text::new(format!("{} to download · installs alongside, then a restart", human(*download)))
-                                    .style(TextStyle::Footnote)
-                                    .foreground(Color::SecondaryLabel),
+                                Text::new(format!(
+                                    "{} to download · installs alongside, then a restart",
+                                    human(*download)
+                                ))
+                                .style(TextStyle::Footnote)
+                                .foreground(Color::SecondaryLabel),
                             )
-                            .push_if((!notes.is_empty()).then(|| Text::paragraph(first_line(notes)).style(TextStyle::Callout).lines(2)))
+                            .push_if(
+                                (!notes.is_empty())
+                                    .then(|| Text::paragraph(first_line(notes)).style(TextStyle::Callout).lines(2)),
+                            )
                             .spacing(3)
                             .alignment(Align::Start)
                             .grow(1),
                     )
-                    .push(Button::new("Software Update…").action(Msg::OpenSoftwareUpdate).button_style(ButtonStyle::Prominent))
+                    .push(
+                        Button::new("Software Update…")
+                            .action(Msg::OpenSoftwareUpdate)
+                            .button_style(ButtonStyle::Prominent),
+                    )
                     .spacing(14)
                     .padding(16)
                     .fill_width()
@@ -733,7 +805,10 @@ impl Store {
                     .id("system"),
             ),
             SystemState::Checking => Some(
-                HStack::new().push(ProgressView::spinner()).push(Text::new("Checking for WaveOS updates…").foreground(Color::SecondaryLabel)).spacing(10),
+                HStack::new()
+                    .push(ProgressView::spinner())
+                    .push(Text::new("Checking for WaveOS updates…").foreground(Color::SecondaryLabel))
+                    .spacing(10),
             ),
             SystemState::Failed(e) => Some(
                 Text::paragraph(format!("Couldn't check for WaveOS updates: {e}"))
@@ -747,7 +822,10 @@ impl Store {
         }
         v = v.push_if(system);
         if ups.is_empty() {
-            v = v.push(empty("Everything is up to date", "New versions of your apps appear here as their repositories publish them."));
+            v = v.push(empty(
+                "Everything is up to date",
+                "New versions of your apps appear here as their repositories publish them.",
+            ));
         }
         for (a, ci, e) in ups {
             self.targets.borrow_mut().push(Target { key: format!("row:{}", e.id), open: Msg::Open(e.id.clone()) });
@@ -762,7 +840,10 @@ impl Store {
                                     .style(TextStyle::Footnote)
                                     .foreground(Color::SecondaryLabel),
                             )
-                            .push_if((!e.notes.is_empty()).then(|| Text::paragraph(e.notes.clone()).style(TextStyle::Callout).lines(3)))
+                            .push_if(
+                                (!e.notes.is_empty())
+                                    .then(|| Text::paragraph(e.notes.clone()).style(TextStyle::Callout).lines(3)),
+                            )
                             .spacing(3)
                             .alignment(Align::Start)
                             .grow(1),
@@ -777,16 +858,22 @@ impl Store {
             );
         }
         let catalogs = &self.shelf.catalogs;
-        let revoked: Vec<&Installed> =
-            self.installed.iter().filter(|a| catalogs.iter().any(|c| c.index.is_revoked(&a.manifest.id, &a.manifest.version))).collect();
+        let revoked: Vec<&Installed> = self
+            .installed
+            .iter()
+            .filter(|a| catalogs.iter().any(|c| c.index.is_revoked(&a.manifest.id, &a.manifest.version)))
+            .collect();
         for a in revoked {
             v = v.push(
                 HStack::new()
                     .push(Image::symbol(Symbol::Warning).symbol_size(16).foreground(Color::Orange))
-                    .push(Text::paragraph(format!(
-                        "{} {} was withdrawn by its repository. Remove it or update it.",
-                        a.manifest.name, a.manifest.version
-                    )).grow(1))
+                    .push(
+                        Text::paragraph(format!(
+                            "{} {} was withdrawn by its repository. Remove it or update it.",
+                            a.manifest.name, a.manifest.version
+                        ))
+                        .grow(1),
+                    )
                     .spacing(10)
                     .padding(14)
                     .fill_width()
@@ -798,11 +885,14 @@ impl Store {
 
     fn library<'a>(&self) -> View<'a, Msg> {
         let mut v = VStack::new()
-            .push(Self::heading("Library", Some(match self.installed.len() {
-                0 => String::from("Apps you install appear here."),
-                1 => String::from("1 app installed."),
-                n => format!("{n} apps installed."),
-            })))
+            .push(Self::heading(
+                "Library",
+                Some(match self.installed.len() {
+                    0 => String::from("Apps you install appear here."),
+                    1 => String::from("1 app installed."),
+                    n => format!("{n} apps installed."),
+                }),
+            ))
             .spacing(14)
             .alignment(Align::Stretch);
         if self.installed.is_empty() {
@@ -902,7 +992,12 @@ impl Store {
             .alignment(Align::Stretch);
         let cats = self.shelf.categories();
         if !cats.is_empty() {
-            v = v.push(Text::label("Categories").padding_insets(Insets { top: 14, leading: 10, bottom: 4, trailing: 0 }));
+            v = v.push(Text::label("Categories").padding_insets(Insets {
+                top: 14,
+                leading: 10,
+                bottom: 4,
+                trailing: 0,
+            }));
             for c in cats {
                 v = v.push(item(category_symbol(c), category_name(c), Page::Category(c), 0));
             }
@@ -977,12 +1072,27 @@ impl Store {
         };
         Some(
             VStack::new()
-                .push(Image::symbol(if none { Symbol::Globe } else { Symbol::Wifi }).symbol_size(44).foreground(Color::SecondaryLabel))
+                .push(
+                    Image::symbol(if none { Symbol::Globe } else { Symbol::Wifi })
+                        .symbol_size(44)
+                        .foreground(Color::SecondaryLabel),
+                )
                 .push(Text::new(title).style(TextStyle::Sized(22, Weight::Bold)))
-                .push(Text::paragraph(body).style(TextStyle::Callout).foreground(Color::SecondaryLabel).text_align(Align::Center).max_width(520))
+                .push(
+                    Text::paragraph(body)
+                        .style(TextStyle::Callout)
+                        .foreground(Color::SecondaryLabel)
+                        .text_align(Align::Center)
+                        .max_width(520),
+                )
                 .push(
                     HStack::new()
-                        .push(TextField::new("https://example.com/apps/", self.new_source.clone()).on_change(Msg::NewSource).on_submit(Msg::AddSource).width(320))
+                        .push(
+                            TextField::new("https://example.com/apps/", self.new_source.clone())
+                                .on_change(Msg::NewSource)
+                                .on_submit(Msg::AddSource)
+                                .width(320),
+                        )
                         .push(Button::new("Add Repository").action(Msg::AddSource).button_style(ButtonStyle::Prominent))
                         .spacing(8),
                 )
@@ -1012,7 +1122,11 @@ impl Store {
         let rise = (1000 - t) * 22 / 1000;
         let mut stack = VStack::new().spacing(14).alignment(Align::Stretch);
         if self.shelf.offline {
-            stack = stack.push(banner(Symbol::Wifi, "You're offline. The Store shows what it saved; installing needs the network.", Some(Msg::Refresh)));
+            stack = stack.push(banner(
+                Symbol::Wifi,
+                "You're offline. The Store shows what it saved; installing needs the network.",
+                Some(Msg::Refresh),
+            ));
         }
         for (source, e) in self.shelf.errors.iter().take(2) {
             stack = stack.push(banner(Symbol::Warning, &format!("{source}: {e}"), None));
@@ -1059,7 +1173,6 @@ impl Store {
     }
 }
 
-
 fn verb(w: &Work) -> &'static str {
     match w {
         Work::Install(_) => "Getting",
@@ -1103,7 +1216,12 @@ fn empty<'a>(title: &str, body: &str) -> View<'a, Msg> {
     VStack::new()
         .push(Image::symbol(Symbol::Search).symbol_size(34).foreground(Color::TertiaryLabel))
         .push(Text::new(String::from(title)).style(TextStyle::Sized(18, Weight::Bold)))
-        .push(Text::paragraph(String::from(body)).style(TextStyle::Callout).foreground(Color::SecondaryLabel).text_align(Align::Center))
+        .push(
+            Text::paragraph(String::from(body))
+                .style(TextStyle::Callout)
+                .foreground(Color::SecondaryLabel)
+                .text_align(Align::Center),
+        )
         .spacing(10)
         .alignment(Align::Center)
         .padding(40)
@@ -1133,7 +1251,10 @@ fn shimmer<'a>(w: i32, h: i32) -> View<'a, Msg> {
         cv.fill_round_rect(r, 14, base);
         let x = r.x - 120 + (r.w + 240) * t / 1400;
         cv.with_clip(r, |cv| {
-            cv.fill_rect(waveui::lumen::geom::Rect::new(x, r.y, 80, r.h), waveui::lumen::canvas::with_alpha(theme.text_secondary, 0x10));
+            cv.fill_rect(
+                waveui::lumen::geom::Rect::new(x, r.y, 80, r.h),
+                waveui::lumen::canvas::with_alpha(theme.text_secondary, 0x10),
+            );
         });
     })
     .size(w, h)
@@ -1148,7 +1269,15 @@ fn progress_ring<'a>(fraction: Option<f32>, size: i32) -> View<'a, Msg> {
         let radius = r.w.min(r.h) / 2 - 2;
         cv.stroke_arc(cx, cy, radius, 3, 0, 360, waveui::lumen::canvas::with_alpha(theme.text_secondary, 0x40));
         match fraction {
-            Some(f) => cv.stroke_arc(cx, cy, radius, 3, -90, (f.clamp(0.0, 1.0) * 360.0) as i32, waveui::lumen::theme::accent()),
+            Some(f) => cv.stroke_arc(
+                cx,
+                cy,
+                radius,
+                3,
+                -90,
+                (f.clamp(0.0, 1.0) * 360.0) as i32,
+                waveui::lumen::theme::accent(),
+            ),
             None => cv.stroke_arc(cx, cy, radius, 3, spin, 90, waveui::lumen::theme::accent()),
         }
     })
@@ -1203,9 +1332,7 @@ impl App for Store {
             }
             Msg::Open(id) => self.go(Page::App(id), cx),
             Msg::Get(id) | Msg::Update(id) => {
-                if self.installed(&id).is_some()
-                    && !self.updates().iter().any(|(a, _, _)| a.manifest.id == id)
-                {
+                if self.installed(&id).is_some() && !self.updates().iter().any(|(a, _, _)| a.manifest.id == id) {
                     self.launch(&id, cx);
                 } else {
                     self.queue_install(&id, cx);

@@ -173,7 +173,8 @@ fn fetch_once(
     }
     if let Some(local) = base.strip_prefix("file://") {
         // A repository folder: copy the file over (no ranges needed).
-        let bytes = fs::read(&format!("{local}{}", want.path)).map_err(|e| Failure::NextMirror(format!("{address}: {e}")))?;
+        let bytes =
+            fs::read(&format!("{local}{}", want.path)).map_err(|e| Failure::NextMirror(format!("{address}: {e}")))?;
         if bytes.len() as u64 != want.size || <[u8; 32]>::from(Sha256::digest(&bytes)) != want.sha256 {
             return Err(Failure::NextMirror(damaged(want)));
         }

@@ -554,7 +554,7 @@ fn corrupt_inputs_never_panic() {
             assert_eq!(system::Update::parse(u.encode().as_bytes()), Ok(u));
         }
     });
-    aurora_mutate::check("gina-system-image", &[tar.clone()], 2000, |bytes| {
+    aurora_mutate::check("gina-system-image", &[tar], 2000, |bytes| {
         let _ = system::layout_of(bytes);
     });
     aurora_mutate::check("gina-records", &[signer(b"x").encode().into_bytes()], 2000, |bytes| {

@@ -185,7 +185,12 @@ pub fn kill_test() {
     }
     assert!(p.exit_code().is_none(), "the slow install ended before it could be killed");
     crate::proc::kill(p.pid).expect("kill pkgtest");
-    while p.exit_code().is_none() {
+    // Until its threads have left and the reaper has it: it is gone, not
+    // an installer still at work.
+    let pid = p.pid;
+    drop(p);
+    let deadline = crate::time::uptime_ms() + 10_000;
+    while crate::proc::get(pid).is_some_and(|p| p.exit_code().is_none()) && crate::time::uptime_ms() < deadline {
         crate::sched::sleep_ms(20);
     }
     pkgtest(&base, "recover", "");

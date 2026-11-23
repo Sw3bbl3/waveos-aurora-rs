@@ -342,6 +342,9 @@ impl Streamed {
     }
 }
 
+/// Sees a streamed answer's status and headers before its body.
+pub type OnHead<'a> = &'a mut dyn FnMut(u16, &[(String, String)]) -> bool;
+
 /// GETs `url` and hands the body to `sink` as it arrives, without holding
 /// it in memory, following up to five redirects. With `from` > 0 it asks
 /// for the rest of the file from that byte (`Range: bytes=from-`): a server
@@ -355,7 +358,7 @@ pub fn download<C: Connect + ?Sized>(
     url: &Url,
     from: u64,
     connect: &mut C,
-    start: &mut dyn FnMut(u16, &[(String, String)]) -> bool,
+    start: OnHead,
     sink: &mut dyn FnMut(&[u8]) -> bool,
 ) -> Result<Streamed, Error> {
     let mut url = url.clone();
@@ -427,8 +430,7 @@ pub fn download<C: Connect + ?Sized>(
             ok
         };
         if find("transfer-encoding").is_some_and(|t| t.to_ascii_lowercase().contains("chunked")) {
-            loop {
-                let Ok(size_line) = r.line() else { break };
+            while let Ok(size_line) = r.line() {
                 let hex = size_line.split(';').next().unwrap_or("").trim();
                 let mut size = usize::from_str_radix(hex, 16).map_err(|_| Error::BadResponse)?;
                 if size == 0 {

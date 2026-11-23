@@ -47,7 +47,9 @@ impl Shelf {
             for id in ids {
                 let Some(e) = c.index.latest(id) else { continue };
                 match apps.iter_mut().find(|(_, a)| a.id == id) {
-                    Some(slot) if gina::compare_versions(&e.version, &slot.1.version).is_gt() => *slot = (ci, e.clone()),
+                    Some(slot) if gina::compare_versions(&e.version, &slot.1.version).is_gt() => {
+                        *slot = (ci, e.clone())
+                    }
                     Some(_) => {}
                     None => apps.push((ci, e.clone())),
                 }
@@ -64,8 +66,7 @@ impl Shelf {
 
     /// Every version of `id` the repositories offer, newest first.
     pub fn versions(&self, id: &str) -> Vec<Entry> {
-        let mut v: Vec<Entry> =
-            self.catalogs.iter().flat_map(|c| c.index.versions(id)).cloned().collect();
+        let mut v: Vec<Entry> = self.catalogs.iter().flat_map(|c| c.index.versions(id)).cloned().collect();
         v.sort_by(|a, b| gina::compare_versions(&b.version, &a.version));
         v.dedup_by(|a, b| a.version == b.version);
         v
@@ -73,7 +74,11 @@ impl Shelf {
 
     /// Categories that have apps, in the usual order.
     pub fn categories(&self) -> Vec<&'static str> {
-        gina::CATEGORIES.iter().copied().filter(|c| self.apps.iter().any(|(_, e)| e.categories.iter().any(|x| x == c))).collect()
+        gina::CATEGORIES
+            .iter()
+            .copied()
+            .filter(|c| self.apps.iter().any(|(_, e)| e.categories.iter().any(|x| x == c)))
+            .collect()
     }
 
     pub fn search(&self, term: &str) -> Vec<(usize, Entry)> {

@@ -320,7 +320,8 @@ fn set_modes(path: &str, system: bool) -> Result<()> {
 fn collect_garbage(root: &str) {
     let active = fs::read_to_string(&format!("{root}/active")).unwrap_or_default();
     let previous = fs::read_to_string(&format!("{root}/previous")).unwrap_or_default();
-    let live: Vec<u32> = process::list().iter().map(|p| p.pid).collect();
+    let live: Vec<u32> =
+        process::list().iter().filter(|p| p.user == 1 && p.state != crate::abi::PROC_EXITED).map(|p| p.pid).collect();
     // Process numbers start again with each start of the computer: what an
     // installer left before this start is never someone's work in progress.
     let booted = crate::time::boot_file_time().saturating_sub(2);
