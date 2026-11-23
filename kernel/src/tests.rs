@@ -39,6 +39,7 @@ const TESTS: &[Test] = &[
     ("ACPI: AML, sleep states, battery", acpi_runtime),
     ("USB: hub, keyboard, tablet, storage", usb),
     ("USB HID: media keys, lights, touchpad gestures, game controllers (virtual devices)", usb_hid),
+    ("I2C: ACPI scan, HID over I2C touchpad (software bus)", i2c_touchpad),
     ("TCP: retransmission ACK bounds", crate::net::tcp::retransmission_ack_test),
     ("network: DHCP, ICMP, UDP, TCP", network),
     ("Wi-Fi: scan, WPA2 join, DHCP over CCMP (simulated network)", wifi),
@@ -946,6 +947,78 @@ fn usb_hid() {
             "controller {id} did not feel the rumble"
         );
     }
+}
+
+/// The touchpad xtask's test SSDT describes (`\_SB.I2CT.TPD0`), played on a
+/// software I²C bus: the ACPI scan (`_STA`, `_CRS` through
+/// `ConcatenateResTemplate`, `_DSM`, `_PS0`), the HID over I²C driver
+/// (descriptor, reset, report descriptor, input mode, polled input) and
+/// the gesture engine, into the input queue.
+fn i2c_touchpad() {
+    use crate::drivers::i2c::{self, mock};
+    use crate::drivers::input::{self, InputEvent};
+    use aurora_i2c::mock::touch_report;
+    let up = || i2c::list().iter().any(|l| l.contains("TPD0") && l.contains("touchpad"));
+    assert!(eventually(15_000, up), "the I2C touchpad did not come up: {:?}", i2c::list());
+    let line = i2c::list().into_iter().find(|l| l.contains("TPD0")).unwrap_or_default();
+    assert!(line.contains("at 0x2c") && line.contains("1234:5678") && line.contains("input mode set"), "{line}");
+    assert!(line.contains("polled (GpioInt pin 23"), "interrupt mode: {line}");
+    assert!(!i2c::list().iter().any(|l| l.contains("TPD1")), "the absent model was skipped");
+    assert_eq!(crate::acpi::devices::integer_at("\\_SB.I2CT.TPD0.PSTA"), Some(1), "_PS0 ran");
+    let (mode, switches, resets) =
+        mock::with_target(|t| (t.feature(3).map(|f| f.to_vec()), t.feature(4).map(|f| f.to_vec()), t.resets))
+            .expect("the software touchpad");
+    assert_eq!(mode.as_deref(), Some(&[3u8, 3][..]), "Input Mode 3 (contacts)");
+    assert_eq!(switches.as_deref(), Some(&[4u8, 3][..]), "surface and button switches");
+    assert!(resets >= 1, "the driver reset the device");
+
+    // Start from a known place, with an empty queue.
+    input::push(InputEvent::Pointer { x: 100, y: 100, buttons: 0 });
+    while input::pop().is_some() {}
+    let push = |r: Vec<u8>| {
+        mock::with_target(|t| t.push_input(&r));
+        sched::sleep_ms(10);
+    };
+    // One finger 30 mm to the right, two fingers 20 mm up, then a tap.
+    for i in 0..=10u16 {
+        push(touch_report(&[(1, true, 3000 + i * 300, 3000)], 1, false));
+    }
+    push(touch_report(&[(1, false, 6000, 3000)], 1, false));
+    sched::sleep_ms(300);
+    for i in 0..=10u16 {
+        let y = 4000 - i * 200;
+        push(touch_report(&[(2, true, 4000, y), (3, true, 5000, y)], 2, false));
+    }
+    push(touch_report(&[(2, false, 4000, 2000), (3, false, 5000, 2000)], 2, false));
+    sched::sleep_ms(1500); // the scroll glides to a stop
+    push(touch_report(&[(4, true, 5000, 3000)], 1, false));
+    sched::sleep_ms(30);
+    push(touch_report(&[(4, false, 5000, 3000)], 1, false));
+
+    let (mut right, mut scrolled, mut clicked, mut released, mut last_x) = (0, 0, false, false, 100);
+    let end = time::uptime_ms() + 3000;
+    while time::uptime_ms() < end && !(right >= 40 && scrolled >= 2 * input::NOTCH && released) {
+        while let Some(ev) = input::pop() {
+            match ev {
+                InputEvent::Pointer { x, buttons, .. } => {
+                    if buttons == 0 {
+                        right += (x - last_x).max(0);
+                        last_x = x;
+                        released |= clicked;
+                    } else if buttons & 1 != 0 {
+                        clicked = true;
+                    }
+                }
+                InputEvent::Scroll { dy, .. } => scrolled += dy,
+                _ => {}
+            }
+        }
+        sched::sleep_ms(20);
+    }
+    crate::kprint!("[moved {right} px, scrolled {scrolled}/120 notches, tap {clicked}/{released}] ");
+    assert!(right >= 40, "pointer moved right: {right}");
+    assert!(scrolled >= 2 * input::NOTCH, "scrolled down: {scrolled}");
+    assert!(clicked && released, "tap to click: {clicked} {released}");
 }
 
 fn sleep_and_wake() {

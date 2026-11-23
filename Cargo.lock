@@ -85,9 +85,11 @@ version = "0.8.0"
 dependencies = [
  "acpi",
  "aurora-abi",
+ "aurora-acpi-res",
  "aurora-desktop",
  "aurora-elf",
  "aurora-hid",
+ "aurora-i2c",
  "aurora-image",
  "aurora-wav",
  "aurora-wifi",
@@ -106,6 +108,10 @@ dependencies = [
 
 [[package]]
 name = "aurora-abi"
+version = "0.8.0"
+
+[[package]]
+name = "aurora-acpi-res"
 version = "0.8.0"
 
 [[package]]
@@ -133,6 +139,13 @@ dependencies = [
 [[package]]
 name = "aurora-hid"
 version = "0.8.0"
+
+[[package]]
+name = "aurora-i2c"
+version = "0.8.0"
+dependencies = [
+ "aurora-hid",
+]
 
 [[package]]
 name = "aurora-image"
@@ -2086,6 +2099,7 @@ dependencies = [
 name = "xtask"
 version = "0.8.0"
 dependencies = [
+ "aurora-acpi-res",
  "aurora-help",
  "aurora-wav",
  "aurorafs",

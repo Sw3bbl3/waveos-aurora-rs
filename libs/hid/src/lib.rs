@@ -13,6 +13,7 @@
 //! - [`touchpad`]: multi-touch (Precision Touchpad) contacts, and
 //!   [`gestures`], which turns them into pointer motion, taps, clicks and
 //!   two-finger scrolling;
+//! - [`touchscreen`]: touch screens, as an absolute pointer;
 //! - [`gamepad`]: HID game controllers and the Xbox protocols, in one
 //!   standard layout.
 //!
@@ -29,6 +30,7 @@ pub mod gestures;
 pub mod keyboard;
 pub mod pointer;
 pub mod touchpad;
+pub mod touchscreen;
 pub mod usage;
 
 pub use descriptor::{Descriptor, Field, Kind};

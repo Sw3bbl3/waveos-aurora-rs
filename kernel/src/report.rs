@@ -62,6 +62,19 @@ pub fn usb() -> String {
     s
 }
 
+/// HID over I²C devices (touchpads, touch screens) and how each is driven;
+/// the `i2c:` log lines have the ACPI details.
+pub fn i2c() -> String {
+    let mut s = String::new();
+    for line in crate::drivers::i2c::list() {
+        let _ = writeln!(s, "{line}");
+    }
+    if s.is_empty() {
+        s.push_str("No I2C HID devices.\n");
+    }
+    s
+}
+
 pub fn cpu() -> String {
     let mut s = String::new();
     let leaf1 = __cpuid(1);
@@ -129,11 +142,12 @@ pub fn log() -> Vec<u8> {
 /// it can be read on another computer).
 pub fn save_boot_log() {
     let mut text = format!(
-        "WaveOS Aurora {} boot log\n\n== CPU ==\n{}\n== PCI ==\n{}\n== USB ==\n{}\n== Log ==\n",
+        "WaveOS Aurora {} boot log\n\n== CPU ==\n{}\n== PCI ==\n{}\n== USB ==\n{}\n== I2C ==\n{}\n== Log ==\n",
         crate::VERSION,
         cpu(),
         pci(),
-        usb()
+        usb(),
+        i2c()
     );
     text.push_str(&String::from_utf8_lossy(&log()));
     match crate::fs::write_all("/Boot/aurora/boot.log", text.as_bytes()) {

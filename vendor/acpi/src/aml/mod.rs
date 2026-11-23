@@ -462,12 +462,21 @@ where
                         };
                         let source1 = source1.as_buffer()?;
                         let source2 = source2.as_buffer()?;
+                        // WaveOS: each template's own end tag (0x79, checksum) is dropped and one
+                        // end tag closes the result (ACPI 6.5, 19.6.13). The crate kept both and
+                        // appended 0x78, so a reader stopped after the first template.
+                        let strip = |b: &[u8]| -> Vec<u8> {
+                            if b.len() >= 2 && b[b.len() - 2] == 0x79 {
+                                b[..b.len() - 2].to_vec()
+                            } else {
+                                b.to_vec()
+                            }
+                        };
                         let result = {
-                            let mut buffer = Vec::from(source1);
-                            buffer.extend_from_slice(source2);
-                            // Add a new end-tag
-                            buffer.push(0x78);
-                            // Don't calculate the new real checksum - just use 0
+                            let mut buffer = strip(source1);
+                            buffer.extend_from_slice(&strip(source2));
+                            // A zero checksum means "not computed".
+                            buffer.push(0x79);
                             buffer.push(0x00);
                             Object::Buffer(buffer).wrap()
                         };
@@ -1710,7 +1719,7 @@ where
         kind: FieldUnitKind,
         start_pc: usize,
         pkg_length: usize,
-        flags: u8,
+        mut flags: u8,
     ) -> Result<(), AmlError> {
         const RESERVED_FIELD: u8 = 0x00;
         const ACCESS_FIELD: u8 = 0x01;
@@ -1731,17 +1740,36 @@ where
                      * elements. They change the access type and attributes for remaining fields in
                      * the list.
                      */
-                    let _access_type = context.next()?;
+                    // WaveOS: the access type applies to the fields that follow; the attribute
+                    // (for serial-bus regions) is not used. The crate panicked here.
+                    let access_type = context.next()?;
                     let _access_attrib = context.next()?;
-                    todo!()
+                    flags = (flags & !0x0F) | (access_type & 0x0F);
                 }
                 CONNECT_FIELD => {
-                    // TODO: either consume a namestring or `BufferData` (it's not
-                    // clear what a buffer data acc is lmao)
-                    todo!("Connect field :(");
+                    /*
+                     * WaveOS: `Connection (..)` names the GPIO or serial-bus resource that the
+                     * following fields of a GeneralPurposeIo / GenericSerialBus region use: a
+                     * NameString or a buffer (DefBuffer). There is no handler for those regions,
+                     * so it is skipped: accessing such a field fails, but the table loads. The
+                     * crate panicked, which lost all of ACPI on many laptops.
+                     */
+                    const BUFFER_OP: u8 = 0x11;
+                    if context.peek()? == BUFFER_OP {
+                        context.next()?;
+                        let start = context.current_block.pc;
+                        let length = context.pkglength()?;
+                        context.current_block.pc = start + length;
+                    } else {
+                        let _connection = context.namestring()?;
+                    }
                 }
                 EXTENDED_ACCESS_FIELD => {
-                    todo!("Extended access field :(");
+                    // WaveOS: AccessType, ExtendedAccessAttrib, AccessLength (see ACCESS_FIELD).
+                    let access_type = context.next()?;
+                    let _attrib = context.next()?;
+                    let _length = context.next()?;
+                    flags = (flags & !0x0F) | (access_type & 0x0F);
                 }
                 _ => {
                     context.current_block.pc -= 1;
@@ -1858,46 +1886,59 @@ where
         let right = right.clone().unwrap_transparent_reference();
 
         /*
-         * Some of these operations allow strings and buffers to be used as operands. Apparently
-         * NT's interpreter just takes the first 4 bytes of the string/buffer and casts them as an
-         * integer...
+         * WaveOS: strings and buffers compare as whole byte strings (ACPI 6.5, 19.6.70 and
+         * following): equal when they have the same length and bytes, otherwise ordered
+         * lexicographically, a prefix first. The right operand is converted to the left one's
+         * type. The crate compared only the first four bytes, and panicked on any buffer longer
+         * than that, which every `_DSM` UUID check (`If (Arg0 == ToUUID (..))`) hit. `LAnd` and
+         * `LOr` take integers.
          */
-        let (left, right) = match *left {
-            Object::Integer(left) => (left, right.as_integer()?),
-            Object::String(ref left) => {
-                let left = {
-                    let mut bytes = [0u8; 4];
-                    let left_bytes = left.as_bytes();
-                    let bytes_to_use = usize::min(4, left_bytes.len());
-                    (bytes[0..bytes_to_use]).copy_from_slice(&left_bytes[0..bytes_to_use]);
-                    u32::from_le_bytes(bytes) as u64
-                };
-                let right = {
-                    let mut bytes = [0u8; 4];
-                    let right = right.as_string()?;
-                    let right_bytes = right.as_bytes();
-                    let bytes_to_use = usize::min(4, right_bytes.len());
-                    (bytes[0..bytes_to_use]).copy_from_slice(&right_bytes[0..bytes_to_use]);
-                    u32::from_le_bytes(bytes) as u64
-                };
-                (left, right)
+        fn bytes_of(object: &Object) -> Option<Vec<u8>> {
+            match object {
+                Object::Buffer(b) => Some(b.clone()),
+                Object::String(s) => Some(s.as_bytes().to_vec()),
+                Object::Integer(v) => Some(v.to_le_bytes().to_vec()),
+                _ => None,
             }
-            Object::Buffer(ref left) => {
-                let Object::Buffer(ref right) = *right else { panic!() };
-                let left = {
-                    let mut bytes = [0u8; 4];
-                    (bytes[0..left.len()]).copy_from_slice(left);
-                    u32::from_le_bytes(bytes) as u64
-                };
-                let right = {
-                    let mut bytes = [0u8; 4];
-                    (bytes[0..right.len()]).copy_from_slice(right);
-                    u32::from_le_bytes(bytes) as u64
-                };
-                (left, right)
-            }
-            _ => Err(AmlError::InvalidOperationOnObject { op: Operation::LogicalOp, typ: left.typ() })?,
+        }
+        let bytewise =
+            matches!(*left, Object::String(_) | Object::Buffer(_)) && !matches!(op.op, Opcode::LAnd | Opcode::LOr);
+        if bytewise {
+            use core::cmp::Ordering;
+            let (Some(l), Some(r)) = (bytes_of(&left), bytes_of(&right)) else {
+                Err(AmlError::InvalidOperationOnObject { op: Operation::LogicalOp, typ: right.typ() })?
+            };
+            // A string operand ends at its first NUL.
+            let is_string = matches!(*left, Object::String(_));
+            let trim =
+                |v: Vec<u8>| if is_string { v.split(|&b| b == 0).next().unwrap_or(&[]).to_vec() } else { v };
+            let ordering = trim(l).cmp(&trim(r));
+            let result = match op.op {
+                Opcode::LNotEqual => ordering != Ordering::Equal,
+                Opcode::LLessEqual => ordering != Ordering::Greater,
+                Opcode::LGreaterEqual => ordering != Ordering::Less,
+                Opcode::LEqual => ordering == Ordering::Equal,
+                Opcode::LGreater => ordering == Ordering::Greater,
+                Opcode::LLess => ordering == Ordering::Less,
+                _ => Err(AmlError::InvalidOperationOnObject { op: Operation::LogicalOp, typ: left.typ() })?,
+            };
+            let result = if result { Object::Integer(u64::MAX) } else { Object::Integer(0) };
+            context.contribute_arg(Argument::Object(result.wrap()));
+            context.retire_op(op);
+            return Ok(());
+        }
+        let as_int = |o: &Object| match o {
+            Object::Integer(v) => Ok(*v),
+            other => bytes_of(other)
+                .map(|b| {
+                    let mut bytes = [0u8; 8];
+                    let n = b.len().min(8);
+                    bytes[..n].copy_from_slice(&b[..n]);
+                    u64::from_le_bytes(bytes)
+                })
+                .ok_or(AmlError::InvalidOperationOnObject { op: Operation::LogicalOp, typ: o.typ() }),
         };
+        let (left, right) = (as_int(&left)?, as_int(&right)?);
 
         let result = match op.op {
             Opcode::LAnd => (left > 0) && (right > 0),

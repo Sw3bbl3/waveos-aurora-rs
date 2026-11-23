@@ -46,7 +46,7 @@ pub fn test_panic() {
     kick();
 }
 
-type Interp = Interpreter<KernelHandler>;
+pub(super) type Interp = Interpreter<KernelHandler>;
 
 /// Work other tasks hand to the ACPI task (all AML runs there).
 #[derive(Clone, Copy)]
@@ -137,26 +137,26 @@ pub fn power_info() -> PowerInfo {
     info
 }
 
-fn name(path: &str) -> AmlName {
+pub(super) fn name(path: &str) -> AmlName {
     AmlName::from_str(path).unwrap_or_else(|_| AmlName::root())
 }
 
-fn child(path: &AmlName, seg: &str) -> Option<AmlName> {
+pub(super) fn child(path: &AmlName, seg: &str) -> Option<AmlName> {
     AmlName::from_str(seg).ok()?.resolve(path).ok()
 }
 
-fn eval(interp: &Interp, path: &AmlName, args: Vec<WrappedObject>) -> Option<WrappedObject> {
+pub(super) fn eval(interp: &Interp, path: &AmlName, args: Vec<WrappedObject>) -> Option<WrappedObject> {
     interp.evaluate_if_present(path.clone(), args).ok().flatten()
 }
 
-fn integer(o: &WrappedObject) -> Option<u64> {
+pub(super) fn integer(o: &WrappedObject) -> Option<u64> {
     match **o {
         Object::Integer(v) => Some(v),
         _ => None,
     }
 }
 
-fn string(o: &WrappedObject) -> String {
+pub(super) fn string(o: &WrappedObject) -> String {
     match &**o {
         Object::String(s) => String::from(s.trim_end_matches('\0')),
         Object::Buffer(b) => String::from_utf8_lossy(b).trim_end_matches('\0').into(),
@@ -164,7 +164,7 @@ fn string(o: &WrappedObject) -> String {
     }
 }
 
-fn package(o: &WrappedObject) -> Option<Vec<WrappedObject>> {
+pub(super) fn package(o: &WrappedObject) -> Option<Vec<WrappedObject>> {
     match &**o {
         Object::Package(v) => Some(v.clone()),
         _ => None,
@@ -186,7 +186,7 @@ fn eisa_id(id: u64) -> String {
     s
 }
 
-fn hardware_id(interp: &Interp, dev: &AmlName) -> Option<String> {
+pub(super) fn hardware_id(interp: &Interp, dev: &AmlName) -> Option<String> {
     let hid = eval(interp, &child(dev, "_HID")?, vec![])?;
     match &*hid {
         Object::Integer(v) => Some(eisa_id(*v)),
@@ -196,7 +196,7 @@ fn hardware_id(interp: &Interp, dev: &AmlName) -> Option<String> {
 }
 
 /// `_STA` bit 0 (present); devices without `_STA` are present.
-fn present(interp: &Interp, dev: &AmlName) -> bool {
+pub(super) fn present(interp: &Interp, dev: &AmlName) -> bool {
     match child(dev, "_STA").and_then(|p| eval(interp, &p, vec![])) {
         Some(o) => integer(&o).is_none_or(|v| v & 1 != 0),
         None => true,
@@ -385,6 +385,8 @@ fn init() -> Option<(Interp, Devices)> {
     read_sleep_types(&interp);
     let devices = find_devices(&interp);
     read_pci_routing(&interp, &devices.pci_roots);
+    // Serial-bus devices (I²C touchpads and touch screens) and their controllers.
+    super::devices::scan(&interp);
     Some((interp, devices))
 }
 
@@ -474,6 +476,8 @@ fn worker() {
             }
             REQUEST_DONE.store(true, Ordering::Release);
         }
+        // AML other drivers asked for (device power states).
+        super::devices::run_jobs(&interp);
         #[cfg(feature = "ktest")]
         if TEST_PANIC.load(Ordering::Acquire) {
             panic!("self-test: a failure inside the AML task");

@@ -30,6 +30,7 @@ mod battery;
 mod debian;
 mod display;
 mod help;
+mod i2c_ssdt;
 mod image;
 mod linux;
 mod monitor;
@@ -843,7 +844,7 @@ struct RunOpts<'a> {
     /// Where the guest's sound goes: a QEMU audio backend ("coreaudio", "none"),
     /// or "wav:PATH" to record it.
     audio: String,
-    /// Add a test SSDT with a laptop battery, power adapter and lid.
+    /// Add test SSDTs: a laptop battery, power adapter and lid, and an I2C touchpad.
     battery: bool,
     /// A battery that mirrors the host's (or fixed values), through shared memory.
     host_battery: Option<battery::Source>,
@@ -1024,6 +1025,10 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     if opts.battery {
         let ssdt = root().join("target/battery-ssdt.aml");
         fs::write(&ssdt, include_bytes!("../../assets/acpi/test-battery.aml")).expect("write battery SSDT");
+        cmd.arg("-acpitable").arg(format!("file={}", ssdt.display()));
+        // And an I2C touchpad, which the self-test build plays on a software bus.
+        let ssdt = root().join("target/i2c-ssdt.aml");
+        fs::write(&ssdt, i2c_ssdt::build()).expect("write I2C SSDT");
         cmd.arg("-acpitable").arg(format!("file={}", ssdt.display()));
     }
     // A network card on QEMU's user networking (NAT; the host is 10.0.2.2).

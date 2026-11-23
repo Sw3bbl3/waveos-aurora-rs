@@ -53,6 +53,7 @@ Options go in `\aurora\boot.conf` on the EFI partition, one `key=value` per line
 | `resolution=1920x1080` | The display mode the bootloader picks (Settings → Display writes it) |
 | `acpi=off` | Don't start the AML interpreter: no power button, battery or sleep, but everything else works. Try this if the machine misbehaves during boot. |
 | `sleep=off` | Hide Sleep, for machines whose firmware does not resume properly |
+| `i2c=off` | Leave the I²C controllers alone (no I²C touchpad or touch screen). The `i2c:` lines in the log still list what the firmware describes. |
 
 ## What to check
 
@@ -63,6 +64,7 @@ Work through the list and note what happens. The boot log (below) records the de
 - [ ] **All CPU cores.** In Terminal, `cpuinfo` should list every core; Activity Monitor shows a graph per core.
 - [ ] **Keyboard.** Check the built-in keyboard and a USB keyboard, including a non-US layout (Settings → Keyboard) and key repeat.
 - [ ] **Pointer.** Check the touchpad, a USB mouse (with the scroll wheel and, if it has them, the back and forward buttons), and clicking and dragging windows. On a USB touchpad, check tap to click, two-finger scrolling and the two-finger click.
+- [ ] **Built-in touchpad or touch screen over I²C (laptops).** See [I²C touchpads](#i2c-touchpads-and-touch-screens) below: whether the pointer moves, tap to click, two-finger scrolling, clicking the pad, and a three-finger swipe sideways (back and forward in the browser).
 - [ ] **Media keys and Caps Lock.** Volume and play/pause keys should work; the Caps Lock light should follow the key on every keyboard.
 - [ ] **Game controllers.** Plug in an Xbox, PlayStation or generic USB controller; `lsusb` should list it as a game controller.
 - [ ] **USB stick.** Plug in a FAT32 stick: it should appear in Files under Locations. Open a file, copy one onto it, then eject it and unplug.
@@ -73,6 +75,22 @@ Work through the list and note what happens. The boot log (below) records the de
 - [ ] **Power button.** A short press should open the Shut Down dialog.
 - [ ] **Sleep.** Use Aurora menu → Sleep, then wake with the power button or a key. Also try closing the lid. Afterwards, check that the picture, the keyboard and pointer, the disk and sound all work.
 - [ ] **Shut Down and Restart.** Both from the Aurora menu.
+
+## I²C touchpads and touch screens
+
+Most laptops since about 2016 connect the touchpad (and any touch screen) to an I²C controller in the chipset; only ACPI says where. WaveOS reads that from the firmware's tables, drives the controller (the Synopsys DesignWare I²C block in Intel LPSS and AMD chipsets) and speaks Microsoft's HID over I²C protocol to the device. A Precision Touchpad then behaves exactly like a USB one: the same gestures and the same Settings → Trackpad options (tap to click, natural scrolling, tracking speed). Touch screens move the pointer to the finger and click while it touches.
+
+**This is untested on real hardware.** The protocol, the resource decoding and the controller driver were written from the public specifications and checked against simulations (host tests) and a software touchpad on a simulated bus (the kernel self-test, through the real ACPI tables and driver). If the touchpad doesn't work, the PS/2 fallback many laptops have still does (as a plain pointer), and `i2c=off` turns the I²C drivers off.
+
+How the driver knows a report is waiting:
+
+| The firmware describes | WaveOS does |
+|---|---|
+| `Interrupt` (an I/O APIC input) | real interrupts |
+| `GpioInt` on an AMD GPIO controller (`AMDI0030`) | reads the pin's level (no bus traffic) and the bus only when it is asserted |
+| `GpioInt` on an Intel GPIO controller (most Intel laptops) | **polls**: 125 reads a second while a finger is on the pad, 20 a second when idle. The first touch can take up to 50 ms to notice, and the touchpad and controller never sleep, which costs a little battery. |
+
+Please send back the lines starting with `i2c:` from the boot log (and the `== I2C ==` section near its top). They name each touchpad's ACPI path and ID, its controller, address and speed, the HID descriptor register, the interrupt resource and which of the three modes above was used, the controller's component version, FIFO depths and bus timings, and the touchpad's USB-style vendor and product id, report descriptor size and whether it accepted touchpad mode. Lines such as `not responding`, `the device stopped answering`, `not a DesignWare I2C controller` or `no driver for this controller` say where it stopped.
 
 ## Reporting what happened
 
@@ -88,7 +106,7 @@ Work through the list and note what happens. The boot log (below) records the de
 - **Graphics.** On real hardware there is no native GPU driver yet: WaveOS draws into the framebuffer the firmware set up (GOP). In virtual machines with a virtio display, Linux's virtio-gpu driver (run through WaveOS's compatibility layer) drives it. The resolution changes only at boot. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes.
 - **Storage.** AHCI, NVMe and virtio disks work, but Intel RST / RAID mode does not. USB storage must be FAT32 (exFAT and NTFS aren't supported).
 - **Input.**
-  - Touchpads that connect over I²C (common on laptops since about 2016) aren't supported yet. Many of them also have a PS/2 fallback, which works (as a plain pointer, without gestures). USB Precision Touchpads get the full gestures.
+  - Touchpads and touch screens that connect over I²C (common on laptops since about 2016) have a driver that has not yet run on real hardware (see [above](#i2c-touchpads-and-touch-screens)); on most Intel laptops it polls the touchpad, as there is no GPIO driver yet. Many such touchpads also have a PS/2 fallback, which works as a plain pointer. I²C keyboards and pens aren't supported. USB Precision Touchpads get the full gestures.
   - Bluetooth keyboards, mice and controllers aren't supported.
 - **USB.**
   - xHCI (USB 3), EHCI (USB 2) with its OHCI or UHCI companions, and OHCI and UHCI on their own (USB 1.1) are all driven. EHCI, OHCI and UHCI have only been tested in QEMU.

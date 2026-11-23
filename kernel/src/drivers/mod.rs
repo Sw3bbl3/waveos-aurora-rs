@@ -5,6 +5,7 @@ pub mod block;
 pub mod display;
 pub mod gamepad;
 pub mod hpet;
+pub mod i2c;
 pub mod input;
 pub mod keyboard;
 pub mod keymap;
@@ -28,4 +29,5 @@ pub fn resume() {
     audio::resume();
     net::resume();
     usb::resume();
+    i2c::resume();
 }

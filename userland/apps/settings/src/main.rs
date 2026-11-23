@@ -637,7 +637,8 @@ impl Settings {
                 footer(
                     "Tap with one finger to click and two to secondary-click; tap, then drag to move \
                      things. Scroll with two fingers: with natural scrolling the content follows your \
-                     fingers, as on a phone.",
+                     fingers, as on a phone. Swipe three fingers sideways to go back and forward. \
+                     These settings apply to built-in and USB trackpads alike.",
                 ),
             ],
         )

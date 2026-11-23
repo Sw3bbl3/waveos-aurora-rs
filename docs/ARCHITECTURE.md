@@ -21,6 +21,9 @@ This document is for someone about to read or change the code. It follows the ma
 | `libs/web/` | `nebula-web` | user + host | URLs, and an HTTP/1.1 client over any byte stream (keep-alive, chunked, gzip) |
 | `libs/tls/` | `nebula-secure` | user + host | TLS 1.3/1.2 client, DER and X.509 path validation |
 | `libs/surf/` | `nebula-engine` | user + host | The browser engine: HTML, CSS, style and layout to a display list |
+| `libs/hid/` | `aurora-hid` | kernel + host | HID report descriptors; keyboards, pointers, touchpads (and their gestures), touch screens, game controllers |
+| `libs/acpires/` | `aurora-acpi-res` | kernel + host + xtask | ACPI resource descriptors (`_CRS`: memory, interrupts, `GpioInt`, I²C/SPI/UART serial bus), `ToUUID`, EISA ids |
+| `libs/i2c/` | `aurora-i2c` | kernel + host | The I²C bus trait, the DesignWare I²C controller, the HID over I²C protocol, and a software HID-over-I²C device |
 | `userland/corekit/` | `aurora` | user | Runtime: entry point, heap, `print!`, files, processes, threads, clipboard, drag and drop, preferences |
 | `userland/aurorakit/` | `aurorakit` | user | UI toolkit: windows, event loop, the `App` trait, the `text` editing engine |
 | `userland/apps/*` | `app-*` | user | Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About, Welcome, Learn, Studio, Installer |
@@ -116,6 +119,7 @@ The IRQ handlers decode input straight into a fixed-size, allocation-free ring b
 - **USB pointers.** Mice, tablets and VM pointers are read through their HID report descriptors (see below).
 - **Mouse, emulated.** Under QEMU and VMware, the **vmmouse** backdoor gives an absolute pointer, so the guest cursor tracks the host cursor without grabbing it.
 - **Mouse, real hardware.** Standard PS/2 relative packets, with IntelliMouse wheel support.
+- **Laptop touchpads and touch screens over I²C** (`drivers/i2c/`). The ACPI task finds HID over I²C devices (`PNP0C50`) and their controllers (`acpi/devices.rs`, see ACPI below); the `i2c` task drives the controllers (DesignWare I²C: Intel LPSS PCI functions, or ACPI-described Intel and AMD ones; interrupt-driven, polled without an interrupt), and each device's `i2c-hid` task speaks HID over I²C. Reports go through the same `aurora_hid` decoding and gesture engine as USB touchpads (`input::touchpad_output`). The device's interrupt is used when it is an I/O APIC input; on an AMD GPIO pin its level is sampled; otherwise (Intel GPIO) the device is polled, at 125 Hz while touched and 20 Hz idle.
 
 ## 3. User space (`proc/`, `syscall/`, `mm/vmm.rs`)
 
@@ -260,6 +264,7 @@ The driver reads and writes FAT32 with VFAT long file names, generating `NAME~N.
 
 - **Static tables** (`tables.rs`) are parsed early: MADT, FADT, MCFG, HPET, and `\_S5` by a pattern scan as a fallback.
 - **The runtime** (`runtime.rs`) runs the `acpi` crate's AML interpreter on its own `acpi` task, with a kernel `Handler` (`handler.rs`: physical memory, ports, PCI configuration, time, AML mutexes). It loads the DSDT and SSDTs, initializes devices, reads the sleep states and finds batteries (`_BIX`/`_BIF`, `_BST`), the power adapter (`_PSR`) and the lid (`_LID`). It then waits for SCI events or a 30-second timer to refresh them.
+- **Devices only ACPI describes** (`devices.rs`). At start the task walks the namespace for HID over I²C devices, I²C and GPIO controllers: `_HID`/`_CID`, `_STA`, `_UID`, `_ADR`, `_CRS` (decoded by `aurora-acpi-res`), `_DSM` (the HID descriptor register), `SSCN`/`FMCN` (bus timings), and runs `_PS0`. It hands the result to `drivers::i2c` and logs one `i2c:` line per device. Other tasks run AML later (power states after sleep) through `devices::call`.
 - **Isolation.** All AML runs on that task. If the interpreter panics on unusual firmware, the panic handler ends only that task: ACPI features switch off and the system keeps running.
 - **The SCI** (`events.rs`) acknowledges the power and sleep buttons and masks fired general-purpose events; the task runs their `\_GPE._Lxx`/`_Exx` methods and re-enables them.
 
@@ -269,7 +274,7 @@ The driver reads and writes FAT32 with VFAT long file names, generating `NAME~N.
 2. The IOAPIC routes and the PCI configuration of every device are saved, the FACS waking vector is pointed at the trampoline page, and the CPU context is saved like `setjmp`.
 3. `SLP_TYP`/`SLP_EN` power everything down but RAM.
 4. On wake, the firmware starts CPU 0 in real mode at the trampoline, which enters long mode and calls `resume_entry`. That reloads the kernel page tables, the GDT and TSS (clearing its busy bit), the IDT, `syscall` and FPU setup, and returns into `suspend` as if the save had just returned.
-5. `suspend` then restores the clocks, the APICs, PCI configuration and MSI/MSI-X routes, each driver's hardware (`drivers::resume`: AHCI, NVMe, virtio, HDA, xHCI, display mode, PS/2), ACPI events and `\_WAK`, and finally restarts the other CPUs.
+5. `suspend` then restores the clocks, the APICs, PCI configuration and MSI/MSI-X routes, each driver's hardware (`drivers::resume`: AHCI, NVMe, virtio, HDA, xHCI, display mode, PS/2; I²C controllers and devices are set up again by their own tasks), ACPI events and `\_WAK`, and finally restarts the other CPUs.
 
 ## 7. Networking (`drivers/net/`, `net/`)
 
@@ -334,6 +339,7 @@ Lines are written while holding the port lock and without allocating, so events 
   - sound: a tone through HDA (the host also checks that QEMU's WAV recording isn't silent)
   - ACPI: AML, sleep types, the test battery, adapter and lid; and that a failing AML task leaves the system running
   - USB: a hub with a keyboard behind it, a tablet, and a FAT32 stick mounted, read and written
+  - I²C: a test SSDT (generated by `xtask/src/i2c_ssdt.rs`) describes a touchpad as laptop firmware does (`_CRS` built with `ConcatenateResTemplate`, a `_DSM`, `_PS0`, an absent alternative model); the self-test build binds its controller to a software bus with a Precision Touchpad (`aurora_i2c::mock`), and the touchpad's swipe, two-finger scroll and tap must reach the input queue
   - sleep: S3 (the harness wakes the VM over QMP), then CPUs, work on every CPU, disk I/O, sound, USB and the network after waking
   - networking: DHCP, ping to loopback and our own address, UDP and TCP over loopback (a megabyte each way), a megabyte over HTTP from a server xtask runs on the host, and an inbound connection through a QEMU port forward
 
@@ -341,6 +347,6 @@ Lines are written while holding the port lock and without allocating, so events 
 
   The kernel reports through QEMU's `isa-debug-exit` device. `xtask test` boots the same fresh disk **twice**: the first boot leaves a file, and the second must find it intact.
 - **Headless boots.** `cargo xtask run --headless` exposes QEMU's HMP monitor at `target/qemu-monitor.sock` and QMP at `target/qemu-qmp.sock`. That makes it possible to script screenshots and input (`screendump`, `input-send-event`).
-- **Host tests.** `cargo test -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling), the image codecs (against the `png`, `jpeg-encoder`, `jpeg-decoder` and `gif` crates), WAV decoding, URLs and HTTP (redirects, keep-alive, gzip), TLS (every cipher suite and version against a rustls server, RFC 8448 key schedule, bad certificates), the browser engine (parsing, selectors, the cascade and layout) and the AML assembler for the test SSDT.
+- **Host tests.** `cargo test -p aurora-hid -p aurora-acpi-res -p aurora-i2c` covers HID descriptors and gestures, ACPI resource decoding (hand-laid descriptors, malformed buffers), the HID over I²C protocol against the software device, and the DesignWare driver against a simulated controller (small FIFOs, NACKs, a stuck bus). `cargo test -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling), the image codecs (against the `png`, `jpeg-encoder`, `jpeg-decoder` and `gif` crates), WAV decoding, URLs and HTTP (redirects, keep-alive, gzip), TLS (every cipher suite and version against a rustls server, RFC 8448 key schedule, bad certificates), the browser engine (parsing, selectors, the cascade and layout) and the AML assembler for the test SSDT.
 - **Scripted UI.** `tools/qmp.py` clicks, types and takes screenshots in a running VM.
 - **CI.** On every push, CI runs the host tests, the kernel suite on AHCI, virtio-blk and NVMe with 4 CPUs (and AHCI with 1 CPU), with virtio-net (and e1000e on one job), and a headless boot to the desktop.

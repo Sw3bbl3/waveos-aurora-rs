@@ -275,15 +275,8 @@ struct Touchpad {
 
 impl Touchpad {
     fn apply(&mut self, o: aurora_hid::gestures::Output) {
-        let buttons = o.buttons & 0x07;
-        if o.dx != 0 || o.dy != 0 || buttons != self.buttons {
-            input::pointer_moved(o.dx, o.dy, buttons);
-            self.buttons = buttons;
-        }
-        if o.scroll_x != 0 || o.scroll_y != 0 {
-            // Pixels to 1/120 notch, at 40 px a notch.
-            input::push(InputEvent::Scroll { dx: o.scroll_x * 3, dy: o.scroll_y * 3 });
-        }
+        // Shared with I²C touchpads (drivers::i2c::hid).
+        input::touchpad_output(o, &mut self.buttons);
     }
 }
 

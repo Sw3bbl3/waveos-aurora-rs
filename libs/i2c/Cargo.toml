@@ -1,0 +1,12 @@
+[package]
+name = "aurora-i2c"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Integer-only and no_std: the soft-float kernel runs it, the host tests it
+# (against a simulated DesignWare controller and a simulated touchpad).
+[dependencies]
+
+[dev-dependencies]
+aurora-hid = { path = "../hid" }
