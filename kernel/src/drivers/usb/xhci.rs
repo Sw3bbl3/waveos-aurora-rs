@@ -92,7 +92,13 @@ const CC_SHORT: u8 = 13;
 const CC_TIMEOUT: u8 = super::TIMEOUT;
 
 const RING_TRBS: usize = 256;
-const EVENT_TRBS: usize = 256;
+/// Event ring entries. A full ring makes the controller drop events (QEMU
+/// does), so it is generous, and the driver hands entries back as it goes.
+const EVENT_TRBS: usize = 1024;
+/// Events handled before the dequeue pointer is handed back mid-drain.
+const ERDP_BATCH: usize = 16;
+const TRB_HOST_CONTROLLER: u32 = 37;
+const CC_EVENT_RING_FULL: u8 = 21;
 
 /// A producer ring (command or transfer), ending in a link TRB back to its start.
 struct Ring {
@@ -217,6 +223,8 @@ pub struct Controller {
     /// The `xhci-events` task: commands it issues (recovering a pipe) must
     /// drain the event ring themselves, as nobody else will.
     event_task: AtomicU64,
+    /// The controller reported a full event ring (events were dropped).
+    events_lost: AtomicBool,
     pipes: IrqMutex<BTreeMap<(u8, u8), Pipe>>,
     /// Isochronous streams by (slot, endpoint DCI).
     isos: IrqMutex<BTreeMap<(u8, u8), iso::Stream>>,
@@ -331,7 +339,8 @@ pub fn probe(dev: &pci::Device) {
     let Some(cmd) = Ring::new() else { return };
     w64(op + CRCR, cmd.phys() | 1);
 
-    let (Some(segment), Some(table)) = (Dma::new(EVENT_TRBS * 16), Dma::new(64)) else { return };
+    // (Aligned to its size: a segment must not cross a 64 KiB boundary.)
+    let (Some(segment), Some(table)) = (Dma::new_aligned(EVENT_TRBS * 16), Dma::new(64)) else { return };
     table.write::<u64>(0, segment.phys);
     table.write::<u32>(8, EVENT_TRBS as u32);
     w32(rt + ERSTSZ, 1);
@@ -354,6 +363,7 @@ pub fn probe(dev: &pci::Device) {
         irq: WaitQueue::new(),
         has_irq: AtomicBool::new(false),
         event_task: AtomicU64::new(u64::MAX),
+        events_lost: AtomicBool::new(false),
         pipes: IrqMutex::new(BTreeMap::new()),
         isos: IrqMutex::new(BTreeMap::new()),
         interrupts: AtomicU64::new(0),
@@ -435,6 +445,7 @@ impl Controller {
 
     fn drain_events(&self) {
         let mut any = false;
+        let mut since_erdp = 0;
         loop {
             let trb = {
                 let mut ev = self.events.lock();
@@ -453,12 +464,54 @@ impl Controller {
             };
             any = true;
             self.handle_event(trb.0, trb.1, trb.2);
+            // Hand entries back while still draining: under a steady stream
+            // the ring would otherwise look full to the controller.
+            since_erdp += 1;
+            if since_erdp == ERDP_BATCH {
+                since_erdp = 0;
+                self.write_erdp();
+            }
         }
         if any {
-            let ev = self.events.lock();
-            w64(self.rt + ERDP, (ev.segment.phys + (ev.dequeue * 16) as u64) | (1 << 3));
-            drop(ev);
+            self.write_erdp();
             self.done.wake_all();
+        }
+        if self.events_lost.swap(false, Ordering::AcqRel) {
+            self.resync_pipes();
+        }
+    }
+
+    fn write_erdp(&self) {
+        let ev = self.events.lock();
+        w64(self.rt + ERDP, (ev.segment.phys + (ev.dequeue * 16) as u64) | (1 << 3));
+    }
+
+    /// The event ring overflowed, so completions went missing: every pipe
+    /// and stream may have buffers the controller finished that we will
+    /// never hear of. Stop each endpoint, skip what was queued, and queue
+    /// all its buffers again.
+    fn resync_pipes(&self) {
+        let keys: Vec<(u8, u8)> = self.pipes.lock().keys().copied().collect();
+        log!("xhci", "controller {}: event ring overflowed; restarting {} pipes", self.index, keys.len());
+        for (slot, ep) in keys {
+            self.command(0, TRB_STOP_EP << 10 | (ep as u32) << 16 | (slot as u32) << 24);
+            let dequeue = {
+                let inner = self.inner.lock();
+                inner.slots.get(&slot).and_then(|s| s.rings[ep as usize].as_ref()).map(|r| r.dequeue_pointer())
+            };
+            if let Some(d) = dequeue {
+                self.command(d, TRB_SET_DEQUEUE << 10 | (ep as u32) << 16 | (slot as u32) << 24);
+            }
+            let count = match self.pipes.lock().get_mut(&(slot, ep)) {
+                Some(p) => {
+                    p.trbs.clear();
+                    p.count
+                }
+                None => continue,
+            };
+            for i in 0..count {
+                self.queue_pipe_buffer(slot, ep, i);
+            }
         }
     }
 
@@ -486,6 +539,9 @@ impl Controller {
                 if let Some(bus) = self.bus.get() {
                     bus.port_changed((param >> 24) as u8);
                 }
+            }
+            TRB_HOST_CONTROLLER if code == CC_EVENT_RING_FULL => {
+                self.events_lost.store(true, Ordering::Release);
             }
             _ => {}
         }
