@@ -127,6 +127,16 @@ fn oracle_intact(what: &str) {
     assert_eq!(fs::read_all(&format!("{ORACLE}/secret.txt")).ok().as_deref(), Some(SECRET), "{what}: the secret changed");
     let names: Vec<String> = fs::readdir(ORACLE).unwrap().into_iter().map(|e| e.name).collect();
     assert_eq!(names.len(), FILES.len(), "{what}: the oracle's folder changed: {names:?}");
+    volume_ok(what);
+}
+
+/// The home volume is consistent after what ran in a sandbox.
+fn volume_ok(what: &str) {
+    fs::sync_all();
+    let (root, _) = fs::lookup("/").unwrap();
+    if let Err(e) = root.check() {
+        panic!("{what}: the home volume is not consistent: {e}");
+    }
 }
 
 fn uid() -> u32 {
@@ -366,6 +376,7 @@ pub fn background() {
         let (code, _) = run(sbx, argv, sandbox("org.waveos.test.bg", declared), None, 90_000, &mut |_, _| {});
         assert_eq!(code, Some(0), "ended although {what}");
     }
+    volume_ok("background");
 }
 
 /// `sandboxtest`, a Linux program, tries every way out it knows.
