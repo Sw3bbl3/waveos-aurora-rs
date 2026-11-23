@@ -46,7 +46,7 @@ One bit set, `aurora_abi::sandbox` (manifests use the names):
 | `audio` | `AUDIO_OUT` | sound streams (`audio_open`, Linux `/dev/dsp`) |
 | `microphone` | `MICROPHONE` | capture streams; checked again on every read |
 | `camera` | `CAMERA` | reserved (no camera drivers yet) |
-| `screen-capture` | `SCREEN_CAPTURE` | reserved (no screen-capture call yet; see `display`) |
+| `screen-capture` | `SCREEN_CAPTURE` | a handle (`GETFB`/`GETFB2`) to a framebuffer the program didn't make — the desktop's or another program's (framebuffer ids are global) — which it could map and read; without it the size and format, and showing it again by id, still work |
 | `input-monitoring` | `INPUT_MONITOR` | reading keyboards and pointers (`/dev/input/event*`) while another program has the focus; grabbing them (`EVIOCGRAB`) without the focus; making keyboards and pointers with `/dev/uinput` (the default profile may make them without asking, as its account always could) |
 | `gamepad` | `GAMEPADS` | `gamepads`, `gamepad_state`, rumble; controllers' `/dev/input/event*`, `js*` and `hidraw*`; making controllers with `/dev/uinput` |
 | `usb` | `USB` | other raw HID devices (`/dev/hidraw*`); raw USB is reserved |
@@ -293,10 +293,11 @@ other accounts (Unix permissions), physical access, and side channels
 - **Loopback** is network: an app with `network` reaches any local server,
   including other apps' (TCP listeners need `network-server`).
 - **Process listing** (`proc_list`) shows every process's name to anyone.
-- **The camera, screen capture and raw USB** have no interfaces yet; the
-  bits are reserved and enforced wherever such an interface is added
-  (`sandbox::require`). The DRM card can show what is on screen, which is
-  why it needs `display`.
+- **The camera and raw USB** have no interfaces yet; the bits are
+  reserved and enforced wherever such an interface is added
+  (`sandbox::require`). Screen capture guards the DRM card's foreign
+  framebuffers; there is no screenshot call for apps yet. A DRM master
+  that may drive the display (`display`) can still show what it likes.
 - **Input monitoring is never asked about when reading** (the devices
   check it while locked): an app gets unfocused keyboard and pointer
   events only once the person allowed it — in Settings, or at its first
