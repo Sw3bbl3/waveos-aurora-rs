@@ -126,6 +126,7 @@ What to try and send back:
    - [ ] plugging a monitor in and out: an `intel: HDMI-A-1: Connected` (or `DP-1`) line should appear within a few seconds
 4. If something is wrong, try `cursor=software`, then `intel=off`, and say which one fixed it.
 5. Optional, on a Skylake to Comet Lake machine with an external monitor: add `intel=modeset`, choose a smaller resolution in Settings → Display, and send the `intel:` lines about it.
+6. Optional, with the Linux packages on the disk: run `kmscube` in Terminal (Return ends it). Mesa draws in software (llvmpipe) on any display device, but full-screen programs on the Intel driver, and llvmpipe's code generation on real processors (it picks instructions by `cpuid`, which `/proc/cpuinfo` now reports in full), have only run in QEMU. The `drm: kmscube on card0: …` line in the log gives its frame rate.
 
 ## Power management
 

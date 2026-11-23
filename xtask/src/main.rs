@@ -40,8 +40,7 @@
 //!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 240;
 //!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run)
 //!       --mesa                            only the Mesa tests, on a disk with Debian's Mesa, kmscube, glmark2
-//!                                         and Vulkan tools (target/mesa-root): opt-in, as llvmpipe under TCG
-//!                                         needs minutes and the packages hundreds of MiB
+//!                                         and Vulkan tools (target/mesa-root, fetched once) and 2 GiB of memory
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;

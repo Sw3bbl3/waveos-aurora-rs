@@ -37,6 +37,9 @@ pub const DEFAULT_PACKAGES: &[&str] = &[
     "gstreamer1.0-plugins-bad",
     "gstreamer1.0-libav",
     "ca-certificates",
+    // Mesa's spinning cube, full screen on the DRM device (its libraries,
+    // GBM, EGL and GLES, come with WebKit anyway).
+    "kmscube",
     "fonts-dejavu-core",
     "fonts-wqy-microhei",
     "libc-bin",
