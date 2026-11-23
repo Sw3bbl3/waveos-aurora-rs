@@ -43,7 +43,9 @@ pub struct Simple<B: Backend> {
     vblank: IrqMutex<Vblank>,
 }
 
-const FORMATS: &[u32] = &[fourcc::XRGB8888];
+/// ARGB8888 is shown as XRGB8888: a primary plane has nothing beneath it
+/// to blend with (EGL configs with alpha, glmark2's, ask for it).
+const FORMATS: &[u32] = &[fourcc::XRGB8888, fourcc::ARGB8888];
 
 impl<B: Backend> Simple<B> {
     pub fn new(backend: B) -> Simple<B> {

@@ -37,10 +37,20 @@ pub const DEFAULT_PACKAGES: &[&str] = &[
     "gstreamer1.0-plugins-bad",
     "gstreamer1.0-libav",
     "ca-certificates",
+    // Mesa's spinning cube, full screen on the DRM device (its libraries,
+    // GBM, EGL and GLES, come with WebKit anyway).
+    "kmscube",
     "fonts-dejavu-core",
     "fonts-wqy-microhei",
     "libc-bin",
 ];
+
+/// What `cargo xtask test --mesa` puts on its disk: Mesa's GBM, EGL, GL,
+/// GLES and Vulkan (lavapipe) drivers and the unmodified programs that drive
+/// them full screen through `/dev/dri/card0` (kmscube, glmark2's DRM builds),
+/// plus `eglinfo` and `vulkaninfo`.
+pub const MESA_PACKAGES: &[&str] =
+    &["kmscube", "glmark2-drm", "glmark2-es2-drm", "mesa-vulkan-drivers", "vulkan-tools", "mesa-utils-bin"];
 
 /// Packages never installed: they only matter to a running Debian system
 /// (package management, init, the system bus).
@@ -164,11 +174,16 @@ fn resolve<'a>(idx: &'a BTreeMap<String, Package>, wanted: &[String]) -> Vec<&'a
 
 /// Builds `target/linux-root` from `packages` (and what they need).
 pub fn build(packages: &[String]) -> PathBuf {
+    build_into(&root().join("target/linux-root"), packages)
+}
+
+/// Builds a Linux root in `out` from `packages` (and what they need).
+pub fn build_into(out: &Path, packages: &[String]) -> PathBuf {
     let idx = index();
     let list = resolve(&idx, packages);
     let size: u64 = list.iter().map(|p| p.get("Installed-Size").parse::<u64>().unwrap_or(0)).sum();
     println!("Linux root: {} Debian packages, {} MiB installed", list.len(), size / 1024);
-    let out = root().join("target/linux-root");
+    let out = out.to_path_buf();
     let _ = fs::remove_dir_all(&out);
     fs::create_dir_all(&out).unwrap();
     let mut links: BTreeMap<String, String> = BTreeMap::new();

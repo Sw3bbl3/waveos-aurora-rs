@@ -337,7 +337,7 @@ pub fn spawn_env(
         };
         let start = linux::exec::load(&data, &image, &linux::fs::to_guest(path), argv, env, &mut aspace)?;
         let state = linux::Linux::new(start.brk);
-        state.trace.store(linux::tracing(env), Ordering::Relaxed);
+        state.configure(env);
         (start.entry, start.sp, 0, Some(state))
     } else {
         let (sp, block) = load_waveos(&data, &image, argv, &mut aspace)?;
