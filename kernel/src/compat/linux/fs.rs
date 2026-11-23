@@ -957,7 +957,7 @@ fn info_for_handle(h: &Handle) -> Result<Info, isize> {
         Handle::PipeRead { pipe, .. } => fifo(Arc::as_ptr(pipe) as u64 >> 4),
         Handle::PipeWrite(pipe) => fifo(Arc::as_ptr(pipe) as u64 >> 4),
         Handle::Socket(_) => Info { mode: S_IFSOCK | 0o777, size: 0, ino: 1, rdev: 0, mtime: 0, ctime: 0 },
-        Handle::Log | Handle::Audio(_) => {
+        Handle::Log | Handle::Audio(_) | Handle::AudioIn(_) => {
             Info { mode: S_IFCHR | 0o620, size: 0, ino: 2, rdev: makedev(5, 1), mtime: 0, ctime: 0 }
         }
     })

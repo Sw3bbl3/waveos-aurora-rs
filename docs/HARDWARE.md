@@ -69,6 +69,7 @@ Work through the list and note what happens. The boot log (below) records the de
 - [ ] **Internal disk.** `lspci` should list the controller, and `df` should show whether a WaveOS volume was found.
 - [ ] **Network.** With a supported wired adapter (see below) plugged in, the menu-bar network item should show Connected and an address. In Terminal try `ifconfig`, `ping example.com` and `fetch https://example.com`, then open NetSurf.
 - [ ] **Sound.** Play `play /System/Sounds/startup.wav`, then `play --tone 440 1000`. Try the volume keys, the menu-bar slider, and headphones in and out.
+- [ ] **USB audio.** Plug in a USB headset, speaker or DAC: `lsusb` should show it as `audio: speaker` (and `microphone`), and `record --list` should list it. Choose it in the menu bar's sound card or Settings → Sound, play a sound, change the volume, then `record -t 5 test.wav` and `play test.wav`. Unplug it while it plays: sound should move back to the built-in output.
 - [ ] **Battery (laptops).** Check the menu-bar percentage and `battery` in Terminal. Unplug and replug the charger.
 - [ ] **Power button.** A short press should open the Shut Down dialog.
 - [ ] **Sleep.** Use Aurora menu → Sleep, then wake with the power button or a key. Also try closing the lid. Afterwards, check that the picture, the keyboard and pointer, the disk and sound all work.
@@ -92,8 +93,8 @@ Work through the list and note what happens. The boot log (below) records the de
   - Bluetooth keyboards, mice and controllers aren't supported.
 - **USB.**
   - xHCI (USB 3), EHCI (USB 2) with its OHCI or UHCI companions, and OHCI and UHCI on their own (USB 1.1) are all driven. EHCI, OHCI and UHCI have only been tested in QEMU.
-  - No isochronous devices, such as USB audio or webcams.
-- **Sound.** Intel HD Audio output only, with no microphone and no HDMI audio.
+  - Isochronous transfers (USB audio) work on xHCI only; on EHCI, OHCI and UHCI, `lsusb` shows audio devices as unsupported. No webcams yet.
+- **Sound.** Intel HD Audio output (no microphone or HDMI audio yet), and USB Audio Class 1 and 2 speakers, headsets, DACs and microphones on xHCI. USB Audio 3.0-only devices aren't supported (most also offer UAC 1 or 2).
 - **Networking.** Wired Ethernet only, on Intel e1000/e1000e adapters (82540EM, 82545/82546, 82574L and similar) or virtio-net in virtual machines. Realtek and newer Intel (I219, I225) chips aren't supported yet. Wi-Fi: Intel adapters from the Wireless 7265 to the Wi-Fi 6E AX211 are recognized, but WaveOS can't start their radio yet, so no real Wi-Fi works. IPv4 only, with the address from DHCP.
 - **Sleep** is S3 (suspend to RAM). Many machines since about 2019 support only "Modern Standby" (S0ix), which WaveOS doesn't implement. On those, Sleep isn't offered.
 
@@ -103,7 +104,7 @@ Please add a row for each machine you try.
 
 | Machine | CPU | Boots | Display | Keyboard / pointer | USB storage | Disk | Network | Sound | Battery | Sleep | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| QEMU 11 (q35, Homebrew OVMF), macOS host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB | ✅ | ✅ AHCI, NVMe, virtio | ✅ virtio-net, e1000, e1000e | ✅ HDA | ✅ test SSDT | ✅ | Development setup (`cargo xtask run` / `test`) |
+| QEMU 11 (q35, Homebrew OVMF), macOS host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB | ✅ | ✅ AHCI, NVMe, virtio | ✅ virtio-net, e1000, e1000e | ✅ HDA, USB audio (xHCI) | ✅ test SSDT | ✅ | Development setup (`cargo xtask run` / `test`) |
 | QEMU 8.2 (q35, Ubuntu OVMF), Linux host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB on xHCI, EHCI+UHCI, EHCI+OHCI, OHCI, UHCI; virtual touchpad, keyboard and controllers over usb-redir | ✅ every controller | ✅ AHCI | ✅ virtio-net | ✅ HDA | ✅ test SSDT | ⚠️ firmware doesn't resume | `cargo xtask test --usb …` |
 | QEMU and OVMF from Ubuntu 24.04 | TCG, 4 cores | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | CI. This firmware build faults while resuming from S3, before WaveOS runs, so the tests skip sleep there |
 | | | | | | | | | | | | |

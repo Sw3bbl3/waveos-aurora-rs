@@ -95,6 +95,8 @@ pub enum Msg {
     WifiDisconnect,
     CheckNetwork,
     Rumble(u32),
+    /// Saves a text preference (the sound output or input, by name).
+    Pref(&'static str, String),
     OpenAbout,
     ClearNote,
 }
@@ -973,15 +975,49 @@ impl Settings {
     }
 
     fn sound(&self) -> View<'_, Msg> {
+        use corekit::abi::audio as abi;
         let vol = prefs::get_int(pref::VOLUME, 70).clamp(0, 100);
-        let out = prefs::get("audio_device").unwrap_or_else(|| String::from("No output device found"));
+        let devices = corekit::audio::devices();
+        // One row per device; the one in use has the check.
+        let list = |kind: u32, key: &'static str, none: &str| -> Vec<View<'_, Msg>> {
+            let rows: Vec<View<'_, Msg>> = devices
+                .iter()
+                .filter(|d| d.flags & kind != 0)
+                .map(|d| {
+                    let on = d.flags & abi::DEFAULT != 0;
+                    let detail =
+                        format!("{}{} kHz", if d.flags & abi::USB != 0 { "USB · " } else { "" }, d.rate / 1000);
+                    row_detail(
+                        d.name(),
+                        detail,
+                        if on { Image::symbol(Symbol::Check).foreground(Color::Accent) } else { View::empty() },
+                    )
+                    .on_tap(Msg::Pref(key, String::from(d.name())))
+                })
+                .collect();
+            if rows.is_empty() {
+                vec![row(none, View::empty())]
+            } else {
+                rows
+            }
+        };
         page(
             "Sound",
-            vec![card(vec![
-                pref_slider("sound/volume", "Volume", pref::VOLUME, vol, 0, 100, 5, None),
-                pref_toggle("sound/mute", "Mute", pref::MUTED),
-                row("Output", Text::new(out).foreground(Color::SecondaryLabel)),
-            ])],
+            vec![
+                card(vec![
+                    pref_slider("sound/volume", "Volume", pref::VOLUME, vol, 0, 100, 5, None),
+                    pref_toggle("sound/mute", "Mute", pref::MUTED),
+                ]),
+                Section::titled(
+                    "Output",
+                    card(list(abi::OUTPUT, pref::AUDIO_OUTPUT, "No output device found")).id("sound/output"),
+                ),
+                Section::titled(
+                    "Input",
+                    card(list(abi::INPUT, pref::AUDIO_INPUT, "No input device found")).id("sound/input"),
+                ),
+                footer("The device you choose is used whenever it is connected."),
+            ],
         )
     }
 
@@ -1297,6 +1333,7 @@ impl App for Settings {
             Msg::Layout(id) => self.set(cx, pref::KEYBOARD, id),
             Msg::Try(t) => self.try_text = t,
             Msg::Toggle(key, on) => self.set(cx, key, if on { "1" } else { "0" }),
+            Msg::Pref(key, value) => self.set(cx, key, &value),
             Msg::Int(key, v) => {
                 // Repeat delay and rate run the other way round on screen.
                 let v = match key {

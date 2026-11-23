@@ -41,6 +41,8 @@ pub const SETTINGS: &[Setting] = &[
     item!("datetime/time-zone", "Time zone", "timezone utc offset", DateTime),
     item!("sound/volume", "Output volume", "audio speaker loudness", Sound),
     item!("sound/mute", "Mute sound", "audio silent speaker", Sound),
+    item!("sound/output", "Sound output device", "audio speaker headphones headset usb", Sound),
+    item!("sound/input", "Sound input device", "audio microphone mic record usb headset", Sound),
     item!("notifications/do-not-disturb", "Calm", "do not disturb notifications silence focus", Notifications),
     item!("bar/crest", "Show Crest", "clock time top bar notch", Bar),
     item!("bar/battery", "Show battery level", "percent power status ring", Bar),

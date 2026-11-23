@@ -25,4 +25,4 @@ acceleration or audible output on a physical computer.
 2. Unmute and set a comfortable volume.
 3. Run `play --tone 440 500` for a short test.
 
-Audio uses Intel HD Audio. Headless runs have no host sound output unless `--audio-wav PATH` records the guest output; a silent host does not establish a guest driver failure. Use `volume` and `lspci` to inspect configuration.
+Audio uses Intel HD Audio, and USB Audio Class speakers, headsets and microphones on xHCI (choose the device in Settings → Sound or the sound card in Current; `record --list` lists them). Headless runs have no host sound output unless `--audio-wav PATH` records the guest output; a silent host does not establish a guest driver failure. Use `volume` and `lspci` to inspect configuration.

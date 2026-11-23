@@ -10,7 +10,7 @@ Programs are stored in /System/Bin. Run `help` in Terminal for shell commands; i
 | System | uname, uptime, date, mem, neofetch, cpuinfo, dmesg |
 | Devices | lspci, lsusb, battery |
 | Network | ifconfig, nslookup, ping, fetch |
-| Sound | play, volume |
+| Sound | play, record, volume |
 | Apps | wavesdk, constellation, gina-check, gina-demo |
 
 ## Practice safely

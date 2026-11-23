@@ -128,6 +128,7 @@ pub fn apply_system(key: &str) {
             let volume = get(pref::VOLUME).and_then(|v| v.parse().ok()).unwrap_or(70u32);
             audio::set_volume(volume.min(100), get_bool(pref::MUTED));
         }
+        pref::AUDIO_OUTPUT | pref::AUDIO_INPUT => audio::preference_changed(),
         pref::POINTER_SPEED | pref::TRACKING_SPEED | pref::TAP_TO_CLICK | pref::NATURAL_SCROLLING => {
             let speed = |k| get(k).and_then(|v| v.parse().ok()).unwrap_or(5u8);
             crate::drivers::input::set_pointer_settings(
@@ -150,7 +151,7 @@ pub fn set_volume(volume: u32, muted: bool) {
 }
 
 pub fn apply_all_system() {
-    for k in [pref::KEYBOARD, pref::REPEAT_DELAY, pref::VOLUME, pref::POINTER_SPEED] {
+    for k in [pref::KEYBOARD, pref::REPEAT_DELAY, pref::VOLUME, pref::POINTER_SPEED, pref::AUDIO_OUTPUT] {
         apply_system(k);
     }
 }

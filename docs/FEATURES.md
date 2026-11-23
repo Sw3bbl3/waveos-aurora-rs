@@ -79,7 +79,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
 - **Threads** in user space, with futex-based locks, and SSE for apps.
 - **USB:** xHCI (USB 3), EHCI (USB 2), OHCI and UHCI (USB 1.1) controllers, with hubs and storage plugged in at any time.
 - **Input:** keyboards in any rollover format with media keys and a shared Caps Lock light; mice with side buttons and two wheels; touchpads with tap to click, tap-and-drag, two-finger click and smooth two-finger scrolling; game controllers (Xbox, PlayStation, Switch Pro, generic) in one standard layout with rumble, for apps through `corekit::gamepad`.
-- **Sound:** an Intel HD Audio driver and a mixer. System sounds, a menu-bar volume control, volume keys, headphone detection, and programs can play audio.
+- **Sound:** an Intel HD Audio driver, USB Audio Class 1 and 2 speakers, headsets and microphones (over isochronous xHCI transfers), and a mixer that follows the chosen output. System sounds, a menu-bar volume control with an output switcher, volume keys (driving a USB device's own volume control), headphone detection; programs can play audio and record (`record`).
 - **Laptop-ready:** a battery indicator with time remaining, low-battery warnings, the power button, and sleep from the menu, Spotlight or the lid.
 
 ## Build commands
@@ -88,7 +88,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
 |---|---|
 | `cargo xtask build` | Builds the bootloader, kernel and user space into `target/esp/` |
 | `cargo xtask run --monitor` | Same as `run`, plus the live System Explorer in your browser |
-| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB, network). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--net virtio\|e1000\|e1000e\|none` the network card, `--usb xhci\|ehci\|ehci-ohci\|ohci\|uhci` the USB controller, `--smp N` the CPUs, `--battery` adds a laptop battery (`--battery=host` mirrors this computer's, `--battery=20,charging` fixes one), `--usb-stick` plugs in a USB stick, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
+| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB, network). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--net virtio\|e1000\|e1000e\|none` the network card, `--usb xhci\|ehci\|ehci-ohci\|ohci\|uhci` the USB controller, `--smp N` the CPUs, `--battery` adds a laptop battery (`--battery=host` mirrors this computer's, `--battery=20,charging` fixes one), `--usb-stick` plugs in a USB stick, `--usb-audio` a USB speaker, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
 | `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller, `--net` the network card, `--smp 1` for one CPU |
 | `cargo xtask web-check --output target/network-web/check` | Builds a disposable full guest and drives Voyage through local browser/transfer/TLS fixtures and a public site sample; `--local-only` omits public sites, `--connection-only` tests live link loss/recovery, `--benchmark-only` records new-process and revisit workloads |
 | `cargo xtask image` | Creates `target/waveos-aurora-usb.img` (ESP plus AuroraFS), ready to `dd` onto a USB stick |

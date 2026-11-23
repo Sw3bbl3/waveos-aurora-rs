@@ -187,7 +187,15 @@ pub mod nr {
     pub const EVENT_FD: usize = 82;
     /// UTC milliseconds since 1970; changes immediately when the clock is corrected.
     pub const UNIX_MS: usize = 83;
-    pub const COUNT: usize = 84;
+    /// `audio_devices(buf, max) -> count` — fills up to `max`
+    /// [`super::audio::AudioDevice`]s at `buf`; returns how many devices exist.
+    pub const AUDIO_DEVICES: usize = 84;
+    /// `audio_capture(device) -> fd` — a capture stream from input `device`
+    /// (0: the default input): read interleaved stereo `i16` samples at
+    /// [`super::audio::RATE`]; reads block until samples arrive and return 0
+    /// once the device is gone (`-ENODEV` without an input device).
+    pub const AUDIO_CAPTURE: usize = 85;
+    pub const COUNT: usize = 86;
 }
 
 #[repr(C)]
@@ -494,6 +502,44 @@ pub mod audio {
     pub const PRESENT: u64 = 1 << 9;
     /// Headphones are plugged in (speakers muted).
     pub const HEADPHONES: u64 = 1 << 10;
+
+    /// [`AudioDevice`] flags: plays sound.
+    pub const OUTPUT: u32 = 1 << 0;
+    /// Records sound.
+    pub const INPUT: u32 = 1 << 1;
+    /// The output in use, or the default input.
+    pub const DEFAULT: u32 = 1 << 2;
+    /// Connected over USB.
+    pub const USB: u32 = 1 << 3;
+    /// The device has its own volume control (the system volume drives it).
+    pub const HW_VOLUME: u32 = 1 << 4;
+
+    /// A sound device, as `audio_devices` lists it. Select one by saving its
+    /// name as the `audio_output` or `audio_input` preference.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    pub struct AudioDevice {
+        pub id: u32,
+        pub flags: u32,
+        /// The device's own format (the system converts to 48 kHz stereo).
+        pub rate: u32,
+        pub channels: u16,
+        pub bits: u16,
+        pub name_len: u32,
+        pub name: [u8; 60],
+    }
+
+    impl Default for AudioDevice {
+        fn default() -> Self {
+            AudioDevice { id: 0, flags: 0, rate: 0, channels: 0, bits: 0, name_len: 0, name: [0; 60] }
+        }
+    }
+
+    impl AudioDevice {
+        pub fn name(&self) -> &str {
+            core::str::from_utf8(&self.name[..(self.name_len as usize).min(60)]).unwrap_or("")
+        }
+    }
 }
 
 /// Error numbers (returned negated).
@@ -821,6 +867,10 @@ pub mod pref {
     pub const BATTERY_LEVEL: &str = "battery_level";
     /// "1": skip Shore at start-up (locking still asks for the password).
     pub const AUTO_LOGIN: &str = "auto_login";
+    /// The preferred sound output and input, by device name (used whenever
+    /// that device is present).
+    pub const AUDIO_OUTPUT: &str = "audio_output";
+    pub const AUDIO_INPUT: &str = "audio_input";
 }
 
 /// A screen resolution.
