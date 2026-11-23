@@ -43,18 +43,46 @@ pub fn init_clock() {
         return;
     }
     const MS: u64 = 20;
-    let (t0, t1) = if crate::drivers::hpet::present() {
-        let t0 = unsafe { _rdtsc() };
-        crate::drivers::hpet::spin_us(MS * 1000);
-        (t0, unsafe { _rdtsc() })
+    let hz = if crate::drivers::hpet::present() {
+        hpet_tsc_hz()
     } else {
-        pit_wait(|| unsafe { _rdtsc() }, MS)
+        let (t0, t1) = pit_wait(|| unsafe { _rdtsc() }, MS);
+        (t1 - t0) * 1000 / MS
     };
-    let hz = (t1 - t0) * 1000 / MS;
     TSC_BASE.store(unsafe { _rdtsc() }, Ordering::Relaxed);
     TSC_MULT.store(((1_000_000_000u128 << 32) / hz as u128) as u64, Ordering::Relaxed);
     TSC_HZ.store(hz, Ordering::Release);
     log!("time", "TSC at {}.{:02} GHz is the clock", hz / 1_000_000_000, hz / 10_000_000 % 100);
+}
+
+/// The TSC frequency measured against the HPET: the median of several short
+/// windows. Under a hypervisor the host can pause this CPU at any point, which
+/// stretches one window or separates a TSC read from its HPET read; the median
+/// discards such windows, and each sample keeps the TSC read that sat in the
+/// tightest pair of HPET reads.
+fn hpet_tsc_hz() -> u64 {
+    use crate::drivers::hpet;
+    let sample = || {
+        let mut best = (u64::MAX, 0u64, 0u64);
+        for _ in 0..8 {
+            let h0 = hpet::nanos();
+            let t = unsafe { _rdtsc() };
+            let h1 = hpet::nanos();
+            if h1 - h0 < best.0 {
+                best = (h1 - h0, t, h0 + (h1 - h0) / 2);
+            }
+        }
+        (best.1, best.2)
+    };
+    let mut rates = [0u64; 5];
+    for rate in rates.iter_mut() {
+        let (t0, h0) = sample();
+        hpet::spin_us(8000);
+        let (t1, h1) = sample();
+        *rate = ((t1 - t0) as u128 * 1_000_000_000 / (h1 - h0).max(1) as u128) as u64;
+    }
+    rates.sort_unstable();
+    rates[rates.len() / 2]
 }
 
 /// Reads `f` before and after `ms` milliseconds measured by PIT channel 2.
