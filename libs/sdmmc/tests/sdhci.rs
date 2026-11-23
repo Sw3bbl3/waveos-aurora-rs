@@ -131,7 +131,9 @@ fn sdhc_on_a_full_v3_controller_every_transfer_mode() {
     assert_eq!(info.clock_hz, 50_000_000);
     assert!(!info.cmd23, "this card has no CMD23: Auto CMD12 ends transfers");
     assert_eq!(info.cid.name, "MOCK!");
-    for (i, mode) in [TransferMode::Adma64, TransferMode::Adma32, TransferMode::Sdma, TransferMode::Pio].into_iter().enumerate() {
+    for (i, mode) in
+        [TransferMode::Adma64, TransferMode::Adma32, TransferMode::Sdma, TransferMode::Pio].into_iter().enumerate()
+    {
         assert_eq!(s.host.set_mode(mode), mode);
         round_trips(&mut s, &mock, 100 * i as u32);
     }
@@ -347,13 +349,9 @@ fn errors_are_retried_and_recovered() {
     let data = pattern(11, 64 * 512);
     s.write_from(0, &data).unwrap();
     let mut back = vec![0u8; data.len()];
-    for fault in [
-        Fault::CmdCrc,
-        Fault::CmdTimeout,
-        Fault::DataCrc { after: 5 },
-        Fault::DataTimeout { after: 0 },
-        Fault::Adma,
-    ] {
+    for fault in
+        [Fault::CmdCrc, Fault::CmdTimeout, Fault::DataCrc { after: 5 }, Fault::DataTimeout { after: 0 }, Fault::Adma]
+    {
         mock.inject(Some(18), fault, 1);
         back.fill(0);
         s.read_into(0, &mut back).unwrap_or_else(|e| panic!("{fault:?}: {e:?}"));
@@ -435,4 +433,3 @@ fn interrupt_line_follows_enabled_statuses() {
     assert!(!mock.irq(), "every completion was acknowledged");
     clean(&mock);
 }
-

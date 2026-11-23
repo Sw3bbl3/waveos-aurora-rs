@@ -44,8 +44,8 @@ const GPIO_CONTROLLERS: &[&str] = &[
 /// `INT3436`), Broxton/Apollo Lake (`80865ACA`, `80865ACC`, `80865AD0`),
 /// `INT344D`, and AMD's eMMC (`AMDI0040`, `AMDI0041`).
 const SDHCI_CONTROLLERS: &[&str] = &[
-    "PNP0D40", "80860F14", "80860F16", "INT33BB", "INT33C6", "INT3436", "INT344D", "80865ACA", "80865ACC",
-    "80865AD0", "AMDI0040", "AMDI0041",
+    "PNP0D40", "80860F14", "80860F16", "INT33BB", "INT33C6", "INT3436", "INT344D", "80865ACA", "80865ACC", "80865AD0",
+    "AMDI0040", "AMDI0041",
 ];
 
 /// The self-test's software controller (described by xtask's test SSDT).

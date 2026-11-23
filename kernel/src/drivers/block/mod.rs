@@ -35,7 +35,8 @@ pub trait BlockDevice: Send + Sync {
     fn flush(&self) -> BlockResult<()>;
     /// The data in `count` sectors at `lba` is no longer needed (TRIM).
     /// Afterwards they may read as anything. `EOPNOTSUPP` when the device
-    /// can't tell its media.
+    /// can't tell its media. (No filesystem issues discards yet.)
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     fn discard(&self, _lba: u64, _count: u64) -> BlockResult<()> {
         Err(EOPNOTSUPP)
     }
@@ -191,6 +192,19 @@ pub fn init() {
             (0x01, 0x06, 0x01, ..) => ahci::probe(&d),
             (0x01, 0x08, 0x02, ..) => nvme::probe(&d),
             (0x08, 0x05, ..) => sdhci::probe_pci(&d),
+            (_, _, _, vendor, device) if sdhci::unsupported_reader(vendor, device).is_some() => {
+                let what = sdhci::unsupported_reader(vendor, device).unwrap();
+                log!(
+                    "sdhci",
+                    "PCI {:02x}:{:02x}.{} {:04x}:{:04x}: {} card reader: not supported (not an SD host controller; see HARDWARE.md)",
+                    d.bus,
+                    d.dev,
+                    d.func,
+                    vendor,
+                    device,
+                    what
+                );
+            }
             (_, _, _, 0x1AF4, 0x1001 | 0x1042) => virtio::probe(&d),
             _ => {}
         }

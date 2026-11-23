@@ -692,6 +692,33 @@ impl<R: Regs, P: Platform> Host<R, P> {
         if d.blocks == 0 || d.blocks > 0xFFFF || len > self.data.bytes().len() || d.block_size > 2048 {
             return Err(Error::Unsupported);
         }
+        // DMA addresses first, then block size and count. The address
+        // register's top byte also restarts SDMA stopped at a boundary, and
+        // some controllers (QEMU's among them) start a transfer at once when
+        // it is written with a block count already set.
+        self.regs.write16(regs::BLOCK_COUNT, 0);
+        let select = match self.mode {
+            TransferMode::Pio => None,
+            TransferMode::Sdma => {
+                self.regs.write32(regs::SDMA_ADDRESS, self.data.phys() as u32);
+                Some(hc::DMA_SDMA)
+            }
+            TransferMode::Adma32 | TransferMode::Adma64 => {
+                self.write_descriptors(len);
+                let table = self.desc.phys();
+                self.regs.write32(regs::ADMA_ADDRESS, table as u32);
+                if self.mode == TransferMode::Adma64 {
+                    self.regs.write32(regs::ADMA_ADDRESS_HI, (table >> 32) as u32);
+                    Some(hc::DMA_ADMA64)
+                } else {
+                    Some(hc::DMA_ADMA32)
+                }
+            }
+        };
+        if let Some(select) = select {
+            let h = self.regs.read8(regs::HOST_CONTROL) & !hc::DMA_MASK;
+            self.regs.write8(regs::HOST_CONTROL, h | select);
+        }
         self.regs.write16(regs::BLOCK_SIZE, d.block_size as u16 | regs::BOUNDARY_512K);
         self.regs.write16(regs::BLOCK_COUNT, d.blocks as u16);
         self.regs.write8(regs::TIMEOUT_CONTROL, 0xE);
@@ -705,27 +732,7 @@ impl<R: Regs, P: Platform> Host<R, P> {
         if !d.write {
             mode |= tm::READ;
         }
-        let select = match self.mode {
-            TransferMode::Pio => return Ok(mode),
-            TransferMode::Sdma => {
-                self.regs.write32(regs::SDMA_ADDRESS, self.data.phys() as u32);
-                hc::DMA_SDMA
-            }
-            TransferMode::Adma32 | TransferMode::Adma64 => {
-                self.write_descriptors(len);
-                let table = self.desc.phys();
-                self.regs.write32(regs::ADMA_ADDRESS, table as u32);
-                if self.mode == TransferMode::Adma64 {
-                    self.regs.write32(regs::ADMA_ADDRESS_HI, (table >> 32) as u32);
-                    hc::DMA_ADMA64
-                } else {
-                    hc::DMA_ADMA32
-                }
-            }
-        };
-        let h = self.regs.read8(regs::HOST_CONTROL) & !hc::DMA_MASK;
-        self.regs.write8(regs::HOST_CONTROL, h | select);
-        Ok(mode | tm::DMA)
+        Ok(if select.is_some() { mode | tm::DMA } else { mode })
     }
 
     /// An ADMA2 descriptor table covering the first `len` bytes of the buffer.

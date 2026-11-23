@@ -147,8 +147,16 @@ enum Phase {
     /// A fixed block the card sends (registers, status, tuning).
     Fixed(Vec<u8>),
     /// Sectors from partition `part` starting at `sector`; `count` if bounded.
-    Read { part: usize, sector: u64, count: Option<u32> },
-    Write { part: usize, sector: u64, count: Option<u32> },
+    Read {
+        part: usize,
+        sector: u64,
+        count: Option<u32>,
+    },
+    Write {
+        part: usize,
+        sector: u64,
+        count: Option<u32>,
+    },
 }
 
 pub struct Card {
@@ -222,10 +230,8 @@ impl Card {
         let s = &self.spec;
         let mut e = [0u8; 512];
         e[ext::REV] = 8;
-        e[ext::DEVICE_TYPE] = ext::HS26
-            | ext::HS52
-            | if s.hs200 { ext::HS200_18 } else { 0 }
-            | if s.hs400 { ext::HS400_18 } else { 0 };
+        e[ext::DEVICE_TYPE] =
+            ext::HS26 | ext::HS52 | if s.hs200 { ext::HS200_18 } else { 0 } | if s.hs400 { ext::HS400_18 } else { 0 };
         e[ext::SEC_COUNT..ext::SEC_COUNT + 4].copy_from_slice(&(s.sectors as u32).to_le_bytes());
         e[ext::HC_ERASE_GRP_SIZE] = 1;
         e[ext::BOOT_SIZE_MULT] = (s.boot_kib / 128) as u8;
@@ -1020,7 +1026,11 @@ impl Ctl {
         }
         let hz = self.clock();
         if hz == 0 || !self.powered() {
-            self.violation(format!("CMD{} with {}", index, if hz == 0 { "the card clock stopped" } else { "bus power off" }));
+            self.violation(format!(
+                "CMD{} with {}",
+                index,
+                if hz == 0 { "the card clock stopped" } else { "bus power off" }
+            ));
             self.raise_err(err::CMD_TIMEOUT);
             return;
         }
@@ -1038,7 +1048,12 @@ impl Ctl {
         let card = self.card.as_mut().unwrap();
         if card.v18 != host_v18 && !card.switching {
             let v18 = card.v18;
-            self.violation(format!("CMD{}: card at {} V, host signalling at {} V", index, if v18 { "1.8" } else { "3.3" }, if host_v18 { "1.8" } else { "3.3" }));
+            self.violation(format!(
+                "CMD{}: card at {} V, host signalling at {} V",
+                index,
+                if v18 { "1.8" } else { "3.3" },
+                if host_v18 { "1.8" } else { "3.3" }
+            ));
         }
         let fault = self.take_fault(index, false);
         if fault == Some(Fault::CmdTimeout) {
@@ -1402,7 +1417,8 @@ impl Ctl {
 
     fn tune_step(&mut self, index: u8, block_size: usize) {
         let Some(card) = self.card.as_mut() else { return };
-        let expect: Vec<u8> = if index == 21 && card.bus_width() == 8 { TUNING_8BIT.to_vec() } else { TUNING_4BIT.to_vec() };
+        let expect: Vec<u8> =
+            if index == 21 && card.bus_width() == 8 { TUNING_8BIT.to_vec() } else { TUNING_4BIT.to_vec() };
         let steps = card.spec.tuning_steps;
         let got = card.read_block(block_size);
         if got.as_deref() != Some(&expect[..]) {
@@ -1444,6 +1460,10 @@ impl Ctl {
                 self.w32(o, v);
                 if let Some(s) = self.sdma.take() {
                     self.run_sdma(s);
+                } else if self.r16(regs::BLOCK_COUNT) != 0 && self.r8(regs::HOST_CONTROL) & hc::DMA_MASK == hc::DMA_SDMA
+                {
+                    // QEMU (and older controllers) start a transfer here.
+                    self.violation(String::from("SDMA address written with a block count set"));
                 }
                 return;
             }
@@ -1490,7 +1510,8 @@ pub struct Mock(Arc<Lock<Ctl>>);
 /// Capabilities of a version 3 controller with everything: 8-bit bus,
 /// ADMA2 with 64-bit addresses, SDMA, high speed, 3.3 and 1.8 V, SDR50,
 /// SDR104 and DDR50, a 200 MHz base clock.
-pub const CAPS_FULL: u64 = 0x34 | 1 << 7 | 200 << 8 | 1 << 18 | 1 << 19 | 1 << 21 | 1 << 22 | 1 << 24 | 1 << 26 | 1 << 28 | 0x7 << 32;
+pub const CAPS_FULL: u64 =
+    0x34 | 1 << 7 | 200 << 8 | 1 << 18 | 1 << 19 | 1 << 21 | 1 << 22 | 1 << 24 | 1 << 26 | 1 << 28 | 0x7 << 32;
 /// What QEMU's sdhci-pci reports by default (version 2: 52 MHz, ADMA2 and SDMA, 3.3 and 1.8 V).
 pub const CAPS_QEMU: u64 = 0x0578_34B4;
 
@@ -1574,7 +1595,8 @@ impl Mock {
     /// Whether the controller asserts its interrupt.
     pub fn irq(&self) -> bool {
         self.0.with(|c| {
-            c.r16(regs::INT_STATUS) & c.r16(regs::INT_SIGNAL) != 0 || c.r16(regs::ERR_STATUS) & c.r16(regs::ERR_SIGNAL) != 0
+            c.r16(regs::INT_STATUS) & c.r16(regs::INT_SIGNAL) != 0
+                || c.r16(regs::ERR_STATUS) & c.r16(regs::ERR_SIGNAL) != 0
         })
     }
 

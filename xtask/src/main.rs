@@ -4,7 +4,11 @@
 //!   cargo xtask launch [--last] [--no-open]  a page to choose the options below and launch (`make run`);
 //!                                         --last boots the last configuration chosen there (`make quick`)
 //!   cargo xtask run [options]           boot the persistent disk target/waveos-aurora.img in QEMU
-//!       --disk ahci|virtio|nvme           storage controller for the disk (default: ahci)
+//!       --disk ahci|virtio|nvme|sd|emmc   storage controller for the disk (default: ahci); sd and emmc put
+//!                                         it on an SDHCI card, with a copy of its EFI partition on SATA for
+//!                                         the firmware, which can't read cards
+//!       --sd-card                         a second SD reader with a FAT card (target/sd-card.img); eject and
+//!                                         insert it from the QEMU monitor (`eject sdcard`, `change sdcard …`)
 //!       --fresh-disk                      recreate the disk (erases files saved inside WaveOS)
 //!       --monitor                         open the live System Explorer (http://127.0.0.1:7777)
 //!       --net virtio|e1000|e1000e|igb|rtl8139|none  network card (default virtio; also for `test`)
@@ -38,7 +42,8 @@
 //!                                         AURORA_FUZZ_ROUNDS, AURORA_FUZZ_ITERS, AURORA_LINUXFUZZ_CHILDREN and
 //!                                         AURORA_LINUXFUZZ_CALLS make the fuzzers run longer, with
 //!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 240;
-//!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run)
+//!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run;
+//!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data)
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
@@ -91,7 +96,7 @@ fn main() {
     let smp: u32 =
         args.iter().position(|a| a == "--smp").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(4);
     if !runconfig::accepts(runconfig::DISKS, disk) {
-        eprintln!("--disk must be ahci, virtio or nvme");
+        eprintln!("--disk must be ahci, virtio, nvme, sd or emmc");
         exit(2);
     }
     let net =
@@ -220,7 +225,8 @@ fn main() {
             // On the standard display, --resolution is the bootloader's choice (as Settings makes it).
             if !gpu.starts_with("virtio") {
                 if let Some(r) = args.iter().position(|a| a == "--resolution").and_then(|i| args.get(i + 1)) {
-                    image::set_boot_option(&img, "resolution", r.split(',').next().unwrap_or(r)).expect("write boot.conf");
+                    image::set_boot_option(&img, "resolution", r.split(',').next().unwrap_or(r))
+                        .expect("write boot.conf");
                 }
             }
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
@@ -262,6 +268,12 @@ fn main() {
                     let stick = root().join("target/usb-stick.img");
                     image::create_usb_stick(&stick).expect("USB stick image");
                     stick
+                }),
+                emmc_partitions: false,
+                sd_card: flag("--sd-card").then(|| {
+                    let card = root().join("target/sd-card.img");
+                    image::create_sd_card(&card).expect("SD card image");
+                    card
                 }),
             };
             let mut cmd = qemu(&img, &opts);
@@ -903,8 +915,13 @@ struct RunOpts<'a> {
     headless: bool,
     gdb: bool,
     log_int: bool,
-    /// Storage controller: ahci, virtio or nvme.
+    /// Storage controller: ahci, virtio, nvme, sd or emmc.
     disk: &'a str,
+    /// eMMC with boot and RPMB partitions before the user area (the image
+    /// is `image::create_emmc`'s).
+    emmc_partitions: bool,
+    /// A second SD card (a raw image), in a reader of its own.
+    sd_card: Option<PathBuf>,
     allow_reboot: bool,
     /// Unix socket for the kernel's COM2 telemetry stream (System Explorer).
     telemetry: Option<PathBuf>,
@@ -988,6 +1005,68 @@ fn rtc_timestamp(unix: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}", rem / 3600, rem / 60 % 60, rem % 60)
 }
 
+/// The disk's QEMU arguments. SD cards and eMMC sit on an SDHCI controller
+/// (version 3, with 64-bit ADMA2 and an 8-bit bus); OVMF can't read them,
+/// so a copy of their EFI partition on the SATA port starts the bootloader.
+fn disk_args(img: &Path, opts: &RunOpts) -> Vec<String> {
+    let mut a: Vec<String> = Vec::new();
+    match opts.disk {
+        "sd" | "emmc" => {
+            let emmc = opts.disk == "emmc";
+            let hidden =
+                if emmc && opts.emmc_partitions { 2 * image::EMMC_BOOT_BYTES + image::EMMC_RPMB_BYTES } else { 0 };
+            let len = fs::metadata(img).map(|m| m.len()).unwrap_or(0);
+            if !image::sd_size_ok(len.saturating_sub(hidden)) {
+                eprintln!(
+                    "{} is {} bytes: an SD card or eMMC must be a power of two up to 2 GiB, or a multiple of 512 KiB",
+                    img.display(),
+                    len.saturating_sub(hidden)
+                );
+                exit(1);
+            }
+            let stub = session_dir().join("card-boot-stub.img");
+            image::esp_stub(img, hidden, &stub).expect("copy the card's EFI partition for the firmware");
+            let card = if !emmc {
+                String::from("sd-card,id=card0,drive=disk")
+            } else if hidden != 0 {
+                format!(
+                    "emmc,id=card0,drive=disk,boot-partition-size={},rpmb-partition-size={}",
+                    image::EMMC_BOOT_BYTES,
+                    image::EMMC_RPMB_BYTES
+                )
+            } else {
+                String::from("emmc,id=card0,drive=disk")
+            };
+            a.extend([
+                "-drive".into(),
+                format!("id=stub,if=none,format=raw,file={}", stub.display()),
+                "-device".into(),
+                "ide-hd,drive=stub,bus=ide.0,bootindex=0".into(),
+                "-device".into(),
+                "sdhci-pci,id=sdhci0,sd-spec-version=3,capareg=0x157C34B4".into(),
+                "-drive".into(),
+                format!("id=disk,if=none,format=raw,file={}", img.display()),
+                "-device".into(),
+                card,
+            ]);
+        }
+        _ => {
+            let device = match opts.disk {
+                "virtio" => "virtio-blk-pci,drive=disk,disable-legacy=on,bootindex=0",
+                "nvme" => "nvme,drive=disk,serial=aurora0,bootindex=0",
+                _ => "ide-hd,drive=disk,bus=ide.0,bootindex=0",
+            };
+            a.extend([
+                "-drive".into(),
+                format!("id=disk,if=none,format=raw,file={}", img.display()),
+                "-device".into(),
+                device.into(),
+            ]);
+        }
+    }
+    a
+}
+
 fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let code = find_ovmf();
     let vars = ovmf_vars(&code);
@@ -1029,12 +1108,14 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     }
     cmd.arg("-drive").arg(format!("if=pflash,format=raw,readonly=on,file={}", code.display()));
     cmd.arg("-drive").arg(format!("if=pflash,format=raw,file={}", vars.display()));
-    cmd.arg("-drive").arg(format!("id=disk,if=none,format=raw,file={}", img.display()));
-    cmd.arg("-device").arg(match opts.disk {
-        "virtio" => "virtio-blk-pci,drive=disk,disable-legacy=on,bootindex=0",
-        "nvme" => "nvme,drive=disk,serial=aurora0,bootindex=0",
-        _ => "ide-hd,drive=disk,bus=ide.0,bootindex=0",
-    });
+    cmd.args(disk_args(img, opts));
+    if let Some(card) = &opts.sd_card {
+        // A second SD reader (version 2, the default capabilities: 32-bit
+        // ADMA2) with a card that tests can pull out and put back.
+        cmd.args(["-device", "sdhci-pci,id=sdhci1"]);
+        cmd.arg("-drive").arg(format!("id=sdcard,if=none,format=raw,file={}", card.display()));
+        cmd.args(["-device", "sd-card,id=sdcard,drive=sdcard"]);
+    }
     // Intel HD Audio with a line-out codec.
     let backend = match opts.audio.strip_prefix("wav:") {
         Some(path) => format!("wav,id=snd,path={path}"),
@@ -1249,7 +1330,9 @@ fn repo_response(req: &[u8]) -> Option<Vec<u8>> {
     let safe = !rest.is_empty() && rest.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
     let body = safe.then(|| fs::read(root().join("target/test-repo").join(rest)).ok()).flatten();
     let body = match body {
-        Some(b) if bad && rest == "index.txt" => String::from_utf8_lossy(&b).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes(),
+        Some(b) if bad && rest == "index.txt" => {
+            String::from_utf8_lossy(&b).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes()
+        }
         Some(b) => b,
         None => return Some(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()),
     };
@@ -1329,10 +1412,27 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
             image::set_boot_option(&img, "sleep", "off").expect("write boot.conf");
         }
         image::set_boot_option(&img, "gpu", gpu_driver(gpu)).expect("write boot.conf");
+        // The SD and eMMC tests check the card they run from.
+        image::set_boot_option(&img, "test_disk", disk).expect("write boot.conf");
+        if let Ok(mode) = env::var("AURORA_SDHCI") {
+            // Force PIO, SDMA or ADMA2 for every SD card (see docs/HARDWARE.md).
+            image::set_boot_option(&img, "sdhci", &mode).expect("write boot.conf");
+        }
+        // A second SD card in every run: data integrity, hot-plug.
+        let sd_card = root().join("target/test-sd-card.img");
+        image::create_sd_card(&sd_card).expect("SD card image");
+        // eMMC: boot and RPMB partitions in front of the disk.
+        let boot_img = if disk == "emmc" {
+            let emmc = root().join("target/test-emmc.img");
+            image::create_emmc(&img, &emmc).expect("eMMC image");
+            emmc
+        } else {
+            img.clone()
+        };
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let output = match run_tests_once(&img, disk, smp, net, gpu, usb, fwd_port) {
+            let output = match run_tests_once(&TestMedia { img: &boot_img, sd_card: &sd_card }, disk, smp, net, gpu, usb, fwd_port) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
                     // The firmware never handed back control: some OVMF builds
@@ -1345,6 +1445,10 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
             };
             if boot == 2 && !output.contains("verified from previous boot") {
                 eprintln!("\npersistence check FAILED: the second boot did not find the first boot's file");
+                exit(1);
+            }
+            if disk == "emmc" && !image::emmc_hidden_intact(&boot_img).unwrap_or(false) {
+                eprintln!("\neMMC check FAILED: a boot or RPMB partition was written");
                 exit(1);
             }
             if output.contains("usb-audio: tone played") {
@@ -1474,8 +1578,14 @@ fn recorded_peak(path: &Path) -> i32 {
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
 /// as an error if the tests failed or timed out.
+/// The disk image a test boot runs from, and the second SD reader's card.
+struct TestMedia<'a> {
+    img: &'a Path,
+    sd_card: &'a Path,
+}
+
 fn run_tests_once(
-    img: &Path,
+    media: &TestMedia,
     disk: &str,
     smp: u32,
     net: &str,
@@ -1517,8 +1627,10 @@ fn run_tests_once(
             image::create_usb_stick(&stick).expect("USB stick image");
             stick
         }),
+        emmc_partitions: disk == "emmc",
+        sd_card: Some(media.sd_card.to_path_buf()),
     };
-    let mut cmd = qemu(img, &opts);
+    let mut cmd = qemu(media.img, &opts);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped());
     let mut child = cmd.spawn().expect("failed to launch qemu");
     let stdout = child.stdout.take().unwrap();
@@ -1526,6 +1638,7 @@ fn run_tests_once(
     let slept_at: std::sync::Arc<std::sync::Mutex<Option<Instant>>> = Default::default();
     let woke = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (slept_w, woke_w) = (slept_at.clone(), woke.clone());
+    let sd_path = media.sd_card.to_path_buf();
     let reader = std::thread::spawn(move || {
         let mut all = String::new();
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -1545,6 +1658,21 @@ fn run_tests_once(
                 );
                 if let Err(e) = qmp_execute(&add) {
                     eprintln!("could not plug the USB speaker back in: {e}");
+                }
+            }
+            // The SD hot-plug test pulls the second card out and puts it back.
+            if line.contains("harness: eject sd-card") {
+                if let Err(e) = qmp_execute(r#"{"execute": "eject", "arguments": {"id": "sdcard", "force": true}}"#) {
+                    eprintln!("could not eject the SD card: {e}");
+                }
+            }
+            if line.contains("harness: insert sd-card") {
+                let insert = format!(
+                    r#"{{"execute": "blockdev-change-medium", "arguments": {{"id": "sdcard", "filename": "{}", "format": "raw"}}}}"#,
+                    sd_path.display()
+                );
+                if let Err(e) = qmp_execute(&insert) {
+                    eprintln!("could not insert the SD card: {e}");
                 }
             }
             if line.contains("awake after S3") {

@@ -23,13 +23,8 @@ pub mod status {
     pub const SWITCH_ERROR: u32 = 1 << 7;
     pub const APP_CMD: u32 = 1 << 5;
     /// Errors a read or write reports about itself.
-    pub const DATA_ERRORS: u32 = OUT_OF_RANGE
-        | ADDRESS_ERROR
-        | BLOCK_LEN_ERROR
-        | WP_VIOLATION
-        | CARD_ECC_FAILED
-        | CC_ERROR
-        | ERROR;
+    pub const DATA_ERRORS: u32 =
+        OUT_OF_RANGE | ADDRESS_ERROR | BLOCK_LEN_ERROR | WP_VIOLATION | CARD_ECC_FAILED | CC_ERROR | ERROR;
     pub const ERASE_ERRORS: u32 = DATA_ERRORS | ERASE_SEQ_ERROR | ERASE_PARAM;
 
     /// The card's state (bits 12:9).
@@ -280,7 +275,11 @@ impl ExtCsd {
     pub fn parse(e: &[u8]) -> ExtCsd {
         let le32 = |o: usize| u32::from_le_bytes([e[o], e[o + 1], e[o + 2], e[o + 3]]);
         let rev = e[ext::REV];
-        let cmd6 = if rev >= 6 && e[ext::GENERIC_CMD6_TIME] != 0 { e[ext::GENERIC_CMD6_TIME] as u64 * 10_000 } else { 500_000 };
+        let cmd6 = if rev >= 6 && e[ext::GENERIC_CMD6_TIME] != 0 {
+            e[ext::GENERIC_CMD6_TIME] as u64 * 10_000
+        } else {
+            500_000
+        };
         ExtCsd {
             rev,
             sectors: le32(ext::SEC_COUNT) as u64,

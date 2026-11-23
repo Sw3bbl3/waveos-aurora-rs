@@ -259,7 +259,7 @@ impl Platform for KPlatform {
         }
         // Polled: most completions take microseconds; then let others run.
         self.spins += 1;
-        if self.spins % 64 != 0 {
+        if !self.spins.is_multiple_of(64) {
             for _ in 0..100 {
                 core::hint::spin_loop();
             }
@@ -393,26 +393,29 @@ impl BlockDevice for SdCard {
 /// The boot options' limits.
 fn boot_limits() -> Limits {
     let opt = crate::gui::prefs::boot_option;
-    let mut l = Limits::default();
-    l.mode = match opt("sdhci").as_deref() {
+    let mode = match opt("sdhci").as_deref() {
         Some("pio") => Some(TransferMode::Pio),
         Some("sdma") => Some(TransferMode::Sdma),
         Some("adma32") => Some(TransferMode::Adma32),
         Some("adma" | "adma64") => Some(TransferMode::Adma64),
         _ => None,
     };
-    l.speed = match opt("sdhci_speed").as_deref() {
+    let speed = match opt("sdhci_speed").as_deref() {
         Some("high") => Speed::High,
         Some("default") => Speed::Default,
         Some("slow") => Speed::Slow,
         _ => Speed::Ultra,
     };
-    l.hs400 = opt("emmc").as_deref() == Some("hs400");
-    l
+    Limits { mode, speed, hs400: opt("emmc").as_deref() == Some("hs400"), ..Limits::default() }
 }
 
 /// Sets up one slot's controller; brings up a card if there is one.
-fn add_slot(regs: KRegs, shared: &'static Shared, location: String, removable_hint: Option<bool>) -> Option<&'static SdSlot> {
+fn add_slot(
+    regs: KRegs,
+    shared: &'static Shared,
+    location: String,
+    removable_hint: Option<bool>,
+) -> Option<&'static SdSlot> {
     let index = SLOTS.lock().len();
     let name = format!("mmc{}", index);
     let platform = KPlatform { shared, name: name.clone(), spins: 0 };
@@ -455,7 +458,13 @@ fn add_slot(regs: KRegs, shared: &'static Shared, location: String, removable_hi
         if c.bus8 { ", 8-bit" } else { "" },
         if c.high_speed { ", high speed" } else { "" },
         if c.v18 { ", 1.8 V" } else { "" },
-        if c.sdr104 { ", SDR104" } else if c.sdr50 { ", SDR50" } else { "" },
+        if c.sdr104 {
+            ", SDR104"
+        } else if c.sdr50 {
+            ", SDR50"
+        } else {
+            ""
+        },
         if c.ddr50 { ", DDR50" } else { "" },
         if removable { "removable" } else { "embedded" }
     );
@@ -543,7 +552,10 @@ pub fn probe_pci(dev: &pci::Device) {
     let function: &'static Function = Box::leak(Box::new(Function { slots: shared.iter().map(|s| s.1).collect() }));
     let mut slots = Vec::new();
     for &(i, s) in &shared {
-        let location = format!("PCI {:02x}:{:02x}.{} {:04x}:{:04x} slot {}", dev.bus, dev.dev, dev.func, dev.vendor, dev.device, i);
+        let location = format!(
+            "PCI {:02x}:{:02x}.{} {:04x}:{:04x} slot {}",
+            dev.bus, dev.dev, dev.func, dev.vendor, dev.device, i
+        );
         if let Some(slot) = add_slot(KRegs::Mmio(Mmio(s)), s, location, None) {
             slots.push(slot);
         }
@@ -577,7 +589,8 @@ pub fn start() {
     for slot in &slots {
         apply_limits(slot, limits);
         let card = slot.card.lock().clone();
-        if let (Some(card), true) = (card, slot.removable) {
+        // eMMC is soldered down, whatever the slot says: an internal disk.
+        if let (Some(card), true) = (card.filter(|c| !c.info.kind.is_mmc()), slot.removable) {
             let dev = super::devices().into_iter().find(|d| d.name() == card.name());
             if let Some(dev) = dev {
                 let v = super::removable::mount_volumes(&dev, "SD Card");
@@ -693,8 +706,11 @@ fn acpi_task() {
         let base = crate::mm::paging::map_mmio(phys, len.max(0x1000));
         let shared = Shared::new(base);
         // eMMC controllers (and their ACPI ids) are soldered-down slots.
-        let emmc = matches!(d.hid.as_str(), "80860F14" | "80865ACC" | "INT33C6" | "INT3436" | "AMDI0040") && d.uid != Some(3);
-        let Some(slot) = add_slot(KRegs::Mmio(Mmio(shared)), shared, format!("ACPI {} {}", d.path, d.hid), emmc.then_some(false)) else {
+        let emmc =
+            matches!(d.hid.as_str(), "80860F14" | "80865ACC" | "INT33C6" | "INT3436" | "AMDI0040") && d.uid != Some(3);
+        let Some(slot) =
+            add_slot(KRegs::Mmio(Mmio(shared)), shared, format!("ACPI {} {}", d.path, d.hid), emmc.then_some(false))
+        else {
             continue;
         };
         let irq = d.resources.iter().find_map(|r| match r {
@@ -734,7 +750,8 @@ pub fn resume() {
             continue;
         }
         let Some(card) = slot.card.lock().clone() else { continue };
-        let ok = matches!(s.init_card(), Ok(i) if i.sectors == card.info.sectors && i.cid.serial == card.info.cid.serial);
+        let ok =
+            matches!(s.init_card(), Ok(i) if i.sectors == card.info.sectors && i.cid.serial == card.info.cid.serial);
         if !ok {
             // Gone, or another card: the watcher unmounts it.
             log!("sdhci", "{}: the card did not come back after sleep", slot.name);
@@ -746,8 +763,34 @@ pub fn resume() {
 }
 
 /// Interrupts the SD host controllers have taken (self-tests).
+#[cfg(feature = "ktest")]
 pub fn interrupts() -> u64 {
     SLOTS.lock().iter().map(|s| s.shared.interrupts.load(Ordering::Relaxed)).sum()
+}
+
+/// PCIe card readers with their own register interface (not SDHCI): named
+/// in the boot log as unsupported.
+pub fn unsupported_reader(vendor: u16, device: u16) -> Option<&'static str> {
+    Some(match (vendor, device) {
+        (0x10EC, 0x5209) => "Realtek RTS5209",
+        (0x10EC, 0x5227) => "Realtek RTS5227",
+        (0x10EC, 0x5228) => "Realtek RTS5228",
+        (0x10EC, 0x5229) => "Realtek RTS5229",
+        (0x10EC, 0x522A) => "Realtek RTS522A",
+        (0x10EC, 0x5249) => "Realtek RTS5249",
+        (0x10EC, 0x524A) => "Realtek RTS524A",
+        (0x10EC, 0x525A) => "Realtek RTS525A",
+        (0x10EC, 0x5260) => "Realtek RTS5260",
+        (0x10EC, 0x5261) => "Realtek RTS5261",
+        (0x10EC, 0x5264) => "Realtek RTS5264",
+        (0x10EC, 0x5286) => "Realtek RTL8402",
+        (0x10EC, 0x5287) => "Realtek RTL8411B",
+        (0x10EC, 0x5289) => "Realtek RTL8411",
+        (0x1AEA, 0x6601) => "Alcor Micro AU6601",
+        (0x1AEA, 0x6621) => "Alcor Micro AU6621",
+        (0x1AEA, 0x6625) => "Alcor Micro AU6625",
+        _ => return None,
+    })
 }
 
 /// One line per slot, for the System Report and the self-test.
@@ -757,12 +800,7 @@ pub fn list() -> Vec<String> {
         .iter()
         .map(|s| {
             let card = s.card.lock().clone();
-            format!(
-                "{} ({}): {}",
-                s.name,
-                s.location,
-                card.map_or_else(|| String::from("empty"), |c| c.describe())
-            )
+            format!("{} ({}): {}", s.name, s.location, card.map_or_else(|| String::from("empty"), |c| c.describe()))
         })
         .collect()
 }
@@ -781,6 +819,10 @@ pub mod test {
     /// Switches a slot's transfer mode; returns the one it uses.
     pub fn set_mode(name: &str, mode: TransferMode) -> Option<TransferMode> {
         Some(slot(name)?.slot.lock().host.set_mode(mode))
+    }
+
+    pub fn buffer_phys(name: &str) -> u64 {
+        slot(name).map_or(0, |s| s.slot.lock().host.buffer().as_ptr() as u64)
     }
 
     pub fn card_info(name: &str) -> Option<CardInfo> {

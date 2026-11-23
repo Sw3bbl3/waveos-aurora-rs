@@ -25,7 +25,7 @@ jobs:
       - name: Validate bilingual handbook
         run: cargo xtask docs
       - name: Filesystem library tests
-        run: cargo test -p aurora-desktop -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-zip -p aurora-wifi -p aurora-hid -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask
+        run: cargo test -p aurora-desktop -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-zip -p aurora-wifi -p aurora-hid -p aurora-sdmmc -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask
 
       - name: File transfer worker fault tests
         run: |
@@ -41,7 +41,8 @@ jobs:
       # Bound concurrent VM builds while retaining every configuration.
       max-parallel: 2
       matrix:
-        disk: [ahci, virtio, nvme]
+        # sd: the system on an SD card (eMMC needs QEMU's newer emmc device, which Ubuntu 24.04's 8.2 lacks).
+        disk: [ahci, virtio, nvme, sd]
         smp: [4]
         net: [virtio]
         include:

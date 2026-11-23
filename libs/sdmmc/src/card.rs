@@ -281,7 +281,11 @@ impl<R: Regs, P: Platform> Slot<R, P> {
     /// ACMD41 until the card reports power-up; its OCR.
     fn sd_power_up(&mut self, v2: bool) -> Result<u32> {
         let caps = self.host.caps;
-        let s18r = v2 && self.ultra && caps.v18 && caps.version >= crate::regs::version::V3 && (caps.sdr50 || caps.sdr104 || caps.ddr50);
+        let s18r = v2
+            && self.ultra
+            && caps.v18
+            && caps.version >= crate::regs::version::V3
+            && (caps.sdr50 || caps.sdr104 || caps.ddr50);
         // 2.7-3.6 V; high capacity and 1.8 V (2.00 cards); maximum performance.
         let arg = 0x00FF_8000 | if v2 { 1 << 30 | 1 << 28 } else { 0 } | if s18r { 1 << 24 } else { 0 };
         let deadline = self.host.platform.now_us() + INIT_TIMEOUT_US;

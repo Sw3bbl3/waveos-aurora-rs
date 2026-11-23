@@ -67,7 +67,8 @@ Everything that works today, layer by layer. For the short tour, see the [README
 - **aurora-sh**, the Terminal shell. It runs about 35 programs from `/System/Bin` as separate processes (`ls`, `cat`, `grep`, `wc`, `ps`, `kill`, `cp`, `mv`, `neofetch`, `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play`, `ping`, `ifconfig`, `nslookup`, `fetch`…). It supports pipelines (`ls -l | grep txt`), redirection (`>`, `>>`), lists (`a && b || c; d`), Ctrl+C and Tab completion.
 - **Storage:**
   - PCI enumeration, plus interrupt-driven **AHCI** (SATA), **virtio-blk** and **NVMe** drivers
-  - **USB sticks** appear in Files under Locations and can be ejected; booted from a USB stick, WaveOS keeps your files on it
+  - **SD cards and eMMC** on SD Host Controllers (PCI or ACPI): PIO, SDMA and ADMA2, high speed, UHS-I, eMMC HS200 (and HS400 on request), TRIM and cache flush, recovery from bus errors. WaveOS installs to and runs from them; eMMC boot partitions stay untouched
+  - **USB sticks and SD cards** appear in Files under Locations when plugged in and can be ejected; booted from one, WaveOS keeps your files on it
   - your files live on **AuroraFS**, our own journaled filesystem, and survive reboots and power cuts
   - the EFI partition is readable and writable at `/Boot` (FAT32 with long file names)
   - `/System` is the read-only system image
@@ -91,12 +92,12 @@ Everything that works today, layer by layer. For the short tour, see the [README
 |---|---|
 | `cargo xtask build` | Builds the bootloader, kernel and user space into `target/esp/` |
 | `cargo xtask run --monitor` | Same as `run`, plus the live System Explorer in your browser |
-| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB, network). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme` picks the controller, `--net virtio\|e1000\|e1000e\|igb\|rtl8139\|none` the network card, `--usb xhci\|ehci\|ehci-ohci\|ohci\|uhci` the USB controller, `--smp N` the CPUs, `--battery` adds a laptop battery (`--battery=host` mirrors this computer's, `--battery=20,charging` fixes one), `--usb-stick` plugs in a USB stick, `--usb-audio` a USB speaker, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
+| `cargo xtask run` | Builds, then boots `target/waveos-aurora.img` in QEMU (4 CPUs, sound, USB, network). Your files on it persist across runs and rebuilds. Options: `--disk ahci\|virtio\|nvme\|sd\|emmc` picks the controller (`sd` and `emmc` run from a card), `--net virtio\|e1000\|e1000e\|igb\|rtl8139\|none` the network card, `--usb xhci\|ehci\|ehci-ohci\|ohci\|uhci` the USB controller, `--smp N` the CPUs, `--battery` adds a laptop battery (`--battery=host` mirrors this computer's, `--battery=20,charging` fixes one), `--usb-stick` plugs in a USB stick, `--sd-card` adds a card reader with a card, `--usb-audio` a USB speaker, `--fresh-disk` starts over, `--headless`, `--gdb`, `--int` |
 | `cargo xtask test` | Runs the kernel self-tests headless, booting the same disk twice to check persistence. Add `--disk` to pick the controller, `--net` the network card, `--smp 1` for one CPU |
 | `cargo xtask web-check --output target/network-web/check` | Builds a disposable full guest and drives Voyage through local browser/transfer/TLS fixtures and a public site sample; `--local-only` omits public sites, `--connection-only` tests live link loss/recovery, `--benchmark-only` records new-process and revisit workloads |
 | `cargo xtask image` | Creates `target/waveos-aurora-usb.img` (ESP plus AuroraFS), ready to `dd` onto a USB stick |
 | `cargo xtask lint` | Clippy on the host libraries, kernel, bootloader and user space, each for its own target, with warnings as errors |
-| `cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask` | Host-side tests: filesystems (with crash recovery), the TrueType engine, the image and sound codecs, URLs and HTTP, TLS against rustls, the browser engine, the test ACPI table, and robustness tests that feed every parser thousands of corrupted inputs (`AURORA_MUTATIONS=N` runs them N times longer) |
+| `cargo test -p aurora-sdmmc -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask` | Host-side tests: filesystems (with crash recovery), the TrueType engine, the image and sound codecs, URLs and HTTP, TLS against rustls, the browser engine, the test ACPI table, and robustness tests that feed every parser thousands of corrupted inputs (`AURORA_MUTATIONS=N` runs them N times longer) |
 | `cargo xtask iso` | Creates `target/waveos-aurora.iso` for a UEFI VM (requires xorriso; enable EFI) |
 
 The kernel log streams to your terminal over the serial port. See [BUILDING.md](BUILDING.md) for debugging and troubleshooting, and [HARDWARE.md](HARDWARE.md) to try WaveOS on a real PC.
@@ -137,7 +138,7 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
              ├─ acpi/     tables, AML runtime (power button, battery, lid), SCI
              ├─ power/    shutdown, restart, S3 sleep and resume
              ├─ drivers/  serial, PS/2 + keyboard layouts, vmmouse, RTC, HPET, PCI, display modes,
-             │            block (AHCI, virtio-blk, NVMe, GPT, MBR), USB (xHCI, EHCI, OHCI, UHCI, hubs, HID,
+             │            block (AHCI, virtio-blk, NVMe, SD/eMMC, GPT, MBR), USB (xHCI, EHCI, OHCI, UHCI, hubs, HID,
              │            storage), game controllers, audio (HDA, mixer),
              │            network (virtio-net, e1000)
              ├─ net/      IPv4, ARP, ICMP, UDP, TCP, DHCP, sockets
