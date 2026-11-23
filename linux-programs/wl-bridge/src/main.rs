@@ -1489,6 +1489,10 @@ impl Server {
             return;
         };
         t.window = Some(id);
+        // The program gets this window's focus for /dev/input and controllers.
+        if let Some(pid) = sys::peer_pid(c.fd) {
+            sys::win_set_program(id, pid);
+        }
         let surface = sys::win_surface(id);
         let size =
             (surface.width as i32 / surface.scale.max(1) as i32, surface.height as i32 / surface.scale.max(1) as i32);

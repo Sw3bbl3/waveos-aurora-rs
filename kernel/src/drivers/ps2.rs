@@ -4,10 +4,12 @@
 //! reports an absolute pointer, so the guest cursor tracks the host cursor
 //! without grabbing. It still signals through IRQ12.
 
+use super::evdev::{self, Device};
 use super::input::{self, InputEvent};
 use super::keyboard::Decoder;
 use super::vmmouse;
 use crate::sync::IrqMutex;
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::instructions::port::Port;
 
@@ -145,6 +147,7 @@ pub fn init() {
     let vm = vmmouse::init();
     VMMOUSE.store(vm, Ordering::Relaxed);
     input::add_light_sink(set_lights);
+    linux_devices(size, explorer, vm);
     log!(
         "ps2",
         "keyboard ready; mouse {}{}",
@@ -157,16 +160,70 @@ pub fn init() {
     );
 }
 
+/// The keyboard, the mouse and the VMware pointer as Linux devices (as
+/// `atkbd`, `psmouse` and `vmmouse` name them), made once.
+static LINUX_KEYBOARD: IrqMutex<Option<Arc<Device>>> = IrqMutex::new(None);
+static LINUX_MOUSE: IrqMutex<Option<Arc<Device>>> = IrqMutex::new(None);
+static LINUX_VMMOUSE: IrqMutex<Option<Arc<Device>>> = IrqMutex::new(None);
+static LINUX_SCANCODES: IrqMutex<evdev::sources::Ps2Keys> = IrqMutex::new(evdev::sources::Ps2Keys::new());
+
+fn linux_devices(size: usize, explorer: bool, vm: bool) {
+    use evdev::codes::BUS_I8042;
+    use evdev::{InputId, Location};
+    let mut k = LINUX_KEYBOARD.lock();
+    if k.is_none() {
+        let id = InputId { bustype: BUS_I8042, vendor: 0x0001, product: 0x0001, version: 0xab41 };
+        *k = Some(evdev::sources::keyboard(
+            "AT Translated Set 2 keyboard",
+            id,
+            "isa0060/serio0/input0",
+            Location::Serio(0),
+        ));
+    }
+    drop(k);
+    let mut m = LINUX_MOUSE.lock();
+    if m.is_none() {
+        let (name, product) = match (size, explorer) {
+            (4, true) => ("ImExPS/2 Generic Explorer Mouse", 0x0006),
+            (4, false) => ("ImPS/2 Generic Wheel Mouse", 0x0003),
+            _ => ("PS/2 Generic Mouse", 0x0001),
+        };
+        let id = InputId { bustype: BUS_I8042, vendor: 0x0002, product, version: 0 };
+        *m = Some(evdev::sources::pointer(name, id, "isa0060/serio1/input0", Location::Serio(1), None));
+    }
+    drop(m);
+    let mut v = LINUX_VMMOUSE.lock();
+    if vm && v.is_none() {
+        let id = InputId { bustype: BUS_I8042, vendor: 0x0002, product: 0x0013, version: 0 };
+        let range = Some(((0, 0xFFFF), (0, 0xFFFF)));
+        *v = Some(evdev::sources::pointer(
+            "VirtualPS/2 VMware VMMouse",
+            id,
+            "isa0060/serio1/input1",
+            Location::Serio(1),
+            range,
+        ));
+    }
+}
+
 pub fn keyboard_irq() {
-    let byte = unsafe { Port::<u8>::new(DATA).read() };
+    keyboard_byte(unsafe { Port::<u8>::new(DATA).read() });
+}
+
+/// A byte from the keyboard (tests type through here too).
+pub fn keyboard_byte(byte: u8) {
     if let Some(ev) = KEYBOARD.lock().feed(byte) {
         input::push(InputEvent::Key(ev));
+    }
+    if let Some(d) = LINUX_KEYBOARD.lock().clone() {
+        LINUX_SCANCODES.lock().feed(&d, byte);
     }
 }
 
 pub fn mouse_irq() {
     let byte = unsafe { Port::<u8>::new(DATA).read() };
     if VMMOUSE.load(Ordering::Relaxed) {
+        let linux = LINUX_VMMOUSE.lock().clone();
         while let Some(p) = vmmouse::poll() {
             let (w, h) = input::screen_size();
             let x = (p.x as i64 * w as i64 / 0xFFFF) as i32;
@@ -174,6 +231,10 @@ pub fn mouse_irq() {
             input::push(InputEvent::Pointer { x, y, buttons: p.buttons });
             if p.wheel != 0 {
                 input::push(InputEvent::Scroll { dx: 0, dy: p.wheel as i32 * input::NOTCH });
+            }
+            if let Some(d) = &linux {
+                // vmmouse's wheel counts towards the user; Linux's away.
+                evdev::sources::pointer_report(d, p.buttons, Some(p.x as i32), Some(p.y as i32), -(p.wheel as i32), 0);
             }
         }
         return;
@@ -196,6 +257,7 @@ pub fn mouse_irq() {
     }
     let dx = b1 as i32 - (((b0 as i32) << 4) & 0x100);
     let dy = b2 as i32 - (((b0 as i32) << 3) & 0x100);
+    let raw = (dx, -dy);
     let (dx, dy) = input::scale_motion(dx, -dy, &mut m.remainder);
     let (w, h) = input::screen_size();
     m.x = (m.x + dx).clamp(0, w - 1);
@@ -212,6 +274,10 @@ pub fn mouse_irq() {
     m.side = side;
     let (x, y, buttons) = (m.x, m.y, m.buttons);
     drop(m);
+    if let Some(d) = LINUX_MOUSE.lock().clone() {
+        // Linux counts the wheel away from the user, and motion unscaled.
+        evdev::sources::pointer_report(&d, buttons | side << 3, Some(raw.0), Some(raw.1), -wheel, 0);
+    }
     input::push(InputEvent::Pointer { x, y, buttons });
     if wheel != 0 {
         input::push(InputEvent::Scroll { dx: 0, dy: wheel * input::NOTCH });
