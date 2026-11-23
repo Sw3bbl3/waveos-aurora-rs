@@ -71,6 +71,8 @@ const TESTS: &[Test] = &[
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
     ("Linux programs: local and network sockets (nettest)", linux_sockets),
+    ("Linux programs: the DRM device, mode setting, events, PRIME (drmtest)", linux_drm),
+    ("Linux programs: libdrm's modetest on the DRM device", linux_modetest),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
@@ -439,6 +441,72 @@ fn linux_sockets() {
     run_linux_test("nettest", "net-test passed");
 }
 
+/// A fourth drives the display through `/dev/dri/card0` while a stand-in
+/// desktop (an `Output` showing one colour) is on it: the program takes
+/// the display with its first mode set, and when it closes the card — and
+/// again when it is killed holding it — the desktop's picture is back.
+/// The harness checks screendumps of both (see `xtask`).
+fn linux_drm() {
+    use crate::drivers::gpu::{self, output::Output, Damage};
+    let desktop = Output::open(None).expect("no display");
+    let (w, h) = desktop.size();
+    unsafe { desktop.back_buffer() }.fill(0xFF33_6699);
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present");
+    run_linux_test_with("drmtest", &["drmtest"], "drm-test passed", 240_000);
+    let dev = gpu::primary().unwrap();
+    assert_eq!(gpu::owner::holder(&*dev), None, "a program still holds the display");
+    let (_, planes) = dev.state();
+    let shown = planes.iter().any(|p| p.fb.as_ref().is_some_and(|fb| Arc::ptr_eq(fb, desktop.framebuffer())));
+    assert!(shown, "the desktop's picture is not on the display");
+    // The desktop presents again (it was skipped while the program held the display).
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present after");
+}
+
+/// libdrm's own test program, `modetest`, built unmodified with libdrm
+/// (`xtask/src/libdrm.rs`), finds the card by its driver's name, lists its
+/// objects and properties, then sets a mode and page-flips on every flip
+/// event for a few seconds (`-v`, until its standard input ends) — with
+/// the legacy calls, and again with atomic commits.
+fn linux_modetest() {
+    use crate::drivers::gpu::{self, Status};
+    let path = "/System/Linux/bin/modetest";
+    if crate::fs::stat(path).is_err() {
+        crate::kprint!("(skipped: not built) ");
+        return;
+    }
+    let dev = gpu::primary().expect("no display");
+    let driver = crate::compat::linux::drm::driver_for(&*dev).name();
+    let conn = dev.connectors().into_iter().find(|c| c.status == Status::Connected).expect("no connected display");
+    let (crtcs, _) = dev.state();
+    let mode = crtcs.iter().find(|s| s.active).and_then(|s| s.mode).or(conn.preferred().copied()).unwrap();
+    let (code, text) = run_linux_program(path, &["modetest", "-M", driver], None, None, 60_000);
+    assert_eq!(code, Some(0), "modetest (listing) failed");
+    for part in ["Encoders:", "Connectors:", "CRTCs:", "Planes:", "Frame buffers:", "EDID", "DPMS"] {
+        assert!(text.contains(part), "modetest's listing has no {part}");
+    }
+    let pipe = alloc::format!("{}:{}", conn.id, mode.name());
+    // Atomic mode sets need the primary plane named (`-P`).
+    let crtc = dev.crtcs()[0].clone();
+    let primary = dev
+        .planes()
+        .into_iter()
+        .find(|p| p.kind == gpu::PlaneKind::Primary && p.possible_crtcs & (1 << crtc.index) != 0)
+        .unwrap();
+    let plane = alloc::format!("{}@{}:{}x{}", primary.id, crtc.id, mode.hdisplay, mode.vdisplay);
+    // Legacy: flips on each event until its input ends (6 s).
+    let argv = ["modetest", "-M", driver, "-s", &pipe, "-v"];
+    let (code, text) = run_linux_program(path, &argv, Some(6000), None, 60_000);
+    assert_eq!(code, Some(0), "modetest {} failed", argv.join(" "));
+    assert!(text.contains("freq:"), "modetest {} did not page-flip", argv.join(" "));
+    // Atomic: blocking commits in a loop that never ends; killed while it
+    // holds the display, which the desktop then gets back.
+    let argv = ["modetest", "-M", driver, "-a", "-s", &pipe, "-P", &plane, "-v"];
+    let (code, text) = run_linux_program(path, &argv, None, Some("freq:"), 60_000);
+    assert!(text.contains("freq:"), "modetest {} did not commit 60 frames", argv.join(" "));
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "modetest {} ended by itself", argv.join(" "));
+    assert!(eventually(5000, || gpu::owner::holder(&*dev).is_none()), "the desktop did not get the display back");
+}
+
 /// The vDSO's clocks (computed from its time page, as `kernel/vdso/vdso.c`
 /// does) lie between two readings of the kernel's, for both clocks, many
 /// times over a second boundary — after sleep (this runs after the S3
@@ -641,9 +709,33 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
         crate::kprint!("(skipped: built without musl-gcc) ");
         return;
     }
+    let (code, text) = run_linux_program(&path, argv, None, None, timeout_ms);
+    assert_eq!(code, Some(0), "{name} failed");
+    assert!(text.contains(passed), "{name} did not finish");
+}
+
+/// Runs a Linux program to its end (or `timeout_ms`), shows its output and
+/// returns its exit code and output. With `stdin_ms`, its standard input is
+/// a pipe that closes (end of file) after that long; with `kill_on`, it is
+/// killed once its output has that text.
+fn run_linux_program(
+    path: &str,
+    argv: &[&str],
+    stdin_ms: Option<u64>,
+    kill_on: Option<&str>,
+    timeout_ms: u64,
+) -> (Option<i64>, String) {
     let (r, w) = crate::proc::new_pipe(false);
-    let pid = crate::proc::spawn(&path, argv, [None, Some(w.clone()), Some(w)], 0).expect("spawn Linux test");
+    let (stdin, mut stdin_writer) = match stdin_ms {
+        Some(_) => {
+            let (ir, iw) = crate::proc::new_pipe(false);
+            (Some(ir), Some(iw))
+        }
+        None => (None, None),
+    };
+    let pid = crate::proc::spawn(path, argv, [stdin, Some(w.clone()), Some(w)], 0).expect("spawn Linux program");
     let p = crate::proc::get(pid).unwrap();
+    let stdin_until = time::uptime_ms() + stdin_ms.unwrap_or(0);
     let mut out = alloc::vec::Vec::new();
     let deadline = time::uptime_ms() + timeout_ms;
     let mut buf = [0u8; 512];
@@ -654,6 +746,13 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
     let mut report = MemReport::new();
     loop {
         report.tick();
+        if stdin_writer.is_some() && time::uptime_ms() >= stdin_until {
+            stdin_writer = None;
+        }
+        let seen = |m: &str| out.windows(m.len()).any(|w| w == m.as_bytes());
+        if kill_on.is_some_and(seen) && p.exit_code().is_none() {
+            let _ = crate::proc::kill(pid);
+        }
         if reader.readable() {
             match reader.read(&mut buf, true) {
                 Ok(0) => break,
@@ -673,12 +772,11 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
             }
         }
     }
-    let text = String::from_utf8_lossy(&out);
+    let text = String::from(String::from_utf8_lossy(&out));
     for line in text.lines() {
         crate::kprintln!("    {line}");
     }
-    assert_eq!(p.exit_code(), Some(0), "{name} failed");
-    assert!(text.contains(passed), "{name} did not finish");
+    (p.exit_code(), text)
 }
 
 use crate::drivers::block::{self, BlockDevice, BlockResult};

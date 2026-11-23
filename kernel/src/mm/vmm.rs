@@ -86,6 +86,12 @@ pub fn shm_hold(frame: u64) {
     shm_retain(frame);
 }
 
+/// Starts counting frames another owner allocated (a GPU buffer a program
+/// maps), held once by that owner, which lets go with [`shm_release`].
+pub fn shm_count(frames: &[u64]) {
+    shm_adopt(frames, 1);
+}
+
 /// Counts private frames as shared by `holders` (a `fork`: parent and child).
 fn shm_adopt(frames: &[u64], holders: u32) {
     let mut refs = SHM_REFS.lock();

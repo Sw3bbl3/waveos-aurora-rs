@@ -1,6 +1,7 @@
 //! Linux programs for the system image (`/System/Linux`):
 //!
 //! - the C programs in `linux-tests/`, built static with musl (see [`Cc`]);
+//! - libdrm's `modetest` (see `libdrm.rs`);
 //! - BusyBox, from Debian's `busybox-static` package (GPL-2.0, a separate
 //!   program; its copyright file goes along);
 //! - Doom: doomgeneric (`third_party/doomgeneric`, GPL-2.0, a separate
@@ -204,6 +205,7 @@ pub fn programs() -> Vec<Program> {
         return all;
     };
     all.extend(test_programs(&cc));
+    all.extend(super::libdrm::build(&cc));
     all.extend(doom(&cc));
     match super::netsurf::build(&cc) {
         Some(files) => all.extend(files),

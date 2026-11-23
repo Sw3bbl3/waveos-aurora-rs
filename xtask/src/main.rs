@@ -49,6 +49,7 @@ mod help;
 mod i2c_ssdt;
 mod image;
 mod launcher;
+mod libdrm;
 mod linux;
 mod monitor;
 mod netsurf;
@@ -1347,6 +1348,10 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
                 eprintln!("\npersistence check FAILED: the second boot did not find the first boot's file");
                 exit(1);
             }
+            if let Err(e) = check_screendumps(&output) {
+                eprintln!("\nscreen check FAILED: {e}");
+                exit(1);
+            }
             if output.contains("usb-audio: tone played") {
                 let wav = usb_audio_wav(&root().join("target/test-audio.wav"));
                 let (peak, loud_ms) = (recorded_peak(&wav), recorded_loud_ms(&wav));
@@ -1371,6 +1376,71 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
         break;
     }
     println!("\nall kernel tests passed (both boots){}", if sleep { "" } else { " — without the sleep test" });
+}
+
+/// Where the screendump the guest asked for as `name` goes.
+fn screendump_path(name: &str) -> PathBuf {
+    session_dir().join(format!("screendump-{name}.ppm"))
+}
+
+/// The pixel at (`fx`, `fy`) (fractions of the size) of a binary PPM.
+fn ppm_pixel(data: &[u8], fx: f32, fy: f32) -> Option<(u8, u8, u8)> {
+    // "P6", width, height, maxval, then one whitespace byte and the pixels.
+    let mut fields = Vec::new();
+    let mut i = 0;
+    while fields.len() < 4 {
+        while data.get(i)?.is_ascii_whitespace() {
+            i += 1;
+        }
+        let start = i;
+        while !data.get(i)?.is_ascii_whitespace() {
+            i += 1;
+        }
+        fields.push(std::str::from_utf8(&data[start..i]).ok()?);
+    }
+    let (w, h): (usize, usize) = (fields[1].parse().ok()?, fields[2].parse().ok()?);
+    if fields[0] != "P6" || fields[3] != "255" || w == 0 || h == 0 {
+        return None;
+    }
+    let (x, y) = (((w as f32 * fx) as usize).min(w - 1), ((h as f32 * fy) as usize).min(h - 1));
+    let at = i + 1 + (y * w + x) * 3;
+    Some((*data.get(at)?, *data.get(at + 1)?, *data.get(at + 2)?))
+}
+
+/// The pictures `drmtest` asked for show what it put on the screen: its
+/// red/green/blue/white quadrants while it held the display, and the
+/// stand-in desktop's colour after it was killed.
+fn check_screendumps(output: &str) -> Result<(), String> {
+    type Point = (f32, f32, (u8, u8, u8));
+    let desktop = (0x33, 0x66, 0x99);
+    let checks: [(&str, &[Point]); 2] = [
+        (
+            "drm-client",
+            &[
+                (0.25, 0.25, (0xFF, 0, 0)),
+                (0.75, 0.25, (0, 0xFF, 0)),
+                (0.25, 0.75, (0, 0, 0xFF)),
+                (0.75, 0.75, (0xFF, 0xFF, 0xFF)),
+            ],
+        ),
+        ("drm-desktop", &[(0.5, 0.5, desktop), (0.1, 0.9, desktop)]),
+    ];
+    for (name, points) in checks {
+        if !output.contains(&format!("harness: screendump {name}")) {
+            continue;
+        }
+        let path = screendump_path(name);
+        let data = fs::read(&path).map_err(|e| format!("no screendump {}: {e}", path.display()))?;
+        for &(fx, fy, want) in points {
+            let got = ppm_pixel(&data, fx, fy).ok_or_else(|| format!("{} is not a PPM picture", path.display()))?;
+            let near = |a: u8, b: u8| a.abs_diff(b) <= 16;
+            if !(near(got.0, want.0) && near(got.1, want.1) && near(got.2, want.2)) {
+                return Err(format!("{name}: the pixel at ({fx}, {fy}) is {got:02x?}, expected {want:02x?}"));
+            }
+        }
+        println!("screen check: {name} shows what it should");
+    }
+    Ok(())
 }
 
 /// Part of the driver name the kernel reports for each `--net` card.
@@ -1545,6 +1615,15 @@ fn run_tests_once(
                 );
                 if let Err(e) = qmp_execute(&add) {
                     eprintln!("could not plug the USB speaker back in: {e}");
+                }
+            }
+            // A picture of the screen, checked after the run (`check_screendumps`).
+            if let Some(name) = line.split("harness: screendump ").nth(1) {
+                let path = screendump_path(name.trim());
+                let _ = fs::remove_file(&path);
+                let cmd = format!(r#"{{"execute": "screendump", "arguments": {{"filename": "{}"}}}}"#, path.display());
+                if let Err(e) = qmp_execute(&cmd) {
+                    eprintln!("could not take a screendump: {e}");
                 }
             }
             if line.contains("awake after S3") {

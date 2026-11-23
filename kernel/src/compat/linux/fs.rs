@@ -139,6 +139,10 @@ pub enum Special {
         file: Arc<super::shm::ShmFile>,
         pos: u64,
     },
+    /// An open DRM card (`/dev/dri/card0`, see [`super::drm`]).
+    Drm(Arc<super::drm::File>),
+    /// A dma-buf: a GPU buffer exported from a card (`PRIME`).
+    DmaBuf(Arc<crate::drivers::gpu::BufferObject>),
 }
 
 impl Special {
@@ -147,7 +151,8 @@ impl Special {
             Special::Event(e) => e.read(out),
             Special::Timer(t) => t.read(out),
             Special::WaveEvents(pid) => super::events::wave_events_read(*pid, out),
-            Special::Epoll(_) => Err(EINVAL),
+            Special::Epoll(_) | Special::DmaBuf(_) => Err(EINVAL),
+            Special::Drm(f) => super::drm::vblank::read(f, out, true),
             Special::Unix(u) => u.recv(out, false, false).map(|r| r.len),
             Special::Shm { file, pos } => {
                 let n = file.read_at(*pos, out);
@@ -179,6 +184,7 @@ impl Special {
             Special::Mem { .. } => Err(EACCES),
             Special::Event(e) => e.write(data),
             Special::Timer(_) | Special::Epoll(_) | Special::WaveEvents(_) => Err(EINVAL),
+            Special::Drm(_) | Special::DmaBuf(_) => Err(EINVAL),
             Special::Unix(u) => u.send(data, Vec::new(), None, false),
             Special::Shm { file, pos } => {
                 let n = file.write_at(*pos, data)?;
@@ -201,6 +207,8 @@ impl Special {
             Special::Event(_) | Special::Timer(_) | Special::Epoll(_) | Special::WaveEvents(_) => (0o600, 0),
             Special::Unix(_) => (S_IFSOCK | 0o777, 0),
             Special::Shm { .. } => (S_IFREG | 0o600, 0),
+            Special::Drm(f) => (S_IFCHR | 0o666, makedev(super::drm::MAJOR, f.minor as u64)),
+            Special::DmaBuf(_) => (0o600, 0),
         }
     }
 }
@@ -212,7 +220,7 @@ const S_IFREG: u32 = 0o100000;
 const S_IFLNK: u32 = 0o120000;
 const S_IFSOCK: u32 = 0o140000;
 
-fn makedev(major: u64, minor: u64) -> u64 {
+pub fn makedev(major: u64, minor: u64) -> u64 {
     (major << 8) | minor
 }
 
@@ -279,9 +287,16 @@ pub fn path_arg(p: &Process, dirfd: u64, ptr: u64) -> Result<String, isize> {
 
 /// Files that exist only for Linux programs.
 fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
+    if super::sysfs::owns(guest) {
+        return Some(match super::sysfs::open(guest) {
+            Ok(None) => Ok(Special::Dir { host: String::from(guest), entries: None, pos: 0 }),
+            Ok(Some(data)) => Ok(Special::Mem { data, pos: 0 }),
+            Err(()) => Err(ENOENT),
+        });
+    }
     let user = account_user();
     Some(Ok(match guest {
-        "/dev" | "/proc" | "/proc/self" | "/dev/shm" => {
+        "/dev" | "/proc" | "/proc/self" | "/dev/shm" | "/dev/dri" => {
             Special::Dir { host: String::from(guest), entries: None, pos: 0 }
         }
         "/dev/null" => Special::Null,
@@ -441,6 +456,16 @@ pub fn read(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
             out.commit(r.len)?;
             return Ok(r.len as u64);
         }
+        let drm = match &*s.lock() {
+            Special::Drm(f) => Some(f.clone()),
+            _ => None,
+        };
+        if let Some(f) = drm {
+            let mut out = user::slice_mut(ptr, len)?;
+            let n = super::drm::vblank::read(&f, &mut out, nonblocking(p, fd))?;
+            out.commit(n)?;
+            return Ok(n as u64);
+        }
         let blocking = match &*s.lock() {
             Special::Event(e) => Some((Some(e.clone()), None)),
             Special::Timer(t) => Some((None, Some(t.clone()))),
@@ -532,6 +557,7 @@ pub fn readiness_of(p: &Process, fd: usize, depth: u32) -> Option<(bool, bool, b
                 Special::Event(e) => Inner::Ready(e.readable(), e.writable()),
                 Special::Timer(t) => Inner::Ready(t.readable(), false),
                 Special::WaveEvents(pid) => Inner::Ready(crate::gui::server::has_events(*pid), false),
+                Special::Drm(f) => Inner::Ready(f.readable(), false),
                 Special::Epoll(e) => Inner::Epoll(e.clone()),
                 Special::Unix(u) => Inner::Unix(u.clone()),
                 _ => Inner::Ready(true, true),
@@ -563,6 +589,7 @@ pub fn wait_keys(p: &Process, fd: usize, keys: &mut Vec<usize>) {
             Special::Event(e) => keys.push(key(Arc::as_ptr(e))),
             Special::Timer(t) => keys.push(key(Arc::as_ptr(t))),
             Special::WaveEvents(pid) => keys.push(crate::gui::server::event_key(*pid)),
+            Special::Drm(f) => keys.push(key(Arc::as_ptr(f))),
             // A set inside the set: any change.
             Special::Epoll(_) => keys.push(ANY),
             Special::Unix(u) => u.wait_keys(keys),
@@ -592,7 +619,13 @@ pub fn openat(p: &Process, dirfd: u64, ptr: u64, flags: u64, mode: u64) -> Resul
         return Err(ELOOP);
     }
     let handle = open_guest_mode(p, &follow(&guest)?, flags, mode)?;
-    install(p, handle, flags & O_CLOEXEC != 0)
+    let drm = matches!(&*handle, Handle::Special(s) if matches!(&*s.lock(), Special::Drm(_)));
+    let fd = install(p, handle, flags & O_CLOEXEC != 0)?;
+    // A card's events may be read without waiting (`O_NONBLOCK` at open).
+    if let (true, Some(l)) = (drm, &p.linux) {
+        l.set_nonblock(fd as usize, flags & O_NONBLOCK != 0);
+    }
+    Ok(fd)
 }
 
 /// Installs a new made-up descriptor (event, timer, epoll).
@@ -636,6 +669,10 @@ fn open_guest_mode(p: &Process, guest: &str, flags: u64, mode: u64) -> Result<Ar
     // stream (`ENODEV` without a sound device).
     if guest == "/dev/dsp" {
         return crate::drivers::audio::open().map(|s| Arc::new(Handle::Audio(s)));
+    }
+    // The display devices' DRM nodes.
+    if let Some(f) = super::drm::open(guest) {
+        return Ok(special(Special::Drm(f?)));
     }
     if let Some(name) = guest.strip_prefix("/dev/shm/") {
         let file = super::shm::open(name, flags & O_CREAT != 0, flags & O_EXCL != 0, flags & O_TRUNC != 0)?;
@@ -725,6 +762,12 @@ pub fn lseek(p: &Process, fd: u64, offset: i64, whence: u64) -> Result<u64, isiz
                 Ok(new as u64)
             }
             Special::Dir { .. } => Err(EINVAL),
+            // A dma-buf tells its size this way (and nothing else).
+            Special::DmaBuf(bo) => match (whence, offset) {
+                (0, 0) => Ok(0),
+                (2, 0) => Ok(bo.size as u64),
+                _ => Err(EINVAL),
+            },
             _ => Ok(0),
         },
         _ => Err(ESPIPE),
@@ -875,6 +918,9 @@ fn dir_entries(host: &str) -> Vec<(String, u8)> {
 
 fn plain_entries(host: &str) -> Vec<(String, u8)> {
     let kind = |dir: bool| if dir { DT_DIR } else { DT_REG };
+    if super::sysfs::owns(host) {
+        return super::sysfs::entries(host);
+    }
     // A layered system folder: what the disk has, then the system image.
     let guest = to_guest(host);
     if in_system_dirs(&guest) {
@@ -889,7 +935,11 @@ fn plain_entries(host: &str) -> Vec<(String, u8)> {
         return v;
     }
     let names: &[(&str, bool)] = match host {
-        "/dev" => &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true)],
+        "/dev" => {
+            &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true), ("dri", true)]
+        }
+        // Character devices (DT_CHR).
+        "/dev/dri" => return super::drm::node_names().into_iter().map(|n| (n, 2)).collect(),
         "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false)],
         "/proc/self" => &[("exe", false), ("maps", false), ("cmdline", false), ("comm", false), ("stat", false)],
         "/dev/shm" => return super::shm::names().into_iter().map(|n| (n, DT_REG)).collect(),
@@ -902,7 +952,7 @@ fn plain_entries(host: &str) -> Vec<(String, u8)> {
                 .collect();
             // The Linux tree shows its top folders at the root.
             if host == "/" {
-                for d in SYSTEM_DIRS.iter().chain(WRITABLE_DIRS.iter()).chain(["dev", "proc"].iter()) {
+                for d in SYSTEM_DIRS.iter().chain(WRITABLE_DIRS.iter()).chain(["dev", "proc", "sys"].iter()) {
                     if !v.iter().any(|(n, _)| n == d) {
                         v.push((String::from(*d), DT_DIR));
                     }
@@ -965,6 +1015,9 @@ fn info_for_path(p: &Process, guest: &str, follow_link: bool) -> Result<Info, is
             mtime: 0,
             ctime: 0,
         });
+    }
+    if let Some(rdev) = super::drm::node_rdev(guest) {
+        return Ok(Info { owner: None, mode: S_IFCHR | 0o666, size: 0, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
     }
     if let Some(v) = virtual_file(p, guest) {
         let s = v?;
@@ -1236,8 +1289,24 @@ fn no_owners(host: &str) -> bool {
 pub fn ioctl(p: &Process, fd: u64, request: u64, arg: u64) -> Result<u64, isize> {
     // The request is 32 bits, as on Linux (musl passes it sign-extended).
     let request = request as u32 as u64;
-    if let Handle::Audio(stream) = &*p.fd(fd as usize)? {
+    let h = p.fd(fd as usize)?;
+    if let Handle::Audio(stream) = &*h {
         return oss(stream, request, arg);
+    }
+    // DRM ('d') requests on a card, dma-buf ('b') ones on a dma-buf.
+    if let Handle::Special(s) = &*h {
+        let kind = request >> 8 & 0xFF;
+        let (card, dmabuf) = match &*s.lock() {
+            Special::Drm(f) => (Some(f.clone()), false),
+            Special::DmaBuf(_) => (None, true),
+            _ => (None, false),
+        };
+        if let (Some(f), 0x64) = (&card, kind) {
+            return super::drm::ioctl(p, f, request, arg);
+        }
+        if dmabuf && kind == 0x62 {
+            return super::drm::dmabuf_ioctl(request, arg);
+        }
     }
     match request {
         // Terminal queries: no file is a terminal yet.

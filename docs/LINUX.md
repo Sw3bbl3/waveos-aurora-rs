@@ -91,7 +91,10 @@ Writing to the file, or deleting it, drops it from the cache.
   always are.
 - **Made-up files:** `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/fd/*`,
   `/dev/kmsg` (the system log: `2>/dev/kmsg` keeps a program's messages);
-  `/proc/self/exe`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/mounts`; and
+  `/proc/self/exe`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/mounts`;
+  `/dev/dri/card0` (see [The display](#the-display-drm)) and the parts of
+  `/sys` that describe it (`/sys/class/drm`, `/sys/dev/char`, the PCI
+  device); and
   `/etc/passwd`, `/etc/group`, `/etc/hostname`, `/etc/hosts` and
   `/etc/resolv.conf` built from the computer's settings.
 - **Memory:** `brk`, `mmap` (anonymous and private file mappings, hints,
@@ -204,6 +207,29 @@ channels, rate, buffer space, delay, sync, reset) describe it as it is,
 48 kHz 16-bit stereo, so a program that asks for another rate is told the
 one it gets and converts (GStreamer's `osssink` does, and with it WebKit's
 media). There is no PulseAudio or ALSA.
+
+## The display (DRM)
+
+Each display is a DRM card, `/dev/dri/card0`, with Linux's ioctls (libdrm
+and anything built on it work as they are): the mode-setting objects and
+their properties, mode sets, planes, the cursor, page flips and atomic
+commits with their events (read from the card, through `poll` or `epoll`),
+vblank waits, dumb buffers mapped through the card, and PRIME: a buffer as
+a dma-buf descriptor that can be mapped and passed to another program over
+a local socket. `drmGetDevices2` finds the card through `/sys`, as on Linux.
+The driver names are Linux's (`virtio_gpu`, `bochs-drm`, `simpledrm`).
+libdrm's test program is included: `modetest -M virtio_gpu` (or
+`bochs-drm`) lists the card, and `modetest -M virtio_gpu -s 9:1280x800 -v`
+sets a mode and page-flips until you press Return.
+
+The first program to open a card is its master, as on Linux when no
+display server runs. Looking costs nothing; its first mode set or page
+flip takes the screen from the desktop, which comes back as soon as the
+program drops master, closes the card or exits — also when it crashes or
+is killed. While it holds the screen, keys and the pointer still go to the
+desktop. No render nodes, syncobjs or format modifiers yet, and Mesa
+hasn't been run against it; see
+[display-core.md](developer/display-core.md#what-mesa-still-needs).
 
 ## Wayland programs (GTK and others)
 

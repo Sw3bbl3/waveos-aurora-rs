@@ -17,6 +17,7 @@
 //! [`WAVE_BASE`] up: `WAVE_BASE + n` is WaveOS's call `n`, with WaveOS's
 //! arguments (`libs/linux/include/waveos.h` describes them for C).
 
+pub mod drm;
 mod events;
 pub mod exec;
 pub mod fs;
@@ -28,6 +29,7 @@ mod net;
 mod process;
 mod shm;
 pub mod signal;
+mod sysfs;
 pub mod unix;
 pub mod vdso;
 

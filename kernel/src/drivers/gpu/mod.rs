@@ -41,6 +41,7 @@ pub mod intel;
 pub mod linux;
 pub mod mode;
 pub mod output;
+pub mod owner;
 #[cfg(feature = "ktest")]
 pub mod selftest;
 pub mod simple;
