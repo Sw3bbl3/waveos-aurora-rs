@@ -85,6 +85,10 @@ const TESTS: &[Test] = &[
     ("Linux programs: input devices — evdev, joystick, hidraw, uinput, hot-plug (inputtest)", linux_input),
     ("Linux programs: the DRM device, mode setting, events, PRIME (drmtest)", linux_drm),
     ("Linux programs: libdrm's modetest on the DRM device", linux_modetest),
+    ("Linux programs: Mesa's kmscube (GBM, EGL, GLES on llvmpipe) on the DRM device", linux_mesa_kmscube),
+    ("Linux programs: Mesa's desktop OpenGL and GLES (glmark2) on the DRM device", linux_mesa_glmark2),
+    ("Linux programs: Mesa's Vulkan (lavapipe), a triangle read back (vkcheck)", linux_mesa_vulkan),
+    ("Linux programs: Mesa in a WaveOS window (es2gears through wl-bridge)", linux_mesa_window),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
@@ -852,6 +856,203 @@ fn linux_modetest() {
     assert!(eventually(5000, || gpu::owner::holder(&*dev).is_none()), "the desktop did not get the display back");
 }
 
+/// Where Debian's Mesa and its programs are when the disk has them
+/// (`cargo xtask test --mesa` puts them there; other disks skip the Mesa tests).
+const MESA_KMSCUBE: &str = "/Linux/usr/bin/kmscube";
+
+/// Runs a program from the Linux packages by its Linux path, through
+/// BusyBox's `env` with `vars` added to the environment.
+fn linux_env_argv<'a>(vars: &[&'a str], argv: &[&'a str]) -> Vec<&'a str> {
+    let mut v = alloc::vec!["env"];
+    v.extend_from_slice(vars);
+    v.extend_from_slice(argv);
+    v
+}
+
+/// Counts the page flips a program makes on `dev`'s primary plane while it
+/// holds the display, and asks the harness for a screendump (`name`) once
+/// it has flipped a few times, so the picture is one it rendered.
+struct FlipWatch {
+    dev: Arc<dyn crate::drivers::gpu::KmsDevice>,
+    last: usize,
+    flips: u32,
+    shot: Option<&'static str>,
+}
+
+impl FlipWatch {
+    fn new(dev: Arc<dyn crate::drivers::gpu::KmsDevice>, shot: Option<&'static str>) -> FlipWatch {
+        FlipWatch { dev, last: 0, flips: 0, shot }
+    }
+
+    fn tick(&mut self) {
+        use crate::drivers::gpu::{self, PlaneKind};
+        if gpu::owner::holder(&*self.dev).is_none() {
+            return;
+        }
+        let primary = self.dev.planes().into_iter().find(|p| p.kind == PlaneKind::Primary).map(|p| p.id);
+        let (_, planes) = self.dev.state();
+        let fb = planes
+            .iter()
+            .find(|p| Some(p.plane) == primary)
+            .and_then(|p| p.fb.as_ref())
+            .map_or(0, |fb| Arc::as_ptr(fb) as *const () as usize);
+        if fb != 0 && fb != self.last {
+            self.last = fb;
+            self.flips += 1;
+        }
+        if self.flips >= 4 {
+            if let Some(name) = self.shot.take() {
+                crate::kprintln!("\nharness: screendump {name}");
+            }
+        }
+    }
+}
+
+/// Vulkan on Mesa's lavapipe: `vulkaninfo` lists the device, and
+/// `vkcheck` (`linux-programs/vkcheck`, built by xtask) draws a triangle
+/// with a graphics pipeline whose shaders lavapipe compiles, reads the
+/// picture back and checks it.
+fn linux_mesa_vulkan() {
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return;
+    }
+    let busybox = "/System/Linux/bin/busybox";
+    let argv = linux_env_argv(&[], &["/usr/bin/vulkaninfo", "--summary"]);
+    let (code, text) = run_linux_program(busybox, &argv, None, None, 300_000);
+    assert_eq!(code, Some(0), "vulkaninfo failed");
+    assert!(text.contains("llvmpipe"), "vulkaninfo does not list lavapipe");
+    if crate::fs::stat("/Linux/usr/local/bin/vkcheck").is_err() {
+        crate::kprint!("(vkcheck skipped: not built) ");
+        return;
+    }
+    let argv = linux_env_argv(&["WAVEOS_SYSCOUNT=1"], &["/usr/local/bin/vkcheck"]);
+    let (code, text) = run_linux_program(busybox, &argv, None, None, 300_000);
+    assert_eq!(code, Some(0), "vkcheck failed");
+    assert!(text.contains("vkcheck passed"), "vkcheck did not finish");
+}
+
+/// Mesa drawing into a WaveOS window instead of the whole screen: Mesa's
+/// `es2gears` demo, a Wayland client, through `wl-bridge`. EGL's Wayland
+/// platform renders with llvmpipe into shared-memory buffers (`wl_shm`),
+/// which the bridge copies into the window on each commit. The window must
+/// show the red gear, turning: its picture changes from frame to frame.
+/// (es2gears' own frame-rate line stays in its output buffer, a pipe here.)
+fn linux_mesa_window() {
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return;
+    }
+    let script = "wl-bridge --background && exec /usr/bin/es2gears_wayland.x86_64-linux-gnu";
+    let (mut red, mut frames, mut last, mut since) = (0usize, 0u32, 0u64, None);
+    let (code, _) =
+        run_linux_program_watched("/System/Linux/bin/busybox", &["sh", "-c", script], None, 300_000, &mut |_| {
+            for (id, _, title) in crate::gui::server::windows() {
+                if title != "es2gears" {
+                    continue;
+                }
+                let seen = crate::gui::server::with_surface_scaled(id, |px, _, _, _| {
+                    let red = px
+                        .iter()
+                        .filter(|&&p| {
+                            let (r, g, b) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
+                            r > 150 && g < 80 && b < 80
+                        })
+                        .count();
+                    // A cheap fingerprint of the picture.
+                    let sum = px.iter().step_by(7).fold(0u64, |h, &p| h.rotate_left(5) ^ p as u64);
+                    (red, sum)
+                });
+                if let Some((r, sum)) = seen {
+                    red = red.max(r);
+                    if r > 200 && sum != last {
+                        last = sum;
+                        frames += 1;
+                        since.get_or_insert(time::uptime_ms());
+                    }
+                }
+            }
+            // Enough once it has turned for a while.
+            frames >= 30 || since.is_some_and(|t| time::uptime_ms() > t + 20_000)
+        });
+    // The bridge runs on in the background: it goes too.
+    for p in crate::proc::all().iter().filter(|p| p.name() == "wl-bridge") {
+        let _ = crate::proc::kill(p.pid);
+    }
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "es2gears ended by itself");
+    assert!(red > 200, "the window shows no red gear ({red} red pixels)");
+    assert!(frames >= 5, "the gears did not turn ({frames} different pictures)");
+    crate::kprint!("[{frames} different pictures, {red} red pixels] ");
+}
+
+/// Runs a Mesa program from the Linux packages full screen (it takes the
+/// display from a stand-in desktop showing one colour), counting its page
+/// flips and asking for screendump `shot` once it has flipped a few times;
+/// the desktop must have the display back when it ends. Returns its exit
+/// code, output and flips; `None` (skipped) when Mesa isn't on the disk.
+fn mesa_fullscreen(argv: &[&str], shot: Option<&'static str>) -> Option<(Option<i64>, String, u32)> {
+    use crate::drivers::gpu::{self, output::Output, Damage};
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return None;
+    }
+    let desktop = Output::open(None).expect("no display");
+    let (w, h) = desktop.size();
+    unsafe { desktop.back_buffer() }.fill(0xFF33_6699);
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present");
+    let dev = gpu::primary().unwrap();
+    let mut watch = FlipWatch::new(dev.clone(), shot);
+    let argv = linux_env_argv(&["WAVEOS_SYSCOUNT=1"], argv);
+    // (Its input stays open: kmscube stops when it becomes readable.)
+    let (code, text) =
+        run_linux_program_watched("/System/Linux/bin/busybox", &argv, Some(600_000), 600_000, &mut |_| {
+            watch.tick();
+            false
+        });
+    assert!(eventually(5000, || gpu::owner::holder(&*dev).is_none()), "the desktop did not get the display back");
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present after");
+    Some((code, text, watch.flips))
+}
+
+/// Mesa from Debian 12, unmodified: kmscube finds the card through libdrm,
+/// makes a GBM device and an EGL display on it, renders a spinning cube
+/// with OpenGL ES 2 on llvmpipe (Mesa's LLVM JIT rasteriser, through the
+/// `kms_swrast` driver: dumb buffers, PRIME, `ADDFB2`) and page-flips every
+/// frame with events. The harness checks a screendump taken while it runs
+/// (grey background, a coloured cube in the middle).
+fn linux_mesa_kmscube() {
+    let frames = "240";
+    let Some((code, text, flips)) = mesa_fullscreen(&["/usr/bin/kmscube", "-c", frames], Some("mesa-kmscube")) else {
+        return;
+    };
+    assert_eq!(code, Some(0), "kmscube failed");
+    assert!(text.contains("llvmpipe"), "kmscube did not render with llvmpipe");
+    assert!(flips >= 10, "kmscube flipped {flips} times");
+    crate::kprint!("[{frames} frames, {flips} flips seen] ");
+}
+
+/// glmark2's DRM builds, from Debian: desktop OpenGL (`glmark2-drm`, an
+/// OpenGL 4.5 core context through EGL on GBM) and OpenGL ES 2
+/// (`glmark2-es2-drm`), each running two of its scenes full screen and
+/// reporting a score.
+fn linux_mesa_glmark2() {
+    for (program, api, shot) in
+        [("glmark2-drm", "OpenGL", "mesa-glmark2"), ("glmark2-es2-drm", "OpenGL ES", "mesa-glmark2-es2")]
+    {
+        let path = alloc::format!("/usr/bin/{program}");
+        // (glmark2 finds the card itself, through libudev: the boot VGA
+        // among the `drm` devices udev has records for.)
+        let argv = [path.as_str(), "-b", "build:duration=3.0", "-b", "texture:duration=3.0"];
+        let Some((code, text, flips)) = mesa_fullscreen(&argv, Some(shot)) else { return };
+        assert_eq!(code, Some(0), "{program} failed");
+        assert!(text.contains("llvmpipe"), "{program} did not render with llvmpipe");
+        assert!(text.contains(api), "{program} did not report {api}");
+        assert!(text.contains("glmark2 Score:"), "{program} did not finish");
+        assert!(flips >= 10, "{program} flipped {flips} times");
+        crate::kprint!("[{program}: {flips} flips] ");
+    }
+}
+
 /// The vDSO's clocks (computed from its time page, as `kernel/vdso/vdso.c`
 /// does) lie between two readings of the kernel's, for both clocks, many
 /// times over a second boundary — after sleep (this runs after the S3
@@ -1080,6 +1281,21 @@ fn run_linux_program(
     kill_on: Option<&str>,
     timeout_ms: u64,
 ) -> (Option<i64>, String) {
+    run_linux_program_watched(path, argv, stdin_ms, timeout_ms, &mut |out| {
+        kill_on.is_some_and(|m| out.windows(m.len()).any(|w| w == m.as_bytes()))
+    })
+}
+
+/// Like [`run_linux_program`], with `watch` called with the output so far
+/// every few milliseconds while the program runs; it is killed once
+/// `watch` says so.
+fn run_linux_program_watched(
+    path: &str,
+    argv: &[&str],
+    stdin_ms: Option<u64>,
+    timeout_ms: u64,
+    watch: &mut dyn FnMut(&[u8]) -> bool,
+) -> (Option<i64>, String) {
     let (r, w) = crate::proc::new_pipe(false);
     let (stdin, mut stdin_writer) = match stdin_ms {
         Some(_) => {
@@ -1104,8 +1320,7 @@ fn run_linux_program(
         if stdin_writer.is_some() && time::uptime_ms() >= stdin_until {
             stdin_writer = None;
         }
-        let seen = |m: &str| out.windows(m.len()).any(|w| w == m.as_bytes());
-        if kill_on.is_some_and(seen) && p.exit_code().is_none() {
+        if p.exit_code().is_none() && watch(&out) {
             let _ = crate::proc::kill(pid);
         }
         if reader.readable() {

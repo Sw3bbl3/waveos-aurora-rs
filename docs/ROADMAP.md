@@ -78,6 +78,13 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - Conservative localized composition with reproducible release measurements.
 - See [0.7.0 update notes](releases/0.7.0/en.md) and the [handbook](handbook/README.md).
 
+## In progress: graphics for games
+
+The direction for graphics, replacing the earlier plan to port more Linux GPU drivers: WaveOS's own Rust display drivers expose Linux's DRM/KMS interface, and unmodified Mesa runs on top through the Linux layer, with Steam games as the eventual target.
+
+- **Done:** the display core; native virtio-gpu, Intel (Skylake to Raptor Lake) and AMD (Polaris to Navi 3x, Ryzen APUs) display drivers that take over the firmware's mode (Intel and AMD untested on real hardware); Nvidia detection; several displays; `/dev/dri/card0` with dumb buffers, atomic commits, page-flip events and PRIME (libdrm's `modetest` runs unmodified); `evdev`, `hidraw`, `uinput` and udev-style discovery (SDL2 recognises controllers unmodified); Wave Play.
+- **Next:** Mesa's software path (llvmpipe, lavapipe) over the DRM device; virtio-gpu 3D (virgl and Venus); render nodes, GEM and command submission for Intel, then AMD; an Nvidia driver through the GSP firmware ([design](developer/nvidia-display.md)); 32-bit Linux programs for Steam's client.
+
 ## Future work
 
 Candidates, in no fixed order:

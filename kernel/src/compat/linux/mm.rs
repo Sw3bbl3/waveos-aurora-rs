@@ -320,6 +320,35 @@ pub fn mremap(p: &Process, addr: u64, old_len: u64, new_len: u64, flags: u64) ->
     Ok(to)
 }
 
+/// `mincore`: one byte per page of `[addr, addr + len)`, `ENOMEM` if any
+/// page isn't mapped. (Programs ask it whether a pointer may be read: EGL
+/// tells a Wayland display from other native displays this way.) A page
+/// swapped out (compressed or on disk) isn't resident; every other mapped
+/// page counts as resident: untouched memory comes on first touch at no
+/// cost a program could notice.
+pub fn mincore(p: &Process, addr: u64, len: u64, vec: u64) -> Result<u64, isize> {
+    if !addr.is_multiple_of(PAGE_SIZE) {
+        return Err(EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    if !user_range(addr, len) {
+        return Err(ENOMEM);
+    }
+    let n = pages(len);
+    let resident: alloc::vec::Vec<u8> = {
+        let mut guard = p.mem();
+        let aspace = guard.as_mut().ok_or(ESRCH)?;
+        if (0..n).any(|i| aspace.is_free(addr + i * PAGE_SIZE, 1)) {
+            return Err(ENOMEM);
+        }
+        (0..n).map(|i| !aspace.is_swapped(addr + i * PAGE_SIZE) as u8).collect()
+    };
+    crate::syscall::user::put_bytes(vec, &resident)?;
+    Ok(0)
+}
+
 /// `madvise`: `MADV_DONTNEED` and `MADV_FREE` let pages go (they read as
 /// zero afterwards, which `MADV_FREE` allows too), `MADV_PAGEOUT` swaps
 /// them out now and `MADV_COLD` makes them the first to go, `MADV_WILLNEED`

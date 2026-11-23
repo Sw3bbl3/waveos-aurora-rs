@@ -34,7 +34,7 @@ const SHARED: u64 = 1 << 9;
 /// writable gives the address space a copy of its own.
 const COPY_ON_WRITE: u64 = 1 << 10;
 /// Software bit, with `SHARED`: the entry holds a count on the frame (see
-/// `SHM_REFS`), which it gives back when it goes. Shared frames without it
+/// `swap::PAGES`), which it gives back when it goes. Shared frames without it
 /// (window surfaces) are their owners' to free: a stale entry for one must
 /// never touch the count of whatever the frame has become since.
 const COUNTED: u64 = 1 << 11;
@@ -1055,30 +1055,46 @@ impl AddressSpace {
     }
 
     fn map_counted(&mut self, va: u64, frames: &[u64], flags: u64) -> Result<(), isize> {
-        for (i, &f) in frames.iter().enumerate() {
+        // The holds on the frames first, under one lock (`walk` may need
+        // the frame allocator, which mustn't wait inside it).
+        let counted = swap::hold_many(frames);
+        let mut replaced = Vec::new();
+        let mut slots = Vec::new();
+        let mut result = Ok(());
+        let mut mapped = 0;
+        for (i, (&f, &c)) in frames.iter().zip(&counted).enumerate() {
             let page = va + i as u64 * PAGE_SIZE;
-            let e = walk(self.pml4, page, true, true).ok_or(aurora_abi::err::ENOMEM)?;
-            if *e & PRESENT != 0 {
-                Self::drop_entry(*e, &mut self.resident);
-            } else if is_swap(*e) {
-                swap::drop_ref(slot_of(*e));
-                self.swapped = self.swapped.saturating_sub(1);
+            let Some(e) = walk(self.pml4, page, true, true) else {
+                result = Err(aurora_abi::err::ENOMEM);
+                break;
+            };
+            let old = core::mem::replace(e, f | flags | if c { COUNTED } else { 0 });
+            // A page that wasn't mapped can't be in any TLB.
+            if old & PRESENT != 0 {
+                replaced.push(old);
+                self.invalidate(page);
+            } else if is_swap(old) {
+                slots.push(slot_of(old));
             }
-            let counted = if shm_retain(f) { COUNTED } else { 0 };
-            *e = f | flags | counted;
-            self.invalidate(page);
+            mapped = i + 1;
         }
-        Ok(())
-    }
-
-    /// Lets go of what a present entry maps (a private frame, or a hold on a shared one).
-    fn drop_entry(e: u64, resident: &mut u64) {
-        if e & SHARED == 0 {
-            frame::free(e & ADDR);
-            *resident = resident.saturating_sub(PAGE_SIZE);
-        } else {
-            Self::release_shared(e);
+        self.swapped = self.swapped.saturating_sub(slots.len() as u64);
+        for s in slots {
+            swap::drop_ref(s);
         }
+        // What the new entries replaced, and the holds not used (out of memory).
+        let mut release: Vec<u64> =
+            frames[mapped..].iter().zip(&counted[mapped..]).filter(|p| *p.1).map(|p| *p.0).collect();
+        for e in replaced {
+            if e & SHARED == 0 {
+                frame::free(e & ADDR);
+                self.resident = self.resident.saturating_sub(PAGE_SIZE);
+            } else if e & COUNTED != 0 {
+                release.push(e & ADDR);
+            }
+        }
+        swap::release_many(&release);
+        result
     }
 
     /// Gives back a shared entry's count on its frame, if it holds one.
@@ -1161,13 +1177,15 @@ impl AddressSpace {
         // (One `invlpg` also drops every cached upper-level entry, so a
         // freed table is never walked again.)
         shootdown(va, pages.max(!tables.is_empty() as u64), Some(self.pml4));
+        let mut shared = Vec::new();
         for e in freed {
             if e & SHARED == 0 {
                 frame::free(e & ADDR);
-            } else {
-                Self::release_shared(e);
+            } else if e & COUNTED != 0 {
+                shared.push(e & ADDR);
             }
         }
+        swap::release_many(&shared);
         for t in tables {
             frame::free(t);
         }
@@ -1765,8 +1783,7 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// Whether the page at `va` is swapped out (tests).
-    #[cfg(feature = "ktest")]
+    /// Whether the page at `va` is swapped out (compressed or on disk).
     pub fn is_swapped(&self, va: u64) -> bool {
         walk(self.pml4, va & !(PAGE_SIZE - 1), false, false).is_some_and(|e| is_swap(*e))
     }

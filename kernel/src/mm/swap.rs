@@ -46,6 +46,7 @@
 use super::{frame, phys_to_virt, PAGE_SIZE};
 use crate::sync::IrqMutex;
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// No slot.
@@ -479,6 +480,40 @@ pub fn hold(f: u64, object: bool) -> bool {
             true
         }
         None => false,
+    }
+}
+
+/// [`hold`] for page table entries mapping `frames`, under one lock (a GPU
+/// buffer is often a thousand pages, mapped every frame): which are counted.
+pub fn hold_many(frames: &[u64]) -> Vec<bool> {
+    // (Allocated before the lock: the heap may wait for memory.)
+    let mut counted = Vec::with_capacity(frames.len());
+    let mut p = PAGES.lock();
+    for f in frames {
+        counted.push(match p.counted.get_mut(f) {
+            Some(c) => {
+                c.holders += 1;
+                true
+            }
+            None => false,
+        });
+    }
+    counted
+}
+
+/// [`release`] by page table entries of `frames` (counted ones), under one
+/// lock; the frames no one holds any more are freed after it.
+pub fn release_many(frames: &[u64]) {
+    if frames.is_empty() {
+        return;
+    }
+    let mut last = Vec::with_capacity(frames.len());
+    {
+        let mut p = PAGES.lock();
+        last.extend(frames.iter().copied().filter(|&f| p.drop_hold(f)));
+    }
+    for f in last {
+        frame::free(f);
     }
 }
 
