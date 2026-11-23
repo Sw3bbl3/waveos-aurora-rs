@@ -165,6 +165,9 @@ pub fn init() {
 }
 
 /// Walks to the leaf entry for `va`, optionally creating intermediate tables.
+/// Tables for user mappings (`user`) are the program's memory, refused once
+/// only the kernel's reserve is left like its pages (a program mapping and
+/// unmapping all over its address space used to fill memory with them).
 fn walk(pml4: u64, va: u64, create: bool, user: bool) -> Option<&'static mut u64> {
     let mut t = pml4;
     for level in (1..=3).rev() {
@@ -173,7 +176,8 @@ fn walk(pml4: u64, va: u64, create: bool, user: bool) -> Option<&'static mut u64
             if !create {
                 return None;
             }
-            *e = zeroed_frame()? | PRESENT | WRITABLE | if user { USER } else { 0 };
+            let f = if user { zeroed_user_frame()? } else { zeroed_frame()? };
+            *e = f | PRESENT | WRITABLE | if user { USER } else { 0 };
         } else if *e & HUGE != 0 {
             return None; // 2 MiB/1 GiB pages are only used by the physical window
         }
@@ -365,6 +369,15 @@ pub fn held_pages() -> (u64, u64) {
     (mapped, (end - KVA_BASE) / PAGE_SIZE)
 }
 
+/// (pages of the kernel virtual area in use, counted shared frames), for
+/// memory reports; zeros where a lock is busy.
+pub fn usage() -> (u64, u64) {
+    let kva =
+        KVA.try_lock().map_or(0, |k| (k.next - KVA_BASE) / PAGE_SIZE - k.free.iter().map(|&(_, p)| p + 1).sum::<u64>());
+    let shm = SHM_REFS.try_lock().map_or(0, |r| r.len() as u64);
+    (kva, shm)
+}
+
 /// Unmaps a `kmap` range on every CPU. Must not be called while holding an
 /// `IrqMutex` (other CPUs have to take the shootdown IPI).
 pub fn kunmap(base: u64, pages: u64) {
@@ -496,7 +509,7 @@ pub struct AddressSpace {
 
 impl AddressSpace {
     pub fn new() -> Option<AddressSpace> {
-        let pml4 = zeroed_frame()?;
+        let pml4 = zeroed_user_frame()?;
         let k = table(kernel_pml4());
         let t = table(pml4);
         t[256..].copy_from_slice(&k[256..]);
@@ -582,6 +595,11 @@ impl AddressSpace {
     pub fn map_lazy(&mut self, va: u64, pages: u64, prot: Prot) -> Result<(), isize> {
         let end = va.checked_add(pages * PAGE_SIZE).filter(|&e| e <= layout::USER_END);
         let Some(end) = end.filter(|_| va.is_multiple_of(PAGE_SIZE)) else { return Err(aurora_abi::err::EINVAL) };
+        // Each range is kernel memory the program asks for (Linux allows
+        // as many mappings, `vm.max_map_count`).
+        if self.lazy.len() >= 65_530 {
+            return Err(aurora_abi::err::ENOMEM);
+        }
         self.lazy_remove(va, end);
         self.lazy.insert(va, (end, prot));
         Ok(())
@@ -814,18 +832,28 @@ impl AddressSpace {
     /// Moves `pages` mapped at `from` to `to` (Linux `mremap`), without
     /// copying: the page table entries move. `to` must be free.
     pub fn move_pages(&mut self, from: u64, to: u64, pages: u64) -> Result<(), isize> {
+        let mut result = Ok(());
         for i in 0..pages {
             let (src, dst) = (from + i * PAGE_SIZE, to + i * PAGE_SIZE);
-            let entry = match walk(self.pml4, src, false, true) {
-                Some(e) if *e & PRESENT != 0 => core::mem::replace(e, 0),
-                _ => continue,
+            if walk(self.pml4, src, false, true).is_none_or(|e| *e & PRESENT == 0) {
+                continue;
+            }
+            // The destination's tables first: a page is never left in neither place.
+            let Some(d) = walk(self.pml4, dst, true, true) else {
+                result = Err(aurora_abi::err::ENOMEM);
+                break;
             };
-            let d = walk(self.pml4, dst, true, true).ok_or(aurora_abi::err::ENOMEM)?;
-            *d = entry;
+            let Some(e) = walk(self.pml4, src, false, true) else { continue };
+            *d = core::mem::replace(e, 0);
             self.invalidate(src);
             self.invalidate(dst);
         }
-        shootdown(from, pages, Some(self.pml4));
+        let tables = self.prune(from, from + pages * PAGE_SIZE);
+        shootdown(from, pages.max(1), Some(self.pml4));
+        for t in tables {
+            frame::free(t);
+        }
+        result?;
         // Lazy memory there moves too.
         let (end, shift) = (from + pages * PAGE_SIZE, to.wrapping_sub(from));
         let parts: Vec<(u64, u64, Prot)> = self
@@ -841,9 +869,9 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// Unmaps pages, freeing private frames.
+    /// Unmaps pages, freeing private frames, and the page tables left empty.
     pub fn unmap(&mut self, va: u64, pages: u64) {
-        let end = va.saturating_add(pages * PAGE_SIZE);
+        let end = va.saturating_add(pages.saturating_mul(PAGE_SIZE));
         self.lazy_remove(va, end);
         let mut freed = Vec::new();
         let mut private = 0;
@@ -855,12 +883,15 @@ impl AddressSpace {
             *e = 0;
         });
         self.resident = self.resident.saturating_sub(private);
-        if !freed.is_empty() && Cr3::read().0.start_address().as_u64() == self.pml4 {
+        let tables = self.prune(va, end);
+        if (!freed.is_empty() || !tables.is_empty()) && Cr3::read().0.start_address().as_u64() == self.pml4 {
             x86_64::instructions::tlb::flush_all();
         }
         // Other threads of this process may run on other CPUs: they must
-        // forget the pages before the frames can be reused.
-        shootdown(va, pages, Some(self.pml4));
+        // forget the pages (and tables) before the frames can be reused.
+        // (One `invlpg` also drops every cached upper-level entry, so a
+        // freed table is never walked again.)
+        shootdown(va, pages.max(!tables.is_empty() as u64), Some(self.pml4));
         for e in freed {
             if e & SHARED == 0 {
                 frame::free(e & ADDR);
@@ -868,6 +899,46 @@ impl AddressSpace {
                 Self::release_shared(e);
             }
         }
+        for t in tables {
+            frame::free(t);
+        }
+    }
+
+    /// Unlinks the page tables under `[start, end)` that map nothing any
+    /// more (after an unmap) and returns their frames, to be freed once no
+    /// CPU can walk them. Without this, a program that maps and unmaps at
+    /// ever new addresses (every `mmap` gets fresh address space) kept a
+    /// page table for every 2 MiB it ever used, until it exited.
+    fn prune(&mut self, start: u64, end: u64) -> Vec<u64> {
+        fn visit(t: u64, level: u32, base: u64, start: u64, end: u64, out: &mut Vec<u64>) {
+            let span = 1u64 << (12 + 9 * level);
+            let limit = if level == 3 { 256 } else { 512 };
+            let first = ((start.max(base) - base) / span) as usize;
+            for i in first..limit {
+                let lo = base + i as u64 * span;
+                if lo >= end {
+                    break;
+                }
+                let e = table(t)[i];
+                if e & PRESENT == 0 || e & HUGE != 0 {
+                    continue;
+                }
+                let child = e & ADDR;
+                if level > 1 {
+                    visit(child, level - 1, lo, start, end, out);
+                }
+                if table(child).iter().all(|&x| x == 0) {
+                    table(t)[i] = 0;
+                    out.push(child);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        let end = end.min(layout::USER_END);
+        if start < end {
+            visit(self.pml4, 3, 0, start, end, &mut out);
+        }
+        out
     }
 
     /// A copy of this address space (Linux `fork`), made without copying
@@ -929,7 +1000,7 @@ impl AddressSpace {
             if e & PRESENT == 0 {
                 continue;
             }
-            let Some(t) = zeroed_frame() else { return false };
+            let Some(t) = zeroed_user_frame() else { return false };
             table(dst)[i] = t | (e & !ADDR);
             if !Self::copy_level(e & ADDR, t, level - 1, shared) {
                 return false;
@@ -1036,6 +1107,25 @@ impl AddressSpace {
         }
         self.mmap_next = end;
         Some(va)
+    }
+
+    /// Frames of this address space's own page tables (the top level included).
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // memory reports in self-tests
+    pub fn table_frames(&self) -> u64 {
+        fn count(t: u64, level: u32) -> u64 {
+            let limit = if level == 3 { 256 } else { 512 };
+            let mut n = 1;
+            if level > 0 {
+                for &e in table(t).iter().take(limit) {
+                    if e & PRESENT != 0 && e & HUGE == 0 {
+                        n += count(e & ADDR, level - 1);
+                    }
+                }
+            }
+            n
+        }
+        // Level-0 tables count themselves; their entries are pages, not tables.
+        count(self.pml4, 3)
     }
 
     /// The user mappings, lowest first, as (start, end, writable, executable),

@@ -47,6 +47,9 @@ struct Queue {
 
 /// Bytes a queue holds before writers wait.
 const CAPACITY: usize = 256 * 1024;
+/// Messages a queue holds before writers wait (empty datagrams take no
+/// bytes, but each is kernel memory).
+const MAX_SEGMENTS: usize = 1024;
 
 type QueueRef = Arc<Mutex<Queue>>;
 
@@ -242,7 +245,7 @@ impl Socket {
                 if q.reader_gone {
                     return if done > 0 { Ok(done) } else { Err(EPIPE) };
                 }
-                let room = CAPACITY.saturating_sub(q.bytes);
+                let room = if q.segs.len() >= MAX_SEGMENTS { 0 } else { CAPACITY.saturating_sub(q.bytes) };
                 let whole = self.ty != Type::Stream;
                 if whole && data.len() > CAPACITY {
                     return Err(EMSGSIZE);
@@ -384,7 +387,7 @@ impl Socket {
         let (writable, gone) = match tx {
             Some(t) => {
                 let q = t.lock();
-                (q.reader_gone || q.bytes < CAPACITY, q.reader_gone)
+                (q.reader_gone || (q.bytes < CAPACITY && q.segs.len() < MAX_SEGMENTS), q.reader_gone)
             }
             None => (self.ty == Type::Dgram, !connected && self.ty != Type::Dgram),
         };

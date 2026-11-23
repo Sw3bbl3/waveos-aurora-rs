@@ -90,6 +90,108 @@ pub fn write_telemetry(o: &mut impl core::fmt::Write) {
     let _ = write!(o, "]");
 }
 
+/// Where memory is, for the log: frames, the heap (and its biggest size
+/// classes), kernel stacks, the kernel virtual area, shared frames, the
+/// block and map caches, pipes and tasks. Allocates nothing and waits for
+/// no lock (what is busy reads as 0), so it can run when memory is out.
+pub fn report(o: &mut impl core::fmt::Write) {
+    let f = frame::stats_nowait();
+    let (heap_size, heap_used) = heap::usage_nowait();
+    let (pages, large) = heap::run_bytes();
+    let (live, live_heap, cached, unmapped) = kstack::counts();
+    let (kva, shm) = vmm::usage();
+    let (tasks, user, sleeping) = crate::sched::task_counts();
+    let _ = writeln!(
+        o,
+        concat!(
+            "mem: free {} of {} frames ({} in CPU caches, {} failures); heap {} KiB held, {} KiB used ",
+            "({} KiB in runs, {} KiB mapped); kstacks {} live + {} on the heap, {} cached, {} slots unmapped; ",
+            "kva {} pages; shared frames {}; block cache {} blocks; map cache {} pages; pipes {}; ",
+            "tasks {} ({} user, {} of them asleep)"
+        ),
+        f.free,
+        f.total,
+        f.cached,
+        f.failures,
+        heap_size / 1024,
+        heap_used / 1024,
+        pages / 1024,
+        large / 1024,
+        live,
+        live_heap,
+        cached,
+        unmapped,
+        kva,
+        shm,
+        crate::fs::cache::held_blocks(),
+        crate::fs::mapcache::held_pages(),
+        crate::proc::pipe::live(),
+        tasks,
+        user,
+        sleeping,
+    );
+    let _ = write!(o, "mem: classes (size:live/slab KiB)");
+    for c in 0..heap::CLASSES {
+        let s = heap::class_stats_nowait(c);
+        if s.slab_bytes >= 256 * 1024 {
+            let _ = write!(o, " {}:{}/{}", s.size, s.live, s.slab_bytes / 1024);
+        }
+    }
+    let _ = writeln!(o);
+}
+
+/// Memory ran short: every cache the kernel keeps gives back what it can:
+/// cached kernel stacks, the filesystems' block caches, the cache of mapped
+/// files, the heap's idle slabs and the CPUs' cached frames. Run from a
+/// task that may wait (the reaper, at most a second after the allocator
+/// saw the shortage); the allocator itself only does the last two, which
+/// never wait. Returns the frames it freed.
+pub fn reclaim() -> u64 {
+    let before = frame::counts().1;
+    kstack::trim_to(0);
+    crate::fs::shrink_caches();
+    crate::fs::mapcache::shrink();
+    heap::reclaim();
+    frame::drain_caches();
+    frame::counts().1.saturating_sub(before)
+}
+
+/// Writes to the kernel console (for [`report`]).
+pub struct Console;
+
+impl core::fmt::Write for Console {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        crate::kprint!("{s}");
+        Ok(())
+    }
+}
+
+/// A kernel heap allocation is about to fail (the caller will most likely
+/// panic): says where memory went, the first few times.
+pub(crate) fn on_heap_failure(size: usize) {
+    static REPORTS: AtomicU64 = AtomicU64::new(0);
+    if REPORTS.fetch_add(1, Ordering::Relaxed) < 3 {
+        crate::kprintln!("\nmm: a kernel heap allocation of {size} bytes failed (fatal unless its caller copes)");
+        report(&mut Console);
+    }
+}
+
+/// Every process's threads, resident memory, page tables and descriptors
+/// (allocates a list: only where the heap still works).
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))] // memory reports in self-tests
+pub fn report_processes(o: &mut impl core::fmt::Write) {
+    let _ = write!(o, "mem: procs (pid:name:threads:resident KiB:table frames:fds)");
+    for p in crate::proc::all() {
+        let (res, tables) = match p.aspace.try_lock() {
+            Some(g) => g.as_ref().map_or((0, 0), |a| (a.resident / 1024, a.table_frames())),
+            None => (0, 0),
+        };
+        let fds = p.fds.try_lock().map_or(0, |f| f.iter().filter(|h| h.is_some()).count());
+        let _ = write!(o, " {}:{}:{}:{}:{}:{}", p.pid, p.name(), p.thread_count(), res, tables, fds);
+    }
+    let _ = writeln!(o);
+}
+
 /// The longest stretch, in TSC cycles, an allocator kept interrupts off
 /// (lock wait included).
 static IRQ_OFF_MAX: AtomicU64 = AtomicU64::new(0);

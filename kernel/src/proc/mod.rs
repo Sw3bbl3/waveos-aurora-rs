@@ -168,6 +168,12 @@ impl Process {
         MemGuard { guard: self.aspace.lock(), _owner: None }
     }
 
+    /// Threads not reaped yet.
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // memory reports in self-tests
+    pub fn thread_count(&self) -> u32 {
+        self.threads.load(Ordering::Relaxed)
+    }
+
     pub fn exit_code(&self) -> Option<i64> {
         let c = self.exit.load(Ordering::Acquire);
         (c != RUNNING).then_some(c)
@@ -189,6 +195,13 @@ impl Process {
         fds.push(Some(h));
         Ok(fds.len() - 1)
     }
+}
+
+/// Whether memory allows another thread: its kernel stack (and the
+/// scheduler's bookkeeping) comes out of what programs may use, so threads
+/// can't eat into the kernel's reserve.
+fn room_for_thread() -> bool {
+    crate::mm::frame::user_may_take(crate::mm::kstack::SIZE / crate::mm::PAGE_SIZE + 4)
 }
 
 static TABLE: IrqMutex<BTreeMap<Pid, Arc<Process>>> = IrqMutex::new(BTreeMap::new());
@@ -302,6 +315,9 @@ pub fn spawn_env(
     parent: Pid,
 ) -> Result<Pid, isize> {
     use crate::compat::linux;
+    if !room_for_thread() {
+        return Err(ENOMEM);
+    }
     let data = fs::read_all(path)?;
     let image = aurora_elf::parse(&data).ok_or(ENOEXEC)?;
     let mut aspace = AddressSpace::new().ok_or(ENOMEM)?;
@@ -444,7 +460,7 @@ pub fn spawn_thread(entry: u64, stack: u64, arg: u64) -> Result<u64, isize> {
     if entry >= layout::USER_END || !(4096..layout::USER_END).contains(&stack) {
         return Err(EINVAL);
     }
-    if p.threads.load(Ordering::Acquire) >= 64 {
+    if p.threads.load(Ordering::Acquire) >= 64 || !room_for_thread() {
         return Err(EAGAIN);
     }
     p.threads.fetch_add(1, Ordering::AcqRel);
@@ -463,7 +479,7 @@ pub fn spawn_linux_thread(
     set_tid: [u64; 2],
 ) -> Result<u64, isize> {
     let p = current().ok_or(EPERM)?;
-    if p.threads.load(Ordering::Acquire) >= 512 {
+    if p.threads.load(Ordering::Acquire) >= 512 || !room_for_thread() {
         return Err(EAGAIN);
     }
     p.threads.fetch_add(1, Ordering::AcqRel);
@@ -705,6 +721,9 @@ pub fn fork(
     share_vm: bool,
     linux: crate::compat::linux::Linux,
 ) -> Result<Arc<Process>, isize> {
+    if !room_for_thread() {
+        return Err(ENOMEM);
+    }
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
     let started = crate::time::uptime_ms();
     let (aspace, cr3, owner, resident) = if share_vm {
@@ -880,5 +899,13 @@ fn reaper() {
         }
         // Frames of kernel stacks cached beyond what is kept for reuse.
         crate::mm::kstack::trim();
+        // Memory ran short: the kernel's caches give back what they can.
+        crate::mm::frame::refresh_low();
+        if crate::mm::frame::take_pressure() {
+            let freed = crate::mm::reclaim();
+            if freed >= 256 {
+                log!("mm", "memory is short: the kernel's caches gave back {} KiB", freed * 4);
+            }
+        }
     }
 }

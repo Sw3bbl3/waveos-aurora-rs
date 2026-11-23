@@ -383,7 +383,7 @@ fn recv_bytes(p: &Process, fd: u64, cap: usize, flags: u64) -> Result<(Got, bool
     let nb = nonblock(p, fd, flags);
     match sock(p, fd)? {
         Sock::Local(u) => {
-            let mut buf = alloc::vec![0u8; cap];
+            let mut buf = user::buffer(cap)?;
             let r = u.recv(&mut buf, flags & MSG_PEEK != 0, nb)?;
             buf.truncate(r.len);
             let cred = u.passcred.load(core::sync::atomic::Ordering::Relaxed).then_some(r.pid);
@@ -391,7 +391,7 @@ fn recv_bytes(p: &Process, fd: u64, cap: usize, flags: u64) -> Result<(Got, bool
         }
         s => {
             let net = s.net();
-            let mut buf = alloc::vec![0u8; cap];
+            let mut buf = user::buffer(cap)?;
             let v6 = net.v6;
             let (n, from) = with_nonblock(net, nb, || {
                 if net.kind == Kind::Tcp {

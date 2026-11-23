@@ -522,6 +522,8 @@ fn take_screenshot(back: &[u32], w: u32, h: u32) {
 /// Restores appearance and system preferences.
 fn load_settings() {
     settings::load();
+    // The RTC has kept local time in this zone.
+    time::learn_zone(settings::get_int("utc_offset", 0));
     theme::set_dark(settings::get_bool("dark", true));
     theme::set_accent(settings::get_int("accent", 0) as u8);
     prefs::apply_all_system();

@@ -80,6 +80,9 @@ pub trait Filesystem: Send + Sync {
     fn sync(&self) -> FsResult<()> {
         Ok(())
     }
+    /// Memory is short: give back what a cache holds (without waiting
+    /// for a lock someone holds).
+    fn shrink(&self) {}
     fn read_only(&self) -> bool {
         false
     }
@@ -418,6 +421,14 @@ pub fn rename(from: &str, to: &str) -> FsResult<()> {
 
 pub fn sync_all() {
     let _ = try_sync_all();
+}
+
+/// Memory is short: every mounted filesystem shrinks its cache.
+pub fn shrink_caches() {
+    let all: Vec<Arc<dyn Filesystem>> = MOUNTS.lock().iter().map(|m| m.fs.clone()).collect();
+    for fs in all {
+        fs.shrink();
+    }
 }
 
 pub fn try_sync_all() -> FsResult<()> {

@@ -19,8 +19,22 @@ pub struct Pipe {
     inner: IrqMutex<Inner>,
 }
 
+/// Pipes that exist (for memory reports).
+static LIVE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn live() -> u64 {
+    LIVE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        LIVE.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl Pipe {
     pub fn new() -> Pipe {
+        LIVE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         Pipe { inner: IrqMutex::new(Inner { buf: VecDeque::new(), readers: 1, writers: 1, waiting: [None, None] }) }
     }
 
@@ -61,12 +75,41 @@ impl Pipe {
     pub fn write(&self, data: &[u8]) -> Result<usize, isize> {
         let mut done = 0;
         while done < data.len() {
+            // How full the buffer may be for the write to go on.
+            let mut limit = CAPACITY;
             {
                 let mut g = self.inner.lock();
                 if g.readers == 0 {
                     return if done > 0 { Ok(done) } else { Err(EPIPE) };
                 }
-                let room = CAPACITY - g.buf.len();
+                let mut room = CAPACITY - g.buf.len();
+                // Growing the buffer takes kernel memory a program asked
+                // for: while memory is short a pipe gets a page at most, and
+                // fills only the room it has. Then the write ends short;
+                // with nothing written yet it waits for the reader as when
+                // the pipe is full, and fails if the buffer has no room.
+                let want = room.min(data.len() - done);
+                let mut spare = g.buf.capacity() - g.buf.len();
+                if want > spare {
+                    if crate::mm::frame::user_may_take((want / 4096) as u64 + 1) {
+                        let _ = g.buf.try_reserve(want);
+                    }
+                    if g.buf.capacity() - g.buf.len() < want && g.buf.capacity() < 4096 {
+                        let page = want.min(4096 - g.buf.len());
+                        let _ = g.buf.try_reserve(page);
+                    }
+                    spare = g.buf.capacity() - g.buf.len();
+                }
+                if want > spare {
+                    if done > 0 && spare == 0 {
+                        return Ok(done);
+                    }
+                    room = spare;
+                    limit = g.buf.len();
+                    if room == 0 && g.buf.is_empty() {
+                        return Err(ENOMEM);
+                    }
+                }
                 if room > 0 {
                     let n = room.min(data.len() - done);
                     g.buf.extend(&data[done..done + n]);
@@ -82,7 +125,7 @@ impl Pipe {
             }
             sched::wait_until(50, || {
                 let g = self.inner.lock();
-                g.buf.len() < CAPACITY || g.readers == 0
+                g.buf.len() < limit || g.readers == 0
             });
         }
         Ok(done)

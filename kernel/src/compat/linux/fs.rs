@@ -935,8 +935,7 @@ struct Info {
 
 /// WaveOS keeps local time since 2000; Linux wants UTC since 1970.
 pub fn unix_time(since_2000: u64) -> i64 {
-    let offset = crate::gui::prefs::get("utc_offset").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
-    since_2000 as i64 + 946_684_800 - offset * 60
+    since_2000 as i64 + 946_684_800 - crate::time::zone_minutes() * 60
 }
 
 /// Program and library folders hold executables; everything else is data.

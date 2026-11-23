@@ -51,6 +51,11 @@ static FILES: Mutex<Vec<Arc<Cached>>> = Mutex::new(Vec::new());
 static PAGES: AtomicU64 = AtomicU64::new(0);
 static CLOCK: AtomicU64 = AtomicU64::new(0);
 
+/// Pages the cache holds (for memory reports).
+pub fn held_pages() -> u64 {
+    PAGES.load(Ordering::Relaxed)
+}
+
 /// What a read is done in: 256 KiB at a time.
 const CHUNK: usize = 64 * PAGE_SIZE as usize;
 
@@ -123,7 +128,9 @@ fn read(file: &Cached, fs: &Arc<dyn Filesystem>, first: u64, count: u64) -> Resu
     let mut frames = file.frames.lock();
     let end = first + count;
     let mut page = first;
-    let mut buf = vec![0u8; CHUNK];
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(CHUNK).map_err(|_| ENOMEM)?;
+    buf.resize(CHUNK, 0);
     while page < end {
         if frames[page as usize] != 0 {
             page += 1;
@@ -145,6 +152,13 @@ fn read(file: &Cached, fs: &Arc<dyn Filesystem>, first: u64, count: u64) -> Resu
         vmm::shm_hold(f);
     }
     Ok(out)
+}
+
+/// Memory is short: drops every file from the cache (pages still mapped
+/// stay with their mappings; the rest are freed).
+pub fn shrink() {
+    let files = core::mem::take(&mut *FILES.lock());
+    drop(files);
 }
 
 /// Drops the files used longest ago (never `keep`) while the cache holds

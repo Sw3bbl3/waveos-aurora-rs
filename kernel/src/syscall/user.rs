@@ -11,7 +11,6 @@
 
 use crate::proc;
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 use aurora_abi::err::*;
 use core::arch::global_asm;
@@ -131,9 +130,19 @@ fn copy_out(ptr: u64, src: &[u8]) -> Result<(), isize> {
     }
 }
 
+/// A zeroed kernel buffer of `len` bytes for a system call, or `ENOMEM`:
+/// its size is the program's to choose, so running out of memory for it
+/// fails the call, not the kernel.
+pub fn buffer(len: usize) -> Result<Vec<u8>, isize> {
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len).map_err(|_| ENOMEM)?;
+    buf.resize(len, 0);
+    Ok(buf)
+}
+
 /// Copies `len` bytes in from user memory (at most `MAX_BUF`).
 pub fn slice(ptr: u64, len: u64) -> Result<Vec<u8>, isize> {
-    let mut buf = vec![0u8; len.min(MAX_BUF) as usize];
+    let mut buf = buffer(len.min(MAX_BUF) as usize)?;
     copy_in(&mut buf, ptr)?;
     Ok(buf)
 }
@@ -168,7 +177,7 @@ impl DerefMut for UserOut {
 pub fn slice_mut(ptr: u64, len: u64) -> Result<UserOut, isize> {
     let len = len.min(MAX_BUF);
     check(ptr, len, true)?;
-    Ok(UserOut { ptr, buf: vec![0u8; len as usize] })
+    Ok(UserOut { ptr, buf: buffer(len as usize)? })
 }
 
 /// Checks that `len` bytes at `ptr` are writable (without copying).

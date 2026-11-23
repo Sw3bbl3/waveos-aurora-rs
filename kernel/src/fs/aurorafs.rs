@@ -88,6 +88,11 @@ impl Filesystem for AuroraFs {
     fn root(&self) -> Ino {
         ::aurorafs::ROOT
     }
+    fn shrink(&self) {
+        if let Some(mut vol) = self.vol.try_lock() {
+            vol.disk().0.shrink(256);
+        }
+    }
     fn lookup(&self, dir: Ino, name: &str) -> FsResult<Ino> {
         self.vol.lock().lookup(dir, name).map_err(errno)
     }

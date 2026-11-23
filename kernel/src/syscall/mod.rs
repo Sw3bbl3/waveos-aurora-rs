@@ -254,8 +254,8 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
                 minute: d.minute,
                 second: d.second,
             };
+            // (The vDSO's time page follows at once.)
             time::set_wall_clock(&rd);
-            crate::compat::linux::vdso::publish();
             Ok(0)
         }
         nr::DISPLAY_MODES => {

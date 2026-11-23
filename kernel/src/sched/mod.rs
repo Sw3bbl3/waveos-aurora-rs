@@ -804,34 +804,47 @@ pub fn unpark() {
 /// the return addresses on its stack (resolve them with `addr2line -e` on the
 /// kernel ELF). For the self-tests' panic report; it never waits for a lock.
 pub fn dump_stacks() {
+    dump_stacks_of(|_| true)
+}
+
+/// [`dump_stacks`] for the tasks of the processes `which` picks (0: the kernel).
+pub fn dump_stacks_of(which: impl Fn(u32) -> bool) {
     let Some(guard) = SCHED.try_lock() else {
         crate::kprintln!("(scheduler busy: no task stacks)");
         return;
     };
     let Some(s) = guard.as_ref() else { return };
+    // (Allocates nothing: the panic may be the heap running out.)
     for (&id, t) in &s.tasks {
-        if t.idle || t.running_on.is_some() {
+        if t.idle || !which(t.pid) {
+            continue;
+        }
+        if let Some(cpu) = t.running_on {
+            crate::kprintln!("task {} '{}' (pid {}) running on CPU {}", id, t.name, t.pid, cpu);
             continue;
         }
         let Some(stack) = t._stack.as_ref() else { continue };
         let (lo, hi) = (stack.bottom(), stack.top());
         let read = |a: u64| -> Option<u64> { (a >= lo && a + 8 <= hi).then(|| unsafe { (a as *const u64).read() }) };
         // aurora_context_switch pushed rbp, rbx, r12–r15 below its return address.
-        let mut frames = alloc::vec::Vec::new();
+        let mut frames = [0u64; 20];
+        let mut n = 0;
         if let Some(ret) = read(t.rsp + 48) {
-            frames.push(ret);
+            frames[0] = ret;
+            n = 1;
         }
         let mut rbp = read(t.rsp + 40).unwrap_or(0);
-        while frames.len() < 20 {
+        while n < frames.len() {
             let (Some(next), Some(ret)) = (read(rbp), read(rbp + 8)) else { break };
-            frames.push(ret);
+            frames[n] = ret;
+            n += 1;
             if next <= rbp {
                 break;
             }
             rbp = next;
         }
         crate::kprint!("task {} '{}' (pid {}) {:?}:", id, t.name, t.pid, t.state);
-        for f in frames {
+        for f in &frames[..n] {
             crate::kprint!(" {:#x}", f);
         }
         crate::kprintln!();
@@ -873,6 +886,18 @@ pub fn list() -> Vec<TaskInfo> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// (tasks, of them user threads, of them sleeping), without waiting for
+/// the lock (zeros if it is busy).
+pub fn task_counts() -> (u64, u64, u64) {
+    interrupts::without_interrupts(|| {
+        let Some(g) = SCHED.try_lock() else { return (0, 0, 0) };
+        let Some(s) = g.as_ref() else { return (0, 0, 0) };
+        let user = s.tasks.values().filter(|t| t.pid != 0).count() as u64;
+        let sleeping = s.tasks.values().filter(|t| t.pid != 0 && matches!(t.state, State::Sleeping(_))).count() as u64;
+        (s.tasks.len() as u64, user, sleeping)
+    })
 }
 
 /// (busy, idle) milliseconds of every CPU that has joined.
