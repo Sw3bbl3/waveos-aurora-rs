@@ -2137,8 +2137,12 @@ fn displays() {
         crate::gui::prefs::boot_option("test_displays").and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 4);
     // The third display is HiDPI: drawn at 2x (1280x720 points).
     const SIZES: [(u32, u32); 3] = [(1024, 768), (2560, 1440), (800, 600)];
-    let connected =
-        || gpu::devices().iter().map(|d| d.connectors().iter().filter(|c| c.status == Status::Connected).count()).sum::<usize>();
+    let connected = || {
+        gpu::devices()
+            .iter()
+            .map(|d| d.connectors().iter().filter(|c| c.status == Status::Connected).count())
+            .sum::<usize>()
+    };
     for head in 1..heads {
         let (w, h) = SIZES[head - 1];
         crate::kprintln!("\nharness: display set {head} {w}x{h}");
@@ -2292,9 +2296,18 @@ fn displays() {
         }
         let (q1, s1) = (c.screens[quick].present_count(), c.screens[slow].present_count());
         c.screens[slow].presenter().unwrap().delay_ms.store(0, core::sync::atomic::Ordering::Relaxed);
-        assert!(q1 - q0 >= 8 && q1 - q0 >= 2 * (s1 - s0), "the slow display held up the others: {} vs {}", q1 - q0, s1 - s0);
+        assert!(
+            q1 - q0 >= 8 && q1 - q0 >= 2 * (s1 - s0),
+            "the slow display held up the others: {} vs {}",
+            q1 - q0,
+            s1 - s0
+        );
         assert!(worst < 250, "a frame waited {worst} ms for the slow display");
-        crate::kprint!("(slow display: {} frames there, {} on the main one, longest frame {worst} ms) ", s1 - s0, q1 - q0);
+        crate::kprint!(
+            "(slow display: {} frames there, {} on the main one, longest frame {worst} ms) ",
+            s1 - s0,
+            q1 - q0
+        );
         // Afterwards it catches up with everything it skipped.
         c.settle(3000);
         displays_screendump(&c);
@@ -2333,13 +2346,18 @@ fn displays() {
         c.settle(2000);
         let (moved, away) = card_rect(&c).unwrap();
         let main_rect = c.screens[c.main].rect;
-        assert!(main_rect.intersect(&moved) == moved && away, "the window was not moved to the main display: {moved:?}");
+        assert!(
+            main_rect.intersect(&moved) == moved && away,
+            "the window was not moved to the main display: {moved:?}"
+        );
         assert_eq!(c.desktop.displays().len(), n - 1);
         let (compose, total) = displays_frame_cost(&mut c);
         costs.push((n - 1, compose, total));
         // Down to the main display alone, for the frame cost.
-        let others: Vec<(u32, (u32, u32))> =
-            (0..c.screens.len()).filter(|&i| i != c.main).map(|i| (c.screens[i].head(), c.screens[i].out.size())).collect();
+        let others: Vec<(u32, (u32, u32))> = (0..c.screens.len())
+            .filter(|&i| i != c.main)
+            .map(|i| (c.screens[i].head(), c.screens[i].out.size()))
+            .collect();
         if !others.is_empty() {
             for (h, _) in &others {
                 crate::kprintln!("\nharness: display set {h} 0x0");

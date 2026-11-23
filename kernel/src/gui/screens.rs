@@ -503,8 +503,8 @@ impl Compositor {
     fn hw_cursor_setup(&mut self) {
         // The pointer goes on the displays' cursor planes when they all have
         // one (`cursor=software` in boot.conf draws it into the picture instead).
-        self.hw_cursor =
-            self.screens.iter().all(|s| s.out.has_cursor()) && prefs::boot_option("cursor").as_deref() != Some("software");
+        self.hw_cursor = self.screens.iter().all(|s| s.out.has_cursor())
+            && prefs::boot_option("cursor").as_deref() != Some("software");
         cursor::set_hardware(self.hw_cursor);
         for s in &mut self.screens {
             s.cursor_shown = None;
@@ -607,7 +607,8 @@ impl Compositor {
     pub fn reconfigure(&mut self) {
         let before: Vec<(u32, (u32, u32), i32, Rect)> =
             self.screens.iter().map(|s| (s.key, s.out.size(), s.scale, s.rect)).collect();
-        let main_before = (self.screens[self.main].key, self.screens[self.main].out.size(), self.screens[self.main].scale);
+        let main_before =
+            (self.screens[self.main].key, self.screens[self.main].out.size(), self.screens[self.main].scale);
         // What is connected now.
         let mut connected: Vec<(Arc<dyn KmsDevice>, ConnectorInfo)> = Vec::new();
         for dev in gpu::devices() {
@@ -618,7 +619,9 @@ impl Compositor {
         // Gone: switched off. (The last display stays, whatever it reports.)
         let mut i = 0;
         while i < self.screens.len() {
-            let here = connected.iter().any(|(d, c)| c.id == self.screens[i].out.connector && Arc::ptr_eq(d, &self.screens[i].out.dev));
+            let here = connected
+                .iter()
+                .any(|(d, c)| c.id == self.screens[i].out.connector && Arc::ptr_eq(d, &self.screens[i].out.dev));
             if !here && self.screens.len() > 1 {
                 let s = self.screens.remove(i);
                 s.close();
@@ -631,7 +634,8 @@ impl Compositor {
             if self.screens.iter().any(|s| s.out.connector == conn.id && Arc::ptr_eq(&s.out.dev, dev)) {
                 continue;
             }
-            let taken: Vec<_> = self.screens.iter().filter(|s| Arc::ptr_eq(&s.out.dev, dev)).map(|s| s.out.crtc).collect();
+            let taken: Vec<_> =
+                self.screens.iter().filter(|s| Arc::ptr_eq(&s.out.dev, dev)).map(|s| s.out.crtc).collect();
             let want = record(identity(conn).0).filter(|r| r.width > 0).map(|r| (r.width, r.height));
             match Output::open_connector(dev.clone(), conn, want, &taken) {
                 Some(out) => {
@@ -684,7 +688,8 @@ impl Compositor {
             }
         }
         self.lay_out();
-        let main_after = (self.screens[self.main].key, self.screens[self.main].out.size(), self.screens[self.main].scale);
+        let main_after =
+            (self.screens[self.main].key, self.screens[self.main].out.size(), self.screens[self.main].scale);
         let m = &self.screens[self.main];
         super::set_main(&m.out, m.scale);
         let after: Vec<(u32, (u32, u32), i32, Rect)> =
@@ -712,7 +717,12 @@ impl Compositor {
                 self.hw_cursor_setup();
                 self.apply();
                 let (w, h) = (self.screens[main].rect.w, self.screens[main].rect.h);
-                server::broadcast(aurora_abi::Event { kind: aurora_abi::event::SCREEN, x: w, y: h, ..Default::default() });
+                server::broadcast(aurora_abi::Event {
+                    kind: aurora_abi::event::SCREEN,
+                    x: w,
+                    y: h,
+                    ..Default::default()
+                });
             }
             Err(e) => log!("gui", "the display can't show {}x{} ({:?})", w, h, e),
         }
@@ -721,11 +731,7 @@ impl Compositor {
     /// The display the pointer is on (an index into `screens`).
     pub fn pointer_screen(&self) -> usize {
         let (x, y) = self.desktop.pointer_at();
-        self.areas
-            .iter()
-            .copied()
-            .find(|&i| self.screens[i].rect.contains(x, y))
-            .unwrap_or(self.main)
+        self.areas.iter().copied().find(|&i| self.screens[i].rect.contains(x, y)).unwrap_or(self.main)
     }
 
     /// One frame: input, commands, damage painted on each display and
@@ -991,7 +997,11 @@ impl Compositor {
                 ns / n.max(1) / 1000,
                 max / 1000,
                 px / n.max(1) / 1000,
-                if s.skipped > 0 { alloc::format!("; {} frames held back while busy", s.skipped) } else { String::new() }
+                if s.skipped > 0 {
+                    alloc::format!("; {} frames held back while busy", s.skipped)
+                } else {
+                    String::new()
+                }
             );
             s.skipped = 0;
         }

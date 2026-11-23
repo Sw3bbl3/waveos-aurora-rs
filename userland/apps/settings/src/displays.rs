@@ -171,7 +171,10 @@ impl Settings {
             Text::new(""),
         )];
         if !d.is_primary() {
-            rows.push(row("Main display", Button::new("Use as Main Display").action(Msg::Displays(DisplayMsg::MakeMain))));
+            rows.push(row(
+                "Main display",
+                Button::new("Use as Main Display").action(Msg::Displays(DisplayMsg::MakeMain)),
+            ));
             let side = list
                 .iter()
                 .find(|m| m.is_primary())
@@ -300,7 +303,8 @@ impl Settings {
             }
             DisplayMsg::MakeMain => {
                 // The arrangement as it is now goes with it.
-                save_places(&list, &places).and_then(|_| prefs::set(layout::PRIMARY_PREF, &format!("{:08x}", list[sel].key)))
+                save_places(&list, &places)
+                    .and_then(|_| prefs::set(layout::PRIMARY_PREF, &format!("{:08x}", list[sel].key)))
             }
             DisplayMsg::Mirror(on) => prefs::set(layout::MIRROR_PREF, if on { "1" } else { "0" }),
             DisplayMsg::Mode(i) => {

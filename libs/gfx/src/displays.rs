@@ -72,7 +72,14 @@ pub fn carry(r: Rect, from: Rect, to: Rect) -> Rect {
         let room = room.max(0) as i64;
         let into = (pos - start).clamp(0, room as i32) as i64;
         let to_room = to_room.max(0) as i64;
-        to_start + if room == to_room { into } else if room == 0 { 0 } else { into * to_room / room } as i32
+        to_start
+            + if room == to_room {
+                into
+            } else if room == 0 {
+                0
+            } else {
+                into * to_room / room
+            } as i32
     };
     Rect::new(along(r.x, from.x, from.w - r.w, to.x, to.w - w), along(r.y, from.y, from.h - r.h, to.y, to.h - h), w, h)
 }
@@ -288,7 +295,8 @@ impl Record {
             scale: next()?.parse().ok()?,
             wallpaper: next().and_then(|v| v.parse().ok()).unwrap_or(-1),
         };
-        let size_ok = (r.width, r.height) == (0, 0) || ((320..=16384).contains(&r.width) && (200..=16384).contains(&r.height));
+        let size_ok =
+            (r.width, r.height) == (0, 0) || ((320..=16384).contains(&r.width) && (200..=16384).contains(&r.height));
         let place_ok = r.x.abs() <= 1 << 20 && r.y.abs() <= 1 << 20;
         (size_ok && place_ok && r.scale <= 2).then_some(r)
     }
@@ -402,7 +410,10 @@ mod tests {
         let sizes = [(1280, 800), (1024, 768), (1920, 1080)];
         // Nothing saved: left to right.
         let d = arrange(&sizes, &[None, None, None], 0);
-        assert_eq!(d, alloc::vec![Rect::new(0, 0, 1280, 800), Rect::new(1280, 0, 1024, 768), Rect::new(2304, 0, 1920, 1080)]);
+        assert_eq!(
+            d,
+            alloc::vec![Rect::new(0, 0, 1280, 800), Rect::new(1280, 0, 1024, 768), Rect::new(2304, 0, 1920, 1080)]
+        );
         // The second saved on the left; the third saved overlapping: moved to touch.
         let d = arrange(&sizes, &[None, Some((-1024, 0)), Some((500, 500))], 0);
         assert_eq!(d[1], Rect::new(-1024, 0, 1024, 768));

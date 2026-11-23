@@ -305,7 +305,9 @@ impl<'a> Canvas<'a> {
 
     pub fn fill_round_rect_with(&mut self, r: Rect, radius: i32, color: impl Fn(i32, i32) -> u32) {
         let (s, (ox, oy)) = (self.scale, self.origin);
-        self.fill_round_rect_with_px(self.to_px(r), radius * s, |x, y| color(x.div_euclid(s) + ox, y.div_euclid(s) + oy))
+        self.fill_round_rect_with_px(self.to_px(r), radius * s, |x, y| {
+            color(x.div_euclid(s) + ox, y.div_euclid(s) + oy)
+        })
     }
 
     /// An anti-aliased outline of a rounded rectangle, one point wide.

@@ -268,7 +268,9 @@ fn main() {
                 }),
             };
             let mut cmd = qemu(&img, &opts);
+            cmd.args(opts.displays.plug_in_args(gpu, &session_dir()));
             opts.displays.starting(&cmd);
+            opts.displays.plug_in(gpu, &session_dir());
             let Some(mon) = mon else {
                 let status = cmd.status().expect("failed to launch qemu");
                 exit(status.code().unwrap_or(1));

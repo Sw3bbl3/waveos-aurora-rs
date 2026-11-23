@@ -227,8 +227,8 @@ impl Desktop {
         let (mw, mh) = self.windows[i].minimum();
         // An edge another display continues is for crossing, not for mooring.
         let outer = |ex: i32| lumen::displays::at(&rects, ex, y).is_none();
-        let near_top = (y < area.y + 32 && y >= d.y)
-            || (self.moorings_open && self.moorings_rect().inset(-24).contains(x, y));
+        let near_top =
+            (y < area.y + 32 && y >= d.y) || (self.moorings_open && self.moorings_rect().inset(-24).contains(x, y));
         let mut zone = None;
         if self.windows[i].app.resizable() && near_top {
             for (n, layout) in MOORINGS.iter().enumerate() {

@@ -86,9 +86,14 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
             return Err(EINVAL)
         }
         displays::MIRROR_PREF if value != "0" && value != "1" => return Err(EINVAL),
-        k if k.starts_with("display_") && k != pref::DISPLAY_SCALE && k != displays::PRIMARY_PREF && k != displays::MIRROR_PREF => {
+        k if k.starts_with("display_")
+            && k != pref::DISPLAY_SCALE
+            && k != displays::PRIMARY_PREF
+            && k != displays::MIRROR_PREF =>
+        {
             let hex = &k["display_".len()..];
-            if hex.len() != 8 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) || displays::Record::parse(value).is_none() {
+            if hex.len() != 8 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) || displays::Record::parse(value).is_none()
+            {
                 return Err(EINVAL);
             }
         }

@@ -82,10 +82,8 @@ impl Output {
         let conn = conn.clone();
         let encoders = dev.encoders();
         let enc = encoders.iter().find(|e| conn.encoders.contains(&e.id))?;
-        let crtc = dev
-            .crtcs()
-            .into_iter()
-            .find(|c| enc.possible_crtcs & (1 << c.index) != 0 && !taken.contains(&c.id))?;
+        let crtc =
+            dev.crtcs().into_iter().find(|c| enc.possible_crtcs & (1 << c.index) != 0 && !taken.contains(&c.id))?;
         let planes = dev.planes();
         let on_crtc = |k: PlaneKind| {
             planes.iter().find(|p| p.kind == k && p.possible_crtcs & (1 << crtc.index) != 0).map(|p| p.id)

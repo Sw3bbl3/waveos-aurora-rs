@@ -39,7 +39,7 @@ pub fn qemu_args(dir: &Path, heads: usize) -> Vec<String> {
 }
 
 /// A minimal RFB 3.8 viewer: no password, shared, asks for nothing but a size.
-fn vnc_connect(path: &Path) -> std::io::Result<UnixStream> {
+pub fn vnc_connect(path: &Path) -> std::io::Result<UnixStream> {
     let mut s = UnixStream::connect(path)?;
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut version = [0u8; 12];
@@ -73,7 +73,7 @@ fn vnc_connect(path: &Path) -> std::io::Result<UnixStream> {
 }
 
 /// SetDesktopSize: one screen of `w`×`h` (0×0 switches the head off).
-fn vnc_set_size(s: &mut UnixStream, w: u16, h: u16) -> std::io::Result<()> {
+pub fn vnc_set_size(s: &mut UnixStream, w: u16, h: u16) -> std::io::Result<()> {
     let mut msg = vec![251, 0];
     msg.extend_from_slice(&w.to_be_bytes());
     msg.extend_from_slice(&h.to_be_bytes());
@@ -148,7 +148,8 @@ impl Harness {
         let mut checked = 0;
         for sample in f {
             let Some((at, want)) = sample.split_once('=') else { continue };
-            let Some((x, y)) = at.split_once(',').and_then(|(x, y)| Some((x.parse::<u32>().ok()?, y.parse::<u32>().ok()?)))
+            let Some((x, y)) =
+                at.split_once(',').and_then(|(x, y)| Some((x.parse::<u32>().ok()?, y.parse::<u32>().ok()?)))
             else {
                 continue;
             };
@@ -188,7 +189,8 @@ fn ppm(data: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     if fields.len() < 4 || fields[0] != "P6" || fields[3] != "255" {
         return Err("not a binary PPM".into());
     }
-    let (w, h): (u32, u32) = (fields[1].parse().map_err(|_| "bad width")?, fields[2].parse().map_err(|_| "bad height")?);
+    let (w, h): (u32, u32) =
+        (fields[1].parse().map_err(|_| "bad width")?, fields[2].parse().map_err(|_| "bad height")?);
     let body = &data[i + 1..];
     if body.len() < (w * h * 3) as usize {
         return Err("short PPM".into());
