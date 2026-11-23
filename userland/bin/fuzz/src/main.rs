@@ -3,6 +3,7 @@
 //! ```text
 //! fuzz run [--seed N] [--rounds N] [--iters N] [--workers N] [--trace]
 //! fuzz child SEED ITERS WORKERS [trace]     one round (what each round runs)
+//! fuzz hog N                                takes all the memory it can (see `hog`)
 //! ```
 //!
 //! Every round is a child process. Its worker threads call every system
@@ -133,7 +134,8 @@ const RO_PATHS: &[&str] = &[
 ];
 const CWD_PATHS: &[&str] = &["/fuzz", "/fuzz/dir", "/fuzz/dir/sub", "/System", "/System/Bin", "/fuzz/a"];
 /// Bytes for random names: never `/` or `.`, so no name leaves the sandbox.
-const NAME_BYTES: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_~#%+=,;:@\xc3\xa9\xff\x80\x01\x7f";
+const NAME_BYTES: &[u8] =
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_~#%+=,;:@\xc3\xa9\xff\x80\x01\x7f";
 
 /// One worker's view: its generator and a scratch area for strings and
 /// structs (never unmapped: it is on the heap).
@@ -371,7 +373,9 @@ impl Worker {
                 [target, self.r.below(70), 0, 0, 0, 0]
             }
             nr::PROC_LIST => [self.buf(4096), self.int(), 0, 0, 0, 0],
-            nr::MMAP => [self.r.pick(&[1, 4096, 4097, 65536, 1 << 20, 4 << 20, 0, (1 << 30) + 1, u64::MAX]), 0, 0, 0, 0, 0],
+            nr::MMAP => {
+                [self.r.pick(&[1, 4096, 4097, 65536, 1 << 20, 4 << 20, 0, (1 << 30) + 1, u64::MAX]), 0, 0, 0, 0, 0]
+            }
             nr::MUNMAP => {
                 let (base, len) = self.region();
                 match self.r.below(8) {
@@ -665,7 +669,10 @@ impl Worker {
             DONE.fetch_add(1, Relaxed);
         }
         if TRACE.load(Relaxed) {
-            let line = format!("fuzz t{} #{i}: nr {n} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}", self.id, a[0], a[1], a[2], a[3], a[4], a[5]);
+            let line = format!(
+                "fuzz t{} #{i}: nr {n} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+                self.id, a[0], a[1], a[2], a[3], a[4], a[5]
+            );
             let _ = call(nr::LOG, &[line.as_ptr() as u64, line.len() as u64]);
         }
         let ret = unsafe { syscall6(n, a[0], a[1], a[2], a[3], a[4], a[5]) };
@@ -741,7 +748,9 @@ fn open_some(r: &mut Rng) -> u64 {
     let path = r.pick(&["/fuzz/a\0", "/fuzz/b\0", "/System/version.txt\0", "/fuzz/dir/x\0"]);
     let path = &path[..path.len() - 1];
     match r.below(6) {
-        0 | 1 => call(nr::OPEN, &[path.as_ptr() as u64, path.len() as u64, (READ | WRITE | CREATE) as u64]).unwrap_or(EMPTY),
+        0 | 1 => {
+            call(nr::OPEN, &[path.as_ptr() as u64, path.len() as u64, (READ | WRITE | CREATE) as u64]).unwrap_or(EMPTY)
+        }
         2 | 3 => {
             let mut fds = [0i32; 2];
             if call(nr::PIPE, &[fds.as_mut_ptr() as u64, r.below(2)]).is_ok() {
@@ -786,6 +795,13 @@ fn map_region(i: usize, r: &mut Rng) {
 
 fn chaos(seed: u64) {
     let mut r = Rng::new(seed);
+    // Stacks of the threads it started, unmapped 256 threads later (long
+    // done, unless blocked: then the thread faults when it wakes, and the
+    // round crashes, which is fine). Leaving them all mapped, a round that
+    // ran long (a worker blocked in a 20 s connect, or the main thread in a
+    // pipe it holds both ends of) took all the memory programs may have.
+    let mut stacks = [0u64; 256];
+    let mut next_stack = 0;
     while !STOP.load(Relaxed) {
         match r.below(6) {
             0 | 1 => {
@@ -806,7 +822,15 @@ fn chaos(seed: u64) {
             4 => {
                 // Thread churn: short-lived threads come and go.
                 if let Ok(stack) = call(nr::MMAP, &[64 * 1024]) {
-                    let _ = call(nr::THREAD_SPAWN, &[mini_thread as *const () as u64, stack + 64 * 1024, r.next()]);
+                    if call(nr::THREAD_SPAWN, &[mini_thread as *const () as u64, stack + 64 * 1024, r.next()]).is_ok() {
+                        let old = core::mem::replace(&mut stacks[next_stack], stack);
+                        next_stack = (next_stack + 1) % stacks.len();
+                        if old != 0 {
+                            let _ = call(nr::MUNMAP, &[old, 64 * 1024]);
+                        }
+                    } else {
+                        let _ = call(nr::MUNMAP, &[stack, 64 * 1024]);
+                    }
                 }
             }
             _ => process::yield_now(),
@@ -910,6 +934,119 @@ fn victim(how: &str) -> i32 {
     9
 }
 
+// ------------------------------------------------------------ memory hog
+
+/// `fuzz hog N`: takes memory every way a program can until the kernel
+/// refuses — threads (kernel stacks), full pipes, loopback TCP connections
+/// with full buffers, windows, then mapped memory, then threads and pipes
+/// again — says `hog: full` on stdout and waits to be killed. The kernel
+/// self-test runs several at once and checks that the kernel keeps working
+/// and gets all of it back. `N` picks the TCP ports.
+fn hog(n: u64) -> i32 {
+    let mut taken = [0u64; 6];
+    // Each thread blocks for good (until the kill), on a stack of its own.
+    // (Raw calls: no heap, which can't grow once memory is out.)
+    extern "C" fn blocked(_: u64) -> ! {
+        let word = AtomicU32::new(0);
+        loop {
+            let _ = call(nr::FUTEX_WAIT, &[word.as_ptr() as u64, 0, u64::MAX]);
+        }
+    }
+    let threads = || {
+        let mut k = 0;
+        while let Ok(stack) = call(nr::MMAP, &[64 * 1024]) {
+            if call(nr::THREAD_SPAWN, &[blocked as *const () as u64, stack + 64 * 1024, 0]).is_err() {
+                let _ = call(nr::MUNMAP, &[stack, 64 * 1024]);
+                break;
+            }
+            k += 1;
+        }
+        k
+    };
+    // (Allocated now: the heap can't grow later.)
+    let chunk = alloc::vec![0x5au8; 65536];
+    let pipes = || {
+        let mut k = 0;
+        // (Up to 128: a pipe holds 64 KiB.)
+        while k < 128 {
+            let Ok([_r, w]) = process::pipe(false) else { break };
+            // One write: short (or refused) once memory is short; another
+            // would wait for a reader that never comes.
+            match call(nr::WRITE, &[w, chunk.as_ptr() as u64, chunk.len() as u64]) {
+                Ok(n) if n as usize == chunk.len() => {}
+                _ => break,
+            }
+            k += 1;
+        }
+        k
+    };
+    taken[0] = threads();
+    taken[1] = pipes();
+    // Loopback connections, both ends' buffers filled.
+    let addr = corekit::abi::SockAddr::new([127, 0, 0, 1], 41000 + (n % 100) as u16 * 10);
+    if let Ok(l) = call(nr::SOCKET, &[net::TCP]) {
+        let _ = call(nr::SOCKOPT, &[l, net::OPT_TIMEOUT, 2000]);
+        let _ = call(nr::BIND, &[l, &addr as *const _ as u64]);
+        let _ = call(nr::LISTEN, &[l, 8]);
+        for _ in 0..8 {
+            let Ok(c) = call(nr::SOCKET, &[net::TCP]) else { break };
+            let _ = call(nr::SOCKOPT, &[c, net::OPT_TIMEOUT, 2000]);
+            if call(nr::CONNECT, &[c, &addr as *const _ as u64]).is_err() {
+                break;
+            }
+            let Ok(a) = call(nr::ACCEPT, &[l, 0]) else { break };
+            for s in [c, a] {
+                let _ = call(nr::SOCKOPT, &[s, net::OPT_NONBLOCK, 1]);
+                let deadline = time::uptime_ms() + 2000;
+                while time::uptime_ms() < deadline {
+                    match call(nr::WRITE, &[s, chunk.as_ptr() as u64, chunk.len() as u64]) {
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+            }
+            taken[2] += 1;
+        }
+    }
+    for _ in 0..8 {
+        let title = "hog";
+        if call(nr::WIN_CREATE, &[1280, 800, title.as_ptr() as u64, title.len() as u64, 0, 0]).is_err() {
+            break;
+        }
+        taken[3] += 1;
+    }
+    // Memory, a megabyte at a time (mapped at once), then a page at a time.
+    for size in [1u64 << 20, 4096] {
+        while call(nr::MMAP, &[size]).is_ok() {
+            taken[4] += size >> 10;
+        }
+    }
+    // Now the kernel must refuse more threads, and pipes past their room.
+    taken[5] = threads() + pipes();
+    // (Formatted on the stack: the heap can't grow now.)
+    struct Line([u8; 256], usize);
+    impl core::fmt::Write for Line {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let n = s.len().min(self.0.len() - self.1);
+            self.0[self.1..self.1 + n].copy_from_slice(&s.as_bytes()[..n]);
+            self.1 += n;
+            Ok(())
+        }
+    }
+    let mut line = Line([0; 256], 0);
+    let _ = core::fmt::Write::write_fmt(
+        &mut line,
+        format_args!(
+            "hog: full: {} threads, {} pipes, {} connections, {} windows, {} KiB mapped; then {} more threads and pipes\n",
+            taken[0], taken[1], taken[2], taken[3], taken[4], taken[5]
+        ),
+    );
+    let _ = call(nr::WRITE, &[1, line.0.as_ptr() as u64, line.1 as u64]);
+    loop {
+        time::sleep_ms(1000);
+    }
+}
+
 // ------------------------------------------------------------ supervisor
 
 /// Memory in use (frames, kernel heap), in KiB, for the log.
@@ -958,12 +1095,14 @@ fn main(args: corekit::Args) -> i32 {
             TRACE.store(args.get(5).map(String::as_str) == Some("trace"), Relaxed);
             return round(seed, iters, workers);
         }
+        Some("hog") => return hog(args.get(2).and_then(|v| parse(v)).unwrap_or(0)),
         Some("run") => {}
         // Anything else (a round spawning this program with arguments it
         // made up, say) is a short-lived victim, never another fuzzer.
         _ => return victim(args.get(2).map(String::as_str).unwrap_or("")),
     }
-    let seed = args.iter().position(|a| a == "--seed").and_then(|i| args.get(i + 1)).and_then(|v| parse_u64(v)).unwrap_or(1);
+    let seed =
+        args.iter().position(|a| a == "--seed").and_then(|i| args.get(i + 1)).and_then(|v| parse_u64(v)).unwrap_or(1);
     let rounds: u64 = arg(&args, "--rounds", 4);
     let iters: u64 = arg(&args, "--iters", 1500);
     let workers: u32 = arg(&args, "--workers", 3);

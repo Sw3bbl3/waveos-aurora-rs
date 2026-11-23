@@ -5,8 +5,9 @@
 //!
 //! One page below the image holds the time page ([`Vvar`]): where the TSC
 //! started, its rate and the offsets to the kernel's clocks. Every process
-//! maps the same frames (read-only). The kernel's own clock uses the same
-//! rate (`time::tsc_mult`), so both always agree.
+//! maps the same frames (read-only). The kernel's own clocks use the very
+//! same values (`time::tsc_params`, `time::real_offset_ns`) in the same
+//! formula, so both always agree.
 
 use crate::mm::vmm::{AddressSpace, Prot};
 use crate::mm::{phys_to_virt, PAGE_SIZE};
@@ -62,12 +63,17 @@ fn frames() -> Option<&'static [u64]> {
 }
 
 /// Writes the clock's current parameters into the time page (at start, and
-/// whenever they change: after sleep).
+/// whenever they change: after sleep, when the clock is set or its zone
+/// learnt). They are the very values the kernel's clocks use — the vDSO
+/// computes `time::now_ns` and `time::realtime_ns` with the same formula —
+/// so both agree by construction; nothing here reads the clock.
 pub fn publish() {
+    static WRITER: spin::Mutex<()> = spin::Mutex::new(());
     let Some(f) = frames() else { return };
+    let _writer = WRITER.lock();
     let v = unsafe { &mut *(phys_to_virt(f[0]) as *mut Vvar) };
     let (ok, tsc_base, mult, offset_ns) = crate::time::tsc_params();
-    let real_offset_ns = super::misc::realtime_ns() as i64 - crate::time::now_ns() as i64;
+    let real_offset_ns = crate::time::real_offset_ns();
     let seq = v.seq.load(Ordering::Relaxed);
     v.seq.store(seq.wrapping_add(1) | 1, Ordering::Relaxed);
     fence(Ordering::SeqCst);
@@ -78,6 +84,48 @@ pub fn publish() {
     v.real_offset_ns = real_offset_ns;
     fence(Ordering::SeqCst);
     v.seq.store((seq | 1).wrapping_add(1), Ordering::Release);
+}
+
+/// The time as the vDSO computes it from the time page (`now()` in
+/// `kernel/vdso/vdso.c`), real time if `real`; `None` if it would ask the
+/// kernel. For the self-tests.
+#[cfg(feature = "ktest")]
+pub fn read_ns(real: bool) -> Option<u64> {
+    let f = frames()?;
+    let v = unsafe { &*(phys_to_virt(f[0]) as *const Vvar) };
+    loop {
+        let seq = v.seq.load(Ordering::Acquire);
+        if seq & 1 != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        let (ok, base, mult, offset, real_offset) = unsafe {
+            (
+                core::ptr::read_volatile(&v.ok),
+                core::ptr::read_volatile(&v.tsc_base),
+                core::ptr::read_volatile(&v.mult),
+                core::ptr::read_volatile(&v.offset_ns),
+                core::ptr::read_volatile(&v.real_offset_ns),
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let d = unsafe {
+            core::arch::x86_64::_mm_lfence();
+            core::arch::x86_64::_rdtsc()
+        }
+        .wrapping_sub(base);
+        let mut t = ((d as u128 * mult as u128) >> 32) as i64 + offset;
+        t = t.max(0);
+        if real {
+            t += real_offset;
+        }
+        fence(Ordering::Acquire);
+        if v.seq.load(Ordering::Relaxed) == seq {
+            return Some(t as u64);
+        }
+    }
 }
 
 /// Maps the time page and the vDSO into `aspace` just below `below`;

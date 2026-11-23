@@ -224,11 +224,10 @@ pub fn getrandom(ptr: u64, len: u64) -> Result<u64, isize> {
     Ok(n as u64)
 }
 
-/// UTC real time. Unlike MONOTONIC, this must follow clock corrections.
+/// UTC real time. Unlike MONOTONIC, this follows clock corrections at once
+/// (and the vDSO computes it the same way; see `time::realtime_ns`).
 pub fn realtime_ns() -> u64 {
-    let ns = time::now_ns();
-    let seconds = super::fs::unix_time(time::wall_seconds()).max(0) as u64;
-    seconds * 1_000_000_000 + ns % 1_000_000_000
+    time::realtime_ns()
 }
 
 fn clock_ns(clock: u64) -> Result<u64, isize> {

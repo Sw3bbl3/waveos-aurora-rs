@@ -149,7 +149,9 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
     // A file's contents are read now, before taking the address-space lock.
     let file_data = if let (true, Some(shm)) = (flags & MAP_ANONYMOUS == 0, super::fs::shm_of(p, fd as u64)) {
         // A private copy of shared memory.
-        let mut data = alloc::vec![0u8; len as usize];
+        // (Only what the object holds: `len` is the program's, up to 64 GiB.)
+        let held = shm.size().saturating_sub(offset).min(len);
+        let mut data = crate::syscall::user::buffer(held as usize)?;
         let got = shm.read_at(offset, &mut data);
         data.truncate(got);
         Some(data)

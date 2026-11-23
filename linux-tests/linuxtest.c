@@ -245,18 +245,32 @@ static void clocks(void) {
     long ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
     CHECK(ms >= 25 && ms < 2000, "slept about 30 ms");
     CHECK(time(0) > 1700000000, "wall clock");
-    // The vDSO answers without a system call, and agrees with the kernel.
+    // The vDSO answers without a system call, and agrees with the kernel:
+    // its time always lies between two of the kernel's taken around it,
+    // for both clocks, again and again until real time has crossed a whole
+    // second (where a clock pieced together from seconds and nanoseconds
+    // read apart would jump).
     CHECK(getauxval(AT_SYSINFO_EHDR) != 0, "a vDSO");
-    struct timespec k1, v, k2;
-    for (int clock = CLOCK_REALTIME; clock <= CLOCK_MONOTONIC; clock++) {
-        syscall(SYS_clock_gettime, clock, &k1);
-        clock_gettime(clock, &v);
-        syscall(SYS_clock_gettime, clock, &k2);
-        long long n1 = k1.tv_sec * 1000000000LL + k1.tv_nsec, nv = v.tv_sec * 1000000000LL + v.tv_nsec,
-                  n2 = k2.tv_sec * 1000000000LL + k2.tv_nsec;
-        CHECK(n1 <= nv && nv <= n2, "the vDSO's time lies between the kernel's");
+    struct timespec k1, v, k2, first;
+    syscall(SYS_clock_gettime, CLOCK_REALTIME, &first);
+    long rounds = 0, real_sec = first.tv_sec;
+    while (real_sec < first.tv_sec + 2 && rounds < 1000000) {
+        for (int clock = CLOCK_REALTIME; clock <= CLOCK_MONOTONIC; clock++) {
+            syscall(SYS_clock_gettime, clock, &k1);
+            clock_gettime(clock, &v);
+            syscall(SYS_clock_gettime, clock, &k2);
+            long long n1 = k1.tv_sec * 1000000000LL + k1.tv_nsec, nv = v.tv_sec * 1000000000LL + v.tv_nsec,
+                      n2 = k2.tv_sec * 1000000000LL + k2.tv_nsec;
+            if (!(n1 <= nv && nv <= n2)) {
+                printf("    clock %d, check %ld: kernel %lld, vDSO %lld, kernel %lld\n", clock, rounds, n1, nv, n2);
+            }
+            CHECK(n1 <= nv && nv <= n2, "the vDSO's time lies between the kernel's");
+            if (clock == CLOCK_REALTIME) real_sec = k2.tv_sec;
+        }
+        rounds++;
     }
-    printf("PASS clocks (slept %ld ms)\n", ms);
+    CHECK(time(0) >= first.tv_sec + 2, "real time moved on through a whole second");
+    printf("PASS clocks (slept %ld ms; vDSO checked against the kernel %ld times over a second)\n", ms, rounds);
 }
 
 // From <linux/futex.h> (musl ships no kernel headers).

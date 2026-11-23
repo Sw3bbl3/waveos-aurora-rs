@@ -18,6 +18,11 @@ use super::{frame, vmm, PAGE_SIZE};
 use crate::sync::IrqMutex;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Stacks handed out now: guarded ones, and ones on the heap.
+static LIVE: AtomicU64 = AtomicU64::new(0);
+static LIVE_HEAP: AtomicU64 = AtomicU64::new(0);
 
 pub const SIZE: u64 = 128 * 1024;
 const SLOT: u64 = 256 * 1024;
@@ -47,7 +52,16 @@ pub enum KStack {
 
 impl KStack {
     pub fn new() -> KStack {
-        Self::guarded().unwrap_or_else(|| KStack::Heap(alloc::vec![0u8; SIZE as usize].into_boxed_slice()))
+        match Self::guarded() {
+            Some(s) => {
+                LIVE.fetch_add(1, Ordering::Relaxed);
+                s
+            }
+            None => {
+                LIVE_HEAP.fetch_add(1, Ordering::Relaxed);
+                KStack::Heap(alloc::vec![0u8; SIZE as usize].into_boxed_slice())
+            }
+        }
     }
 
     fn guarded() -> Option<KStack> {
@@ -101,8 +115,14 @@ impl KStack {
 
 impl Drop for KStack {
     fn drop(&mut self) {
-        if let KStack::Guarded(slot) = *self {
-            POOL.lock().free.push(slot);
+        match *self {
+            KStack::Guarded(slot) => {
+                LIVE.fetch_sub(1, Ordering::Relaxed);
+                POOL.lock().free.push(slot);
+            }
+            KStack::Heap(_) => {
+                LIVE_HEAP.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -111,6 +131,12 @@ impl Drop for KStack {
 #[cfg(feature = "ktest")]
 pub fn cached_frames() -> u64 {
     POOL.lock().free.len() as u64 * (SIZE / PAGE_SIZE)
+}
+
+/// (guarded stacks in use, on the heap in use, cached mapped, given back)
+pub fn counts() -> (u64, u64, u64, u64) {
+    let (cached, empty) = POOL.try_lock().map_or((0, 0), |p| (p.free.len() as u64, p.empty.len() as u64));
+    (LIVE.load(Ordering::Relaxed), LIVE_HEAP.load(Ordering::Relaxed), cached, empty)
 }
 
 /// Whether `addr` is in the guard area of a kernel stack.
@@ -122,10 +148,15 @@ pub fn is_guard(addr: u64) -> bool {
 /// Must be called with interrupts on and no spinlock held (it waits for a
 /// TLB shootdown); the reaper does after each process.
 pub fn trim() {
+    trim_to(KEEP)
+}
+
+/// [`trim`] down to `keep` cached stacks (0 when memory is short).
+pub fn trim_to(keep: usize) {
     loop {
         let slot = {
             let mut pool = POOL.lock();
-            if pool.free.len() <= KEEP {
+            if pool.free.len() <= keep {
                 return;
             }
             // The lowest slots first, so the area stays compact-ish.
@@ -133,7 +164,8 @@ pub fn trim() {
             pool.free.swap_remove(i)
         };
         let bottom = slot + SLOT - SIZE;
-        let frames: Vec<u64> = (0..SIZE / PAGE_SIZE).filter_map(|i| vmm::kunmap_fixed(bottom + i * PAGE_SIZE)).collect();
+        let frames: Vec<u64> =
+            (0..SIZE / PAGE_SIZE).filter_map(|i| vmm::kunmap_fixed(bottom + i * PAGE_SIZE)).collect();
         vmm::shootdown(bottom, SIZE / PAGE_SIZE, None);
         for f in frames {
             frame::free(f);

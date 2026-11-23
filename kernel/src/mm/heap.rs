@@ -551,15 +551,21 @@ struct KernelAllocator;
 
 unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if let Some(c) = class_of(layout) {
-            return alloc_small(c, layout.size());
+        let p = if let Some(c) = class_of(layout) {
+            alloc_small(c, layout.size())
+        } else if let Some(p) =
+            (layout.size() >= LARGE && layout.align() <= PAGE && LARGE_READY.load(Ordering::Acquire))
+                .then(|| large::alloc(layout.size()))
+                .flatten()
+        {
+            p
+        } else {
+            alloc_pages(layout)
+        };
+        if p.is_null() {
+            super::on_heap_failure(layout.size());
         }
-        if layout.size() >= LARGE && layout.align() <= PAGE && LARGE_READY.load(Ordering::Acquire) {
-            if let Some(p) = large::alloc(layout.size()) {
-                return p;
-            }
-        }
-        alloc_pages(layout)
+        p
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -716,9 +722,27 @@ pub struct ClassStats {
 }
 
 pub fn class_stats(c: usize) -> ClassStats {
+    class_stats_with(c, LISTS[c].lock().slabs)
+}
+
+/// [`class_stats`] without waiting for the class's lock (no slabs if busy).
+pub fn class_stats_nowait(c: usize) -> ClassStats {
+    class_stats_with(c, LISTS[c].try_lock().map_or(0, |l| l.slabs))
+}
+
+/// (bytes in runs of frames for mid-sized allocations, bytes of large mapped ones)
+pub fn run_bytes() -> (u64, u64) {
+    (PAGE_BYTES.load(Ordering::Relaxed), LARGE_BYTES.load(Ordering::Relaxed))
+}
+
+/// [`usage`] without waiting for locks.
+pub fn usage_nowait() -> (u64, u64) {
+    usage_with(class_stats_nowait)
+}
+
+fn class_stats_with(c: usize, slabs: u64) -> ClassStats {
     let allocs = CPUS.iter().fold(0u64, |a, cpu| a.wrapping_add(cpu.allocs[c].load(Ordering::Relaxed)));
     let frees = CPUS.iter().fold(0u64, |a, cpu| a.wrapping_add(cpu.frees[c].load(Ordering::Relaxed)));
-    let slabs = LISTS[c].lock().slabs;
     ClassStats {
         size: SIZES[c],
         live: (allocs.wrapping_sub(frees) as i64).max(0) as u64,
@@ -745,9 +769,13 @@ pub fn held_frames() -> u64 {
 
 /// (bytes the heap holds, bytes handed out)
 pub fn usage() -> (u64, u64) {
+    usage_with(class_stats)
+}
+
+fn usage_with(stats: fn(usize) -> ClassStats) -> (u64, u64) {
     let (mut size, mut used) = (0, 0);
     for c in 0..NCLASSES {
-        let s = class_stats(c);
+        let s = stats(c);
         size += s.slab_bytes;
         used += s.live * s.size as u64;
     }

@@ -423,6 +423,7 @@ pub fn alloc() -> Option<u64> {
         }
     }
     FAILURES.fetch_add(1, Ordering::Relaxed);
+    PRESSURE.store(true, Ordering::Relaxed);
     None
 }
 
@@ -500,6 +501,10 @@ pub fn alloc_run(count: u64, align_order: u32, limit: u64) -> Option<u64> {
         }
     }
     FAILURES.fetch_add(1, Ordering::Relaxed);
+    // (A run can fail for want of a long enough one, with plenty free.)
+    if counts().1 < 2 * kernel_reserve() {
+        PRESSURE.store(true, Ordering::Relaxed);
+    }
     None
 }
 
@@ -566,7 +571,7 @@ static USER_ALLOCS: AtomicU64 = AtomicU64::new(0);
 /// memory must fail before they do. This is a margin, not a guarantee:
 /// kernel memory a program causes (threads, pipes, sockets) isn't charged
 /// to it yet.
-fn kernel_reserve() -> u64 {
+pub fn kernel_reserve() -> u64 {
     (TOTAL.load(Ordering::Relaxed) / 16).clamp(8192, 32768)
 }
 
@@ -577,9 +582,44 @@ pub fn alloc_user() -> Option<u64> {
         LOW.store(counts().1 <= kernel_reserve(), Ordering::Relaxed);
     }
     if LOW.load(Ordering::Relaxed) {
+        PRESSURE.store(true, Ordering::Relaxed);
         return None;
     }
     alloc()
+}
+
+/// Whether a program may have the kernel take about `frames` more frames
+/// on its behalf (a thread's kernel stack, a pipe's buffer): not if that
+/// would eat into the kernel's reserve, which user memory can't touch.
+pub fn user_may_take(frames: u64) -> bool {
+    let ok = counts().1 > kernel_reserve() + frames;
+    if !ok {
+        PRESSURE.store(true, Ordering::Relaxed);
+    }
+    ok
+}
+
+/// Memory ran short since the last [`take_pressure`].
+static PRESSURE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether memory ran short (user memory reached the reserve, or an
+/// allocation failed) since the last call: time to shrink the caches.
+pub fn take_pressure() -> bool {
+    PRESSURE.swap(false, Ordering::Relaxed)
+}
+
+/// Whether user memory is down to the kernel's reserve (as last seen by
+/// [`alloc_user`], or [`refresh_low`]): caches should keep less, and
+/// buffers programs fill wait rather than grow.
+pub fn is_low() -> bool {
+    LOW.load(Ordering::Relaxed)
+}
+
+/// Looks again whether memory is down to the reserve (the reaper does,
+/// every second, so [`is_low`] clears once memory is back even if no
+/// program allocates).
+pub fn refresh_low() {
+    LOW.store(counts().1 <= kernel_reserve(), Ordering::Relaxed);
 }
 
 /// (total usable frames, free frames)
@@ -606,7 +646,15 @@ pub struct FrameStats {
 }
 
 pub fn stats() -> FrameStats {
-    let (dma32, high) = BUDDY.lock().as_ref().map_or((0, 0), |b| (b.free[DMA32], b.free[HIGH]));
+    stats_with(BUDDY.lock().as_ref().map_or((0, 0), |b| (b.free[DMA32], b.free[HIGH])))
+}
+
+/// [`stats`] without waiting for the lock (free counts read 0 if it is busy).
+pub fn stats_nowait() -> FrameStats {
+    stats_with(BUDDY.try_lock().and_then(|b| b.as_ref().map(|b| (b.free[DMA32], b.free[HIGH]))).unwrap_or((0, 0)))
+}
+
+fn stats_with((dma32, high): (u64, u64)) -> FrameStats {
     let sum = |f: fn(&Cache) -> &AtomicU64| CACHES.iter().map(|c| f(c).load(Ordering::Relaxed)).sum::<u64>();
     let cached = sum(|c| &c.len);
     FrameStats {

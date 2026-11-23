@@ -81,23 +81,11 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         }
         _ => {}
     }
-    let previous_zone = (key == "utc_offset").then(|| settings::get_int("utc_offset", 0));
     settings::try_set(key, value)?;
-    if let Some(previous) = previous_zone {
+    if key == "utc_offset" {
         // The RTC stores local time; changing its presentation zone must not
         // change the UTC instant used by TLS, cookies or Linux applications.
-        let delta = (value.parse::<i64>().unwrap() - previous) * 60;
-        let current = crate::time::wall_seconds() as i64;
-        let d = aurora_abi::calendar::from_seconds_since_2000((current + delta).max(0) as u64);
-        crate::time::set_wall_clock(&crate::drivers::rtc::DateTime {
-            year: d.year,
-            month: d.month,
-            day: d.day,
-            hour: d.hour,
-            minute: d.minute,
-            second: d.second,
-        });
-        crate::compat::linux::vdso::publish();
+        crate::time::change_zone(value.parse::<i64>().unwrap());
     }
     server::command(Command::Pref(String::from(key)));
     Ok(())

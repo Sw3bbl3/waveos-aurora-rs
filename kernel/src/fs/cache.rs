@@ -17,6 +17,13 @@ use alloc::vec;
 use aurora_abi::err::*;
 
 pub const BLOCK: usize = 4096;
+/// Blocks held by every cache (for memory reports).
+static HELD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Blocks the block caches hold, all devices together.
+pub fn held_blocks() -> u64 {
+    HELD.load(core::sync::atomic::Ordering::Relaxed)
+}
 /// Blocks a miss reads at most (128 KiB).
 const READ_AHEAD: u64 = 32;
 type Block = [u8; BLOCK];
@@ -61,11 +68,32 @@ impl BlockCache {
         self.dev.sectors() / self.per_block
     }
 
-    /// Makes room for one more block: writes back and drops the one used longest ago.
+    /// Memory is short: drops clean blocks, the ones used longest ago
+    /// first, until at most `keep` are left (dirty ones wait for `flush`).
+    pub fn shrink(&mut self, keep: usize) {
+        let over = self.entries.len().saturating_sub(keep);
+        let clean: alloc::vec::Vec<(u64, u64)> = self
+            .by_use
+            .iter()
+            .filter(|(_, b)| self.entries.get(b).is_some_and(|e| !e.dirty))
+            .take(over)
+            .map(|(&u, &b)| (u, b))
+            .collect();
+        for (used, block) in clean {
+            self.by_use.remove(&used);
+            self.entries.remove(&block);
+            HELD.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Makes room for one more block: writes back and drops the one used
+    /// longest ago. While memory is short the cache keeps an eighth as much.
     fn evict(&mut self) -> Result<(), isize> {
-        while self.entries.len() >= self.capacity {
+        let capacity = if crate::mm::frame::is_low() { (self.capacity / 8).max(32) } else { self.capacity };
+        while self.entries.len() >= capacity {
             let Some((_, victim)) = self.by_use.pop_first() else { break };
             let e = self.entries.remove(&victim).unwrap();
+            HELD.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
             if e.dirty {
                 self.dev.write(victim * self.per_block, &e.data[..])?;
             }
@@ -87,6 +115,7 @@ impl BlockCache {
         self.evict()?;
         self.clock += 1;
         self.entries.insert(block, Entry { data, dirty, used: self.clock });
+        HELD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         self.by_use.insert(self.clock, block);
         Ok(())
     }
@@ -176,5 +205,11 @@ impl BlockCache {
             i = j;
         }
         self.dev.flush()
+    }
+}
+
+impl Drop for BlockCache {
+    fn drop(&mut self) {
+        HELD.fetch_sub(self.entries.len() as u64, core::sync::atomic::Ordering::Relaxed);
     }
 }

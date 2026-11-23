@@ -55,10 +55,12 @@ const TESTS: &[Test] = &[
     ("network: DHCP, ICMP, UDP, TCP", network),
     ("Wi-Fi: scan, WPA2 join, DHCP over CCMP (simulated network)", wifi),
     ("sleep (S3) and wake", sleep_and_wake),
+    ("clock: the vDSO agrees with the kernel's clocks (after sleep, set-clock, zone)", vdso_clock),
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
     ("syscall fuzzer (native calls, racing threads, kills)", syscall_fuzz),
+    ("memory exhaustion: programs take all they can, the kernel keeps its reserve and recovers", memory_exhaustion),
     ("Learn: both offline libraries", learn_library),
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
@@ -370,6 +372,7 @@ fn syscall_fuzz() {
     .expect("spawn fuzz");
     let p = crate::proc::get(pid).unwrap();
     let deadline = time::uptime_ms() + 30 * 60_000;
+    let mut report = MemReport::new();
     while p.exit_code().is_none() && time::uptime_ms() < deadline {
         // Nobody runs the window server here: answer what the fuzzer's
         // windows ask of it, as the Linux tests do.
@@ -378,6 +381,7 @@ fn syscall_fuzz() {
                 crate::gui::server::frame_done(id);
             }
         }
+        report.tick();
         sched::sleep_ms(10);
     }
     assert_eq!(p.exit_code(), Some(0), "the fuzzer reported failures (see the log above)");
@@ -429,12 +433,187 @@ fn linux_sockets() {
     run_linux_test("nettest", "net-test passed");
 }
 
+/// The vDSO's clocks (computed from its time page, as `kernel/vdso/vdso.c`
+/// does) lie between two readings of the kernel's, for both clocks, many
+/// times over a second boundary — after sleep (this runs after the S3
+/// test), after the clock is set forward and back, and after the RTC's zone
+/// is learnt.
+fn vdso_clock() {
+    use crate::compat::linux::vdso;
+    use aurora_abi::calendar::from_seconds_since_2000;
+    let check = |what: &str| {
+        let start = time::realtime_ns() / 1_000_000_000;
+        let mut n = 0u64;
+        while time::realtime_ns() / 1_000_000_000 <= start || n < 1000 {
+            for real in [false, true] {
+                let kernel = || if real { time::realtime_ns() } else { time::now_ns() };
+                let k1 = kernel();
+                let Some(v) = vdso::read_ns(real) else { return };
+                let k2 = kernel();
+                assert!(k1 <= v && v <= k2, "{what}: vDSO time {v} outside the kernel's {k1}..{k2} (real {real})");
+            }
+            n += 1;
+        }
+    };
+    vdso::publish();
+    if vdso::read_ns(false).is_none() {
+        crate::kprint!("(skipped: no vDSO or no TSC clock) ");
+        return;
+    }
+    check("after sleep");
+    let set = |local: u64| {
+        let d = from_seconds_since_2000(local);
+        time::set_wall_clock(&crate::drivers::rtc::DateTime {
+            year: d.year,
+            month: d.month,
+            day: d.day,
+            hour: d.hour,
+            minute: d.minute,
+            second: d.second,
+        });
+    };
+    let (wall, real) = (time::wall_seconds(), time::realtime_ns());
+    set(wall + 3600);
+    let jumped = time::realtime_ns() as i64 - real as i64;
+    assert!((3598..=3602).contains(&(jumped / 1_000_000_000)), "setting the clock an hour ahead moved it {jumped} ns");
+    check("clock set ahead");
+    set(time::wall_seconds() - 3600);
+    check("clock set back");
+    let zone = time::zone_minutes();
+    let real = time::realtime_ns();
+    time::learn_zone(zone + 90);
+    let moved = real as i64 - time::realtime_ns() as i64;
+    assert!(
+        (5395..=5401).contains(&(moved / 1_000_000_000)),
+        "learning a zone 90 minutes east moved real time {moved} ns"
+    );
+    check("zone learnt");
+    time::learn_zone(zone);
+    check("zone restored");
+}
+
+/// Several programs at once take memory every way a program can until the
+/// kernel refuses (`fuzz hog`: threads, full pipes, loopback connections
+/// with full buffers, windows, mapped memory). The kernel must keep its
+/// reserve — no kernel allocation fails, and it can still allocate and
+/// start tasks — and get every frame back once they are killed.
+fn memory_exhaustion() {
+    const HOGS: usize = 3;
+    const SLACK: u64 = 160; // kernel page tables for the stacks and windows they had
+    let before = free_frames();
+    let failures = mm::frame::stats().failures;
+    let mut hogs = Vec::new();
+    for n in 0..HOGS {
+        let (r, w) = crate::proc::new_pipe(true);
+        let arg = alloc::format!("{n}");
+        let pid = crate::proc::spawn("/System/Bin/fuzz", &["fuzz", "hog", &arg], [None, Some(w), None], 0)
+            .expect("spawn a memory hog");
+        let pipe = match &*r {
+            crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
+            _ => unreachable!(),
+        };
+        // (The read end stays open: closing it would fail the hog's writes.)
+        hogs.push((pid, pipe, String::new(), r));
+    }
+    let deadline = time::uptime_ms() + 120_000;
+    let mut next_report = time::uptime_ms() + 30_000;
+    let mut buf = [0u8; 256];
+    loop {
+        if time::uptime_ms() > next_report {
+            // Slow: say where they are.
+            next_report += 30_000;
+            crate::kprintln!();
+            mm::report(&mut mm::Console);
+            mm::report_processes(&mut mm::Console);
+            sched::dump_stacks_of(|pid| pid != 0);
+        }
+        // (No compositor runs: the windows' requests are taken here.)
+        let _ = crate::gui::server::take_commands();
+        for (_, pipe, out, _) in hogs.iter_mut() {
+            while let Ok(n @ 1..) = pipe.read(&mut buf, true) {
+                out.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+        }
+        if hogs.iter().all(|(_, _, out, _)| out.contains("hog: full")) {
+            break;
+        }
+        for (pid, _, out, _) in &hogs {
+            let gone = crate::proc::get(*pid).is_none_or(|p| p.exit_code().is_some());
+            assert!(!gone, "memory hog {pid} ended: {out}");
+        }
+        assert!(time::uptime_ms() < deadline, "the memory hogs never filled memory");
+        sched::sleep_ms(20);
+    }
+    for (_, _, out, _) in &hogs {
+        crate::kprint!("[{}] ", out.trim().trim_start_matches("hog: full: "));
+    }
+    // The kernel kept what it needs, and still allocates.
+    let free = mm::frame::counts().1;
+    assert!(free >= mm::frame::kernel_reserve() / 2, "programs took the kernel's reserve: {free} frames free");
+    let big = alloc::vec![7u8; 4 << 20];
+    let small: Vec<Box<[u8; 200]>> = (0..2000).map(|_| Box::new([1u8; 200])).collect();
+    assert!(big[(4 << 20) - 1] == 7 && small[1999][199] == 1);
+    drop((big, small));
+    static RAN: AtomicU32 = AtomicU32::new(0);
+    sched::spawn("t-oom", || {
+        RAN.store(1, Ordering::SeqCst);
+    });
+    assert!(eventually(5000, || RAN.load(Ordering::SeqCst) == 1), "a kernel task could not run");
+    assert_eq!(mm::frame::stats().failures, failures, "kernel allocations failed while programs held memory");
+
+    // Killed, they give everything back.
+    for (pid, _, _, _) in &hogs {
+        let _ = crate::proc::kill(*pid);
+    }
+    let all_gone = || hogs.iter().all(|(pid, _, _, _)| crate::proc::get(*pid).is_none());
+    assert!(
+        eventually(30_000, || {
+            let _ = crate::gui::server::take_commands();
+            all_gone()
+        }),
+        "killed memory hogs did not go away"
+    );
+    drop(hogs);
+    let cleanup = time::uptime_ms() + 10_000;
+    while free_frames() + SLACK < before && time::uptime_ms() < cleanup {
+        let _ = crate::gui::server::take_commands();
+        sched::sleep_ms(20);
+    }
+    let after = free_frames();
+    assert!(after + SLACK >= before, "memory hogs leaked {} frames", before - after);
+}
+
+/// Memory reports every `mem_report` seconds (boot option; `AURORA_MEM_REPORT`)
+/// while a fuzzer runs, to see what grows.
+struct MemReport {
+    every_ms: u64,
+    next: u64,
+}
+
+impl MemReport {
+    fn new() -> MemReport {
+        let secs = crate::gui::prefs::boot_option("mem_report").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        MemReport { every_ms: secs * 1000, next: time::uptime_ms() }
+    }
+
+    fn tick(&mut self) {
+        if self.every_ms == 0 || time::uptime_ms() < self.next {
+            return;
+        }
+        self.next = time::uptime_ms() + self.every_ms;
+        mm::report(&mut mm::Console);
+        mm::report_processes(&mut mm::Console);
+        sched::dump_stacks_of(|pid| pid != 0);
+    }
+}
+
 /// The Linux system-call fuzzer (`linux-tests/linuxfuzz.c`): random Linux
 /// calls from racing threads in disposable child processes. Longer runs:
 /// `AURORA_FUZZ_SEED`, `AURORA_LINUXFUZZ_CHILDREN`, `AURORA_LINUXFUZZ_CALLS`.
 fn linux_fuzz() {
     let opt = |k: &str, d: &str| crate::gui::prefs::boot_option(k).unwrap_or_else(|| String::from(d));
-    let (seed, children, calls) = (opt("fuzz_seed", "1"), opt("linuxfuzz_children", "6"), opt("linuxfuzz_calls", "300"));
+    let (seed, children, calls) =
+        (opt("fuzz_seed", "1"), opt("linuxfuzz_children", "6"), opt("linuxfuzz_calls", "300"));
     let before = free_frames();
     run_linux_test_with("linuxfuzz", &["linuxfuzz", &seed, &children, &calls], "linuxfuzz passed", 30 * 60_000);
     let deadline = time::uptime_ms() + 10_000;
@@ -466,7 +645,9 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
         crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
         _ => unreachable!(),
     };
+    let mut report = MemReport::new();
     loop {
+        report.tick();
         if reader.readable() {
             match reader.read(&mut buf, true) {
                 Ok(0) => break,
@@ -1412,7 +1593,8 @@ fn sleep_and_wake() {
     let (protected, inits) = crate::arch::protect::every_cpu();
     assert!(protected && inits >= 2, "SMEP/SMAP/UMIP not back on every CPU after sleep");
     assert!(
-        x86_64::registers::control::Cr4::read_raw() & crate::arch::protect::wanted_cr4() == crate::arch::protect::wanted_cr4(),
+        x86_64::registers::control::Cr4::read_raw() & crate::arch::protect::wanted_cr4()
+            == crate::arch::protect::wanted_cr4(),
         "CR4 protections lost across sleep"
     );
     // Drivers were reset and restarted: the disk, sound and USB work again.
@@ -1443,7 +1625,14 @@ fn sleep_and_wake() {
     // The network card was reset too: talk to the host again.
     if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
         use crate::net::socket::{Kind, Socket};
-        assert!(wait_for(crate::net::online, 10_000), "no network address after sleep");
+        // An IPv4 address: the host is reached over IPv4, and an IPv6
+        // address alone (which can come first) makes `online` true.
+        let v4 = || {
+            crate::net::interfaces()
+                .iter()
+                .any(|i| i.flags & aurora_abi::net::IF_LOOPBACK == 0 && !i.name.starts_with(b"wlan") && i.ip != [0; 4])
+        };
+        assert!(wait_for(|| crate::net::online() && v4(), 10_000), "no network address after sleep");
         let c = Socket::new(Kind::Tcp, false);
         c.option(aurora_abi::net::OPT_TIMEOUT, 10_000).unwrap();
         c.connect((crate::net::v4([10, 0, 2, 2]), port)).expect("no network after sleep");

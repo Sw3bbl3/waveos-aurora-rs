@@ -34,7 +34,9 @@
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
 //!                                         (AURORA_TEST_FILTER=NAME runs matching tests; AURORA_FUZZ_SEED,
 //!                                         AURORA_FUZZ_ROUNDS, AURORA_FUZZ_ITERS, AURORA_LINUXFUZZ_CHILDREN and
-//!                                         AURORA_LINUXFUZZ_CALLS make the fuzzers run longer)
+//!                                         AURORA_LINUXFUZZ_CALLS make the fuzzers run longer, with
+//!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 240;
+//!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run)
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
@@ -1228,6 +1230,8 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
             ("AURORA_FUZZ_ROUNDS", "fuzz_rounds"),
             ("AURORA_LINUXFUZZ_CHILDREN", "linuxfuzz_children"),
             ("AURORA_LINUXFUZZ_CALLS", "linuxfuzz_calls"),
+            // Seconds between memory reports while the fuzzers run (`mm::report`).
+            ("AURORA_MEM_REPORT", "mem_report"),
         ] {
             if let Ok(v) = env::var(var) {
                 image::set_boot_option(&img, key, &v).expect("write boot.conf");
@@ -1316,7 +1320,7 @@ fn qmp_command(command: &str) -> std::io::Result<()> {
 /// Sends one QMP command (a JSON object) to the running VM and returns its reply.
 fn qmp_execute(json: &str) -> std::io::Result<String> {
     use std::io::{BufRead, BufReader, Write};
-    let sock = std::os::unix::net::UnixStream::connect(root().join("target/qemu-qmp.sock"))?;
+    let sock = std::os::unix::net::UnixStream::connect(session_dir().join("qemu-qmp.sock"))?;
     sock.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(sock.try_clone()?);
     let mut line = String::new();
@@ -1478,7 +1482,8 @@ fn run_tests_once(
         all
     });
     let start = Instant::now();
-    let timeout = Duration::from_secs(240);
+    // Longer fuzzing runs need more: AURORA_TEST_TIMEOUT (seconds per boot).
+    let timeout = Duration::from_secs(env::var("AURORA_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(240));
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
             break Some(s);

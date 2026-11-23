@@ -93,6 +93,15 @@ impl<T> Mutex<T> {
         }
         MutexGuard { lock: self }
     }
+
+    /// The lock, if nobody holds it right now.
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        use core::sync::atomic::Ordering;
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| MutexGuard { lock: self })
+    }
 }
 
 impl<T> Deref for MutexGuard<'_, T> {

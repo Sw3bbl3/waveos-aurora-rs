@@ -402,7 +402,8 @@ impl Conn {
             self.ack_now = true; // duplicate ACK tells the sender what's missing
             return;
         }
-        let n = data.len().min(RECV_CAP - self.recv_buf.len());
+        let want = data.len().min(RECV_CAP - self.recv_buf.len());
+        let n = grow(&mut self.recv_buf, want);
         self.recv_buf.extend(&data[..n]);
         self.rcv_nxt = self.rcv_nxt.wrapping_add(n as u32);
         while let Some((&s, _)) = self.ooo.first_key_value() {
@@ -413,7 +414,8 @@ impl Conn {
             let skip = self.rcv_nxt.wrapping_sub(s) as usize;
             if skip < seg.len() {
                 let rest = &seg[skip..];
-                let n = rest.len().min(RECV_CAP - self.recv_buf.len());
+                let want = rest.len().min(RECV_CAP - self.recv_buf.len());
+                let n = grow(&mut self.recv_buf, want);
                 self.recv_buf.extend(&rest[..n]);
                 self.rcv_nxt = self.rcv_nxt.wrapping_add(n as u32);
             }
@@ -538,10 +540,29 @@ pub fn send(s: &mut Stack, id: ConnId, data: &[u8]) -> Result<usize, isize> {
     if c.fin_queued {
         return Err(EPIPE);
     }
-    let n = data.len().min(SEND_CAP - c.send_buf.len());
+    let want = data.len().min(SEND_CAP - c.send_buf.len());
+    let n = grow(&mut c.send_buf, want);
+    if n == 0 && c.send_buf.is_empty() && !data.is_empty() {
+        return Err(ENOMEM);
+    }
     c.send_buf.extend(&data[..n]);
     flush(s, id, now);
     Ok(n)
+}
+
+/// How many of `want` more bytes `buf` can take: all of them if it has
+/// the room or can grow; while memory is short (or growing fails) only
+/// what fits without growing. (Buffers are memory programs make the kernel
+/// hold, up to a megabyte per connection: they must not eat into the
+/// kernel's reserve or panic it.) A sender waits as for a full buffer; a
+/// segment that doesn't fit is acknowledged in part and sent again.
+fn grow(buf: &mut VecDeque<u8>, want: usize) -> usize {
+    let spare = buf.capacity() - buf.len();
+    if want <= spare || (!crate::mm::frame::is_low() && buf.try_reserve(want).is_ok()) {
+        want
+    } else {
+        spare
+    }
 }
 
 /// Takes received bytes: `Ok(0)` means the peer finished sending (end of file).
@@ -591,8 +612,16 @@ pub fn write_ready(s: &Stack, id: ConnId) -> bool {
     s.tcp.conns.get(&id).is_none_or(|c| {
         c.error.is_some()
             || !matches!(c.state, State::Established | State::CloseWait | State::SynSent | State::SynReceived)
-            || (c.state != State::SynSent && c.state != State::SynReceived && c.send_buf.len() < SEND_CAP)
+            || (c.state != State::SynSent
+                && c.state != State::SynReceived
+                && c.send_buf.len() < SEND_CAP
+                && can_grow(&c.send_buf))
     })
+}
+
+/// Whether a buffer takes more bytes now: it has room, or memory allows it to grow (see [`grow`]).
+fn can_grow(buf: &VecDeque<u8>) -> bool {
+    buf.len() < buf.capacity() || !crate::mm::frame::is_low()
 }
 
 /// No more data from us: a FIN follows what is queued.
