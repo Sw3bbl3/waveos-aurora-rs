@@ -270,10 +270,13 @@ impl<'a> Canvas<'a> {
     /// The clip in device pixels.
     #[inline]
     pub fn pclip(&self) -> Rect {
-        match self.px_clip {
+        // Never past the buffer, whatever `clip` was set to: the fills index
+        // rows of the buffer directly.
+        let r = match self.px_clip {
             Some(r) => r,
             None => self.to_px(self.clip),
-        }
+        };
+        r.intersect(&Rect::new(0, 0, self.width, self.height))
     }
 
     /// Runs `f` with the device-pixel clip narrowed to `r`.
@@ -1325,6 +1328,15 @@ mod scale_tests {
         let src = alloc::vec![0xFFFF_FFFFu32; 16];
         cv.blit_alpha(&src, 4, 4, Rect::new(2, 4, 4, 4), 0);
         assert!(buf.iter().all(|&p| p == 0));
+    }
+
+    #[test]
+    fn a_clip_past_the_buffer_does_not_reach_outside_it() {
+        let mut buf = alloc::vec![0u32; 8 * 6];
+        let mut cv = Canvas::new(&mut buf, 8, 6);
+        cv.clip = Rect::new(-4, -4, 40, 40);
+        cv.fill_round_rect(Rect::new(-2, -2, 30, 30), 3, 0xff00_00ff);
+        cv.stroke_round_rect(Rect::new(1, 1, 30, 30), 3, 0xffff_ffff);
     }
 
     #[test]
