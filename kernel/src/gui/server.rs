@@ -230,12 +230,7 @@ fn free_surface(s: Surface, pid: u32, unmap_user: bool) {
 
 /// Runs `f` with the window's pixels (row stride = width; both in device
 /// pixels). Holds the client lock, so the surface cannot be freed underneath
-/// the compositor.
-pub fn with_surface<R>(id: u32, f: impl FnOnce(&[u32], u32, u32) -> R) -> Option<R> {
-    with_surface_scaled(id, |px, w, h, _| f(px, w, h))
-}
-
-/// [`with_surface`], with the scale the surface was drawn at.
+/// the compositor. `f` also gets the scale the surface was drawn at.
 pub fn with_surface_scaled<R>(id: u32, f: impl FnOnce(&[u32], u32, u32, u32) -> R) -> Option<R> {
     let clients = CLIENTS.lock();
     let c = clients.get(&id)?;

@@ -10,7 +10,7 @@
 //! arrangement math (pointer crossing, which display a window is on,
 //! carrying windows between displays).
 
-use super::{Desktop, Window};
+use super::Desktop;
 use crate::gui::canvas::Canvas;
 use crate::gui::geom::Rect;
 use crate::gui::{cursor, server, theme, wallpaper};
@@ -91,10 +91,15 @@ impl Desktop {
 
     /// The rectangle around every display: what damage and the pointer may cover.
     pub fn bounds(&self) -> Rect {
-        displays::bounds(&self.display_rects())
+        if self.displays.is_empty() {
+            self.screen()
+        } else {
+            self.all_displays
+        }
     }
 
     /// The displays, as the compositor last set them.
+    #[cfg(feature = "ktest")]
     pub fn displays(&self) -> &[DisplayArea] {
         &self.displays
     }
@@ -142,7 +147,7 @@ impl Desktop {
     /// the top-left of [`Desktop::bounds`]) in desktop points, kept on a
     /// display. Moves the devices' idea of the pointer along when it was
     /// stopped at an edge.
-    pub(super) fn from_input(&self, x: i32, y: i32) -> (i32, i32) {
+    pub(super) fn input_to_desktop(&self, x: i32, y: i32) -> (i32, i32) {
         let (ox, oy) = self.input_origin;
         let (gx, gy) = (x + ox, y + oy);
         let (cx, cy) = displays::constrain(&self.display_rects(), gx, gy);
@@ -192,6 +197,7 @@ impl Desktop {
                 }
             })
             .collect();
+        self.all_displays = displays::bounds(&areas.iter().map(|d| d.rect).collect::<Vec<_>>());
         self.displays = areas;
         self.main = main;
         if main_changed {
@@ -334,14 +340,8 @@ impl Desktop {
         server::set_new_window_scale(self.displays[here].scale);
     }
 
-    /// The id of the display window `id` (a desktop window id) is on.
-    pub fn display_of_window(&self, id: u32) -> Option<u32> {
-        let w = self.windows.iter().find(|w| w.id == id)?;
-        let d = self.displays.get(self.display_of_rect(w.rect))?;
-        Some(d.id)
-    }
-
-    /// Window ids and rectangles, for the self-tests.
+    /// Window ids and rectangles, and whether they were taken off a display (self-tests).
+    #[cfg(feature = "ktest")]
     pub fn window_rects(&self) -> Vec<(u32, Rect, bool)> {
         self.windows.iter().map(|w| (w.id, w.rect, w.away.is_some())).collect()
     }
@@ -355,7 +355,7 @@ impl Desktop {
     #[cfg(feature = "ktest")]
     pub fn add_test_window(&mut self, app: alloc::boxed::Box<dyn super::App>) -> u32 {
         self.add_window(app);
-        self.windows.last().map_or(0, |w: &Window| w.id)
+        self.windows.last().map_or(0, |w| w.id)
     }
 
     /// Moves a window (self-tests).

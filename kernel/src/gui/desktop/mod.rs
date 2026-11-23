@@ -232,6 +232,8 @@ pub struct Desktop {
     displays: Vec<DisplayArea>,
     /// Index of the main display in `displays`.
     main: usize,
+    /// The rectangle around them all.
+    all_displays: Rect,
     /// The other displays' pictures (None at the main display's index).
     others: Vec<Option<displays::Caches>>,
     /// Desktop point of the input devices' (0, 0).
@@ -317,6 +319,7 @@ impl Desktop {
             play: play::Play::new(),
             displays: Vec::new(),
             main: 0,
+            all_displays: Rect::default(),
             others: Vec::new(),
             input_origin: (0, 0),
             displays_request: false,
@@ -1009,7 +1012,7 @@ impl Desktop {
 
     fn pointer(&mut self, x: i32, y: i32, buttons: u8) {
         // Across the displays: it crosses where they touch.
-        let (x, y) = self.from_input(x, y);
+        let (x, y) = self.input_to_desktop(x, y);
         let moved = (x, y) != self.cursor;
         if moved && cursor::hardware() {
             self.cursor = (x, y);

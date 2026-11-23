@@ -122,11 +122,11 @@ impl Harness {
     }
 
     fn set_size(&mut self, dir: &Path, head: usize, w: u16, h: u16) -> std::io::Result<()> {
-        if !self.viewers.contains_key(&head) {
-            let s = vnc_connect(&vnc_socket(dir, head))?;
-            self.viewers.insert(head, s);
-        }
-        vnc_set_size(self.viewers.get_mut(&head).unwrap(), w, h)
+        let viewer = match self.viewers.entry(head) {
+            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::btree_map::Entry::Vacant(e) => e.insert(vnc_connect(&vnc_socket(dir, head))?),
+        };
+        vnc_set_size(viewer, w, h)
     }
 
     fn screendump(&mut self, dir: &Path, rest: &str, qmp: impl Fn(&str) -> std::io::Result<String>) {

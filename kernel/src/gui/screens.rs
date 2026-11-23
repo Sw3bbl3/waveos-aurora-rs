@@ -254,7 +254,7 @@ pub fn record(key: u32) -> Option<Record> {
 /// screens of 2560×1440 and up. 2× only when it leaves 1024×640 points and
 /// the size divides evenly.
 pub fn scale_for(w: u32, h: u32, own: u8) -> i32 {
-    let fits = w / 2 >= 1024 && h / 2 >= 640 && w % 2 == 0 && h % 2 == 0;
+    let fits = w / 2 >= 1024 && h / 2 >= 640 && w.is_multiple_of(2) && h.is_multiple_of(2);
     let choice = match own {
         1 => Some("1"),
         2 => Some("2"),
@@ -301,17 +301,13 @@ impl Screen {
         }
     }
 
-    /// Size in device pixels.
-    pub fn pixels(&self) -> (u32, u32) {
-        self.out.size()
-    }
-
     /// Busy presenting: its damage waits.
     pub fn busy(&self) -> bool {
         self.presenter.as_ref().is_some_and(|p| p.busy())
     }
 
-    /// The presenter (several displays), for statistics and the self-tests.
+    /// The presenter (several displays), for the self-tests.
+    #[cfg(feature = "ktest")]
     pub fn presenter(&self) -> Option<&Arc<Presenter>> {
         self.presenter.as_ref()
     }
@@ -1131,11 +1127,13 @@ fn lay_out(screens: &mut [Screen], main: usize, mirror: bool) -> Vec<usize> {
     }
     let sizes: Vec<(i32, i32)> =
         screens.iter().map(|s| (s.out.size().0 as i32 / s.scale, s.out.size().1 as i32 / s.scale)).collect();
-    // Saved places are relative to the main display as it was then.
+    // Saved places are relative to the main display as it was then: if
+    // that was another one, this one's saved place is the new origin.
+    let base = record(screens[main].key).map_or((0, 0), |r| (r.x, r.y));
     let saved: Vec<Option<(i32, i32)>> = screens
         .iter()
         .enumerate()
-        .map(|(i, s)| (i != main && record(s.key).is_some()).then_some((s.record.x, s.record.y)))
+        .map(|(i, s)| (i != main && record(s.key).is_some()).then_some((s.record.x - base.0, s.record.y - base.1)))
         .collect();
     let rects = displays::arrange(&sizes, &saved, main);
     for (s, r) in screens.iter_mut().zip(rects) {

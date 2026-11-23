@@ -2133,7 +2133,8 @@ fn displays() {
     crate::gui::settings::load();
     let heads: usize =
         crate::gui::prefs::boot_option("test_displays").and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 4);
-    const SIZES: [(u32, u32); 3] = [(1024, 768), (1152, 864), (800, 600)];
+    // The third display is HiDPI: drawn at 2x (1280x720 points).
+    const SIZES: [(u32, u32); 3] = [(1024, 768), (2560, 1440), (800, 600)];
     let connected =
         || gpu::devices().iter().map(|d| d.connectors().iter().filter(|c| c.status == Status::Connected).count()).sum::<usize>();
     for head in 1..heads {
