@@ -212,10 +212,10 @@ impl Balloon {
         Balloon(held)
     }
 
-    /// Takes frames until a quarter of the kernel's reserve is gone too
+    /// Takes frames until a little of the kernel's reserve is gone too
     /// (kernel memory growing under the programs): theirs must shrink.
     fn squeeze(&mut self) {
-        let target = frame::kernel_reserve() * 3 / 4;
+        let target = frame::kernel_reserve() - 256;
         while frame::counts().1 > target {
             match frame::alloc() {
                 Some(f) => self.0.push(f),
@@ -467,21 +467,26 @@ pub fn oom() {
     wait_gone(&progs.iter().map(|p| p.pid).collect::<Vec<_>>());
     drop(progs);
 
-    // 2. For real: the program in front reads its memory over and over,
-    //    swapping; a protected one and a background one hold theirs; swap is
-    //    small, and then kernel memory grows. The background one must go.
+    // 2. For real: a program writes its memory and pauses, and is swapped
+    //    out meanwhile; a background program and a protected one fill
+    //    memory; swap is full, and kernel memory grows a little. Then the
+    //    first becomes the program in front and reads its memory again,
+    //    which needs memory back: the background one must go, not the one
+    //    in front or the protected one.
     let mut balloon = Balloon::leaving(Some(48));
-    swap::set_limits(4096, 4 * 4096 * PAGE_SIZE);
-    swap::set_capacity_cap(Some(4096));
-    let mut front = Prog::start(&["fuzz", "swap", "24", "11", "1", "100000"]);
+    let mut front = Prog::start(&["fuzz", "swap", "32", "11", "1", "100000", "6000"]);
     assert!(front.wait_for("swap: wrote", 120_000), "front: {}", front.out);
-    crate::gui::server::set_foreground(front.pid);
-    let mut back = Prog::start(&["fuzz", "swap", "24", "12", "1", "0"]);
+    let out = front.proc.aspace.lock().as_mut().map_or(0, |a| a.pageout(0, aurora_abi::layout::USER_END / PAGE_SIZE));
+    assert!(out >= 8192, "the program in front was swapped out ({out} pages)");
+    let mut back = Prog::start(&["fuzz", "swap", "16", "12", "1", "0"]);
     assert!(back.wait_for("swap: wrote", 120_000), "background: {}", back.out);
     let mut service = Prog::start(&["fuzz", "swap", "8", "13", "1", "0"]);
     service.proc.oom_protected.store(true, Ordering::Relaxed);
     assert!(service.wait_for("swap: wrote", 120_000), "service: {}", service.out);
+    // Swap holds no more than it does now.
+    swap::set_capacity_cap(Some(swap::stats().slots));
     balloon.squeeze();
+    crate::gui::server::set_foreground(front.pid);
     let killed = back.exit(120_000);
     front.poll();
     assert_eq!(killed, Some(-9), "the background program was not ended; front: {}", front.out);

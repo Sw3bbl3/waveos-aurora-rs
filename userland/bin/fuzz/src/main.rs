@@ -4,8 +4,9 @@
 //! fuzz run [--seed N] [--rounds N] [--iters N] [--workers N] [--trace]
 //! fuzz child SEED ITERS WORKERS [trace]     one round (what each round runs)
 //! fuzz hog N                                takes all the memory it can (see `hog`)
-//! fuzz swap MIB SEED [THREADS [PASSES]]     fills MIB of memory with a pattern and checks
-//!                                           every page of it, over and over (see `swapcheck`)
+//! fuzz swap MIB SEED [THREADS [PASSES [MS]]] fills MIB of memory with a pattern and checks
+//!                                           every page of it, over and over, after a pause
+//!                                           of MS (see `swapcheck`; 0 passes: holds it)
 //! ```
 //!
 //! Every round is a child process. Its worker threads call every system
@@ -1108,7 +1109,7 @@ fn swap_verify(addr: u64, seed: u64, page: u64) -> Option<(usize, u64, u64)> {
 /// threads, then reads every page back `passes` times in a different
 /// order each time, checking every word. Prints `swap: ok` or the first
 /// page that came back wrong; the exit status is the number of bad pages.
-fn swapcheck(mib: u64, seed: u64, threads: u64, passes: u64) -> i32 {
+fn swapcheck(mib: u64, seed: u64, threads: u64, passes: u64, pause_ms: u64) -> i32 {
     static BAD: AtomicU64 = AtomicU64::new(0);
     let pages = mib * 256;
     // In pieces: one mapping may be at most 1 GiB.
@@ -1154,8 +1155,8 @@ fn swapcheck(mib: u64, seed: u64, threads: u64, passes: u64) -> i32 {
     let run = |write: bool, pass: u64| {
         let mut handles = Vec::new();
         for t in 1..threads {
-            let bases = bases.clone();
-            match thread::spawn(move || share(&bases, t, threads, write, pass, seed)) {
+            let mine = bases.clone();
+            match thread::spawn(move || share(&mine, t, threads, write, pass, seed)) {
                 Ok(h) => handles.push(h),
                 // (Memory may be too short for another thread: this one does it.)
                 Err(_) => share(&bases, t, threads, write, pass, seed),
@@ -1174,6 +1175,8 @@ fn swapcheck(mib: u64, seed: u64, threads: u64, passes: u64) -> i32 {
             time::sleep_ms(1000);
         }
     }
+    // Left alone a while (to be swapped out), if asked.
+    time::sleep_ms(pause_ms);
     for pass in 1..=passes {
         let t = time::uptime_ms();
         run(false, pass);
@@ -1201,7 +1204,8 @@ fn main(args: corekit::Args) -> i32 {
             let seed = args.get(3).and_then(|v| parse_u64(v)).unwrap_or(1);
             let threads = args.get(4).and_then(|v| parse(v)).unwrap_or(2);
             let passes = args.get(5).and_then(|v| parse(v)).unwrap_or(2);
-            return swapcheck(mib, seed, threads, passes);
+            let pause = args.get(6).and_then(|v| parse(v)).unwrap_or(0);
+            return swapcheck(mib, seed, threads, passes, pause);
         }
         Some("run") => {}
         // Anything else (a round spawning this program with arguments it
