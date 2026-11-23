@@ -28,7 +28,8 @@ This document is for someone about to read or change the code. It follows the ma
 | `userland/corekit/` | `aurora` | user | Runtime: entry point, heap, `print!`, files, processes, threads, clipboard, drag and drop, preferences |
 | `userland/aurorakit/` | `aurorakit` | user | UI toolkit: windows, event loop, the `App` trait, the `text` editing engine |
 | `userland/apps/*` | `app-*` | user | Files, Terminal, Notes, Calculator, Settings, Lens, Paint, Clock, Pulse, About, Welcome, Learn, Studio, Installer |
-| `userland/bin/*` | — | user | Command-line tools (`coreutils`), `usertest`, `crashtest` |
+| `userland/bin/*` | — | user | Command-line tools (`coreutils`), `pkg` (apps), `usertest`, `crashtest`, `pkgtest` |
+| `libs/gina/` | `gina` | kernel + user + host | GINA app packages: manifest, archive checks, hash lists, Ed25519 signatures (feature `crypto`, off in the kernel), repository indexes, version order |
 | `xtask/` | `xtask` | host | Build, run, image and test orchestration; system sounds, Mozilla's root CAs (from `webpki-roots`), a test SSDT (battery, lid) and a USB-stick image |
 | `assets/fonts/` | — | — | Manrope and JetBrains Mono, shipped in `/System/Fonts` |
 | `assets/home/` | — | — | Default folders, documents and pictures for a new home volume |
@@ -202,6 +203,7 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
 - **Desktop** (`desktop/mod.rs`): the window stack, focus, drag and resize, zoom and minimize. A press in a window's content captures the pointer until release, so apps get drags even outside their window.
 - **Animations** (`desktop/anim.rs`): opening, closing, minimizing into the dock, restoring and zooming draw a snapshot of the window scaled and faded between two rectangles while the real window stays hidden. Client windows appear once they've drawn their first frame. Lumen Server runs at 60 Hz only while something moves.
 - **Shell** (`desktop/shell.rs`): the menu bar, dock (with the Trash), launcher and menus. The catalog in `apps/mod.rs` maps app names and icons to program paths.
+- **Installed apps** (`installed.rs`): apps installed from GINA packages, read from `/Applications` and the session account's `~/Library/Applications` (each app's atomic `active` pointer, then its manifest). Shoal, Seek and the dock show them with their own icons (`lumen::icons::custom`, a PNG checked to be at most 1024×1024 before it is decoded), games also under Play; the dock keeps the ones in the `dock_apps` preference and shows running ones (matched by program path). `REFRESH_APPS` drops the cache, so installs and removals show at once. Installing, the registry and repositories are user space: `corekit::apps` (see the GINA section of [WAVESDK.md](WAVESDK.md)).
 - **Clipboard** (`clipboard.rs`): one item, text or a list of files; files paste as their paths where text is wanted.
 - **Drag and drop** (`dnd.rs`, `desktop/dragdrop.rs`): an app calls `drag_start` during a press; Lumen Server takes the pointer, draws the drag image, sends `DRAG_OVER`/`DRAG_LEAVE` to windows underneath, and on release delivers `DROP` (the target fetches the payload with `drag_data`) and `DRAG_END` to the source. Dock apps open dropped files, and the dock Trash takes them.
 - **Notifications** (`notify.rs`, `desktop/notifications.rs`): `notify` from apps, or the system; banners slide in at the top right, and the Notification Center (click the clock) keeps the history next to a calendar and Do Not Disturb.
@@ -367,6 +369,8 @@ Lines are written while holding the port lock and without allocating, so events 
   - networking (on the card `--net` chose, which the test checks is the one in use): DHCP, ping to loopback and our own address, UDP and TCP over loopback (a megabyte each way), a megabyte over HTTP from a server xtask runs on the host, and an inbound connection through a QEMU port forward
 
   `usertest` also covers threads, futexes and SIMD state surviving preemption, randomized layouts and UMIP.
+
+  `pkgtest` installs, updates and removes apps from a signed test repository the harness serves (`target/test-repo`, under `/repo/`, and an altered copy under `/badrepo/`), and the kernel checks what the desktop sees between the steps.
 - **Fuzzers.** `cargo xtask test` runs two system-call fuzzers briefly (see "Hardening" below); longer or reproducible runs take `AURORA_FUZZ_SEED`, `AURORA_FUZZ_ROUNDS`, `AURORA_FUZZ_ITERS` (native) and `AURORA_LINUXFUZZ_CHILDREN`, `AURORA_LINUXFUZZ_CALLS` (Linux), e.g. `AURORA_FUZZ_ROUNDS=200 AURORA_FUZZ_ITERS=5000 AURORA_TEST_FILTER=fuzzer cargo xtask test`.
 
   The kernel reports through QEMU's `isa-debug-exit` device. `xtask test` boots the same fresh disk **twice**: the first boot leaves a file, and the second must find it intact.

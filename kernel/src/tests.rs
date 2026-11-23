@@ -58,6 +58,7 @@ const TESTS: &[Test] = &[
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
+    ("packages: install, update and remove from a repository (pkgtest)", crate::gui::installed::self_test),
     ("syscall fuzzer (native calls, racing threads, kills)", syscall_fuzz),
     ("Learn: both offline libraries", learn_library),
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),

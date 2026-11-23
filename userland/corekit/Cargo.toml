@@ -13,3 +13,4 @@ nebula-secure.workspace = true
 linked_list_allocator = "0.10"
 
 gina.workspace = true
+sha2 = { version = "0.10", default-features = false }

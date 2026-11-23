@@ -77,6 +77,8 @@ pub enum SortKey {
 pub enum Action {
     Open,
     OpenWith(&'static str),
+    /// Open with an installed app that registered the file type (its index in `corekit::apps::list()`).
+    OpenWithInstalled(u8),
     QuickLook,
     Rename,
     Copy,
@@ -620,6 +622,13 @@ impl Folder {
                         corekit::process::spawn(&format!("/System/Apps/{app}.elf"), &[p.as_str()], Default::default());
                 }
             }
+            Action::OpenWithInstalled(i) => {
+                if let Some(app) = corekit::apps::list().get(i as usize) {
+                    for p in paths.into_iter().take(8) {
+                        let _ = corekit::process::spawn(&app.executable, &[p.as_str()], Default::default());
+                    }
+                }
+            }
             Action::QuickLook => self.toggle_quicklook(),
             Action::Rename => {
                 if let Some(i) = self.single() {
@@ -898,6 +907,17 @@ impl Folder {
                     Action::OpenWith(if pictures { "Notes" } else { "Preview" }),
                     if pictures { "Open with Notes" } else { "Open with Lens" },
                 )));
+                // Installed apps that said they open these files (their file associations).
+                let ext = |p: &String| fs::file_name(p).rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+                for (i, app) in corekit::apps::list().iter().enumerate().take(64) {
+                    let opens = paths.iter().all(|p| ext(p).is_some_and(|e| app.manifest.extensions.contains(&e)));
+                    if opens && items.len() < 12 {
+                        items.push(Some((
+                            Action::OpenWithInstalled(i as u8),
+                            static_label(format!("Open with {}", app.manifest.name)),
+                        )));
+                    }
+                }
             }
             items.push(Some((Action::QuickLook, "Quick Look")));
             items.push(None);
@@ -1115,4 +1135,20 @@ fn split_ext(name: &str, is_dir: bool) -> (String, String) {
         Some(i) if i > 0 && !is_dir => (String::from(&name[..i]), String::from(&name[i..])),
         _ => (String::from(name), String::new()),
     }
+}
+
+/// Menu labels are `&'static str`; installed apps' names are made into
+/// labels once each (a handful, for the life of the process).
+fn static_label(s: String) -> &'static str {
+    static LABELS: corekit::sync::Mutex<Vec<&'static str>> = corekit::sync::Mutex::new(Vec::new());
+    let mut labels = LABELS.lock();
+    if let Some(l) = labels.iter().find(|l| **l == s) {
+        return l;
+    }
+    if labels.len() >= 64 {
+        return "Open with App";
+    }
+    let l: &'static str = alloc::boxed::Box::leak(s.into_boxed_str());
+    labels.push(l);
+    l
 }

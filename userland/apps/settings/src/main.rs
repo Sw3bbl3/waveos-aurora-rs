@@ -23,6 +23,7 @@ use waveui::prelude::*;
 use waveui::style::Weight;
 use waveui::Request;
 
+mod installed;
 mod search;
 mod users;
 
@@ -44,11 +45,12 @@ pub enum Pane {
     Desktop,
     Bar,
     Login,
+    Apps,
     Accessibility,
     About,
 }
 
-const PANES: [(Pane, &str, &str, u32); 15] = [
+const PANES: [(Pane, &str, &str, u32); 16] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
@@ -62,6 +64,7 @@ const PANES: [(Pane, &str, &str, u32); 15] = [
     (Pane::Desktop, "Desktop & Dock", "desktop", 0xFF5856D6),
     (Pane::Bar, "Top Bar & Clock", "bar", 0xFF2F62F5),
     (Pane::Login, "Users & Login", "login", 0xFF8E5CF5),
+    (Pane::Apps, "Apps", "apps", 0xFF32ADE6),
     (Pane::Accessibility, "Accessibility", "accessibility", 0xFF147EFB),
     (Pane::About, "About", "about", 0xFF30B0C7),
 ];
@@ -101,6 +104,7 @@ pub enum Msg {
     OpenAbout,
     ClearNote,
     Users(users::UserMsg),
+    Apps(installed::AppMsg),
 }
 
 pub struct Settings {
@@ -131,6 +135,8 @@ pub struct Settings {
     network_report: Option<corekit::diagnostics::NetworkCheck>,
     /// Users & Login.
     users: users::UsersState,
+    /// Apps installed from packages.
+    apps: installed::AppsState,
 }
 
 fn days_in(y: i64, m: i64) -> i64 {
@@ -169,6 +175,7 @@ impl Settings {
             pads: Vec::new(),
             now: corekit::time::now(),
             users: Default::default(),
+            apps: Default::default(),
         };
         s.load_custom_thumb();
         s.sync_clock();
@@ -229,6 +236,7 @@ impl Settings {
             }
             Pane::About => self.info = corekit::process::sys_info(),
             Pane::Login => self.users.refresh(),
+            Pane::Apps => self.apps.refresh(),
             _ => {}
         }
     }
@@ -1400,6 +1408,7 @@ impl App for Settings {
             Msg::OpenAbout => cx.open_app("About"),
             Msg::ClearNote => self.note = None,
             Msg::Users(m) => self.users_update(m, cx),
+            Msg::Apps(m) => self.apps_update(m, cx),
         }
     }
 
@@ -1475,6 +1484,7 @@ impl App for Settings {
                 Pane::Desktop => self.desktop(),
                 Pane::Bar => self.bar(),
                 Pane::Login => self.users_pane(),
+                Pane::Apps => self.apps_pane(),
                 Pane::Accessibility => self.accessibility(),
                 Pane::About => self.about(env),
             };
@@ -1562,6 +1572,11 @@ fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
             cv.fill_round_rect(Rect::new(cx - 3, cy - 5, 6, 3), 1, tile);
             cv.fill_rect(Rect::new(cx - 7, cy + 2, 14, 1), w);
             cv.fill_rect(Rect::new(cx - 7, cy + 5, 9, 1), w);
+        }
+        Pane::Apps => {
+            for (dx, dy) in [(-6, -6), (1, -6), (-6, 1), (1, 1)] {
+                cv.fill_round_rect(Rect::new(cx + dx, cy + dy, 5, 5), 1, w);
+            }
         }
         Pane::Login => {
             cv.fill_circle(cx, cy - 3, 3, w);

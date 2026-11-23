@@ -765,6 +765,7 @@ impl Desktop {
         for cmd in server::take_commands() {
             match cmd {
                 Command::AppsChanged => {
+                    self.forget_package_apps();
                     if self.launcher.is_some() {
                         self.toggle_launcher();
                         self.toggle_launcher();

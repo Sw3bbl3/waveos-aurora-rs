@@ -6,7 +6,10 @@ extern crate alloc;
 
 use waveui::prelude::*;
 
-const COUNT: &str = "/AppData/dev.example.gallery/count.txt";
+/// The count, in the app's own data folder (`~/Library/Containers/<id>`).
+fn count_path() -> String {
+    alloc::format!("{}/count.txt", corekit::apps::data_dir("dev.example.gallery"))
+}
 
 struct Gallery {
     count: u32,
@@ -48,7 +51,7 @@ impl App for Gallery {
         match msg {
             Msg::Click => {
                 self.count += 1;
-                let _ = corekit::fs::write(COUNT, format!("{}", self.count).as_bytes());
+                let _ = corekit::fs::write(&count_path(), format!("{}", self.count).as_bytes());
                 corekit::println!("Count: {}", self.count);
             }
             Msg::Switch(on) => self.on = on,
@@ -61,7 +64,7 @@ impl App for Gallery {
             Msg::ConfirmReset => {
                 self.count = 0;
                 self.confirm = false;
-                let _ = corekit::fs::write(COUNT, b"0");
+                let _ = corekit::fs::write(&count_path(), b"0");
             }
             Msg::Cancel => self.confirm = false,
         }
@@ -132,7 +135,7 @@ impl App for Gallery {
 corekit::entry!(main);
 
 fn main(_: corekit::Args) -> i32 {
-    let count = corekit::fs::read_to_string(COUNT).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    let count = corekit::fs::read_to_string(&count_path()).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
     waveui::run(Gallery {
         count,
         on: false,
