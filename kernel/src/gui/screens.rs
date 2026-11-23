@@ -249,6 +249,20 @@ pub fn record(key: u32) -> Option<Record> {
     settings::get(&displays::pref_key(key)).and_then(|v| Record::parse(&v))
 }
 
+/// "Keep this resolution": with one display, for the bootloader too
+/// (`boot.conf`); with several, in the main display's own preferences, so
+/// it follows that display (the bootloader sets up only the first).
+pub fn keep_main_resolution(w: u32, h: u32) -> Result<(), isize> {
+    let list = published();
+    match list.first() {
+        Some(main) if list.len() > 1 => {
+            let r = Record { width: w, height: h, ..record(main.key).unwrap_or_default() };
+            prefs::set(&displays::pref_key(main.key), &r.format())
+        }
+        _ => prefs::set_boot_resolution(w, h),
+    }
+}
+
 /// Device pixels per point for a `w`×`h` display: its own choice (Settings,
 /// per display), else the system's (`pref::DISPLAY_SCALE`), else 2 on
 /// screens of 2560×1440 and up. 2× only when it leaves 1024×640 points and

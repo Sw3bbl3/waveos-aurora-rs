@@ -2226,10 +2226,33 @@ fn displays() {
     let card_rect = |c: &Compositor| c.desktop.window_rects().into_iter().find(|w| w.0 == card).map(|w| (w.1, w.2));
     let (wr, _) = card_rect(&c).expect("the card window");
     assert_eq!(layout::home(&r, wr), target, "the window opened at {wr:?}, not on display {target}");
+    // Maximised on the display it is on, and back.
+    c.desktop.toggle_zoom(card);
+    c.settle(2000);
+    let (zoomed, _) = card_rect(&c).unwrap();
+    let d = r[target];
+    let expect = if target == c.main { zoomed } else { Rect::new(d.x + 8, d.y + 8, d.w - 16, d.h - 16) };
+    assert!(layout::home(&r, zoomed) == target && zoomed == expect, "maximised to {zoomed:?} on {d:?}");
+    c.desktop.toggle_zoom(card);
+    c.settle(2000);
+    assert_eq!(card_rect(&c).unwrap().0, wr, "not restored after maximising");
     // Out of the way of the screendumps' samples.
     input::push(at(r[target].x + 2, r[target].bottom() - 2));
     c.settle(2000);
     displays_screendump(&c);
+    // Shore (setup, login, lock) holds the main display: nothing of the
+    // desktop shows on the others meanwhile.
+    let (s, (cx, cy)) = (&c.screens[target], wr.center());
+    let px = ((cx - s.rect.x) as u32 * s.scale as u32, (cy - s.rect.y) as u32 * s.scale as u32);
+    assert_eq!(s.pixel(px.0, px.1) & 0xFF_FFFF, 0x1F_7A4C, "the card isn't drawn");
+    if target != c.main {
+        c.desktop.show_shore();
+        c.settle(3000);
+        let s = &c.screens[target];
+        assert_ne!(s.pixel(px.0, px.1) & 0xFF_FFFF, 0x1F_7A4C, "a window shows beside the login screen");
+        c.desktop.dismiss_shore();
+        c.settle(3000);
+    }
 
     let mut costs = alloc::vec![(n, compose_all, total_all)];
     if n > 1 {
@@ -2275,6 +2298,31 @@ fn displays() {
         // Afterwards it catches up with everything it skipped.
         c.settle(3000);
         displays_screendump(&c);
+
+        // Dragged by its title bar onto the main display, and back.
+        let drag_to = |c: &mut Compositor, from: (i32, i32), to: (i32, i32)| {
+            let b = c.desktop.bounds();
+            let ev = |x: i32, y: i32, buttons: u8| InputEvent::Pointer { x: x - b.x, y: y - b.y, buttons };
+            input::push(ev(from.0, from.1, 1));
+            c.frame();
+            for k in 1..=12 {
+                let p = (from.0 + (to.0 - from.0) * k / 12, from.1 + (to.1 - from.1) * k / 12);
+                input::push(ev(p.0, p.1, 1));
+                c.frame();
+            }
+            input::push(ev(to.0, to.1, 0));
+            c.settle(2000);
+        };
+        let grip = (wr.x + 60, wr.y + 17);
+        let main_rect = r[c.main];
+        let to = (main_rect.center().0, grip.1.clamp(main_rect.y + 120, main_rect.bottom() - 60));
+        drag_to(&mut c, grip, to);
+        let (dragged, _) = card_rect(&c).unwrap();
+        assert_eq!(layout::home(&r, dragged), c.main, "the window did not cross to the main display: {dragged:?}");
+        drag_to(&mut c, (dragged.x + 60, dragged.y + 17), grip);
+        let (back, _) = card_rect(&c).unwrap();
+        assert_eq!(layout::home(&r, back), target, "the window did not cross back: {back:?}");
+        let wr = back;
 
         // Unplugged: its windows move to the main display and remember where they were.
         let (key, head) = (c.screens[target].key, c.screens[target].head());

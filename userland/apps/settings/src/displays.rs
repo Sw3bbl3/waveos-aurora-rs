@@ -190,13 +190,19 @@ impl Settings {
                 .on_change(|i| Msg::Displays(DisplayMsg::Scale(i)))
                 .picker_style(PickerStyle::Segmented),
         ));
-        let mut walls: Vec<String> = alloc::vec![String::from("Same as main")];
-        walls.extend(wallpaper::NAMES.iter().map(|n| String::from(*n)));
-        let wall = if rec.wallpaper < 0 { 0 } else { (rec.wallpaper as usize + 1).min(walls.len() - 1) };
-        rows.push(row(
-            "Wallpaper",
-            Picker::new(walls, wall).on_change(|i| Msg::Displays(DisplayMsg::Wallpaper(i))).picker_style(PickerStyle::Menu),
-        ));
+        if d.is_primary() {
+            rows.push(row_detail("Wallpaper", "Chosen in Appearance", Text::new("")));
+        } else {
+            let mut walls: Vec<String> = alloc::vec![String::from("Same as main")];
+            walls.extend(wallpaper::NAMES.iter().map(|n| String::from(*n)));
+            let wall = if rec.wallpaper < 0 { 0 } else { (rec.wallpaper as usize + 1).min(walls.len() - 1) };
+            rows.push(row(
+                "Wallpaper",
+                Picker::new(walls, wall)
+                    .on_change(|i| Msg::Displays(DisplayMsg::Wallpaper(i)))
+                    .picker_style(PickerStyle::Menu),
+            ));
+        }
         sections.push(card(rows).id("display/each"));
         // Resolutions, largest first.
         let modes = self.modes.iter().enumerate().rev().map(|(i, m)| {

@@ -666,7 +666,7 @@ impl Desktop {
                             self.resolution_request = Some(prev);
                         } else if let Err(e) = {
                             let (pw, ph) = super::screen_pixels();
-                            super::prefs::set_boot_resolution(pw as u32, ph as u32)
+                            super::screens::keep_main_resolution(pw as u32, ph as u32)
                         } {
                             // Kept for this session; the next start uses the firmware's choice.
                             log!("gui", "could not save the resolution: {}", aurora_abi::err::name(e));

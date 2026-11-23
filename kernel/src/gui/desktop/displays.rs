@@ -174,18 +174,27 @@ impl Desktop {
         let main = main.min(areas.len() - 1);
         let old: Vec<(u32, Rect)> = self.displays.iter().map(|d| (d.key, d.rect)).collect();
         let new: Vec<(u32, Rect)> = areas.iter().map(|d| (d.key, d.rect)).collect();
+        let (w, h) = (areas[main].rect.w, areas[main].rect.h);
+        let main_key = areas[main].key;
+        // (The first time, the desktop was just made for the main display.)
+        let main_changed = (w, h) != (self.w, self.h)
+            || self.displays.get(self.main_index()).is_some_and(|d| d.key != main_key || d.scale != areas[main].scale);
+        // Windows whose display changed (moved, resized, gone or back) are
+        // fitted to it again; the others stay exactly where they are.
+        let old_rects: Vec<Rect> = old.iter().map(|d| d.1).collect();
+        let mut refit = Vec::with_capacity(self.windows.len());
         for win in &mut self.windows {
+            let was = (!old.is_empty()).then(|| old[displays::home(&old_rects, win.rect)]);
             let (rect, away) = displays::migrate(&old, &new, main, win.rect, win.away);
             if let Some(saved) = win.saved {
                 win.saved = Some(displays::migrate(&old, &new, main, saved, win.away).0);
             }
+            let same_display = was.is_some_and(|(k, r)| new.iter().any(|&(nk, nr)| nk == k && nr == r));
+            let on_main = was.is_none_or(|(k, _)| k == main_key);
+            refit.push(rect != win.rect || away != win.away || !same_display || (main_changed && on_main));
             win.rect = rect;
             win.away = away;
         }
-        let (w, h) = (areas[main].rect.w, areas[main].rect.h);
-        let main_key = areas[main].key;
-        let main_changed = (w, h) != (self.w, self.h)
-            || self.displays.get(self.main_index()).is_none_or(|d| d.key != main_key || d.scale != areas[main].scale);
         // Other displays keep their pictures when nothing they depend on changed.
         let mut kept: Vec<Caches> = self.others.drain(..).flatten().collect();
         self.others = areas
@@ -209,7 +218,7 @@ impl Desktop {
         if main_changed {
             self.main_resized(w, h);
         }
-        self.fit_windows();
+        self.fit_windows(&refit);
         let rects = self.display_rects();
         self.cursor = displays::constrain(&rects, self.cursor.0, self.cursor.1);
         let b = self.bounds();
@@ -221,12 +230,16 @@ impl Desktop {
         self.damage_all();
     }
 
-    /// Keeps every window inside the work area of its display (and fitted
-    /// to it when moored or maximized), as after any change of size.
-    pub(super) fn fit_windows(&mut self) {
+    /// Keeps windows inside the work area of their display (and fitted to
+    /// it when moored or maximized), as after any change of size: those
+    /// marked in `which` (windows added since are fitted too).
+    pub(super) fn fit_windows(&mut self, which: &[bool]) {
         let rects = self.display_rects();
         let areas: Vec<Rect> = (0..rects.len()).map(|i| self.work_area_on(i)).collect();
-        for win in &mut self.windows {
+        for (i, win) in self.windows.iter_mut().enumerate() {
+            if !which.get(i).copied().unwrap_or(true) {
+                continue;
+            }
             let wa = areas[displays::home(&rects, win.rect)];
             let minimum = win.minimum();
             let r = &mut win.rect;
@@ -379,6 +392,13 @@ impl Desktop {
     #[cfg(feature = "ktest")]
     pub fn dismiss_shore(&mut self) {
         self.shore = None;
+        self.damage_all();
+    }
+
+    /// Brings Shore back as at start-up (self-tests: nothing shows on the other displays).
+    #[cfg(feature = "ktest")]
+    pub fn show_shore(&mut self) {
+        self.shore = Self::startup_shore(self.account.as_ref());
         self.damage_all();
     }
 }
