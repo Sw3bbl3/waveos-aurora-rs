@@ -542,13 +542,14 @@ impl UsbNic {
     fn tick(&self) {
         match self.kind {
             Kind::Chip(chip) => asix::tick(self, chip),
-            Kind::Cdc(Function::Ecm | Function::Ncm) => {
-                if !self.link() && !self.heard.load(Ordering::Acquire) && crate::time::uptime_ms() - self.started > 3000
-                {
-                    log!("usbnet", "{}: no link notification; assuming connected", self.label);
-                    self.heard.store(true, Ordering::Release);
-                    self.set_link(true);
-                }
+            Kind::Cdc(Function::Ecm | Function::Ncm)
+                if !self.link()
+                    && !self.heard.load(Ordering::Acquire)
+                    && crate::time::uptime_ms() - self.started > 3000 =>
+            {
+                log!("usbnet", "{}: no link notification; assuming connected", self.label);
+                self.heard.store(true, Ordering::Release);
+                self.set_link(true);
             }
             _ => {}
         }
