@@ -13,7 +13,8 @@
 //!       --audio-wav PATH                  record guest audio to a WAV file
 //!       --usb-audio                       add a USB speaker (QEMU's usb-audio, isochronous; with --audio-wav
 //!                                         it records to PATH-usb.wav)
-//!       --gpu std|virtio                  display adapter (default std; virtio runs the ported Linux driver)
+//!       --gpu std|virtio|virtio-linux     display adapter (default std; virtio runs the native virtio-gpu
+//!                                         driver, virtio-linux the ported Linux driver)
 //!       --resolution WxH[,WxH…]           virtio's starting screen size (default 1920x1080; WaveOS then
 //!                                         follows the QEMU window when you resize it); with several
 //!                                         displays, one size each (std: the extra displays' EDID size)
@@ -97,7 +98,7 @@ fn main() {
     }
     let gpu = args.iter().position(|a| a == "--gpu").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("std");
     if !runconfig::accepts(runconfig::GPUS, gpu) {
-        eprintln!("--gpu must be std or virtio");
+        eprintln!("--gpu must be std, virtio or virtio-linux");
         exit(2);
     }
 
@@ -155,6 +156,7 @@ fn main() {
             // Simulated Wi-Fi networks (the kernel's software radio).
             image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
                 .expect("write boot.conf");
+            image::set_boot_option(&img, "gpu", gpu_driver(gpu)).expect("write boot.conf");
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
             let displays = displays::from_args(&args, flag("--headless"));
             let opts = RunOpts {
@@ -944,7 +946,7 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         "max"
     };
     cmd.args(["-machine", "q35", "-cpu", cpu]);
-    if opts.gpu == "virtio" {
+    if opts.gpu.starts_with("virtio") {
         let device = match opts.resolution {
             Some((w, h)) => format!("virtio-vga,edid=on,xres={w},yres={h}"),
             None => String::from("virtio-vga,edid=on"),
@@ -1100,7 +1102,21 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     if opts.log_int {
         cmd.args(["-d", "int,cpu_reset", "-D", "target/qemu-int.log"]);
     }
+    // Extra QEMU arguments for experiments, e.g. a VNC server or a second
+    // virtio-gpu head: AURORA_QEMU_ARGS="-vnc :5 -global virtio-vga.max_outputs=2".
+    if let Ok(extra) = env::var("AURORA_QEMU_ARGS") {
+        cmd.args(extra.split_whitespace());
+    }
     cmd
+}
+
+/// The kernel's virtio-gpu driver for `--gpu` (`gpu=` in boot.conf).
+fn gpu_driver(gpu: &str) -> &'static str {
+    if gpu == "virtio-linux" {
+        "linux"
+    } else {
+        "native"
+    }
 }
 
 /// Boots the kernel with the `ktest` feature. The kernel runs its self-tests
@@ -1224,6 +1240,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
         if !sleep {
             image::set_boot_option(&img, "sleep", "off").expect("write boot.conf");
         }
+        image::set_boot_option(&img, "gpu", gpu_driver(gpu)).expect("write boot.conf");
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");

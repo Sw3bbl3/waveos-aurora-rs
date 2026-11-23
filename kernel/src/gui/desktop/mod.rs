@@ -805,10 +805,12 @@ impl Desktop {
                     }
                 }
                 Command::StartTour => self.start_tour(),
-                Command::Cursor => {
+                Command::Cursor if !cursor::hardware() => {
                     let (x, y) = self.cursor;
                     self.damage.push(cursor::bounds(x, y).intersect(&self.screen()));
                 }
+                // The compositor updates the cursor plane from `cursor_state`.
+                Command::Cursor => {}
                 Command::Title(id) => {
                     if let Some(w) = self.window_of_client(id) {
                         self.damage_handle(w);
@@ -944,7 +946,9 @@ impl Desktop {
         let x = x.clamp(0, self.w - 1);
         let y = y.clamp(0, self.h - 1);
         let moved = (x, y) != self.cursor;
-        if moved {
+        if moved && cursor::hardware() {
+            self.cursor = (x, y);
+        } else if moved {
             let (ox, oy) = self.cursor;
             self.damage.push(cursor::bounds(ox, oy).intersect(&self.screen()));
             self.cursor = (x, y);
@@ -1028,8 +1032,17 @@ impl Desktop {
     }
 
     fn damage_cursor(&mut self) {
+        // A cursor plane needs no repaint (the compositor updates it).
+        if cursor::hardware() {
+            return;
+        }
         let (x, y) = self.cursor;
         self.damage.push(cursor::bounds(x, y).intersect(&self.screen()));
+    }
+
+    /// Where the pointer is (in points) and its shape, for a cursor plane.
+    pub fn cursor_state(&self) -> ((i32, i32), u32) {
+        (self.cursor, self.cursor_shape())
     }
 
     fn step_cursor(&mut self) -> bool {

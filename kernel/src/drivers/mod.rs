@@ -4,6 +4,7 @@ pub mod audio;
 pub mod block;
 pub mod display;
 pub mod gamepad;
+pub mod gpu;
 pub mod hpet;
 pub mod i2c;
 pub mod input;

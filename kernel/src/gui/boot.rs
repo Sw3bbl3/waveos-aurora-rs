@@ -14,6 +14,8 @@ const STAGES: [&str; 9] = ["scheduler", "smp", "storage", "network", "usb", "sou
 
 struct Screen {
     fb: Framebuffer,
+    /// The framebuffer's kernel mapping (write-combining when possible).
+    front: u64,
     back: Vec<u32>,
     bar: Rect,
     dark: bool,
@@ -86,9 +88,12 @@ pub fn show(fb: Framebuffer, dark: bool) {
     }
     let bar_w = (w / 6).clamp(180, 280);
     let bar = Rect::new((w - bar_w) / 2, h / 2 + h / 16 + 18, bar_w, 4);
-    let mut screen = Screen { fb, back, bar, dark, done: 0 };
+    // Drawn straight to the firmware's framebuffer: no display driver runs yet.
+    let len = fb.stride as u64 * fb.height as u64 * 4;
+    let front = crate::mm::vmm::kmap_wc(fb.phys_addr, len).unwrap_or_else(|| crate::mm::phys_to_virt(fb.phys_addr));
+    let mut screen = Screen { fb, front, back, bar, dark, done: 0 };
     paint_bar(&mut screen);
-    super::flush(super::front_buffer(&fb), &screen.back, &fb, Rect::new(0, 0, w, h));
+    copy(&screen, Rect::new(0, 0, w, h));
     *SCREEN.lock() = Some(screen);
 }
 
@@ -122,7 +127,28 @@ pub fn stage(id: &str) {
     s.done = n + 1;
     paint_bar(s);
     let r = s.bar;
-    super::flush(super::front_buffer(&s.fb), &s.back, &s.fb, r);
+    copy(s, r);
+}
+
+/// Copies `r` of the boot screen to the framebuffer.
+fn copy(s: &Screen, r: Rect) {
+    let fb = &s.fb;
+    let (w, stride) = (fb.width as usize, fb.stride as usize);
+    let front = unsafe { core::slice::from_raw_parts_mut(s.front as *mut u32, stride * fb.height as usize) };
+    let r = r.intersect(&Rect::new(0, 0, fb.width as i32, fb.height as i32));
+    for y in r.y as usize..r.bottom() as usize {
+        let src = &s.back[y * w + r.x as usize..y * w + r.right() as usize];
+        let dst = &mut front[y * stride + r.x as usize..y * stride + r.right() as usize];
+        match fb.format {
+            bootinfo::PixelFormat::Bgr => dst.copy_from_slice(src),
+            bootinfo::PixelFormat::Rgb => {
+                for (d, s) in dst.iter_mut().zip(src) {
+                    *d = (s & 0x00FF00) | (s >> 16 & 0xFF) | (s & 0xFF) << 16;
+                }
+            }
+        }
+    }
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }
 
 /// The desktop took over the screen: free the boot screen's buffer.

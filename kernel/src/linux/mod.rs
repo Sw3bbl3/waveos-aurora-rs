@@ -240,14 +240,18 @@ mod imp {
     /// The preferred size the last probe reported.
     static PREFERRED: IrqMutex<(u32, u32)> = IrqMutex::new((0, 0));
 
-    /// Starts the worker, initializes DRM and probes the GPUs the ported
-    /// drivers support. Call after PCI enumeration, with the scheduler running.
-    pub fn init() {
+    /// Starts the worker, initializes DRM and (with `probe_gpus`) probes
+    /// the GPUs the ported drivers support. Call after PCI enumeration,
+    /// with the scheduler running.
+    pub fn init(probe_gpus: bool) {
         let id: TaskId = sched::spawn("linux-worker", worker);
         WORKER.store(id as u64, Ordering::Relaxed);
         let ret = unsafe { waveos_init_drm_core_init() };
         if ret != 0 {
             log!("linux", "DRM core failed to start ({ret})");
+            return;
+        }
+        if !probe_gpus {
             return;
         }
         for drm in virtio::probe_gpus() {
@@ -294,15 +298,6 @@ mod imp {
         out
     }
 
-    /// After a hotplug event: the preferred size, if it is not the one the
-    /// last probe reported (the host window was resized, say).
-    pub fn display_preferred_changed() -> Option<(u32, u32)> {
-        let before = *PREFERRED.lock();
-        display_modes();
-        let now = *PREFERRED.lock();
-        (now != before && now != (0, 0)).then_some(now)
-    }
-
     /// Switches the screen to `w`×`h`; the old pixels are gone afterwards.
     pub fn display_set_mode(w: u32, h: u32) -> Option<DisplayInfo> {
         let handle = DISPLAY.handle.load(Ordering::Acquire);
@@ -335,4 +330,4 @@ mod imp {
 
 /// Without the C half there is nothing to start.
 #[cfg(not(linuxkpi))]
-pub fn init() {}
+pub fn init(_probe_gpus: bool) {}

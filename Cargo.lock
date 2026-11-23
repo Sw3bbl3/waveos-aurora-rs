@@ -87,6 +87,7 @@ dependencies = [
  "aurora-abi",
  "aurora-acpi-res",
  "aurora-desktop",
+ "aurora-edid",
  "aurora-elf",
  "aurora-hid",
  "aurora-i2c",
@@ -119,6 +120,10 @@ version = "0.8.0"
 dependencies = [
  "aurora-abi",
 ]
+
+[[package]]
+name = "aurora-edid"
+version = "0.8.0"
 
 [[package]]
 name = "aurora-elf"

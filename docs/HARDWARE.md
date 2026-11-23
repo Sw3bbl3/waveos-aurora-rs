@@ -54,6 +54,8 @@ Options go in `\aurora\boot.conf` on the EFI partition, one `key=value` per line
 | `acpi=off` | Don't start the AML interpreter: no power button, battery or sleep, but everything else works. Try this if the machine misbehaves during boot. |
 | `sleep=off` | Hide Sleep, for machines whose firmware does not resume properly |
 | `i2c=off` | Leave the I²C controllers alone (no I²C touchpad or touch screen). The `i2c:` lines in the log still list what the firmware describes. |
+| `gpu=linux` | Drive a virtio GPU with the ported Linux driver instead of the native one (virtual machines) |
+| `cursor=software` | Draw the pointer into the picture instead of on the display's cursor plane |
 
 ## What to check
 
@@ -104,7 +106,7 @@ Please send back the lines starting with `i2c:` from the boot log (and the `== I
 
 ## Known limits
 
-- **Graphics.** On real hardware there is no native GPU driver yet: WaveOS draws into the framebuffer the firmware set up (GOP). In virtual machines with a virtio display, Linux's virtio-gpu driver (run through WaveOS's compatibility layer) drives it. The resolution changes only at boot. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes.
+- **Graphics.** On real hardware there is no native GPU driver yet: WaveOS draws into the framebuffer the firmware set up (GOP), and the resolution changes only at boot. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes. In virtual machines, Bochs/QEMU std VGA and virtio-gpu (WaveOS's own driver, with a hardware cursor and the window size followed live) change resolution at once and restore the picture after sleep.
 - **Storage.** AHCI, NVMe and virtio disks work, but Intel RST / RAID mode does not. USB storage must be FAT32 (exFAT and NTFS aren't supported).
 - **Input.**
   - Touchpads and touch screens that connect over I²C (common on laptops since about 2016) have a driver that has not yet run on real hardware (see [above](#i2c-touchpads-and-touch-screens)); on most Intel laptops it polls the touchpad, as there is no GPIO driver yet. Many such touchpads also have a PS/2 fallback, which works as a plain pointer. I²C keyboards and pens aren't supported. USB Precision Touchpads get the full gestures.

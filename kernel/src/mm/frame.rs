@@ -560,11 +560,14 @@ fn relieve_pressure() {
 static LOW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static USER_ALLOCS: AtomicU64 = AtomicU64::new(0);
 
-/// Frames user programs can't take: 1/32 of memory, between 8 and 64 MiB.
-/// The kernel's heap, page tables and drivers allocate on demand, so a
-/// program that maps all of memory must fail before they do.
+/// Frames user programs can't take: 1/16 of memory, between 32 and 128 MiB.
+/// The kernel's heap, page tables, task stacks, block cache (16 MiB when
+/// full) and drivers allocate on demand, so a program that maps all of
+/// memory must fail before they do. This is a margin, not a guarantee:
+/// kernel memory a program causes (threads, pipes, sockets) isn't charged
+/// to it yet.
 fn kernel_reserve() -> u64 {
-    (TOTAL.load(Ordering::Relaxed) / 32).clamp(2048, 16384)
+    (TOTAL.load(Ordering::Relaxed) / 16).clamp(8192, 32768)
 }
 
 /// One frame for a user program's memory (or a window surface): like

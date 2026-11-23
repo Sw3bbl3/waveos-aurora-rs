@@ -172,7 +172,7 @@ impl Displays {
 
     /// The QEMU console (device and head) that shows display `index`.
     fn console(&self, gpu: &str, index: usize) -> String {
-        if gpu == "virtio" {
+        if gpu.starts_with("virtio") {
             format!("display=video0,head={index}")
         } else {
             format!("display=video{index}")
@@ -182,7 +182,7 @@ impl Displays {
     /// QEMU arguments for displays 2 to N (nothing for one display).
     pub fn qemu_args(&self, gpu: &str) -> Vec<String> {
         let mut a = Vec::new();
-        if gpu != "virtio" {
+        if !gpu.starts_with("virtio") {
             // virtio-vga has its outputs built in; the Bochs VGA needs a
             // second device per display, each with its own EDID.
             for (i, &(w, h)) in self.sizes.iter().enumerate().skip(1) {

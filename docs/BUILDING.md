@@ -77,7 +77,8 @@ cargo xtask run --headless --audio-wav target/playback.wav # record native guest
 cargo xtask run --no-keyboard-capture # macOS: opt out of full keyboard capture
 cargo xtask run --developer         # separate 8 GiB developer disk, 4 GiB RAM
 cargo xtask run --net none          # disable networking for offline validation
-cargo xtask run --gpu virtio        # virtio-vga display, driven by the ported Linux DRM virtio-gpu driver
+cargo xtask run --gpu virtio        # virtio-vga display, driven by the native virtio-gpu driver
+cargo xtask run --gpu virtio-linux  # the same display, driven by the ported Linux DRM virtio-gpu driver
 cargo xtask run --wifi-sim          # simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
 cargo xtask run --displays 2        # two simulated displays, each in its own window (see "Several displays")
 cargo xtask launch                  # the launcher page (make run); --last boots the last configuration (make quick)

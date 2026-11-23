@@ -89,13 +89,77 @@ struct Cached {
 }
 static CACHE: spin::Mutex<alloc::vec::Vec<Cached>> = spin::Mutex::new(alloc::vec::Vec::new());
 
+/// The display shows the pointer on its cursor plane: the compositor
+/// neither draws it into the picture nor repaints where it moved.
+static HARDWARE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_hardware(on: bool) {
+    HARDWARE.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn hardware() -> bool {
+    HARDWARE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The activity frame `shape` shows at `now` (0 for still shapes).
+pub fn frame(shape: u32, now: u64) -> u64 {
+    if animated(shape) && !super::theme::reduce_motion() {
+        now / 80 % 8
+    } else {
+        0
+    }
+}
+
+/// A cursor-plane image: 0xAARRGGBB pixels (straight alpha), its size,
+/// and the hot spot inside it.
+pub struct Image {
+    pub pixels: alloc::vec::Vec<u32>,
+    pub width: u32,
+    pub height: u32,
+    pub hot: (i32, i32),
+}
+
+/// The pointer `shape` (activity frame `frame`) at `scale` as a
+/// cursor-plane image of at most `max`×`max` pixels. `None` if the shape
+/// is larger than the plane at this scale (the compositor then draws it).
+pub fn image(shape: u32, frame: u64, scale: i32, max: u32) -> Option<Image> {
+    let (w, h) = (49 * scale, 51 * scale);
+    let mut full = alloc::vec![0u32; (w * h) as usize];
+    let mut cv = Canvas::new(&mut full, w, h).with_scale(scale);
+    draw_vector(&mut cv, 17, 17, shape, frame * 80);
+    // Crop to what was drawn.
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            if full[(y * w + x) as usize] >> 24 != 0 {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+    }
+    if x1 <= x0 {
+        // Nothing to show (hidden): one transparent pixel.
+        return Some(Image { pixels: alloc::vec![0], width: 1, height: 1, hot: (0, 0) });
+    }
+    let (cw, ch) = ((x1 - x0) as u32, (y1 - y0) as u32);
+    if cw > max || ch > max {
+        return None;
+    }
+    let mut out = alloc::vec![0u32; (cw * ch) as usize];
+    for y in 0..ch as i32 {
+        let src = ((y0 + y) * w + x0) as usize;
+        out[(y as u32 * cw) as usize..((y as u32 + 1) * cw) as usize].copy_from_slice(&full[src..src + cw as usize]);
+    }
+    Some(Image { pixels: out, width: cw, height: ch, hot: (17 * scale - x0, 17 * scale - y0) })
+}
+
 /// Rasterize each vector once per scale and activity frame, then move a small
 /// transparent bitmap. Pointer motion never rebuilds vector geometry.
+/// (Nothing when the display shows the pointer on its cursor plane.)
 pub fn draw(cv: &mut Canvas, x: i32, y: i32, shape: u32, now: u64) {
-    if shape == c::HIDDEN {
+    if shape == c::HIDDEN || hardware() {
         return;
     }
-    let frame = if animated(shape) && !super::theme::reduce_motion() { now / 80 % 8 } else { 0 };
+    let frame = frame(shape, now);
     let scale = cv.scale;
     let mut cache = CACHE.lock();
     let at = cache.iter().position(|p| p.shape == shape && p.scale == scale && p.frame == frame);

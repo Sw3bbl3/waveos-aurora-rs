@@ -1267,6 +1267,18 @@ mod scale_tests {
     }
 
     #[test]
+    fn alpha_blit_with_the_clip_beside_it_draws_nothing() {
+        // A 4x4 image (the pointer, say) whose rows the clip covers but
+        // whose columns it doesn't: the intersection is empty and to the right.
+        let mut buf = alloc::vec![0u32; 16 * 8];
+        let mut cv = Canvas::new(&mut buf, 16, 8);
+        cv.clip = Rect::new(10, 0, 6, 8);
+        let src = alloc::vec![0xFFFF_FFFFu32; 16];
+        cv.blit_alpha(&src, 4, 4, Rect::new(2, 4, 4, 4), 0);
+        assert!(buf.iter().all(|&p| p == 0));
+    }
+
+    #[test]
     fn the_clip_is_in_points() {
         let mut buf = alloc::vec![0u32; 8 * 8];
         let mut cv = Canvas::new(&mut buf, 8, 8).with_scale(2);

@@ -25,6 +25,7 @@ const TESTS: &[Test] = &[
     ("account_password_hash", crate::gui::account::self_test),
     ("write-combining mappings", crate::arch::pat::self_test),
     ("LinuxKPI: runtime, DRM and the GPU display", linux_kpi),
+    ("display: EDID, connectors, mode sets, atomic commits, cursor plane", crate::drivers::gpu::selftest::display),
     ("rect math", rects),
     ("keyboard decoder", keyboard),
     ("ramfs + vfs", ramfs),
@@ -168,8 +169,9 @@ fn linux_kpi() {
         }
         let line = unsafe { waveos_lkpi_selftest() };
         assert_eq!(line, 0, "LinuxKPI self-test failed at waveos_selftest.c line {line}");
+        // The ported driver runs the virtio GPU only when boot.conf asks for it.
         let gpu = crate::drivers::pci::devices().iter().any(|d| d.vendor == 0x1AF4 && d.device == 0x1050);
-        if gpu {
+        if gpu && crate::gui::prefs::boot_option("gpu").as_deref() == Some("linux") {
             let d = crate::linux::display().expect("virtio-gpu present but no display");
             assert!(d.width >= 640 && d.height >= 480 && d.pitch >= d.width * 4);
             crate::kprint!("(GPU display {}x{}) ", d.width, d.height);
@@ -1436,6 +1438,8 @@ fn sleep_and_wake() {
     sched::sleep_ms(200);
     // And the restarted CPUs really run work again.
     smp_work();
+    // The display shows its framebuffer again.
+    crate::drivers::gpu::selftest::after_sleep();
     // The network card was reset too: talk to the host again.
     if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
         use crate::net::socket::{Kind, Socket};

@@ -49,7 +49,13 @@ pub const GPUS: &[Choice] = &[
     choice(
         "virtio",
         "virtio-gpu",
-        "virtio-vga, driven by the ported Linux DRM driver; follows the window size.",
+        "virtio-vga, driven by WaveOS's native driver; follows the window size.",
+        &["virtio-vga"],
+    ),
+    choice(
+        "virtio-linux",
+        "virtio-gpu (Linux driver)",
+        "virtio-vga, driven by the ported Linux DRM driver, for comparison.",
         &["virtio-vga"],
     ),
 ];

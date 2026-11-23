@@ -20,10 +20,10 @@ pub mod stages;
 
 pub use lumen::{canvas, geom, icons, theme, wallpaper, widgets};
 
+use crate::drivers::gpu::{output::Output, Damage};
 use crate::drivers::input;
 use crate::mm::phys_to_virt;
 use crate::{sched, time};
-use alloc::vec;
 use bootinfo::{Framebuffer, PixelFormat};
 use canvas::{rgb, Canvas};
 use core::fmt::Write;
@@ -96,11 +96,6 @@ fn scale_for(w: i32, h: i32) -> i32 {
 }
 
 pub fn start() {
-    // A ported GPU driver took over the screen in a mode of its own.
-    if let Some(fb) = crate::drivers::display::drm_framebuffer() {
-        *FB.lock() = Some(fb);
-        input::set_screen_size(fb.width as i32, fb.height as i32);
-    }
     // The compositor keeps its own SIMD registers, so drawing can use SSE2.
     lumen::simd::set_gate(simd_allowed);
     sched::spawn_simd("lumen-server", run);
@@ -113,12 +108,13 @@ fn simd_allowed() -> bool {
         && x86_64::instructions::interrupts::are_enabled()
 }
 
-/// A network interface got (or lost) its address.
-/// A ported GPU driver reported new display modes (see `crate::linux`).
+/// A display driver reported new display modes (a host window resized,
+/// a monitor plugged in).
 pub fn display_changed() {
     server::command(server::Command::DisplayChanged);
 }
 
+/// A network interface got (or lost) its address.
 pub fn network_changed() {
     server::command(server::Command::NetworkChanged);
 }
@@ -157,76 +153,94 @@ pub fn power_changed(old: Option<aurora_abi::PowerInfo>, new: aurora_abi::PowerI
     }
 }
 
-/// The framebuffer, mapped write-combining when the CPU allows (so copies
-/// to it go out in bursts) and through the physical window otherwise.
-///
-/// When a ported GPU driver runs the display (`linux::display`), its
-/// framebuffer — ordinary memory the driver copies to the GPU on flush —
-/// takes the firmware framebuffer's place.
-fn front_buffer(fb: &Framebuffer) -> &'static mut [u32] {
-    #[cfg(linuxkpi)]
-    if let Some(d) = crate::linux::display() {
-        return unsafe { core::slice::from_raw_parts_mut(d.pixels, (d.pitch / 4 * d.height) as usize) };
-    }
-    // (physical address, length in pixels, virtual address) of the last mapping.
-    static MAPPED: spin::Mutex<(u64, usize, u64)> = spin::Mutex::new((0, 0, 0));
-    let len = (fb.stride * fb.height) as usize;
-    let mut mapped = MAPPED.lock();
-    if mapped.0 != fb.phys_addr || mapped.1 < len {
-        let virt = match crate::mm::vmm::kmap_wc(fb.phys_addr, len as u64 * 4) {
-            Some(v) => {
-                log!("gui", "framebuffer mapped write-combining at {:#x}", v);
-                v
-            }
-            None => phys_to_virt(fb.phys_addr),
-        };
-        *mapped = (fb.phys_addr, len, virt);
-    }
-    unsafe { core::slice::from_raw_parts_mut(mapped.2 as *mut u32, len) }
+/// The screen as a `Framebuffer`: its size, and where the panic screen
+/// may draw (a physical framebuffer the CPU writes, or none: `phys_addr` 0).
+fn describe(out: &Output) -> Framebuffer {
+    let (w, h) = out.size();
+    out.panic_framebuffer().filter(|f| (f.width, f.height) == (w, h)).unwrap_or(Framebuffer {
+        phys_addr: 0,
+        size: 0,
+        width: w,
+        height: h,
+        stride: w,
+        format: PixelFormat::Bgr,
+    })
 }
 
-/// Copies `r` from the back buffer to the framebuffer.
-fn flush(front: &mut [u32], back: &[u32], fb: &Framebuffer, r: Rect) {
-    #[cfg(linuxkpi)]
-    if let Some(d) = crate::linux::display() {
-        // XRGB8888 in memory is the back buffer's own layout.
-        let r = r.intersect(&Rect::new(0, 0, fb.width.min(d.width) as i32, fb.height.min(d.height) as i32));
-        let (w, stride) = (fb.width as usize, (d.pitch / 4) as usize);
-        for y in r.y as usize..r.bottom() as usize {
-            front[y * stride + r.x as usize..y * stride + r.right() as usize]
-                .copy_from_slice(&back[y * w + r.x as usize..y * w + r.right() as usize]);
-        }
-        if r.w > 0 && r.h > 0 {
-            crate::linux::display_flush(r.x, r.y, r.w, r.h);
-        }
-        return;
+/// Where the pointer goes this frame.
+#[derive(PartialEq)]
+enum PointerOn {
+    /// The display's cursor plane.
+    Plane,
+    /// The picture: this shape is larger than the plane at this scale.
+    Picture,
+    /// The plane failed; the compositor draws the pointer from now on.
+    Failed,
+}
+
+/// Shows the pointer on the display's cursor plane: draws a new cursor
+/// image when the shape, its activity frame or the scale changed, and
+/// moves it.
+fn update_hw_cursor(
+    out: &mut Output,
+    shown: &mut Option<(u32, u64, i32)>,
+    pos: (i32, i32),
+    shape: u32,
+    now: u64,
+    s: i32,
+) -> PointerOn {
+    if out.move_cursor(pos.0 * s, pos.1 * s).is_err() {
+        return PointerOn::Failed;
     }
-    let w = fb.width as usize;
-    let stride = fb.stride as usize;
-    for y in r.y as usize..r.bottom() as usize {
-        let src = &back[y * w + r.x as usize..y * w + r.right() as usize];
-        let dst = &mut front[y * stride + r.x as usize..y * stride + r.right() as usize];
-        match fb.format {
-            PixelFormat::Bgr => dst.copy_from_slice(src),
-            PixelFormat::Rgb => {
-                for (d, s) in dst.iter_mut().zip(src) {
-                    *d = (s & 0x00FF00) | (s >> 16 & 0xFF) | (s & 0xFF) << 16;
-                }
+    let key = (shape, cursor::frame(shape, now), s);
+    if *shown == Some(key) {
+        return PointerOn::Plane;
+    }
+    if shown.is_some_and(|k| (k.0, k.2) == (u32::MAX, s) && k.1 == shape as u64) {
+        return PointerOn::Picture; // still the oversized shape
+    }
+    if shape == aurora_abi::cursor::HIDDEN {
+        *shown = Some(key);
+        return if out.hide_cursor().is_ok() { PointerOn::Plane } else { PointerOn::Failed };
+    }
+    let max = out.cursor_size().0;
+    match cursor::image(shape, key.1, s, max) {
+        Some(img) => {
+            *shown = Some(key);
+            let ok = out.set_cursor(&img.pixels, img.width, img.height, img.hot).is_ok() && out.show_cursor().is_ok();
+            if ok {
+                PointerOn::Plane
+            } else {
+                PointerOn::Failed
             }
         }
+        None => {
+            // Remembered as (MAX, shape, scale) so the image isn't tried again each frame.
+            *shown = Some((u32::MAX, shape as u64, s));
+            let _ = out.hide_cursor();
+            PointerOn::Picture
+        }
     }
-    // Drain the write-combining buffers so the frame reaches the screen now.
-    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }
 
 fn run() {
-    let mut fb = current_fb().expect("gui::init not called");
     input::set_consumer(sched::current_id());
     server::set_compositor(sched::current_id());
 
     crate::telemetry::stage("gui", "Lumen Server window server");
     load_settings();
     prefs::apply_appearance();
+    // The display, in the resolution chosen in Settings when it can switch
+    // now (otherwise the bootloader already applied it).
+    let wanted = if crate::drivers::display::live() { prefs::boot_resolution() } else { None };
+    let mut out = Output::open(wanted).expect("no display");
+    let mut fb = describe(&out);
+    *FB.lock() = Some(fb);
+    // The pointer goes on the display's cursor plane when it has one
+    // (`cursor=software` in boot.conf draws it into the picture instead).
+    let mut hw_cursor = out.has_cursor() && prefs::boot_option("cursor").as_deref() != Some("software");
+    cursor::set_hardware(hw_cursor);
+    let mut cursor_shown: Option<(u32, u64, i32)> = None;
     // The desktop works in points; the back buffer is in device pixels.
     let mut s = scale_for(fb.width as i32, fb.height as i32);
     SCALE.store(s, core::sync::atomic::Ordering::Relaxed);
@@ -236,22 +250,20 @@ fn run() {
     let mut desktop = Desktop::new(w, h);
     log!("gui", "desktop composed in {} ms ({}x{})", time::uptime_ms() - t0, w, h);
 
-    // A ported GPU driver starts in the screen's preferred mode; switch to
-    // the resolution chosen in Settings, if the screen has it.
-    if crate::drivers::display::drm() {
-        if let Some((bw, bh)) = prefs::boot_resolution().filter(|&r| r != (fb.width, fb.height)) {
-            desktop.resolution_request = Some((bw, bh));
-        }
-    }
-    let mut back = vec![0u32; (fb.width * fb.height) as usize];
+    // The back buffer is the framebuffer the display scans out (valid
+    // until the next mode change, when it is fetched again).
+    let mut back = unsafe { out.back_buffer() };
     let mut materials = lumen::material::MaterialCache::default();
-    let mut front = front_buffer(&fb);
     let mut ready = false;
     let mut next_tick = 0;
     // Full-screen frames (count, total ns, max ns) and partial updates (count,
     // total ns), logged every 10 seconds.
     let mut frame_stats = (0u64, 0u64, 0u64, time::uptime_ms());
     let mut partial_stats = (0u64, 0u64);
+    // Presents (count, total ns, max ns, pixels): the cost of getting the
+    // damaged rectangles onto the display (copies, transfers, flushes).
+    let mut present_stats = (0u64, 0u64, 0u64, 0u64);
+    let mut rects: alloc::vec::Vec<Damage> = alloc::vec::Vec::new();
     loop {
         let now = time::uptime_ms();
         desktop.set_now(now);
@@ -280,24 +292,31 @@ fn run() {
         }
         // A new resolution: new framebuffer, back buffer and layout.
         if let Some((nw, nh)) = desktop.resolution_request.take() {
-            match crate::drivers::display::set_mode(nw, nh) {
-                // Following the screen: it already has this size.
-                Some(new_fb) if (nw, nh) == (0, 0) && (new_fb.width, new_fb.height) == (fb.width, fb.height) => {
-                    front = front_buffer(&new_fb);
-                    fb = new_fb;
-                    *FB.lock() = Some(fb);
-                    desktop.damage_all();
+            // (0, 0): follow the display's preferred size (a resized host window).
+            let switched = if (nw, nh) == (0, 0) {
+                out.follow_preferred()
+            } else {
+                match out.set_size(nw, nh) {
+                    Ok(()) => Some(true),
+                    Err(e) => {
+                        log!("gui", "the display can't show {}x{} ({:?})", nw, nh, e);
+                        None
+                    }
                 }
-                Some(new_fb) => {
-                    fb = new_fb;
+            };
+            match switched {
+                // Following the screen: it already has this size.
+                Some(false) => desktop.damage_all(),
+                Some(true) => {
+                    fb = describe(&out);
                     *FB.lock() = Some(fb);
                     let before = s;
                     s = scale_for(fb.width as i32, fb.height as i32);
                     SCALE.store(s, core::sync::atomic::Ordering::Relaxed);
                     (w, h) = (fb.width as i32 / s, fb.height as i32 / s);
-                    back = vec![0u32; (fb.width * fb.height) as usize];
+                    back = unsafe { out.back_buffer() };
                     materials.clear();
-                    front = front_buffer(&fb);
+                    cursor_shown = None;
                     input::set_screen_size(w, h);
                     desktop.resize(w, h);
                     if s != before {
@@ -310,8 +329,7 @@ fn run() {
                         ..Default::default()
                     });
                 }
-                None if (nw, nh) == (0, 0) => {}
-                None => log!("gui", "the display can't show {}x{}", nw, nh),
+                None => {}
             }
         }
         // Input can start an animation, change focus, or unhover an expired
@@ -328,16 +346,19 @@ fn run() {
         let batch_start = time::uptime_ms();
         let batch_pixels: i64 = damage.iter().map(|r| r.area()).sum();
         let batch_full = damage.iter().any(|r| r.area() == i64::from(w) * i64::from(h));
+        rects.clear();
         for r in damage {
             let started = time::now_ns();
             crate::telemetry::PIXELS.fetch_add(r.area() as u64, core::sync::atomic::Ordering::Relaxed);
-            let mut cv = Canvas::new(&mut back, fb.width as i32, fb.height as i32).with_scale(s);
+            let mut cv = Canvas::new(back, fb.width as i32, fb.height as i32).with_scale(s);
             materials.begin_frame();
             cv.materials = Some(&mut materials);
             cv.clip = r;
             desktop.paint(&mut cv);
-            let px = cv.to_px(r);
-            stages::time(stages::Stage::Flush, || flush(front, &back, &fb, px));
+            let px = cv.to_px(r).intersect(&Rect::new(0, 0, fb.width as i32, fb.height as i32));
+            if px.w > 0 && px.h > 0 {
+                rects.push(Damage { x: px.x as u32, y: px.y as u32, w: px.w as u32, h: px.h as u32 });
+            }
             let elapsed = time::now_ns() - started;
             if r.area() == i64::from(w) * i64::from(h) {
                 frame_stats.0 += 1;
@@ -346,6 +367,36 @@ fn run() {
             } else if scene_changed {
                 partial_stats.0 += 1;
                 partial_stats.1 += elapsed;
+            }
+        }
+        // Everything painted this frame goes to the display at once.
+        if !rects.is_empty() {
+            let started = time::now_ns();
+            if let Err(e) = out.present(&rects) {
+                log!("gui", "present failed: {:?}", e);
+            }
+            let elapsed = time::now_ns() - started;
+            // "flush" in the time by stage: getting the picture to the display.
+            stages::add(stages::Stage::Flush, elapsed);
+            present_stats.0 += 1;
+            present_stats.1 += elapsed;
+            present_stats.2 = present_stats.2.max(elapsed);
+            present_stats.3 += rects.iter().map(|r| r.w as u64 * r.h as u64).sum::<u64>();
+        }
+        if hw_cursor {
+            let (pos, shape) = desktop.cursor_state();
+            let on = update_hw_cursor(&mut out, &mut cursor_shown, pos, shape, now, s);
+            if on == PointerOn::Failed {
+                log!("gui", "the display's cursor plane failed; drawing the pointer instead");
+                hw_cursor = false;
+                let _ = out.hide_cursor();
+            }
+            // Moving between the plane and the picture: repaint (rare: a
+            // shape too large for the plane at 2x).
+            if cursor::hardware() != (on == PointerOn::Plane) {
+                cursor::set_hardware(on == PointerOn::Plane);
+                desktop.damage_all();
+                next_tick = time::uptime_ms();
             }
         }
         desktop.finish_frame();
@@ -369,7 +420,9 @@ fn run() {
                 h
             );
         }
-        if (frame_stats.0 > 0 || partial_stats.0 > 0) && time::uptime_ms() - frame_stats.3 >= 10000 {
+        if (frame_stats.0 > 0 || partial_stats.0 > 0 || present_stats.0 > 0)
+            && time::uptime_ms() - frame_stats.3 >= 10000
+        {
             log!(
                 "lumen",
                 "{} scene frames, mean {} us, max {} us; {} partial updates, mean {} us; at {}x{}",
@@ -386,11 +439,21 @@ fn run() {
             if !spent.is_empty() {
                 log!("lumen", "time by stage: {}", spent);
             }
+            log!(
+                "lumen",
+                "present on {}: {} frames, mean {} us, max {} us, {} kpx per frame",
+                out.dev.name(),
+                present_stats.0,
+                present_stats.1 / present_stats.0.max(1) / 1000,
+                present_stats.2 / 1000,
+                present_stats.3 / present_stats.0.max(1) / 1000
+            );
             frame_stats = (0, 0, 0, time::uptime_ms());
             partial_stats = (0, 0);
+            present_stats = (0, 0, 0, 0);
         }
         if core::mem::take(&mut desktop.screenshot) {
-            take_screenshot(&back, w as u32, h as u32);
+            take_screenshot(back, w as u32, h as u32);
         }
         if !ready {
             ready = true;
