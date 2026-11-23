@@ -65,6 +65,8 @@ QEMU 11 under TCG on an 8-core Mac shared with other work (load averages of 20�
 
 Two idle usb-net adapters cost 38–39 CPU ms per second in ECM mode (QEMU answers every poll of the notification endpoint) and 18–20 in RNDIS mode, on xHCI; on EHCI's UHCI companion, in ECM mode, 400–540 CPU ms per second (see below). Unplugged with QMP `device_del`, an adapter's interface is gone 2–7 ms later on xHCI (90–175 ms on UHCI), and a connection through it fails at the same moment; plugged back with `device_add`, the interface is there 15–70 ms later and has its DHCP address another 70 ms to 1.3 s later (QEMU's DHCP server answers at its own pace).
 
+A bug this work found: the xHCI driver handed event-ring entries back only after draining everything, so a busy receive stream plus transmits could fill the 256-entry ring, and a full ring makes the controller (QEMU included) drop events. Each dropped receive completion was a stream buffer never queued again; with RNDIS's four buffers, reception died after a few losses (the adapter's report showed receive silent for 40 s while transmits went on, with one transmit timeout). The driver now hands entries back every 16 events, the ring has 1024 entries, and a reported overflow restarts every pipe.
+
 Where the time goes:
 
 - **Receive on xHCI** is close to virtio: frames are split in place on the event task. The extra CPU is the per-frame transfer event and wake-up (QEMU completes one frame per TD).
