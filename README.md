@@ -50,7 +50,7 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 
 ## Every app in its own world.
 
-Each app runs as a separate, protected process. If one crashes, you see a polite "quit unexpectedly" — and everything else keeps right on working. Your files live on **AuroraFS**, a journaled filesystem built to survive a power cut.
+Each app runs as a separate, protected process. If one crashes, you see a polite "quit unexpectedly" — and everything else keeps right on working. Run out of memory and it keeps going too: pages you haven't touched in a while are compressed, then moved to an encrypted swap file, and come back the moment you need them. Your files live on **AuroraFS**, a journaled filesystem built to survive a power cut.
 
 | | |
 |---|---|
@@ -95,6 +95,7 @@ A minute later, you're at the desktop. Add `--monitor` to open the System Explor
 | **Firstlight** | UEFI bootloader |
 | **Aster** | Hybrid kernel: multicore, ACPI, sleep and resume |
 | **AuroraFS** | Journaled, extent-based filesystem |
+| **kswapd** | Memory reclaim: compressed memory (our own LZ4), an encrypted swap file, and an out-of-memory killer that spares the app you're using |
 | **Lumen Server** | Compositing window server |
 | **WaveUI** | Declarative interface framework every app is built with ([WaveSDK](docs/WAVESDK.md)) |
 | **AuroraKit** | Windowing toolkit WaveUI runs on |
