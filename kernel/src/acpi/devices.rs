@@ -1,6 +1,6 @@
 //! Devices described only by ACPI: I²C controllers, HID over I²C touchpads
-//! and touch screens (`PNP0C50`), and the GPIO controllers their interrupts
-//! go through. Runs on the ACPI task (all AML does).
+//! and touch screens (`PNP0C50`), the GPIO controllers their interrupts
+//! go through, and SD host controllers (`drivers::block::sdhci`). Runs on the ACPI task (all AML does).
 //!
 //! For each device of interest it reads `_HID`/`_CID`, `_STA`, `_UID`,
 //! `_ADR`, decodes `_CRS` with `aurora_acpi_res`, and for HID over I²C
@@ -36,6 +36,16 @@ const I2C_CONTROLLERS: &[&str] =
 const GPIO_CONTROLLERS: &[&str] = &[
     "AMDI0030", "AMD0030", "INT33C7", "INT33FC", "INT33FF", "INT344B", "INT345D", "INT34BB", "INT3450", "INT34C5",
     "INT34C6", "INTC1055", "INTC1056", "INTC1057", "INTC1085",
+];
+
+/// SD host controllers ACPI describes (rather than PCI): the standard
+/// `PNP0D40`, Intel Bay Trail/Cherry Trail (`80860F14` eMMC and SD by
+/// `_UID`, `80860F16`, `INT33BB`), Haswell/Broadwell LPSS (`INT33C6`,
+/// `INT3436`), Broxton/Apollo Lake (`80865ACA`, `80865ACC`, `80865AD0`),
+/// `INT344D`, and AMD's eMMC (`AMDI0040`, `AMDI0041`).
+const SDHCI_CONTROLLERS: &[&str] = &[
+    "PNP0D40", "80860F14", "80860F16", "INT33BB", "INT33C6", "INT3436", "INT344D", "80865ACA", "80865ACC",
+    "80865AD0", "AMDI0040", "AMDI0041",
 ];
 
 /// The self-test's software controller (described by xtask's test SSDT).
@@ -230,6 +240,7 @@ pub fn scan(interp: &Interp) {
     drop(ns);
 
     let mut found = Found::default();
+    let mut sdhci = Vec::new();
     let mut controller_paths: Vec<String> = Vec::new();
     let mut gpio_paths: Vec<String> = Vec::new();
     // HID over I²C devices first: they name the controllers they need.
@@ -243,6 +254,17 @@ pub fn scan(interp: &Interp) {
         }
         if GPIO_CONTROLLERS.contains(&hid.as_str()) {
             gpio_paths.push(p.as_string());
+        }
+        if SDHCI_CONTROLLERS.iter().any(|id| *id == hid || cids.iter().any(|c| c == id)) {
+            if !present(interp, p) {
+                log!("sdhci", "{} ({}): not present (_STA)", p, hid);
+            } else {
+                let dev = describe(interp, p, hid.clone(), cids.clone());
+                power(interp, p, true);
+                log!("sdhci", "ACPI {} {} uid {:?}:{}", dev.path, dev.hid, dev.uid, resource_summary(&dev.resources));
+                sdhci.push(dev);
+            }
+            continue;
         }
         if !is_hid {
             continue;
@@ -312,6 +334,9 @@ pub fn scan(interp: &Interp) {
     }
     if !found.hid.is_empty() || !found.controllers.is_empty() {
         crate::drivers::i2c::start(found);
+    }
+    if !sdhci.is_empty() {
+        crate::drivers::block::sdhci::start_acpi(sdhci);
     }
 }
 

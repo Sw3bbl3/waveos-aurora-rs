@@ -92,6 +92,7 @@ dependencies = [
  "aurora-hid",
  "aurora-i2c",
  "aurora-image",
+ "aurora-sdmmc",
  "aurora-wav",
  "aurora-wifi",
  "aurorafs",
@@ -165,6 +166,10 @@ dependencies = [
 
 [[package]]
 name = "aurora-mutate"
+version = "0.8.0"
+
+[[package]]
+name = "aurora-sdmmc"
 version = "0.8.0"
 
 [[package]]
