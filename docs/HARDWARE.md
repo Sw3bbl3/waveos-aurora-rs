@@ -11,7 +11,7 @@ WaveOS is developed and tested in QEMU. Milestone 5 adds the drivers a real PC n
 | Processor | Any 64-bit Intel or AMD (x86-64), 1 core | 2 or more cores | 4 or more cores with AVX2 (Intel from 2013, AMD Ryzen) |
 | Memory | 512 MiB (it boots on 256 MiB) | **2 GiB** | 4 to 8 GiB |
 | USB stick or disk | 512 MiB (`cargo xtask image --no-linux-root`) | 4 GiB | 8 GiB or more, USB 3 or an SSD in AHCI mode |
-| Network | Optional | Intel e1000/e1000e (see Known limits) | Intel 82574L, for example an Intel Gigabit CT PCIe card |
+| Network | Optional | Intel e1000/e1000e or igb, Realtek RTL8139 or RTL8168/8111 (see Known limits) | Intel 82574L, for example an Intel Gigabit CT PCIe card |
 | Screen | 1280 × 800 | 1920 × 1080 | 1920 × 1080; larger screens work, but the processor draws everything |
 
 - **Firmware:** 64-bit UEFI with Secure Boot off. Legacy BIOS (CSM) can't start WaveOS.
@@ -95,8 +95,32 @@ Work through the list and note what happens. The boot log (below) records the de
   - xHCI (USB 3), EHCI (USB 2) with its OHCI or UHCI companions, and OHCI and UHCI on their own (USB 1.1) are all driven. EHCI, OHCI and UHCI have only been tested in QEMU.
   - Isochronous transfers (USB audio) work on xHCI only; on EHCI, OHCI and UHCI, `lsusb` shows audio devices as unsupported. No webcams yet.
 - **Sound.** Intel HD Audio output (no microphone or HDMI audio yet), and USB Audio Class 1 and 2 speakers, headsets, DACs and microphones on xHCI. USB Audio 3.0-only devices aren't supported (most also offer UAC 1 or 2).
-- **Networking.** Wired Ethernet only, on Intel e1000/e1000e adapters (82540EM, 82545/82546, 82574L and similar) or virtio-net in virtual machines. Realtek and newer Intel (I219, I225) chips aren't supported yet. Wi-Fi: Intel adapters from the Wireless 7265 to the Wi-Fi 6E AX211 are recognized, but WaveOS can't start their radio yet, so no real Wi-Fi works. IPv4 only, with the address from DHCP.
+- **Networking.** Wired Ethernet only; see [Wired network adapters](#wired-network-adapters) for which chips are driven and how far each is tested. Wi-Fi: Intel adapters from the Wireless 7265 to the Wi-Fi 6E AX211 are recognized, but WaveOS can't start their radio yet, so no real Wi-Fi works. IPv4 only, with the address from DHCP.
 - **Sleep** is S3 (suspend to RAM). Many machines since about 2019 support only "Modern Standby" (S0ix), which WaveOS doesn't implement. On those, Sleep isn't offered.
+
+## Wired network adapters
+
+Every driver resets the card, reads its MAC address, runs one receive and one transmit ring, reports the link, and comes back after sleep. `lspci` names the adapters WaveOS knows, and the boot log has a line for each one it drives. "QEMU" means the kernel self-tests (DHCP, ping, UDP, TCP, a megabyte over HTTP from the host, an inbound connection, IPv6, and the network after S3 sleep) pass with `cargo xtask test --net <model>`.
+
+| Adapter | PCI ids | Driver | Interrupts | Tested |
+|---|---|---|---|---|
+| virtio-net | 1af4:1000, 1041 | `virtio.rs` | MSI-X | QEMU (`--net virtio`) |
+| Intel 82540EM, 82545/82546 (e1000) | 8086:100e and others | `e1000.rs` | MSI, else polled | QEMU (`--net e1000`) |
+| Intel 82574L (e1000e) | 8086:10d3, 10f6 | `e1000.rs` | MSI-X | QEMU (`--net e1000e`) |
+| Intel 82576 (igb) | 8086:10c9, 10e8, 1526, 150a | `igb.rs` | MSI-X (MSI, polled) | QEMU (`--net igb`), MSI-X path only |
+| Intel 82580, I350, I210, I211 (igb) | 8086:150e, 1521, 1533, 157b, 1539 | `igb.rs` | MSI-X or MSI | Untested on real hardware |
+| Intel I225, I226 (igc, 2.5 Gbit/s) | 8086:15f2, 15f3, 15f8, 0d9f, 125b–125d | `igb.rs` | MSI-X or MSI | Untested on real hardware |
+| Realtek RTL8139 | 10ec:8139 (and D-Link, Accton clones) | `rtl8139.rs` | INTx, polled until ACPI routes it | QEMU (`--net rtl8139`) |
+| Realtek RTL8168/8111/8411 | 10ec:8168, 8161, 2502, 2600 | `rtl8169.rs` | MSI-X or MSI | Untested on real hardware |
+| Realtek RTL8169/8110 (PCI) | 10ec:8169, 8167; 1186:4300, 4302 | `rtl8169.rs` | INTx | Untested on real hardware |
+| Realtek RTL8125 (2.5 Gbit/s) | 10ec:8125, 3000 | `rtl8169.rs` | MSI-X or MSI | Untested on real hardware |
+| Intel 82579, I217, I218, I219 (chipset LAN) | 8086:1502, 153a, 15b8, 15fa and others | — | — | Recognized only: the boot log says it isn't supported |
+
+What the untested drivers do, and what they leave out:
+
+- **Realtek RTL8168 family and RTL8125.** Written from Realtek's register descriptions. The driver tells the chip generations apart by the revision in the transmit configuration register, takes RTL8168G and later chips out of out-of-band (management) mode, resets the MAC, powers up the PHY if firmware left it off, and uses the PHY's power-on settings. It does not apply the per-revision PHY parameter tables or PHY firmware patches that other operating systems load; most chips link without them, but a few revisions may link slower or less reliably. The RTL8125 gets a link-status read over the PHY's OCP window; its 2.5 Gbit/s mode depends on the PHY's defaults. The boot log line `rtl8169: … (chip 0x…, …)` names the revision: please include it in reports.
+- **Intel igb and igc.** The 82576 path is exercised in QEMU. The other igb chips share its registers; the I225/I226 differ in their reset bit and get no PHY access (their PHY negotiates on its own). Copper ports only: fibre and SerDes variants of these chips aren't claimed.
+- **Intel chipset LAN (I217/I218/I219, 82579).** Not driven. Its PHY sits outside the chipset, may be in SMBus or ultra-low-power mode shared with the management engine, and needs a semaphore-guarded wake-up sequence, plus, on the I219, a descriptor-ring flush before every reset. Doing that wrong can leave the PHY unreachable until a power cycle, so these adapters are only reported. Use a PCIe card (Intel 82574L, I210, or a Realtek RTL8111) instead.
 
 ## Compatibility
 
@@ -104,7 +128,7 @@ Please add a row for each machine you try.
 
 | Machine | CPU | Boots | Display | Keyboard / pointer | USB storage | Disk | Network | Sound | Battery | Sleep | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| QEMU 11 (q35, Homebrew OVMF), macOS host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB | ✅ | ✅ AHCI, NVMe, virtio | ✅ virtio-net, e1000, e1000e | ✅ HDA, USB audio (xHCI) | ✅ test SSDT | ✅ | Development setup (`cargo xtask run` / `test`) |
+| QEMU 11 (q35, Homebrew OVMF), macOS host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB | ✅ | ✅ AHCI, NVMe, virtio | ✅ virtio-net, e1000, e1000e, igb, RTL8139 | ✅ HDA, USB audio (xHCI) | ✅ test SSDT | ✅ | Development setup (`cargo xtask run` / `test`) |
 | QEMU 8.2 (q35, Ubuntu OVMF), Linux host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB on xHCI, EHCI+UHCI, EHCI+OHCI, OHCI, UHCI; virtual touchpad, keyboard and controllers over usb-redir | ✅ every controller | ✅ AHCI | ✅ virtio-net | ✅ HDA | ✅ test SSDT | ⚠️ firmware doesn't resume | `cargo xtask test --usb …` |
 | QEMU and OVMF from Ubuntu 24.04 | TCG, 4 cores | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | CI. This firmware build faults while resuming from S3, before WaveOS runs, so the tests skip sleep there |
 | | | | | | | | | | | | |

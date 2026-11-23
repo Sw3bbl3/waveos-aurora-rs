@@ -8,7 +8,7 @@ use std::{
 pub fn run(args: &[String]) {
     let value = |key: &str| args.iter().position(|a| a == key).and_then(|n| args.get(n + 1)).cloned();
     let net = value("--net").unwrap_or_else(|| "virtio".into());
-    assert!(["virtio", "e1000", "e1000e", "none"].contains(&net.as_str()), "unsupported --net");
+    assert!(["virtio", "e1000", "e1000e", "igb", "rtl8139", "none"].contains(&net.as_str()), "unsupported --net");
     let output = value("--output")
         .map(PathBuf::from)
         .unwrap_or_else(|| super::root().join(format!("target/network-web/check-{net}")));
