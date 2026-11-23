@@ -157,10 +157,16 @@ fn reclaim_to(target: u64) {
         let (round, busy) = evict_round(want);
         if written + round.evicted > 0 {
             idle_scanned = 0;
-        } else if busy > 0 && busy_rounds < 100 {
+            busy_rounds = 0;
+        } else if busy > 0 {
             // Address spaces in use (a fault, a system call): soon free.
+            // Never a reason to call it hopeless: after a while this round
+            // ends, and waiters wait (or time out) for the next.
             busy_rounds += 1;
-            crate::sched::sleep_ms(1);
+            if busy_rounds > 5000 {
+                break;
+            }
+            crate::sched::yield_now();
             continue;
         } else {
             idle_scanned += round.scanned;

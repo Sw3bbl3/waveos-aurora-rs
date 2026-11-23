@@ -253,7 +253,7 @@ pub fn resolve_fault(addr: u64, write: bool) -> bool {
 fn with_memory(p: &Process, mut op: impl FnMut(&mut AddressSpace) -> crate::mm::vmm::Fault) -> bool {
     use crate::mm::{kswapd, vmm::Fault};
     let mut without_room = 0;
-    for _ in 0..16 {
+    for _ in 0..32 {
         let r = {
             let mut guard = p.mem();
             match guard.as_mut() {
@@ -273,7 +273,7 @@ fn with_memory(p: &Process, mut op: impl FnMut(&mut AddressSpace) -> crate::mm::
             continue;
         }
         without_room += 1;
-        if kswapd::futile() || without_room >= 3 {
+        if kswapd::futile() || without_room >= 10 {
             kswapd::out_of_memory();
         }
         if p.killed.load(Ordering::Acquire) {

@@ -500,6 +500,22 @@ fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64, linux: Option<&P
     image::create_with(esp, &home, linux, img, size).expect("image creation failed");
 }
 
+/// Strips the debug information from a kernel going on a boot image.
+fn strip_debug(kernel: &Path) {
+    let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().expect("rustc sysroot");
+    let version = Command::new("rustc").arg("-vV").output().expect("rustc host");
+    let version = String::from_utf8_lossy(&version.stdout);
+    let host = version.lines().find_map(|line| line.strip_prefix("host: ")).expect("rustc host triple");
+    let objcopy =
+        PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim()).join("lib/rustlib").join(host).join("bin/llvm-objcopy");
+    let status = Command::new(objcopy)
+        .arg("--strip-debug")
+        .arg(kernel)
+        .status()
+        .expect("llvm-objcopy (install llvm-tools-preview)");
+    assert!(status.success(), "could not strip packaged kernel debug information");
+}
+
 fn esp_dir(test: bool) -> PathBuf {
     root().join(if test { "target/esp-test" } else { "target/esp" })
 }
@@ -573,20 +589,7 @@ fn build(profile: Profile, test: bool) -> PathBuf {
     if profile == Profile::Release {
         // Keep the full ELF for host GDB. DWARF is never loaded by UEFI and
         // would otherwise crowd the bounded El Torito EFI boot image.
-        let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().expect("rustc sysroot");
-        let version = Command::new("rustc").arg("-vV").output().expect("rustc host");
-        let version = String::from_utf8_lossy(&version.stdout);
-        let host = version.lines().find_map(|line| line.strip_prefix("host: ")).expect("rustc host triple");
-        let objcopy = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
-            .join("lib/rustlib")
-            .join(host)
-            .join("bin/llvm-objcopy");
-        let status = Command::new(objcopy)
-            .arg("--strip-debug")
-            .arg(esp.join("aurora/kernel.elf"))
-            .status()
-            .expect("llvm-objcopy (install llvm-tools-preview)");
-        assert!(status.success(), "could not strip packaged kernel debug information");
+        strip_debug(&esp.join("aurora/kernel.elf"));
     }
     let mut programs = build_userland(profile);
     programs.extend(linux::programs());
@@ -1295,6 +1298,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
     // of the `bench:` and `mm-bench:` lines.
     if let Some(kernel) = env::var_os("AURORA_TEST_KERNEL") {
         fs::copy(&kernel, esp.join("aurora/kernel.elf")).expect("copy AURORA_TEST_KERNEL");
+        strip_debug(&esp.join("aurora/kernel.elf"));
         println!("testing the kernel {}", Path::new(&kernel).display());
     }
     let img = root().join("target/test-disk.img");
