@@ -643,8 +643,11 @@ fn apply_limits(slot: &SdSlot, limits: Limits) {
 fn watch() {
     loop {
         CHANGES.wait(500, || SLOTS.lock().iter().any(|s| s.shared.changed.load(Ordering::Acquire)));
-        let slots: Vec<&'static SdSlot> = SLOTS.lock().clone();
-        for slot in slots {
+        // By index, without allocating: this runs twice a second for good.
+        // (The guard must not live across `check_slot`, which sleeps.)
+        for i in 0.. {
+            let next = SLOTS.lock().get(i).copied();
+            let Some(slot) = next else { break };
             if slot.removable {
                 check_slot(slot);
             }

@@ -127,6 +127,18 @@ WaveOS drives SD Host Controllers (SDHCI, the standard most laptop card readers 
 | Errors: command timeout and CRC, data CRC and timeout, ADMA error; retries, re-tuning, falling back to slower modes | | ✅ (injected) | |
 | Resume from S3 (controller reset, card brought up again) | ✅ | | |
 
+**Throughput in QEMU** (the self-test's `sd-perf:` lines; QEMU 11.1 under TCG on an 8-core Mac shared with other work, so only the ratios mean much). The card is QEMU's `sd-card` on the version 2.00 reader, 4-bit high speed at 26 MHz; sequential runs move 4 MiB in 256 KiB requests, random ones 200 single 4 KiB requests:
+
+| Path | Sequential read | Sequential write | Random 4 KiB read | Random 4 KiB write |
+|---|---|---|---|---|
+| SD, PIO | 3.2–4.1 MB/s | 3.7–4.2 MB/s | 870–973 IOPS | 907–1015 IOPS |
+| SD, SDMA | 6.6–7.7 MB/s | 6.6–7.6 MB/s | 1545–1870 IOPS | 1410–1765 IOPS |
+| SD, ADMA2 (32-bit) | 6.3–8.1 MB/s | 6.1–7.6 MB/s | 1460–1850 IOPS | 1430–1770 IOPS |
+| SD system disk (`--disk sd`: version 3.00 reader, ADMA2 64-bit) | 6.2–7.9 MB/s | 6.1–7.4 MB/s | 1450–1710 IOPS | 1350–1400 IOPS |
+| AHCI system disk (for comparison) | 640–1060 MB/s | 550–740 MB/s | 14 000–33 000 IOPS | 15 000–28 000 IOPS |
+
+DMA roughly doubles PIO here, where every 32-bit Buffer Data Port access is a trap into QEMU; SDMA and ADMA2 tie because QEMU's card model moves data a byte at a time either way, which also caps every SD figure two orders of magnitude below AHCI (whose reads come from the host's page cache). On real hardware the card's bus is the limit (about 23 MB/s at high speed, 90 MB/s at SDR104, 200 MB/s for HS200 eMMC), and ADMA2's single descriptor table per command should matter more than it does here.
+
 In the boot log, `sdhci:` lines name each controller (version, base clock, DMA mode, 8-bit, 1.8 V and UHS-I support, removable or embedded, interrupt), each card (kind, name, size, bus width, timing and clock, CID) and any recovery (`I/O failed (…), attempt N`, `brought up again: …` after falling back to a slower mode). Please include them in reports. If a card reader misbehaves, try `sdhci=pio`, then `sdhci_speed=high` or `default`.
 
 **Card readers that aren't SDHCI** are not supported. The boot log names them (`… card reader: not supported`):
