@@ -43,13 +43,8 @@ fn layout(size: u64) -> Layout {
 }
 
 /// Creates a fresh image: GPT, FAT32 ESP with `esp`'s contents, and a AuroraFS
-/// home volume seeded from `home` (a directory tree).
-pub fn create(esp: &Path, home: &Path, out: &Path, size: u64) -> io::Result<()> {
-    create_with(esp, home, None, out, size)
-}
-
-/// Like [`create`], with a Linux system root (`cargo xtask linux-root`)
-/// put on the home volume as `/Linux`.
+/// home volume seeded from `home` (a directory tree), with a Linux system
+/// root (`cargo xtask linux-root`), if given, on it as `/Linux`.
 pub fn create_with(esp: &Path, home: &Path, linux: Option<&Path>, out: &Path, size: u64) -> io::Result<()> {
     let l = layout(size);
     let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(out)?;

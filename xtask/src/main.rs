@@ -39,6 +39,9 @@
 //!                                         AURORA_LINUXFUZZ_CALLS make the fuzzers run longer, with
 //!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 240;
 //!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run)
+//!       --mesa                            only the Mesa tests, on a disk with Debian's Mesa, kmscube, glmark2
+//!                                         and Vulkan tools (target/mesa-root): opt-in, as llvmpipe under TCG
+//!                                         needs minutes and the packages hundreds of MiB
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
@@ -221,7 +224,8 @@ fn main() {
             // On the standard display, --resolution is the bootloader's choice (as Settings makes it).
             if !gpu.starts_with("virtio") {
                 if let Some(r) = args.iter().position(|a| a == "--resolution").and_then(|i| args.get(i + 1)) {
-                    image::set_boot_option(&img, "resolution", r.split(',').next().unwrap_or(r)).expect("write boot.conf");
+                    image::set_boot_option(&img, "resolution", r.split(',').next().unwrap_or(r))
+                        .expect("write boot.conf");
                 }
             }
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
@@ -332,7 +336,7 @@ fn main() {
             }
             println!("wrote {}", out.display());
         }
-        Some("test") => test(profile, disk, smp, net, gpu, usb),
+        Some("test") => test(profile, disk, smp, net, gpu, usb, flag("--mesa")),
         Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
@@ -1250,7 +1254,9 @@ fn repo_response(req: &[u8]) -> Option<Vec<u8>> {
     let safe = !rest.is_empty() && rest.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
     let body = safe.then(|| fs::read(root().join("target/test-repo").join(rest)).ok()).flatten();
     let body = match body {
-        Some(b) if bad && rest == "index.txt" => String::from_utf8_lossy(&b).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes(),
+        Some(b) if bad && rest == "index.txt" => {
+            String::from_utf8_lossy(&b).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes()
+        }
         Some(b) => b,
         None => return Some(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()),
     };
@@ -1287,16 +1293,38 @@ fn inbound_check(port: u16) {
     });
 }
 
-fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str) {
+/// `target/mesa-root`: Debian's Mesa and the programs `cargo xtask test
+/// --mesa` runs (`debian::MESA_PACKAGES`), fetched once.
+fn mesa_root() -> PathBuf {
+    let dir = root().join("target/mesa-root");
+    let installed = fs::read_to_string(dir.join("packages.txt")).unwrap_or_default();
+    let complete = dir.join(".links").exists()
+        && debian::MESA_PACKAGES.iter().all(|p| installed.lines().any(|l| l.split(' ').next() == Some(*p)));
+    if complete {
+        dir
+    } else {
+        debian::build_into(&dir, &debian::MESA_PACKAGES.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+}
+
+fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str, mesa: bool) {
     let esp = build(profile, true);
     let img = root().join("target/test-disk.img");
     println!("running kernel tests with the disk on {disk}, network {net}, display {gpu}, USB on {usb}");
+    // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux and
+    // the memory LLVM's code generator needs.
+    let mesa_root = mesa.then(mesa_root);
+    let (disk_size, memory_mib) = match &mesa_root {
+        Some(r) => (dir_size(r) + 256 * 1024 * 1024, 2048),
+        None => (128 * 1024 * 1024, 512),
+    };
     let http_port = start_test_http_server();
     let fwd_port = free_port();
     // AURORA_TEST_SLEEP=off skips the sleep test (firmware that can't resume).
     let mut sleep = env::var("AURORA_TEST_SLEEP").as_deref() != Ok("off");
     'attempt: loop {
-        image::create(&esp, &root().join("assets/home"), &img, 128 * 1024 * 1024).expect("test disk creation failed");
+        image::create_with(&esp, &root().join("assets/home"), mesa_root.as_deref(), &img, disk_size)
+            .expect("test disk creation failed");
         image::set_boot_option(&img, "test_http_port", &http_port.to_string()).expect("write boot.conf");
         // A USB speaker plays on xHCI; elsewhere it must be reported unsupported.
         let usb_audio = if usb == "xhci" { "1" } else { "unsupported" };
@@ -1305,7 +1333,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
         if let Some(driver) = test_net_driver(net) {
             image::set_boot_option(&img, "test_net_driver", driver).expect("write boot.conf");
         }
-        if let Ok(filter) = env::var("AURORA_TEST_FILTER") {
+        if let Some(filter) = env::var("AURORA_TEST_FILTER").ok().or(mesa.then(|| String::from("Mesa"))) {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
         }
         // A longer or reproducible fuzzing run (see `syscall_fuzz` in kernel/src/tests.rs).
@@ -1333,7 +1361,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let output = match run_tests_once(&img, disk, smp, net, gpu, usb, fwd_port) {
+            let output = match run_tests_once(&img, disk, (smp, memory_mib), net, gpu, usb, fwd_port) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
                     // The firmware never handed back control: some OVMF builds
@@ -1407,23 +1435,37 @@ fn ppm_pixel(data: &[u8], fx: f32, fy: f32) -> Option<(u8, u8, u8)> {
     Some((*data.get(at)?, *data.get(at + 1)?, *data.get(at + 2)?))
 }
 
-/// The pictures `drmtest` asked for show what it put on the screen: its
-/// red/green/blue/white quadrants while it held the display, and the
-/// stand-in desktop's colour after it was killed.
+/// The pictures the tests asked for show what they put on the screen:
+/// `drmtest`'s red/green/blue/white quadrants while it held the display,
+/// and the stand-in desktop's colour after it was killed; kmscube's grey
+/// background around a cube that is anything but grey (or the desktop).
 fn check_screendumps(output: &str) -> Result<(), String> {
-    type Point = (f32, f32, (u8, u8, u8));
+    // (x, y as fractions of the size, colour, whether the pixel must be
+    // near that colour or far from it)
+    type Point = (f32, f32, (u8, u8, u8), bool);
     let desktop = (0x33, 0x66, 0x99);
-    let checks: [(&str, &[Point]); 2] = [
+    let grey = (0x80, 0x80, 0x80);
+    let checks: [(&str, &[Point]); 3] = [
         (
             "drm-client",
             &[
-                (0.25, 0.25, (0xFF, 0, 0)),
-                (0.75, 0.25, (0, 0xFF, 0)),
-                (0.25, 0.75, (0, 0, 0xFF)),
-                (0.75, 0.75, (0xFF, 0xFF, 0xFF)),
+                (0.25, 0.25, (0xFF, 0, 0), true),
+                (0.75, 0.25, (0, 0xFF, 0), true),
+                (0.25, 0.75, (0, 0, 0xFF), true),
+                (0.75, 0.75, (0xFF, 0xFF, 0xFF), true),
             ],
         ),
-        ("drm-desktop", &[(0.5, 0.5, desktop), (0.1, 0.9, desktop)]),
+        ("drm-desktop", &[(0.5, 0.5, desktop, true), (0.1, 0.9, desktop, true)]),
+        (
+            "mesa-kmscube",
+            &[
+                (0.03, 0.05, grey, true),
+                (0.97, 0.95, grey, true),
+                (0.5, 0.5, grey, false),
+                (0.5, 0.5, desktop, false),
+                (0.5, 0.5, (0, 0, 0), false),
+            ],
+        ),
     ];
     for (name, points) in checks {
         if !output.contains(&format!("harness: screendump {name}")) {
@@ -1431,11 +1473,12 @@ fn check_screendumps(output: &str) -> Result<(), String> {
         }
         let path = screendump_path(name);
         let data = fs::read(&path).map_err(|e| format!("no screendump {}: {e}", path.display()))?;
-        for &(fx, fy, want) in points {
+        for &(fx, fy, want, same) in points {
             let got = ppm_pixel(&data, fx, fy).ok_or_else(|| format!("{} is not a PPM picture", path.display()))?;
             let near = |a: u8, b: u8| a.abs_diff(b) <= 16;
-            if !(near(got.0, want.0) && near(got.1, want.1) && near(got.2, want.2)) {
-                return Err(format!("{name}: the pixel at ({fx}, {fy}) is {got:02x?}, expected {want:02x?}"));
+            if (near(got.0, want.0) && near(got.1, want.1) && near(got.2, want.2)) != same {
+                let what = if same { "expected" } else { "must not be" };
+                return Err(format!("{name}: the pixel at ({fx}, {fy}) is {got:02x?}, {what} {want:02x?}"));
             }
         }
         println!("screen check: {name} shows what it should");
@@ -1544,21 +1587,23 @@ fn recorded_peak(path: &Path) -> i32 {
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
 /// as an error if the tests failed or timed out.
+/// `machine` is (processors, MiB of memory).
 fn run_tests_once(
     img: &Path,
     disk: &str,
-    smp: u32,
+    machine: (u32, u64),
     net: &str,
     gpu: &str,
     usb: &str,
     fwd_port: u16,
 ) -> Result<String, String> {
+    let (smp, memory_mib) = machine;
     use std::io::{BufRead, BufReader};
     let audio = root().join("target/test-audio.wav");
     let _ = fs::remove_file(&audio);
     let _ = fs::remove_file(usb_audio_wav(&audio));
     let opts = RunOpts {
-        memory_mib: 512,
+        memory_mib,
         keyboard_capture: false,
         headless: true,
         gdb: false,
@@ -1646,7 +1691,10 @@ fn run_tests_once(
     });
     let start = Instant::now();
     // Longer fuzzing runs need more: AURORA_TEST_TIMEOUT (seconds per boot).
-    let timeout = Duration::from_secs(env::var("AURORA_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(240));
+    // (The Mesa tests, with more memory, compile shaders under emulation.)
+    let default = if memory_mib > 512 { 1200 } else { 240 };
+    let timeout =
+        Duration::from_secs(env::var("AURORA_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(default));
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
             break Some(s);

@@ -2,7 +2,8 @@
 //!
 //! The properties are derived from the core's objects and state, with
 //! Linux's names, types and flags: a plane's `type`, `FB_ID`, `CRTC_ID`,
-//! `SRC_*`, `CRTC_*` (and `HOTSPOT_*` on cursor planes for clients that ask);
+//! `SRC_*`, `CRTC_*`, `IN_FORMATS` (its formats, each with the linear
+//! modifier) and `HOTSPOT_*` on cursor planes for clients that ask;
 //! a CRTC's `ACTIVE` and `MODE_ID`; a connector's `EDID`, `DPMS`,
 //! `CRTC_ID`, `link-status`, `non-desktop`. Atomic-only ones are shown to
 //! atomic clients only. Writes become a core `Commit` built on the current
@@ -48,6 +49,7 @@ pub enum P {
     CrtcH,
     HotspotX,
     HotspotY,
+    InFormats,
     Active,
     ModeId,
     Edid,
@@ -89,6 +91,7 @@ const DEFS: &[Def] = &[
     Def { p: P::CrtcH, name: "CRTC_H", kind: Kind::Range(0, i32::MAX as u64), flags: PROP_ATOMIC },
     Def { p: P::HotspotX, name: "HOTSPOT_X", kind: Kind::Signed(i32::MIN as i64, i32::MAX as i64), flags: PROP_ATOMIC },
     Def { p: P::HotspotY, name: "HOTSPOT_Y", kind: Kind::Signed(i32::MIN as i64, i32::MAX as i64), flags: PROP_ATOMIC },
+    Def { p: P::InFormats, name: "IN_FORMATS", kind: Kind::Blob, flags: PROP_IMMUTABLE },
     Def { p: P::Active, name: "ACTIVE", kind: Kind::Range(0, 1), flags: PROP_ATOMIC },
     Def { p: P::ModeId, name: "MODE_ID", kind: Kind::Blob, flags: PROP_ATOMIC },
     Def { p: P::Edid, name: "EDID", kind: Kind::Blob, flags: PROP_IMMUTABLE },
@@ -250,6 +253,27 @@ pub fn mode_from(b: &[u8]) -> Result<Mode, isize> {
     Ok(m)
 }
 
+/// `struct drm_format_modifier_blob` for a plane taking `formats`, all
+/// with the one modifier there is, `DRM_FORMAT_MOD_LINEAR` (0): a header
+/// (version 1, flags, count and offset of the formats, count and offset of
+/// the modifiers), the fourccs, then 8-aligned `struct drm_format_modifier`s
+/// (a bit mask of the formats it applies to, from format `offset`, and the
+/// modifier).
+pub fn in_formats(formats: &[u32]) -> Vec<u8> {
+    let formats = &formats[..formats.len().min(64)];
+    let fmt_off = 24usize;
+    let mod_off = (fmt_off + 4 * formats.len()).next_multiple_of(8);
+    let mut b = alloc::vec![0u8; mod_off + 24];
+    let header = [1u32, 0, formats.len() as u32, fmt_off as u32, 1, mod_off as u32];
+    for (i, v) in header.iter().chain(formats).enumerate() {
+        b[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let mask = if formats.len() == 64 { u64::MAX } else { (1u64 << formats.len()) - 1 };
+    b[mod_off..mod_off + 8].copy_from_slice(&mask.to_le_bytes());
+    // offset 0, pad, modifier LINEAR (0): already zero.
+    b
+}
+
 /// The blob id of `m` as a `MODE_ID` value.
 pub fn mode_blob(m: &Mode) -> u32 {
     kernel_blob(modeinfo(m).to_vec())
@@ -321,7 +345,8 @@ fn props_of(f: &File, obj: &Obj, every: bool) -> Vec<P> {
                 P::CrtcX,
                 P::CrtcY,
                 P::CrtcW,
-                P::CrtcH
+                P::CrtcH,
+                P::InFormats
             ];
             if info.kind == PlaneKind::Cursor && caps.hotspot {
                 v.extend([P::HotspotX, P::HotspotY]);
@@ -362,6 +387,7 @@ fn value(f: &File, obj: &Obj, p: P, state: &(Vec<CrtcState>, Vec<PlaneState>)) -
                 P::CrtcH => s.dst.3 as u64,
                 P::HotspotX => s.hotspot.0 as i64 as u64,
                 P::HotspotY => s.hotspot.1 as i64 as u64,
+                P::InFormats => kernel_blob(in_formats(info.formats)) as u64,
                 _ => 0,
             }
         }

@@ -73,6 +73,7 @@ const TESTS: &[Test] = &[
     ("Linux programs: local and network sockets (nettest)", linux_sockets),
     ("Linux programs: the DRM device, mode setting, events, PRIME (drmtest)", linux_drm),
     ("Linux programs: libdrm's modetest on the DRM device", linux_modetest),
+    ("Linux programs: Mesa's kmscube (GBM, EGL, GLES on llvmpipe) on the DRM device", linux_mesa_kmscube),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
@@ -507,6 +508,95 @@ fn linux_modetest() {
     assert!(eventually(5000, || gpu::owner::holder(&*dev).is_none()), "the desktop did not get the display back");
 }
 
+/// Where Debian's Mesa and its programs are when the disk has them
+/// (`cargo xtask test --mesa` puts them there; other disks skip the Mesa tests).
+const MESA_KMSCUBE: &str = "/Linux/usr/bin/kmscube";
+
+/// Runs a program from the Linux packages by its Linux path, through
+/// BusyBox's `env` with `vars` added to the environment.
+fn linux_env_argv<'a>(vars: &[&'a str], argv: &[&'a str]) -> Vec<&'a str> {
+    let mut v = alloc::vec!["env"];
+    v.extend_from_slice(vars);
+    v.extend_from_slice(argv);
+    v
+}
+
+/// Counts the page flips a program makes on `dev`'s primary plane while it
+/// holds the display, and asks the harness for a screendump (`name`) once
+/// it has flipped a few times, so the picture is one it rendered.
+struct FlipWatch {
+    dev: Arc<dyn crate::drivers::gpu::KmsDevice>,
+    last: usize,
+    flips: u32,
+    shot: Option<&'static str>,
+}
+
+impl FlipWatch {
+    fn new(dev: Arc<dyn crate::drivers::gpu::KmsDevice>, shot: Option<&'static str>) -> FlipWatch {
+        FlipWatch { dev, last: 0, flips: 0, shot }
+    }
+
+    fn tick(&mut self) {
+        use crate::drivers::gpu::{self, PlaneKind};
+        if gpu::owner::holder(&*self.dev).is_none() {
+            return;
+        }
+        let primary = self.dev.planes().into_iter().find(|p| p.kind == PlaneKind::Primary).map(|p| p.id);
+        let (_, planes) = self.dev.state();
+        let fb = planes
+            .iter()
+            .find(|p| Some(p.plane) == primary)
+            .and_then(|p| p.fb.as_ref())
+            .map_or(0, |fb| Arc::as_ptr(fb) as *const () as usize);
+        if fb != 0 && fb != self.last {
+            self.last = fb;
+            self.flips += 1;
+        }
+        if self.flips >= 4 {
+            if let Some(name) = self.shot.take() {
+                crate::kprintln!("\nharness: screendump {name}");
+            }
+        }
+    }
+}
+
+/// Mesa from Debian 12, unmodified: kmscube finds the card through libdrm,
+/// makes a GBM device and an EGL display on it, renders a spinning cube
+/// with OpenGL ES 2 on llvmpipe (Mesa's LLVM JIT rasteriser, through the
+/// `kms_swrast` driver: dumb buffers, PRIME, `ADDFB2`) and page-flips every
+/// frame with events. The harness checks a screendump taken while it runs
+/// (grey background, a coloured cube in the middle), and the desktop must
+/// have the display back when it ends.
+fn linux_mesa_kmscube() {
+    use crate::drivers::gpu::{self, output::Output, Damage};
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return;
+    }
+    let desktop = Output::open(None).expect("no display");
+    let (w, h) = desktop.size();
+    unsafe { desktop.back_buffer() }.fill(0xFF33_6699);
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present");
+    let dev = gpu::primary().unwrap();
+    let mut watch = FlipWatch::new(dev.clone(), Some("mesa-kmscube"));
+    let frames = "240";
+    let argv = linux_env_argv(&["WAVEOS_SYSCOUNT=1"], &["/usr/bin/kmscube", "-c", frames]);
+    let start = time::uptime_ms();
+    // (Its input stays open: kmscube stops when it becomes readable.)
+    let (code, text) =
+        run_linux_program_watched("/System/Linux/bin/busybox", &argv, Some(600_000), 600_000, &mut |_| {
+            watch.tick();
+            false
+        });
+    let ms = time::uptime_ms() - start;
+    assert_eq!(code, Some(0), "kmscube failed");
+    assert!(text.contains("llvmpipe"), "kmscube did not render with llvmpipe");
+    assert!(watch.flips >= 10, "kmscube flipped {} times", watch.flips);
+    assert!(eventually(5000, || gpu::owner::holder(&*dev).is_none()), "the desktop did not get the display back");
+    crate::kprint!("[{frames} frames, {} flips seen, {ms} ms] ", watch.flips);
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present after");
+}
+
 /// The vDSO's clocks (computed from its time page, as `kernel/vdso/vdso.c`
 /// does) lie between two readings of the kernel's, for both clocks, many
 /// times over a second boundary — after sleep (this runs after the S3
@@ -725,6 +815,21 @@ fn run_linux_program(
     kill_on: Option<&str>,
     timeout_ms: u64,
 ) -> (Option<i64>, String) {
+    run_linux_program_watched(path, argv, stdin_ms, timeout_ms, &mut |out| {
+        kill_on.is_some_and(|m| out.windows(m.len()).any(|w| w == m.as_bytes()))
+    })
+}
+
+/// Like [`run_linux_program`], with `watch` called with the output so far
+/// every few milliseconds while the program runs; it is killed once
+/// `watch` says so.
+fn run_linux_program_watched(
+    path: &str,
+    argv: &[&str],
+    stdin_ms: Option<u64>,
+    timeout_ms: u64,
+    watch: &mut dyn FnMut(&[u8]) -> bool,
+) -> (Option<i64>, String) {
     let (r, w) = crate::proc::new_pipe(false);
     let (stdin, mut stdin_writer) = match stdin_ms {
         Some(_) => {
@@ -749,8 +854,7 @@ fn run_linux_program(
         if stdin_writer.is_some() && time::uptime_ms() >= stdin_until {
             stdin_writer = None;
         }
-        let seen = |m: &str| out.windows(m.len()).any(|w| w == m.as_bytes());
-        if kill_on.is_some_and(seen) && p.exit_code().is_none() {
+        if p.exit_code().is_none() && watch(&out) {
             let _ = crate::proc::kill(pid);
         }
         if reader.readable() {

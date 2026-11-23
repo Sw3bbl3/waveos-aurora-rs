@@ -29,6 +29,7 @@
 
 pub mod kms;
 pub mod props;
+pub mod stats;
 pub mod vblank;
 
 use super::fs::Special;
@@ -212,6 +213,9 @@ pub struct File {
     authenticated: AtomicBool,
     /// Became master once (may take it back without privileges, as on Linux).
     was_master: AtomicBool,
+    /// The program that opened it, and how its frames went ([`stats`]).
+    program: String,
+    pub flips: Mutex<stats::Flips>,
 }
 
 static NEXT_FILE: AtomicU64 = AtomicU64::new(1);
@@ -251,6 +255,7 @@ impl File {
 impl Drop for File {
     fn drop(&mut self) {
         FILES.lock().retain(|(id, _)| *id != self.id);
+        self.flips.lock().report(&self.program, self.minor);
         kms::forget_file(self.id);
         props::forget_file(self.id);
         let was = with_card(&*self.dev, |c| {
@@ -303,6 +308,8 @@ pub fn open(guest: &str) -> Option<Result<Arc<File>, isize>> {
         magic: id as u32 | 0x4000_0000,
         authenticated: AtomicBool::new(false),
         was_master: AtomicBool::new(false),
+        program: crate::proc::current().map(|p| p.name()).unwrap_or_default(),
+        flips: Mutex::new(stats::Flips::default()),
     });
     // The first to open a card while nobody is master becomes master.
     if !render {
@@ -640,7 +647,7 @@ fn get_cap(f: &File, a: &mut Args) -> Result<(), isize> {
         0x7 => 0,               // ASYNC_PAGE_FLIP
         0x8 => cursor.0 as u64, // CURSOR_WIDTH
         0x9 => cursor.1 as u64, // CURSOR_HEIGHT
-        0x10 => 0,              // ADDFB2_MODIFIERS
+        0x10 => 1,              // ADDFB2_MODIFIERS: linear (IN_FORMATS lists it)
         0x11 => 0,              // PAGE_FLIP_TARGET
         0x12 => 1,              // CRTC_IN_VBLANK_EVENT
         0x13..=0x15 => 0,       // SYNCOBJ, SYNCOBJ_TIMELINE, ATOMIC_ASYNC_PAGE_FLIP

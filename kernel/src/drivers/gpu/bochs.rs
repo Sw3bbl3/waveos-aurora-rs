@@ -64,8 +64,12 @@ impl Backend for Bochs {
         let fits = |w: u32, h: u32| w as u64 * h as u64 * 4 <= self.vram.size;
         let mut modes: Vec<Mode> =
             mode::COMMON.iter().filter(|&&(w, h)| fits(w, h)).filter_map(|&(w, h)| Mode::cvt(w, h, 60)).collect();
-        if !modes.iter().any(|m| m.size() == self.boot) {
-            modes.push(Mode::fixed(self.boot.0, self.boot.1));
+        // The firmware's mode is the one the screen prefers (OVMF follows
+        // QEMU's EDID): marked so, as Linux's bochs-drm marks one, so that
+        // programs choosing "the preferred mode" don't take the largest.
+        match modes.iter_mut().find(|m| m.size() == self.boot) {
+            Some(m) => *m = m.preferred(true),
+            None => modes.push(Mode::fixed(self.boot.0, self.boot.1).preferred(true)),
         }
         modes
     }
