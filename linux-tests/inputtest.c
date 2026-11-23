@@ -441,7 +441,8 @@ static int await_uevent(int s, const char *head, const char *udev_prop) {
         if (from.groups == 2 && n > 40 && !memcmp(buf, "libudev", 8) && root &&
             ntohl(*(uint32_t *)(buf + 8)) == 0xfeedcafe) {
             // Properties after the header, NUL-separated.
-            uint32_t off = ntohl(*(uint32_t *)(buf + 16));
+            uint32_t off = *(uint32_t *)(buf + 16); // in the machine's order, as udev sends it
+            if (off != 40 || *(uint32_t *)(buf + 20) + off != (uint32_t)n) continue;
             char *devpath = NULL;
             int has = 0;
             for (char *q = buf + off; q < buf + n; q += strlen(q) + 1) {

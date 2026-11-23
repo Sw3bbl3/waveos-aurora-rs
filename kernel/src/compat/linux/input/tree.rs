@@ -65,8 +65,21 @@ pub type Tree = BTreeMap<String, Node>;
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 static CACHE: Mutex<Option<(u64, Arc<Tree>)>> = Mutex::new(None);
 
+/// When a device last came or went (Unix seconds; 0: not since boot).
+static CHANGED_AT: AtomicU64 = AtomicU64::new(0);
+
 pub fn changed() {
     GENERATION.fetch_add(1, Ordering::AcqRel);
+    CHANGED_AT.store(super::super::realtime_ns() / 1_000_000_000, Ordering::Release);
+}
+
+/// The time the device folders say they were changed: when a device
+/// last came or went, or when the system started.
+pub fn mtime() -> i64 {
+    match CHANGED_AT.load(Ordering::Acquire) {
+        0 => ((super::super::realtime_ns() - crate::time::now_ns()) / 1_000_000_000) as i64,
+        t => t as i64,
+    }
 }
 
 /// The tree as it is now.

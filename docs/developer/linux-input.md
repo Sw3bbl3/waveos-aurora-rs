@@ -173,3 +173,36 @@ rumble to the motors and back to a uinput device's maker, hot-plug over
 netlink (both groups) and inotify, and uinput devices reaching WaveOS.
 `drivers::evdev::self_test` checks the queue's overflow rule, the joystick
 correction and the code tables.
+
+### SDL, unmodified
+
+`linux-programs/sdlprobe` is a small program linked against Debian's
+`libSDL2-2.0.so.0` (SDL 2.26.5, in the Linux packages; built by xtask like
+Voyage and put on the disk at `/usr/lib/waveos-tests/sdlprobe`). It
+initialises SDL's game controller subsystem, waits a while for controllers
+to be plugged in, and reports each joystick: name, GUID, whether SDL calls
+it a game controller and the mapping it chose. On a disk with the Linux
+packages (`cargo xtask run --linux-root`), in Terminal:
+
+```sh
+sh -c "/usr/lib/waveos-tests/sdlprobe 20 2>/dev/kmsg"      # then Super+G
+sh -c "SDL_JOYSTICK_DISABLE_UDEV=1 /usr/lib/waveos-tests/sdlprobe 20 2>/dev/kmsg"
+```
+
+Both ways (SDL's libudev enumeration and monitor; its `/dev/input` scan
+and inotify), with the keyboard-played controller connected after SDL
+started, SDL reports one controller-added event and:
+
+```
+joystick 0 "Xbox 360 Controller" guid 030003f05e0400008e02000014010000: game controller
+  name "X360 Controller", mapping 030003f05e0400008e02000014010000,X360 Controller,a:b0,b:b1,back:b6,
+  dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b8,leftshoulder:b4,leftstick:b9,lefttrigger:a2,
+  leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b10,righttrigger:a5,rightx:a3,righty:a4,start:b7,x:b2,y:b3,
+  opened; rumble yes
+```
+
+— SDL's built-in Xbox 360 mapping, matched by GUID. What libudev needed
+besides the files: `O_PATH | O_NOFOLLOW` opens of symbolic links with
+`readlinkat(fd, "")` (systemd's path walking), `statfs` saying sysfs for
+`/sys`, and folder times in `/dev/input` that change with the devices
+(SDL rescans when they do).

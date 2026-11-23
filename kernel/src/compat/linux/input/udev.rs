@@ -194,16 +194,13 @@ impl Message {
         }
         let mut m = Vec::with_capacity(40 + props.len());
         m.extend_from_slice(b"libudev\0");
-        for v in [
-            0xFEED_CAFEu32,
-            40,
-            40,
-            props.len() as u32,
-            murmur2(self.subsystem.as_bytes()),
-            0,
-            (bloom >> 32) as u32,
-            bloom as u32,
-        ] {
+        // The magic and the filter hashes are in network order (socket
+        // filters read them); the sizes and offset in the machine's.
+        m.extend_from_slice(&0xFEED_CAFEu32.to_be_bytes());
+        for v in [40u32, 40, props.len() as u32] {
+            m.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [murmur2(self.subsystem.as_bytes()), 0, (bloom >> 32) as u32, bloom as u32] {
             m.extend_from_slice(&v.to_be_bytes());
         }
         m.extend_from_slice(&props);

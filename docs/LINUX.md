@@ -155,6 +155,12 @@ Writing to the file, or deleting it, drops it from the cache.
 - **Symbolic links:** the read-only tree's links come with the system image
   (`/bin/sh` and every other BusyBox command are links to `/bin/busybox`,
   where Debian puts them); `symlink` makes new ones in the writable tree.
+  `O_PATH | O_NOFOLLOW` opens a link itself, and `readlinkat(fd, "")`
+  reads it (systemd's libraries walk paths this way). `statfs` says
+  sysfs, procfs and tmpfs for `/sys`, `/proc`, `/dev` and `/run`.
+- **inotify:** folders are watched for files and folders created,
+  deleted and renamed (and device nodes in `/dev`); changes to a file's
+  contents aren't reported yet.
 - **Everything else:** calls that aren't there yet return `ENOSYS`, and the
   first use of each is written to the system log (`linux: … system call N
   is not supported yet`).
@@ -208,6 +214,10 @@ Steam's input layer and Wine work unchanged
   under `/sys/devices`), `/dev/input/by-id` and `by-path`, udev's records in
   `/run/udev/data`, device events over netlink for libudev's monitors (the
   kernel sends udev's messages itself), and inotify on `/dev/input`.
+- Debian's SDL 2.26 finds the keyboard-played controller, plugged in
+  while it runs, and calls it a game controller with its built-in Xbox 360
+  mapping, through libudev and through inotify alike (`sdlprobe`, see the
+  developer page).
 - Who reads what: keyboards, mice and touchpads reach only the program
   whose window has the focus; controllers, the program in front (Wave
   Play's rule). A program without the focus sees its devices at rest. The

@@ -19,6 +19,7 @@ pub const AT_REMOVEDIR: u64 = 0x200;
 const AT_EMPTY_PATH: u64 = 0x1000;
 pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 const O_NOFOLLOW: u64 = 0o400000;
+const O_PATH: u64 = 0o10000000;
 pub const O_CLOEXEC: u64 = 0o2000000;
 
 pub const O_WRONLY: u64 = 1;
@@ -146,6 +147,8 @@ pub enum Special {
     Inotify(Arc<super::inotify::Inotify>),
     /// A `NETLINK_KOBJECT_UEVENT` socket.
     Netlink(Arc<super::uevent::Socket>),
+    /// A symbolic link itself (`O_PATH | O_NOFOLLOW`), by Linux path.
+    Link(String),
 }
 
 impl Special {
@@ -163,6 +166,7 @@ impl Special {
             Special::Device(d) => d.read(out, true),
             Special::Inotify(i) => super::chardev::CharDev::read(&**i, out, true),
             Special::Netlink(_) => Err(EINVAL),
+            Special::Link(_) => Err(EBADF),
             Special::Event(e) => e.read(out),
             Special::Timer(t) => t.read(out),
             Special::WaveEvents(pid) => super::events::wave_events_read(*pid, out),
@@ -203,6 +207,7 @@ impl Special {
             | Special::WaveEvents(_)
             | Special::Inotify(_)
             | Special::Netlink(_) => Err(EINVAL),
+            Special::Link(_) => Err(EBADF),
             Special::Unix(u) => u.send(data, Vec::new(), None, false),
             Special::Shm { file, pos } => {
                 let n = file.write_at(*pos, data)?;
@@ -230,6 +235,7 @@ impl Special {
                 (mode, rdev)
             }
             Special::Inotify(_) => (0o600, 0),
+            Special::Link(_) => (S_IFLNK | 0o777, 0),
         }
     }
 }
@@ -651,7 +657,12 @@ fn next_timer(p: &Process, fds: impl Iterator<Item = usize>) -> Option<u64> {
 pub fn openat(p: &Process, dirfd: u64, ptr: u64, flags: u64, mode: u64) -> Result<u64, isize> {
     let guest = path_arg(p, dirfd, ptr)?;
     if super::links::target(&guest).is_some() && flags & O_NOFOLLOW != 0 {
-        return Err(ELOOP);
+        // O_PATH opens the link itself (systemd's path walking, in
+        // libudev, reads links this way: readlinkat(fd, "")).
+        if flags & O_PATH == 0 {
+            return Err(ELOOP);
+        }
+        return install(p, special(Special::Link(guest)), flags & O_CLOEXEC != 0);
     }
     let handle = open_guest_mode(p, &follow(&guest)?, flags, mode)?;
     let fd = install(p, handle, flags & O_CLOEXEC != 0)?;
@@ -1075,7 +1086,10 @@ fn info_for_path(p: &Process, guest: &str, follow_link: bool) -> Result<Info, is
         let s = v?;
         let (mode, rdev) = s.mode();
         let size = if let Special::Mem { data, .. } = &s { data.len() as u64 } else { 0 };
-        return Ok(Info { owner: None, mode, size, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
+        // Device folders change when devices come and go (SDL rescans
+        // /dev/input when its time changes).
+        let mtime = super::input::lookup(guest).map_or(0, |_| super::input::tree::mtime());
+        return Ok(Info { owner: None, mode, size, ino: fnv(guest), rdev, mtime, ctime: mtime });
     }
     let host = to_host(guest);
     // The Linux tree's top folders exist even before anything is in them.
@@ -1828,6 +1842,20 @@ pub fn renameat(p: &Process, olddir: u64, old: u64, newdir: u64, new: u64) -> Re
 }
 
 pub fn readlinkat(p: &Process, dirfd: u64, ptr: u64, buf: u64, size: u64) -> Result<u64, isize> {
+    // An empty path: the link `dirfd` was opened on (`O_PATH`).
+    if user::cstr(ptr)?.is_empty() {
+        let link = match &*p.fd(dirfd as usize)? {
+            Handle::Special(s) => match &*s.lock() {
+                Special::Link(guest) => super::links::target(guest),
+                _ => None,
+            },
+            _ => None,
+        };
+        let target = link.ok_or(ENOENT)?;
+        let n = target.len().min(size as usize);
+        user::put_bytes(buf, &target.as_bytes()[..n])?;
+        return Ok(n as u64);
+    }
     let guest = path_arg(p, dirfd, ptr)?;
     let target = match guest.as_str() {
         "/proc/self/exe" => to_guest(&p.path()),
@@ -1909,12 +1937,49 @@ pub fn fallocate(p: &Process, fd: u64, mode: u64, off: u64, len: u64) -> Result<
     }
 }
 
-/// `statfs`/`fstatfs`: one big volume.
-pub fn statfs(buf: u64) -> Result<u64, isize> {
+/// The file system type `statfs` reports for Linux path `guest`: sysfs,
+/// devtmpfs, /proc and /run as Linux's (libudev checks it is in sysfs),
+/// one ext4-like volume elsewhere.
+fn fs_magic(guest: &str) -> u64 {
+    let under = |root: &str| guest.strip_prefix(root).is_some_and(|r| r.is_empty() || r.starts_with('/'));
+    if under("/sys") {
+        0x6265_6572 // SYSFS_MAGIC
+    } else if under("/proc") {
+        0x9fa0 // PROC_SUPER_MAGIC
+    } else if under("/dev") || under("/run") {
+        0x0102_1994 // TMPFS_MAGIC (devtmpfs too)
+    } else {
+        0xEF53
+    }
+}
+
+/// `statfs`: by path.
+pub fn statfs_path(p: &Process, ptr: u64, buf: u64) -> Result<u64, isize> {
+    let guest = follow(&path_arg(p, AT_FDCWD, ptr)?)?;
+    info_for_path(p, &guest, true)?;
+    statfs(buf, fs_magic(&guest))
+}
+
+/// `fstatfs`: by descriptor (made-up folders say where they are).
+pub fn fstatfs(p: &Process, fd: u64, buf: u64) -> Result<u64, isize> {
+    let magic = match &*p.fd(fd as usize)? {
+        Handle::Special(s) => match &*s.lock() {
+            Special::Dir { host, .. } => fs_magic(&to_guest(host)),
+            Special::Link(guest) => fs_magic(guest),
+            Special::Device(_) => fs_magic("/dev"),
+            _ => 0xEF53,
+        },
+        _ => 0xEF53,
+    };
+    statfs(buf, magic)
+}
+
+/// `statfs`/`fstatfs`: one big volume (of type `magic`).
+fn statfs(buf: u64, magic: u64) -> Result<u64, isize> {
     let (total, free) = fs::space_of("/").unwrap_or((1 << 34, 1 << 33));
     let mut b = [0u8; 120];
     let mut w = |off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
-    w(0, 0xEF53);
+    w(0, magic);
     w(8, 4096);
     w(16, total / 4096);
     w(24, free / 4096);

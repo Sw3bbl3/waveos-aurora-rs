@@ -370,6 +370,17 @@ pub fn dispatch(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Re
     let (nr, a) = (f.rax, [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
     let r = call(f, p);
     let tid = misc::tid(p);
+    // The path a call names, when it names one.
+    let path = match nr {
+        nr::OPEN | nr::STAT | nr::LSTAT | nr::ACCESS | nr::READLINK => Some(a[0]),
+        nr::OPENAT | nr::NEWFSTATAT | nr::STATX | nr::READLINKAT | nr::FACCESSAT | nr::INOTIFY_ADD_WATCH => {
+            Some(a[1])
+        }
+        _ => None,
+    };
+    if let Some(s) = path.and_then(|ptr| crate::syscall::user::cstr(ptr).ok()) {
+        log!("strace", "{tid} {nr} path {s:?}");
+    }
     match r {
         Ok(v) => log!("strace", "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}) = {:#x}", a[0], a[1], a[2], a[3], v),
         Err(e) => log!("strace", "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}) = -{}", a[0], a[1], a[2], a[3], e.abs()),
@@ -429,8 +440,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::READLINKAT => fs::readlinkat(&p, a[0], a[1], a[2], a[3]),
         nr::TRUNCATE => fs::truncate(&p, a[0], a[1]),
         nr::FTRUNCATE => fs::ftruncate(&p, a[0], a[1]),
-        nr::STATFS => fs::statfs(a[1]),
-        nr::FSTATFS => fs::statfs(a[1]),
+        nr::STATFS => fs::statfs_path(&p, a[0], a[1]),
+        nr::FSTATFS => fs::fstatfs(&p, a[0], a[1]),
         nr::FALLOCATE => fs::fallocate(&p, a[0], a[1], a[2], a[3]),
         nr::FSYNC | nr::FDATASYNC | nr::FLOCK | nr::FADVISE64 | nr::READAHEAD => {
             p.fd(a[0] as usize)?;
