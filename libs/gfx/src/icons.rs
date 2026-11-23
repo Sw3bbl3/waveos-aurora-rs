@@ -37,6 +37,8 @@ pub enum Icon {
     Studio,
     /// The package installer.
     Installer,
+    /// The Store: a bag with a wave.
+    Store,
     /// The Doom game launcher.
     Doom,
     /// Firefox ESR, a Linux program: a plain globe (not Mozilla's logo).
@@ -88,6 +90,7 @@ impl Icon {
             Icon::Trash | Icon::TrashFull => "trash",
             Icon::Studio => "studio",
             Icon::Installer => "installer",
+            Icon::Store => "store",
             Icon::Doom => "doom",
             Icon::Folder | Icon::Document | Icon::Picture | Icon::Firefox | Icon::Custom(_) => return None,
         })
@@ -323,6 +326,15 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
             cv.line(cx, cy - u(10), cx, cy + u(6), u(3).max(2), 0xFFFF_FFFF);
             cv.line(cx - u(7), cy, cx, cy + u(7), u(3).max(2), 0xFFFF_FFFF);
             cv.line(cx + u(7), cy, cx, cy + u(7), u(3).max(2), 0xFFFF_FFFF);
+        }
+        Icon::Store => {
+            cv.fill_round_rect_vgradient(r, rad, rgb(0xFB, 0x71, 0x85), rgb(0xBE, 0x12, 0x3C));
+            let (cx, cy) = r.center();
+            let t = u(3).max(2);
+            let w = 0xFFFF_FFFF;
+            cv.polyline(&[(cx - u(13), cy - u(7)), (cx + u(13), cy - u(7)), (cx + u(11), cy + u(14)), (cx - u(11), cy + u(14))], t, w);
+            cv.line(cx - u(11), cy + u(14), cx - u(13), cy - u(7), t, w);
+            cv.polyline(&[(cx - u(6), cy - u(7)), (cx - u(6), cy - u(11)), (cx - u(3), cy - u(15)), (cx + u(3), cy - u(15)), (cx + u(6), cy - u(11)), (cx + u(6), cy - u(7))], t, w);
         }
         Icon::Doom => {
             cv.fill_round_rect_vgradient(r, rad, rgb(0xD0, 0x34, 0x2C), rgb(0x3A, 0x0A, 0x0C));

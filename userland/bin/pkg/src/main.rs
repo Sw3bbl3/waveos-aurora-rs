@@ -5,6 +5,8 @@
 //! pkg remove ID [--delete-data]
 //! pkg list [--category C]          pkg info ID|FILE        pkg verify [ID]
 //! pkg update [ID] [--check]        pkg search [TERM]
+//! pkg rollback ID                  pkg repo [URL]
+//! pkg system [status|check|download|install|restart|discard]
 //! pkg source [list|add URL|remove URL]
 //! pkg trust FILE.pub | pkg untrust KEYHEX | pkg keys
 //! pkg pin ID | pkg unpin ID        pkg registry
@@ -46,7 +48,11 @@ const HELP: &str = "pkg — apps for WaveOS (GINA packages)
   info ID|FILE               details, permissions and signature
   verify [ID]                check installed files against their hashes
   update [ID] [--check]      install newer versions from the repositories
+  rollback ID                go back to the version an update replaced
   search [TERM]              find apps in the repositories
+  repo [URL]                 what each repository's signed catalogue says (version, expiry, mirrors)
+  system [status|check|download|install|restart|discard] [--version V]
+                             WaveOS updates: download, install alongside, restart into them
   source [list|add URL|remove URL]   package repositories
   trust FILE.pub | untrust KEY | keys   publisher keys
   pin ID | unpin ID          keep an app in the dock
@@ -67,7 +73,7 @@ fn plain(args: &[String]) -> Vec<&str> {
     for a in args {
         if skip {
             skip = false;
-        } else if a == "--version" || a == "--category" {
+        } else if a == "--version" || a == "--category" || a == "--tries" {
             skip = true;
         } else if !a.starts_with("--") {
             out.push(a.as_str());
@@ -158,6 +164,20 @@ fn download(url: &str) -> Result<Vec<u8>> {
     Ok(r.body)
 }
 
+/// Downloads a package from a catalogue (resuming an earlier attempt),
+/// reporting every tenth of the way.
+fn fetch_entry(c: &repo::Catalog, e: &gina::repo::Entry) -> Result<Vec<u8>> {
+    let mut shown = 0;
+    let mut report = |n: u64, total: u64| {
+        let tenth = (n * 10 / total.max(1)) as u32;
+        if tenth > shown {
+            shown = tenth;
+            println!("  downloaded {} of {}", human(n), human(total));
+        }
+    };
+    repo::download_entry(c, e, &apps::download::Control::new(), &mut report)?.ok_or_else(|| String::from("stopped"))
+}
+
 fn install(args: &[String]) -> Result<()> {
     let target = *plain(args).get(1).ok_or("install what? A .gina file, an address or an app ID")?;
     let (bytes, source) = if target.starts_with("https://") || target.starts_with("http://") {
@@ -166,10 +186,10 @@ fn install(args: &[String]) -> Result<()> {
         let path = fs::resolve(&fs::cwd(), target);
         (fs::read(&path).map_err(|e| format!("{target}: {e}"))?, path)
     } else if gina::valid_id(target) {
-        let (src, e) = repo::find(target, value(args, "--version"))?;
-        println!("{} {} from {src}", e.name, e.version);
-        let bytes = repo::download(&src, &e)?;
-        (bytes, format!("{src}{}", e.path))
+        let (c, e) = repo::find(target, value(args, "--version"))?;
+        println!("{} {} from {}", e.name, e.version, c.source);
+        let bytes = fetch_entry(&c, &e)?;
+        (bytes, format!("{}{}", c.source, e.path))
     } else {
         return Err(format!("{target}: no such file, and not an app ID"));
     };
@@ -267,7 +287,8 @@ fn update(args: &[String]) -> Result<()> {
         return Ok(());
     }
     for (app, source, e) in ups {
-        let bytes = repo::download(&source, &e)?;
+        let c = repo::catalog(&source).or_else(|err| repo::cached(&source).ok_or(err))?;
+        let bytes = fetch_entry(&c, &e)?;
         let review = apps::review(&bytes)?;
         if !flag(args, "--allow-untrusted") {
             warn_untrusted(&review.trust)?;
@@ -277,6 +298,96 @@ fn update(args: &[String]) -> Result<()> {
         println!("Updated {} to {}.", new.manifest.name, new.manifest.version);
     }
     Ok(())
+}
+
+fn describe_repo(source: &str) -> Result<()> {
+    let c = repo::catalog(source)?;
+    let i = &c.index;
+    println!("{source}: {}", i.name);
+    if i.format == 2 {
+        let now = (corekit::time::unix_ms() / 1000.0) as u64;
+        println!("  catalogue version {}, expires in {}", i.version, gina::repo::ago(i.expires.saturating_sub(now)));
+        for m in &i.mirrors {
+            println!("  mirror {m}");
+        }
+        for s in &i.system {
+            println!("  system update {} ({})", s.version, if s.min_from.is_empty() { "from any" } else { &s.min_from });
+        }
+        for (id, v) in &i.revoked {
+            println!("  withdrawn {id} {v}");
+        }
+    } else {
+        println!("  format 1 index (no expiry or rollback version)");
+    }
+    println!("  {} packages", i.packages.len());
+    Ok(())
+}
+
+fn system(args: &[String]) -> Result<()> {
+    use corekit::update;
+    let p = plain(args);
+    let st = update::status();
+    let find = || -> Result<update::Available> {
+        update::check(value(args, "--version"))?.ok_or_else(|| String::from("WaveOS is up to date."))
+    };
+    match p.get(1).copied().unwrap_or("status") {
+        "status" => {
+            println!("WaveOS {} (started from {}{})", st.version, st.slot, if st.trial { ", on trial" } else { "" });
+            if let Some((slot, v)) = &st.ready {
+                println!("WaveOS {v} is installed in slot {slot}: restart to use it (pkg system restart)");
+            }
+            if let Some(v) = &st.failed {
+                println!("WaveOS {v} could not start, so this version was started instead");
+            }
+            Ok(())
+        }
+        "check" => {
+            match update::check(value(args, "--version"))? {
+                Some(av) => {
+                    println!(
+                        "WaveOS {} is available: {} to download ({} objects), {} installed",
+                        av.update.version,
+                        human(av.download_size()),
+                        av.missing.len(),
+                        human(av.installed_size())
+                    );
+                    if !av.update.notes.is_empty() {
+                        println!("{}", av.update.notes);
+                    }
+                }
+                None => println!("WaveOS {} is up to date.", st.version),
+            }
+            Ok(())
+        }
+        "download" | "install" => {
+            let av = find()?;
+            let mut shown = 0;
+            update::download(&av, &apps::download::Control::new(), |n, total| {
+                let tenth = (n * 10 / total.max(1)) as u32;
+                if tenth > shown {
+                    shown = tenth;
+                    println!("  downloaded {} of {}", human(n), human(total));
+                }
+            })?;
+            println!("Downloaded WaveOS {}.", av.update.version);
+            if p.get(1) == Some(&"install") {
+                let slot = update::install(&av, |_, _| {})?;
+                println!("Installed WaveOS {} into slot {slot}. Restart to use it: pkg system restart", av.update.version);
+            }
+            Ok(())
+        }
+        "restart" => {
+            let tries = value(args, "--tries").and_then(|t| t.parse().ok()).unwrap_or(update::TRIES);
+            let v = update::arm(tries)?;
+            println!("Restarting into WaveOS {v}…");
+            if !flag(args, "--no-restart") {
+                corekit::process::desktop::reboot();
+            }
+            Ok(())
+        }
+        "discard" => update::discard_ready(),
+        other => Err(format!("pkg system {other}? (status, check, download, install, restart, discard)")),
+    }
 }
 
 fn run(args: &[String]) -> Result<()> {
@@ -311,6 +422,17 @@ fn run(args: &[String]) -> Result<()> {
             Ok(())
         }
         "info" => info(args),
+        "rollback" => {
+            let id = *p.get(1).ok_or("roll back which app?")?;
+            let a = apps::rollback(id)?;
+            println!("{} is back to version {}.", a.manifest.name, a.manifest.version);
+            Ok(())
+        }
+        "repo" | "repos" => match p.get(1) {
+            Some(url) => describe_repo(url),
+            None => repo::sources().iter().try_for_each(|s| describe_repo(s)),
+        },
+        "system" => system(args),
         "verify" => verify(args),
         "update" | "upgrade" => update(args),
         "search" => {

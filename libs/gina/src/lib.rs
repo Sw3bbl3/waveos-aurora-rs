@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 pub mod repo;
 #[cfg(feature = "crypto")]
 pub mod sign;
+pub mod system;
 pub mod version;
 
 pub use version::{compare as compare_versions, Dependency};

@@ -110,7 +110,11 @@ impl Desktop {
                     item("Log Out…", "", MenuAction::LogOut)
                 },
                 item("Sleep", "", MenuAction::Sleep),
-                item("Restart…", "", MenuAction::Power),
+                if crate::gui::sysupdate::ready().is_some() {
+                    item("Update and Restart…", "", MenuAction::Power)
+                } else {
+                    item("Restart…", "", MenuAction::Power)
+                },
                 item("Shut Down…", "", MenuAction::Power),
             ],
             MenuKind::App if self.focused().is_some() => alloc::vec![

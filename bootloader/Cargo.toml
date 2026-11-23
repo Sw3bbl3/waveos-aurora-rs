@@ -10,3 +10,5 @@ aurora-elf = { path = "../libs/elf" }
 uefi = { version = "0.36", features = ["alloc", "panic_handler", "logger", "global_allocator"] }
 log = "0.4"
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+aurorafs = { path = "../libs/aurorafs" }
+sha2 = { version = "0.10", default-features = false }

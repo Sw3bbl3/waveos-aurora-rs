@@ -416,8 +416,16 @@ pub fn refresh_esp(esp: &Path, img: &Path) -> io::Result<bool> {
     if entry[0..16] != ESP_TYPE || start != ESP_START {
         return Ok(false);
     }
-    // Options written inside WaveOS (Settings → Display) survive the refresh.
-    let boot_conf = read_boot_conf(&mut file, start, end - start + 1);
+    // Options written inside WaveOS (Settings → Display) survive the refresh;
+    // a system update it was running is set aside, so the new build starts.
+    let boot_conf = read_boot_conf(&mut file, start, end - start + 1).map(|c| {
+        String::from_utf8_lossy(&c)
+            .lines()
+            .filter(|l| !l.trim().starts_with("system"))
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
+            .into_bytes()
+    });
     format_esp(&mut file, start, end - start + 1, esp)?;
     if let Some(conf) = boot_conf {
         let part = Region { file: &mut file, start: start * SECTOR, len: (end - start + 1) * SECTOR, pos: 0 };
@@ -563,25 +571,42 @@ fn format_esp_with_type(
     esp: &Path,
     fat_type: fatfs::FatType,
 ) -> io::Result<()> {
-    let mut part = Region { file, start: start * SECTOR, len: sectors * SECTOR, pos: 0 };
-    fatfs::format_volume(
-        &mut part,
-        fatfs::FormatVolumeOptions::new().fat_type(fat_type).volume_label(*b"AURORA-BOOT"),
-    )?;
-    part.pos = 0;
-    let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new())?;
-    copy_to_fat(esp, &fs.root_dir())?;
-    fs.unmount()?;
-    Ok(())
+    // The system image goes on as it is; when the partition is too small
+    // for it (64 MiB holds about 62 MiB of system), compressed instead
+    // (`system.tar.zlib`, which the bootloader inflates).
+    let attempt = |file: &mut File, pack: bool| -> io::Result<()> {
+        let mut part = Region { file, start: start * SECTOR, len: sectors * SECTOR, pos: 0 };
+        fatfs::format_volume(
+            &mut part,
+            fatfs::FormatVolumeOptions::new().fat_type(fat_type).volume_label(*b"AURORA-BOOT"),
+        )?;
+        part.pos = 0;
+        let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new())?;
+        copy_to_fat(esp, &fs.root_dir(), pack)?;
+        fs.unmount()?;
+        Ok(())
+    };
+    match attempt(file, false) {
+        Err(e) if e.kind() == io::ErrorKind::StorageFull || e.to_string().contains("No space") => {
+            println!("note: the system image doesn't fit the EFI partition as it is; writing it compressed");
+            attempt(file, true)
+        }
+        other => other,
+    }
 }
 
-fn copy_to_fat<T: fatfs::ReadWriteSeek>(src: &Path, dst: &fatfs::Dir<T>) -> io::Result<()> {
+fn copy_to_fat<T: fatfs::ReadWriteSeek>(src: &Path, dst: &fatfs::Dir<T>, pack: bool) -> io::Result<()> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if entry.file_type()?.is_dir() {
             let sub = dst.create_dir(&name)?;
-            copy_to_fat(&entry.path(), &sub)?;
+            copy_to_fat(&entry.path(), &sub, pack)?;
+        } else if pack && name == "system.tar" {
+            let packed = miniz_oxide::deflate::compress_to_vec_zlib(&fs::read(entry.path())?, 6);
+            let mut f = dst.create_file("system.tar.zlib")?;
+            f.truncate()?;
+            f.write_all(&packed)?;
         } else {
             let mut f = dst.create_file(&name)?;
             f.truncate()?;

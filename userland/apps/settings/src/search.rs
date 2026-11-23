@@ -19,6 +19,10 @@ macro_rules! item {
 }
 
 pub const SETTINGS: &[Setting] = &[
+    item!("update/check", "Check for software updates", "update upgrade new version system download", Update),
+    item!("update/auto-check", "Check for updates automatically", "update background automatic", Update),
+    item!("update/auto-download", "Download system updates automatically", "update background download", Update),
+    item!("update/repository", "App repositories", "store sources repository add url server", Update),
     item!("appearance/light", "Light appearance", "theme bright", Appearance),
     item!("appearance/dark", "Dark appearance", "theme night", Appearance),
     item!("appearance/accent", "Accent colour", "color highlight", Appearance),

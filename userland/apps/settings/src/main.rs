@@ -1,6 +1,6 @@
 //! Settings — appearance, display, keyboard, trackpad and mouse, game
 //! controllers and Wave Play, network, date and time, sound, notifications, the desktop,
-//! login, accessibility, and information about this computer.
+//! login, apps, software update, accessibility, and information about this computer.
 //!
 //! Start with a pane name (`Settings.elf keyboard`) or a setting
 //! (`Settings.elf keyboard/repeat-rate`) to open it, as Seek does.
@@ -26,6 +26,7 @@ use waveui::Request;
 mod displays;
 mod installed;
 mod search;
+mod update;
 mod users;
 
 /// The `energy_mode` values, in the order the picker shows them.
@@ -52,11 +53,12 @@ pub enum Pane {
     Bar,
     Login,
     Apps,
+    Update,
     Accessibility,
     About,
 }
 
-const PANES: [(Pane, &str, &str, u32); 18] = [
+const PANES: [(Pane, &str, &str, u32); 19] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
@@ -73,6 +75,7 @@ const PANES: [(Pane, &str, &str, u32); 18] = [
     (Pane::Bar, "Top Bar & Clock", "bar", 0xFF2F62F5),
     (Pane::Login, "Users & Login", "login", 0xFF8E5CF5),
     (Pane::Apps, "Apps", "apps", 0xFF32ADE6),
+    (Pane::Update, "Software Update", "update", 0xFF2C7BE5),
     (Pane::Accessibility, "Accessibility", "accessibility", 0xFF147EFB),
     (Pane::About, "About", "about", 0xFF30B0C7),
 ];
@@ -116,6 +119,7 @@ pub enum Msg {
     ClearNote,
     Users(users::UserMsg),
     Apps(installed::AppMsg),
+    Update(update::UpdMsg),
     /// Several displays: arrangement, main display, mirroring, each display's settings.
     Displays(displays::DisplayMsg),
 }
@@ -150,6 +154,8 @@ pub struct Settings {
     users: users::UsersState,
     /// Apps installed from packages.
     apps: installed::AppsState,
+    /// Software Update.
+    update: update::UpdateState,
     /// Display, with several displays.
     displays: displays::DisplaysState,
 }
@@ -191,6 +197,7 @@ impl Settings {
             now: corekit::time::now(),
             users: Default::default(),
             apps: Default::default(),
+            update: Default::default(),
             displays: Default::default(),
         };
         s.load_custom_thumb();
@@ -253,6 +260,7 @@ impl Settings {
             Pane::About => self.info = corekit::process::sys_info(),
             Pane::Login => self.users.refresh(),
             Pane::Apps => self.apps.refresh(),
+            Pane::Update => self.update.refresh(),
             _ => {}
         }
     }
@@ -1512,6 +1520,7 @@ impl App for Settings {
             Msg::Users(m) => self.users_update(m, cx),
             Msg::Displays(m) => self.displays_update(m, cx),
             Msg::Apps(m) => self.apps_update(m, cx),
+            Msg::Update(m) => self.update_update(m, cx),
         }
     }
 
@@ -1535,6 +1544,7 @@ impl App for Settings {
             Pane::Controllers => Some(50),
             Pane::DateTime | Pane::Network => Some(1000),
             Pane::Appearance | Pane::About => Some(2000),
+            Pane::Update => Some(if self.update.busy() { 150 } else { 1000 }),
             _ => None,
         }
     }
@@ -1562,6 +1572,7 @@ impl App for Settings {
                 }
                 missing
             }
+            Pane::Update => self.update.changed(),
             _ => {
                 self.refresh();
                 true
@@ -1590,6 +1601,7 @@ impl App for Settings {
                 Pane::Bar => self.bar(),
                 Pane::Login => self.users_pane(),
                 Pane::Apps => self.apps_pane(),
+                Pane::Update => self.update_pane(),
                 Pane::Accessibility => self.accessibility(),
                 Pane::About => self.about(env),
             };
@@ -1691,6 +1703,13 @@ fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
             for (dx, dy) in [(-6, -6), (1, -6), (-6, 1), (1, 1)] {
                 cv.fill_round_rect(Rect::new(cx + dx, cy + dy, 5, 5), 1, w);
             }
+        }
+        Pane::Update => {
+            // Two arrows chasing round.
+            cv.stroke_arc(cx, cy, 6, 2, 20, 140, w);
+            cv.stroke_arc(cx, cy, 6, 2, 200, 140, w);
+            cv.fill_circle(cx + 6, cy - 3, 2, w);
+            cv.fill_circle(cx - 6, cy + 3, 2, w);
         }
         Pane::Login => {
             cv.fill_circle(cx, cy - 3, 3, w);

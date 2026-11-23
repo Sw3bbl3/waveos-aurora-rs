@@ -36,6 +36,10 @@ fn default(key: &str) -> Option<&'static str> {
         pref::TRACKING_SPEED | pref::POINTER_SPEED => "5",
         pref::VOLUME => "70",
         pref::ENERGY_MODE => "balanced",
+        // Software Update: look for updates in the background; download
+        // system updates only when asked.
+        "software_update_check" => "1",
+        "software_update_download" => "0",
         _ => return None,
     })
 }
@@ -44,6 +48,12 @@ pub fn get(key: &str) -> Option<String> {
     // Read-only facts about the system, answered live.
     if key == "audio_device" {
         return audio::describe();
+    }
+    if key == "system_slot" {
+        return Some(String::from(super::sysupdate::booted_slot()));
+    }
+    if key == "system_bootloader" {
+        return Some(String::from(if super::sysupdate::bootloader_knows_slots() { "slots" } else { "legacy" }));
     }
     if key == "account_name" {
         return super::account::Account::load().map(|a| if a.full.is_empty() { a.name } else { a.full });
@@ -73,6 +83,8 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         | pref::NATURAL_SCROLLING
         | pref::PLAY_AUTO_ENTER
         | pref::PLAY_SOUNDS
+        | "software_update_check"
+        | "software_update_download"
             if value != "0" && value != "1" =>
         {
             return Err(EINVAL)

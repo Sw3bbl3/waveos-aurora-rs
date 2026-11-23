@@ -69,7 +69,13 @@ const TESTS: &[Test] = &[
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
-    ("packages: install, update and remove from a repository (pkgtest)", crate::gui::installed::self_test),
+    ("packages: install, update, roll back and remove from a repository (pkgtest)", crate::gui::installed::self_test),
+    (
+        "packages: catalogue freshness, key rotation, damaged and resumed downloads, pause and cancel (pkgtest)",
+        crate::gui::installed::store_test,
+    ),
+    ("packages: an install killed half-way leaves nothing half-installed (pkgtest)", crate::gui::installed::kill_test),
+    ("system update: download, install alongside, start on trial, fall back (pkgtest)", crate::gui::installed::system_test),
     ("syscall fuzzer (native calls, racing threads, kills)", syscall_fuzz),
     ("memory exhaustion: programs take all they can, the kernel keeps its reserve and recovers", memory_exhaustion),
     ("Learn: both offline libraries", learn_library),
@@ -115,6 +121,10 @@ pub fn run() {
         crate::kprintln!("ok");
     }
     crate::kprintln!("\ntest result: ok. {} passed", chosen.len());
+    // On the first start the harness then cuts the power in mid-install.
+    if crate::gui::prefs::boot_option("test_power_cut").as_deref() == Some("1") {
+        crate::gui::installed::power_cut();
+    }
     power::qemu_exit(0x10);
 }
 

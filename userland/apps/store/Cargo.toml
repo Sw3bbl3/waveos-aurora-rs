@@ -1,0 +1,10 @@
+[package]
+name = "app-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+corekit.workspace = true
+waveui.workspace = true
+gina.workspace = true
+aurora-image.workspace = true

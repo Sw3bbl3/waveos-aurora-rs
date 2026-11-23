@@ -118,6 +118,14 @@ pub const BOOT_VERBOSE: u32 = 1;
 /// `appearance=dark` in boot.conf (or no appearance line): the boot screen is dark.
 pub const BOOT_DARK: u32 = 2;
 
+/// The system started from slot `a` on the home volume (a system update).
+pub const BOOT_SLOT_A: u32 = 1 << 8;
+/// … from slot `b`. Neither: from the EFI partition's own files.
+pub const BOOT_SLOT_B: u32 = 1 << 9;
+/// The bootloader knows slots (an older one leaves this clear and always
+/// starts the EFI partition's own files).
+pub const BOOT_SLOTS: u32 = 1 << 10;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VideoMode {

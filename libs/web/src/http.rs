@@ -321,6 +321,160 @@ fn decode_body(body: Vec<u8>, encoding: &str) -> Result<Vec<u8>, Error> {
     }
 }
 
+/// What a streamed download got: the final response's status and headers
+/// (its body went to the sink), and whether the body arrived whole.
+#[derive(Clone, Debug)]
+pub struct Streamed {
+    pub status: u16,
+    pub reason: String,
+    pub headers: Vec<(String, String)>,
+    pub url: Url,
+    /// Bytes handed to the sink.
+    pub received: u64,
+    /// The body ended where the server said it would (false: the sink
+    /// stopped it, or the connection broke off).
+    pub complete: bool,
+}
+
+impl Streamed {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+}
+
+/// GETs `url` and hands the body to `sink` as it arrives, without holding
+/// it in memory, following up to five redirects. With `from` > 0 it asks
+/// for the rest of the file from that byte (`Range: bytes=from-`): a server
+/// that can answers 206, one that can't sends it all again with 200. The
+/// body is never compressed in transit (`Accept-Encoding: identity`), so
+/// byte offsets mean the same on both sides. `start` sees a successful
+/// answer's status and headers before its body (to start over on a 200,
+/// say) and `sink` each piece of the body; either returns false to stop
+/// early (pausing or cancelling), and the connection is then dropped.
+pub fn download<C: Connect + ?Sized>(
+    url: &Url,
+    from: u64,
+    connect: &mut C,
+    start: &mut dyn FnMut(u16, &[(String, String)]) -> bool,
+    sink: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<Streamed, Error> {
+    let mut url = url.clone();
+    for _ in 0..6 {
+        if url.scheme != "http" && url.scheme != "https" {
+            return Err(Error::UnsupportedScheme(url.scheme.clone()));
+        }
+        let mut target = url.clone();
+        target.fragment = None;
+        let mut head = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+            if target.path.is_empty() { "/" } else { &target.path },
+            target.authority(),
+            USER_AGENT
+        );
+        if from > 0 {
+            head.push_str(&format!("Range: bytes={from}-\r\n"));
+        }
+        head.push_str("\r\n");
+        let (mut conn, _) = connect.connect(&url, true)?;
+        conn.write_all(head.as_bytes()).map_err(Error::Io)?;
+        let mut r = Reader { io: &mut conn, buf: Vec::new(), pos: 0, eof: false };
+        let (status, reason, headers) = loop {
+            let status_line = r.line()?;
+            let mut parts = status_line.splitn(3, ' ');
+            if !parts.next().unwrap_or("").starts_with("HTTP/") {
+                return Err(Error::BadResponse);
+            }
+            let status: u16 = parts.next().and_then(|s| s.parse().ok()).ok_or(Error::BadResponse)?;
+            let reason = parts.next().unwrap_or("").to_string();
+            let mut headers = Vec::new();
+            loop {
+                let line = r.line()?;
+                if line.is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = line.split_once(':') {
+                    headers.push((k.trim().to_string(), v.trim().to_string()));
+                }
+            }
+            if !(100..200).contains(&status) {
+                break (status, reason, headers);
+            }
+        };
+        let find = |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            if let Some(next) = find("location").and_then(|l| url.join(&l)) {
+                url = next;
+                continue;
+            }
+        }
+        let mut out = Streamed { status, reason, headers: Vec::new(), url: url.clone(), received: 0, complete: false };
+        if !(200..300).contains(&status) {
+            out.headers = headers;
+            return Ok(out);
+        }
+        if find("content-encoding").is_some_and(|e| !e.eq_ignore_ascii_case("identity")) {
+            return Err(Error::BadResponse);
+        }
+        if !start(status, &headers) {
+            out.headers = headers;
+            return Ok(out);
+        }
+        // Hands what is buffered to the sink; false when it said stop.
+        let mut give = |r: &mut Reader, n: usize, out: &mut Streamed| -> bool {
+            let ok = sink(&r.buf[r.pos..r.pos + n]);
+            r.pos += n;
+            out.received += n as u64;
+            ok
+        };
+        if find("transfer-encoding").is_some_and(|t| t.to_ascii_lowercase().contains("chunked")) {
+            loop {
+                let Ok(size_line) = r.line() else { break };
+                let hex = size_line.split(';').next().unwrap_or("").trim();
+                let mut size = usize::from_str_radix(hex, 16).map_err(|_| Error::BadResponse)?;
+                if size == 0 {
+                    out.complete = true;
+                    break;
+                }
+                while size > 0 {
+                    if r.buf.len() == r.pos && !r.fill().unwrap_or(false) {
+                        break;
+                    }
+                    let n = size.min(r.buf.len() - r.pos);
+                    size -= n;
+                    if !give(&mut r, n, &mut out) {
+                        out.headers = headers;
+                        return Ok(out);
+                    }
+                }
+                if size > 0 || r.line().is_err() {
+                    break;
+                }
+            }
+        } else {
+            let length = find("content-length").and_then(|v| v.parse::<u64>().ok());
+            loop {
+                if length.is_some_and(|l| out.received >= l) {
+                    break;
+                }
+                if r.buf.len() == r.pos && !r.fill().unwrap_or(false) {
+                    break;
+                }
+                let left = length.map_or(usize::MAX, |l| (l - out.received).min(usize::MAX as u64) as usize);
+                let n = left.min(r.buf.len() - r.pos);
+                if !give(&mut r, n, &mut out) {
+                    out.headers = headers;
+                    return Ok(out);
+                }
+            }
+            // Without a length, the end of the connection ends the body.
+            out.complete = length.is_none_or(|l| out.received == l);
+        }
+        out.headers = headers;
+        return Ok(out);
+    }
+    Err(Error::TooManyRedirects)
+}
+
 /// GETs `url`, following up to five redirects.
 pub fn fetch<C: Connect + ?Sized>(url: &Url, connect: &mut C) -> Result<Response, Error> {
     request("GET", url, &[], &[], connect)
@@ -559,6 +713,83 @@ mod tests {
         let r = fetch(&Url::parse("http://h/").unwrap(), &mut pool).unwrap();
         assert_eq!(r.body, b"ok");
         assert_eq!(pool.opened, 1);
+    }
+
+    /// Downloads from canned responses, collecting the body.
+    fn stream(raws: &[&str], from: u64, stop_after: usize) -> (Streamed, Vec<u8>) {
+        let mut i = 0;
+        let mut connect = |_: &Url| -> Result<Box<dyn Io>, Error> {
+            i += 1;
+            Ok(Box::new(Canned { data: raws[i - 1].as_bytes().to_vec(), pos: 0, sent: Vec::new() }))
+        };
+        let mut body = Vec::new();
+        let mut sink = |b: &[u8]| {
+            body.extend_from_slice(b);
+            body.len() < stop_after
+        };
+        let s = download(&Url::parse("http://h/f").unwrap(), from, &mut connect, &mut |_, _| true, &mut sink).unwrap();
+        (s, body)
+    }
+
+    #[test]
+    fn download_streams_ranges_and_stops() {
+        let (s, body) = stream(&["HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789"], 0, usize::MAX);
+        assert_eq!((s.status, s.complete, body.as_slice()), (200, true, &b"0123456789"[..]));
+        // A resumed download: the server answers with the rest.
+        let (s, body) = stream(
+            &["HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-9/10\r\nContent-Length: 6\r\n\r\n456789"],
+            4,
+            usize::MAX,
+        );
+        assert_eq!((s.status, s.complete, body.as_slice()), (206, true, &b"456789"[..]));
+        // The connection breaks off: what arrived is kept, and it says so.
+        let (s, body) = stream(&["HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n01234"], 0, usize::MAX);
+        assert_eq!((s.complete, s.received, body.len()), (false, 5, 5));
+        // Chunked, after a redirect.
+        let (s, body) = stream(
+            &[
+                "HTTP/1.1 302 Found\r\nLocation: /g\r\nContent-Length: 0\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n6\r\npedia \r\n0\r\n\r\n",
+            ],
+            0,
+            usize::MAX,
+        );
+        assert_eq!((s.complete, body.as_slice(), s.url.path.as_str()), (true, &b"Wikipedia "[..], "/g"));
+        // The sink stops it (a pause).
+        let (s, body) = stream(&["HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789"], 0, 3);
+        assert!(!s.complete && body.len() >= 3 && body.len() < 10);
+        // Errors are answers, not bodies.
+        let (s, body) = stream(&["HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\n\r\ngone"], 0, usize::MAX);
+        assert_eq!((s.status, body.len()), (404, 0));
+    }
+
+    #[test]
+    fn download_request_headers() {
+        struct Spy(alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>);
+        impl Io for Spy {
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, isize> {
+                let r = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                if self.0.borrow().ends_with(b"\r\n\r\n") && !self.0.borrow().starts_with(b"done") {
+                    let n = r.len().min(buf.len());
+                    buf[..n].copy_from_slice(&r[..n]);
+                    let mut v = self.0.borrow_mut();
+                    v.splice(0..0, *b"done");
+                    return Ok(n);
+                }
+                Ok(0)
+            }
+            fn write_all(&mut self, data: &[u8]) -> Result<(), isize> {
+                self.0.borrow_mut().extend_from_slice(data);
+                Ok(())
+            }
+        }
+        let log = alloc::rc::Rc::new(core::cell::RefCell::new(Vec::new()));
+        let l = log.clone();
+        let mut connect = move |_: &Url| -> Result<Box<dyn Io>, Error> { Ok(Box::new(Spy(l.clone()))) };
+        let mut sink = |_: &[u8]| true;
+        download(&Url::parse("http://h/f").unwrap(), 7, &mut connect, &mut |_, _| true, &mut sink).unwrap();
+        let sent = String::from_utf8(log.borrow().clone()).unwrap();
+        assert!(sent.contains("Range: bytes=7-\r\n") && sent.contains("Accept-Encoding: identity\r\n"), "{sent}");
     }
 
     #[test]

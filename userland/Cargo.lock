@@ -167,6 +167,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-store"
+version = "0.8.0"
+dependencies = [
+ "aurora-image",
+ "corekit",
+ "gina",
+ "waveui",
+]
+
+[[package]]
 name = "app-studio"
 version = "0.8.0"
 dependencies = [
@@ -922,6 +932,7 @@ version = "0.8.0"
 dependencies = [
  "corekit",
  "gina",
+ "nebula-web",
 ]
 
 [[package]]

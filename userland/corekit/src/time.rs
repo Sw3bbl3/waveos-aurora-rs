@@ -89,6 +89,15 @@ pub fn from_seconds(secs: u64) -> DateTime {
     }
 }
 
+/// When this start of the computer began, in file time (seconds since
+/// 2000-01-01, local): anything written before it is from an earlier start.
+pub fn boot_file_time() -> u64 {
+    let d = now();
+    let days = days_from_civil(d.year as i64, d.month as i64, d.day as i64) - 10957;
+    let secs = days * 86400 + d.hour as i64 * 3600 + d.minute as i64 * 60 + d.second as i64;
+    (secs - (uptime_ms() / 1000) as i64).max(0) as u64
+}
+
 pub fn format_uptime(ms: u64) -> String {
     let s = ms / 1000;
     let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);

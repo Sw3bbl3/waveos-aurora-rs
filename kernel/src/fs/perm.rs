@@ -14,8 +14,9 @@
 //! for everyone; the EFI partition (`/Boot`) to the system and the admin
 //! group; removable volumes to the logged-in account.
 //!
-//! On the home volume, `/Security`, `/Users` and `/Applications` are the
-//! system's: nobody else may create, remove or rename them.
+//! On the home volume, `/Security`, `/Users`, `/Applications` and `/.system`
+//! (system updates) are the system's: nobody else may create, remove or
+//! rename them.
 
 use super::*;
 use crate::users::{self, Cred};
@@ -27,7 +28,7 @@ pub const X: u16 = 1;
 const STICKY: u16 = 0o1000;
 
 /// Top-level names on the home volume only the system may change.
-const PROTECTED: [&str; 3] = ["Security", "Users", "Applications"];
+const PROTECTED: [&str; 4] = ["Security", "Users", "Applications", ".system"];
 /// The first account's personal folders, private on an upgraded volume.
 const PRIVATE: [&str; 6] = ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Movies"];
 
@@ -329,13 +330,22 @@ pub fn prepare_root_volume() {
             }
             let _ = ensure_system_dir(super::super::users::db::DIR);
         }
-        if !is_dir("/Applications") {
-            let _ = mkdir("/Applications");
+        ensure_admin_dir("/Applications");
+        ensure_admin_dir(crate::gui::sysupdate::SLOTS);
+    });
+}
+
+/// Makes `path` on the home volume if needed: the system's, and the admin
+/// group may change what is in it (`/Applications`, `/.system`).
+pub fn ensure_admin_dir(path: &str) {
+    system(|| {
+        if !is_dir(path) {
+            let _ = mkdir(path);
         }
-        if let Ok((o, explicit)) = stat_owner("/Applications") {
+        if let Ok((o, explicit)) = stat_owner(path) {
             let want = Owner { uid: users::ROOT_UID, gid: users::ADMIN_GID, mode: 0o775 };
             if !explicit || o != want {
-                let _ = set_owner_path("/Applications", want);
+                let _ = set_owner_path(path, want);
             }
         }
     });

@@ -45,6 +45,7 @@ pub enum AppKind {
     /// A program not in the catalog.
     Other,
     Installer,
+    Store,
     Studio,
     Doom,
     Firefox,
@@ -88,6 +89,16 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Studio.elf",
         single: false,
+        also: &[],
+    },
+    AppInfo {
+        kind: AppKind::Store,
+        name: "Store",
+        icon: Icon::Store,
+        pinned: false,
+        listed: true,
+        path: "/System/Apps/Store.elf",
+        single: true,
         also: &[],
     },
     AppInfo {
@@ -322,6 +333,8 @@ pub enum Request {
     Close,
     Shutdown,
     Reboot,
+    /// Start the system update that is ready, then restart.
+    UpdateAndRestart,
     Sleep,
     /// Keep the display mode just chosen.
     KeepDisplay,

@@ -111,11 +111,11 @@ The signature is Ed25519 (RustCrypto's `ed25519-dalek`, strict verification) ove
        dist/dev.example.myapp-1.2.0.gina --sign ~/keys/example.key
    ```
    The icon and resources are read relative to the manifest. Without `--sign` the package is unsigned: it installs only after the person accepts a warning.
-4. **Publish a repository:** put the packages in a folder served over HTTPS (HTTP works for testing: the index is signed either way) with
+4. **Publish a repository:** put the packages in a folder (optionally with Store listings: `<app id>/listing.txt` and `<app id>/screenshots/*.png`, see [developer/store-and-updates.md](developer/store-and-updates.md)) and run
    ```sh
-   cargo xtask repo dist/*.gina --sign ~/keys/example.key --out site/stable
+   cargo xtask repo dist --sign ~/keys/example.key --out site/stable
    ```
-   which copies them to `packages/` and writes `index.txt` and its signature `index.sig`. Each index carries a `generated` date that only grows: devices refuse an older index from the same address (no rollback to old versions). Packages are checked against the size and SHA-256 the index names, and then their own signature is checked again.
+   which copies them to `packages/`, their icons and screenshots to `assets/`, and writes the signed catalogue (`catalog.txt`, `catalog.sig`) and, for older systems, `index.txt` and `index.sig`. Serve the folder over HTTPS (HTTP works too: everything is signed). Each catalogue has a version one higher than the last and expires after 30 days (`--expires-days N`): devices refuse an older catalogue from the same address (rollback) and an expired one (freeze), so re-run it at least that often. Packages are checked against the size and SHA-256 the catalogue names, and then their own signature is checked again. Trust roots (`root/<n>.txt`) let a repository move to a new signing key; `--mirror URL` lists mirrors.
 5. **Users add your key and repository** (both need an administrator):
    ```sh
    pkg trust example.key.pub
@@ -124,7 +124,7 @@ The signature is Ed25519 (RustCrypto's `ed25519-dalek`, strict verification) ove
    pkg install dev.example.myapp
    ```
 
-Each build of WaveOS makes its own sample key (`target/keys/waveos-samples.key`, never committed) and trusts it (`/System/Keys/waveos-samples.pub`); `cargo xtask build` writes a sample repository to `target/repo` (WaveUI Gallery and Doom as a `game`), signed with it. Serve it with `python3 -m http.server -d target/repo 8000` and in the guest run `pkg source add http://10.0.2.2:8000/`.
+Each build of WaveOS makes its own sample key (`target/keys/waveos-samples.key`, never committed) and trusts it (`/System/Keys/waveos-samples.pub`); `cargo xtask build` writes a demo repository to `target/repo` (WaveUI Gallery 1.0.0 and 1.1.0 and Doom as a `game`, with their Store pages, and a WaveOS update to the next version signed with the build's system update key), signed with it. Serve it with `cargo xtask serve-repo` and add `http://10.0.2.2:8000/` in the Store (or `pkg source add`). WaveOS itself comes with no repository configured.
 
 ### Installing
 
@@ -134,10 +134,12 @@ Each build of WaveOS makes its own sample key (`target/keys/waveos-samples.key`,
 | `~/Library/Applications/<id>/` | apps for one account (`pkg install --user`, "Install only for me") |
 | `<root>/<id>/active` | the live generation's folder name |
 | `<root>/<id>/<version>-<sha256>/` | a generation: the package's files, `META/hashes`, `META/signature`, and `META/receipt` (when, from where, signed by whom, size) |
+| `<root>/<id>/previous` | the generation an update replaced, kept for `pkg rollback` and the Store's Revert |
 | `<root>/.registry` | every installed app, one tab-separated line each: id, version, name, categories, program, icon, folder, extensions, size, publisher (for programs such as Wave Play; `corekit::apps::in_category("game")` reads the same) |
 | `~/Library/Containers/<id>/` | the app's data, kept apart from its files |
 | `/System/Keys/*.pub`, `/Applications/.keys/*.pub` | trusted publisher keys (shipped; added by administrators) |
-| `/Applications/.sources` | repository addresses |
+| `/Applications/.sources` | repository addresses (none out of the box) |
+| `~/Library/Packages/` | per account: the newest catalogue version seen per repository, trust roots, resumable downloads |
 
 An install stages the new generation in `.pending-<pid>`, flushes it, renames it into place, then writes `active` the same way (new file, flush, rename). Interrupted anywhere, the old version or the new one is live, never a mix; leftovers are cleared by the next install. Under `/Applications` files belong to `system:admin` (programs `rwxr-xr-x`, other files `rw-r--r--`, folders `rwxrwxr-x`) and the registry is `rw-r--r-- system`, so other accounts can run apps but not change them. Updates keep the app's data, must come from the same publisher key as the installed version, and may not go to an older version without `--allow-downgrade`. Missing dependencies and a too-old system stop an install before anything is written.
 
@@ -147,13 +149,15 @@ Installed apps appear in Shoal (games also under Play), Seek and Settings → Ap
 pkg install FILE.gina | URL | ID [--user] [--version V] [--allow-untrusted] [--allow-downgrade]
 pkg remove ID [--delete-data]       pkg list [--category game]     pkg info ID|FILE
 pkg verify [ID]                     pkg update [ID] [--check]      pkg search [TERM]
+pkg rollback ID                 pkg repo [URL]
+pkg system [status|check|download|install|restart|discard] [--version V]
 pkg source [list|add URL|remove URL]   pkg trust FILE.pub | untrust KEY | keys
 pkg pin ID | unpin ID               pkg registry
 ```
 
 Opening a `.gina` file in Files starts Installer: name, version, publisher, signature status, requested permissions, size and category, then progress. Unsigned packages and keys you don't trust need the "I trust where this package came from" box ticked first.
 
-For a precompiled example, open `/System/Developer/Examples/WaveUIGallery.gina`. It is compiled by the host when assembling the system image; it is **not evidence of native compilation**. A graphical Store and whole-system updates are designed in [developer/store-and-updates.md](developer/store-and-updates.md).
+For a precompiled example, open `/System/Developer/Examples/WaveUIGallery.gina`. It is compiled by the host when assembling the system image; it is **not evidence of native compilation**. The Store and Software Update are described in [developer/store-and-updates.md](developer/store-and-updates.md).
 
 ## Native commands and Studio
 
