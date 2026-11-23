@@ -91,6 +91,8 @@ Writing to the file, or deleting it, drops it from the cache.
   always are.
 - **Made-up files:** `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/fd/*`,
   `/dev/kmsg` (the system log: `2>/dev/kmsg` keeps a program's messages);
+  the input devices and what describes them (`/dev/input`, `/dev/hidraw*`,
+  `/dev/uinput`, `/sys`, `/run/udev`; see below);
   `/proc/self/exe`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/mounts`; and
   `/etc/passwd`, `/etc/group`, `/etc/hostname`, `/etc/hosts` and
   `/etc/resolv.conf` built from the computer's settings.
@@ -184,7 +186,33 @@ Only these WaveOS calls are open to Linux programs: windows, events, sound
 clipboard, notifications, reading preferences, the uptime clock, and game
 controllers (`wave_gamepads`, `wave_gamepad_state`, `wave_gamepad_rumble`:
 one standard layout for every controller; Doom uses them). A program reads
-a neutral controller while it isn't the one in front.
+a neutral controller while it isn't the one in front. Programs written for
+Linux don't need these for input: see below.
+
+## Keyboards, mice and game controllers the Linux way
+
+Linux programs find and read input devices as on Linux, so SDL, libinput,
+Steam's input layer and Wine work unchanged
+([developer/linux-input.md](developer/linux-input.md) has the details):
+
+- `/dev/input/event*` for every keyboard, mouse, tablet, touchpad and game
+  controller, with Linux's events, `ioctl`s, force feedback (rumble) and
+  Caps Lock light; `/dev/input/js*` (the old joystick API) for
+  controllers; `/dev/hidraw*` for USB HID devices (raw reports, feature
+  reports); `/dev/uinput` to make devices (they work in WaveOS too).
+- Controllers look exactly as Linux's drivers show them (Xbox pads as
+  `xpad`, PlayStation as `hid-playstation`, Switch Pro as `hid-nintendo`),
+  so SDL's built-in controller database knows them. The keyboard-played
+  controller (Super+G) is an Xbox 360 pad.
+- Finding them: sysfs (`/sys/class/input`, `/sys/class/hidraw`, the devices
+  under `/sys/devices`), `/dev/input/by-id` and `by-path`, udev's records in
+  `/run/udev/data`, device events over netlink for libudev's monitors (the
+  kernel sends udev's messages itself), and inotify on `/dev/input`.
+- Who reads what: keyboards, mice and touchpads reach only the program
+  whose window has the focus; controllers, the program in front (Wave
+  Play's rule). A program without the focus sees its devices at rest. The
+  device files belong to the account logged in at the screen; raw HID
+  files of keyboards and mice belong to the system.
 
 Three calls fit windows into a program's own main loop:
 
@@ -410,8 +438,11 @@ and `FRAME`) and `linux-tests/proctest.c` (fork, exec, wait, scripts and
 the shell, `posix_spawn` and `vfork`, signals and handlers, faults handled
 as signals, signals to a thread busy in its own code,
 interrupted calls, `poll`, `select`, `epoll`, `eventfd`, `timerfd`,
-close-on-exec and symbolic links), and `linux-tests/nettest.c` (local
-sockets with descriptor passing, TCP and UDP over loopback, name lookup).
+close-on-exec and symbolic links), `linux-tests/nettest.c` (local
+sockets with descriptor passing, TCP and UDP over loopback, name lookup),
+and `linux-tests/inputtest.c` (input devices: evdev, the joystick API,
+hidraw, uinput, sysfs and udev records, hot-plug over netlink and inotify,
+focus, grabs and rumble, with the kernel test playing the user).
 
 To see what a Linux program asks of the kernel, put `WAVEOS_STRACE=1` in
 its environment: every system call it makes, with its arguments and

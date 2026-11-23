@@ -25,6 +25,8 @@ mod tour;
 #[cfg(feature = "ktest")]
 pub use play::self_test as play_self_test;
 #[cfg(feature = "ktest")]
+pub(crate) use play::KeyboardPad;
+#[cfg(feature = "ktest")]
 pub use spotlight::calc_for_test;
 
 use super::account::Account;

@@ -3,6 +3,7 @@ pub mod serial;
 pub mod audio;
 pub mod block;
 pub mod display;
+pub mod evdev;
 pub mod gamepad;
 pub mod gpu;
 pub mod hpet;

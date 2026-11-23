@@ -52,6 +52,9 @@ pub struct Client {
     events: VecDeque<Event>,
     /// The pointer's shape over the window (`aurora_abi::cursor`).
     cursor: u32,
+    /// The process whose drawing the window shows, for a bridge's window
+    /// (`win_set_program`): it gets the window's input focus too.
+    program: Option<u32>,
 }
 
 /// Changes the compositor must apply on its next frame.
@@ -115,6 +118,11 @@ pub fn drag_start(pid: u32, kind: usize, data: &[u8], count: u32, icon: usize) -
 /// The process owning client window `id`.
 pub fn pid_of(id: u32) -> Option<u32> {
     CLIENTS.lock().get(&id).map(|c| c.pid)
+}
+
+/// The process whose drawing client window `id` shows, if a bridge said so.
+pub fn program_of(id: u32) -> Option<u32> {
+    CLIENTS.lock().get(&id).and_then(|c| c.program)
 }
 
 static CLIENTS: IrqMutex<BTreeMap<u32, Client>> = IrqMutex::new(BTreeMap::new());
@@ -398,6 +406,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
                     surface,
                     events: VecDeque::new(),
                     cursor: aurora_abi::cursor::ARROW,
+                    program: None,
                 },
             );
             send(Command::Created(id));
@@ -485,6 +494,26 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
                 c.cursor = a[1] as u32;
             }
             send(Command::Cursor);
+            Ok(0)
+        }
+        nr::WIN_SET_PROGRAM => {
+            let id = a[0] as u32;
+            owned(id, pid)?;
+            let program = match a[1] as u32 {
+                0 => None,
+                other => {
+                    // Only a program of the caller's own account.
+                    let target = crate::proc::get(other).ok_or(ESRCH)?;
+                    let mine = *crate::proc::current().ok_or(EPERM)?.cred.lock();
+                    if target.cred.lock().uid != mine.uid && !mine.is_root() {
+                        return Err(EPERM);
+                    }
+                    Some(other)
+                }
+            };
+            if let Some(c) = CLIENTS.lock().get_mut(&id) {
+                c.program = program;
+            }
             Ok(0)
         }
         nr::WIN_SET_TITLE => {

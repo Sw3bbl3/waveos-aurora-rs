@@ -231,8 +231,22 @@ pub fn caps() -> bool {
 /// updates every keyboard's light. Returns the new state.
 pub fn toggle_caps() -> bool {
     let on = !CAPS.fetch_xor(true, Ordering::AcqRel);
+    LIGHT.store(on, Ordering::Release);
     request_lights();
+    super::evdev::sources::caps_changed(on);
     on
+}
+
+/// The Caps Lock light as last set (it follows the lock, unless a program
+/// set it through a keyboard's `/dev/input` node).
+static LIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Lights (or puts out) every keyboard's Caps Lock light without changing
+/// the lock (Linux programs write `LED_CAPSL`).
+pub fn set_caps_light(on: bool) {
+    if LIGHT.swap(on, Ordering::AcqRel) != on {
+        request_lights();
+    }
 }
 
 /// Something that shows the lock state (a keyboard driver).
@@ -275,7 +289,7 @@ fn lights_task() {
         }
         let sinks = *SINKS.lock();
         for sink in sinks.into_iter().flatten() {
-            sink(caps());
+            sink(LIGHT.load(Ordering::Acquire));
         }
     }
 }

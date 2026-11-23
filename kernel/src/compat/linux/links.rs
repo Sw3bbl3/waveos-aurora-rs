@@ -46,6 +46,10 @@ fn with<R>(f: impl FnOnce(&mut Table) -> R) -> R {
 
 /// The target of the link at `path`, if it is one.
 pub fn target(path: &str) -> Option<String> {
+    // The links sysfs and /dev/input are made of.
+    if let Some(to) = super::input::link(path) {
+        return Some(to);
+    }
     let (user, system) = with(|t| (t.user.get(path).cloned(), t.system.get(path).cloned()));
     // A file installed on the disk takes the place of a system image link
     // (a Debian package's own `/usr/bin/awk` over BusyBox's).
