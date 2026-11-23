@@ -16,6 +16,11 @@ type Test = (&'static str, fn());
 const TESTS: &[Test] = &[
     ("frame allocator", frame_allocator),
     ("heap", heap),
+    ("mm: allocator benchmark", mm::selftest::run),
+    ("mm: size classes", mm::selftest::classes),
+    ("mm: buddy frame allocator", mm::selftest::frames),
+    ("mm: heap stress from every CPU", mm::selftest::stress),
+    ("mm: out of memory", mm::selftest::out_of_memory),
     ("isqrt", sqrt),
     ("account_password_hash", crate::gui::account::self_test),
     ("write-combining mappings", crate::arch::pat::self_test),
@@ -294,7 +299,7 @@ fn wallpaper() {
 
 fn address_spaces() {
     use crate::mm::vmm::{AddressSpace, Prot};
-    let (_, before) = mm::frame::counts();
+    let (_, before) = mm::leak_check_counts();
     {
         let mut a = AddressSpace::new().unwrap();
         a.map_anon(0x40_0000, 4, Prot::ReadWrite).unwrap();
@@ -306,12 +311,12 @@ fn address_spaces() {
         assert!(!a.check(0x40_1000, 1, false));
         a.map_anon(0x40_0000, 1, Prot::ReadExec).unwrap(); // widening an existing page
     }
-    let (_, after) = mm::frame::counts();
+    let (_, after) = mm::leak_check_counts();
     assert_eq!(before, after, "address space teardown leaked frames");
 }
 
 fn user_processes() {
-    let (_, before) = mm::frame::counts();
+    let (_, before) = mm::leak_check_counts();
     let pid = crate::proc::spawn("/System/Bin/usertest", &["usertest"], [None, None, None], 0).expect("spawn usertest");
     let p = crate::proc::get(pid).unwrap();
     let deadline = time::ticks() + 60_000;
@@ -324,10 +329,10 @@ fn user_processes() {
     // the asynchronous reaper releases its address space. Wait for the actual
     // resource invariant, not a fixed delay that races slow/emulated CPUs.
     let cleanup_deadline = time::uptime_ms() + 5000;
-    while mm::frame::counts().1 + 8 < before && time::uptime_ms() < cleanup_deadline {
+    while mm::leak_check_counts().1 + 8 < before && time::uptime_ms() < cleanup_deadline {
         sched::sleep_ms(10);
     }
-    let (_, after) = mm::frame::counts();
+    let (_, after) = mm::leak_check_counts();
     assert!(after + 8 >= before, "user processes leaked {} frames", before - after);
 }
 
