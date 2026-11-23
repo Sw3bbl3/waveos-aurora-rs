@@ -1688,6 +1688,18 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
                 }
                 Err(_) => exit(1),
             };
+            // After the power cut, the home volume as the next start finds it
+            // (a copy, mounted and checked here: replaying its journal is the
+            // next start's own job) must be consistent.
+            if boot == 1 && output.contains("harness: power cut") {
+                match image::check_home_copy(&img) {
+                    Ok(()) => println!("harness: the home volume after the power cut checks clean"),
+                    Err(e) => {
+                        eprintln!("\npower cut check FAILED: the home volume after the cut: {e}");
+                        exit(1);
+                    }
+                }
+            }
             if boot == 2 && !output.contains("verified from previous boot") {
                 eprintln!("\npersistence check FAILED: the second boot did not find the first boot's file");
                 exit(1);

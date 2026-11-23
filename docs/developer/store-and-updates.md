@@ -276,7 +276,9 @@ menu's Restart becomes Update and Restart while an update is ready.
   dropped download resumed with a range; pausing, resuming and cancelling;
   an install killed half-way (nothing half-installed, recovery cleans up);
   the power cut in the middle of an install on the first start (the harness
-  quits QEMU; the second start finds the old state or the new one); a
+  quits QEMU, then mounts a copy of the home volume on the host, replaying
+  its journal, and runs `fsck` on it; the second start finds the old state
+  or the new one); a
   system update downloaded (one object), installed into slot a and started
   on the second start, marked good; and an update whose kernel faults at its
   first instruction, armed with one try, which the bootloader abandons on a

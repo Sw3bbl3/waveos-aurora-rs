@@ -89,6 +89,28 @@ pub fn preference(img: &Path, key: &str) -> Option<String> {
     })
 }
 
+/// Mounts the home volume of a copy of `img` (replaying its journal, as a
+/// start would) and checks it with `fsck`; `img` itself is not changed.
+pub fn check_home_copy(img: &Path) -> Result<(), String> {
+    let copy = img.with_extension("check.img");
+    fs::copy(img, &copy).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let mut file = OpenOptions::new().read(true).write(true).open(&copy).map_err(|e| e.to_string())?;
+        let mut entry = [0u8; ENTRY_SIZE as usize];
+        file.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE)).map_err(|e| e.to_string())?;
+        file.read_exact(&mut entry).map_err(|e| e.to_string())?;
+        let start = u64::from_le_bytes(entry[32..40].try_into().unwrap());
+        let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
+        let bytes = (end - start + 1) * SECTOR;
+        let region = Region { file: &mut file, start: start * SECTOR, len: bytes, pos: 0 };
+        let mut vol = aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now)
+            .map_err(|e| format!("mount: {e:?}"))?;
+        vol.fsck()
+    })();
+    let _ = fs::remove_file(&copy);
+    result
+}
+
 /// Put the Linux root on the home volume as `/Linux`, preserving saved files.
 /// Existing installations receive updated settings and missing packages.
 pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io::Result<LinuxOnDisk> {
