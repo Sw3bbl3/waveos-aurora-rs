@@ -19,7 +19,9 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <waveos.h>
@@ -116,6 +118,117 @@ static void memory(void) {
     CHECK(madvise(h, 2 * 4096, MADV_DONTNEED) == 0 && h[4096] == 0, "MADV_DONTNEED gives zeros back");
     CHECK(munmap(h, huge) == 0, "unmap 8 GiB");
     printf("PASS memory\n");
+}
+
+#ifndef MADV_COLD
+#define MADV_COLD 20
+#endif
+#ifndef MADV_PAGEOUT
+#define MADV_PAGEOUT 21
+#endif
+
+// A field of /proc/self/status, in kB (-1 if missing).
+static long status_kb(const char *field) {
+    static char buf[4096];
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return -1;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    char *at = strstr(buf, field);
+    return at ? strtol(at + strlen(field), NULL, 10) : -1;
+}
+
+static unsigned char byte_at(size_t i, unsigned seed) {
+    return (unsigned char)((i * 2654435761u + seed) >> 13);
+}
+
+static int same(const unsigned char *p, size_t len, unsigned seed, size_t flipped) {
+    for (size_t i = 0; i < len; i++) {
+        unsigned char want = byte_at(i, seed);
+        if (i < flipped) want ^= 0xFF;
+        if (p[i] != want) return 0;
+    }
+    return 1;
+}
+
+// Swapping as Linux programs see it: the figures in /proc and sysinfo,
+// MADV_PAGEOUT (pages out now, back on touch, VmSwap counting them),
+// mlock (locked pages stay), fork (each side keeps its own copy of what
+// the other writes after) and shared memory (a write seen across fork),
+// all with the pages swapped out in between.
+static void swapping(void) {
+    static char text[4096];
+    FILE *f = fopen("/proc/meminfo", "r");
+    CHECK(f, "/proc/meminfo");
+    text[fread(text, 1, sizeof text - 1, f)] = 0;
+    fclose(f);
+    CHECK(strstr(text, "MemAvailable:") && strstr(text, "SwapTotal:") && strstr(text, "SwapFree:") &&
+              strstr(text, "Zswap:"),
+          "/proc/meminfo has memory, swap and compressed figures");
+    f = fopen("/proc/pressure/memory", "r");
+    CHECK(f, "/proc/pressure/memory");
+    text[fread(text, 1, sizeof text - 1, f)] = 0;
+    fclose(f);
+    CHECK(strncmp(text, "some avg10=", 11) == 0 && strstr(text, "\nfull avg10="), "/proc/pressure/memory");
+    struct sysinfo si;
+    CHECK(sysinfo(&si) == 0 && si.totalram > 0 && si.totalswap > 0 && si.freeswap <= si.totalswap, "sysinfo swap");
+
+    size_t len = 256 * 4096;
+    unsigned char *p = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(p != MAP_FAILED, "mmap");
+    for (size_t i = 0; i < len; i++) p[i] = byte_at(i, 1);
+    long s0 = status_kb("VmSwap:");
+    CHECK(s0 >= 0 && status_kb("VmRSS:") >= 1024, "/proc/self/status: VmSwap and VmRSS");
+    CHECK(madvise(p, len, MADV_PAGEOUT) == 0, "MADV_PAGEOUT");
+    long s1 = status_kb("VmSwap:");
+    CHECK(s1 >= s0 + 1024, "VmSwap counts the pages swapped out");
+    CHECK(same(p, len, 1, 0), "swapped-out pages come back as they were");
+    CHECK(status_kb("VmSwap:") <= s1 - 1024, "touched pages are in memory again");
+
+    CHECK(mlock(p, 64 * 4096) == 0 && status_kb("VmLck:") >= 256, "mlock (VmLck)");
+    s0 = status_kb("VmSwap:");
+    CHECK(madvise(p, len, MADV_PAGEOUT) == 0, "MADV_PAGEOUT with some pages locked");
+    s1 = status_kb("VmSwap:");
+    CHECK(s1 - s0 >= 192 * 4 && s1 - s0 <= 192 * 4 + 64, "locked pages are not swapped out");
+    CHECK(munlock(p, 64 * 4096) == 0 && status_kb("VmLck:") == 0, "munlock");
+    CHECK(same(p, len, 1, 0), "after mlock and MADV_PAGEOUT");
+    CHECK(madvise(p, len, MADV_COLD) == 0 && madvise(p, len, MADV_WILLNEED) == 0, "MADV_COLD and MADV_WILLNEED");
+
+    // fork with the pages out: the child writes half and swaps again; the
+    // parent's pages stay as they were.
+    CHECK(madvise(p, len, MADV_PAGEOUT) == 0, "MADV_PAGEOUT before fork");
+    pid_t c = fork();
+    CHECK(c >= 0, "fork");
+    if (c == 0) {
+        int ok = same(p, len, 1, 0);
+        for (size_t i = 0; i < len / 2; i++) p[i] ^= 0xFF;
+        madvise(p, len, MADV_PAGEOUT);
+        _exit(ok && same(p, len, 1, len / 2) ? 0 : 1);
+    }
+    int st = -1;
+    CHECK(waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0, "the child's copy, swapped");
+    CHECK(madvise(p, len, MADV_PAGEOUT) == 0 && same(p, len, 1, 0), "the parent's copy, swapped");
+    munmap(p, len);
+
+    // Shared memory: what the child writes, the parent reads, swapped out
+    // by both in between.
+    unsigned char *s = mmap(0, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    CHECK(s != MAP_FAILED, "mmap shared");
+    for (size_t i = 0; i < len; i++) s[i] = byte_at(i, 2);
+    CHECK(madvise(s, len, MADV_PAGEOUT) == 0, "MADV_PAGEOUT shared");
+    c = fork();
+    CHECK(c >= 0, "fork (shared)");
+    if (c == 0) {
+        int ok = same(s, len, 2, 0);
+        for (size_t i = 0; i < len / 4; i++) s[i] ^= 0xFF;
+        madvise(s, len, MADV_PAGEOUT);
+        _exit(ok ? 0 : 1);
+    }
+    CHECK(waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0, "the child read shared memory");
+    CHECK(same(s, len, 2, len / 4), "the parent reads what the child wrote to shared memory");
+    munmap(s, len);
+    printf("PASS swapping (MADV_PAGEOUT, mlock, fork, shared memory, /proc figures)\n");
 }
 
 // A process's credentials along with what it sends (SO_PASSCRED and
@@ -415,6 +528,7 @@ int main(int argc, char **argv) {
     start(argc, argv);
     files();
     memory();
+    swapping();
     threads();
     credentials();
     avx();

@@ -7,6 +7,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
 - **Boots on UEFI x86_64** with its own bootloader (`firstlight`). It loads the kernel and a read-only system image.
 - **Aster kernel** (hybrid design):
   - memory management, with per-process address spaces and no-execute pages
+  - **running out of memory gracefully**, as macOS and Windows do: the `kswapd` task drops the kernel's caches, then swaps out pages programs haven't used lately — compressed in memory first (LZ4, written for WaveOS), then to an encrypted swap file on the system volume — and brings them back on touch; shared memory and pages shared since `fork` swap too, locked pages (`mlock`) never do. When even that can't keep up, one program is ended (the biggest in the background; never the one you're using if another will do), with a notification. Programs get a memory-pressure event, Linux programs `/proc/meminfo`, `/proc/pressure/memory`, `VmSwap`, `MADV_PAGEOUT` and `mlock`; Pulse and the System Explorer show compressed and swapped memory. See [ARCHITECTURE.md](ARCHITECTURE.md#2-kernel-bring-up-kernelsrcmainrs) ("When memory runs short")
   - **multicore**: every CPU runs tasks, with per-CPU run queues, work stealing and TLB shootdowns
   - HPET and TSC clocks, APIC timers, MSI/MSI-X interrupts
   - `syscall`/`sysret`, with fault-safe copies of user memory

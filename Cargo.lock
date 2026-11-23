@@ -92,6 +92,7 @@ dependencies = [
  "aurora-hid",
  "aurora-i2c",
  "aurora-image",
+ "aurora-lz4",
  "aurora-wav",
  "aurora-wifi",
  "aurorafs",
@@ -161,6 +162,13 @@ dependencies = [
  "jpeg-encoder",
  "miniz_oxide 0.8.9",
  "png",
+]
+
+[[package]]
+name = "aurora-lz4"
+version = "0.8.0"
+dependencies = [
+ "aurora-mutate",
 ]
 
 [[package]]

@@ -157,7 +157,10 @@ fn read(file: &Cached, fs: &Arc<dyn Filesystem>, first: u64, count: u64) -> Resu
 /// Memory is short: drops every file from the cache (pages still mapped
 /// stay with their mappings; the rest are freed).
 pub fn shrink() {
-    let files = core::mem::take(&mut *FILES.lock());
+    // (Never waits: `kswapd` calls this, and whoever holds the lock may be
+    // waiting for memory.)
+    let Some(mut files) = FILES.try_lock() else { return };
+    let files = core::mem::take(&mut *files);
     drop(files);
 }
 

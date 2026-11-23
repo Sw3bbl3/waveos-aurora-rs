@@ -135,6 +135,7 @@ Then check:
   - Isochronous transfers (USB audio) work on xHCI only; on EHCI, OHCI and UHCI, `lsusb` shows audio devices as unsupported. No webcams yet.
 - **Sound.** Intel HD Audio output (no microphone or HDMI audio yet), and USB Audio Class 1 and 2 speakers, headsets, DACs and microphones on xHCI. USB Audio 3.0-only devices aren't supported (most also offer UAC 1 or 2).
 - **Networking.** Wired Ethernet only; see [Wired network adapters](#wired-network-adapters) for which chips are driven and how far each is tested. Wi-Fi: Intel adapters from the Wireless 7265 to the Wi-Fi 6E AX211 are recognized, but WaveOS can't start their radio yet, so no real Wi-Fi works. IPv4 only, with the address from DHCP.
+- **Swap.** The swap file (`/Security/swapfile`, made the first time memory runs short) has only been exercised on QEMU's AHCI, virtio and NVMe disks. Its I/O bypasses the filesystem, straight to the partition's sectors; it has not run on real SSDs or hard disks, and sends no TRIM for freed pages (their contents are encrypted with a per-boot key, so stale pages are noise). When the system volume is on a USB stick (booting from one), the swap file is there too: slow, and it wears the stick.
 - **Sleep** is S3 (suspend to RAM). Many machines since about 2019 support only "Modern Standby" (S0ix), which WaveOS doesn't implement. On those, Sleep isn't offered.
 
 ## Wired network adapters

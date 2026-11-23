@@ -943,6 +943,27 @@ pub struct SysStats {
     pub frames: u64,
     pub windows: u32,
     pub processes: u32,
+    /// Memory free plus what caches would give back (bytes).
+    pub mem_available: u64,
+    /// Bytes the compressed memory store takes, and the bytes of the pages
+    /// in it (uncompressed).
+    pub mem_compressed: u64,
+    pub mem_compressed_pages: u64,
+    /// Swap (compressed store and swap file) size and use, and the swap
+    /// file's part of each (bytes).
+    pub swap_total: u64,
+    pub swap_used: u64,
+    pub swap_file_total: u64,
+    pub swap_file_used: u64,
+    /// Pages swapped in and out since boot.
+    pub swap_ins: u64,
+    pub swap_outs: u64,
+    /// 0 none, 1 warning, 2 critical (see [`event::MEMORY_PRESSURE`]).
+    pub mem_pressure: u32,
+    /// Share of the last 10 s some program waited for memory (1/100 %).
+    pub mem_stall_10s: u32,
+    /// Programs ended because memory ran out, since boot.
+    pub oom_kills: u64,
 }
 
 /// A window's pixel buffer, mapped into the owning process.
@@ -1126,6 +1147,11 @@ pub mod event {
     /// (while it may read the controllers), connections to every window;
     /// `gamepad_state` has the rest (sticks, triggers).
     pub const GAMEPAD: u32 = 16;
+    /// Memory pressure changed, sent to every window: `a` = 0 none, 1
+    /// warning (memory is short and being reclaimed: let go of caches you
+    /// can rebuild), 2 critical (programs wait for memory, and one may be
+    /// ended soon: free all you can).
+    pub const MEMORY_PRESSURE: u32 = 17;
 }
 
 /// A single input/window event. Field meaning depends on `kind`:

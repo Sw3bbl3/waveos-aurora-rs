@@ -66,6 +66,11 @@ const TESTS: &[Test] = &[
     ("packages: install, update and remove from a repository (pkgtest)", crate::gui::installed::self_test),
     ("syscall fuzzer (native calls, racing threads, kills)", syscall_fuzz),
     ("memory exhaustion: programs take all they can, the kernel keeps its reserve and recovers", memory_exhaustion),
+    ("mm: what memory costs a program under no pressure (bench)", memory_bench),
+    ("swap: private, fork-shared, shared and locked pages out and back", mm::swaptest::semantics),
+    ("swap: a program fills several times its memory, every page checked", mm::swaptest::overcommit),
+    ("swap: pages through the swap file, then it fills; the kernel is unharmed", mm::swaptest::file_full),
+    ("swap: out of memory ends the right program", mm::swaptest::oom),
     ("Learn: both offline libraries", learn_library),
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
@@ -408,6 +413,38 @@ fn syscall_fuzz() {
     );
     let heap_after = mm::heap::usage().1;
     crate::kprint!("[seed {seed}, heap {} KiB → {} KiB] ", heap_before / 1024, heap_after / 1024);
+}
+
+/// What memory costs a program with no pressure on it: `fuzz swap` maps
+/// 64 MiB, writes every page and reads it back (`bench:` lines, to compare
+/// kernels; it asserts nothing but that the pattern held).
+fn memory_bench() {
+    let (r, w) = crate::proc::new_pipe(true);
+    let argv = ["fuzz", "swap", "64", "9", "1", "1"];
+    let pid = crate::proc::spawn("/System/Bin/fuzz", &argv, [None, Some(w.clone()), Some(w)], 0).expect("spawn fuzz");
+    let pipe = match &*r {
+        crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
+        _ => unreachable!(),
+    };
+    let p = crate::proc::get(pid).unwrap();
+    let mut out = String::new();
+    let mut buf = [0u8; 256];
+    loop {
+        while let Ok(n @ 1..) = pipe.read(&mut buf, true) {
+            out.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        if p.exit_code().is_some() {
+            while let Ok(n @ 1..) = pipe.read(&mut buf, true) {
+                out.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+            break;
+        }
+        sched::sleep_ms(20);
+    }
+    for line in out.lines() {
+        crate::kprintln!("bench: {line}");
+    }
+    assert_eq!(p.exit_code(), Some(0), "{out}");
 }
 
 fn learn_library() {

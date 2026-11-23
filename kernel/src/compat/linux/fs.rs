@@ -281,7 +281,7 @@ pub fn path_arg(p: &Process, dirfd: u64, ptr: u64) -> Result<String, isize> {
 fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
     let user = account_user();
     Some(Ok(match guest {
-        "/dev" | "/proc" | "/proc/self" | "/dev/shm" => {
+        "/dev" | "/proc" | "/proc/self" | "/proc/pressure" | "/dev/shm" => {
             Special::Dir { host: String::from(guest), entries: None, pos: 0 }
         }
         "/dev/null" => Special::Null,
@@ -290,6 +290,8 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/dev/tty" | "/dev/console" => return Some(Err(ENXIO)),
         "/proc/cpuinfo" => mem(cpuinfo()),
         "/proc/meminfo" => mem(meminfo()),
+        "/proc/pressure/memory" => mem(pressure()),
+        "/proc/self/status" => mem(status(p)),
         "/proc/self/maps" => mem(super::mm::maps(p)),
         "/proc/self/cmdline" => mem(format!("{}\0", p.name())),
         "/proc/self/comm" | "/proc/self/task/self/comm" => mem(format!("{}\n", p.name())),
@@ -309,7 +311,14 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/etc/hostname" => mem(String::from("aurora\n")),
         "/etc/hosts" => mem(String::from("127.0.0.1 localhost aurora\n::1 localhost aurora\n")),
         "/etc/resolv.conf" => mem(resolv_conf()),
-        _ => return None,
+        _ => {
+            // `/proc/<pid>/status`.
+            let pid = guest.strip_prefix("/proc/")?.strip_suffix("/status")?.parse::<u32>().ok()?;
+            match crate::proc::get(pid) {
+                Some(other) => mem(status(&other)),
+                None => return Some(Err(ENOENT)),
+            }
+        }
     }))
 }
 
@@ -370,15 +379,73 @@ fn cpuinfo() -> String {
     s
 }
 
+/// `/proc/meminfo`: memory, the caches, swap (the compressed store and the
+/// swap file together) and the compressed store (as Linux's zswap).
 fn meminfo() -> String {
-    let m = crate::mm::stats();
+    let m = crate::mm::kswapd::meminfo();
+    let s = crate::mm::swap::stats();
     let kib = |b: u64| b / 1024;
+    let page_kib = |pages: u64| pages * 4;
+    let mut out = String::new();
+    for (name, v) in [
+        ("MemTotal", kib(m.total)),
+        ("MemFree", kib(m.free)),
+        ("MemAvailable", kib(m.available)),
+        ("Buffers", page_kib(crate::fs::cache::held_blocks())),
+        ("Cached", page_kib(crate::fs::mapcache::held_pages())),
+        ("SwapCached", page_kib(s.cached_pages)),
+        ("SwapTotal", kib(m.swap_total)),
+        ("SwapFree", kib(m.swap_total.saturating_sub(m.swap_used))),
+        ("Zswap", kib(m.compressed_bytes)),
+        ("Zswapped", page_kib(m.compressed_pages)),
+    ] {
+        out.push_str(&format!("{:<16}{:>8} kB\n", format!("{name}:"), v));
+    }
+    out
+}
+
+/// `/proc/pressure/memory`: the share of time some program waited for
+/// memory, over 10, 60 and 300 seconds, and in all (microseconds). ("full",
+/// every program waiting at once, isn't tracked: it reads as none.)
+fn pressure() -> String {
+    let (total_ns, avg) = crate::mm::kswapd::pressure();
+    let pct = |v: u64| format!("{}.{:02}", v / 100, v % 100);
     format!(
-        "MemTotal:       {} kB\nMemFree:        {} kB\nMemAvailable:   {} kB\n",
-        kib(m.total_bytes),
-        kib(m.total_bytes - m.used_bytes),
-        kib(m.total_bytes - m.used_bytes)
+        "some avg10={} avg60={} avg300={} total={}\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        pct(avg[0]),
+        pct(avg[1]),
+        pct(avg[2]),
+        total_ns / 1000
     )
+}
+
+/// `/proc/<pid>/status`: who the process is and its memory (resident,
+/// swapped out, locked).
+fn status(p: &Process) -> String {
+    let c = p.mem().as_ref().map(|a| a.page_counts()).unwrap_or_default();
+    let cred = *p.cred.lock();
+    let kb = |pages: u64| pages * 4;
+    let mut out = format!(
+        "Name:\t{}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{u}\t{u}\t{u}\t{u}\nGid:\t{g}\t{g}\t{g}\t{g}\n",
+        p.name(),
+        if p.exit_code().is_some() { "Z (zombie)" } else { "S (sleeping)" },
+        p.pid,
+        p.pid,
+        p.parent,
+        u = cred.uid,
+        g = cred.gid
+    );
+    for (name, pages) in [
+        ("VmLck", c.locked),
+        ("VmRSS", c.private + c.shared),
+        ("RssAnon", c.private),
+        ("RssShmem", c.shared),
+        ("VmSwap", c.swapped),
+    ] {
+        out.push_str(&format!("{name}:\t{:>8} kB\n", kb(pages)));
+    }
+    out.push_str(&format!("Threads:\t{}\n", p.thread_count()));
+    out
 }
 
 fn mounts() -> String {
@@ -890,8 +957,16 @@ fn plain_entries(host: &str) -> Vec<(String, u8)> {
     }
     let names: &[(&str, bool)] = match host {
         "/dev" => &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true)],
-        "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false)],
-        "/proc/self" => &[("exe", false), ("maps", false), ("cmdline", false), ("comm", false), ("stat", false)],
+        "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false), ("pressure", true)],
+        "/proc/self" => &[
+            ("exe", false),
+            ("maps", false),
+            ("cmdline", false),
+            ("comm", false),
+            ("stat", false),
+            ("status", false),
+        ],
+        "/proc/pressure" => &[("memory", false)],
         "/dev/shm" => return super::shm::names().into_iter().map(|n| (n, DT_REG)).collect(),
         _ => {
             let mut v: Vec<(String, u8)> = fs::readdir(host)

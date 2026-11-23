@@ -163,6 +163,7 @@ impl App for ClientApp {
         false
     }
     fn focus(&mut self, focused: bool) {
+        server::note_focus(self.id, focused);
         server::push_event(self.id, Event { kind: event::FOCUS, a: focused as u32, ..Default::default() });
     }
     fn request_close(&mut self) -> bool {

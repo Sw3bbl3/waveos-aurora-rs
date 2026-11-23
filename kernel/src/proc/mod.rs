@@ -107,6 +107,9 @@ pub struct Process {
     /// Threads that have not been reaped yet.
     threads: AtomicU32,
     pub resident_kib: AtomicU64,
+    /// A system service the out-of-memory killer spares while any other
+    /// program is left (see `mm::kswapd::badness`).
+    pub oom_protected: AtomicBool,
     /// Set for Linux programs (their system calls go to `compat::linux`).
     pub linux: Option<crate::compat::linux::Linux>,
     entry: u64,
@@ -166,6 +169,11 @@ impl Process {
             }
         }
         MemGuard { guard: self.aspace.lock(), _owner: None }
+    }
+
+    /// Whether the reaper has freed the process's resources (its memory among them).
+    pub fn is_reaped(&self) -> bool {
+        self.reaped.load(Ordering::Acquire)
     }
 
     /// Threads not reaped yet.
@@ -229,13 +237,55 @@ pub fn get(pid: Pid) -> Option<Arc<Process>> {
 }
 
 /// An access to user address `addr` faulted (a write if `write`): makes
-/// the page there if it is lazy memory, or the process's own if it shares
-/// it since `fork` (see `AddressSpace::resolve_fault`). True if the access
-/// can go again.
+/// the page there if it is lazy memory, brings it back if it is swapped
+/// out, or makes it the process's own if it shares it since `fork` (see
+/// `AddressSpace::fault`). True if the access can go again.
 pub fn resolve_fault(addr: u64, write: bool) -> bool {
     let Some(p) = current() else { return false };
-    let mut guard = p.mem();
-    guard.as_mut().is_some_and(|a| a.resolve_fault(addr, write))
+    with_memory(&p, |a| a.fault(addr, write))
+}
+
+/// Runs a fault-like operation on `p`'s memory. When memory is out it
+/// waits for reclaim (its address-space lock let go meanwhile) and tries
+/// again; when reclaim can't keep up, the out-of-memory killer ends a
+/// program (perhaps this one: then false, and its threads leave at their
+/// next safe point).
+fn with_memory(p: &Process, mut op: impl FnMut(&mut AddressSpace) -> crate::mm::vmm::Fault) -> bool {
+    use crate::mm::{kswapd, vmm::Fault};
+    let mut without_room = 0;
+    for _ in 0..16 {
+        let r = {
+            let mut guard = p.mem();
+            match guard.as_mut() {
+                Some(a) => op(a),
+                None => Fault::Invalid,
+            }
+        };
+        match r {
+            Fault::Resolved => return true,
+            Fault::Invalid => return false,
+            Fault::NoMemory => {}
+        }
+        if p.killed.load(Ordering::Acquire) || !x86_64::instructions::interrupts::are_enabled() {
+            return false;
+        }
+        if kswapd::wait_for_memory() {
+            continue;
+        }
+        without_room += 1;
+        if kswapd::futile() || without_room >= 3 {
+            kswapd::out_of_memory();
+        }
+        if p.killed.load(Ordering::Acquire) {
+            return false;
+        }
+    }
+    false
+}
+
+/// Whether the running thread's process is being ended.
+pub fn current_killed() -> bool {
+    current().is_some_and(|p| p.killed.load(Ordering::Acquire))
 }
 
 /// True if the running process has `addr` mapped (or reserved), whatever
@@ -250,8 +300,7 @@ pub fn is_mapped(addr: u64) -> bool {
 /// write) now, as faults would; false if some of it isn't mapped so.
 pub fn prefault(addr: u64, len: u64, write: bool) -> bool {
     let Some(p) = current() else { return false };
-    let mut guard = p.mem();
-    guard.as_mut().is_some_and(|a| a.prefault(addr, len, write))
+    with_memory(&p, |a| a.prefault(addr, len, write))
 }
 
 /// Each CPU's last answer to [`current`]: (pid, process). Process ids are
@@ -283,6 +332,17 @@ pub fn current() -> Option<Arc<Process>> {
 
 pub fn all() -> Vec<Arc<Process>> {
     TABLE.lock().values().cloned().collect()
+}
+
+/// [`all`], or None if the list can't be allocated (memory is out).
+pub fn try_all() -> Option<Vec<Arc<Process>>> {
+    let mut out = Vec::new();
+    // (Sized outside the table's lock, which an allocation must not wait under.)
+    let n = TABLE.lock().len();
+    out.try_reserve_exact(n + 8).ok()?;
+    let table = TABLE.lock();
+    out.extend(table.values().take(n + 8).cloned());
+    Some(out)
 }
 
 pub fn init() {
@@ -362,6 +422,7 @@ pub fn spawn_env(
         pgid: AtomicU32::new(pid),
         sid: AtomicU32::new(pid),
         resident_kib: AtomicU64::new(aspace.resident / 1024),
+        oom_protected: AtomicBool::new(false),
         aspace: Mutex::new(Some(aspace)),
         fds: Mutex::new(fds),
         cwd: Mutex::new(cwd.unwrap_or_else(|| String::from("/"))),
@@ -750,6 +811,7 @@ pub fn fork(
         pgid: AtomicU32::new(parent.pgid.load(Ordering::Relaxed)),
         sid: AtomicU32::new(parent.sid.load(Ordering::Relaxed)),
         resident_kib: AtomicU64::new(resident / 1024),
+        oom_protected: AtomicBool::new(false),
         aspace: Mutex::new(aspace),
         fds: Mutex::new(parent.fds.lock().clone()),
         cwd: Mutex::new(parent.cwd.lock().clone()),

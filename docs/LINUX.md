@@ -91,15 +91,24 @@ Writing to the file, or deleting it, drops it from the cache.
   always are.
 - **Made-up files:** `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/fd/*`,
   `/dev/kmsg` (the system log: `2>/dev/kmsg` keeps a program's messages);
-  `/proc/self/exe`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/mounts`; and
+  `/proc/self/exe`, `/proc/cpuinfo`, `/proc/meminfo` (with swap and the
+  compressed store as `Zswap`), `/proc/pressure/memory`,
+  `/proc/self/status` and `/proc/<pid>/status` (`VmRSS`, `VmSwap`,
+  `VmLck`), `/proc/mounts`; and
   `/etc/passwd`, `/etc/group`, `/etc/hostname`, `/etc/hosts` and
   `/etc/resolv.conf` built from the computer's settings.
 - **Memory:** `brk`, `mmap` (anonymous and private file mappings, hints,
   `MAP_FIXED`), `mprotect`, `mremap`, `munmap` and `madvise`. Anonymous
   memory gets its pages when they are first touched, so a program can
   reserve gigabytes (WebKit's JavaScript engine maps 8 GiB) and pay only
-  for what it uses; `MADV_DONTNEED` gives pages back. `PROT_NONE`
-  reservations take no memory at all.
+  for what it uses; `MADV_DONTNEED` and `MADV_FREE` give pages back,
+  `MADV_PAGEOUT` swaps them out now, `MADV_COLD` makes them the first to
+  go, `MADV_WILLNEED` brings swapped-out ones back. `PROT_NONE`
+  reservations take no memory at all. `mlock`, `mlock2`, `munlock`,
+  `mlockall` and `munlockall` keep pages in memory (`MCL_FUTURE` is
+  accepted, but memory mapped later isn't locked); `sysinfo` reports swap.
+  When memory runs short, pages are swapped out (see
+  [developer/memory.md](developer/memory.md)).
 - **The processor:** x87, SSE and AVX, with the kernel saving each thread's
   registers (XSAVE) across switches and in signal frames, as on Linux.
 - **Shared memory:** `memfd_create`, `shm_open` (`/dev/shm`) and

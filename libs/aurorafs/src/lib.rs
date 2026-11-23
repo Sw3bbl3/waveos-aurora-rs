@@ -1219,6 +1219,41 @@ impl<D: Disk> Volume<D> {
         self.maybe_commit()
     }
 
+    /// Gives file `ino` blocks for `size` bytes without writing them (a
+    /// swap file, whose every block is written before it is read), and
+    /// commits. What the new blocks held before is not cleared: the caller
+    /// must never let it be read. Fails before allocating anything if the
+    /// blocks don't fit.
+    pub fn allocate(&mut self, ino: u64, size: u64) -> Result<()> {
+        let mut inode = self.read_inode(ino)?;
+        if inode.kind()? != Kind::File {
+            return Err(Error::IsDir);
+        }
+        if size > MAX_FILE_SIZE {
+            return Err(Error::TooBig);
+        }
+        let blocks = size.div_ceil(BLOCK as u64);
+        let had = inode.allocated_blocks();
+        if blocks.saturating_sub(had) > self.sb.free_blocks {
+            return Err(Error::NoSpace);
+        }
+        if let Err(e) = self.grow(&mut inode, blocks) {
+            self.shrink(&mut inode, had);
+            return Err(e);
+        }
+        inode.size = inode.size.max(size);
+        inode.mtime = (self.now)();
+        self.write_inode(ino, &inode)?;
+        self.commit()
+    }
+
+    /// Where file `ino`'s blocks are on the disk, in file order: runs of
+    /// (first block, blocks).
+    pub fn extents(&mut self, ino: u64) -> Result<Vec<(u64, u64)>> {
+        let inode = self.read_inode(ino)?;
+        Ok(inode.extents.iter().map(|e| (e.start, e.len as u64)).collect())
+    }
+
     /// Sets a file's or folder's times, as when copying it from another volume.
     pub fn set_times(&mut self, ino: u64, ctime: u64, mtime: u64) -> Result<()> {
         let mut inode = self.read_inode(ino)?;

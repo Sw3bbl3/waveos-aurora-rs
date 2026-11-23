@@ -34,6 +34,8 @@
 //!   cargo xtask image [--no-linux-root] build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
+//!                                         (--memory-mib N: guest RAM, default 512; the swap tests
+//!                                         overcommit whatever it is several times over)
 //!                                         (AURORA_TEST_FILTER=NAME runs matching tests; AURORA_FUZZ_SEED,
 //!                                         AURORA_FUZZ_ROUNDS, AURORA_FUZZ_ITERS, AURORA_LINUXFUZZ_CHILDREN and
 //!                                         AURORA_LINUXFUZZ_CALLS make the fuzzers run longer, with
@@ -331,7 +333,7 @@ fn main() {
             }
             println!("wrote {}", out.display());
         }
-        Some("test") => test(profile, disk, smp, net, gpu, usb),
+        Some("test") => test(profile, disk, smp, net, gpu, usb, number("--memory-mib", 512, 256, 32768)),
         Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
@@ -1286,10 +1288,19 @@ fn inbound_check(port: u16) {
     });
 }
 
-fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str) {
+fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str, memory_mib: u64) {
     let esp = build(profile, true);
+    // AURORA_TEST_KERNEL=path runs another kernel (a self-test build of an
+    // earlier commit, say) with this build's programs: for A/B comparisons
+    // of the `bench:` and `mm-bench:` lines.
+    if let Some(kernel) = env::var_os("AURORA_TEST_KERNEL") {
+        fs::copy(&kernel, esp.join("aurora/kernel.elf")).expect("copy AURORA_TEST_KERNEL");
+        println!("testing the kernel {}", Path::new(&kernel).display());
+    }
     let img = root().join("target/test-disk.img");
-    println!("running kernel tests with the disk on {disk}, network {net}, display {gpu}, USB on {usb}");
+    println!(
+        "running kernel tests with the disk on {disk}, network {net}, display {gpu}, USB on {usb}, {memory_mib} MiB of memory"
+    );
     let http_port = start_test_http_server();
     let fwd_port = free_port();
     // AURORA_TEST_SLEEP=off skips the sleep test (firmware that can't resume).
@@ -1316,6 +1327,10 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
             ("AURORA_LINUXFUZZ_CALLS", "linuxfuzz_calls"),
             // Seconds between memory reports while the fuzzers run (`mm::report`).
             ("AURORA_MEM_REPORT", "mem_report"),
+            // The swap tests: MiB left to programs ("all": all of memory),
+            // and how many times that they fill (`mm::swaptest`).
+            ("AURORA_SWAP_TEST_RAM", "swap_test_ram"),
+            ("AURORA_SWAP_FACTOR", "swap_factor"),
         ] {
             if let Ok(v) = env::var(var) {
                 image::set_boot_option(&img, key, &v).expect("write boot.conf");
@@ -1332,7 +1347,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let output = match run_tests_once(&img, disk, smp, net, gpu, usb, fwd_port) {
+            let output = match run_tests_once(&img, disk, smp, net, gpu, usb, fwd_port, memory_mib) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
                     // The firmware never handed back control: some OVMF builds
@@ -1474,6 +1489,7 @@ fn recorded_peak(path: &Path) -> i32 {
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
 /// as an error if the tests failed or timed out.
+#[allow(clippy::too_many_arguments)]
 fn run_tests_once(
     img: &Path,
     disk: &str,
@@ -1482,13 +1498,14 @@ fn run_tests_once(
     gpu: &str,
     usb: &str,
     fwd_port: u16,
+    memory_mib: u64,
 ) -> Result<String, String> {
     use std::io::{BufRead, BufReader};
     let audio = root().join("target/test-audio.wav");
     let _ = fs::remove_file(&audio);
     let _ = fs::remove_file(usb_audio_wav(&audio));
     let opts = RunOpts {
-        memory_mib: 512,
+        memory_mib,
         keyboard_capture: false,
         headless: true,
         gdb: false,

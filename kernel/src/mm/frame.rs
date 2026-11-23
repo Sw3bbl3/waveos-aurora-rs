@@ -576,14 +576,35 @@ pub fn kernel_reserve() -> u64 {
 }
 
 /// One frame for a user program's memory (or a window surface): like
-/// [`alloc`], but fails once only the kernel's reserve is left.
+/// [`alloc`], but never takes the kernel's reserve. Free memory under the
+/// low watermark wakes `kswapd`; at the reserve, a caller that may sleep
+/// waits for it to make room (see `mm::kswapd` for who may), and others
+/// fail at once.
 pub fn alloc_user() -> Option<u64> {
+    alloc_user_with(true)
+}
+
+/// [`alloc_user`] that never waits for `kswapd` (for callers holding an
+/// address-space lock, which `kswapd` may need).
+pub fn alloc_user_nowait() -> Option<u64> {
+    alloc_user_with(false)
+}
+
+fn alloc_user_with(wait: bool) -> Option<u64> {
     if USER_ALLOCS.fetch_add(1, Ordering::Relaxed).is_multiple_of(32) || LOW.load(Ordering::Relaxed) {
-        LOW.store(counts().1 <= kernel_reserve(), Ordering::Relaxed);
+        let free = counts().1;
+        LOW.store(free <= kernel_reserve(), Ordering::Relaxed);
+        if free < super::kswapd::low_watermark() {
+            super::kswapd::wake();
+        }
     }
     if LOW.load(Ordering::Relaxed) {
-        PRESSURE.store(true, Ordering::Relaxed);
-        return None;
+        let room = wait && super::kswapd::wait_for_memory();
+        LOW.store(counts().1 <= kernel_reserve(), Ordering::Relaxed);
+        if !room || LOW.load(Ordering::Relaxed) {
+            PRESSURE.store(true, Ordering::Relaxed);
+            return None;
+        }
     }
     alloc()
 }
@@ -592,9 +613,13 @@ pub fn alloc_user() -> Option<u64> {
 /// on its behalf (a thread's kernel stack, a pipe's buffer): not if that
 /// would eat into the kernel's reserve, which user memory can't touch.
 pub fn user_may_take(frames: u64) -> bool {
-    let ok = counts().1 > kernel_reserve() + frames;
+    let free = counts().1;
+    let ok = free > kernel_reserve() + frames;
     if !ok {
         PRESSURE.store(true, Ordering::Relaxed);
+    }
+    if free < super::kswapd::low_watermark() + frames {
+        super::kswapd::wake();
     }
     ok
 }
