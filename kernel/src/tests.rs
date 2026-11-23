@@ -27,6 +27,10 @@ const TESTS: &[Test] = &[
     ("LinuxKPI: runtime, DRM and the GPU display", linux_kpi),
     ("display: EDID, connectors, mode sets, atomic commits, cursor plane", crate::drivers::gpu::selftest::display),
     ("intel display: firmware takeover on a simulated engine", crate::drivers::gpu::intel::selftest::run),
+    (
+        "displays: layout, pointer crossing, per-display damage, slow display, hotplug, arrangement, mirroring, screendumps",
+        displays,
+    ),
     ("rect math", rects),
     ("keyboard decoder", keyboard),
     ("ramfs + vfs", ramfs),
@@ -2154,4 +2158,360 @@ fn network6() {
             Err(e) => log!("net-test", "host over IPv6 unavailable: {}", aurora_abi::err::name(e)),
         }
     }
+}
+
+/// A window that paints itself one colour (the multi-monitor test's marker).
+struct Card(u32);
+
+impl crate::gui::apps::App for Card {
+    fn kind(&self) -> crate::gui::apps::AppKind {
+        crate::gui::apps::AppKind::Other
+    }
+    fn title(&self) -> alloc::string::String {
+        "Card".into()
+    }
+    fn covers_window(&self) -> bool {
+        true
+    }
+    fn size(&self) -> (i32, i32) {
+        (360, 220)
+    }
+    fn draw(&mut self, cv: &mut crate::gui::canvas::Canvas, area: Rect, _env: &crate::gui::apps::Env) {
+        cv.fill_rect(area, self.0);
+    }
+}
+
+/// Asks the harness to check what every head shows: a few pixels of each
+/// display's back buffer, compared with a QMP screendump of its scanout.
+fn displays_screendump(c: &crate::gui::screens::Compositor) {
+    assert!(c.wait_presented(3000), "a display never took its picture");
+    for s in &c.screens {
+        let (w, h) = s.out.size();
+        let mut line = alloc::format!("\nharness: screendump {}", s.head());
+        for (fx, fy) in [(1, 1), (2, 1), (1, 2), (5, 6), (7, 3), (6, 7)] {
+            let (x, y) = (w * fx / 8, h * fy / 8);
+            line.push_str(&alloc::format!(" {x},{y}={:06x}", s.pixel(x, y) & 0xFF_FFFF));
+        }
+        crate::kprintln!("{line}");
+    }
+    // The harness takes them now; nothing is drawn meanwhile.
+    sched::sleep_ms(1500);
+}
+
+/// Median time (µs) of a frame that repaints every display: composing it,
+/// and until every display has taken it.
+fn displays_frame_cost(c: &mut crate::gui::screens::Compositor) -> (u64, u64) {
+    c.settle(2000);
+    let (mut compose, mut total) = (Vec::new(), Vec::new());
+    for _ in 0..11 {
+        c.desktop.damage_all();
+        let t = time::now_ns();
+        c.frame();
+        c.wait_presented(2000);
+        total.push((time::now_ns() - t) / 1000);
+        compose.push(c.last_frame_ns / 1000);
+        sched::sleep_ms(5);
+    }
+    compose.sort_unstable();
+    total.sort_unstable();
+    (compose[compose.len() / 2], total[total.len() / 2])
+}
+
+/// Several displays, on virtio-gpu with as many heads as `cargo xtask test
+/// --gpu virtio --displays N` gives (one elsewhere): the compositor's
+/// layout, a new window opening where the pointer is, the pointer crossing
+/// between displays and stopping at the outer edges, damage presented only
+/// where it falls, a slow display not holding up the others, windows
+/// leaving an unplugged display and coming back, the arrangement, main
+/// display and mirroring from preferences (and the arrangement found again
+/// by identity on the second boot), what each head shows (QMP
+/// screendumps), and the frame cost with 3, 2 and 1 displays.
+fn displays() {
+    use crate::drivers::gpu::{self, Status};
+    use crate::drivers::input::{self, InputEvent};
+    use crate::gui::screens::{self, Compositor};
+    use lumen::displays::{self as layout, Record, Side};
+    crate::gui::settings::load();
+    let heads: usize =
+        crate::gui::prefs::boot_option("test_displays").and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 4);
+    // The third display is HiDPI: drawn at 2x (1280x720 points).
+    const SIZES: [(u32, u32); 3] = [(1024, 768), (2560, 1440), (800, 600)];
+    let connected = || {
+        gpu::devices()
+            .iter()
+            .map(|d| d.connectors().iter().filter(|c| c.status == Status::Connected).count())
+            .sum::<usize>()
+    };
+    for head in 1..heads {
+        let (w, h) = SIZES[head - 1];
+        crate::kprintln!("\nharness: display set {head} {w}x{h}");
+    }
+    assert!(eventually(20_000, || connected() >= heads), "{} of {heads} displays connected", connected());
+    let _ = crate::gui::server::take_commands();
+
+    let mut c = Compositor::new();
+    c.desktop.dismiss_shore();
+    let n = c.screens.len();
+    assert_eq!(n, heads, "the compositor opened {n} of {heads} displays");
+    let rects = |c: &Compositor| c.screens.iter().map(|s| s.rect).collect::<Vec<Rect>>();
+    let r = rects(&c);
+    assert_eq!((r[c.main].x, r[c.main].y), (0, 0), "the main display is at the origin");
+    for (i, a) in r.iter().enumerate() {
+        let (pw, ph) = c.screens[i].out.size();
+        assert_eq!((a.w * c.screens[i].scale, a.h * c.screens[i].scale), (pw as i32, ph as i32));
+        assert!(r[i + 1..].iter().all(|b| !a.intersects(b)), "displays overlap: {r:?}");
+    }
+    assert!(layout::connected(&r), "displays don't touch: {r:?}");
+    let published = screens::published();
+    assert_eq!(published.len(), n);
+    assert!(published[0].is_primary() && published[0].id == c.screens[c.main].id);
+    assert_eq!(c.desktop.displays().len(), n);
+    let main_key = c.screens[c.main].key;
+    // The second boot: a display saved on the left of the main one is there again.
+    let restored = c.screens.iter().find(|s| s.key != main_key && screens::record(s.key).is_some_and(|r| r.x < 0));
+    if let Some(s) = restored {
+        assert!(s.rect.x < 0, "{} was saved on the left but is at {:?}", s.connector, s.rect);
+        crate::kprint!("(arrangement restored by identity) ");
+    }
+    c.settle(4000);
+    let (compose_all, total_all) = displays_frame_cost(&mut c);
+
+    // Point at a display next to the main one (or the main one alone).
+    let side = (0..n).find(|&i| i != c.main && layout::side_of(r[c.main], r[i]).is_some());
+    let b = c.desktop.bounds();
+    let at = |x: i32, y: i32| InputEvent::Pointer { x: x - b.x, y: y - b.y, buttons: 0 };
+    let (cx, cy) = r[c.main].center();
+    input::push(at(cx, cy));
+    c.frame();
+    assert_eq!(c.desktop.pointer_at(), (cx, cy));
+    let target = match side {
+        Some(i) => {
+            let dir = match layout::side_of(r[c.main], r[i]).unwrap() {
+                Side::Left => (-1, 0),
+                Side::Right => (1, 0),
+                Side::Above => (0, -1),
+                Side::Below => (0, 1),
+            };
+            // Across the shared edge…
+            for _ in 0..80 {
+                input::pointer_moved(dir.0 * 40, dir.1 * 40, 0);
+                c.frame();
+                if r[i].contains(c.desktop.pointer_at().0, c.desktop.pointer_at().1) {
+                    break;
+                }
+            }
+            let p = c.desktop.pointer_at();
+            assert!(r[i].contains(p.0, p.1), "the pointer did not cross to display {i}: {p:?}");
+            if c.screens.iter().all(|s| s.out.has_cursor()) {
+                assert!(c.screens[i].cursor_shown() && !c.screens[c.main].cursor_shown(), "cursor planes");
+            }
+            i
+        }
+        None => c.main,
+    };
+    // …and on to an outer edge, where it stops.
+    let p0 = c.desktop.pointer_at();
+    for _ in 0..80 {
+        input::pointer_moved(0, -60, 0);
+        c.frame();
+    }
+    let p = c.desktop.pointer_at();
+    assert!(layout::at(&r, p.0, p.1).is_some(), "the pointer left the displays: {p:?}");
+    assert_eq!(p.0, p0.0);
+    assert!(layout::at(&r, p.0, p.1 - 1).is_none(), "the pointer did not stop at the top edge: {p:?}");
+    let (tx, ty) = r[target].center();
+    input::push(at(tx, ty));
+    c.frame();
+
+    // A new window opens on the display with the pointer.
+    let card = c.desktop.add_test_window(Box::new(Card(0xFF1F_7A4C)));
+    c.settle(3000);
+    let card_rect = |c: &Compositor| c.desktop.window_rects().into_iter().find(|w| w.0 == card).map(|w| (w.1, w.2));
+    let (wr, _) = card_rect(&c).expect("the card window");
+    assert_eq!(layout::home(&r, wr), target, "the window opened at {wr:?}, not on display {target}");
+    // Maximised on the display it is on, and back.
+    c.desktop.toggle_zoom(card);
+    c.settle(2000);
+    let (zoomed, _) = card_rect(&c).unwrap();
+    let d = r[target];
+    let expect = if target == c.main { zoomed } else { Rect::new(d.x + 8, d.y + 8, d.w - 16, d.h - 16) };
+    assert!(layout::home(&r, zoomed) == target && zoomed == expect, "maximised to {zoomed:?} on {d:?}");
+    c.desktop.toggle_zoom(card);
+    c.settle(2000);
+    assert_eq!(card_rect(&c).unwrap().0, wr, "not restored after maximising");
+    // Out of the way of the screendumps' samples.
+    input::push(at(r[target].x + 2, r[target].bottom() - 2));
+    c.settle(2000);
+    displays_screendump(&c);
+    // Shore (setup, login, lock) holds the main display: nothing of the
+    // desktop shows on the others meanwhile.
+    let (s, (cx, cy)) = (&c.screens[target], wr.center());
+    let px = ((cx - s.rect.x) as u32 * s.scale as u32, (cy - s.rect.y) as u32 * s.scale as u32);
+    assert_eq!(s.pixel(px.0, px.1) & 0xFF_FFFF, 0x1F_7A4C, "the card isn't drawn");
+    if target != c.main {
+        c.desktop.show_shore();
+        c.settle(3000);
+        let s = &c.screens[target];
+        assert_ne!(s.pixel(px.0, px.1) & 0xFF_FFFF, 0x1F_7A4C, "a window shows beside the login screen");
+        c.desktop.dismiss_shore();
+        c.settle(3000);
+    }
+
+    let mut costs = alloc::vec![(n, compose_all, total_all)];
+    if n > 1 {
+        // Damage on one display is painted and presented there only.
+        let mut alone = false;
+        for _ in 0..4 {
+            c.settle(2000);
+            let before: Vec<u64> = c.screens.iter().map(|s| s.present_count()).collect();
+            let (x, y) = r[target].center();
+            c.desktop.damage(Rect::new(x - 30, y - 30, 60, 60));
+            c.frame();
+            c.wait_presented(2000);
+            let after: Vec<u64> = c.screens.iter().map(|s| s.present_count()).collect();
+            alone = (0..n).all(|i| (after[i] > before[i]) == (i == target));
+            if alone {
+                break;
+            }
+        }
+        assert!(alone, "damage on one display was presented elsewhere too");
+
+        // A slow display (each present takes 300 ms) holds up nobody else.
+        let slow = target;
+        let delay = &c.screens[slow].presenter().expect("a presenter per display").delay_ms;
+        delay.store(300, core::sync::atomic::Ordering::Relaxed);
+        let quick = c.main;
+        let (q0, s0) = (c.screens[quick].present_count(), c.screens[slow].present_count());
+        let (start, mut worst) = (time::uptime_ms(), 0);
+        while time::uptime_ms() - start < 2500 {
+            for i in [quick, slow] {
+                let (x, y) = r[i].center();
+                c.desktop.damage(Rect::new(x - 100, y + 120, 40, 20));
+            }
+            let t = time::uptime_ms();
+            c.frame();
+            worst = worst.max(time::uptime_ms() - t);
+            sched::sleep_ms(10);
+        }
+        let (q1, s1) = (c.screens[quick].present_count(), c.screens[slow].present_count());
+        c.screens[slow].presenter().unwrap().delay_ms.store(0, core::sync::atomic::Ordering::Relaxed);
+        assert!(
+            q1 - q0 >= 8 && q1 - q0 >= 2 * (s1 - s0),
+            "the slow display held up the others: {} vs {}",
+            q1 - q0,
+            s1 - s0
+        );
+        assert!(worst < 250, "a frame waited {worst} ms for the slow display");
+        crate::kprint!(
+            "(slow display: {} frames there, {} on the main one, longest frame {worst} ms) ",
+            s1 - s0,
+            q1 - q0
+        );
+        // Afterwards it catches up with everything it skipped.
+        c.settle(3000);
+        displays_screendump(&c);
+
+        // Dragged by its title bar onto the main display, and back.
+        let drag_to = |c: &mut Compositor, from: (i32, i32), to: (i32, i32)| {
+            let b = c.desktop.bounds();
+            let ev = |x: i32, y: i32, buttons: u8| InputEvent::Pointer { x: x - b.x, y: y - b.y, buttons };
+            input::push(ev(from.0, from.1, 1));
+            c.frame();
+            for k in 1..=12 {
+                let p = (from.0 + (to.0 - from.0) * k / 12, from.1 + (to.1 - from.1) * k / 12);
+                input::push(ev(p.0, p.1, 1));
+                c.frame();
+            }
+            input::push(ev(to.0, to.1, 0));
+            c.settle(2000);
+        };
+        let grip = (wr.x + 60, wr.y + 17);
+        let main_rect = r[c.main];
+        let to = (main_rect.center().0, grip.1.clamp(main_rect.y + 120, main_rect.bottom() - 60));
+        drag_to(&mut c, grip, to);
+        let (dragged, _) = card_rect(&c).unwrap();
+        assert_eq!(layout::home(&r, dragged), c.main, "the window did not cross to the main display: {dragged:?}");
+        drag_to(&mut c, (dragged.x + 60, dragged.y + 17), grip);
+        let (back, _) = card_rect(&c).unwrap();
+        assert_eq!(layout::home(&r, back), target, "the window did not cross back: {back:?}");
+        let wr = back;
+
+        // Unplugged: its windows move to the main display and remember where they were.
+        let (key, head) = (c.screens[target].key, c.screens[target].head());
+        let size = c.screens[target].out.size();
+        let rel = wr.offset(-r[target].x, -r[target].y);
+        crate::kprintln!("\nharness: display set {head} 0x0");
+        assert!(c.until(15_000, |c| c.screens.len() == n - 1), "the unplugged display stayed");
+        c.settle(2000);
+        let (moved, away) = card_rect(&c).unwrap();
+        let main_rect = c.screens[c.main].rect;
+        assert!(
+            main_rect.intersect(&moved) == moved && away,
+            "the window was not moved to the main display: {moved:?}"
+        );
+        assert_eq!(c.desktop.displays().len(), n - 1);
+        let (compose, total) = displays_frame_cost(&mut c);
+        costs.push((n - 1, compose, total));
+        // Down to the main display alone, for the frame cost.
+        let others: Vec<(u32, (u32, u32))> = (0..c.screens.len())
+            .filter(|&i| i != c.main)
+            .map(|i| (c.screens[i].head(), c.screens[i].out.size()))
+            .collect();
+        if !others.is_empty() {
+            for (h, _) in &others {
+                crate::kprintln!("\nharness: display set {h} 0x0");
+            }
+            assert!(c.until(15_000, |c| c.screens.len() == 1), "displays stayed plugged in");
+            let (compose, total) = displays_frame_cost(&mut c);
+            costs.push((1, compose, total));
+            for (h, (w, hh)) in &others {
+                crate::kprintln!("\nharness: display set {h} {w}x{hh}");
+            }
+            assert!(c.until(15_000, |c| c.screens.len() == 1 + others.len()), "displays did not come back");
+        }
+        // Plugged in again: the window goes back where it was.
+        crate::kprintln!("\nharness: display set {head} {}x{}", size.0, size.1);
+        assert!(c.until(15_000, |c| c.screens.len() == n), "the display did not come back");
+        c.settle(2000);
+        let back = c.screens.iter().find(|s| s.key == key).expect("the same display (by identity)").rect;
+        let (now, away) = card_rect(&c).unwrap();
+        assert_eq!(now.offset(-back.x, -back.y), rel, "the window did not return to its display");
+        assert!(!away);
+
+        // Arranged in Settings: on the left of the main display.
+        let i = c.screens.iter().position(|s| s.key == key).unwrap();
+        let rec = Record { x: -c.screens[i].rect.w, y: 0, ..c.screens[i].record };
+        crate::gui::prefs::set(&layout::pref_key(key), &rec.format()).expect("display preference");
+        let left = |c: &Compositor| {
+            let i = c.screens.iter().position(|s| s.key == key).unwrap();
+            layout::side_of(c.screens[c.main].rect, c.screens[i].rect) == Some(Side::Left)
+        };
+        assert!(c.until(10_000, left), "the display did not move to the left");
+        // Another main display: it goes to the origin, the bar with it.
+        crate::gui::prefs::set(layout::PRIMARY_PREF, &alloc::format!("{key:08x}")).unwrap();
+        assert!(c.until(10_000, |c| c.screens[c.main].key == key), "the main display did not change");
+        assert_eq!((c.screens[c.main].rect.x, c.screens[c.main].rect.y), (0, 0));
+        assert_eq!(screens::published()[0].key, key);
+        assert_eq!(c.desktop.w, c.screens[c.main].rect.w);
+        crate::gui::prefs::set(layout::PRIMARY_PREF, &alloc::format!("{main_key:08x}")).unwrap();
+        assert!(c.until(10_000, |c| c.screens[c.main].key == main_key));
+        // Mirroring: one desktop, the same picture everywhere.
+        crate::gui::prefs::set(layout::MIRROR_PREF, "1").unwrap();
+        assert!(c.until(10_000, |c| c.mirror && c.areas() == 1), "no mirroring");
+        let size = c.screens[c.main].out.size();
+        assert!(c.screens.iter().all(|s| s.out.size() == size), "mirrors at another resolution");
+        c.settle(3000);
+        for s in &c.screens {
+            for (x, y) in [(size.0 / 3, size.1 / 2), (size.0 - 20, size.1 - 20)] {
+                assert_eq!(s.pixel(x, y), c.screens[c.main].pixel(x, y), "{} doesn't mirror", s.connector);
+            }
+        }
+        displays_screendump(&c);
+        crate::gui::prefs::set(layout::MIRROR_PREF, "0").unwrap();
+        assert!(c.until(10_000, |c| !c.mirror && c.areas() == n), "still mirroring");
+        assert!(c.until(10_000, left), "the arrangement did not come back after mirroring");
+    }
+    c.close();
+    let cost = costs.iter().map(|(n, c, t)| alloc::format!("{n}: {c}/{t} us")).collect::<Vec<_>>().join(", ");
+    crate::kprint!("({n} display(s); full frame composed/shown by display count: {cost}) ");
 }

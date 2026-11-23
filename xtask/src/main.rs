@@ -39,6 +39,8 @@
 //!                                         AURORA_LINUXFUZZ_CALLS make the fuzzers run longer, with
 //!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 240;
 //!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run)
+//!       --displays N                      with --gpu virtio: N scanouts, plugged in and out by the
+//!                                         multi-monitor test, each checked by QMP screendump (testdisplays.rs)
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
@@ -57,6 +59,7 @@ mod package;
 mod runconfig;
 mod sounds;
 mod tar;
+mod testdisplays;
 mod usbredir;
 mod voyage;
 mod webcheck;
@@ -266,7 +269,9 @@ fn main() {
                 }),
             };
             let mut cmd = qemu(&img, &opts);
+            cmd.args(opts.displays.plug_in_args(gpu, &session_dir()));
             opts.displays.starting(&cmd);
+            opts.displays.plug_in(gpu, &session_dir());
             let Some(mon) = mon else {
                 let status = cmd.status().expect("failed to launch qemu");
                 exit(status.code().unwrap_or(1));
@@ -332,7 +337,22 @@ fn main() {
             }
             println!("wrote {}", out.display());
         }
-        Some("test") => test(profile, disk, smp, net, gpu, usb),
+        Some("test") => {
+            let n = args
+                .iter()
+                .position(|a| a == "--displays")
+                .map(|i| args.get(i + 1).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0))
+                .unwrap_or(1);
+            if !(1..=displays::MAX_DISPLAYS).contains(&n) {
+                eprintln!("--displays must be between 1 and {}", displays::MAX_DISPLAYS);
+                exit(2);
+            }
+            if n > 1 && !gpu.starts_with("virtio") {
+                eprintln!("the multi-monitor test needs --gpu virtio (the kernel drives one Bochs VGA)");
+                exit(2);
+            }
+            test(profile, disk, smp, net, gpu, usb, n)
+        }
         Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
@@ -1287,10 +1307,11 @@ fn inbound_check(port: u16) {
     });
 }
 
-fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str) {
+fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str, heads: usize) {
     let esp = build(profile, true);
     let img = root().join("target/test-disk.img");
-    println!("running kernel tests with the disk on {disk}, network {net}, display {gpu}, USB on {usb}");
+    let shown = if heads > 1 { format!("display {gpu} with {heads} heads") } else { format!("display {gpu}") };
+    println!("running kernel tests with the disk on {disk}, network {net}, {shown}, USB on {usb}");
     let http_port = start_test_http_server();
     let fwd_port = free_port();
     // AURORA_TEST_SLEEP=off skips the sleep test (firmware that can't resume).
@@ -1330,10 +1351,12 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
             image::set_boot_option(&img, "sleep", "off").expect("write boot.conf");
         }
         image::set_boot_option(&img, "gpu", gpu_driver(gpu)).expect("write boot.conf");
+        // The multi-monitor test plugs in the extra heads itself.
+        image::set_boot_option(&img, "test_displays", &heads.to_string()).expect("write boot.conf");
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let output = match run_tests_once(&img, disk, smp, net, gpu, usb, fwd_port) {
+            let output = match run_tests_once(&img, disk, smp, net, gpu, usb, fwd_port, heads) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
                     // The firmware never handed back control: some OVMF builds
@@ -1544,6 +1567,7 @@ fn recorded_peak(path: &Path) -> i32 {
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
 /// as an error if the tests failed or timed out.
+#[allow(clippy::too_many_arguments)] // the test matrix
 fn run_tests_once(
     img: &Path,
     disk: &str,
@@ -1552,6 +1576,7 @@ fn run_tests_once(
     gpu: &str,
     usb: &str,
     fwd_port: u16,
+    heads: usize,
 ) -> Result<String, String> {
     use std::io::{BufRead, BufReader};
     let audio = root().join("target/test-audio.wav");
@@ -1572,7 +1597,11 @@ fn run_tests_once(
         netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
         gpu,
         resolution: None,
-        displays: displays::Displays::single(displays::DEFAULT_SIZE),
+        displays: if heads > 1 {
+            displays::Displays::plan(vec![displays::DEFAULT_SIZE; heads], true, false, &Default::default())
+        } else {
+            displays::Displays::single(displays::DEFAULT_SIZE)
+        },
         usb,
         virtual_hid: if !usbredir::available() {
             Vec::new()
@@ -1589,6 +1618,8 @@ fn run_tests_once(
         }),
     };
     let mut cmd = qemu(img, &opts);
+    let session = session_dir();
+    cmd.args(testdisplays::qemu_args(&session, heads));
     cmd.stdin(Stdio::null()).stdout(Stdio::piped());
     let mut child = cmd.spawn().expect("failed to launch qemu");
     let stdout = child.stdout.take().unwrap();
@@ -1598,8 +1629,12 @@ fn run_tests_once(
     let (slept_w, woke_w) = (slept_at.clone(), woke.clone());
     let reader = std::thread::spawn(move || {
         let mut all = String::new();
+        let mut harness = testdisplays::Harness::new(heads > 1);
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             println!("{line}");
+            if line.contains("harness: display set ") || line.contains("harness: screendump ") {
+                harness.line(&session, &line, qmp_execute);
+            }
             if line.contains("net-test: listening on 8080") {
                 inbound_check(fwd_port);
             }
@@ -1642,7 +1677,7 @@ fn run_tests_once(
             all.push_str(&line);
             all.push('\n');
         }
-        all
+        (all, harness.failed)
     });
     let start = Instant::now();
     // Longer fuzzing runs need more: AURORA_TEST_TIMEOUT (seconds per boot).
@@ -1660,7 +1695,11 @@ fn run_tests_once(
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    let output = reader.join().unwrap_or_default();
+    let (output, display_failed) = reader.join().unwrap_or_default();
+    if display_failed {
+        eprintln!("\nmulti-monitor check FAILED: a head did not show what the compositor drew (see above)");
+        return Err(output);
+    }
     match status.and_then(|s| s.code()) {
         Some(33) => Ok(output),
         Some(code) => {

@@ -55,14 +55,20 @@ pub fn live() -> bool {
     gpu::primary().is_some_and(|d| d.caps().live_modeset)
 }
 
-/// The resolutions to offer, with the current one flagged.
-pub fn modes(current: (u32, u32), at_boot: Option<(u32, u32)>) -> Vec<DisplayMode> {
+/// The resolutions to offer for the main display (connector `main` when
+/// the compositor says which one it is), with the current one flagged.
+pub fn modes(main: Option<u32>, current: (u32, u32), at_boot: Option<(u32, u32)>) -> Vec<DisplayMode> {
     let mut out: Vec<DisplayMode> = Vec::new();
-    match gpu::primary().filter(|d| d.caps().live_modeset) {
+    let on_main = main.and_then(|id| gpu::devices().into_iter().find(|d| d.connectors().iter().any(|c| c.id == id)));
+    match on_main.or_else(gpu::primary).filter(|d| d.caps().live_modeset) {
         Some(dev) => {
             let follows = if dev.caps().follows_host { display::FOLLOWS_WINDOW } else { 0 };
             let conns = dev.connectors();
-            let conn = conns.iter().find(|c| c.status == gpu::Status::Connected).or(conns.first());
+            let conn = conns
+                .iter()
+                .find(|c| Some(c.id) == main)
+                .or_else(|| conns.iter().find(|c| c.status == gpu::Status::Connected))
+                .or(conns.first());
             for m in conn.map(|c| c.modes.as_slice()).unwrap_or(&[]) {
                 if m.hdisplay < 800 || m.vdisplay < 600 {
                     continue;
