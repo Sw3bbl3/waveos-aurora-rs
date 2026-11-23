@@ -90,8 +90,17 @@ impl fmt::Write for Ring {
 
 static RING: Mutex<Ring> = Mutex::new(Ring { buf: [0; 1 << 16], head: 0, len: 0 });
 
+/// When the kernel last printed (ns since boot).
+static LAST_OUTPUT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub fn last_output_ns() -> u64 {
+    LAST_OUTPUT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
+    LAST_OUTPUT.store(crate::time::now_ns(), core::sync::atomic::Ordering::Relaxed);
     x86_64::instructions::interrupts::without_interrupts(|| {
         let _ = COM1.lock().write_fmt(args);
         let _ = RING.lock().write_fmt(args);

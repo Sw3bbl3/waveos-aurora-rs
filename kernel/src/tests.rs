@@ -46,6 +46,7 @@ const TESTS: &[Test] = &[
     ("clipboard and Trash", clipboard_and_trash),
     ("SMP: work on every CPU, lock stress", smp_work),
     ("SMP: TLB shootdown", smp_shootdown),
+    ("locks: waiters for a lock held long sleep, so even an idle-task holder runs", mutex_long_hold),
     ("clock: TSC/HPET monotonic", clock),
     ("timers: queue order, accuracy, cancel, on every CPU", timer_queue),
     ("tickless: timeouts fire on CPUs with the tick stopped", tickless_timeouts),
@@ -1741,6 +1742,48 @@ fn smp_work() {
     let seen = SEEN.load(Ordering::SeqCst).count_ones();
     crate::kprint!("[{} CPUs, work ran on {}] ", online, seen);
     assert_eq!(seen, online, "every CPU ran some of the work");
+}
+
+/// A `sync::Mutex` held across a long wait (I/O, say): its contenders must
+/// stop being ready (they sleep), or a holder that only runs when nothing
+/// else is ready — the boot code, in a CPU's idle task — never runs again.
+/// (That starved the second boot on one CPU with a virtio disk: the boot
+/// code held the disk's queue lock while three tasks yield-spun on it and
+/// on the locks behind it.) Here three tasks on the boot CPU contend for a
+/// lock this task holds while it sleeps; then they all get it.
+fn mutex_long_hold() {
+    static M: crate::sync::Mutex<u32> = crate::sync::Mutex::new(0);
+    static GOT: AtomicU32 = AtomicU32::new(0);
+    let before = crate::sync::LONG_WAITS.load(Ordering::Relaxed);
+    let guard = M.lock();
+    let ids: Vec<u64> = (0..3)
+        .map(|_| {
+            sched::spawn_on_bsp("t-lock", || {
+                *M.lock() += 1;
+                GOT.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+    // Held for a while: the contenders give up yielding and sleep; some
+    // moment finds none of them ready.
+    let start = time::uptime_ms();
+    let mut all_asleep = false;
+    while time::uptime_ms() < start + 200 {
+        sched::sleep_ms(2);
+        if time::uptime_ms() < start + 20 {
+            continue;
+        }
+        let tasks = sched::list();
+        let mine: Vec<_> = tasks.iter().filter(|t| ids.contains(&t.id)).collect();
+        all_asleep |= mine.len() == 3 && mine.iter().all(|t| matches!(t.state, sched::State::Sleeping(_)));
+    }
+    let slept = crate::sync::LONG_WAITS.load(Ordering::Relaxed) - before;
+    drop(guard);
+    assert!(slept > 0, "contenders of a lock held 200 ms never slept: they would starve an idle-task holder");
+    assert!(all_asleep, "the contenders were never all asleep at once while the lock was held");
+    assert!(eventually(5000, || GOT.load(Ordering::SeqCst) == 3), "the contenders did not get the lock once it was free");
+    assert_eq!(*M.lock(), 3);
+    crate::kprint!("[{slept} sleeps] ");
 }
 
 fn smp_shootdown() {

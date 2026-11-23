@@ -94,6 +94,35 @@ pub fn preference(img: &Path, key: &str) -> Option<String> {
     })
 }
 
+/// Checks the home volume of disk image `img` (`cargo xtask fsck IMG`):
+/// replays its journal in memory, runs `fsck`, and lists the top folders.
+/// (The journal replay writes: run it on a copy to keep the image as it was.)
+pub fn check_home(img: &Path) -> io::Result<String> {
+    let mut file = OpenOptions::new().read(true).write(true).open(img)?;
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    file.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE))?;
+    file.read_exact(&mut entry)?;
+    if entry[0..16] != aurorafs::PARTITION_TYPE {
+        return Err(io::Error::other("the disk has no AuroraFS volume"));
+    }
+    let start = u64::from_le_bytes(entry[32..40].try_into().unwrap());
+    let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
+    let err = |e: aurorafs::Error| io::Error::other(format!("AuroraFS: {e:?}"));
+    let mut vol = home_volume(&mut file, (start, end)).map_err(err)?;
+    let mut out = String::new();
+    vol.fsck().map_err(io::Error::other)?;
+    let (total, free) = vol.space();
+    out.push_str(&format!("fsck: clean; {} of {} MiB free\n", free >> 20, total >> 20));
+    for dir in ["/", "/Security"] {
+        let ino = vol.resolve(dir).map_err(err)?;
+        for e in vol.readdir(ino).map_err(err)? {
+            let size = vol.stat(e.ino).map(|m| m.size).unwrap_or(0);
+            out.push_str(&format!("{dir}{}{}: {:?}, {size} bytes\n", if dir == "/" { "" } else { "/" }, e.name, e.kind));
+        }
+    }
+    Ok(out)
+}
+
 /// Put the Linux root on the home volume as `/Linux`, preserving saved files.
 /// Existing installations receive updated settings and missing packages.
 pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io::Result<LinuxOnDisk> {

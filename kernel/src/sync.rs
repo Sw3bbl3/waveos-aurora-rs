@@ -66,6 +66,10 @@ impl<T> Drop for IrqMutexGuard<'_, T> {
     }
 }
 
+/// Sleeps contenders took waiting for a [`Mutex`] held a long time (tests).
+#[cfg(feature = "ktest")]
+pub static LONG_WAITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// A mutex for task context that may be held across blocking operations
 /// (disk I/O, sleeping). Contenders yield to the scheduler instead of
 /// spinning with interrupts off. Never take it from an interrupt handler.
@@ -86,10 +90,27 @@ impl<T> Mutex<T> {
         Self { locked: core::sync::atomic::AtomicBool::new(false), value: core::cell::UnsafeCell::new(value) }
     }
 
+    /// Waits for the lock: yielding at first; once it has been held for a
+    /// couple of milliseconds (its holder is doing I/O, say), sleeping a
+    /// millisecond between tries. Yielding alone could starve the holder
+    /// for good when it runs in an idle task (the boot code does, and the
+    /// idle task runs only when nothing else is ready): contenders that
+    /// only ever yield are always ready.
     pub fn lock(&self) -> MutexGuard<'_, T> {
         use core::sync::atomic::Ordering;
+        let mut since = 0;
         while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-            crate::sched::yield_now();
+            let now = crate::time::now_ns();
+            if since == 0 {
+                since = now;
+            }
+            if now.saturating_sub(since) < 2_000_000 {
+                crate::sched::yield_now();
+            } else {
+                #[cfg(feature = "ktest")]
+                LONG_WAITS.fetch_add(1, Ordering::Relaxed);
+                crate::sched::sleep_ms(1);
+            }
         }
         MutexGuard { lock: self }
     }

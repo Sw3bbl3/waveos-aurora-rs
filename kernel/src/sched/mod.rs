@@ -549,12 +549,47 @@ fn pick_next(s: &mut Scheduler, cpu: usize) -> Option<TaskId> {
 /// Only the choice is made under the scheduler's lock, which every CPU
 /// takes: saving and loading registers and switching page tables (slow,
 /// especially in an emulator) come after it.
+/// Self-tests: when nothing was printed for 60 s while tasks keep being
+/// switched (a livelock, which no timeout reports), every task's stack
+/// goes to the log, once a minute at most.
+#[cfg(feature = "ktest")]
+fn hang_report(now: u64) {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let quiet = now.saturating_sub(crate::drivers::serial::last_output_ns());
+    let last = LAST.load(Ordering::Relaxed);
+    if quiet > 60_000_000_000
+        && now > last + 60_000_000_000
+        && LAST.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    {
+        crate::kprintln!("\nno output for {} s; tasks:", quiet / 1_000_000_000);
+        dump_stacks();
+        // The running task's own callers (it is the one switching).
+        let mut rbp: u64;
+        unsafe { core::arch::asm!("mov {}, rbp", out(reg) rbp) };
+        crate::kprint!("running task {}:", current_id());
+        for _ in 0..24 {
+            if rbp == 0 || !rbp.is_multiple_of(8) {
+                break;
+            }
+            let (next, ret) = unsafe { (*(rbp as *const u64), *((rbp + 8) as *const u64)) };
+            crate::kprint!(" {ret:#x}");
+            if next <= rbp || next - rbp > 1 << 20 {
+                break;
+            }
+            rbp = next;
+        }
+        crate::kprintln!();
+    }
+}
+
 fn schedule() {
     if !STARTED.load(Ordering::Acquire) {
         return;
     }
     let cpu = percpu::cpu_id();
     let now = time::now_ns();
+    #[cfg(feature = "ktest")]
+    hang_report(now);
     let (save, load, next_flag, switch_to, kick_idle) = {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };

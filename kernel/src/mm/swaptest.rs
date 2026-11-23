@@ -6,7 +6,8 @@
 //!   private pages, pages shared since `fork` (written by one side after),
 //!   shared memory mapped twice (a write on one side seen on the other
 //!   after both swapped it out), locked pages (never swapped), protection
-//!   changes and moves of swapped pages, and every slot given back.
+//!   changes and moves of swapped pages, GPU buffers never swapped, and
+//!   every slot given back.
 //! - [`overcommit`]: a program (`fuzz swap`) fills several times the memory
 //!   it may have with a pattern of its own per page, from two threads, and
 //!   reads every page back twice in other orders, while `kswapd` swaps.
@@ -181,6 +182,23 @@ pub fn semantics() {
             check_page(&mut a, base + p * PAGE_SIZE, &pattern(seed + 1, p, p % 4 == 3), "shared");
             check_page(&mut b, moved + p * PAGE_SIZE, &pattern(seed + 1, p, p % 4 == 3), "shared, other side");
         }
+    }
+    {
+        // Device memory (a GPU buffer a program maps: `BufferObject::user_frames`)
+        // is never swapped out, while the buffer lives (it may be on the
+        // screen) or after (another device may still use it); the last
+        // mapping frees it.
+        let frames: Vec<u64> = (0..8).map(|_| frame::alloc().unwrap()).collect();
+        vmm::shm_count(&frames);
+        let mut a = AddressSpace::new().unwrap();
+        a.map_shared(base, &frames, Prot::ReadWrite).unwrap();
+        assert_eq!(a.pageout(base, 8), 0, "a GPU buffer's pages were swapped out");
+        for &f in &frames {
+            vmm::shm_release(f);
+        }
+        assert_eq!(a.pageout(base, 8), 0, "a GPU buffer's pages were swapped out once the buffer was gone");
+        assert_eq!(a.reclaim(64, 64).evicted, 0);
+        assert!((0..8).all(|p| !a.is_swapped(base + p * PAGE_SIZE)));
     }
     slots_settle(slots_before, "after the address spaces went");
     let (_, frames_after) = super::leak_check_counts();

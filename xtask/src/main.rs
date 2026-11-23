@@ -126,6 +126,13 @@ fn main() {
 
     match args.first().map(String::as_str) {
         Some("web-check") => webcheck::run(&args[1..]),
+        Some("fsck") => match image::check_home(Path::new(args.get(1).map(String::as_str).unwrap_or("target/test-disk.img"))) {
+            Ok(report) => print!("{report}"),
+            Err(e) => {
+                eprintln!("fsck: {e}");
+                exit(1);
+            }
+        },
         Some("docs") => {
             println!("{}", help::build(&root()).unwrap_or_else(|e| panic!("{e}")).display());
         }
