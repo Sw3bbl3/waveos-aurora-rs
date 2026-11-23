@@ -175,6 +175,38 @@ pub fn touchpad_settings() -> aurora_hid::gestures::Settings {
     }
 }
 
+/// What a touchpad's gesture engine decided, into the queue (USB and I²C
+/// touchpads alike); `held` tracks the buttons this pad holds down.
+pub fn touchpad_output(o: aurora_hid::gestures::Output, held: &mut u8) {
+    let buttons = o.buttons & 0x07;
+    if o.dx != 0 || o.dy != 0 || buttons != *held {
+        pointer_moved(o.dx, o.dy, buttons);
+        *held = buttons;
+    }
+    if o.scroll_x != 0 || o.scroll_y != 0 {
+        // Pixels to 1/120 notch, at 40 px a notch.
+        push(InputEvent::Scroll { dx: o.scroll_x * 3, dy: o.scroll_y * 3 });
+    }
+    if let Some(s) = o.swipe {
+        touchpad_swipe(s);
+    }
+}
+
+/// Three fingers swept across a touchpad. Sideways means back and forward
+/// (fingers to the right go back, as pages slide); up and down are free
+/// for the desktop to use.
+pub fn touchpad_swipe(s: aurora_hid::gestures::Swipe) {
+    use aurora_hid::gestures::Swipe;
+    let code = match s {
+        Swipe::Right => KeyCode::Back,
+        Swipe::Left => KeyCode::Forward,
+        Swipe::Up | Swipe::Down => return,
+    };
+    for pressed in [true, false] {
+        push(InputEvent::Key(KeyEvent { code, ch: None, pressed, mods: modifiers() }));
+    }
+}
+
 /// Mouse motion scaled by the speed setting (5: one pixel per count),
 /// keeping the fractions in `rem` (1/64 px).
 pub fn scale_motion(dx: i32, dy: i32, rem: &mut (i32, i32)) -> (i32, i32) {

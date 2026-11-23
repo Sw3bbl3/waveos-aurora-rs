@@ -1,8 +1,10 @@
 //! ACPI: the static tables parsed early in boot ([`tables`]), and the
 //! runtime ([`runtime`]) — the AML interpreter from the `acpi` crate on its
 //! own task, which handles the power button, batteries, the power adapter,
-//! the lid and sleep states.
+//! the lid and sleep states; and [`devices`], the serial-bus devices
+//! (I²C touchpads and touch screens) only ACPI describes.
 
+pub mod devices;
 mod events;
 mod handler;
 mod runtime;

@@ -16,6 +16,7 @@ serde_json = "1"
 sha2 = "0.10"
 miniz_oxide = "0.8"
 aurora-help = { path = "../libs/help" }
+aurora-acpi-res = { path = "../libs/acpires" }
 lzma-rs = "0.3"
 tar = "0.4"
 png = "0.17"
