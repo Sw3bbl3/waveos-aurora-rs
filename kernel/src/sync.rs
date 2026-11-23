@@ -75,6 +75,9 @@ pub static LONG_WAITS: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomi
 /// spinning with interrupts off. Never take it from an interrupt handler.
 pub struct Mutex<T> {
     locked: core::sync::atomic::AtomicBool,
+    /// A task sleeping for the lock, for the holder to wake when it lets go
+    /// (0: none; others waiting meanwhile look again every millisecond).
+    sleeper: core::sync::atomic::AtomicU64,
     value: core::cell::UnsafeCell<T>,
 }
 
@@ -87,15 +90,20 @@ pub struct MutexGuard<'a, T> {
 
 impl<T> Mutex<T> {
     pub const fn new(value: T) -> Self {
-        Self { locked: core::sync::atomic::AtomicBool::new(false), value: core::cell::UnsafeCell::new(value) }
+        Self {
+            locked: core::sync::atomic::AtomicBool::new(false),
+            sleeper: core::sync::atomic::AtomicU64::new(0),
+            value: core::cell::UnsafeCell::new(value),
+        }
     }
 
     /// Waits for the lock: yielding at first; once it has been held for a
-    /// couple of milliseconds (its holder is doing I/O, say), sleeping a
-    /// millisecond between tries. Yielding alone could starve the holder
-    /// for good when it runs in an idle task (the boot code does, and the
-    /// idle task runs only when nothing else is ready): contenders that
-    /// only ever yield are always ready.
+    /// couple of milliseconds (its holder is doing I/O, say), sleeping until
+    /// the holder lets go (one waiter is woken then; any others look again
+    /// every millisecond). Yielding alone could starve the holder for good
+    /// when it runs in an idle task (the boot code does, and the idle task
+    /// runs only when nothing else is ready): contenders that only ever
+    /// yield are always ready.
     pub fn lock(&self) -> MutexGuard<'_, T> {
         use core::sync::atomic::Ordering;
         let mut since = 0;
@@ -109,7 +117,13 @@ impl<T> Mutex<T> {
             } else {
                 #[cfg(feature = "ktest")]
                 LONG_WAITS.fetch_add(1, Ordering::Relaxed);
-                crate::sched::sleep_ms(1);
+                let me = crate::sched::current_id();
+                let woken = me != 0 && self.sleeper.compare_exchange(0, me, Ordering::SeqCst, Ordering::Relaxed).is_ok();
+                // (Marked asleep before it looks: a release in between is seen.)
+                crate::sched::wait_until(1, || !self.locked.load(Ordering::SeqCst));
+                if woken {
+                    let _ = self.sleeper.compare_exchange(me, 0, Ordering::SeqCst, Ordering::Relaxed);
+                }
             }
         }
         MutexGuard { lock: self }
@@ -140,7 +154,12 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 
 impl<T> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-        self.lock.locked.store(false, core::sync::atomic::Ordering::Release);
+        use core::sync::atomic::Ordering;
+        self.lock.locked.store(false, Ordering::SeqCst);
+        let sleeper = self.lock.sleeper.swap(0, Ordering::SeqCst);
+        if sleeper != 0 {
+            crate::sched::wake(sleeper);
+        }
     }
 }
 
