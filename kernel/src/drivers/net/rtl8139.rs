@@ -292,6 +292,9 @@ impl Nic for Handle {
     fn poll(&self) {
         self.0.poll()
     }
+    fn needs_polling(&self) -> bool {
+        !self.0.intx.lock().is_some_and(|l| l.live())
+    }
 }
 
 static CARDS: IrqMutex<Vec<&'static Rtl8139>> = IrqMutex::new(Vec::new());

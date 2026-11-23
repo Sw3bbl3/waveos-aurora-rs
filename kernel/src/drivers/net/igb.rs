@@ -423,6 +423,9 @@ impl Nic for Handle {
     fn poll(&self) {
         self.0.poll()
     }
+    fn needs_polling(&self) -> bool {
+        !self.0.has_irq.load(Ordering::Relaxed)
+    }
 }
 
 static CARDS: IrqMutex<Vec<&'static Igb>> = IrqMutex::new(Vec::new());

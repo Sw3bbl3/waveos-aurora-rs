@@ -545,6 +545,9 @@ fn terminate(p: &Process, code: i64) {
     let _ = p.exit.compare_exchange(RUNNING, code, Ordering::AcqRel, Ordering::Acquire);
     p.killed.store(true, Ordering::Release);
     sched::wake_process(p.pid);
+    // A thread busy in user code on another CPU may get no timer interrupt
+    // (there is no periodic tick): interrupt it so it notices.
+    sched::interrupt_process(p.pid);
 }
 
 /// Ends process `p` as signal `sig` does (its exit code is `-sig`).
@@ -850,7 +853,7 @@ pub fn group(pgid: Pid) -> Vec<Arc<Process>> {
 /// Frees resources of exited processes (runs as a kernel task).
 fn reaper() {
     loop {
-        sched::wait_until(1000, || !REAP_QUEUE.lock().is_empty());
+        sched::wait_until(10_000, || !REAP_QUEUE.lock().is_empty());
         // (Pop in its own statement: a `while let` would hold the lock — with
         // interrupts off — for the whole body.)
         loop {

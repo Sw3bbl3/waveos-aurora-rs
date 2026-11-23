@@ -160,6 +160,8 @@ pub fn suspend() -> Result<(), &'static str> {
         // vectors overlap CPU exceptions) is masked again.
         crate::time::resume();
         apic::resume(&ioapic);
+        // Frequency settings (HWP, CPPC) were reset with the processor.
+        crate::power::cpu_started(0);
         (true, pci)
     });
     let (slept, pci) = resumed;

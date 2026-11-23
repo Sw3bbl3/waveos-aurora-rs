@@ -93,6 +93,9 @@ impl crate::net::Nic for Interface {
     fn wireless(&self) -> bool {
         true
     }
+    fn needs_polling(&self) -> bool {
+        false // the wifi task hands frames over as they arrive
+    }
 }
 
 /// Makes a radio the system's Wi-Fi adapter.

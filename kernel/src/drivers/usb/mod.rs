@@ -339,6 +339,10 @@ pub trait Hcd: Send + Sync {
     /// Root ports whose status changed since the last call. Controllers that
     /// interrupt on port changes queue them; the others are polled here.
     fn changed_ports(&self) -> Vec<u8>;
+    /// Whether port changes are only found by polling [`Hcd::changed_ports`].
+    fn polls_ports(&self) -> bool {
+        true
+    }
     /// Acknowledges a root port's changes; true when a device is connected.
     fn port_connected(&self, port: u8) -> bool;
     /// Resets a root port with a device on it. Returns the device's speed once
@@ -507,7 +511,10 @@ impl Bus {
                 hub::changed(self, hub, bitmap);
             }
             self.settled.store(true, Ordering::Release);
-            self.wake.wait(250, || !self.port_events.lock().is_empty() || !self.hub_events.lock().is_empty());
+            // Controllers that report port changes as events wake this task;
+            // the others are polled four times a second.
+            let poll = if self.hcd.polls_ports() { 250 } else { 5000 };
+            self.wake.wait(poll, || !self.port_events.lock().is_empty() || !self.hub_events.lock().is_empty());
         }
     }
 
@@ -743,7 +750,9 @@ fn start_ticks() {
 fn tick_task() {
     loop {
         let now = crate::time::uptime_ms();
-        let mut next = 1000u64;
+        // Handlers that start needing ticks (a key held, a touchpad glide)
+        // kick this task; otherwise it rests.
+        let mut next = 10_000u64;
         let handlers: Vec<Arc<dyn PipeHandler>> =
             buses().iter().flat_map(|b| b.pipes.lock().iter().map(|(_, h)| h.clone()).collect::<Vec<_>>()).collect();
         for h in handlers {

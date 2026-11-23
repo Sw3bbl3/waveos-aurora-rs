@@ -30,6 +30,7 @@ mod telemetry;
 #[cfg(feature = "ktest")]
 mod tests;
 mod time;
+mod timer;
 mod users;
 
 use bootinfo::{BootInfo, BOOTINFO_MAGIC};
@@ -119,6 +120,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::audio::init();
     telemetry::stage("acpi", "ACPI runtime (AML, power button, battery)");
     acpi::start(boot_info.rsdp_phys);
+    power::start();
     telemetry::start();
     // Accounts and file owners, once the home volume is there.
     users::init();

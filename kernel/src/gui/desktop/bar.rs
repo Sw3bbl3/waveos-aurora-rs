@@ -167,6 +167,16 @@ pub(super) fn time_text() -> String {
     }
 }
 
+/// Milliseconds until [`time_text`] can change: a second when it shows
+/// seconds, else until the next minute (the RTC counts whole seconds, so
+/// the new minute shows within a second of starting).
+pub(super) fn until_clock_changes() -> u64 {
+    if prefs::get_bool(pref::CLOCK_SECONDS) {
+        return 1000;
+    }
+    (60 - rtc::now().second.min(59) as u64) * 1000
+}
+
 /// "Mon 26 Oct" (with AM/PM first on a 12-hour clock: "PM · Mon 26 Oct").
 pub(super) fn date_text() -> String {
     let d = rtc::now();

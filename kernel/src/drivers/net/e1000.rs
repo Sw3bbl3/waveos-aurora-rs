@@ -237,6 +237,9 @@ impl Nic for Handle {
     fn poll(&self) {
         self.0.poll()
     }
+    fn needs_polling(&self) -> bool {
+        !self.0.has_irq.load(Ordering::Relaxed)
+    }
 }
 
 impl E1000 {

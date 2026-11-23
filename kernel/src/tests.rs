@@ -41,6 +41,9 @@ const TESTS: &[Test] = &[
     ("SMP: work on every CPU, lock stress", smp_work),
     ("SMP: TLB shootdown", smp_shootdown),
     ("clock: TSC/HPET monotonic", clock),
+    ("timers: queue order, accuracy, cancel, on every CPU", timer_queue),
+    ("tickless: timeouts fire on CPUs with the tick stopped", tickless_timeouts),
+    ("tickless: quiet idle (timer interrupts per CPU) and idle accounting", quiet_idle),
     ("user copies recover from faults", user_copy_fault),
     ("hardening: SMEP/SMAP/UMIP, kernel W^X, stack guards, ASLR", hardening),
     ("RTC: reads from every CPU at once", rtc_concurrent),
@@ -1053,6 +1056,176 @@ fn clock() {
     }
 }
 
+/// The timer queue: callbacks armed out of order run in deadline order,
+/// never early, a cancelled one never; and timers armed on application
+/// processors fire there.
+fn timer_queue() {
+    use crate::sync::IrqMutex;
+    use crate::timer::{self, Action};
+    static FIRED: IrqMutex<Vec<(u64, u64, usize)>> = IrqMutex::new(Vec::new());
+    fn fire(arg: u64) {
+        FIRED.lock().push((arg, time::now_ns(), crate::arch::percpu::cpu_id()));
+    }
+    FIRED.lock().clear();
+    let base = time::now_ns() + 20_000_000;
+    let offsets = [7u64, 3, 11, 1, 9, 5, 13, 2];
+    let mut handles = Vec::new();
+    for &o in &offsets {
+        handles.push((o, timer::add(base + o * 1_000_000, Action::Call { f: fire, arg: o, name: "ktest" })));
+    }
+    let (_, h9) = handles.iter().find(|(o, _)| *o == 9).unwrap();
+    assert!(timer::cancel(*h9), "a pending timer can be cancelled");
+    assert!(eventually(2000, || FIRED.lock().len() >= offsets.len() - 1), "timers did not all fire");
+    sched::sleep_ms(30);
+    let fired = FIRED.lock().clone();
+    let order: Vec<u64> = fired.iter().map(|f| f.0).collect();
+    assert_eq!(order, [1, 2, 3, 5, 7, 11, 13], "timers fire in deadline order, the cancelled one never");
+    let mut worst = 0;
+    for &(o, at, _) in &fired {
+        let deadline = base + o * 1_000_000;
+        assert!(at >= deadline, "timer {o} fired {} ns early", deadline - at);
+        worst = worst.max(at - deadline);
+    }
+    // Late only by interrupt latency (and an emulator's scheduling).
+    assert!(worst < 500_000_000, "a timer fired {worst} ns late");
+    crate::kprint!("[latest {} us] ", worst / 1000);
+
+    // From tasks on the other CPUs: each callback runs where it was armed.
+    static ARMED_ON: [AtomicU32; 16] = [const { AtomicU32::new(u32::MAX) }; 16];
+    static STARTED: AtomicU32 = AtomicU32::new(0);
+    static WANT: AtomicU32 = AtomicU32::new(0);
+    FIRED.lock().clear();
+    STARTED.store(0, Ordering::SeqCst);
+    fn arm() {
+        // Everyone spins until all have started, so each holds a CPU of its
+        // own (a task that waits behind another moves to an idle CPU).
+        STARTED.fetch_add(1, Ordering::SeqCst);
+        let end = time::now_ns() + 3_000_000_000;
+        while STARTED.load(Ordering::SeqCst) < WANT.load(Ordering::SeqCst) && time::now_ns() < end {
+            core::hint::spin_loop();
+        }
+        let slot =
+            (0..16).find(|&s| ARMED_ON[s].compare_exchange(u32::MAX, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok());
+        let Some(slot) = slot else { return };
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            ARMED_ON[slot].store(crate::arch::percpu::cpu_id() as u32, Ordering::SeqCst);
+            crate::timer::call_after_ms(5, fire, slot as u64, "ktest");
+        });
+        sched::sleep_ms(50);
+    }
+    for s in &ARMED_ON {
+        s.store(u32::MAX, Ordering::SeqCst);
+    }
+    // One task per other CPU (this one stays busy waiting).
+    let n = (crate::arch::percpu::count().saturating_sub(1)).clamp(1, 8) as u32;
+    WANT.store(n, Ordering::SeqCst);
+    for _ in 0..n {
+        sched::spawn("t-timer", arm);
+    }
+    let end = time::now_ns() + 3_000_000_000;
+    while STARTED.load(Ordering::SeqCst) < n && time::now_ns() < end {
+        core::hint::spin_loop();
+    }
+    let together = STARTED.load(Ordering::SeqCst) == n;
+    assert!(eventually(5000, || FIRED.lock().len() as u32 >= n), "timers armed by tasks did not fire");
+    let mut cpus = 0u32;
+    for &(slot, _, cpu) in FIRED.lock().iter() {
+        assert_eq!(ARMED_ON[slot as usize].load(Ordering::SeqCst), cpu as u32, "a timer fired on another CPU");
+        cpus |= 1 << cpu;
+    }
+    crate::kprint!("[armed and fired on {} CPUs] ", cpus.count_ones());
+    if n >= 2 && together {
+        assert!(cpus.count_ones() >= 2, "every timer was armed on one CPU");
+    }
+}
+
+/// Timeouts end on time on CPUs that are idle with no tick: each task's CPU
+/// takes only a few timer interrupts while it waits (a 1 kHz tick: ~40).
+fn tickless_timeouts() {
+    use crate::arch::percpu;
+    static RESULTS: crate::sync::IrqMutex<Vec<(usize, u64, u64)>> = crate::sync::IrqMutex::new(Vec::new());
+    fn waiter() {
+        let cpu = percpu::cpu_id();
+        let irqs = crate::timer::STATS[cpu].interrupts.load(Ordering::Relaxed);
+        let t0 = time::now_ns();
+        sched::wait_until(40, || false);
+        let waited = time::now_ns() - t0;
+        // Only interrupts of the CPU the wait started on, if it is still there.
+        let after = crate::timer::STATS[cpu].interrupts.load(Ordering::Relaxed);
+        RESULTS.lock().push((cpu, waited, after - irqs));
+    }
+    RESULTS.lock().clear();
+    let n = percpu::count().min(8);
+    for _ in 0..n {
+        sched::spawn("t-timeout", waiter);
+    }
+    assert!(eventually(5000, || RESULTS.lock().len() == n), "timeouts did not fire");
+    let results = RESULTS.lock().clone();
+    for &(cpu, waited, irqs) in &results {
+        assert!(waited >= 39_000_000, "CPU {cpu}: a 40 ms timeout ended after {} us", waited / 1000);
+        assert!(waited < 2_000_000_000, "CPU {cpu}: a 40 ms timeout took {} ms", waited / 1_000_000);
+        if crate::arch::timer::mode() != crate::arch::timer::Mode::Periodic {
+            assert!(irqs <= 15, "CPU {cpu} took {irqs} timer interrupts during a 40 ms wait");
+        }
+    }
+    let worst = results.iter().map(|r| r.2).max().unwrap_or(0);
+    crate::kprint!("[{} waits, at most {} timer interrupts each] ", results.len(), worst);
+}
+
+/// With nothing to do, every CPU stays asleep: few timer interrupts per
+/// second on each (a 1 kHz tick takes 1000), and idle time keeps being
+/// counted while the tick is stopped (Activity Monitor's graphs).
+fn quiet_idle() {
+    use crate::arch::percpu;
+    const WINDOW_MS: u64 = 2000;
+    // Settle: let earlier tests' tasks finish.
+    sched::sleep_ms(300);
+    let cpus: Vec<usize> = percpu::online().collect();
+    let irqs = |c: usize| crate::timer::STATS[c].interrupts.load(Ordering::Relaxed);
+    let before: Vec<u64> = cpus.iter().map(|&c| irqs(c)).collect();
+    let times0 = sched::cpu_times();
+    let wakers0 = sched::timer_wakeups();
+    let t0 = time::now_ns();
+    sched::sleep_ms(WINDOW_MS);
+    let elapsed_ms = (time::now_ns() - t0) / 1_000_000;
+    let times1 = sched::cpu_times();
+    let per_s: Vec<u64> = cpus.iter().zip(&before).map(|(&c, &b)| (irqs(c) - b) * 1000 / elapsed_ms.max(1)).collect();
+    crate::kprint!("[timer interrupts/s per CPU: {:?}] ", per_s);
+    let periodic = crate::arch::timer::mode() == crate::arch::timer::Mode::Periodic;
+    // What woke the system (timeouts that ran out, by task name) in the window.
+    let wakers1 = sched::timer_wakeups();
+    let mut woke: Vec<(&str, u64)> = Vec::new();
+    for (name, _) in &wakers1 {
+        if woke.iter().any(|w| w.0 == name.as_str()) {
+            continue;
+        }
+        let was: u64 = wakers0.iter().filter(|w| &w.0 == name).map(|w| w.1).sum();
+        let now: u64 = wakers1.iter().filter(|w| &w.0 == name).map(|w| w.1).sum();
+        if now > was {
+            woke.push((name.as_str(), now - was));
+        }
+    }
+    woke.sort_by_key(|a| core::cmp::Reverse(a.1));
+    crate::kprint!("[woken by:");
+    for (name, n) in woke.iter().take(8) {
+        crate::kprint!(" {name} {n}");
+    }
+    crate::kprint!(" in {elapsed_ms} ms] ");
+    if !periodic {
+        let worst = per_s.iter().copied().max().unwrap_or(0);
+        assert!(worst <= 50, "a CPU took {worst} timer interrupts per second while idle");
+    }
+    // Idle time keeps adding up with the tick stopped.
+    for (i, (a, b)) in times0.iter().zip(&times1).enumerate() {
+        if !percpu::CPUS[i].online.load(Ordering::Relaxed) {
+            continue;
+        }
+        let counted = (b.0 + b.1) - (a.0 + a.1);
+        assert!(counted + 50 >= elapsed_ms * 9 / 10, "CPU {i}: {counted} ms of {elapsed_ms} accounted");
+        assert!(b.1 > a.1, "CPU {i}: no idle time counted while idle");
+    }
+}
+
 fn user_copy_fault() {
     use crate::syscall::user;
     // Kernel tests run on the kernel page table: the user half is unmapped,
@@ -1601,9 +1774,7 @@ fn sleep_and_wake() {
     );
     // Drivers were reset and restarted: the disk, sound and USB work again.
     block_round_trip();
-    let (played, _, _) = crate::drivers::audio::counters();
-    crate::sched::sleep_ms(200);
-    assert!(crate::drivers::audio::counters().0 > played, "sound stopped after sleep");
+    check_playing("sound after sleep", 300);
     assert!(
         wait_for(|| crate::fs::stat("/Volumes/AURORA-USB/Hello.txt").is_ok(), 10_000),
         "the USB stick did not come back after sleep"

@@ -176,6 +176,8 @@ pub struct Desktop {
     clock: String,
     now_ms: u64,
     last_tick: u64,
+    /// When the clock's text can next change (a tick is due then).
+    clock_due: u64,
     pub power: Option<PowerAction>,
     /// Set when the user asks for a screenshot; the compositor takes it after the next frame.
     pub screenshot: bool,
@@ -263,6 +265,7 @@ impl Desktop {
             clock: String::new(),
             now_ms: 0,
             last_tick: 0,
+            clock_due: 0,
             power: None,
             screenshot: false,
             launching: Vec::new(),
@@ -844,11 +847,16 @@ impl Desktop {
                 Command::Reboot => self.power = Some(PowerAction::Reboot),
                 Command::DragStart => self.begin_drag(),
                 Command::TrashChanged => self.refresh_trash(),
-                Command::Pref(key) => self.pref_changed(&key),
+                Command::Pref(key) => {
+                    self.clock_due = 0; // the clock's format or zone may have changed
+                    self.pref_changed(&key)
+                }
+                Command::DesktopItems => self.clock_due = 0, // the next tick takes them
                 Command::PowerButton => self.open(AppKind::Power),
                 Command::PowerChanged => self.power_changed(),
                 // The screen lost its contents while asleep; waking asks for the password.
                 Command::Resumed => {
+                    self.clock_due = 0;
                     self.lock_after_sleep();
                     self.damage_all();
                 }
@@ -904,8 +912,9 @@ impl Desktop {
         if self.focused_id() != self.last_focus {
             return self.now_ms;
         }
-        // Sample the wall clock at most once a second (also catches time edits).
-        let mut next = self.last_tick + 1000;
+        // Sample the wall clock when its text can change: each second if it
+        // shows seconds, else at the next minute (see `tick`).
+        let mut next = self.clock_due;
         if self.wants_frames() {
             next = next.min(self.last_tick + 16);
         }
@@ -1495,6 +1504,7 @@ impl Desktop {
         self.step_items();
         self.last_tick = now_ms;
         let clock = bar::time_text();
+        self.clock_due = now_ms + bar::until_clock_changes();
         if clock != self.clock {
             self.clock = clock;
             self.crest_retarget();

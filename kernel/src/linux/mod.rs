@@ -218,7 +218,7 @@ mod imp {
             let next = unsafe { waveos_lkpi_run_pending() };
             let now = crate::time::now_ns();
             // Devices without interrupts are polled every few milliseconds.
-            let mut ms = if virtio::needs_polling() { 4 } else { 1000 };
+            let mut ms = if virtio::needs_polling() { 4 } else { 10_000 };
             if next != 0 {
                 ms = ms.min((next.saturating_sub(now) / 1_000_000).max(1));
             }

@@ -226,7 +226,7 @@ pub extern "sysv64" fn trap(f: &mut TrapFrame) {
         TIMER_VECTOR => {
             crate::telemetry::irq(crate::telemetry::Irq::Timer);
             apic::eoi();
-            crate::sched::on_timer_tick();
+            crate::timer::interrupt();
         }
         RESCHEDULE_VECTOR => {
             apic::eoi();

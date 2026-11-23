@@ -501,10 +501,25 @@ pub fn resume() {
     for p in &h.pins {
         h.enable_pin(p, true);
     }
-    start_stream(h);
+    // Only if the mixer was playing (it stops the stream when it rests).
+    if STREAMING.load(Ordering::Relaxed) {
+        start_stream(h);
+    }
     if h.has_irq.load(Ordering::Relaxed) {
         h.regs.w32(INTCTL, 1 << 31 | 1 << ((h.sd - 0x80) / 0x20));
     }
+}
+
+/// The output stream's DMA is running.
+static STREAMING: AtomicBool = AtomicBool::new(false);
+
+/// Stops the output stream: no DMA, no interrupts until it starts again.
+fn stop_stream(hda: &Hda) {
+    let (r, sd) = (hda.regs, hda.sd);
+    r.w8(sd + SD_CTL, 0);
+    let _ = wait_for(10, || r.r8(sd + SD_CTL) & SD_RUN == 0);
+    r.w8(sd + SD_STS, SD_STS_ALL);
+    STREAMING.store(false, Ordering::Relaxed);
 }
 
 /// The mixer's handle to the controller (which lives as long as the system).
@@ -528,6 +543,20 @@ impl Output for HdaRef {
     }
     fn poll_jack(&self) -> Option<bool> {
         self.0.poll_jack()
+    }
+    /// The mixer plays to it (again): the stream runs.
+    fn activate(&self) {
+        if !STREAMING.load(Ordering::Relaxed) {
+            start_stream(self.0);
+        }
+    }
+    /// The mixer rests or moved to another device: silence, then stop.
+    fn deactivate(&self) {
+        let zeros = alloc::vec![0i16; SEGMENT_FRAMES * 2];
+        for f in (0..RING_FRAMES).step_by(SEGMENT_FRAMES) {
+            self.0.write(f, &zeros);
+        }
+        stop_stream(self.0);
     }
 }
 
@@ -638,4 +667,5 @@ fn start_stream(hda: &Hda) {
     r.w8(sd + SD_CTL_STREAM, (STREAM_TAG << 4) as u8);
     r.w8(sd + SD_STS, SD_STS_ALL);
     r.w8(sd + SD_CTL, SD_RUN | SD_IOCE);
+    STREAMING.store(true, Ordering::Relaxed);
 }
