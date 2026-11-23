@@ -229,9 +229,23 @@ when arming instead.) If the desktop never comes up, the bootloader runs out
 of tries on its own and the previous system starts; Software Update then
 says that version couldn't start.
 
-`cargo xtask run` refreshes the EFI partition of the developer's disk with
-the new build and drops the `system*` lines from `boot.conf`, so a fresh
-build always starts, whatever was installed through Software Update.
+**What `cargo xtask run` does to an existing disk** (`image::refresh_esp`).
+It writes only the sectors of the EFI partition: it reformats that FAT32
+volume and copies the new build onto it (`\EFI\BOOT\BOOTX64.EFI`,
+`\aurora\kernel.elf`, `\aurora\system.tar` or `system.tar.zlib`,
+`\aurora\update.txt`), then writes back the old `\aurora\boot.conf` without
+exactly four keys: `system`, `system_tries`, `system_previous` and
+`system_failed`. Every other boot option (resolution, appearance, …) is
+kept, so the new build always starts, from the EFI partition. The home
+volume is not opened for writing: your files, settings, installed apps and
+the slots in `/.system` are left exactly as they were (a slot is reused, and
+overwritten, only by the next update installed through Software Update).
+Anything else on the EFI partition, such as `\aurora\boot.log`, is replaced.
+`image::tests::refresh_keeps_the_home_volume_and_drops_only_slot_lines`
+(`cargo test -p xtask`) checks this on a disk image with a file in
+Documents, an installed slot and all four lines: the new kernel is on the
+EFI partition, `boot.conf` keeps its resolution and loses the slot lines,
+and the home volume's files are unchanged and pass `fsck`.
 
 ### Software Update and notifications
 

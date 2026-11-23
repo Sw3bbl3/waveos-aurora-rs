@@ -26,6 +26,10 @@ mod overlay;
 mod pad;
 mod scene;
 
+/// The keyboard-played controller, for the Linux input tests.
+#[cfg(feature = "ktest")]
+pub(crate) use pad::Virtual as KeyboardPad;
+
 use super::Desktop;
 use crate::drivers::gamepad::{self, Change};
 use crate::drivers::input::{KeyCode, KeyEvent};
@@ -116,6 +120,8 @@ pub struct Play {
     enter_at: Option<u64>,
     stats: Stats,
     owner: u64,
+    /// The program the owner's window shows (a bridge's window).
+    owner_program: Option<u32>,
     /// The boot options were read (`virtual_gamepad=1` connects the keyboard controller).
     booted: bool,
     /// The home's springs were moving at the last step.
@@ -148,6 +154,7 @@ impl Play {
             enter_at: None,
             stats: Stats::default(),
             owner: gamepad::ANYONE,
+            owner_program: None,
             booted: false,
             home_moving: false,
             returning: Vec::new(),
@@ -626,10 +633,32 @@ impl Desktop {
         } else {
             self.focused_id().and_then(|id| client_pid(self, id)).unwrap_or(gamepad::ANYONE)
         };
-        if owner != self.play.owner {
+        // The program a bridge's window shows reads along with the bridge.
+        let program = |d: &Desktop, id: Option<u32>| {
+            id.and_then(|id| d.index_of(id))
+                .and_then(|i| d.windows[i].app.client_id())
+                .and_then(crate::gui::server::program_of)
+        };
+        let owner_program = match self.play.front {
+            Front::Game(id) if self.play.on => program(self, Some(id)),
+            _ if self.play.on => None,
+            _ => program(self, self.focused_id()),
+        };
+        if owner != self.play.owner || owner_program != self.play.owner_program {
             self.play.owner = owner;
-            gamepad::set_owner(owner);
+            self.play.owner_program = owner_program;
+            gamepad::set_owners(owner, owner_program);
         }
+        // Keyboards and pointers reach Linux programs through /dev/input
+        // only while their window has the focus (not under the lock screen
+        // or Wave Play's overlay).
+        let keys = if self.shore.is_some() || self.play.overlay.is_some() {
+            (None, None)
+        } else {
+            let id = self.focused_id();
+            (id.and_then(|id| client_pid(self, id)).map(|p| p as u32), program(self, id))
+        };
+        crate::drivers::evdev::set_focus(keys.0, keys.1);
     }
 
     /// One press of a controller button (or its keyboard stand-in).
@@ -1416,12 +1445,12 @@ pub fn self_test() {
     assert_eq!(nav.poll(1100), alloc::vec![Button::Down]);
     assert!(nav.deadline().is_none());
     // While the shell has the controllers, programs read nothing pressed.
-    gamepad::set_owner(gamepad::SHELL);
+    gamepad::set_owners(gamepad::SHELL, None);
     assert_eq!(gamepad::state_for(9999, id).map(|s| s.buttons), Some(0));
-    gamepad::set_owner(9999);
+    gamepad::set_owners(9999, None);
     assert_eq!(gamepad::state_for(9999, id).map(|s| s.buttons), Some(aurora_abi::gamepad::SOUTH));
     assert!(gamepad::polled_recently(9999, crate::time::uptime_ms()));
-    gamepad::set_owner(gamepad::ANYONE);
+    gamepad::set_owners(gamepad::ANYONE, None);
     v.toggle();
     assert!(gamepad::state(id).is_none(), "disconnected");
     let changes = gamepad::take_changes();

@@ -82,8 +82,13 @@ const TESTS: &[Test] = &[
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
     ("Linux programs: local and network sockets (nettest)", linux_sockets),
+    ("Linux programs: input devices — evdev, joystick, hidraw, uinput, hot-plug (inputtest)", linux_input),
     ("Linux programs: the DRM device, mode setting, events, PRIME (drmtest)", linux_drm),
     ("Linux programs: libdrm's modetest on the DRM device", linux_modetest),
+    ("Linux programs: Mesa's kmscube (GBM, EGL, GLES on llvmpipe) on the DRM device", linux_mesa_kmscube),
+    ("Linux programs: Mesa's desktop OpenGL and GLES (glmark2) on the DRM device", linux_mesa_glmark2),
+    ("Linux programs: Mesa's Vulkan (lavapipe), a triangle read back (vkcheck)", linux_mesa_vulkan),
+    ("Linux programs: Mesa in a WaveOS window (es2gears through wl-bridge)", linux_mesa_window),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
@@ -461,6 +466,301 @@ fn linux_sockets() {
     run_linux_test("nettest", "net-test passed");
 }
 
+/// Linux's input interfaces (`linux-tests/inputtest.c`): the program asks
+/// for what it needs as "@command" lines and this plays the user — the
+/// keyboard-played controller (Wave Play's Super+G one), the PS/2
+/// keyboard, a touchpad, a raw HID controller, the window focus — answering
+/// "ok …" on its standard input.
+fn linux_input() {
+    crate::drivers::evdev::self_test();
+    crate::compat::linux::input::self_test();
+    let path = "/System/Linux/bin/inputtest";
+    if crate::fs::stat(path).is_err() {
+        crate::kprint!("(skipped: built without musl-gcc) ");
+        return;
+    }
+    let (in_r, in_w) = crate::proc::new_pipe(false);
+    let (out_r, out_w) = crate::proc::new_pipe(false);
+    let pid = crate::proc::spawn(path, &["inputtest"], [Some(in_r), Some(out_w.clone()), Some(out_w)], 0)
+        .expect("spawn inputtest");
+    let p = crate::proc::get(pid).unwrap();
+    let (to_test, from_test) = match (&*in_w, &*out_r) {
+        (crate::proc::Handle::PipeWrite(w), crate::proc::Handle::PipeRead { pipe, .. }) => (w.clone(), pipe.clone()),
+        _ => unreachable!(),
+    };
+    let mut user = InputTestUser::new(pid);
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let deadline = time::uptime_ms() + 10 * 60_000;
+    let mut buf = [0u8; 512];
+    loop {
+        if from_test.readable() {
+            match from_test.read(&mut buf, true) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => {}
+            }
+        } else if p.exit_code().is_some() || time::uptime_ms() > deadline {
+            break;
+        } else {
+            sched::sleep_ms(5);
+        }
+        while let Some(end) = out.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = out.drain(..=end).collect();
+            let line = String::from_utf8_lossy(&line[..line.len() - 1]).into_owned();
+            match line.strip_prefix('@') {
+                Some(cmd) => {
+                    let reply = user.command(cmd);
+                    let _ = to_test.write(alloc::format!("{reply}\n").as_bytes());
+                }
+                None => {
+                    crate::kprintln!("    {line}");
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+            }
+        }
+    }
+    user.finish();
+    drop(in_w);
+    assert_eq!(p.exit_code(), Some(0), "inputtest failed");
+    assert!(text.contains("input-test passed"), "inputtest did not finish");
+}
+
+/// What `inputtest` asks for, done as a user would (or a device).
+struct InputTestUser {
+    pid: u32,
+    pad: crate::gui::desktop::KeyboardPad,
+    touchpad: Option<(Arc<crate::drivers::evdev::Device>, crate::drivers::evdev::sources::Touches)>,
+    raw: Option<Arc<crate::drivers::evdev::hidraw::Hidraw>>,
+    raw_io: Arc<MockHid>,
+    pointer_from: (i32, i32),
+}
+
+/// A raw HID controller that remembers what it was sent.
+struct MockHid {
+    output: crate::sync::IrqMutex<Vec<u8>>,
+    feature: crate::sync::IrqMutex<Vec<u8>>,
+}
+
+impl crate::drivers::evdev::hidraw::HidIo for MockHid {
+    fn output(&self, report: &[u8]) -> Result<usize, isize> {
+        *self.output.lock() = report.to_vec();
+        Ok(report.len())
+    }
+    fn get_report(&self, _kind: u8, buf: &mut [u8]) -> Result<usize, isize> {
+        buf[1..3].copy_from_slice(&[0x42, 0x43]);
+        Ok(3)
+    }
+    fn set_report(&self, kind: u8, report: &[u8]) -> Result<usize, isize> {
+        if kind == crate::drivers::evdev::hidraw::FEATURE {
+            *self.feature.lock() = report.to_vec();
+        }
+        Ok(report.len())
+    }
+}
+
+impl InputTestUser {
+    fn new(pid: u32) -> Self {
+        InputTestUser {
+            pid,
+            pad: crate::gui::desktop::KeyboardPad::new(),
+            touchpad: None,
+            raw: None,
+            raw_io: Arc::new(MockHid {
+                output: crate::sync::IrqMutex::new(Vec::new()),
+                feature: crate::sync::IrqMutex::new(Vec::new()),
+            }),
+            pointer_from: (0, 0),
+        }
+    }
+
+    fn command(&mut self, cmd: &str) -> String {
+        use crate::drivers::evdev::{self, InputId, Location};
+        use crate::drivers::gamepad;
+        use crate::drivers::input::{self, InputEvent, KeyEvent, Modifiers};
+        let mut words = cmd.split_whitespace();
+        let verb = words.next().unwrap_or("");
+        let args: Vec<&str> = words.collect();
+        let hex = |a: &[&str]| -> Vec<u8> { a.iter().filter_map(|h| u8::from_str_radix(h, 16).ok()).collect() };
+        let ok = String::from("ok");
+        match verb {
+            "focus-me" => {
+                evdev::set_focus(Some(self.pid), None);
+                gamepad::set_owners(self.pid as u64, None);
+                ok
+            }
+            "focus-none" => {
+                evdev::set_focus(None, None);
+                gamepad::set_owners(gamepad::SHELL, None);
+                ok
+            }
+            "pad-connect" | "pad-disconnect" => {
+                if self.pad.id.is_some() == (verb == "pad-disconnect") {
+                    self.pad.toggle();
+                }
+                ok
+            }
+            "pad-press" | "pad-release" | "pad-burst" => {
+                let (code, times) = match (verb, args.first().copied()) {
+                    ("pad-burst", n) => (KeyCode::Enter, n.and_then(|n| n.parse::<usize>().ok()).unwrap_or(1) * 2),
+                    (_, Some("Up")) => (KeyCode::Up, 1),
+                    _ => (KeyCode::Enter, 1),
+                };
+                for i in 0..times {
+                    let pressed = if verb == "pad-burst" { i % 2 == 0 } else { verb == "pad-press" };
+                    let k = KeyEvent { code, ch: None, pressed, mods: Modifiers::default() };
+                    self.pad.key(&k, true);
+                }
+                ok
+            }
+            "rumble?" => {
+                let felt = &gamepad::VIRTUAL_FELT;
+                let until = time::uptime_ms() + 3000;
+                while felt.load(Ordering::Acquire) == 0 && time::uptime_ms() < until {
+                    sched::sleep_ms(10);
+                }
+                let v = felt.swap(0, Ordering::AcqRel);
+                alloc::format!("ok {} {}", v >> 8, v & 0xFF)
+            }
+            "key" => {
+                for b in hex(&args) {
+                    crate::drivers::ps2::keyboard_byte(b);
+                }
+                ok
+            }
+            "touchpad-add" => {
+                let info = aurora_hid::touchpad::Info {
+                    x_min: 0,
+                    x_max: 4000,
+                    y_min: 0,
+                    y_max: 3000,
+                    width_hmm: Some(10_000),
+                    height_hmm: Some(7_500),
+                    max_contacts: 5,
+                };
+                let id = InputId { bustype: 0x18, vendor: 0x1209, product: 0x0002, version: 1 };
+                let d = evdev::sources::touchpad("WaveOS Test Touchpad", id, "", Location::Virtual, &info);
+                self.touchpad = Some((d, evdev::sources::Touches::new()));
+                ok
+            }
+            "touch" => {
+                let Some((d, touches)) = &mut self.touchpad else { return String::from("no touchpad") };
+                let num = |i: usize| args.get(i).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                let contacts = if args.first() == Some(&"down") {
+                    alloc::vec![aurora_hid::touchpad::Contact {
+                        id: 7,
+                        x: num(1),
+                        y: num(2),
+                        tip: true,
+                        confident: true
+                    }]
+                } else {
+                    Vec::new()
+                };
+                touches.frame(d, &aurora_hid::touchpad::Frame { contacts, button: false });
+                ok
+            }
+            "touchpad-remove" => {
+                if let Some((d, _)) = self.touchpad.take() {
+                    evdev::remove(&d);
+                }
+                ok
+            }
+            "hidraw-add" => {
+                let place = evdev::UsbPlace {
+                    bus: 9,
+                    ports: String::from("1"),
+                    interface: 0,
+                    vendor: 0x1209,
+                    product: 0x0003,
+                    version: 0x0100,
+                    maker: String::from("WaveOS"),
+                    model: String::from("Test Pad"),
+                    serial: String::new(),
+                    pci: String::from("0000:00:1f.7"),
+                    hid: 0x99,
+                };
+                self.raw = Some(evdev::hidraw::add(evdev::hidraw::Spec {
+                    name: String::from("WaveOS Test Pad"),
+                    phys: String::from("usb-0000:00:1f.7-1/input0"),
+                    uniq: String::new(),
+                    bustype: 3,
+                    vendor: 0x1209,
+                    product: 0x0003,
+                    descriptor: alloc::vec![0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0xC0],
+                    location: Location::Usb(place),
+                    class: evdev::Class::Joystick,
+                    io: self.raw_io.clone(),
+                }));
+                ok
+            }
+            "hidraw-report" => {
+                if let Some(r) = &self.raw {
+                    r.input(&hex(&args));
+                }
+                ok
+            }
+            "hidraw-check" => {
+                let h = |b: &[u8]| b.iter().map(|x| alloc::format!("{x:02x}")).collect::<String>();
+                alloc::format!("ok {} {}", h(&self.raw_io.output.lock()), h(&self.raw_io.feature.lock()))
+            }
+            "hidraw-remove" => {
+                if let Some(r) = self.raw.take() {
+                    evdev::hidraw::remove(&r);
+                }
+                ok
+            }
+            "native-pads" => {
+                let names: Vec<String> = gamepad::list()
+                    .iter()
+                    .map(|p| String::from_utf8_lossy(&p.name[..p.name_len as usize]).into_owned())
+                    .collect();
+                alloc::format!("ok {}", names.join("|"))
+            }
+            "drain-native" => {
+                while input::pop().is_some() {}
+                self.pointer_from = input::pointer_position();
+                ok
+            }
+            "native-key?" => {
+                let mut got = String::from("none");
+                while let Some(e) = input::pop() {
+                    if let InputEvent::Key(KeyEvent { pressed: true, ch: Some(c), .. }) = e {
+                        got = alloc::format!("{c}");
+                    }
+                }
+                alloc::format!("ok {got}")
+            }
+            "native-pointer?" => {
+                let mut at = None;
+                while let Some(e) = input::pop() {
+                    if let InputEvent::Pointer { x, y, .. } = e {
+                        at = Some((x, y));
+                    }
+                }
+                match at {
+                    Some((x, y)) => alloc::format!("ok {} {}", x - self.pointer_from.0, y - self.pointer_from.1),
+                    None => String::from("ok none"),
+                }
+            }
+            _ => alloc::format!("unknown command {cmd}"),
+        }
+    }
+
+    /// Puts things back as they were.
+    fn finish(&mut self) {
+        if self.pad.id.is_some() {
+            self.pad.toggle();
+        }
+        let _ = self.command("touchpad-remove");
+        let _ = self.command("hidraw-remove");
+        crate::drivers::evdev::set_focus(None, None);
+        crate::drivers::gamepad::set_owners(crate::drivers::gamepad::ANYONE, None);
+        let _ = crate::drivers::gamepad::take_changes();
+    }
+}
+
 /// A fourth drives the display through `/dev/dri/card0` while a stand-in
 /// desktop (an `Output` showing one colour) is on it: the program takes
 /// the display with its first mode set, and when it closes the card — and
@@ -525,6 +825,203 @@ fn linux_modetest() {
     assert!(text.contains("freq:"), "modetest {} did not commit 60 frames", argv.join(" "));
     assert_eq!(code, Some(crate::proc::KILLED_CODE), "modetest {} ended by itself", argv.join(" "));
     assert!(eventually(5000, || gpu::owner::holder(&*dev).is_none()), "the desktop did not get the display back");
+}
+
+/// Where Debian's Mesa and its programs are when the disk has them
+/// (`cargo xtask test --mesa` puts them there; other disks skip the Mesa tests).
+const MESA_KMSCUBE: &str = "/Linux/usr/bin/kmscube";
+
+/// Runs a program from the Linux packages by its Linux path, through
+/// BusyBox's `env` with `vars` added to the environment.
+fn linux_env_argv<'a>(vars: &[&'a str], argv: &[&'a str]) -> Vec<&'a str> {
+    let mut v = alloc::vec!["env"];
+    v.extend_from_slice(vars);
+    v.extend_from_slice(argv);
+    v
+}
+
+/// Counts the page flips a program makes on `dev`'s primary plane while it
+/// holds the display, and asks the harness for a screendump (`name`) once
+/// it has flipped a few times, so the picture is one it rendered.
+struct FlipWatch {
+    dev: Arc<dyn crate::drivers::gpu::KmsDevice>,
+    last: usize,
+    flips: u32,
+    shot: Option<&'static str>,
+}
+
+impl FlipWatch {
+    fn new(dev: Arc<dyn crate::drivers::gpu::KmsDevice>, shot: Option<&'static str>) -> FlipWatch {
+        FlipWatch { dev, last: 0, flips: 0, shot }
+    }
+
+    fn tick(&mut self) {
+        use crate::drivers::gpu::{self, PlaneKind};
+        if gpu::owner::holder(&*self.dev).is_none() {
+            return;
+        }
+        let primary = self.dev.planes().into_iter().find(|p| p.kind == PlaneKind::Primary).map(|p| p.id);
+        let (_, planes) = self.dev.state();
+        let fb = planes
+            .iter()
+            .find(|p| Some(p.plane) == primary)
+            .and_then(|p| p.fb.as_ref())
+            .map_or(0, |fb| Arc::as_ptr(fb) as *const () as usize);
+        if fb != 0 && fb != self.last {
+            self.last = fb;
+            self.flips += 1;
+        }
+        if self.flips >= 4 {
+            if let Some(name) = self.shot.take() {
+                crate::kprintln!("\nharness: screendump {name}");
+            }
+        }
+    }
+}
+
+/// Vulkan on Mesa's lavapipe: `vulkaninfo` lists the device, and
+/// `vkcheck` (`linux-programs/vkcheck`, built by xtask) draws a triangle
+/// with a graphics pipeline whose shaders lavapipe compiles, reads the
+/// picture back and checks it.
+fn linux_mesa_vulkan() {
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return;
+    }
+    let busybox = "/System/Linux/bin/busybox";
+    let argv = linux_env_argv(&[], &["/usr/bin/vulkaninfo", "--summary"]);
+    let (code, text) = run_linux_program(busybox, &argv, None, None, 300_000);
+    assert_eq!(code, Some(0), "vulkaninfo failed");
+    assert!(text.contains("llvmpipe"), "vulkaninfo does not list lavapipe");
+    if crate::fs::stat("/Linux/usr/local/bin/vkcheck").is_err() {
+        crate::kprint!("(vkcheck skipped: not built) ");
+        return;
+    }
+    let argv = linux_env_argv(&["WAVEOS_SYSCOUNT=1"], &["/usr/local/bin/vkcheck"]);
+    let (code, text) = run_linux_program(busybox, &argv, None, None, 300_000);
+    assert_eq!(code, Some(0), "vkcheck failed");
+    assert!(text.contains("vkcheck passed"), "vkcheck did not finish");
+}
+
+/// Mesa drawing into a WaveOS window instead of the whole screen: Mesa's
+/// `es2gears` demo, a Wayland client, through `wl-bridge`. EGL's Wayland
+/// platform renders with llvmpipe into shared-memory buffers (`wl_shm`),
+/// which the bridge copies into the window on each commit. The window must
+/// show the red gear, turning: its picture changes from frame to frame.
+/// (es2gears' own frame-rate line stays in its output buffer, a pipe here.)
+fn linux_mesa_window() {
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return;
+    }
+    let script = "wl-bridge --background && exec /usr/bin/es2gears_wayland.x86_64-linux-gnu";
+    let (mut red, mut frames, mut last, mut since) = (0usize, 0u32, 0u64, None);
+    let (code, _) =
+        run_linux_program_watched("/System/Linux/bin/busybox", &["sh", "-c", script], None, 300_000, &mut |_| {
+            for (id, _, title) in crate::gui::server::windows() {
+                if title != "es2gears" {
+                    continue;
+                }
+                let seen = crate::gui::server::with_surface_scaled(id, |px, _, _, _| {
+                    let red = px
+                        .iter()
+                        .filter(|&&p| {
+                            let (r, g, b) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
+                            r > 150 && g < 80 && b < 80
+                        })
+                        .count();
+                    // A cheap fingerprint of the picture.
+                    let sum = px.iter().step_by(7).fold(0u64, |h, &p| h.rotate_left(5) ^ p as u64);
+                    (red, sum)
+                });
+                if let Some((r, sum)) = seen {
+                    red = red.max(r);
+                    if r > 200 && sum != last {
+                        last = sum;
+                        frames += 1;
+                        since.get_or_insert(time::uptime_ms());
+                    }
+                }
+            }
+            // Enough once it has turned for a while.
+            frames >= 30 || since.is_some_and(|t| time::uptime_ms() > t + 20_000)
+        });
+    // The bridge runs on in the background: it goes too.
+    for p in crate::proc::all().iter().filter(|p| p.name() == "wl-bridge") {
+        let _ = crate::proc::kill(p.pid);
+    }
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "es2gears ended by itself");
+    assert!(red > 200, "the window shows no red gear ({red} red pixels)");
+    assert!(frames >= 5, "the gears did not turn ({frames} different pictures)");
+    crate::kprint!("[{frames} different pictures, {red} red pixels] ");
+}
+
+/// Runs a Mesa program from the Linux packages full screen (it takes the
+/// display from a stand-in desktop showing one colour), counting its page
+/// flips and asking for screendump `shot` once it has flipped a few times;
+/// the desktop must have the display back when it ends. Returns its exit
+/// code, output and flips; `None` (skipped) when Mesa isn't on the disk.
+fn mesa_fullscreen(argv: &[&str], shot: Option<&'static str>) -> Option<(Option<i64>, String, u32)> {
+    use crate::drivers::gpu::{self, output::Output, Damage};
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return None;
+    }
+    let desktop = Output::open(None).expect("no display");
+    let (w, h) = desktop.size();
+    unsafe { desktop.back_buffer() }.fill(0xFF33_6699);
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present");
+    let dev = gpu::primary().unwrap();
+    let mut watch = FlipWatch::new(dev.clone(), shot);
+    let argv = linux_env_argv(&["WAVEOS_SYSCOUNT=1"], argv);
+    // (Its input stays open: kmscube stops when it becomes readable.)
+    let (code, text) =
+        run_linux_program_watched("/System/Linux/bin/busybox", &argv, Some(600_000), 600_000, &mut |_| {
+            watch.tick();
+            false
+        });
+    assert!(eventually(5000, || gpu::owner::holder(&*dev).is_none()), "the desktop did not get the display back");
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present after");
+    Some((code, text, watch.flips))
+}
+
+/// Mesa from Debian 12, unmodified: kmscube finds the card through libdrm,
+/// makes a GBM device and an EGL display on it, renders a spinning cube
+/// with OpenGL ES 2 on llvmpipe (Mesa's LLVM JIT rasteriser, through the
+/// `kms_swrast` driver: dumb buffers, PRIME, `ADDFB2`) and page-flips every
+/// frame with events. The harness checks a screendump taken while it runs
+/// (grey background, a coloured cube in the middle).
+fn linux_mesa_kmscube() {
+    let frames = "240";
+    let Some((code, text, flips)) = mesa_fullscreen(&["/usr/bin/kmscube", "-c", frames], Some("mesa-kmscube")) else {
+        return;
+    };
+    assert_eq!(code, Some(0), "kmscube failed");
+    assert!(text.contains("llvmpipe"), "kmscube did not render with llvmpipe");
+    assert!(flips >= 10, "kmscube flipped {flips} times");
+    crate::kprint!("[{frames} frames, {flips} flips seen] ");
+}
+
+/// glmark2's DRM builds, from Debian: desktop OpenGL (`glmark2-drm`, an
+/// OpenGL 4.5 core context through EGL on GBM) and OpenGL ES 2
+/// (`glmark2-es2-drm`), each running two of its scenes full screen and
+/// reporting a score.
+fn linux_mesa_glmark2() {
+    for (program, api, shot) in
+        [("glmark2-drm", "OpenGL", "mesa-glmark2"), ("glmark2-es2-drm", "OpenGL ES", "mesa-glmark2-es2")]
+    {
+        let path = alloc::format!("/usr/bin/{program}");
+        // (glmark2 finds the card itself, through libudev: the boot VGA
+        // among the `drm` devices udev has records for.)
+        let argv = [path.as_str(), "-b", "build:duration=3.0", "-b", "texture:duration=3.0"];
+        let Some((code, text, flips)) = mesa_fullscreen(&argv, Some(shot)) else { return };
+        assert_eq!(code, Some(0), "{program} failed");
+        assert!(text.contains("llvmpipe"), "{program} did not render with llvmpipe");
+        assert!(text.contains(api), "{program} did not report {api}");
+        assert!(text.contains("glmark2 Score:"), "{program} did not finish");
+        assert!(flips >= 10, "{program} flipped {flips} times");
+        crate::kprint!("[{program}: {flips} flips] ");
+    }
 }
 
 /// The vDSO's clocks (computed from its time page, as `kernel/vdso/vdso.c`
@@ -745,6 +1242,21 @@ fn run_linux_program(
     kill_on: Option<&str>,
     timeout_ms: u64,
 ) -> (Option<i64>, String) {
+    run_linux_program_watched(path, argv, stdin_ms, timeout_ms, &mut |out| {
+        kill_on.is_some_and(|m| out.windows(m.len()).any(|w| w == m.as_bytes()))
+    })
+}
+
+/// Like [`run_linux_program`], with `watch` called with the output so far
+/// every few milliseconds while the program runs; it is killed once
+/// `watch` says so.
+fn run_linux_program_watched(
+    path: &str,
+    argv: &[&str],
+    stdin_ms: Option<u64>,
+    timeout_ms: u64,
+    watch: &mut dyn FnMut(&[u8]) -> bool,
+) -> (Option<i64>, String) {
     let (r, w) = crate::proc::new_pipe(false);
     let (stdin, mut stdin_writer) = match stdin_ms {
         Some(_) => {
@@ -769,8 +1281,7 @@ fn run_linux_program(
         if stdin_writer.is_some() && time::uptime_ms() >= stdin_until {
             stdin_writer = None;
         }
-        let seen = |m: &str| out.windows(m.len()).any(|w| w == m.as_bytes());
-        if kill_on.is_some_and(seen) && p.exit_code().is_none() {
+        if p.exit_code().is_none() && watch(&out) {
             let _ = crate::proc::kill(pid);
         }
         if reader.readable() {

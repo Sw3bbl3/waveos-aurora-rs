@@ -148,6 +148,9 @@ pub struct DeviceDescriptor {
     pub product: u16,
     pub manufacturer_index: u8,
     pub product_index: u8,
+    pub serial_index: u8,
+    /// `bcdDevice`: the device's release.
+    pub release: u16,
 }
 
 impl DeviceDescriptor {
@@ -161,6 +164,8 @@ impl DeviceDescriptor {
             product: u16::from_le_bytes([b[10], b[11]]),
             manufacturer_index: b[14],
             product_index: b[15],
+            serial_index: b[16],
+            release: u16::from_le_bytes([b[12], b[13]]),
         })
     }
 }
@@ -412,6 +417,8 @@ type DetachHook = Box<dyn Fn() + Send + Sync>;
 /// One USB bus: a host controller and the devices on it.
 pub struct Bus {
     pub index: usize,
+    /// The controller's PCI address ("0000:00:04.0"), as Linux names it.
+    pub pci: String,
     pub hcd: &'static dyn Hcd,
     devices: IrqMutex<Vec<DeviceRecord>>,
     detach: IrqMutex<Vec<(u8, DetachHook)>>,
@@ -436,6 +443,7 @@ pub fn register(hcd: &'static dyn Hcd) -> &'static Bus {
     let mut all = BUSES.lock();
     let bus: &'static Bus = Box::leak(Box::new(Bus {
         index: all.len(),
+        pci: PROBING.lock().clone(),
         hcd,
         devices: IrqMutex::new(Vec::new()),
         detach: IrqMutex::new(Vec::new()),
@@ -465,9 +473,35 @@ pub struct UsbDevice {
     pub desc: DeviceDescriptor,
     pub config: Configuration,
     pub name: String,
+    /// The manufacturer, product and serial number strings (may be empty).
+    pub maker: String,
+    pub model: String,
+    pub serial: String,
 }
 
 impl UsbDevice {
+    /// Where interface `interface` is, as Linux's sysfs and stable device
+    /// names say it.
+    pub fn place(&self, interface: u8) -> crate::drivers::evdev::UsbPlace {
+        let mut ports = format!("{}", self.pos.root_port);
+        for tier in 0..self.pos.depth {
+            ports.push_str(&format!(".{}", (self.pos.route >> (4 * tier)) & 0xF));
+        }
+        crate::drivers::evdev::UsbPlace {
+            bus: self.bus.index as u8 + 1,
+            ports,
+            interface,
+            vendor: self.desc.vendor,
+            product: self.desc.product,
+            version: self.desc.release,
+            maker: self.maker.clone(),
+            model: self.model.clone(),
+            serial: self.serial.clone(),
+            pci: self.bus.pci.clone(),
+            hid: 0,
+        }
+    }
+
     pub fn control(&self, setup: Setup, data: Option<&mut [u8]>) -> Result<usize, u8> {
         self.bus.control(self.dev, setup, data)
     }
@@ -641,8 +675,8 @@ impl Bus {
         let maker = self.string(dev, desc.manufacturer_index);
         let name = match (maker.is_empty(), product.is_empty()) {
             (_, true) => format!("USB device {:04x}:{:04x}", desc.vendor, desc.product),
-            (true, false) => product,
-            (false, false) if product.starts_with(maker.as_str()) => product,
+            (true, false) => product.clone(),
+            (false, false) if product.starts_with(maker.as_str()) => product.clone(),
             (false, false) => format!("{maker} {product}"),
         };
         let mut head = [0u8; 9];
@@ -658,7 +692,18 @@ impl Bus {
         if self.hcd.control(dev, Setup::set_configuration(config.value), None).is_err() {
             return fail("SET_CONFIGURATION failed");
         }
-        let device = UsbDevice { bus: self, dev, pos, desc: desc.clone(), config, name: name.clone() };
+        let serial = self.string(dev, desc.serial_index);
+        let device = UsbDevice {
+            bus: self,
+            dev,
+            pos,
+            desc: desc.clone(),
+            config,
+            name: name.clone(),
+            maker: maker.clone(),
+            model: product.clone(),
+            serial,
+        };
         // Recorded first, so an unplug during the driver's setup still finds it.
         self.devices.lock().push(DeviceRecord { dev, pos, desc, name: name.clone(), driver: String::new() });
         let driver = attach(&device);
@@ -849,16 +894,23 @@ pub fn init() {
     let devices = crate::drivers::pci::devices();
     let usb =
         |prog_if: u8| devices.iter().filter(move |d| d.class == 0x0C && d.subclass == 0x03 && d.prog_if == prog_if);
+    let probe = |d: &crate::drivers::pci::Device, f: fn(&crate::drivers::pci::Device)| {
+        *PROBING.lock() = format!("0000:{:02x}:{:02x}.{:x}", d.bus, d.dev, d.func);
+        f(d);
+    };
     for d in usb(0x30) {
-        xhci::probe(d);
+        probe(d, xhci::probe);
     }
     for d in usb(0x20) {
-        ehci::probe(d);
+        probe(d, ehci::probe);
     }
     for d in usb(0x10) {
-        ohci::probe(d);
+        probe(d, ohci::probe);
     }
     for d in usb(0x00) {
-        uhci::probe(d);
+        probe(d, uhci::probe);
     }
 }
+
+/// The PCI address of the controller being probed (a bus records it).
+static PROBING: IrqMutex<String> = IrqMutex::new(String::new());

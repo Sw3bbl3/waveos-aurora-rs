@@ -42,7 +42,7 @@ the kernel loads next to them; it then loads the libraries itself.
 `cargo xtask linux-root [PKG…]` fetches Debian 12 packages and everything
 they depend on into `target/linux-root` (by default Firefox ESR, bash,
 coreutils, Python 3, the DejaVu fonts, WenQuanYi Micro Hei for Chinese,
-Japanese and Korean text, and glibc's locale data: about 150 packages,
+Japanese and Korean text, glibc's locale data and Mesa's `kmscube`: about 150 packages,
 450 MiB). Without arguments it also rebuilds a root that lacks one of these.
 They come from a fixed snapshot of the Debian archive, and every download
 is checked: the archive's `Release` file against a SHA-256 pinned in
@@ -91,10 +91,14 @@ Writing to the file, or deleting it, drops it from the cache.
   always are.
 - **Made-up files:** `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/fd/*`,
   `/dev/kmsg` (the system log: `2>/dev/kmsg` keeps a program's messages);
-  `/proc/self/exe`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/mounts`;
-  `/dev/dri/card0` (see [The display](#the-display-drm)) and the parts of
+  the input devices and what describes them (`/dev/input`, `/dev/hidraw*`,
+  `/dev/uinput`, `/sys`, `/run/udev`; see below);
+  `/proc/self/exe`, `/proc/meminfo`, `/proc/mounts`; `/proc/cpuinfo` and
+  `/sys/devices/system/cpu`, as Linux writes them from `cpuid` (the
+  `flags` line lists what the processor has and the kernel enables);
+  `/dev/dri/card0` (see [The display](#the-display-drm)), the parts of
   `/sys` that describe it (`/sys/class/drm`, `/sys/dev/char`, the PCI
-  device); and
+  device) and its udev record (`/run/udev/data/c226:0`); and
   `/etc/passwd`, `/etc/group`, `/etc/hostname`, `/etc/hosts` and
   `/etc/resolv.conf` built from the computer's settings.
 - **Memory:** `brk`, `mmap` (anonymous and private file mappings, hints,
@@ -102,7 +106,8 @@ Writing to the file, or deleting it, drops it from the cache.
   memory gets its pages when they are first touched, so a program can
   reserve gigabytes (WebKit's JavaScript engine maps 8 GiB) and pay only
   for what it uses; `MADV_DONTNEED` gives pages back. `PROT_NONE`
-  reservations take no memory at all.
+  reservations take no memory at all. `mincore` tells whether pages are
+  mapped.
 - **The processor:** x87, SSE and AVX, with the kernel saving each thread's
   registers (XSAVE) across switches and in signal frames, as on Linux.
 - **Shared memory:** `memfd_create`, `shm_open` (`/dev/shm`) and
@@ -156,6 +161,12 @@ Writing to the file, or deleting it, drops it from the cache.
 - **Symbolic links:** the read-only tree's links come with the system image
   (`/bin/sh` and every other BusyBox command are links to `/bin/busybox`,
   where Debian puts them); `symlink` makes new ones in the writable tree.
+  `O_PATH | O_NOFOLLOW` opens a link itself, and `readlinkat(fd, "")`
+  reads it (systemd's libraries walk paths this way). `statfs` says
+  sysfs, procfs and tmpfs for `/sys`, `/proc`, `/dev` and `/run`.
+- **inotify:** folders are watched for files and folders created,
+  deleted and renamed (and device nodes in `/dev`); changes to a file's
+  contents aren't reported yet.
 - **Everything else:** calls that aren't there yet return `ENOSYS`, and the
   first use of each is written to the system log (`linux: … system call N
   is not supported yet`).
@@ -187,7 +198,37 @@ Only these WaveOS calls are open to Linux programs: windows, events, sound
 clipboard, notifications, reading preferences, the uptime clock, and game
 controllers (`wave_gamepads`, `wave_gamepad_state`, `wave_gamepad_rumble`:
 one standard layout for every controller; Doom uses them). A program reads
-a neutral controller while it isn't the one in front.
+a neutral controller while it isn't the one in front. Programs written for
+Linux don't need these for input: see below.
+
+## Keyboards, mice and game controllers the Linux way
+
+Linux programs find and read input devices as on Linux, so SDL, libinput,
+Steam's input layer and Wine work unchanged
+([developer/linux-input.md](developer/linux-input.md) has the details):
+
+- `/dev/input/event*` for every keyboard, mouse, tablet, touchpad and game
+  controller, with Linux's events, `ioctl`s, force feedback (rumble) and
+  Caps Lock light; `/dev/input/js*` (the old joystick API) for
+  controllers; `/dev/hidraw*` for USB HID devices (raw reports, feature
+  reports); `/dev/uinput` to make devices (they work in WaveOS too).
+- Controllers look exactly as Linux's drivers show them (Xbox pads as
+  `xpad`, PlayStation as `hid-playstation`, Switch Pro as `hid-nintendo`),
+  so SDL's built-in controller database knows them. The keyboard-played
+  controller (Super+G) is an Xbox 360 pad.
+- Finding them: sysfs (`/sys/class/input`, `/sys/class/hidraw`, the devices
+  under `/sys/devices`), `/dev/input/by-id` and `by-path`, udev's records in
+  `/run/udev/data`, device events over netlink for libudev's monitors (the
+  kernel sends udev's messages itself), and inotify on `/dev/input`.
+- Debian's SDL 2.26 finds the keyboard-played controller, plugged in
+  while it runs, and calls it a game controller with its built-in Xbox 360
+  mapping, through libudev and through inotify alike (`sdlprobe`, see the
+  developer page).
+- Who reads what: keyboards, mice and touchpads reach only the program
+  whose window has the focus; controllers, the program in front (Wave
+  Play's rule). A program without the focus sees its devices at rest. The
+  device files belong to the account logged in at the screen; raw HID
+  files of keyboards and mice belong to the system.
 
 Three calls fit windows into a program's own main loop:
 
@@ -227,9 +268,38 @@ display server runs. Looking costs nothing; its first mode set or page
 flip takes the screen from the desktop, which comes back as soon as the
 program drops master, closes the card or exits — also when it crashes or
 is killed. While it holds the screen, keys and the pointer still go to the
-desktop. No render nodes, syncobjs or format modifiers yet, and Mesa
-hasn't been run against it; see
-[display-core.md](developer/display-core.md#what-mesa-still-needs).
+desktop. Mesa runs on it unmodified (see [Mesa](#mesa-opengl-and-vulkan));
+render nodes, syncobjs and tiled formats are what hardware drivers will
+need next (see
+[display-core.md](developer/display-core.md#what-hardware-drivers-still-need)).
+
+## Mesa (OpenGL and Vulkan)
+
+Debian's Mesa 22.3 draws in software on the processor, with llvmpipe
+(LLVM compiles shaders to the processor's own code): OpenGL ES 3.2 and
+OpenGL 4.5 through EGL, and Vulkan 1.3 through lavapipe.
+
+- **Full screen**, as on a Linux console: GBM and EGL on `/dev/dri/card0`
+  (Mesa's `kms_swrast`: llvmpipe draws into dumb buffers, page-flipped
+  with events). `kmscube` and `glmark2-drm`/`glmark2-es2-drm` run as they
+  are; the program takes the display from the desktop and gives it back
+  when it ends.
+- **In a window**, through `wl-bridge`: Mesa's EGL on Wayland draws into
+  shared memory, and the bridge copies each frame into the WaveOS window
+  (`wl-bridge &` then `es2gears_wayland`).
+- **Vulkan** with lavapipe: rendering and reading back (`vulkaninfo`
+  lists it). Presenting full screen through `VK_KHR_display` is untried.
+
+`kmscube` is among the default packages (in Terminal: `kmscube`; Return
+ends it). The others (`glmark2-drm`, `mesa-vulkan-drivers`,
+`vulkan-tools`, `mesa-utils-bin`) aren't; `cargo xtask test --mesa` puts
+them on its own test disk with `vkcheck`, a small
+Vulkan program (`linux-programs/vkcheck`) that xtask builds with clang
+against Debian's Vulkan headers, as it builds Voyage. In QEMU emulating
+the processor, kmscube's cube at 1280 × 800 runs at 25 to 35 frames per
+second; see
+[display-core.md](developer/display-core.md#mesa-performance) for where
+the time goes.
 
 ## Wayland programs (GTK and others)
 
@@ -252,9 +322,14 @@ frame and resizes windows; the program is told the new size and draws
 again. Copying in a program offers the text to WaveOS's clipboard, and
 WaveOS's clipboard is what programs paste.
 
+OpenGL programs work the same way: with no GPU buffers offered (no
+`linux-dmabuf`), Mesa's EGL draws in software into shared memory, and the
+bridge copies each frame.
+
 What isn't there yet: pop-up menus stay inside their window, drag and drop
-between programs, GPU buffers (`linux-dmabuf`: programs draw in software),
-input methods, and touch.
+between programs, GPU buffers (`linux-dmabuf`: programs draw in software;
+see [display-core.md](developer/display-core.md#mesa-in-a-window) for the
+design), input methods, and touch.
 
 ## Voyage
 
@@ -436,9 +511,15 @@ and `FRAME`) and `linux-tests/proctest.c` (fork, exec, wait, scripts and
 the shell, `posix_spawn` and `vfork`, signals and handlers, faults handled
 as signals, signals to a thread busy in its own code,
 interrupted calls, `poll`, `select`, `epoll`, `eventfd`, `timerfd`,
-close-on-exec and symbolic links), and `linux-tests/nettest.c` (local
-sockets with descriptor passing, TCP and UDP over loopback, name lookup).
+close-on-exec and symbolic links), `linux-tests/nettest.c` (local
+sockets with descriptor passing, TCP and UDP over loopback, name lookup),
+and `linux-tests/inputtest.c` (input devices: evdev, the joystick API,
+hidraw, uinput, sysfs and udev records, hot-plug over netlink and inotify,
+focus, grabs and rumble, with the kernel test playing the user).
 
 To see what a Linux program asks of the kernel, put `WAVEOS_STRACE=1` in
-its environment: every system call it makes, with its arguments and
-result, goes to the system log.
+its environment: every system call it makes, with its arguments, the path
+it names (if any) and its result, goes to the system log.
+`WAVEOS_SYSCOUNT=1` is lighter: when the program ends (or `exec`s
+another), the log gets how many of each call it made and the time they
+took, waits included, most first.

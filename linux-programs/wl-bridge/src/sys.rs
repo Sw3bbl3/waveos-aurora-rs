@@ -303,6 +303,29 @@ pub fn win_close(id: u32) {
     call(WAVE + WIN_CLOSE, [id as i64, 0, 0, 0, 0, 0]);
 }
 
+const WIN_SET_PROGRAM: i64 = 93;
+
+/// Says window `id` shows what process `pid` draws: that program then gets
+/// the window's input focus (`/dev/input`, game controllers).
+pub fn win_set_program(id: u32, pid: i32) {
+    call(WAVE + WIN_SET_PROGRAM, [id as i64, pid as i64, 0, 0, 0, 0]);
+}
+
+const GETSOCKOPT: i64 = 55;
+const SOL_SOCKET: i64 = 1;
+const SO_PEERCRED: i64 = 17;
+
+/// The process at the other end of local socket `fd`.
+pub fn peer_pid(fd: Fd) -> Option<i32> {
+    let mut cred = [0i32; 3];
+    let mut len: u32 = 12;
+    let r = call(
+        GETSOCKOPT,
+        [fd as i64, SOL_SOCKET, SO_PEERCRED, cred.as_mut_ptr() as i64, &mut len as *mut u32 as i64, 0],
+    );
+    (r == 0 && cred[0] > 0).then_some(cred[0])
+}
+
 /// The next window event, waiting up to `timeout_ms`.
 pub fn next_event(timeout_ms: i64) -> Option<Event> {
     let mut e = Event::default();

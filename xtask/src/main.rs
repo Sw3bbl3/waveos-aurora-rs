@@ -46,6 +46,8 @@
 //!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data)
 //!       --displays N                      with --gpu virtio: N scanouts, plugged in and out by the
 //!                                         multi-monitor test, each checked by QMP screendump (testdisplays.rs)
+//!       --mesa                            only the Mesa tests, on a disk with Debian's Mesa, kmscube, glmark2
+//!                                         and Vulkan tools (target/mesa-root, fetched once) and 2 GiB of memory
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
@@ -58,6 +60,7 @@ mod image;
 mod launcher;
 mod libdrm;
 mod linux;
+mod mesa;
 mod monitor;
 mod netsurf;
 mod package;
@@ -430,7 +433,7 @@ fn main() {
                 eprintln!("the multi-monitor test needs --gpu virtio (the kernel drives one Bochs VGA)");
                 exit(2);
             }
-            test(profile, disk, smp, net, gpu, usb, n)
+            test(profile, disk, smp, net, gpu, usb, n, flag("--mesa"))
         }
         Some("test262") => test262(&args[1..]),
         _ => {
@@ -1584,18 +1587,30 @@ fn inbound_check(port: u16) {
     });
 }
 
-fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str, heads: usize) {
+#[allow(clippy::too_many_arguments)] // the test matrix
+fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str, heads: usize, mesa: bool) {
     let esp = build(profile, true);
     let img = root().join("target/test-disk.img");
     let shown = if heads > 1 { format!("display {gpu} with {heads} heads") } else { format!("display {gpu}") };
     println!("running kernel tests with the disk on {disk}, network {net}, {shown}, USB on {usb}");
+    // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux and
+    // the memory LLVM's code generator needs.
+    let mesa_root = mesa.then(mesa::root_dir);
+    let (disk_size, memory_mib) = match &mesa_root {
+        Some(r) => (dir_size(r) + 256 * 1024 * 1024, 2048),
+        // Cards keep their 128 MiB (a size a card can have); a disk gets
+        // room for two system updates beside the home folder (see the
+        // system update test, which cards skip).
+        None if disk == "sd" || disk == "emmc" => (128 * 1024 * 1024, 512),
+        None => (384 * 1024 * 1024, 512),
+    };
     let http_port = start_test_http_server();
     let fwd_port = free_port();
     // AURORA_TEST_SLEEP=off skips the sleep test (firmware that can't resume).
     let mut sleep = env::var("AURORA_TEST_SLEEP").as_deref() != Ok("off");
     'attempt: loop {
-        // Room for two system updates beside the home folder (see the system update test).
-        image::create(&esp, &root().join("assets/home"), &img, 384 * 1024 * 1024).expect("test disk creation failed");
+        image::create_with(&esp, &root().join("assets/home"), mesa_root.as_deref(), &img, disk_size)
+            .expect("test disk creation failed");
         image::set_boot_option(&img, "test_http_port", &http_port.to_string()).expect("write boot.conf");
         // A USB speaker plays on xHCI; elsewhere it must be reported unsupported.
         let usb_audio = if usb == "xhci" { "1" } else { "unsupported" };
@@ -1604,7 +1619,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
         if let Some(driver) = test_net_driver(net) {
             image::set_boot_option(&img, "test_net_driver", driver).expect("write boot.conf");
         }
-        if let Ok(filter) = env::var("AURORA_TEST_FILTER") {
+        if let Some(filter) = env::var("AURORA_TEST_FILTER").ok().or(mesa.then(|| String::from("Mesa"))) {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
         }
         // A longer or reproducible fuzzing run (see `syscall_fuzz` in kernel/src/tests.rs).
@@ -1648,19 +1663,21 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
         } else {
             img.clone()
         };
-        // Cards can't hold the power cut and system update tests (see installed.rs).
+        // Cards can't hold the power cut and system update tests (see
+        // installed.rs); the Mesa run is its tests alone.
         let cards = disk == "sd" || disk == "emmc";
-        if !cards {
+        let power_cut = !cards && !mesa;
+        if power_cut {
             image::set_boot_option(&img, "test_power_cut", "1").expect("write boot.conf");
         }
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            if boot == 2 && !cards {
+            if boot == 2 && power_cut {
                 image::set_boot_option(&img, "test_power_cut", "0").expect("write boot.conf");
             }
             let media = TestMedia { img: &boot_img, sd_card: &sd_card, allow_reboot: false };
-            let output = match run_tests_once(&media, disk, smp, net, gpu, usb, fwd_port, heads) {
+            let output = match run_tests_once(&media, disk, (smp, memory_mib), net, gpu, usb, fwd_port, heads) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
                     // The firmware never handed back control: some OVMF builds
@@ -1709,7 +1726,8 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
                 println!("\n=== boot 3: a system update that never starts ===");
                 image::set_boot_option(&img, "test_filter", "system update").expect("write boot.conf");
                 let media = TestMedia { img: &boot_img, sd_card: &sd_card, allow_reboot: true };
-                let output = run_tests_once(&media, disk, smp, net, gpu, usb, fwd_port, heads).unwrap_or_else(|_| exit(1));
+                let output = run_tests_once(&media, disk, (smp, memory_mib), net, gpu, usb, fwd_port, heads)
+                    .unwrap_or_else(|_| exit(1));
                 if !output.contains("never started; back on") {
                     eprintln!("\nsystem update check FAILED: the broken update did not fall back");
                     exit(1);
@@ -1750,23 +1768,42 @@ fn ppm_pixel(data: &[u8], fx: f32, fy: f32) -> Option<(u8, u8, u8)> {
     Some((*data.get(at)?, *data.get(at + 1)?, *data.get(at + 2)?))
 }
 
-/// The pictures `drmtest` asked for show what it put on the screen: its
-/// red/green/blue/white quadrants while it held the display, and the
-/// stand-in desktop's colour after it was killed.
+/// The pictures the tests asked for show what they put on the screen:
+/// `drmtest`'s red/green/blue/white quadrants while it held the display,
+/// and the stand-in desktop's colour after it was killed; kmscube's grey
+/// background around a cube that is anything but grey (or the desktop);
+/// glmark2's scenes instead of the desktop.
 fn check_screendumps(output: &str) -> Result<(), String> {
-    type Point = (f32, f32, (u8, u8, u8));
+    // (x, y as fractions of the size, colour, whether the pixel must be
+    // near that colour or far from it)
+    type Point = (f32, f32, (u8, u8, u8), bool);
     let desktop = (0x33, 0x66, 0x99);
-    let checks: [(&str, &[Point]); 2] = [
+    let grey = (0x80, 0x80, 0x80);
+    // glmark2's scenes move: only that its picture replaced the desktop's.
+    let not_desktop: &[Point] = &[(0.5, 0.5, desktop, false), (0.05, 0.05, desktop, false)];
+    let checks: [(&str, &[Point]); 5] = [
         (
             "drm-client",
             &[
-                (0.25, 0.25, (0xFF, 0, 0)),
-                (0.75, 0.25, (0, 0xFF, 0)),
-                (0.25, 0.75, (0, 0, 0xFF)),
-                (0.75, 0.75, (0xFF, 0xFF, 0xFF)),
+                (0.25, 0.25, (0xFF, 0, 0), true),
+                (0.75, 0.25, (0, 0xFF, 0), true),
+                (0.25, 0.75, (0, 0, 0xFF), true),
+                (0.75, 0.75, (0xFF, 0xFF, 0xFF), true),
             ],
         ),
-        ("drm-desktop", &[(0.5, 0.5, desktop), (0.1, 0.9, desktop)]),
+        ("drm-desktop", &[(0.5, 0.5, desktop, true), (0.1, 0.9, desktop, true)]),
+        (
+            "mesa-kmscube",
+            &[
+                (0.03, 0.05, grey, true),
+                (0.97, 0.95, grey, true),
+                (0.5, 0.5, grey, false),
+                (0.5, 0.5, desktop, false),
+                (0.5, 0.5, (0, 0, 0), false),
+            ],
+        ),
+        ("mesa-glmark2", not_desktop),
+        ("mesa-glmark2-es2", not_desktop),
     ];
     for (name, points) in checks {
         if !output.contains(&format!("harness: screendump {name}")) {
@@ -1774,11 +1811,12 @@ fn check_screendumps(output: &str) -> Result<(), String> {
         }
         let path = screendump_path(name);
         let data = fs::read(&path).map_err(|e| format!("no screendump {}: {e}", path.display()))?;
-        for &(fx, fy, want) in points {
+        for &(fx, fy, want, same) in points {
             let got = ppm_pixel(&data, fx, fy).ok_or_else(|| format!("{} is not a PPM picture", path.display()))?;
             let near = |a: u8, b: u8| a.abs_diff(b) <= 16;
-            if !(near(got.0, want.0) && near(got.1, want.1) && near(got.2, want.2)) {
-                return Err(format!("{name}: the pixel at ({fx}, {fy}) is {got:02x?}, expected {want:02x?}"));
+            if (near(got.0, want.0) && near(got.1, want.1) && near(got.2, want.2)) != same {
+                let what = if same { "expected" } else { "must not be" };
+                return Err(format!("{name}: the pixel at ({fx}, {fy}) is {got:02x?}, {what} {want:02x?}"));
             }
         }
         println!("screen check: {name} shows what it should");
@@ -1885,8 +1923,6 @@ fn recorded_peak(path: &Path) -> i32 {
         .unwrap_or(0)
 }
 
-/// Boots the test kernel once, echoing its serial output. Returns the output,
-/// as an error if the tests failed or timed out.
 /// The disk image a test boot runs from, and the second SD reader's card.
 struct TestMedia<'a> {
     img: &'a Path,
@@ -1896,23 +1932,27 @@ struct TestMedia<'a> {
     allow_reboot: bool,
 }
 
+/// Boots the test kernel once, echoing its serial output. Returns the output,
+/// as an error if the tests failed or timed out. `machine` is (processors,
+/// MiB of memory).
 #[allow(clippy::too_many_arguments)] // the test matrix
 fn run_tests_once(
     media: &TestMedia,
     disk: &str,
-    smp: u32,
+    machine: (u32, u64),
     net: &str,
     gpu: &str,
     usb: &str,
     fwd_port: u16,
     heads: usize,
 ) -> Result<String, String> {
+    let (smp, memory_mib) = machine;
     use std::io::{BufRead, BufReader};
     let audio = root().join("target/test-audio.wav");
     let _ = fs::remove_file(&audio);
     let _ = fs::remove_file(usb_audio_wav(&audio));
     let opts = RunOpts {
-        memory_mib: 512,
+        memory_mib,
         keyboard_capture: false,
         headless: true,
         gdb: false,
@@ -2035,7 +2075,10 @@ fn run_tests_once(
     });
     let start = Instant::now();
     // Longer fuzzing runs need more: AURORA_TEST_TIMEOUT (seconds per boot).
-    let timeout = Duration::from_secs(env::var("AURORA_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(240));
+    // (The Mesa tests, with more memory, compile shaders under emulation.)
+    let default = if memory_mib > 512 { 1200 } else { 240 };
+    let timeout =
+        Duration::from_secs(env::var("AURORA_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(default));
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
             break Some(s);
