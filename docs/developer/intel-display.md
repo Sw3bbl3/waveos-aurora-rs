@@ -57,6 +57,8 @@ Only after that does it write anything: `DE_PIPE_IMR` (unmask vblank and plane 1
 - Framebuffers are system RAM (`BufferObject`), mapped into the GGTT on first use (`Ggtt::bind`: one 64-bit PTE per page, `phys | 1`, then `GFX_FLSH_CNTL`), 256 KiB aligned (the display 9 rule for linear surfaces; later versions need less), followed by 16 guard entries pointing at a scratch page because the display engine prefetches past the end. When the buffer object is freed the range is pointed at the scratch page and returned.
 - A flip writes `PLANE_CTL` (the firmware's value with the surface fields replaced: 8:8:8:8 BGRX, linear, no rotation), `PLANE_STRIDE` (64-byte units), `PLANE_OFFSET` = 0 and `PLANE_SURF` last (it arms the others for the next vblank), then waits up to 100 ms for `PLANE_SURFLIVE` to show the new address. The flip event's sequence number is `PIPE_FRMCOUNT`.
 - Watermarks and the display buffer allocation are the firmware's: same bytes per pixel, tiling and width, so they still hold.
+- When the firmware lit several displays (a laptop with a monitor attached at boot, showing one framebuffer), a pipe no client has given a picture of its own scans the same buffer as the one that was flipped, if the sizes match; otherwise it keeps the firmware's last picture. Buffers are released only after every pipe scanning them has flipped away.
+- GGTT entries the firmware points at one scratch page of its own (the most common page among the sampled entries) count as free.
 - The display engine doesn't snoop CPU caches: `dirty` flushes the damaged rows with `clflush`; a new framebuffer is flushed whole before it is flipped to. Framebuffers whose pitch isn't a multiple of 64 bytes (1366 wide, for one) get a padded shadow buffer that `dirty` copies into.
 - `create_dumb` tries one physically contiguous run for screen-sized buffers, so `panic_framebuffer` can hand the panic screen the scanout buffer; the panic screen ends with `wbinvd` for the same cache reason.
 
@@ -89,7 +91,7 @@ Skylake-class only, on a pipe the firmware lit, keeping its port and output type
 - Lighting ports the firmware left dark (needs the VBT from the OpRegion for DDC pins, AUX channels, buffer translations; `DDI_BUF_TRANS` tables; power wells).
 - Watermark computation (PCU memory latency mailbox), CD clock changes, pipe scaler programming, larger modes.
 - Display 11+ PLLs and PHYs (combo PHY, Type-C/Thunderbolt), MST, DSC, PSR, FBC, HDR, audio.
-- Restoring the display after sleep: the display core (power wells, CD clock, DBUF) is off after S3 and the firmware doesn't re-initialize it; the driver logs this. (Unchanged from the firmware framebuffer path.)
+- Restoring the display after sleep: the display core (power wells, CD clock, DBUF) is off after S3 and the firmware doesn't re-initialize it; the driver logs this. (Unchanged from the firmware framebuffer path.) If the firmware did light the pipes again, the driver gives the cursor its display buffer share again and flips back to its buffers.
 - Real interrupts: completion is polled from `PLANE_SURFLIVE`/`PIPE_FRMCOUNT` and the identity registers, so `Caps::vblank_irq` is false.
 - VBT parsing: GMBUS pins and AUX channels are Intel's reference defaults (marked UNCONFIRMED in `platform.rs`).
 

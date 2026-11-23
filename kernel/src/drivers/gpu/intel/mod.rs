@@ -319,12 +319,20 @@ impl<H: Hw> Intel<H> {
         for p in &fw.pipes {
             reserved = reserved.max(p.primary.surf as u64 + p.primary.stride_bytes as u64 * p.src.1 as u64);
         }
-        let mut at = 0;
-        while at < ggtt_size {
-            if gtt::pte_page(hw.get(at / gtt::PAGE)).is_some() {
+        // (Firmware that points every unused entry at one scratch page of
+        // its own makes that page the most common one: those entries are
+        // free.)
+        let samples: Vec<(u64, Option<u64>)> =
+            (0..ggtt_size >> 20).map(|mib| (mib << 20, gtt::pte_page(hw.get((mib << 20) / gtt::PAGE)))).collect();
+        let mut counts: BTreeMap<u64, u32> = BTreeMap::new();
+        for page in samples.iter().filter_map(|s| s.1) {
+            *counts.entry(page).or_insert(0) += 1;
+        }
+        let filler = counts.iter().max_by_key(|c| *c.1).filter(|c| *c.1 > 16).map(|c| *c.0);
+        for (at, page) in samples {
+            if page.is_some() && page != filler {
                 reserved = reserved.max(at + (1 << 20));
             }
-            at += 1 << 20;
         }
         let start = reserved.next_multiple_of(16 << 20);
         if ggtt_size < start + (64 << 20) {
@@ -354,7 +362,7 @@ impl<H: Hw> Intel<H> {
             .collect();
         let mut ports: Vec<Port> = Vec::new();
         for p in &fw.pipes {
-            let edid = Self::edid_of(m, &info, p.port, p.output == Out::Edp);
+            let edid = Self::edid_of(m, &info, p.port, matches!(p.output, Out::Dp | Out::Edp), p.output != Out::Edp);
             let clock = Self::firmware_clock(m, &info, p, edid.as_deref());
             let mode = mode_of(p, clock);
             log!(
@@ -569,13 +577,16 @@ impl<H: Hw> Intel<H> {
         true
     }
 
-    /// A port's EDID: over AUX first (DP and eDP), else over GMBUS (HDMI, DVI).
-    fn edid_of(m: &H, info: &Info, port: u8, edp: bool) -> Option<Vec<u8>> {
-        let aux = aux::AuxCh { mmio: m, ch: info.aux_ch(port) };
-        if let Some(e) = read_edid(|b, out| aux.read_edid_block(b, out).is_ok()) {
-            return Some(e);
+    /// A port's EDID: over AUX (DP and eDP) if `aux`, else (or then, if
+    /// `ddc`) over GMBUS (HDMI, DVI).
+    fn edid_of(m: &H, info: &Info, port: u8, aux: bool, ddc: bool) -> Option<Vec<u8>> {
+        if aux {
+            let ch = aux::AuxCh { mmio: m, ch: info.aux_ch(port) };
+            if let Some(e) = read_edid(|b, out| ch.read_edid_block(b, out).is_ok()) {
+                return Some(e);
+            }
         }
-        if edp {
+        if !ddc {
             return None;
         }
         let pin = info.gmbus_pin(port)?;
@@ -596,7 +607,7 @@ impl<H: Hw> Intel<H> {
             let dp = !p.edp && aux::AuxCh { mmio: m, ch: self.info.aux_ch(p.port) }.read_byte(0).is_ok();
             let edid = match prev.and_then(|c| c.edid.as_ref()) {
                 Some(e) if p.edp => Some(e.as_ref().clone()),
-                _ => Self::edid_of(m, &self.info, p.port, p.edp || dp),
+                _ => Self::edid_of(m, &self.info, p.port, p.edp || dp, !p.edp && !dp),
             };
             let kind = match (p.edp, dp, &edid, lit.map(|l| l.fw.output)) {
                 (true, ..) => ConnectorKind::Edp,
@@ -797,8 +808,10 @@ impl<H: Hw> Intel<H> {
     /// Until a client gives such a pipe a picture of its own, it shows the
     /// same scanout buffer as `head` when the sizes match (as it did with
     /// the firmware framebuffer), instead of a frozen boot screen.
-    fn mirror(&self, s: &State, head: usize, planes: &[PlaneState]) {
-        let Some(scan) = &s.scan[head] else { return };
+    /// Returns the pipes it flipped.
+    fn mirror(&self, s: &State, head: usize, planes: &[PlaneState]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let Some(scan) = &s.scan[head] else { return out };
         for (j, h) in self.heads.iter().enumerate() {
             let Some(l) = &h.lit else { continue };
             if j == head || planes[2 * j].fb.is_some() || s.scan[j].is_some() {
@@ -807,8 +820,10 @@ impl<H: Hw> Intel<H> {
             // (A pipe of another size keeps the firmware's last picture.)
             if l.fw.src == (scan.fb.width, scan.fb.height) {
                 self.flip(j, scan);
+                out.push(h.pipe);
             }
         }
+        out
     }
 
     /// The internal panel's backlight.
@@ -960,13 +975,17 @@ impl<H: Hw> KmsDevice for Intel<H> {
             if let Some(scan) = scans[i].take() {
                 self.flip(i, &scan);
                 flipped.push((i, h.pipe, scan.gtt as u32));
-                // The old scanout (and its GGTT mapping) goes after the flip.
+                let surf = scan.gtt as u32;
                 let old = s.scan[i].replace(scan);
-                if !self.wait_flip(h.pipe, s.scan[i].as_ref().unwrap().gtt as u32) {
-                    log!("intel", "pipe {}: flip not seen within 100 ms", takeover::pipe_name(h.pipe));
+                let mut pipes = self.mirror(&s, i, &ps);
+                pipes.push(h.pipe);
+                // The old scanout (and its GGTT mapping) goes once no pipe scans it.
+                for pipe in pipes {
+                    if !self.wait_flip(pipe, surf) {
+                        log!("intel", "pipe {}: flip not seen within 100 ms", takeover::pipe_name(pipe));
+                    }
                 }
                 drop(old);
-                self.mirror(&s, i, &ps);
             }
             let (new_k, old_k) = (&ps[2 * i + 1], &s.planes[2 * i + 1]);
             let on = cs[i].active && new_k.fb.is_some();
@@ -1025,6 +1044,15 @@ impl<H: Hw> KmsDevice for Intel<H> {
             .filter_map(|h| h.lit.as_ref())
             .all(|l| m.read(regs::transconf(l.fw.trans)) & regs::TRANSCONF_STATE != 0);
         if alive {
+            // Firmware that lit the display again on resume also set up the
+            // display buffer again, without the cursor's share.
+            for h in &self.heads {
+                let Some(l) = h.lit.as_ref().filter(|l| l.cursor_ok) else { continue };
+                m.modify(regs::de_pipe_imr(h.pipe), regs::PIPE_VBLANK | regs::PIPE_PLANE1_FLIP_DONE, 0);
+                if Ddb::decode(m.read(regs::cur_buf_cfg(h.pipe))).size() == 0 {
+                    Self::setup_cursor(m, &self.info, h.pipe, &l.fw, l.cursor_gtt);
+                }
+            }
             let s = self.state.lock();
             for (i, scan) in s.scan.iter().enumerate() {
                 if let Some(scan) = scan {
