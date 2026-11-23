@@ -9,7 +9,7 @@
 //! rate (`time::tsc_mult`), so both always agree.
 
 use crate::mm::vmm::{AddressSpace, Prot};
-use crate::mm::{frame, phys_to_virt, PAGE_SIZE};
+use crate::mm::{phys_to_virt, PAGE_SIZE};
 use alloc::vec::Vec;
 use core::sync::atomic::{fence, AtomicU32, Ordering};
 use spin::Once;
@@ -45,10 +45,12 @@ fn frames() -> Option<&'static [u64]> {
             }
             let pages = 1 + IMAGE.len().div_ceil(PAGE_SIZE as usize);
             let mut frames = Vec::with_capacity(pages);
+            // Counted shared frames (held forever by the vDSO itself), so a
+            // `fork` child keeps them mapped: plain shared frames stay with
+            // the parent, and the child crashed in its first clock_gettime
+            // (found by `linuxfuzz`).
             for _ in 0..pages {
-                let f = frame::alloc()?;
-                unsafe { core::ptr::write_bytes(phys_to_virt(f) as *mut u8, 0, PAGE_SIZE as usize) };
-                frames.push(f);
+                frames.push(crate::mm::vmm::shm_alloc()?);
             }
             for (i, chunk) in IMAGE.chunks(PAGE_SIZE as usize).enumerate() {
                 let to = phys_to_virt(frames[1 + i]) as *mut u8;

@@ -51,10 +51,10 @@ impl Memory {
 /// thread's stack here).
 pub fn maps(p: &Process) -> String {
     let heap = p.linux.as_ref().map_or((0, 0), |l| l.mm.lock().heap());
-    let regions = p.mem().as_ref().map(|a| a.regions()).unwrap_or_default();
+    let (regions, stack_top) = p.mem().as_ref().map(|a| (a.regions(), a.stack_top)).unwrap_or_default();
     let mut out = String::new();
     for (start, end, w, x) in regions {
-        let name = if end == layout::STACK_TOP {
+        let name = if end == stack_top {
             "[stack]"
         } else if start < heap.1 && end > heap.0 {
             "[heap]"

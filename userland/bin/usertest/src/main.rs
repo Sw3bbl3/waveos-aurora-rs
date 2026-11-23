@@ -42,6 +42,20 @@ fn main(args: corekit::Args) -> i32 {
         println!("child says {}", args[2..].join(" "));
         return 7;
     }
+    if args.get(1).map(String::as_str) == Some("layout") {
+        // Where things landed (ASLR): a stack local, and fresh memory.
+        let local = 0u64;
+        let heap = call(nr::MMAP, &[4096]).unwrap_or(0);
+        println!("{:#x} {:#x}", black_box(&local) as *const u64 as u64, heap);
+        return 0;
+    }
+    if args.get(1).map(String::as_str) == Some("umip") {
+        // With UMIP, `smsw` in ring 3 faults instead of revealing CR0.
+        let msw: u64;
+        unsafe { core::arch::asm!("smsw {0}", out(reg) msw) };
+        black_box(msw);
+        return 0;
+    }
     if args.get(1).map(String::as_str) == Some("spinner") {
         // Exit while another thread is busy: the whole process must go away.
         let _ = thread::spawn(|| loop {
@@ -123,10 +137,88 @@ fn main(args: corekit::Args) -> i32 {
     }
 
     threads_and_simd();
+    hardening();
 
     let failed = unsafe { FAILED };
     println!("usertest: {}", if failed == 0 { String::from("all passed") } else { alloc::format!("{failed} FAILED") });
     failed
+}
+
+/// Output of a child run with `args`.
+fn child_output(args: &[&str]) -> String {
+    let Ok([r, w]) = process::pipe(false) else { return String::new() };
+    let pid = process::spawn("/System/Bin/usertest", args, Stdio { stdout: Some(w), ..Default::default() });
+    process::close(w);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 128];
+    while let Ok(n) = corekit::io::read_fd(r, &mut buf) {
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    process::close(r);
+    if let Ok(pid) = pid {
+        let _ = process::wait(pid, None);
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Randomized layouts and UMIP, seen from user space; short sleeps on
+/// busy CPUs.
+fn hardening() {
+    // Many 1 ms sleeps while other threads keep the CPUs busy must all end
+    // (a sleep preempted at the wrong moment once lasted 2^64 ms).
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static SLEPT: AtomicU32 = AtomicU32::new(0);
+    static SPIN: AtomicBool = AtomicBool::new(true);
+    let sleepers = (0..6)
+        .filter(|_| {
+            thread::spawn(|| {
+                for _ in 0..150 {
+                    time::sleep_ms(1);
+                }
+                SLEPT.fetch_add(1, Ordering::SeqCst);
+            })
+            .is_ok()
+        })
+        .count() as u32;
+    let spinners: Vec<_> = (0..3)
+        .filter_map(|_| {
+            thread::spawn(|| {
+                while SPIN.load(Ordering::Relaxed) {
+                    core::hint::spin_loop();
+                }
+            })
+            .ok()
+        })
+        .collect();
+    let t0 = time::uptime_ms();
+    while SLEPT.load(Ordering::SeqCst) < sleepers && time::uptime_ms() - t0 < 30_000 {
+        time::sleep_ms(10);
+    }
+    SPIN.store(false, Ordering::Relaxed);
+    for s in spinners {
+        s.join();
+    }
+    check("short sleeps on busy CPUs all end", sleepers == 6 && SLEPT.load(Ordering::SeqCst) == 6);
+
+    // Two runs of the same program: stacks and mmap areas in different places.
+    let a = child_output(&["layout"]);
+    let b = child_output(&["layout"]);
+    check("layout child ran", a.starts_with("0x") && b.starts_with("0x"));
+    check("ASLR: stack and mmap base differ between runs", a != b);
+    let stack = |s: &str| s.split(' ').next().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+    check("ASLR: two stacks differ", stack(&a) != stack(&b));
+    // UMIP: `smsw` from ring 3 ends the program where the CPU has UMIP.
+    let umip = core::arch::x86_64::__cpuid_count(7, 0).ecx & (1 << 2) != 0;
+    match process::spawn("/System/Bin/usertest", &["umip"], Stdio::default()) {
+        Ok(pid) => {
+            let code = process::wait(pid, None).ok();
+            check("UMIP: smsw faults in ring 3 (or runs without UMIP)", code == Some(if umip { -11 } else { 0 }));
+        }
+        Err(_) => check("spawn umip child", false),
+    }
 }
 
 /// Long enough to be preempted many times (10 ms quantum).

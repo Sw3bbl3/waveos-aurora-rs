@@ -1,7 +1,9 @@
 //! Memory management: physical frames, kernel heap, page tables.
 
+pub mod aslr;
 pub mod frame;
 pub mod heap;
+pub mod kstack;
 pub mod paging;
 pub mod vmm;
 
@@ -20,6 +22,7 @@ pub fn init(boot_info: &'static BootInfo) {
     heap::init();
     paging::init(boot_info);
     vmm::init();
+    crate::arch::protect::protect_kernel(vmm::kernel_pml4());
     heap::enable_large();
 }
 

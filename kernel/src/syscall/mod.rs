@@ -47,8 +47,16 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::SLEEP => {
             let ms = a[0].min(24 * 3600 * 1000);
             let until = time::uptime_ms() + ms;
-            while time::uptime_ms() < until && !proc::interrupted() {
-                sched::wait_until(until - time::uptime_ms(), proc::interrupted);
+            loop {
+                // One reading of the clock for the test and the wait: with
+                // two, a thread preempted in between computed `until - now`
+                // with `now` past `until` and slept for 2^64 ms — a 25 ms
+                // sleep that never ended (found by `fuzz`).
+                let now = time::uptime_ms();
+                if now >= until || proc::interrupted() {
+                    break;
+                }
+                sched::wait_until(until - now, proc::interrupted);
             }
             Ok(0)
         }

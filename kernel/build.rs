@@ -25,6 +25,8 @@ fn main() {
     println!("cargo:rerun-if-changed=linux");
     println!("cargo::rustc-check-cfg=cfg(linuxkpi)");
     println!("cargo::rustc-check-cfg=cfg(vdso)");
+    // Set with `-Z stack-protector` in .cargo/config.toml (see `stackguard`).
+    println!("cargo::rustc-check-cfg=cfg(aurora_ssp)");
     println!("cargo:rerun-if-changed=vdso");
     println!("cargo:rerun-if-env-changed=WAVEOS_CC");
 

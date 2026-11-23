@@ -191,15 +191,26 @@ static KVA: IrqMutex<Kva> = IrqMutex::new(Kva { next: KVA_BASE, free: Vec::new()
 pub fn kmap(frames: &[u64]) -> Option<u64> {
     let pages = frames.len() as u64;
     let mut k = KVA.lock();
-    let base = if let Some(i) = k.free.iter().position(|&(_, p)| p == pages) {
-        k.free.swap_remove(i).0
+    // First fit among freed ranges, split (a free range of `p` pages is
+    // followed by its guard page, as every allocation is). Reusing only
+    // ranges of exactly the same size let the area — and its page tables —
+    // grow without bound with surfaces of ever new sizes (found by `fuzz`).
+    let base = if let Some(i) = k.free.iter().position(|&(_, p)| p >= pages) {
+        let (b, p) = k.free[i];
+        if p >= pages + 2 {
+            k.free[i] = (b + (pages + 1) * PAGE_SIZE, p - pages - 1);
+        } else {
+            k.free.swap_remove(i);
+        }
+        b
     } else {
         let b = k.next;
         // One unmapped guard page between allocations.
-        k.next += (pages + 1) * PAGE_SIZE;
-        if k.next > KVA_BASE + KVA_SIZE {
+        let next = b + (pages + 1) * PAGE_SIZE;
+        if next > KVA_BASE + KVA_SIZE {
             return None;
         }
+        k.next = next;
         b
     };
     let pml4 = kernel_pml4();
@@ -210,6 +221,29 @@ pub fn kmap(frames: &[u64]) -> Option<u64> {
         x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
     }
     Some(base)
+}
+
+/// Maps frame `f` at kernel address `va` (writable, no-execute), outside
+/// the kernel virtual area: for `mm::kstack`, which serializes its own
+/// calls. False if a page table could not be allocated.
+pub fn kmap_fixed(va: u64, f: u64) -> bool {
+    match walk(kernel_pml4(), va, true, false) {
+        Some(e) => {
+            *e = f | PRESENT | WRITABLE | NO_EXECUTE;
+            x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Unmaps the page at kernel address `va` (from [`kmap_fixed`]) on this
+/// CPU only; returns its frame. The caller shoots down other CPUs' TLBs.
+pub fn kunmap_fixed(va: u64) -> Option<u64> {
+    let e = walk(kernel_pml4(), va, false, false)?;
+    let old = core::mem::replace(e, 0);
+    x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+    (old & PRESENT != 0).then_some(old & ADDR)
 }
 
 /// Maps `size` bytes of device memory at `phys` (a framebuffer) into the
@@ -307,6 +341,22 @@ pub fn kernel_entry(va: u64) -> Option<u64> {
     walk(kernel_pml4(), va, false, false).map(|e| *e)
 }
 
+/// Pages mapped in the kernel virtual area, and pages of it ever used
+/// (tests: where frames are held).
+#[cfg(feature = "ktest")]
+pub fn held_pages() -> (u64, u64) {
+    let end = KVA.lock().next;
+    let mut mapped = 0;
+    let mut va = KVA_BASE;
+    while va < end {
+        if walk(kernel_pml4(), va, false, false).is_some_and(|e| *e & PRESENT != 0) {
+            mapped += 1;
+        }
+        va += PAGE_SIZE;
+    }
+    (mapped, (end - KVA_BASE) / PAGE_SIZE)
+}
+
 /// Unmaps a `kmap` range on every CPU. Must not be called while holding an
 /// `IrqMutex` (other CPUs have to take the shootdown IPI).
 pub fn kunmap(base: u64, pages: u64) {
@@ -323,7 +373,28 @@ pub fn kunmap(base: u64, pages: u64) {
     }
     // Outside the lock: the other CPUs must be free to take the IPI.
     shootdown(base, pages, None);
-    KVA.lock().free.push((base, pages));
+    let mut k = KVA.lock();
+    k.free.push((base, pages));
+    // Merge neighbours (each range with the guard page after it), and give
+    // a range at the end back to the never-used part.
+    // (In place: the heap frees large blocks through here.)
+    k.free.sort_unstable_by_key(|&(b, _)| b);
+    let mut i = 0;
+    while i + 1 < k.free.len() {
+        let ((b, p), (nb, np)) = (k.free[i], k.free[i + 1]);
+        if b + (p + 1) * PAGE_SIZE == nb {
+            k.free[i].1 = p + 1 + np;
+            k.free.remove(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(&(b, p)) = k.free.last() {
+        if b + (p + 1) * PAGE_SIZE == k.next {
+            k.next = b;
+            k.free.pop();
+        }
+    }
 }
 
 // ----------------------------------------------------------- TLB shootdown
@@ -402,8 +473,10 @@ pub enum Prot {
 
 pub struct AddressSpace {
     pml4: u64,
-    /// Next free address for `mmap`-style allocations.
+    /// Next free address for `mmap`-style allocations (randomized; `mm::aslr`).
     mmap_next: u64,
+    /// The top of the main thread's stack (randomized by the program loaders).
+    pub stack_top: u64,
     /// Bytes of private memory mapped (for accounting).
     pub resident: u64,
     /// Memory mapped but not made yet: start -> (end, protection), not
@@ -419,7 +492,13 @@ impl AddressSpace {
         let k = table(kernel_pml4());
         let t = table(pml4);
         t[256..].copy_from_slice(&k[256..]);
-        Some(AddressSpace { pml4, mmap_next: layout::MMAP_BASE, resident: 0, lazy: Default::default() })
+        Some(AddressSpace {
+            pml4,
+            mmap_next: super::aslr::mmap_base(),
+            stack_top: layout::STACK_TOP,
+            resident: 0,
+            lazy: Default::default(),
+        })
     }
 
     pub fn cr3(&self) -> u64 {
@@ -794,6 +873,7 @@ impl AddressSpace {
     pub fn fork_copy(&mut self) -> Option<AddressSpace> {
         let mut child = AddressSpace::new()?;
         child.mmap_next = self.mmap_next;
+        child.stack_top = self.stack_top;
         child.lazy = self.lazy.clone();
         let mut shared = 0;
         let ok = Self::copy_level(self.pml4, child.pml4, 3, &mut shared);

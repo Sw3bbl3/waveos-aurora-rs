@@ -169,12 +169,26 @@ fn alloc_surface(pid: u32, width: u32, height: u32) -> Result<Surface, isize> {
         frames.iter().for_each(|&f| frame::free(f));
         return Err(ENOMEM);
     };
-    let p = proc::get(pid).ok_or(ESRCH)?;
-    let mut guard = p.mem();
-    let aspace = guard.as_mut().ok_or(ESRCH)?;
-    let user_va = aspace.reserve(pages).ok_or(ENOMEM)?;
-    aspace.map_shared(user_va, &frames, Prot::ReadWrite)?;
-    Ok(Surface { frames, kva, user_va, width, height, scale })
+    let mapped = (|| {
+        let p = proc::get(pid).ok_or(ESRCH)?;
+        let mut guard = p.mem();
+        let aspace = guard.as_mut().ok_or(ESRCH)?;
+        let user_va = aspace.reserve(pages).ok_or(ENOMEM)?;
+        if let Err(e) = aspace.map_shared(user_va, &frames, Prot::ReadWrite) {
+            aspace.unmap(user_va, pages);
+            return Err(e);
+        }
+        Ok(user_va)
+    })();
+    match mapped {
+        Ok(user_va) => Ok(Surface { frames, kva, user_va, width, height, scale }),
+        Err(e) => {
+            // (Each `?` here used to leak the frames and the kernel mapping.)
+            vmm::kunmap(kva, pages);
+            frames.iter().for_each(|&f| frame::free(f));
+            Err(e)
+        }
+    }
 }
 
 /// Releases a surface. `unmap_user` is false when the process's address space
@@ -426,11 +440,13 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             let id = a[0] as u32;
             owned(id, pid)?;
             let (w, h) = clamp_size(a[1], a[2]);
-            let new = alloc_surface(pid, w, h)?;
-            let old = {
-                let mut clients = CLIENTS.lock();
-                let c = clients.get_mut(&id).ok_or(EBADF)?;
-                core::mem::replace(&mut c.surface, new)
+            let mut new = Some(alloc_surface(pid, w, h)?);
+            let old = CLIENTS.lock().get_mut(&id).map(|c| core::mem::replace(&mut c.surface, new.take().unwrap()));
+            let Some(old) = old else {
+                // Another thread closed the window meanwhile: the new
+                // surface goes too (it used to leak, found by `fuzz`).
+                free_surface(new.take().unwrap(), pid, true);
+                return Err(EBADF);
             };
             free_surface(old, pid, true);
             send(Command::Present(id, Rect::new(0, 0, w as i32, h as i32)));

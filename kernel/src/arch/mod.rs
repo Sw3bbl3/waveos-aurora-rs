@@ -8,6 +8,7 @@ pub mod idt;
 pub mod irq;
 pub mod pat;
 pub mod percpu;
+pub mod protect;
 pub mod smp;
 pub mod switch;
 pub mod syscall;
