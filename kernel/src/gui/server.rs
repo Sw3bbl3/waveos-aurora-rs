@@ -66,7 +66,9 @@ pub enum Command {
     Title(u32),
     /// A window's pointer shape changed.
     Cursor,
-    OpenApp(String),
+    /// A program, its arguments, and (asked by a sandboxed app) the files
+    /// among them the program is given (None: every one).
+    OpenApp(String, Vec<String>, Option<Vec<(String, bool)>>),
     OpenFile(String),
     SetDark(bool),
     SetWallpaper(u8),
@@ -95,6 +97,12 @@ pub enum Command {
     NetworkChanged,
     /// A process asks for an administrator's password (see `users::elevate`).
     Elevate,
+    /// An app asks to use something guarded (see `sandbox::consent`).
+    Consent,
+    /// An app asks for the open or save panel (see `sandbox::panel`).
+    Panel,
+    /// Something started or stopped recording (the menu bar's dot).
+    Indicators,
     /// Accounts were added, removed or changed (`users::db`).
     AccountsChanged,
     /// Enter (true) or leave Wave Play.
@@ -119,6 +127,24 @@ pub fn drag_start(pid: u32, kind: usize, data: &[u8], count: u32, icon: usize) -
 /// The process owning client window `id`.
 pub fn pid_of(id: u32) -> Option<u32> {
     CLIENTS.lock().get(&id).map(|c| c.pid)
+}
+
+/// The process whose window is in front (0: none, or a built-in one).
+static FRONT: AtomicU32 = AtomicU32::new(0);
+
+pub fn frontmost() -> u32 {
+    FRONT.load(Ordering::Relaxed)
+}
+
+/// The desktop focused client window `id` (None: no client window).
+pub fn set_frontmost(id: Option<u32>) {
+    FRONT.store(id.and_then(pid_of).unwrap_or(0), Ordering::Relaxed);
+}
+
+/// Self-tests: process `pid` is in front.
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub fn set_frontmost_pid(pid: u32) {
+    FRONT.store(pid, Ordering::Relaxed);
 }
 
 static CLIENTS: IrqMutex<BTreeMap<u32, Client>> = IrqMutex::new(BTreeMap::new());
@@ -439,6 +465,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             );
             send(Command::Created(id));
             crate::telemetry::window("open", id, pid, &title_of(id));
+            crate::sandbox::window_opened(pid);
             Ok(id as u64)
         }
         nr::WIN_MATERIALS => {
@@ -545,6 +572,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             }
             send(Command::Closed(id));
             crate::telemetry::window("close", id, pid, "");
+            crate::sandbox::window_closed(pid);
             Ok(0)
         }
         nr::NEXT_EVENT => {
@@ -570,6 +598,17 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
 /// The `desktop` system call: requests to the shell.
 pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
     use aurora_abi::desktop::*;
+    use aurora_abi::sandbox as cap;
+    // What a sandboxed app needs for each request.
+    let need = match req {
+        OPEN_APP | OPEN_FILE => cap::LAUNCH,
+        SET_DARK | SET_WALLPAPER | SET_WALLPAPER_IMAGE | START_TOUR | PLAY => cap::PREFS_WRITE,
+        SHUTDOWN | REBOOT | EJECT | EMPTY_TRASH | PUT_BACK => cap::SYSTEM,
+        _ => 0,
+    };
+    if need != 0 {
+        crate::sandbox::require(need)?;
+    }
     match req {
         START_TOUR => {
             if ptr != 0 || len != 0 {
@@ -625,9 +664,31 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
         OPEN_APP | OPEN_FILE => {
             let raw = user_str(ptr, len)?;
             let cwd = proc::current().map(|p| p.cwd.lock().clone()).unwrap_or_else(|| String::from("/"));
-            let path = crate::fs::resolve(&cwd, &raw);
+            // `open_app` may name arguments after the program, NUL-separated.
+            let mut parts = raw.split('\0');
+            let path = crate::fs::resolve(&cwd, parts.next().unwrap_or(""));
+            let args: Vec<String> = parts.filter(|a| !a.is_empty()).take(16).map(String::from).collect();
             crate::fs::stat(&path)?;
-            send(if req == OPEN_APP { Command::OpenApp(path) } else { Command::OpenFile(path) });
+            if req == OPEN_FILE {
+                // Only what the app may read itself goes to another app.
+                crate::sandbox::check_path(&path, crate::sandbox::Access::Read)?;
+                send(Command::OpenFile(path));
+                return Ok(0);
+            }
+            // Files among the arguments: those the app may use, as far as it may.
+            let grants = crate::sandbox::current().map(|s| {
+                let mut g = Vec::new();
+                for a in args.iter().filter(|a| a.starts_with('/')) {
+                    let p = crate::fs::resolve("/", a);
+                    if s.check_path(&p, crate::sandbox::Access::Write).is_ok() {
+                        g.push((p, true));
+                    } else if s.check_path(&p, crate::sandbox::Access::Read).is_ok() {
+                        g.push((p, false));
+                    }
+                }
+                g
+            });
+            send(Command::OpenApp(path, args, grants));
             Ok(0)
         }
         SET_DARK => {
@@ -677,6 +738,7 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
             let cwd = proc::current().map(|p| p.cwd.lock().clone()).unwrap_or_else(|| String::from("/"));
             let path = crate::fs::resolve(&cwd, &raw);
             crate::fs::stat(&path)?;
+            crate::sandbox::check_path(&path, crate::sandbox::Access::Read)?;
             send(Command::SetWallpaperImage(path));
             Ok(0)
         }

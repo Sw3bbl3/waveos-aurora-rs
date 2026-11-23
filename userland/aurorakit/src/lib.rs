@@ -25,6 +25,15 @@ fn refresh_effects() {
 pub use corekit::abi::input::{KeyCode, KeyEvent, Modifiers};
 /// The displays (`displays()`, `window_display`, `modes`): see `corekit::display`.
 pub use corekit::display;
+/// The app's sandbox: its container, the open and save panel, bookmarks.
+/// See `corekit::sandbox`.
+pub use corekit::sandbox;
+
+/// Where the app keeps its files, without hard-coded paths: its private
+/// folder (container) and the folders in it. See `corekit::sandbox`.
+pub mod container {
+    pub use corekit::sandbox::{caches, container as root, documents, preferences, preferences_file, temporary};
+}
 pub use lumen::{canvas, font, geom, icons, math, theme, wallpaper, widgets};
 
 use alloc::string::String;

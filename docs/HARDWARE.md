@@ -259,6 +259,7 @@ Then check:
   - Isochronous transfers (USB audio) work on xHCI only; on EHCI, OHCI and UHCI, `lsusb` shows audio devices as unsupported. No webcams yet.
 - **Sound.** Intel HD Audio output (no microphone or HDMI audio yet), and USB Audio Class 1 and 2 speakers, headsets, DACs and microphones on xHCI. USB Audio 3.0-only devices aren't supported (most also offer UAC 1 or 2).
 - **Networking.** Wired Ethernet only; see [Wired network adapters](#wired-network-adapters) for which chips are driven and how far each is tested. Wi-Fi: Intel adapters from the Wireless 7265 to the Wi-Fi 6E AX211 are recognized, but WaveOS can't start their radio yet, so no real Wi-Fi works. IPv4 only, with the address from DHCP.
+- **App sandbox.** The kernel's checks are tested in QEMU from inside sandboxed native and Linux programs and fuzzers, but the window server's privacy prompt, open and save panel and the menu bar's microphone dot have not been driven by the tests (they answer for the person instead) and have not run on real hardware; the dot has not been seen with a real microphone. Camera, screen capture, input monitoring and raw USB have no interfaces yet, so those permissions guard nothing so far.
 - **Sleep** is S3 (suspend to RAM). Many machines since about 2019 support only "Modern Standby" (S0ix), which WaveOS doesn't implement. On those, Sleep isn't offered.
 
 ## Wired network adapters

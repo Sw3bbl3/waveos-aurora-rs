@@ -14,6 +14,11 @@
 // paths stay inside /tmp/lfz (or are only read). The parent kills a child
 // that does not finish in time; a child that cannot be killed, or a
 // kernel panic, fails the test.
+//
+// `linuxfuzz SEED CHILDREN CALLS ORACLE` runs in a sandbox (the self-tests
+// start it in one) and also aims path calls, mutating ones included, at
+// the folder ORACLE, which it must never read or change: the kernel
+// watches it and fails the test if any call gets there.
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -119,8 +124,17 @@ static const char *ro_paths[] = {"/proc/self/maps", "/proc/self/status", "/dev/n
                                  "/proc/self/exe", "/etc/passwd", "", "/proc/self/cmdline", "/dev/zero"};
 static const char *cwd_paths[] = {SANDBOX, SANDBOX "/dir", "/proc", "/dev"};
 
+// The folder outside the sandbox to aim at (argv[4]), if any.
+static const char *oracle;
+
 static uint64_t path_at(rng *r, int half, int mutating) {
     char *s = r->scratch + half * 8192;
+    if (oracle && below(r, 4) == 0) {
+        static const char *forms[] = {"%s/secret.txt", "%s", "/tmp/lfz/../../..%s/secret.txt", "%s/new",
+                                      "%s/secret.txt/x", "%s/..", "%s//secret.txt/."};
+        snprintf(s, 8192, forms[below(r, sizeof forms / sizeof *forms)], oracle);
+        return (uint64_t)(uintptr_t)s;
+    }
     switch (below(r, 10)) {
     case 0: case 1: case 2: case 3:
         strcpy(s, rw_paths[below(r, sizeof rw_paths / sizeof *rw_paths)]);
@@ -430,6 +444,10 @@ int main(int argc, char **argv) {
     uint64_t seed = argc > 1 ? strtoull(argv[1], NULL, 0) : 1;
     int children = argc > 2 ? atoi(argv[2]) : 8;
     long calls = argc > 3 ? atol(argv[3]) : 400;
+    if (argc > 4) {
+        oracle = argv[4];
+        printf("linuxfuzz: in a sandbox, aiming at %s\n", oracle);
+    }
     printf("linuxfuzz: seed %#llx, %d children of %ld calls on 3 threads\n", (unsigned long long)seed, children,
            calls);
     fflush(stdout);

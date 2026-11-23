@@ -1,0 +1,14 @@
+# What Calculator may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.calculator"
+name = "Calculator"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Calculator.elf"
+description = "Sums and conversions."
+categories = ["system"]
+permissions = []

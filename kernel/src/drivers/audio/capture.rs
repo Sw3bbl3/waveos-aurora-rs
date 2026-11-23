@@ -54,6 +54,10 @@ impl Capture {
     /// Reads little-endian `i16` samples (whole samples), blocking until
     /// some arrive. 0 means the device is gone.
     pub fn read(&self, out: &mut [u8]) -> Result<usize, isize> {
+        // Taken away in Settings: a running app stops hearing at once.
+        if !crate::sandbox::allows(aurora_abi::sandbox::MICROPHONE) {
+            return Err(EACCES);
+        }
         let want = out.len() / 2;
         if want == 0 {
             return Ok(0);
@@ -128,7 +132,13 @@ impl Capture {
                 dev.stop();
             }
         }
+        crate::gui::server::command(crate::gui::server::Command::Indicators);
     }
+}
+
+/// Whether anything records now (the menu bar shows it).
+pub fn recording() -> bool {
+    !CAPTURES.lock().is_empty()
 }
 
 /// Opens a capture stream on input `device` (0: the default input).
@@ -149,6 +159,7 @@ pub fn open(device: u32) -> Result<Arc<Capture>, isize> {
         CAPTURES.lock().retain(|x| !Arc::ptr_eq(x, &c));
         return Err(EIO);
     }
+    crate::gui::server::command(crate::gui::server::Command::Indicators);
     Ok(c)
 }
 

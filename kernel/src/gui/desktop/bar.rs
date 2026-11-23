@@ -35,6 +35,15 @@ const RISE_MS: u64 = 260;
 const STEP: u32 = 100 / 16;
 const CURRENT_W: i32 = 372;
 const OK: u32 = 0xFF3D_DC97;
+/// The dot shown while the microphone is in use.
+const PRIVACY: u32 = 0xFFFF_9F0A;
+
+/// Where the microphone dot goes, left of the right bubble (None: nothing
+/// records).
+fn privacy_dot(bubble: Rect) -> Option<Rect> {
+    let used = crate::sandbox::syscall::in_use() & aurora_abi::sandbox::MICROPHONE != 0;
+    used.then(|| Rect::new(bubble.x - 8 - H, TOP, H, H))
+}
 const DANGER: u32 = 0xFFFF_6B6B;
 
 #[derive(Clone)]
@@ -670,6 +679,13 @@ impl Desktop {
             paint_seek(cv, sx, sy, ink);
         }
         paint_ring(cv, ring.x * 16 + ring.w * 8, ring.y * 16 + ring.h * 8, size, ink);
+        // Something records: an orange dot beside the bubble, while it lasts.
+        if let Some(r) = privacy_dot(bubble) {
+            cv.shadow(r, H / 2, 14, 4, t.shadow / 4);
+            cv.frosted(r, H / 2, t.glass_tint);
+            let (cx, cy) = r.center();
+            cv.fill_circle(cx, cy, 6, PRIVACY);
+        }
         if let (Some(p), Some(b)) = (pct, battery()) {
             cv.text(p.x, TOP + 24, &format!("{}%", b.percent), theme::ui_bold(13), ink);
         }

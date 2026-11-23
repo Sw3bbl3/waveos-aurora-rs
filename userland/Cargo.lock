@@ -1104,6 +1104,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sbxtest"
+version = "0.8.0"
+dependencies = [
+ "corekit",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

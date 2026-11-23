@@ -111,6 +111,8 @@ pub fn execve(
     let guest = fs::path_arg(p, dirfd, path)?;
     let argv = string_array(argv)?;
     let envp = string_array(envp)?;
+    // Running another program takes `spawn` in a sandbox.
+    crate::sandbox::require(aurora_abi::sandbox::SPAWN)?;
     exec_guest(p, f, guest, argv, envp, 0)
 }
 

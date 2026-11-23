@@ -68,6 +68,50 @@ impl Desktop {
         }
     }
 
+    /// Shows the privacy prompt for the oldest waiting question (see
+    /// `sandbox::consent`), and closes prompts no longer waited for.
+    pub(super) fn sync_consent(&mut self) {
+        let pending = crate::sandbox::consent::pending();
+        let stale: Vec<u32> = self
+            .windows
+            .iter()
+            .filter(|w| w.app.consent().is_some_and(|id| pending.as_ref().is_none_or(|p| p.id != id)))
+            .map(|w| w.id)
+            .collect();
+        for id in stale {
+            self.close(id);
+        }
+        if let Some(req) = pending {
+            match self.windows.iter().find(|w| w.app.consent() == Some(req.id)).map(|w| w.id) {
+                Some(id) => self.raise(id),
+                None => {
+                    self.add_window(Box::new(apps::ConsentDialog::new(req)));
+                    crate::drivers::audio::play_sound("notify");
+                }
+            }
+        }
+    }
+
+    /// Shows the open and save panels apps wait for (see `sandbox::panel`).
+    pub(super) fn sync_panel(&mut self) {
+        let pending = crate::sandbox::panel::pending();
+        let stale: Vec<u32> = self
+            .windows
+            .iter()
+            .filter(|w| w.app.panel().is_some_and(|id| pending.as_ref().is_none_or(|p| p.id != id)))
+            .map(|w| w.id)
+            .collect();
+        for id in stale {
+            self.close(id);
+        }
+        if let Some(req) = pending {
+            match self.windows.iter().find(|w| w.app.panel() == Some(req.id)).map(|w| w.id) {
+                Some(id) => self.raise(id),
+                None => self.add_window(Box::new(apps::PanelDialog::new(req))),
+            }
+        }
+    }
+
     /// Waking from sleep locks the screen when the account has a password.
     pub(super) fn lock_after_sleep(&mut self) {
         if self.account.as_ref().is_some_and(|a| a.has_password) {

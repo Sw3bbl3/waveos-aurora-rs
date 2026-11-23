@@ -194,6 +194,7 @@ pub fn mount(path: &str, fs: Arc<dyn Filesystem>) {
 
 /// (total, free) bytes of the filesystem holding `path`, if it reports them.
 pub fn space_of(path: &str) -> Option<(u64, u64)> {
+    crate::sandbox::check_path(&resolve("/", path), crate::sandbox::Access::Stat).ok()?;
     let (fs, _) = mount_for(&resolve("/", path)).ok()?;
     fs.space()
 }
@@ -279,8 +280,10 @@ pub fn lookup(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino)> {
     lookup_full(&resolve("/", path)).map(|(fs, ino, _)| (fs, ino))
 }
 
-/// [`lookup`] of a normalised path, with the mount point.
+/// [`lookup`] of a normalised path, with the mount point. A sandboxed
+/// caller must be allowed to see it (see `sandbox`).
 fn lookup_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String)> {
+    crate::sandbox::check_path(path, crate::sandbox::Access::Stat)?;
     let (fs, rest, mount) = mount_full(path)?;
     let ino = walk(&fs, &rest, &mount, perm::caller().as_ref())?;
     Ok((fs, ino, mount))
@@ -305,6 +308,8 @@ fn parent_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String, String
     if MOUNTS.lock().iter().any(|m| m.path == path) {
         return Err(EPERM);
     }
+    // Making, removing or renaming an entry changes it.
+    crate::sandbox::check_path(&path, crate::sandbox::Access::Write)?;
     let (fs, dino, mount) = lookup_full(&resolve("/", dir))?;
     if fs.metadata(dino)?.kind != Kind::Dir {
         return Err(ENOTDIR);
@@ -327,6 +332,7 @@ pub struct Entry {
 /// Lists a directory, including mount points that live directly inside it.
 pub fn readdir(path: &str) -> FsResult<Vec<Entry>> {
     let path = resolve("/", path);
+    crate::sandbox::check_path(&path, crate::sandbox::Access::Read)?;
     let (fs, ino, mount) = lookup_full(&path)?;
     if fs.metadata(ino)?.kind != Kind::Dir {
         return Err(ENOTDIR);
@@ -484,6 +490,8 @@ pub fn open_mode(path: &str, flags: usize, mode: Option<u16>) -> FsResult<OpenFi
     use aurora_abi::open::*;
     let writable = flags & (WRITE | APPEND | TRUNCATE) != 0;
     let mut created = false;
+    let access = if writable { crate::sandbox::Access::Write } else { crate::sandbox::Access::Read };
+    crate::sandbox::check_path(&resolve("/", path), access)?;
     let (fs, ino, mount) = match lookup_full(&resolve("/", path)) {
         Ok(found) => {
             if flags & CREATE != 0 && flags & EXCLUSIVE != 0 {

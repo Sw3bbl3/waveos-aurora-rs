@@ -37,6 +37,9 @@
 #define WAVE_WIN_SET_CURSOR 81
 #define WAVE_EVENT_FD 82
 #define WAVE_UNIX_MS 83
+/* sandbox(op, ...): see aurora_abi::sandbox (INFO 1, RESTRICT 2, PANEL 3,
+ * BOOKMARK 4, RESOLVE 5). */
+#define WAVE_SANDBOX 93
 
 /* Window flags for wave_win_create. */
 #define WAVE_WIN_RESIZABLE 1

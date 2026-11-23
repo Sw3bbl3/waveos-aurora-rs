@@ -1,90 +1,318 @@
-# Per-app sandboxing: design note
+# Per-app sandboxing
 
-Status: design only. Accounts, file owners and the administrator capability
-(`kernel/src/users`, `kernel/src/fs/perm.rs`) are the foundation this builds on.
+Accounts (`kernel/src/users`, `kernel/src/fs/perm.rs`) keep *people* apart:
+every process acts as an account and the VFS checks Unix permission bits.
+That does not keep one person's *apps* apart — a game Alex runs could read
+Alex's Documents, open sockets and record the microphone, because it acts as
+Alex. The sandbox (`kernel/src/sandbox`) adds the second wall, as on macOS
+and iOS: an app can touch only what its manifest declares and what its
+person allowed or handed it.
 
-## Where we are
+## The model
 
-Every process carries credentials (`users::Cred`): a uid, a primary group,
-supplementary groups, the administrator capability (held by administrator
-accounts, or granted for five minutes by the system prompt) and a umask.
-They are inherited on spawn and `fork`, and the VFS checks Unix permission
-bits against them. That isolates *accounts* from each other. It does not
-isolate *apps* of one account: a game Alex runs can read Alex's Documents,
-open sockets and change Alex's preferences, because it acts as Alex.
+Every process may carry a `sandbox::Sandbox` (`Process::sandbox`; `None`
+is unconfined):
 
-## The proposal: a capability set attached to credentials
+- its app's **profile** (`sandbox::Profile`), one per app and account: the
+  app's id and name, its *container*, its own files (the package), what its
+  manifest **declares**, and where the rules come from (`Kind`);
+- the capabilities it **gave up** (`sandbox(RESTRICT)`), never to return;
+- the files and folders the person **gave** it (grants).
 
-Add one field to `Cred`:
+Whether a declared capability may be used is decided at the moment of use:
 
-```rust
-pub struct Sandbox {
-    /// What the app may do beyond computing and drawing its own windows.
-    pub caps: u64,               // bit set, see below
-    /// Folders it may read (and, separately, write), as path prefixes.
-    pub read: SmallVec<[PathId; 4]>,
-    pub write: SmallVec<[PathId; 4]>,
-}
-pub struct Cred { /* … */ pub sandbox: Option<Arc<Sandbox>> }
+| Declared? | Guarded? | The person said | Result |
+|---|---|---|---|
+| no | – | – | refused (`EACCES`) |
+| yes | no | nothing, or allow | allowed |
+| yes | – | deny (Settings) | refused |
+| yes | yes | nothing yet | **asked** (the privacy prompt), answer remembered |
+| yes | yes | allow | allowed |
+
+Guarded capabilities are the microphone, camera, screen capture, input
+monitoring, raw USB, and the folders. The person's answers live in
+`/Security/Privacy/<uid>.conf` (the system's, mode `0600` in a `0700`
+folder, like the account database); they are looked up on every check, so
+switching something off in Settings reaches running apps at once.
+
+### Capabilities
+
+One bit set, `aurora_abi::sandbox` (manifests use the names):
+
+| Name | Bit | Allows |
+|---|---|---|
+| `network` | `NET_CLIENT` | `socket` (native, Linux `AF_INET`/`AF_INET6`) |
+| `network-server` | `NET_SERVER` | `listen` on a network socket (a listener takes every interface) |
+| `audio` | `AUDIO_OUT` | sound streams (`audio_open`, Linux `/dev/dsp`) |
+| `microphone` | `MICROPHONE` | capture streams; checked again on every read |
+| `camera` | `CAMERA` | reserved (no camera drivers yet) |
+| `screen-capture` | `SCREEN_CAPTURE` | reserved (no screen-capture call yet; see `display`) |
+| `input-monitoring` | `INPUT_MONITOR` | reserved for input devices read directly (`sandbox::may_monitor_input`) |
+| `gamepad` | `GAMEPADS` | `gamepads`, `gamepad_state`, rumble |
+| `usb` | `USB` | reserved (no raw USB interface yet) |
+| `spawn` | `SPAWN` | starting other programs (they inherit the sandbox); Linux `execve` |
+| `launch` | `LAUNCH` | asking the desktop to open apps and documents; starting another app's program as that app |
+| `ipc` | `IPC` | other apps' local sockets and shared memory (otherwise a namespace of its own) |
+| `notifications` | `NOTIFY` | `notify` |
+| `background` | `BACKGROUND` | running on without a window |
+| `clipboard` | `CLIPBOARD_READ` | reading the clipboard while another app is in front |
+| `preferences` | `PREFS_WRITE` | `pref_set`, appearance, wallpaper, volume, the tour |
+| `linux` | `LINUX` | starting Linux programs |
+| `elevate` | `ELEVATE` | the administrator prompt at all |
+| `display` | `DISPLAY` | the DRM card (`/dev/dri/card*`; render nodes are free) |
+| `documents`, `downloads`, `pictures`, `music`, `movies`, `desktop` | `DOCUMENTS` … | that folder of the home folder (`:read` variants: read only) |
+| `home` | `HOME` | the whole home folder, other apps' containers excepted |
+
+The system's own apps may also declare `system` (power, displays, Wi-Fi,
+the clock, the kernel log, the Trash and volumes), `admin` (keep an
+administrator's capability), `privacy` (Settings' view of all this),
+`processes` (signal and end the account's other programs), `linux-home`
+(the real Linux home and `/tmp`) and `all-files`. `gina::Manifest::parse`
+refuses them; only `parse_first_party`, used for the manifests built into
+the kernel, accepts them.
+
+### Files
+
+All native and Linux file calls funnel through the VFS, which asks
+`sandbox::check_path(path, Stat | Read | Write)` with the normalised path
+(after the Linux layer resolved its links and mapped its tree):
+`lookup_full` (any use: `Stat`), `open_mode` (`Read` or `Write`),
+`readdir` (`Read`), `parent_full` (creating, removing, renaming: `Write` on
+the entry, for both ends of a rename), `chmod`/`chown` (`Write`), `access`
+and `space_of`. Kernel code doing the system's own work inside a call
+(`fs::perm::system`) is not checked, as before.
+
+A sandboxed process may use:
+
+1. `/System`, read-only;
+2. its container, everything;
+3. its own package's files, read-only;
+4. what it was given (grants), as given (read, or read and write), and
+   for a folder everything in it;
+5. the Linux system folders (`/Linux/{bin,etc,lib,lib64,opt,sbin,usr}`, the
+   link table), read-only;
+6. with `linux-home`, the account's Linux home and `/tmp`;
+7. with `all-files`, anything its account may;
+8. in the home folder (other apps' containers excepted): everything with
+   `home`, or a declared folder (`documents`, `pictures:read`, …);
+9. for `Stat` only, the folders on the way to any of the above (so `/` and
+   `/Users/alex/Library` can be walked through, not listed).
+
+Unix permissions still apply on top, always.
+
+### The container
+
+`~/Library/Containers/<app id>/`, the account's, `rwx------`, made by the
+kernel when the app first starts:
+
+```text
+Documents/     the app's own documents
+Preferences/   its settings (one file per thing it keeps)
+Caches/        what it can make again (may be cleared)
+tmp/           temporary files; its Linux programs' /tmp, /var/tmp and /run
+Home/          its Linux programs' home folder ($HOME)
 ```
 
-`None` means unconfined (today's behaviour, and the default for system
-tools). A sandbox can only ever be narrowed: `cred_set` and spawning may
-drop capabilities or folders, never add them, so a child of a sandboxed app
-is at most as able as its parent — the same rule `cred_set` already follows
-for the administrator capability.
+Apps find it without hard-coded paths: `corekit::sandbox::{container,
+documents, preferences, preferences_file, caches, temporary}`, re-exported as
+`aurorakit::container::{root, documents, …}`. They work unsandboxed too
+(the container is then the one the program would have). The same folder
+is `corekit::apps::data_dir`, which uninstalling may delete.
 
-Capability bits (first set):
+### What the person hands an app
 
-| Bit | Allows |
-|---|---|
-| `NET_CLIENT` | outgoing TCP/UDP (`socket`, `connect`) |
-| `NET_SERVER` | `bind`/`listen` on non-loopback addresses |
-| `AUDIO_OUT`, `AUDIO_IN` | `audio_open`, a future capture call |
-| `GAMEPADS` | `gamepads`, `gamepad_state`, rumble |
-| `CLIPBOARD_READ` | `clipboard_get` (writing stays allowed) |
-| `NOTIFY` | `notify` |
-| `PREFS_WRITE` | `pref_set` |
-| `SPAWN` | `spawn` of programs other than itself |
-| `LINUX` | running Linux programs (their syscall surface is large) |
-| `ELEVATE` | asking for the administrator capability at all |
-| `USER_FILES` | the whole home folder (otherwise only `read`/`write` lists) |
+No blanket grant is needed for what the person does themselves:
 
-## Enforcement points
+- **The open and save panel** (`sandbox(PANEL)`, `corekit::sandbox::
+  {open_panel, save_panel, choose_folder}`): the window server shows its own
+  panel (`gui/apps/panel.rs`, listing only what the account may read), so
+  the app sees nothing but the answer; the asking process may then read and
+  change exactly the file or folder picked.
+- **Opening a document with an app** (double-click, Open With, a drop on the
+  dock, `open_file` from another app): the desktop starts the app with the
+  document granted.
+- **Drag and drop**: files dropped on an app's window are granted when it
+  reads the drop (`drag_data`).
+- **The clipboard**: files pasted (read while the app is in front) are
+  granted. An app may only put on the clipboard or drag files it may read
+  itself, so it cannot launder a path through them.
+- **Bookmarks**: `sandbox(BOOKMARK, path)` turns a grant into a 128-bit
+  random token kept by the kernel (in the privacy file, per account and
+  app). `sandbox(RESOLVE, token)` in a later run grants the same file again;
+  another app's token, or a made-up one, is `ENOENT`. Settings lists and
+  forgets them.
 
-- **Files**: `fs::perm::caller()` already returns the credentials every VFS
-  entry point checks. A sandbox adds one test after the permission bits: the
-  normalised path must lie under a granted prefix (plus `/System`, read-only,
-  and the app's own container `~/Library/Containers/<app id>`, always
-  writable). Because all native and Linux file calls funnel through
-  `fs::{lookup_full, parent_full, open_mode, readdir}`, there is one place to
-  add it; `fs::perm::system` stays the only bypass, used by kernel code for
-  the system's own files.
-- **Other calls**: a small table in `syscall::handle` and `compat::linux`
-  mapping call numbers to capability bits, checked before dispatch (`ENOSYS`
-  stays `ENOSYS`; a missing capability is `EACCES`).
-- **The desktop**: requests that make the window server act for an app
-  (`desktop::OPEN_APP`, `OPEN_FILE`, `TRASH`) must carry the requester's
-  credentials into the `Command`, so an app can't launch something less
-  confined than itself through the desktop. Today the desktop starts apps
-  with the session's credentials.
-- **User-chosen files**: a system open/save panel (built into the window
-  server, like the administrator prompt) grants the chosen path to the
-  asking process for its lifetime by adding it to `read`/`write` — the
-  "powerbox" pattern, so sandboxed apps still open any document the person
-  picks.
+### Asking, Settings and the indicator
 
-## Where the set comes from
+- **The privacy prompt** (`gui/apps/consent.rs`, like the administrator
+  prompt): "“Example” would like to use the microphone." *Allow* and *Don't
+  Allow* are remembered; dismissing it refuses this time only. The asking
+  system call waits for the answer (two minutes at most). Nobody to ask (no
+  window server, as in the self-tests) is a refusal that is not remembered.
+- **Settings → Privacy & Security** lists, per capability, every app that
+  declares it with a switch (and *Reset*, to be asked again), the files apps
+  keep bookmarks to (*Forget*), and the latest refusals (the audit log,
+  `sandbox::denied`, also in the kernel log once per app and thing).
+- **The menu bar** shows an orange dot beside the right bubble while
+  anything records from a microphone (`sandbox(IN_USE)`).
 
-GINA app manifests (`gina::Manifest`, installed under `/Applications` or the
-home folder) gain an `[permissions]` table naming capabilities and folders.
-The installer shows them before installing; the kernel builds the `Sandbox`
-when it spawns a program whose path is inside an installed app's folder,
-reading the manifest the package manager verified. Programs in `/System`
-keep `None`. Settings gets a per-app page to revoke grants.
+### Processes
 
-## Open questions
+- **Children inherit** a copy of their parent's sandbox (`fork`, `spawn`,
+  Linux `clone`): same app, same given-up rights, same grants. Giving up
+  rights later affects only the one giving them up.
+- **Starting another app**: a sandboxed program with `launch` that starts
+  another app's program (`/System/Apps/Voyage.elf`, an installed app) gets
+  that app running *as itself*, in its own profile — as if the desktop had
+  opened it — and passes on only the documents among the arguments it may
+  use itself (as far as it may: read, or read and write). Anything else needs
+  `spawn` and runs in the caller's sandbox. Starting its own program again
+  needs nothing.
+- **Signals**: a sandboxed process may signal only its own app's processes
+  (`processes` lifts that), on top of the account rule.
+- **Administrators**: a sandboxed app runs without the administrator
+  capability and the admin group unless it declares `admin`; it may ask
+  for it only with `elevate`.
+- **Background**: an app without `background` is ended ten seconds after
+  its last window closes, unless it opens another.
+- **IPC**: Linux local sockets (paths and the abstract namespace) and
+  `/dev/shm` objects of a sandboxed app without `ipc` live in a namespace
+  of its own (`sandbox::ipc_key`): it reaches its own processes and nobody
+  else, and nobody else reaches it. Descriptors it is sent (`SCM_RIGHTS`)
+  and inherits work: a descriptor is a capability.
 
-- Path prefixes vs. inode-based grants (renames move files out of a grant).
-- Whether Linux programs get a separate, coarser profile.
-- Auditing: a log of denied operations per app, for the Settings page.
+## Which rules a program gets
+
+| Program | Profile | Why |
+|---|---|---|
+| Started by the kernel (boot, the self-tests) | none | the system's own |
+| The system's own apps (`/System/Apps/*.elf`) | `System`: their `userland/apps/*/manifest.toml`, built into the kernel | explicit, reviewed lists; the folders they declare need no question, devices do |
+| Installed apps, format-2 manifest | `Package`: exactly the declared permissions | the package format already carried them; the installer shows them |
+| Installed apps, format-1 manifest | `Legacy`, under the app's id | they predate permissions and must keep working |
+| Anything else the desktop starts (tools from Seek, Linux programs, Wave Play's Linux and Steam games) | `Legacy`, id `legacy.<name>` | no manifest to go by |
+| Started by a sandboxed program | the parent's (or the other app's, with `launch`) | children only ever have less |
+| A program that sandboxed itself | `Restricted`, id `local.<name>` | it keeps what it kept |
+
+**The default profile (`Legacy`)** may do what its account may — every
+file Unix permissions allow, the network, starting programs, other apps,
+the administrator capability of an administrator account — except the
+guarded devices (microphone, camera, screen, input, USB), which it must ask
+for under its own name. Programs without a manifest cannot say what they
+need, so taking anything else away would silently break them; the devices
+are where the person's privacy is, and asking cannot break anything that
+works today, only make it wait for an answer once.
+
+**Terminal** and everything run in it: Terminal's manifest declares
+`all-files` and every capability, with the devices guarded, so command-line
+tools and Linux programs started there behave as before, and the first
+recording asks "Allow Terminal to use the microphone?", as on macOS.
+
+**Linux programs** honour their account's file permissions (as before) and
+the grants of the app that started them: they are its children. A
+sandboxed app's Linux programs find `/tmp`, `/var/tmp`, `/run` and
+`/home/<user>` in its container (unless it has `linux-home`, as Firefox and
+Voyage do, to keep their existing profiles), may not change the shared link
+table (so cannot plant links for others), and need `linux` to start at all,
+`spawn` to `execve`, `display` for the DRM card.
+
+The system apps' manifests (in `userland/apps/<app>/manifest.toml`) give
+each what it does: Files, Installer, Settings and Terminal `all-files`;
+Notes, Paint, Preview, Studio, Firefox and Voyage `home`; Doom `documents`;
+Clock its old alarm file (`/Settings/clock.conf`); Calculator nothing.
+
+## Changes from the first design
+
+The design note this replaces proposed a `sandbox: Option<Arc<Sandbox>>`
+inside `users::Cred`. `Cred` is `Copy` and copied everywhere, so the sandbox
+lives beside it on the process instead; children copy both. The capability
+list grew (camera, screen, input, USB, launch, IPC, background, display,
+system-only bits) and `AUDIO_IN`/`USER_FILES` became `MICROPHONE`/`HOME`.
+Grants are path prefixes, as proposed (the open question of inode grants is
+answered below). Linux programs did not get a coarser separate profile:
+they take their launcher's, with private temporary and home folders.
+
+## Threat model
+
+The sandbox defends the person's files, devices and other apps against an
+app that runs as them and is malicious or compromised: its code, any
+Linux programs it starts, and anything it can make the system do for it.
+
+In scope, and covered by the self-tests (below):
+
+- Reading or changing files outside its container and grants through any
+  file call, native or Linux, with `..`, relative paths, directory
+  descriptors, `/proc/self/fd`, symbolic links (followed, then checked;
+  planting new ones in the shared table is refused), hard links (none
+  exist: `link` is `EPERM`), renames racing opens (checks are on the final
+  path, and there is nothing in between to swap).
+- Inherited and passed descriptors: they work (that is how a grant by a
+  less confined process looks) but do not widen anything else — a
+  directory descriptor is a path, checked again.
+- Laundering: getting another app or the desktop to act for it — opening a
+  document it may not read in another app, putting files on the clipboard
+  or dragging them, passing paths to an app it launches, setting a
+  wallpaper from a file. Each is checked against the requester.
+- Devices and other apps: the network, the microphone (also after a
+  revocation, mid-stream), sound, controllers, the DRM card, notifications,
+  preferences, power, other apps' processes, sockets and shared memory, the
+  administrator capability, the kernel log, Settings' own privacy calls.
+
+Out of scope: the kernel itself (a kernel bug defeats every wall; the
+fuzzers are there to find them), the person deliberately granting things,
+other accounts (Unix permissions), physical access, and side channels
+(timing, cache, power, GPU memory).
+
+## Known gaps
+
+- **Path grants follow paths, not files.** A granted file renamed or
+  replaced keeps (or loses) access by its path; a bookmark to a moved file
+  does not follow it. A folder grant covers whatever is later put there.
+- **Open descriptors outlive revocation.** Switching off a folder stops new
+  opens, not files already open (a recording, by contrast, stops at once).
+- **The clipboard** is readable by whichever app is in front; reading it
+  there counts as a paste, files and all.
+- **`open_file`** gives the opening app the document to read and change
+  even when the requester could only read it.
+- **Loopback** is network: an app with `network` reaches any local server,
+  including other apps' (TCP listeners need `network-server`).
+- **Process listing** (`proc_list`) shows every process's name to anyone.
+- **The camera, screen capture, input monitoring and raw USB** have no
+  interfaces yet; the bits are reserved and enforced wherever such an
+  interface is added (`sandbox::require`, `sandbox::may_monitor_input`).
+  The DRM card can show what is on screen, which is why it needs `display`.
+- **Legacy programs** keep their account's rights (see above): install
+  format-2 packages to get the sandbox's protection.
+- **Root-level Spotlight** (the file index) is the window server's: it
+  shows names of files to the person, not to apps.
+- **Symbolic links** can't be made by a sandboxed Linux program at all
+  (the table is shared).
+
+## Testing
+
+`cargo xtask test` runs (filter with `AURORA_TEST_FILTER=sandbox`):
+
+- **sandbox: policy, consent, grants, bookmarks, system manifests** — the
+  rules on their own, including revocation, the decisions on disk, the
+  system apps' manifests and Settings' view.
+- **sandbox: a native program … (sbxtest)** — `userland/bin/sbxtest` in a
+  sandbox: everything it did not declare is refused (files, `..`, chmod,
+  renames out and in, sockets, the microphone, sound, notifications,
+  programs, controllers, preferences, the desktop, other apps' processes,
+  the clipboard from behind, the administrator prompt, the kernel log,
+  Settings' calls); an inherited descriptor works; `restrict` is for good.
+  Then it is given files by the open panel, a drop and a paste, keeps a
+  bookmark and uses it in a later run, and is refused a forged one. Last it
+  is allowed what it declared, and Documents is switched off while it runs.
+- **sandbox: a Linux program … (sandboxtest)** — `linux-tests/sandboxtest.c`
+  tries paths, `..`, dirfds, `/proc`, symlinks (planting and following a
+  planted one), hard links, renames racing opens, network sockets, another
+  app's local socket and shared memory, its own socket with descriptor
+  passing, signals, `execve`, the DRM card, sound and WaveOS calls.
+- **sandbox: the native / Linux fuzzer never reaches the oracle** — both
+  system-call fuzzers run in a sandbox with `--oracle /SandboxOracle`
+  (`ORACLE` for `linuxfuzz`) and aim a quarter of their path arguments,
+  mutating calls included, at it. `/SandboxOracle` is a filesystem of its
+  own that counts every call a sandboxed process makes to it; the test
+  fails on any count, on a changed secret or a changed folder.
+
+Every test checks the oracle the same way.

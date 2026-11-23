@@ -47,6 +47,12 @@ pub fn system<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// True while kernel code runs for the system inside a system call
+/// ([`system`]): neither permissions nor the sandbox apply.
+pub fn acting_as_system() -> bool {
+    SYSTEM_TASKS.lock().contains(&crate::sched::current_id())
+}
+
 /// The credentials file access is checked against: None for the system.
 pub fn caller() -> Option<Cred> {
     let p = crate::proc::current()?;
@@ -212,6 +218,14 @@ pub fn session_allows(path: &str, want: u16) -> bool {
 
 /// `access()`: may the caller do `want` (R, W, X bits) with `path`?
 pub fn access(path: &str, want: u16) -> FsResult<()> {
+    let access = if want & W != 0 {
+        crate::sandbox::Access::Write
+    } else if want & R != 0 {
+        crate::sandbox::Access::Read
+    } else {
+        crate::sandbox::Access::Stat
+    };
+    crate::sandbox::check_path(&resolve("/", path), access)?;
     let (o, _) = stat_owner(path)?;
     let (_, ro) = stat(path)?;
     if want & W != 0 && ro {
@@ -222,6 +236,7 @@ pub fn access(path: &str, want: u16) -> FsResult<()> {
 
 /// `chmod`: the owner (or the system) changes the permission bits.
 pub fn chmod(path: &str, mode: u16) -> FsResult<()> {
+    crate::sandbox::check_path(&resolve("/", path), crate::sandbox::Access::Write)?;
     let (fs, ino, mount) = lookup_full(&resolve("/", path))?;
     if fs.read_only() {
         return Err(EROFS);
@@ -238,6 +253,7 @@ pub fn chmod(path: &str, mode: u16) -> FsResult<()> {
 /// `chown`: changing the owner takes the administrator capability; the
 /// owner may hand the group to one they are in. `u32::MAX` = unchanged.
 pub fn chown(path: &str, uid: u32, gid: u32) -> FsResult<()> {
+    crate::sandbox::check_path(&resolve("/", path), crate::sandbox::Access::Write)?;
     let (fs, ino, mount) = lookup_full(&resolve("/", path))?;
     if fs.read_only() {
         return Err(EROFS);

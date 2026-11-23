@@ -1,8 +1,8 @@
 //! fuzz: a system-call fuzzer for the native WaveOS ABI.
 //!
 //! ```text
-//! fuzz run [--seed N] [--rounds N] [--iters N] [--workers N] [--trace]
-//! fuzz child SEED ITERS WORKERS [trace]     one round (what each round runs)
+//! fuzz run [--seed N] [--rounds N] [--iters N] [--workers N] [--trace] [--oracle DIR]
+//! fuzz child SEED ITERS WORKERS [trace] [oracle=DIR]   one round (what each round runs)
 //! fuzz hog N                                takes all the memory it can (see `hog`)
 //! ```
 //!
@@ -18,6 +18,11 @@
 //! change the rest of the system (power, display, preferences, the clock,
 //! files outside `/fuzz`, other processes) are left out or given only
 //! arguments the kernel must refuse.
+//!
+//! With `--oracle DIR` the fuzzer runs in a sandbox (the self-tests start
+//! it in one) and also aims every path call, mutating ones included, at
+//! `DIR`: files outside its sandbox it must never read or change. The
+//! kernel watches `DIR` and fails the test if any call reaches it.
 //!
 //! The parent checks that each round ends (killing it after a deadline),
 //! that every thread of it really goes away, and that processes blocked in
@@ -101,6 +106,26 @@ static STOP: AtomicBool = AtomicBool::new(false);
 static DONE: AtomicU32 = AtomicU32::new(0);
 static CALLS: AtomicU64 = AtomicU64::new(0);
 static TRACE: AtomicBool = AtomicBool::new(false);
+/// `--oracle`: a folder outside the sandbox to aim at (set before threads start).
+static ORACLE: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+fn set_oracle(dir: &str) {
+    let mut b = [0u8; 64];
+    let n = dir.len().min(63);
+    b[..n].copy_from_slice(&dir.as_bytes()[..n]);
+    for (i, w) in ORACLE.iter().enumerate() {
+        w.store(u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap()), Relaxed);
+    }
+}
+
+fn oracle() -> Option<String> {
+    let mut b = [0u8; 64];
+    for (i, w) in ORACLE.iter().enumerate() {
+        b[i * 8..i * 8 + 8].copy_from_slice(&w.load(Relaxed).to_le_bytes());
+    }
+    let n = b.iter().position(|&c| c == 0).unwrap_or(64);
+    (n > 0).then(|| String::from_utf8_lossy(&b[..n]).into_owned())
+}
 
 /// Paths the round may change (all inside the sandbox; relative ones
 /// resolve against a working directory that is kept inside it or /System).
@@ -278,6 +303,19 @@ impl Worker {
     /// A path argument (pointer, length). `mutating`: only the sandbox (or
     /// the read-only system image).
     fn path_at(&mut self, at: usize, mutating: bool) -> (u64, u64) {
+        // In a sandbox: often the oracle, mutating or not (it must hold).
+        if let Some(o) = oracle().filter(|_| self.r.one_in(4)) {
+            let p = match self.r.below(7) {
+                0 => format!("{o}/secret.txt"),
+                1 => o.clone(),
+                2 => format!("/fuzz/../..{o}/secret.txt"),
+                3 => format!("{o}/new-{}", self.r.below(4)),
+                4 => format!("{o}/secret.txt/x"),
+                5 => format!("{o}/.."),
+                _ => format!("{o}//secret.txt/."),
+            };
+            return self.put_str(at, p.as_bytes(), false);
+        }
         match self.r.below(12) {
             0..=4 => {
                 let p = self.r.pick(RW_PATHS);
@@ -599,6 +637,24 @@ impl Worker {
                 [p, l, self.buf(16), 0, 0, 0]
             }
             nr::AUDIO_DEVICES => [self.buf(1024), self.r.below(3), 0, 0, 0, 0],
+            // The sandbox: its own state, panels (nobody answers them here),
+            // bookmarks and Settings' list. Never PRIVACY_SET (it would change
+            // the person's decisions); dropping rights is rare, as it changes
+            // the rest of the round.
+            nr::SANDBOX => {
+                let op = self.r.pick(&[1u64, 1, 3, 4, 5, 6, 8, 0, 9, u64::MAX]);
+                match op {
+                    1 => [1, self.buf(400), 0, 0, 0, 0],
+                    3 => [3, self.r.below(5), self.buf(16), self.len(), self.buf(256), self.len()],
+                    4 | 5 => {
+                        let (p, l) = self.path(false);
+                        [op, p, l, self.buf(64), self.len(), 0]
+                    }
+                    6 => [6, self.buf(256), self.len(), 0, 0, 0],
+                    _ if self.r.one_in(50) => [2, self.r.next() | self.r.next(), 0, 0, 0, 0],
+                    _ => [op, self.int(), self.int(), 0, 0, 0],
+                }
+            }
             _ => [self.int(), self.int(), self.int(), self.int(), self.int(), self.int()],
         };
         Some(a)
@@ -1093,6 +1149,9 @@ fn main(args: corekit::Args) -> i32 {
             let iters = args.get(3).and_then(|v| parse(v)).unwrap_or(1000);
             let workers = args.get(4).and_then(|v| parse(v)).unwrap_or(3);
             TRACE.store(args.get(5).map(String::as_str) == Some("trace"), Relaxed);
+            if let Some(o) = args.iter().find_map(|a| a.strip_prefix("oracle=")) {
+                set_oracle(o);
+            }
             return round(seed, iters, workers);
         }
         Some("hog") => return hog(args.get(2).and_then(|v| parse(v)).unwrap_or(0)),
@@ -1107,6 +1166,11 @@ fn main(args: corekit::Args) -> i32 {
     let iters: u64 = arg(&args, "--iters", 1500);
     let workers: u32 = arg(&args, "--workers", 3);
     let trace = args.iter().any(|a| a == "--trace");
+    let oracle_arg = args.iter().position(|a| a == "--oracle").and_then(|i| args.get(i + 1)).cloned();
+    if let Some(o) = &oracle_arg {
+        set_oracle(o);
+        println!("fuzz: in a sandbox, aiming at {o}");
+    }
     println!("fuzz: seed {seed:#x}, {rounds} rounds of {iters} calls on each of {} threads", workers + 1);
     let mut failed = 0;
     let mut fail = |what: String| {
@@ -1140,6 +1204,10 @@ fn main(args: corekit::Args) -> i32 {
         let mut child_args = alloc::vec!["child", s_hex.as_str(), it.as_str(), wk.as_str()];
         if trace {
             child_args.push("trace");
+        }
+        let oracle_child = oracle_arg.as_ref().map(|o| format!("oracle={o}"));
+        if let Some(o) = &oracle_child {
+            child_args.push(o.as_str());
         }
         let start = time::uptime_ms();
         let pid = match process::spawn("/System/Bin/fuzz", &child_args, Stdio::default()) {

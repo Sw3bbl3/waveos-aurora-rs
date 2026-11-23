@@ -758,6 +758,8 @@ pub(super) fn builtin_id(a: &apps::AppInfo) -> String {
         Firefox => "firefox",
         Voyage => "voyage",
         Elevate => "elevate",
+        Consent => "consent",
+        Panel => "panel",
     };
     id.into()
 }

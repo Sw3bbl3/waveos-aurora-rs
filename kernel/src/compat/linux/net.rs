@@ -166,6 +166,7 @@ pub fn socket(p: &Process, domain: u64, ty: u64, proto: u64) -> Result<u64, isiz
                 (SOCK_DGRAM | SOCK_RAW, 1 | 58) => Kind::Icmp,
                 _ => return Err(EPROTONOSUPPORT_),
             };
+            crate::sandbox::require(aurora_abi::sandbox::NET_CLIENT)?;
             let s = Socket::new(kind, domain == AF_INET6);
             if nb {
                 s.option(aurora_abi::net::OPT_NONBLOCK, 1)?;
@@ -222,7 +223,11 @@ pub fn bind(p: &Process, fd: u64, addr: u64, len: u64) -> Result<u64, isize> {
 pub fn listen(p: &Process, fd: u64, backlog: u64) -> Result<u64, isize> {
     match sock(p, fd)? {
         Sock::Local(u) => u.listen().map(|_| 0),
-        s => s.net().listen(backlog.clamp(1, 128) as usize).map(|_| 0),
+        s => {
+            // (A listener takes connections on every interface.)
+            crate::sandbox::require(aurora_abi::sandbox::NET_SERVER)?;
+            s.net().listen(backlog.clamp(1, 128) as usize).map(|_| 0)
+        }
     }
 }
 

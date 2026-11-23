@@ -95,6 +95,8 @@ pub struct Process {
     pub cwd: Mutex<String>,
     /// Who the process acts as (inherited from its parent; see `users`).
     pub cred: IrqMutex<crate::users::Cred>,
+    /// What its app may do (None: unconfined; see `sandbox`).
+    pub sandbox: IrqMutex<Option<Arc<crate::sandbox::Sandbox>>>,
     exit: AtomicI64,
     pub killed: AtomicBool,
     /// Set once a parent has collected the exit code with `wait`.
@@ -314,17 +316,41 @@ pub fn spawn_env(
     stdio: [Option<Arc<Handle>>; 3],
     parent: Pid,
 ) -> Result<Pid, isize> {
+    spawn_confined(path, argv, env, stdio, parent, crate::sandbox::Confine::Inherit)
+}
+
+/// Like [`spawn_env`], in the sandbox `confine` says (see `sandbox`).
+pub fn spawn_confined(
+    path: &str,
+    argv: &[&str],
+    env: Option<&[String]>,
+    stdio: [Option<Arc<Handle>>; 3],
+    parent: Pid,
+    confine: crate::sandbox::Confine,
+) -> Result<Pid, isize> {
     use crate::compat::linux;
     if !room_for_thread() {
         return Err(ENOMEM);
     }
-    let data = fs::read_all(path)?;
+    // Another app the caller may launch is read for the system: the caller
+    // itself may not be able to read that app's files.
+    let launched = matches!(confine, crate::sandbox::Confine::With(_));
+    let sandbox = match confine {
+        crate::sandbox::Confine::Inherit => get(parent).and_then(|p| p.sandbox.lock().as_ref().map(|s| s.child())),
+        crate::sandbox::Confine::With(s) => s,
+    };
+    let data = if launched { fs::perm::system(|| fs::read_all(path)) } else { fs::read_all(path) }?;
     let image = aurora_elf::parse(&data).ok_or(ENOEXEC)?;
     let mut aspace = AddressSpace::new().ok_or(ENOMEM)?;
     let (entry, user_sp, arg, linux_state) = if linux::is_linux(&image, path) {
         // Linux programs need the execute bit too (WaveOS programs only
         // need to be readable, which `read_all` checked).
-        fs::perm::check_exec(path)?;
+        if !launched {
+            fs::perm::check_exec(path)?;
+        }
+        if let Some(s) = &sandbox {
+            s.require(aurora_abi::sandbox::LINUX)?;
+        }
         let user = linux::fs::account_user();
         linux::fs::prepare_root(&user, crate::users::for_child(parent).uid);
         let default_env;
@@ -350,6 +376,10 @@ pub fn spawn_env(
     let log = || Some(Arc::new(Handle::Log));
     let fds = alloc::vec![i.or_else(log), o.or_else(log), e.or_else(log)];
     let cwd = if parent != 0 { get(parent).map(|p| p.cwd.lock().clone()) } else { None };
+    let mut cred = crate::users::for_child(parent);
+    if let Some(s) = &sandbox {
+        crate::sandbox::narrow_cred(s, &mut cred);
+    }
     let process = Arc::new(Process {
         pid,
         parent,
@@ -365,7 +395,8 @@ pub fn spawn_env(
         aspace: Mutex::new(Some(aspace)),
         fds: Mutex::new(fds),
         cwd: Mutex::new(cwd.unwrap_or_else(|| String::from("/"))),
-        cred: IrqMutex::new(crate::users::for_child(parent)),
+        cred: IrqMutex::new(cred),
+        sandbox: IrqMutex::new(sandbox),
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
         waited: AtomicBool::new(false),
@@ -754,6 +785,7 @@ pub fn fork(
         fds: Mutex::new(parent.fds.lock().clone()),
         cwd: Mutex::new(parent.cwd.lock().clone()),
         cred: IrqMutex::new(*parent.cred.lock()),
+        sandbox: IrqMutex::new(parent.sandbox.lock().as_ref().map(|s| s.child())),
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
         waited: AtomicBool::new(false),

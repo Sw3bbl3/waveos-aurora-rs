@@ -173,6 +173,8 @@ impl App for ClientApp {
         false
     }
     fn focus(&mut self, focused: bool) {
+        // (The desktop says "lost" before "gained".)
+        server::set_frontmost(focused.then_some(self.id));
         server::push_event(self.id, Event { kind: event::FOCUS, a: focused as u32, ..Default::default() });
     }
     fn request_close(&mut self) -> bool {
