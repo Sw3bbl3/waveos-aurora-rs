@@ -127,6 +127,17 @@ pub fn decisions(uid: u32, id: &str) -> (u64, u64) {
     (allowed, denied)
 }
 
+/// [`decisions`] without reading the file: (0, 0) if the account's
+/// decisions are not loaded yet (for callers that may not block).
+pub fn decisions_cached(uid: u32, id: &str) -> (u64, u64) {
+    let stores = STORES.lock();
+    let Some(s) = stores.get(&uid) else { return (0, 0) };
+    s.decisions
+        .range((String::from(id), 0)..)
+        .take_while(|((app, _), _)| app == id)
+        .fold((0, 0), |(a, d), ((_, bit), yes)| if *yes { (a | bit, d) } else { (a, d | bit) })
+}
+
 /// Records a decision (None: forget it, so the app asks again).
 pub fn decide(uid: u32, id: &str, bit: u64, allowed: Option<bool>) {
     load(uid);

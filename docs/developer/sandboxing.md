@@ -47,9 +47,9 @@ One bit set, `aurora_abi::sandbox` (manifests use the names):
 | `microphone` | `MICROPHONE` | capture streams; checked again on every read |
 | `camera` | `CAMERA` | reserved (no camera drivers yet) |
 | `screen-capture` | `SCREEN_CAPTURE` | reserved (no screen-capture call yet; see `display`) |
-| `input-monitoring` | `INPUT_MONITOR` | reserved for input devices read directly (`sandbox::may_monitor_input`) |
-| `gamepad` | `GAMEPADS` | `gamepads`, `gamepad_state`, rumble |
-| `usb` | `USB` | reserved (no raw USB interface yet) |
+| `input-monitoring` | `INPUT_MONITOR` | reading keyboards and pointers (`/dev/input/event*`) while another program has the focus; grabbing them (`EVIOCGRAB`) without the focus; making keyboards and pointers with `/dev/uinput` (the default profile may make them without asking, as its account always could) |
+| `gamepad` | `GAMEPADS` | `gamepads`, `gamepad_state`, rumble; controllers' `/dev/input/event*`, `js*` and `hidraw*`; making controllers with `/dev/uinput` |
+| `usb` | `USB` | other raw HID devices (`/dev/hidraw*`); raw USB is reserved |
 | `spawn` | `SPAWN` | starting other programs (they inherit the sandbox); Linux `execve` |
 | `launch` | `LAUNCH` | asking the desktop to open apps and documents; starting another app's program as that app |
 | `ipc` | `IPC` | other apps' local sockets and shared memory (otherwise a namespace of its own) |
@@ -174,7 +174,24 @@ No blanket grant is needed for what the person does themselves:
   capability and the admin group unless it declares `admin`; it may ask
   for it only with `elevate`.
 - **Background**: an app without `background` is ended ten seconds after
-  its last window closes, unless it opens another.
+  its last window closes, unless it opens another — and unless it is still
+  at work: another process of the same app has a window (a launcher whose
+  game shows one, a bridge whose client does), it has programs of its own
+  running (it waits for them, or they are starting), or it holds a DRM
+  card (full-screen programs such as `kmscube` never own a window). Only
+  closing a window starts the clock, so programs that never had one are
+  never ended; programs without a manifest and those that sandboxed
+  themselves are exempt.
+- **Input devices** (`compat/linux/input`, `drivers/evdev`): keyboard and
+  pointer nodes open for anyone and deliver events only to the program
+  whose window has the focus (or to a sandboxed app the person allowed
+  `input-monitoring`); the rest is in the table above. Device discovery —
+  `/sys`, `/run/udev` (never moved into the container), `/dev/input`
+  listings, uevents, inotify — is everyone's, as on Linux.
+- **Windows shown for another process** (`win_set_program`, used by
+  `wl-bridge`): the window's focus gives that process the keyboard,
+  pointer and controllers, so a sandboxed caller may name only its own
+  app's processes (the signal rule; `processes` lifts it).
 - **IPC**: Linux local sockets (paths and the abstract namespace) and
   `/dev/shm` objects of a sandboxed app without `ipc` live in a namespace
   of its own (`sandbox::ipc_key`): it reaches its own processes and nobody
@@ -276,10 +293,15 @@ other accounts (Unix permissions), physical access, and side channels
 - **Loopback** is network: an app with `network` reaches any local server,
   including other apps' (TCP listeners need `network-server`).
 - **Process listing** (`proc_list`) shows every process's name to anyone.
-- **The camera, screen capture, input monitoring and raw USB** have no
-  interfaces yet; the bits are reserved and enforced wherever such an
-  interface is added (`sandbox::require`, `sandbox::may_monitor_input`).
-  The DRM card can show what is on screen, which is why it needs `display`.
+- **The camera, screen capture and raw USB** have no interfaces yet; the
+  bits are reserved and enforced wherever such an interface is added
+  (`sandbox::require`). The DRM card can show what is on screen, which is
+  why it needs `display`.
+- **Input monitoring is never asked about when reading** (the devices
+  check it while locked): an app gets unfocused keyboard and pointer
+  events only once the person allowed it — in Settings, or at its first
+  grab or made keyboard. Device discovery (`/sys`, `/run/udev`) shows
+  every app what devices exist.
 - **Legacy programs** keep their account's rights (see above): install
   format-2 packages to get the sandbox's protection.
 - **Root-level Spotlight** (the file index) is the window server's: it
@@ -316,3 +338,20 @@ other accounts (Unix permissions), physical access, and side channels
   fails on any count, on a changed secret or a changed folder.
 
 Every test checks the oracle the same way.
+
+- **sandbox: windowless apps end only when idle and without background** —
+  an app without `background` that closes its last window is ended; with
+  `background`, with a program of its own running, or never having had a
+  window, it runs on.
+- `sandboxtest` also covers input: `/sys`, `/run/udev` and `/dev/input` are
+  visible; controllers' nodes, raw HID and making devices with `uinput`
+  are refused; keyboards and pointers can neither be read nor grabbed
+  without the focus; a window it shows may be said to show only its own
+  process.
+- The self-tests start every Linux test program (`linuxtest`, `proctest`,
+  `nettest`, `inputtest`, `drmtest`, `modetest`, `linuxfuzz`) in the
+  **default profile**, as the desktop would: since nobody answers prompts
+  in the tests, anything there that needed one would fail. `sdlprobe` (the
+  SDL controller check, needs the Debian packages) is not in the
+  automated run; it uses controllers' nodes, udev and inotify, which the
+  default profile and Terminal have without asking.

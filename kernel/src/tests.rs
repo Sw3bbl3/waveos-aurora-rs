@@ -76,12 +76,14 @@ const TESTS: &[Test] = &[
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
     ("Linux programs: local and network sockets (nettest)", linux_sockets),
+    ("Linux programs: input devices — evdev, joystick, hidraw, uinput, hot-plug (inputtest)", linux_input),
     ("Linux programs: the DRM device, mode setting, events, PRIME (drmtest)", linux_drm),
     ("Linux programs: libdrm's modetest on the DRM device", linux_modetest),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("sandbox: policy, consent, grants, bookmarks, system manifests", crate::sandbox::selftest::policy),
     ("sandbox: a native program refused, given files, allowed and revoked (sbxtest)", crate::sandbox::selftest::programs),
     ("sandbox: a Linux program tries every way out (sandboxtest)", crate::sandbox::selftest::linux),
+    ("sandbox: windowless apps end only when idle and without background", crate::sandbox::selftest::background),
     ("sandbox: the native fuzzer never reaches the oracle", crate::sandbox::selftest::fuzz_native),
     ("sandbox: the Linux fuzzer never reaches the oracle", crate::sandbox::selftest::fuzz_linux),
     ("storage: disk + GPT", storage_devices),
@@ -456,6 +458,310 @@ fn linux_sockets() {
     run_linux_test("nettest", "net-test passed");
 }
 
+/// Linux's input interfaces (`linux-tests/inputtest.c`): the program asks
+/// for what it needs as "@command" lines and this plays the user — the
+/// keyboard-played controller (Wave Play's Super+G one), the PS/2
+/// keyboard, a touchpad, a raw HID controller, the window focus — answering
+/// "ok …" on its standard input.
+fn linux_input() {
+    crate::drivers::evdev::self_test();
+    crate::compat::linux::input::self_test();
+    let path = "/System/Linux/bin/inputtest";
+    if crate::fs::stat(path).is_err() {
+        crate::kprint!("(skipped: built without musl-gcc) ");
+        return;
+    }
+    let (in_r, in_w) = crate::proc::new_pipe(false);
+    let (out_r, out_w) = crate::proc::new_pipe(false);
+    // In the default profile, as the desktop would start it: nothing it
+    // does may need an answer nobody is here to give.
+    let pid = crate::proc::spawn_confined(
+        path,
+        &["inputtest"],
+        None,
+        [Some(in_r), Some(out_w.clone()), Some(out_w)],
+        0,
+        default_profile(path),
+    )
+    .expect("spawn inputtest");
+    let p = crate::proc::get(pid).unwrap();
+    let (to_test, from_test) = match (&*in_w, &*out_r) {
+        (crate::proc::Handle::PipeWrite(w), crate::proc::Handle::PipeRead { pipe, .. }) => (w.clone(), pipe.clone()),
+        _ => unreachable!(),
+    };
+    let mut user = InputTestUser::new(pid);
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let deadline = time::uptime_ms() + 10 * 60_000;
+    let mut buf = [0u8; 512];
+    loop {
+        if from_test.readable() {
+            match from_test.read(&mut buf, true) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => {}
+            }
+        } else if p.exit_code().is_some() || time::uptime_ms() > deadline {
+            break;
+        } else {
+            sched::sleep_ms(5);
+        }
+        while let Some(end) = out.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = out.drain(..=end).collect();
+            let line = String::from_utf8_lossy(&line[..line.len() - 1]).into_owned();
+            match line.strip_prefix('@') {
+                Some(cmd) => {
+                    let reply = user.command(cmd);
+                    let _ = to_test.write(alloc::format!("{reply}\n").as_bytes());
+                }
+                None => {
+                    crate::kprintln!("    {line}");
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+            }
+        }
+    }
+    user.finish();
+    drop(in_w);
+    assert_eq!(p.exit_code(), Some(0), "inputtest failed");
+    assert!(text.contains("input-test passed"), "inputtest did not finish");
+}
+
+/// What `inputtest` asks for, done as a user would (or a device).
+struct InputTestUser {
+    pid: u32,
+    pad: crate::gui::desktop::KeyboardPad,
+    touchpad: Option<(Arc<crate::drivers::evdev::Device>, crate::drivers::evdev::sources::Touches)>,
+    raw: Option<Arc<crate::drivers::evdev::hidraw::Hidraw>>,
+    raw_io: Arc<MockHid>,
+    pointer_from: (i32, i32),
+}
+
+/// A raw HID controller that remembers what it was sent.
+struct MockHid {
+    output: crate::sync::IrqMutex<Vec<u8>>,
+    feature: crate::sync::IrqMutex<Vec<u8>>,
+}
+
+impl crate::drivers::evdev::hidraw::HidIo for MockHid {
+    fn output(&self, report: &[u8]) -> Result<usize, isize> {
+        *self.output.lock() = report.to_vec();
+        Ok(report.len())
+    }
+    fn get_report(&self, _kind: u8, buf: &mut [u8]) -> Result<usize, isize> {
+        buf[1..3].copy_from_slice(&[0x42, 0x43]);
+        Ok(3)
+    }
+    fn set_report(&self, kind: u8, report: &[u8]) -> Result<usize, isize> {
+        if kind == crate::drivers::evdev::hidraw::FEATURE {
+            *self.feature.lock() = report.to_vec();
+        }
+        Ok(report.len())
+    }
+}
+
+impl InputTestUser {
+    fn new(pid: u32) -> Self {
+        InputTestUser {
+            pid,
+            pad: crate::gui::desktop::KeyboardPad::new(),
+            touchpad: None,
+            raw: None,
+            raw_io: Arc::new(MockHid {
+                output: crate::sync::IrqMutex::new(Vec::new()),
+                feature: crate::sync::IrqMutex::new(Vec::new()),
+            }),
+            pointer_from: (0, 0),
+        }
+    }
+
+    fn command(&mut self, cmd: &str) -> String {
+        use crate::drivers::evdev::{self, InputId, Location};
+        use crate::drivers::gamepad;
+        use crate::drivers::input::{self, InputEvent, KeyEvent, Modifiers};
+        let mut words = cmd.split_whitespace();
+        let verb = words.next().unwrap_or("");
+        let args: Vec<&str> = words.collect();
+        let hex = |a: &[&str]| -> Vec<u8> { a.iter().filter_map(|h| u8::from_str_radix(h, 16).ok()).collect() };
+        let ok = String::from("ok");
+        match verb {
+            "focus-me" => {
+                evdev::set_focus(Some(self.pid), None);
+                gamepad::set_owners(self.pid as u64, None);
+                ok
+            }
+            "focus-none" => {
+                evdev::set_focus(None, None);
+                gamepad::set_owners(gamepad::SHELL, None);
+                ok
+            }
+            "pad-connect" | "pad-disconnect" => {
+                if self.pad.id.is_some() == (verb == "pad-disconnect") {
+                    self.pad.toggle();
+                }
+                ok
+            }
+            "pad-press" | "pad-release" | "pad-burst" => {
+                let (code, times) = match (verb, args.first().copied()) {
+                    ("pad-burst", n) => (KeyCode::Enter, n.and_then(|n| n.parse::<usize>().ok()).unwrap_or(1) * 2),
+                    (_, Some("Up")) => (KeyCode::Up, 1),
+                    _ => (KeyCode::Enter, 1),
+                };
+                for i in 0..times {
+                    let pressed = if verb == "pad-burst" { i % 2 == 0 } else { verb == "pad-press" };
+                    let k = KeyEvent { code, ch: None, pressed, mods: Modifiers::default() };
+                    self.pad.key(&k, true);
+                }
+                ok
+            }
+            "rumble?" => {
+                let felt = &gamepad::VIRTUAL_FELT;
+                let until = time::uptime_ms() + 3000;
+                while felt.load(Ordering::Acquire) == 0 && time::uptime_ms() < until {
+                    sched::sleep_ms(10);
+                }
+                let v = felt.swap(0, Ordering::AcqRel);
+                alloc::format!("ok {} {}", v >> 8, v & 0xFF)
+            }
+            "key" => {
+                for b in hex(&args) {
+                    crate::drivers::ps2::keyboard_byte(b);
+                }
+                ok
+            }
+            "touchpad-add" => {
+                let info = aurora_hid::touchpad::Info {
+                    x_min: 0,
+                    x_max: 4000,
+                    y_min: 0,
+                    y_max: 3000,
+                    width_hmm: Some(10_000),
+                    height_hmm: Some(7_500),
+                    max_contacts: 5,
+                };
+                let id = InputId { bustype: 0x18, vendor: 0x1209, product: 0x0002, version: 1 };
+                let d = evdev::sources::touchpad("WaveOS Test Touchpad", id, "", Location::Virtual, &info);
+                self.touchpad = Some((d, evdev::sources::Touches::new()));
+                ok
+            }
+            "touch" => {
+                let Some((d, touches)) = &mut self.touchpad else { return String::from("no touchpad") };
+                let num = |i: usize| args.get(i).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                let contacts = if args.first() == Some(&"down") {
+                    alloc::vec![aurora_hid::touchpad::Contact {
+                        id: 7,
+                        x: num(1),
+                        y: num(2),
+                        tip: true,
+                        confident: true
+                    }]
+                } else {
+                    Vec::new()
+                };
+                touches.frame(d, &aurora_hid::touchpad::Frame { contacts, button: false });
+                ok
+            }
+            "touchpad-remove" => {
+                if let Some((d, _)) = self.touchpad.take() {
+                    evdev::remove(&d);
+                }
+                ok
+            }
+            "hidraw-add" => {
+                let place = evdev::UsbPlace {
+                    bus: 9,
+                    ports: String::from("1"),
+                    interface: 0,
+                    vendor: 0x1209,
+                    product: 0x0003,
+                    version: 0x0100,
+                    maker: String::from("WaveOS"),
+                    model: String::from("Test Pad"),
+                    serial: String::new(),
+                    pci: String::from("0000:00:1f.7"),
+                    hid: 0x99,
+                };
+                self.raw = Some(evdev::hidraw::add(evdev::hidraw::Spec {
+                    name: String::from("WaveOS Test Pad"),
+                    phys: String::from("usb-0000:00:1f.7-1/input0"),
+                    uniq: String::new(),
+                    bustype: 3,
+                    vendor: 0x1209,
+                    product: 0x0003,
+                    descriptor: alloc::vec![0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0xC0],
+                    location: Location::Usb(place),
+                    class: evdev::Class::Joystick,
+                    io: self.raw_io.clone(),
+                }));
+                ok
+            }
+            "hidraw-report" => {
+                if let Some(r) = &self.raw {
+                    r.input(&hex(&args));
+                }
+                ok
+            }
+            "hidraw-check" => {
+                let h = |b: &[u8]| b.iter().map(|x| alloc::format!("{x:02x}")).collect::<String>();
+                alloc::format!("ok {} {}", h(&self.raw_io.output.lock()), h(&self.raw_io.feature.lock()))
+            }
+            "hidraw-remove" => {
+                if let Some(r) = self.raw.take() {
+                    evdev::hidraw::remove(&r);
+                }
+                ok
+            }
+            "native-pads" => {
+                let names: Vec<String> = gamepad::list()
+                    .iter()
+                    .map(|p| String::from_utf8_lossy(&p.name[..p.name_len as usize]).into_owned())
+                    .collect();
+                alloc::format!("ok {}", names.join("|"))
+            }
+            "drain-native" => {
+                while input::pop().is_some() {}
+                self.pointer_from = input::pointer_position();
+                ok
+            }
+            "native-key?" => {
+                let mut got = String::from("none");
+                while let Some(e) = input::pop() {
+                    if let InputEvent::Key(KeyEvent { pressed: true, ch: Some(c), .. }) = e {
+                        got = alloc::format!("{c}");
+                    }
+                }
+                alloc::format!("ok {got}")
+            }
+            "native-pointer?" => {
+                let mut at = None;
+                while let Some(e) = input::pop() {
+                    if let InputEvent::Pointer { x, y, .. } = e {
+                        at = Some((x, y));
+                    }
+                }
+                match at {
+                    Some((x, y)) => alloc::format!("ok {} {}", x - self.pointer_from.0, y - self.pointer_from.1),
+                    None => String::from("ok none"),
+                }
+            }
+            _ => alloc::format!("unknown command {cmd}"),
+        }
+    }
+
+    /// Puts things back as they were.
+    fn finish(&mut self) {
+        if self.pad.id.is_some() {
+            self.pad.toggle();
+        }
+        let _ = self.command("touchpad-remove");
+        let _ = self.command("hidraw-remove");
+        crate::drivers::evdev::set_focus(None, None);
+        crate::drivers::gamepad::set_owners(crate::drivers::gamepad::ANYONE, None);
+        let _ = crate::drivers::gamepad::take_changes();
+    }
+}
+
 /// A fourth drives the display through `/dev/dri/card0` while a stand-in
 /// desktop (an `Output` showing one colour) is on it: the program takes
 /// the display with its first mode set, and when it closes the card — and
@@ -729,6 +1035,13 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
     assert!(text.contains(passed), "{name} did not finish");
 }
 
+/// Linux programs run in the default profile, as the desktop starts them
+/// (see `sandbox`): their account's rights; the guarded devices would ask,
+/// and nobody answers in the tests, so a program needing one fails.
+fn default_profile(path: &str) -> crate::sandbox::Confine {
+    crate::sandbox::Confine::With(Some(crate::sandbox::for_launch(path)))
+}
+
 /// Runs a Linux program to its end (or `timeout_ms`), shows its output and
 /// returns its exit code and output. With `stdin_ms`, its standard input is
 /// a pipe that closes (end of file) after that long; with `kill_on`, it is
@@ -748,7 +1061,8 @@ fn run_linux_program(
         }
         None => (None, None),
     };
-    let pid = crate::proc::spawn(path, argv, [stdin, Some(w.clone()), Some(w)], 0).expect("spawn Linux program");
+    let pid = crate::proc::spawn_confined(path, argv, None, [stdin, Some(w.clone()), Some(w)], 0, default_profile(path))
+        .expect("spawn Linux program");
     let p = crate::proc::get(pid).unwrap();
     let stdin_until = time::uptime_ms() + stdin_ms.unwrap_or(0);
     let mut out = alloc::vec::Vec::new();

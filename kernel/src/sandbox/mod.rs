@@ -427,6 +427,39 @@ pub fn may_monitor_input() -> bool {
     require(cap::INPUT_MONITOR).is_ok()
 }
 
+/// May process `pid` read keyboards and pointers while another program has
+/// the focus? Only a sandboxed app with `input-monitoring` that the person
+/// allowed (never asks: called while devices are locked, so it uses the
+/// decisions already loaded). Unconfined programs follow the focus.
+pub fn monitors_input(pid: u32) -> bool {
+    let Some(s) = of(pid) else { return false };
+    let p = &s.profile;
+    if p.declared & s.kept() & cap::INPUT_MONITOR == 0 {
+        return false;
+    }
+    let (allowed, denied) = consent::decisions_cached(p.uid, &p.id);
+    denied & cap::INPUT_MONITOR == 0 && (allowed | p.preapproved()) & cap::INPUT_MONITOR != 0
+}
+
+/// May the caller make a keyboard or pointer (`/dev/uinput`), whose input
+/// goes to whatever has the focus? With `input-monitoring`; programs
+/// without a manifest may, as their account always could (Steam Input,
+/// remote-desktop tools).
+pub fn may_inject_input() -> Result<(), isize> {
+    match current() {
+        Some(s) if s.profile.kind == Kind::Legacy => Ok(()),
+        Some(s) => s.require(cap::INPUT_MONITOR),
+        None => Ok(()),
+    }
+}
+
+/// May the caller name `target` as the program a window of its shows
+/// (`win_set_program`), which gives `target` that window's focus? The same
+/// rule as signals: a sandboxed bridge only its own app's processes.
+pub fn may_designate(target: &crate::proc::Process) -> bool {
+    may_signal(target)
+}
+
 /// May the caller signal or end `target`? Its own app's processes, or any
 /// with the `processes` capability (the account check is `users`').
 pub fn may_signal(target: &crate::proc::Process) -> bool {
@@ -475,7 +508,8 @@ pub fn linux_private(guest: &str) -> Option<String> {
     if let Some(r) = rest("/tmp").or_else(|| rest("/var/tmp")) {
         return Some(format!("{c}/tmp{r}"));
     }
-    if let Some(r) = rest("/run") {
+    // (udev's records are the system's, made up for everyone: `compat::linux::input`.)
+    if let Some(r) = rest("/run").filter(|_| !under(guest, "/run/udev")) {
         return Some(format!("{c}/tmp/run{r}"));
     }
     if let Some(r) = rest("/home") {
@@ -578,13 +612,14 @@ static WINDOWLESS: IrqMutex<Vec<(u32, u64)>> = IrqMutex::new(Vec::new());
 const WINDOWLESS_MS: u64 = 10_000;
 
 /// A window of `pid` closed: an app that may not run in the background
-/// ends once it has had no window for a while.
+/// ends once it has had no window for a while — unless it still shows
+/// something some other way (see [`busy`]).
 pub fn window_closed(pid: u32) {
     let Some(s) = of(pid) else { return };
-    if s.profile.kind == Kind::Legacy || s.has(cap::BACKGROUND) {
+    if matches!(s.profile.kind, Kind::Legacy | Kind::Restricted) || s.has(cap::BACKGROUND) {
         return;
     }
-    if crate::gui::server::windows().iter().any(|(_, p, _)| *p == pid) {
+    if busy(pid, &s) {
         return;
     }
     WINDOWLESS.lock().push((pid, crate::time::uptime_ms() + WINDOWLESS_MS));
@@ -597,6 +632,28 @@ pub fn window_opened(pid: u32) {
         s.had_window.store(true, Ordering::Release);
     }
     WINDOWLESS.lock().retain(|(p, _)| *p != pid);
+}
+
+/// Whether windowless `pid` (of sandbox `s`) is still at work for the
+/// person: a process of its app has a window (a launcher whose game, or a
+/// bridge whose client, shows one), it has programs of its own running
+/// (it waits for them, or they start up), or it drives a display itself
+/// (a full-screen DRM program never has a window).
+fn busy(pid: u32, s: &Sandbox) -> bool {
+    let same_app = |other: u32| of(other).is_some_and(|o| o.profile.id == s.profile.id && o.profile.uid == s.profile.uid);
+    if crate::gui::server::windows().iter().any(|(_, p, _)| *p == pid || same_app(*p)) {
+        return true;
+    }
+    let all = crate::proc::all();
+    if all.iter().any(|c| c.parent == pid && c.exit_code().is_none()) {
+        return true;
+    }
+    all.iter().find(|p| p.pid == pid).is_some_and(|p| {
+        p.fds.lock().iter().flatten().any(|h| match &**h {
+            crate::proc::Handle::Special(sp) => matches!(&*sp.lock(), crate::compat::linux::Special::Drm(_)),
+            _ => false,
+        })
+    })
 }
 
 static SWEEPER: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -621,8 +678,9 @@ fn sweeper() {
                     due
                 };
                 for pid in due {
-                    let windows = crate::gui::server::windows();
-                    if !windows.iter().any(|(_, p, _)| *p == pid) && crate::proc::get(pid).is_some() {
+                    let Some(s) = of(pid) else { continue };
+                    let running = crate::proc::get(pid).is_some_and(|p| p.exit_code().is_none());
+                    if running && !busy(pid, &s) && !s.has(cap::BACKGROUND) {
                         log!("sandbox", "pid {} has no window and may not run in the background: ending it", pid);
                         let _ = crate::proc::kill(pid);
                     }

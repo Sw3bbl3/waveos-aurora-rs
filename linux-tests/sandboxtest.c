@@ -14,10 +14,13 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <dirent.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -233,6 +236,100 @@ static void processes(const char *victim) {
     waitpid(child, &st, 0);
 }
 
+// <linux/input.h> and <linux/uinput.h>, as far as used here.
+#define EVIOCGRAB _IOW('E', 0x90, int)
+#define UI_DEV_CREATE _IO('U', 1)
+#define UI_SET_EVBIT _IOW('U', 100, int)
+#define UI_SET_KEYBIT _IOW('U', 101, int)
+#define UI_DEV_SETUP _IOW('U', 3, struct uinput_setup)
+struct uinput_setup {
+    uint16_t bustype, vendor, product, version;
+    char name[80];
+    uint32_t ff_effects_max;
+};
+struct input_event_ {
+    long sec, usec;
+    uint16_t type, code;
+    int32_t value;
+};
+
+// Input: devices are found as anyone finds them; keyboards and pointers
+// read nothing while another program has the focus and can't be grabbed
+// then; controllers and raw devices need their capabilities; no device
+// may be made to type into other programs.
+static void input(void) {
+    struct stat st;
+    CHECK(stat("/sys/class/input", &st) == 0 && S_ISDIR(st.st_mode), "/sys/class/input is there");
+    CHECK(stat("/run/udev/control", &st) == 0, "/run/udev is udev's, not the container's");
+    DIR *d = opendir("/run/udev/data");
+    CHECK(d != NULL, "list /run/udev/data");
+    if (d) closedir(d);
+    int keyboards = 0;
+    d = opendir("/dev/input");
+    CHECK(d != NULL, "list /dev/input");
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        char path[300];
+        if (strncmp(e->d_name, "event", 5) && strncmp(e->d_name, "js", 2)) continue;
+        snprintf(path, sizeof path, "/dev/input/%s", e->d_name);
+        int fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) {
+            // A controller (no `gamepad`).
+            CHECK(errno == EACCES, "a controller's node: EACCES");
+            continue;
+        }
+        CHECK(e->d_name[0] == 'e', "a joystick node opened");
+        keyboards++;
+        REFUSED(ioctl(fd, EVIOCGRAB, 1), EACCES, "grab a keyboard or pointer without the focus");
+        struct input_event_ ev;
+        REFUSED(read(fd, &ev, sizeof ev), EAGAIN, "read a keyboard or pointer without the focus");
+        close(fd);
+    }
+    if (d) closedir(d);
+    CHECK(keyboards > 0, "some keyboard or pointer node to try");
+    d = opendir("/dev");
+    while (d && (e = readdir(d))) {
+        if (strncmp(e->d_name, "hidraw", 6)) continue;
+        char path[300];
+        snprintf(path, sizeof path, "/dev/%s", e->d_name);
+        REFUSED(open(path, O_RDWR), EACCES, "a raw HID device");
+    }
+    if (d) closedir(d);
+    // A made keyboard would type into whatever has the focus; a made
+    // controller is a controller.
+    for (int pad = 0; pad < 2; pad++) {
+        int u = open("/dev/uinput", O_RDWR | O_NONBLOCK);
+        CHECK(u >= 0, "open /dev/uinput");
+        if (u < 0) continue;
+        ioctl(u, UI_SET_EVBIT, 1);
+        ioctl(u, UI_SET_KEYBIT, pad ? 0x130 : 30); // BTN_SOUTH, KEY_A
+        struct uinput_setup s = {3, 0x1234, 0x5678, 1, "", 0};
+        strcpy(s.name, pad ? "sandbox pad" : "sandbox keyboard");
+        CHECK(ioctl(u, UI_DEV_SETUP, &s) == 0, "UI_DEV_SETUP");
+        REFUSED(ioctl(u, UI_DEV_CREATE), EACCES, pad ? "make a controller" : "make a keyboard");
+        close(u);
+    }
+}
+
+// A bridge's window may be said to show only its own app's process.
+static void windows(const char *victim) {
+    long w = syscall(WAVE_BASE + WAVE_WIN_CREATE, 320L, 200L, "sandboxtest", 11L, 0L, 0L);
+    CHECK(w >= 0, "make a window");
+    if (w < 0) return;
+    REFUSED(syscall(WAVE_BASE + WAVE_WIN_SET_PROGRAM, w, (long)atoi(victim)), EPERM,
+            "say its window shows another app's process");
+    pid_t child = fork();
+    if (child == 0) {
+        pause();
+        _exit(0);
+    }
+    CHECK(syscall(WAVE_BASE + WAVE_WIN_SET_PROGRAM, w, (long)child) == 0, "say it shows its own process");
+    CHECK(syscall(WAVE_BASE + WAVE_WIN_SET_PROGRAM, w, 0L) == 0, "clear it");
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+    syscall(WAVE_BASE + WAVE_WIN_CLOSE, w);
+}
+
 static void devices(void) {
     REFUSED(open("/dev/dri/card0", O_RDWR), EACCES, "the DRM card");
     REFUSED(open("/dev/dsp", O_WRONLY), EACCES, "sound");
@@ -250,6 +347,8 @@ int main(int argc, char **argv) {
     shared_memory();
     processes(argc > 1 ? argv[1] : "1");
     devices();
+    input();
+    windows(argc > 1 ? argv[1] : "1");
     if (failures == 0) printf("sandbox-test passed\n");
     else printf("sandbox-test: %d failed\n", failures);
     return failures;

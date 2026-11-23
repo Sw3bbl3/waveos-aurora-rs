@@ -6,6 +6,9 @@
 //! sbxtest grants          what the person gives it: the open panel, a drop, a paste, bookmarks
 //! sbxtest resolve TOKEN   a later run brings a bookmark back
 //! sbxtest allow           declared and allowed; then taken away while it runs
+//! sbxtest window SECS     opens a window, closes it, then lives SECS seconds
+//! sbxtest window-child SECS   the same, with a program of its own running
+//! sbxtest sleep SECS      lives SECS seconds without ever having a window
 //! ```
 //!
 //! `/SandboxOracle` holds files it must never reach unless given them.
@@ -121,6 +124,16 @@ fn deny(victim: u32) {
         call(nr::SYS_REPORT, &[abi::report::LOG, b.as_mut_ptr() as u64, 16])
     });
     refused("privacy settings", sandbox::set_permission("org.waveos.test.sbx", "microphone", Some(true)));
+    // A window it shows may be said to show only its own app's process.
+    match window() {
+        Some(w) => {
+            refused("give its window's focus to another app's process", call(nr::WIN_SET_PROGRAM, &[w, victim as u64]));
+            allowed("say its window shows itself", call(nr::WIN_SET_PROGRAM, &[w, process::pid() as u64]));
+            allowed("clear it", call(nr::WIN_SET_PROGRAM, &[w, 0]));
+            let _ = call(nr::WIN_CLOSE, &[w]);
+        }
+        None => fail("make a window"),
+    }
     // A descriptor it was given still works: it is a capability.
     let mut b = [0u8; 64];
     match corekit::io::read_fd(0, &mut b) {
@@ -210,9 +223,39 @@ fn allow() {
     allowed("socket, still", call(nr::SOCKET, &[abi::net::TCP]));
 }
 
+fn window() -> Option<u64> {
+    let [t, tl] = str_args("sbxtest");
+    call(nr::WIN_CREATE, &[320, 200, t, tl, 0, 0]).ok()
+}
+
+/// Opens and closes a window (with a program of its own running if
+/// `child`), then lives `secs` seconds: an app without `background` is
+/// ended before then.
+fn windowless(secs: u64, child: bool) {
+    let kid = child.then(|| process::spawn("/System/Bin/sbxtest", &["sleep", &format!("{}", secs + 10)], Default::default()));
+    if let Some(Err(e)) = &kid {
+        fail(&format!("spawn: {e}"));
+    }
+    match window() {
+        Some(w) => {
+            let _ = call(nr::WIN_CLOSE, &[w]);
+        }
+        None => fail("make a window"),
+    }
+    println!("sbxtest: window closed");
+    corekit::time::sleep_ms(secs * 1000);
+    if let Some(Ok(pid)) = kid {
+        let _ = process::kill(pid);
+    }
+}
+
 fn main(args: corekit::Args) -> i32 {
     let mode = args.get(1).map(String::as_str).unwrap_or("");
+    let secs = || args.get(2).and_then(|v| v.parse().ok()).unwrap_or(15);
     match mode {
+        "window" => windowless(secs(), false),
+        "window-child" => windowless(secs(), true),
+        "sleep" => corekit::time::sleep_ms(secs() * 1000),
         "deny" => deny(args.get(2).and_then(|v| v.parse().ok()).unwrap_or(1)),
         "grants" => grants(),
         "resolve" => resolve(args.get(2).map(String::as_str).unwrap_or("")),

@@ -347,6 +347,27 @@ pub fn programs() {
     oracle_intact("sbxtest");
 }
 
+/// Apps without `background` end once they have had no window for a
+/// while — but not programs still at work: one with a program of its own
+/// running, one that never had a window, one that may run on.
+pub fn background() {
+    let sbx = "/System/Bin/sbxtest";
+    let started = crate::time::uptime_ms();
+    let (code, _) = run(sbx, &["sbxtest", "window", "40"], sandbox("org.waveos.test.bg", 0), None, 90_000, &mut |_, _| {});
+    let took = crate::time::uptime_ms() - started;
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "a windowless app without background was not ended");
+    assert!(took < 35_000, "it was ended after {took} ms");
+    let cases: [(&str, &[&str], u64); 3] = [
+        ("background", &["sbxtest", "window", "15"], cap::BACKGROUND),
+        ("a program of its own running", &["sbxtest", "window-child", "15"], 0),
+        ("never had a window", &["sbxtest", "sleep", "15"], 0),
+    ];
+    for (what, argv, declared) in cases {
+        let (code, _) = run(sbx, argv, sandbox("org.waveos.test.bg", declared), None, 90_000, &mut |_, _| {});
+        assert_eq!(code, Some(0), "ended although {what}");
+    }
+}
+
 /// `sandboxtest`, a Linux program, tries every way out it knows.
 pub fn linux() {
     use crate::compat::linux::{links, shm, unix};

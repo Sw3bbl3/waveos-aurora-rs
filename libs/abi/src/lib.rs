@@ -218,11 +218,17 @@ pub mod nr {
     /// password (the caller never sees them). 0 once granted (for a few
     /// minutes), `-EPERM` if refused. Returns 0 at once for administrators.
     pub const ELEVATE: usize = 92;
+    /// `win_set_program(window, pid)` — says the window shows what process
+    /// `pid` draws (a bridge such as `wl-bridge` showing a Wayland
+    /// program): that program then gets the window's input focus for
+    /// `/dev/input` and the controllers. `pid` must belong to the caller's
+    /// account; 0 clears it.
+    pub const WIN_SET_PROGRAM: usize = 93;
     /// `sandbox(op, a, b, c, d) -> value` — the calling app's sandbox, the
     /// system open and save panel, file bookmarks and (for Settings) the
     /// privacy decisions; see [`super::sandbox`].
-    pub const SANDBOX: usize = 93;
-    pub const COUNT: usize = 94;
+    pub const SANDBOX: usize = 94;
+    pub const COUNT: usize = 95;
 }
 
 /// Per-app sandboxing (`sandbox`, see docs/developer/sandboxing.md).

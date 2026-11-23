@@ -50,9 +50,10 @@ fn with<R>(f: impl FnOnce(&mut Table) -> R) -> R {
 
 /// The target of the link at `path`, if it is one.
 pub fn target(path: &str) -> Option<String> {
-    // `/sys` is made up, links and all.
-    if super::sysfs::owns(path) {
-        return super::sysfs::link(path);
+    // `/sys` is made up, links and all (the input devices' and the DRM
+    // cards', see `input::lookup`), as is /dev/input.
+    if let Some(to) = super::input::link(path) {
+        return Some(to);
     }
     let (user, system) = with(|t| (t.user.get(path).cloned(), t.system.get(path).cloned()));
     // A file installed on the disk takes the place of a system image link

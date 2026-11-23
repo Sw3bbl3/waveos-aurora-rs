@@ -17,10 +17,13 @@
 //! [`WAVE_BASE`] up: `WAVE_BASE + n` is WaveOS's call `n`, with WaveOS's
 //! arguments (`libs/linux/include/waveos.h` describes them for C).
 
+pub mod chardev;
 pub mod drm;
 mod events;
 pub mod exec;
 pub mod fs;
+pub mod inotify;
+pub mod input;
 pub mod links;
 mod misc;
 pub(crate) use misc::realtime_ns;
@@ -30,6 +33,7 @@ mod process;
 pub mod shm;
 pub mod signal;
 mod sysfs;
+pub mod uevent;
 pub mod unix;
 pub mod vdso;
 
@@ -284,6 +288,10 @@ mod nr {
     pub const PSELECT6: u64 = 270;
     pub const PPOLL: u64 = 271;
     pub const SET_ROBUST_LIST: u64 = 273;
+    pub const INOTIFY_INIT: u64 = 253;
+    pub const INOTIFY_ADD_WATCH: u64 = 254;
+    pub const INOTIFY_RM_WATCH: u64 = 255;
+    pub const INOTIFY_INIT1: u64 = 294;
     pub const UTIMENSAT: u64 = 280;
     pub const EPOLL_PWAIT: u64 = 281;
     pub const ACCEPT4: u64 = 288;
@@ -325,6 +333,7 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::WIN_PRESENT
         | w::WIN_SET_TITLE
         | w::WIN_SET_CURSOR
+        | w::WIN_SET_PROGRAM
         | w::WIN_CLOSE
         | w::WIN_RESIZE
         | w::NEXT_EVENT
@@ -364,6 +373,17 @@ pub fn dispatch(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Re
     let (nr, a) = (f.rax, [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
     let r = call(f, p);
     let tid = misc::tid(p);
+    // The path a call names, when it names one.
+    let path = match nr {
+        nr::OPEN | nr::STAT | nr::LSTAT | nr::ACCESS | nr::READLINK => Some(a[0]),
+        nr::OPENAT | nr::NEWFSTATAT | nr::STATX | nr::READLINKAT | nr::FACCESSAT | nr::INOTIFY_ADD_WATCH => {
+            Some(a[1])
+        }
+        _ => None,
+    };
+    if let Some(s) = path.and_then(|ptr| crate::syscall::user::cstr(ptr).ok()) {
+        log!("strace", "{tid} {nr} path {s:?}");
+    }
     match r {
         Ok(v) => log!("strace", "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}) = {:#x}", a[0], a[1], a[2], a[3], v),
         Err(e) => log!("strace", "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}) = -{}", a[0], a[1], a[2], a[3], e.abs()),
@@ -423,8 +443,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::READLINKAT => fs::readlinkat(&p, a[0], a[1], a[2], a[3]),
         nr::TRUNCATE => fs::truncate(&p, a[0], a[1]),
         nr::FTRUNCATE => fs::ftruncate(&p, a[0], a[1]),
-        nr::STATFS => fs::statfs(a[1]),
-        nr::FSTATFS => fs::statfs(a[1]),
+        nr::STATFS => fs::statfs_path(&p, a[0], a[1]),
+        nr::FSTATFS => fs::fstatfs(&p, a[0], a[1]),
         nr::FALLOCATE => fs::fallocate(&p, a[0], a[1], a[2], a[3]),
         nr::FSYNC | nr::FDATASYNC | nr::FLOCK | nr::FADVISE64 | nr::READAHEAD => {
             p.fd(a[0] as usize)?;
@@ -472,6 +492,10 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::SETSOCKOPT => net::setsockopt(&p, a[0], a[1], a[2], a[3], a[4]),
         nr::GETSOCKOPT => net::getsockopt(&p, a[0], a[1], a[2], a[3], a[4]),
         nr::MEMFD_CREATE => fs::memfd_create(&p, a[0], a[1]),
+        nr::INOTIFY_INIT => inotify::init1(&p, 0),
+        nr::INOTIFY_INIT1 => inotify::init1(&p, a[0]),
+        nr::INOTIFY_ADD_WATCH => inotify::add_watch(&p, a[0], a[1], a[2]),
+        nr::INOTIFY_RM_WATCH => inotify::rm_watch(&p, a[0], a[1]),
         nr::EVENTFD => events::eventfd(&p, a[0], 0),
         nr::EVENTFD2 => events::eventfd(&p, a[0], a[1]),
         nr::TIMERFD_CREATE => events::timerfd_create(&p, a[0], a[1]),
