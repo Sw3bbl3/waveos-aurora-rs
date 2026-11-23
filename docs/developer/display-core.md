@@ -40,6 +40,8 @@ EDID is parsed by `libs/edid` (`aurora-edid`, host-tested with `cargo test -p au
 | Ported Linux virtio-gpu | `linux.rs` | Only with `gpu=linux` in boot.conf (`cargo xtask run --gpu virtio-linux`) |
 | Native virtio-gpu | `virtio/` | Default for virtio GPUs |
 | Intel integrated graphics | `intel/` (over `libs/igfx`) | Display 9–13; takes over the firmware's mode; see [intel-display.md](intel-display.md). Untested on real hardware |
+| AMD Radeon | `amd/` (over `libs/amdgfx`) | DCE 11.2/12, DCN 1.0–3.2; takes over the firmware's mode, flips between VRAM buffers; see [amd-display.md](amd-display.md). Untested on real hardware |
+| Nvidia GeForce | `nvidia.rs` (over `libs/nvgfx`) | Detection and a log line only; the firmware framebuffer stays. See [nvidia-display.md](nvidia-display.md) |
 
 The three simple ones share `simple.rs` (one CRTC, one primary plane, one connector; the backend sets modes and shows rectangles).
 

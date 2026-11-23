@@ -1,0 +1,16 @@
+[package]
+name = "aurora-amdgfx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# AMD Radeon display engines (DCE 11.2/12, DCN 1.0–3.2), integer-only and
+# no_std: the kernel's driver runs it over the real register BAR, the host
+# tests it over a simulated engine (`mock`). Shares the register access
+# trait, the DisplayPort AUX protocol and the address-space allocator with
+# the Intel library.
+[dependencies]
+aurora-igfx = { path = "../igfx" }
+
+[dev-dependencies]
+aurora-edid = { path = "../edid" }

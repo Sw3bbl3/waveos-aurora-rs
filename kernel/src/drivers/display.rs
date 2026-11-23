@@ -14,6 +14,9 @@ use aurora_abi::{display, DisplayMode};
 use bootinfo::{BootInfo, VideoMode};
 
 static FIRMWARE_MODES: IrqMutex<Vec<VideoMode>> = IrqMutex::new(Vec::new());
+/// The bootloader's framebuffer (which GPU scans it decides which driver
+/// may take the display over).
+static BOOT_FRAMEBUFFER: IrqMutex<Option<bootinfo::Framebuffer>> = IrqMutex::new(None);
 
 /// Registers the boot display (after PCI enumeration): Bochs VGA when
 /// present, else the firmware framebuffer. GPU drivers come later
@@ -22,6 +25,7 @@ pub fn init(boot: &BootInfo) {
     let firmware_modes = boot.modes[..(boot.mode_count as usize).min(boot.modes.len())].to_vec();
     let n = firmware_modes.len();
     *FIRMWARE_MODES.lock() = firmware_modes;
+    *BOOT_FRAMEBUFFER.lock() = (boot.framebuffer.phys_addr != 0).then_some(boot.framebuffer);
     if !gpu::bochs::probe(&boot.framebuffer) {
         gpu::gop::register(boot.framebuffer);
         log!("display", "{} firmware mode(s); changes apply at the next start", n);
@@ -31,9 +35,13 @@ pub fn init(boot: &BootInfo) {
 /// Starts the GPU drivers. Needs the disks (`gpu=` in boot.conf chooses
 /// the virtio-gpu driver: `native`, the default, or `linux` for the ported
 /// Linux driver; `intel=` the Intel driver's policy: `off`, `takeover`, the
-/// default, or `modeset`).
+/// default, or `modeset`; `amd=off` keeps the AMD driver off; `nvidia=off`
+/// skips reading the Nvidia GPU's identification register).
 pub fn gpu_start() {
     gpu::intel::probe();
+    let boot_fb = *BOOT_FRAMEBUFFER.lock();
+    gpu::amd::probe(boot_fb);
+    gpu::nvidia::probe(boot_fb);
     let linux = crate::gui::prefs::boot_option("gpu").as_deref() == Some("linux");
     crate::linux::init(linux);
     #[cfg(linuxkpi)]
