@@ -1,7 +1,8 @@
 //! The display core: GPU and display drivers, modelled on Linux KMS.
 //!
 //! Every display driver — the firmware framebuffer (`gop`), Bochs/QEMU
-//! std VGA (`bochs`), Intel integrated graphics (`intel`), the native
+//! std VGA (`bochs`), Intel integrated graphics (`intel`), AMD Radeon
+//! (`amd`; Nvidia is only identified, `nvidia`), the native
 //! virtio-gpu driver (`virtio`), and the ported Linux virtio-gpu driver
 //! (`linux`) — implements [`KmsDevice`] and
 //! exposes the same objects as Linux's kernel mode setting:
@@ -33,6 +34,7 @@
 // (overlays, encoder kinds, events, vblank queries) have no user yet.
 #![allow(dead_code)]
 
+pub mod amd;
 pub mod bo;
 pub mod bochs;
 pub mod gop;
@@ -40,6 +42,7 @@ pub mod intel;
 #[cfg(linuxkpi)]
 pub mod linux;
 pub mod mode;
+pub mod nvidia;
 pub mod output;
 #[cfg(feature = "ktest")]
 pub mod selftest;

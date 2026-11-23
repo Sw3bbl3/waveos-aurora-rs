@@ -27,6 +27,7 @@ const TESTS: &[Test] = &[
     ("LinuxKPI: runtime, DRM and the GPU display", linux_kpi),
     ("display: EDID, connectors, mode sets, atomic commits, cursor plane", crate::drivers::gpu::selftest::display),
     ("intel display: firmware takeover on a simulated engine", crate::drivers::gpu::intel::selftest::run),
+    ("amd display: firmware takeover on a simulated engine", crate::drivers::gpu::amd::selftest::run),
     ("rect math", rects),
     ("keyboard decoder", keyboard),
     ("ramfs + vfs", ramfs),

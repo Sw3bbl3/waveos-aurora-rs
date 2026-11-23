@@ -160,6 +160,51 @@ impl<M: Mmio> AuxCh<'_, M> {
         Err(AuxError::Receive)
     }
 
+    pub fn read(&self, addr: u32, out: &mut [u8]) -> Result<(), AuxError> {
+        Transport::read(self, addr, out)
+    }
+
+    pub fn write(&self, addr: u32, data: &[u8]) -> Result<(), AuxError> {
+        Transport::write(self, addr, data)
+    }
+
+    pub fn write_byte(&self, addr: u32, v: u8) -> Result<(), AuxError> {
+        Transport::write_byte(self, addr, v)
+    }
+
+    pub fn read_byte(&self, addr: u32) -> Result<u8, AuxError> {
+        Transport::read_byte(self, addr)
+    }
+
+    pub fn i2c(&self, addr: u8, write: &[u8], read: &mut [u8]) -> Result<(), AuxError> {
+        Transport::i2c(self, addr, write, read)
+    }
+
+    pub fn read_edid_block(&self, block: u8, out: &mut [u8; 128]) -> Result<(), AuxError> {
+        Transport::read_edid_block(self, block, out)
+    }
+}
+
+impl<M: Mmio> Transport for AuxCh<'_, M> {
+    fn raw(&self, send: &[u8], recv: &mut [u8; 20]) -> Result<usize, AuxError> {
+        AuxCh::raw(self, send, recv)
+    }
+
+    fn delay_us(&self, us: u32) {
+        self.mmio.delay_us(us)
+    }
+}
+
+/// A controller that moves one AUX message (header and data, at most 20
+/// bytes) and returns the reply: Intel's [`AuxCh`] here, AMD's AUX engine
+/// in `aurora-amdgfx`. The DisplayPort side (DEFER retries, DPCD reads and
+/// writes, I²C-over-AUX, EDID) is shared.
+pub trait Transport {
+    /// Sends `send` (header and data) and reads the reply into `recv`;
+    /// returns the reply's length.
+    fn raw(&self, send: &[u8], recv: &mut [u8; 20]) -> Result<usize, AuxError>;
+    fn delay_us(&self, us: u32);
+
     /// One request with the specification's DEFER retries.
     fn request(&self, cmd: u8, addr: u32, data: &[u8], read_len: usize, out: &mut [u8]) -> Result<usize, AuxError> {
         let len = if cmd & 1 == 1 { read_len } else { data.len() };
@@ -181,14 +226,14 @@ impl<M: Mmio> AuxCh<'_, M> {
                     return Ok(got - 1);
                 }
                 Reply::Nack | Reply::I2cNack => return Err(AuxError::Nack),
-                Reply::Defer | Reply::I2cDefer => self.mmio.delay_us(500),
+                Reply::Defer | Reply::I2cDefer => self.delay_us(500),
             }
         }
         Err(AuxError::Defer)
     }
 
     /// Reads DPCD registers starting at `addr`.
-    pub fn read(&self, addr: u32, out: &mut [u8]) -> Result<(), AuxError> {
+    fn read(&self, addr: u32, out: &mut [u8]) -> Result<(), AuxError> {
         let mut done = 0;
         while done < out.len() {
             let want = (out.len() - done).min(MAX_PAYLOAD);
@@ -202,18 +247,18 @@ impl<M: Mmio> AuxCh<'_, M> {
     }
 
     /// Writes DPCD registers starting at `addr`.
-    pub fn write(&self, addr: u32, data: &[u8]) -> Result<(), AuxError> {
+    fn write(&self, addr: u32, data: &[u8]) -> Result<(), AuxError> {
         for (i, chunk) in data.chunks(MAX_PAYLOAD).enumerate() {
             self.request(NATIVE_WRITE, addr + (i * MAX_PAYLOAD) as u32, chunk, 0, &mut [])?;
         }
         Ok(())
     }
 
-    pub fn write_byte(&self, addr: u32, v: u8) -> Result<(), AuxError> {
+    fn write_byte(&self, addr: u32, v: u8) -> Result<(), AuxError> {
         self.write(addr, &[v])
     }
 
-    pub fn read_byte(&self, addr: u32) -> Result<u8, AuxError> {
+    fn read_byte(&self, addr: u32) -> Result<u8, AuxError> {
         let mut b = [0u8];
         self.read(addr, &mut b)?;
         Ok(b[0])
@@ -221,7 +266,7 @@ impl<M: Mmio> AuxCh<'_, M> {
 
     /// An I²C-over-AUX transfer: write, then read (each in 16-byte AUX
     /// transactions with the MOT bit), then an address-only stop.
-    pub fn i2c(&self, addr: u8, write: &[u8], read: &mut [u8]) -> Result<(), AuxError> {
+    fn i2c(&self, addr: u8, write: &[u8], read: &mut [u8]) -> Result<(), AuxError> {
         let addr = addr as u32;
         let r = (|| {
             for chunk in write.chunks(MAX_PAYLOAD) {
@@ -245,7 +290,7 @@ impl<M: Mmio> AuxCh<'_, M> {
     }
 
     /// Reads EDID block `block` over I²C-over-AUX (segment pointer for blocks ≥ 2).
-    pub fn read_edid_block(&self, block: u8, out: &mut [u8; 128]) -> Result<(), AuxError> {
+    fn read_edid_block(&self, block: u8, out: &mut [u8; 128]) -> Result<(), AuxError> {
         if block >= 2 {
             self.request(I2C_WRITE | I2C_MOT, 0x30, &[block / 2], 0, &mut [])?;
         }

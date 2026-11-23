@@ -58,6 +58,8 @@ Options go in `\aurora\boot.conf` on the EFI partition, one `key=value` per line
 | `cursor=software` | Draw the pointer into the picture instead of on the display's cursor plane (on Intel graphics this also leaves the display buffer as the firmware set it up) |
 | `intel=off` | Leave Intel graphics to the firmware framebuffer, as before the Intel driver existed |
 | `intel=modeset` | Let the Intel driver change resolutions (Skylake, Kaby, Coffee and Comet Lake, external displays only, no larger than the firmware's mode; untested) |
+| `amd=off` | Leave AMD Radeon graphics to the firmware framebuffer, as before the AMD driver existed. (`amd=modeset` is accepted but changes nothing: the AMD driver can't set modes.) |
+| `nvidia=off` | Don't read the Nvidia GPU's identification register (the log then names the GPU from its device id only). Nvidia GPUs always use the firmware framebuffer. |
 | `timer=periodic` | Go back to a 1 kHz tick on every CPU (instead of tickless timers). `timer=oneshot` avoids the TSC-deadline timer. Try these if the machine hangs or stutters once the desktop is up. |
 | `idle=halt` | Idle with `hlt` only (no `mwait` C-states). `idle=mwait` uses `mwait` even in a virtual machine; `idle=poll` never sleeps (for measurements). |
 
@@ -66,7 +68,7 @@ Options go in `\aurora\boot.conf` on the EFI partition, one `key=value` per line
 Work through the list and note what happens. The boot log (below) records the details.
 
 - [ ] **Boots to the desktop.** Note the time it takes and whether the picture looks right.
-- [ ] **Display.** Check the resolution, and whether the text is sharp. On Intel graphics, see [Intel graphics](#intel-graphics) below.
+- [ ] **Display.** Check the resolution, and whether the text is sharp. On Intel, AMD or Nvidia graphics, see [Intel graphics](#intel-graphics), [AMD Radeon graphics](#amd-radeon-graphics) or [Nvidia GeForce graphics](#nvidia-geforce-graphics) below.
 - [ ] **All CPU cores.** In Terminal, `cpuinfo` should list every core; Activity Monitor shows a graph per core.
 - [ ] **Keyboard.** Check the built-in keyboard and a USB keyboard, including a non-US layout (Settings → Keyboard) and key repeat.
 - [ ] **Pointer.** Check the touchpad, a USB mouse (with the scroll wheel and, if it has them, the back and forward buttons), and clicking and dragging windows. On a USB touchpad, check tap to click, two-finger scrolling and the two-finger click.
@@ -126,6 +128,43 @@ What to try and send back:
    - [ ] plugging a monitor in and out: an `intel: HDMI-A-1: Connected` (or `DP-1`) line should appear within a few seconds
 4. If something is wrong, try `cursor=software`, then `intel=off`, and say which one fixed it.
 5. Optional, on a Skylake to Comet Lake machine with an external monitor: add `intel=modeset`, choose a smaller resolution in Settings → Display, and send the `intel:` lines about it.
+
+## AMD Radeon graphics
+
+Ryzen laptops and desktops with integrated Radeon graphics (Raven Ridge 2018 through Phoenix and Hawk Point 2024, Raphael and Granite Ridge desktop iGPUs, the Steam Deck's Van Gogh) and Radeon cards from Polaris (RX 400/500) through Vega and RDNA 1–3 (RX 5000, 6000, 7000) get a native display driver. Like the Intel driver it keeps the mode the firmware set at boot; it shows WaveOS's picture from two buffers of its own in video memory, flipping between them at the vertical blank, adds a hardware pointer, reads DisplayPort monitors' EDID and notices monitors plugged in and out. It cannot change the resolution (that needs the card's own AtomBIOS tables, which WaveOS doesn't run): Settings → Display still applies a new resolution at the next start, as before.
+
+**This is untested on real hardware.** It was written from AMD's published register headers and checked against a simulated display engine (host tests and a kernel self-test). Before writing anything it reads which displays are lit and what they scan, and declines (leaving the firmware framebuffer in charge, exactly as before) unless that is exactly the framebuffer the bootloader was given. The details are in [developer/amd-display.md](developer/amd-display.md).
+
+| GPUs | Display block | Device ids | Default (takeover) |
+|---|---|---|---|
+| Polaris 10/11/12/20/30 (RX 460–590, RX 540/550, WX 2100–7100) | DCE 11.2 | 1002:67cx, 67dx, 67ex, 67ff, 698x, 6995, 699f, 6fdf | Untested on real hardware |
+| Vega 10/12/20 (RX Vega 56/64, Radeon VII) | DCE 12 | 1002:686x, 687f, 69ax, 66ax | Untested on real hardware |
+| Raven Ridge, Picasso (Ryzen 2000/3000 APUs) | DCN 1.0 | 1002:15dd, 15d8 | Untested on real hardware |
+| Renoir, Lucienne, Cezanne, Barcelo (Ryzen 4000/5000 APUs) | DCN 2.1 | 1002:1636, 164c, 1638, 15e7 | Untested on real hardware |
+| Van Gogh (Steam Deck) | DCN 3.0.1 | 1002:163f | Untested on real hardware |
+| Rembrandt (Ryzen 6000) | DCN 3.1.2 | 1002:164d, 1681 | Untested on real hardware |
+| Phoenix, Hawk Point (Ryzen 7040/8040) | DCN 3.1.4 | 1002:15bf, 15c8, 164f, 1900, 1901 | Untested on real hardware |
+| Raphael, Granite Ridge (Ryzen 7000/9000 desktop graphics) | DCN 3.1.5 | 1002:164e, 13c0 | Untested on real hardware |
+| Mendocino (Ryzen 7020) | DCN 3.1.6 | 1002:1506 | Untested on real hardware |
+| Navi 10/12/14 (RX 5500–5700 XT) | DCN 2.0 | 1002:731x, 734x, 736x | Untested on real hardware |
+| Navi 21/22/23/24 (RX 6400–6950 XT) | DCN 3.0–3.0.3 | 1002:73a0–73ff, 7420–743f | Untested on real hardware |
+| Navi 31/32/33 (RX 7600–7900 XTX) | DCN 3.2, 3.2.1 | 1002:7440–749f, 73f0 | Untested on real hardware |
+
+Not driven (the firmware framebuffer as before, with a log line saying why): older Radeons (HD 7000 to R9 Fury, DCE 6–10), Carrizo and Stoney, Strix Point and newer APUs, RX 9000 (RDNA 4). Monitors the firmware didn't light at boot are detected and listed (with their EDID when they are DisplayPort), but can't be turned on. HDMI monitors' EDID isn't read. After sleep the screen may stay dark, as with the firmware framebuffer.
+
+What to try and send back:
+
+1. Boot without any `amd=` option. The desktop should look exactly as it did before, at the same resolution.
+2. In the boot log (`\aurora\boot.log`, or `dmesg`), every line starting `amd:`. They name the GPU, its display block and whether the register layout is confirmed for it, the VRAM aperture and registers, where the firmware framebuffer is and which part of video memory the driver uses, each lit display (timing generator, pipes, resolution, refresh, pitch), whether the hardware pointer is used, each connector, and either `took the display over from the firmware` or `declining: …` with the reason. A machine with two GPUs logs both; only the one showing the boot screen is taken over.
+3. Check:
+   - [ ] no flicker, corruption or garbage on screen, especially right after the desktop appears (that would mean the video memory the driver chose was not free) and while dragging windows
+   - [ ] the pointer: visible, the right shape and colours (wrong colours or a dark fringe: the cursor mode is off), clicks landing at its tip, and moving off the left and top edges
+   - [ ] plugging a monitor in and out: an `amd: DP-2: Connected` (or `Unknown-2`) line should appear within a few seconds
+4. If something is wrong, try `cursor=software` (no hardware pointer), then `amd=off`, and say which one fixed it.
+
+## Nvidia GeForce graphics
+
+GeForce GPUs from the GTX 900 series (Maxwell) to the RTX 40 series (Ada) are **recognised but not driven**: WaveOS keeps using the firmware framebuffer, at the resolution the bootloader chose, with the pointer drawn in software. A native driver needs Nvidia's GSP firmware and much that isn't publicly documented; [developer/nvidia-display.md](developer/nvidia-display.md) explains what one would take. Please send the `nvidia:` line from the boot log: it names the GPU's architecture and chip (from its identification register; `nvidia=off` skips that read).
 
 ## Power management
 
