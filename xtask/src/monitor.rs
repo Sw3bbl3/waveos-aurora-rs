@@ -66,7 +66,7 @@ fn json_escape(s: &str) -> String {
 }
 
 /// Strips terminal escape sequences from firmware output.
-fn clean(line: &str) -> String {
+pub(crate) fn clean(line: &str) -> String {
     let mut out = String::new();
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Runs WaveOS Aurora, for those without make:
+#   ./waveos          open the launcher (same as `make run`)
+#   ./waveos quick    boot the configuration launched last (same as `make quick`)
+# Anything else goes to `cargo xtask launch`, e.g. ./waveos --no-open
+cd "$(dirname "$0")" || exit 1
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo isn't installed: get Rust from https://rustup.rs, then run ./waveos again." >&2
+    exit 1
+fi
+if [ "$1" = quick ]; then
+    shift
+    exec cargo xtask launch --last "$@"
+fi
+exec cargo xtask launch "$@"

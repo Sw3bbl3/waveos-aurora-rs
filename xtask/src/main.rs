@@ -1,6 +1,8 @@
 //! `cargo xtask` — the WaveOS Aurora build orchestrator.
 //!
 //!   cargo xtask build [--debug]         build bootloader, kernel and user space into target/esp
+//!   cargo xtask launch [--last] [--no-open]  a page to choose the options below and launch (`make run`);
+//!                                         --last boots the last configuration chosen there (`make quick`)
 //!   cargo xtask run [options]           boot the persistent disk target/waveos-aurora.img in QEMU
 //!       --disk ahci|virtio|nvme           storage controller for the disk (default: ahci)
 //!       --fresh-disk                      recreate the disk (erases files saved inside WaveOS)
@@ -12,8 +14,10 @@
 //!       --usb-audio                       add a USB speaker (QEMU's usb-audio, isochronous; with --audio-wav
 //!                                         it records to PATH-usb.wav)
 //!       --gpu std|virtio                  display adapter (default std; virtio runs the ported Linux driver)
-//!       --resolution WxH                  virtio's starting screen size (default 1920x1080; WaveOS then
-//!                                         follows the QEMU window when you resize it)
+//!       --resolution WxH[,WxH…]           virtio's starting screen size (default 1920x1080; WaveOS then
+//!                                         follows the QEMU window when you resize it); with several
+//!                                         displays, one size each (std: the extra displays' EDID size)
+//!       --displays N                      simulate N displays (1-4), each in its own window (see displays.rs)
 //!       --wifi-sim                        simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
 //!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
 //!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
@@ -32,13 +36,16 @@
 mod battery;
 mod debian;
 mod display;
+mod displays;
 mod help;
 mod i2c_ssdt;
 mod image;
+mod launcher;
 mod linux;
 mod monitor;
 mod netsurf;
 mod package;
+mod runconfig;
 mod sounds;
 mod tar;
 mod usbredir;
@@ -75,25 +82,25 @@ fn main() {
         args.iter().position(|a| a == "--disk").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("ahci");
     let smp: u32 =
         args.iter().position(|a| a == "--smp").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(4);
-    if !["ahci", "virtio", "nvme"].contains(&disk) {
+    if !runconfig::accepts(runconfig::DISKS, disk) {
         eprintln!("--disk must be ahci, virtio or nvme");
         exit(2);
     }
     let net =
         args.iter().position(|a| a == "--net").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("virtio");
-    if !["virtio", "e1000", "e1000e", "igb", "rtl8139", "none"].contains(&net) {
+    if !runconfig::accepts(runconfig::NETS, net) {
         eprintln!("--net must be virtio, e1000, e1000e, igb, rtl8139 or none");
         exit(2);
     }
     let gpu = args.iter().position(|a| a == "--gpu").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("std");
-    if !["std", "virtio"].contains(&gpu) {
+    if !runconfig::accepts(runconfig::GPUS, gpu) {
         eprintln!("--gpu must be std or virtio");
         exit(2);
     }
 
     let usb =
         args.iter().position(|a| a == "--usb").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("xhci");
-    if !["xhci", "ehci", "ehci-ohci", "ohci", "uhci"].contains(&usb) {
+    if !runconfig::accepts(runconfig::USBS, usb) {
         eprintln!("--usb must be xhci, ehci, ehci-ohci, ohci or uhci");
         exit(2);
     }
@@ -117,6 +124,7 @@ fn main() {
             build(profile, false);
         }
         Some("lint") => lint(),
+        Some("launch") => launcher::main(&args[1..]),
         Some("run") => {
             let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let developer = flag("--developer");
@@ -145,6 +153,7 @@ fn main() {
             image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
                 .expect("write boot.conf");
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
+            let displays = displays::from_args(&args, flag("--headless"));
             let opts = RunOpts {
                 memory_mib: number("--memory-mib", 4096, 256, 32768),
                 keyboard_capture: !flag("--no-keyboard-capture"),
@@ -173,21 +182,8 @@ fn main() {
                 net,
                 netdev_extra: String::new(),
                 gpu,
-                resolution: Some(
-                    args.iter()
-                        .position(|a| a == "--resolution")
-                        .and_then(|i| args.get(i + 1))
-                        .map(|r| {
-                            r.split_once('x')
-                                .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
-                                .filter(|&(w, h): &(u32, u32)| (640..=8192).contains(&w) && (480..=8192).contains(&h))
-                                .unwrap_or_else(|| {
-                                    eprintln!("--resolution must be WIDTHxHEIGHT, e.g. 2560x1600");
-                                    exit(2)
-                                })
-                        })
-                        .unwrap_or((1920, 1080)),
-                ),
+                resolution: Some(displays.primary()),
+                displays,
                 usb,
                 virtual_hid: Vec::new(),
                 usb_audio: flag("--usb-audio"),
@@ -198,6 +194,7 @@ fn main() {
                 }),
             };
             let mut cmd = qemu(&img, &opts);
+            opts.displays.starting(&cmd);
             let Some(mon) = mon else {
                 let status = cmd.status().expect("failed to launch qemu");
                 exit(status.code().unwrap_or(1));
@@ -267,7 +264,7 @@ fn main() {
         Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo xtask <build|run|image|iso|test|test262|lint> [--debug] [--headless] [--no-build] [--gdb] [--int]"
+                "usage: cargo xtask <build|run|launch|image|iso|test|test262|lint> [--debug] [--headless] [--no-build] [--gdb] [--int]"
             );
             exit(2);
         }
@@ -867,6 +864,8 @@ struct RunOpts<'a> {
     resolution: Option<(u32, u32)>,
     /// USB controller: xhci, ehci (with UHCI companions), ehci-ohci (with an OHCI one), ohci or uhci.
     usb: &'a str,
+    /// The simulated displays (`--displays`) and how they reach the screen.
+    displays: displays::Displays,
     /// Virtual USB devices (keyboard with media keys, touchpad, game
     /// controllers) served over usb-redir, behind the hub.
     virtual_hid: Vec<(usbredir::Kind, PathBuf)>,
@@ -946,12 +945,13 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         let device = match opts.resolution {
             Some((w, h)) => format!("virtio-vga,edid=on,xres={w},yres={h}"),
             None => String::from("virtio-vga,edid=on"),
-        };
+        } + &opts.displays.virtio_props();
         cmd.args(["-vga", "none", "-device", &device]);
     } else {
         // 64 MiB of video memory: room for 4K modes.
         cmd.args(["-vga", "std", "-global", "VGA.vgamem_mb=64"]);
     }
+    cmd.args(opts.displays.qemu_args(opts.gpu));
     for accel in accels {
         cmd.args(["-accel", &accel]);
     }
@@ -1084,7 +1084,8 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     cmd.arg("-monitor").arg(format!("unix:{},server,nowait", monitor.display()));
     cmd.arg("-qmp").arg(format!("unix:{},server,nowait", qmp.display()));
     cmd.args(["-name", "WaveOS Aurora"]);
-    if let Some(backend) = display::backend(cfg!(target_os = "macos"), opts.headless, opts.keyboard_capture) {
+    let backend = display::backend(cfg!(target_os = "macos"), opts.headless, opts.keyboard_capture);
+    if let Some(backend) = backend.filter(|_| !opts.displays.chooses_backend()) {
         cmd.args(["-display", backend]);
         if cfg!(target_os = "macos") && !opts.headless && opts.keyboard_capture {
             eprintln!("\nWaveOS keyboard capture: enable QEMU in macOS System Settings > Privacy & Security > Accessibility.\nClick inside the VM to capture Command and system shortcuts. Control+Option+G releases input.\nIf QEMU reports 'Could not create event tap', capture is NOT active: grant permission and relaunch.\nUse --no-keyboard-capture to disable this feature.\n");
@@ -1201,7 +1202,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
         if let Ok(filter) = env::var("AURORA_TEST_FILTER") {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
         }
-        if env::var("AURORA_TEST_NO_USBREDIR").as_deref() == Ok("1") {
+        if !usbredir::available() {
             println!("warning: skipping virtual USB HID checks (usb-redir unavailable)");
             image::set_boot_option(&img, "skip_virtual_hid", "1").expect("write boot.conf");
         }
@@ -1381,8 +1382,9 @@ fn run_tests_once(
         netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
         gpu,
         resolution: None,
+        displays: displays::Displays::single(displays::DEFAULT_SIZE),
         usb,
-        virtual_hid: if env::var("AURORA_TEST_NO_USBREDIR").as_deref() == Ok("1") {
+        virtual_hid: if !usbredir::available() {
             Vec::new()
         } else {
             usbredir::ALL.iter().map(|&k| (k, usbredir::start(k, &root().join("target")))).collect()

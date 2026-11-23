@@ -81,8 +81,10 @@ You need a Mac (Apple silicon or Intel) or a Linux PC, [rustup](https://rustup.r
 ```sh
 git clone https://github.com/Sw3bbl3/waveos-aurora-rs.git
 cd waveos-aurora-rs
-cargo xtask run
+make run
 ```
+
+`make run` (or `./waveos` without make) opens the launcher in your browser: pick a preset or choose the displays, memory, devices and so on, then press Launch. The build output and the serial console stream into the page. `make quick` boots whatever you launched last, and `make` on its own lists the other shortcuts. Prefer the terminal? `cargo xtask run` does the same with the defaults.
 
 A minute later, you're at the desktop. Add `--monitor` to open the System Explorer alongside it. To try a real PC, see [HARDWARE.md](docs/HARDWARE.md); for every build command, see [FEATURES.md](docs/FEATURES.md#build-commands).
 
