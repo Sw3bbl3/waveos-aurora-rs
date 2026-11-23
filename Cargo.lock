@@ -693,9 +693,11 @@ name = "firstlight"
 version = "0.8.0"
 dependencies = [
  "aurora-elf",
+ "aurorafs",
  "bootinfo",
  "log",
  "miniz_oxide 0.8.9",
+ "sha2",
  "uefi",
 ]
 

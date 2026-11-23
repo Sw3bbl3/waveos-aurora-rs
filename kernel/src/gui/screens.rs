@@ -1017,6 +1017,8 @@ impl Compositor {
         self.ready = true;
         boot::finish();
         log!("boot", "Aurora desktop ready");
+        // A system update on trial has proved it starts.
+        super::sysupdate::mark_good();
         crate::drivers::audio::play_sound("startup");
         // Written a moment later, off the compositor, so it includes late devices.
         sched::spawn("bootlog", || {

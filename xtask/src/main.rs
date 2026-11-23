@@ -66,6 +66,7 @@ mod netsurf;
 mod package;
 mod runconfig;
 mod sounds;
+mod store;
 mod tar;
 mod testdisplays;
 mod usbredir;
@@ -163,12 +164,24 @@ fn main() {
             }
         }
         Some("repo") => {
-            // Packages built from this checkout, or the given .gina files.
-            let out = args.iter().position(|a| a == "--out").and_then(|i| args.get(i + 1)).map(PathBuf::from);
-            let key = args.iter().position(|a| a == "--sign").and_then(|i| args.get(i + 1)).map(PathBuf::from);
-            let files: Vec<&String> = args.iter().skip(1).filter(|a| a.ends_with(".gina")).collect();
-            let out = out.unwrap_or_else(|| root().join("target/repo"));
-            if files.is_empty() {
+            // A folder of packages (with Store listings), the given .gina
+            // files, or the samples built from this checkout.
+            let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+            let out = value("--out").map(PathBuf::from).unwrap_or_else(|| root().join("target/repo"));
+            let key = match value("--sign") {
+                Some(k) => package::load_key(Path::new(&k)).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    exit(1)
+                }),
+                None => package::sample_key(),
+            };
+            let options: Vec<&str> = ["--out", "--sign", "--name", "--expires-days", "--mirror"]
+                .iter()
+                .flat_map(|o| args.iter().position(|a| a == o).and_then(|i| args.get(i + 1)))
+                .map(String::as_str)
+                .collect();
+            let inputs: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--") && !options.contains(&a.as_str())).collect();
+            if inputs.is_empty() {
                 build(profile, false);
                 println!("wrote the sample repository to {}", root().join("target/repo").display());
                 if out != root().join("target/repo") {
@@ -176,22 +189,76 @@ fn main() {
                     println!("copied it to {}", out.display());
                 }
             } else {
-                let key = match key {
-                    Some(k) => package::load_key(&k).unwrap_or_else(|e| {
+                let mut apps = Vec::new();
+                for input in &inputs {
+                    let path = Path::new(input);
+                    if path.is_dir() {
+                        apps.extend(store::read_folder(path).unwrap_or_else(|e| {
+                            eprintln!("{e}");
+                            exit(1)
+                        }));
+                    } else {
+                        let bytes = fs::read(path).unwrap_or_else(|e| panic!("{input}: {e}"));
+                        apps.push((bytes, store::Listing::default()));
+                    }
+                }
+                let name = value("--name").unwrap_or_else(|| key.1.clone());
+                let mut spec = store::Spec::new(&name, &key);
+                if let Some(days) = value("--expires-days").and_then(|d| d.parse().ok()) {
+                    spec.expires_days = days;
+                }
+                spec.mirrors = args.windows(2).filter(|w| w[0] == "--mirror").map(|w| w[1].clone()).collect();
+                fs::create_dir_all(&out).expect("create the repository folder");
+                match store::write(&out, &spec, &apps) {
+                    Ok(index) => println!(
+                        "wrote catalogue version {} ({} packages, expires in {} days) to {}",
+                        index.version,
+                        apps.len(),
+                        spec.expires_days,
+                        out.display()
+                    ),
+                    Err(e) => {
                         eprintln!("{e}");
-                        exit(1)
-                    }),
-                    None => package::sample_key(),
-                };
-                let packages: Vec<Vec<u8>> =
-                    files.iter().map(|f| fs::read(f).unwrap_or_else(|e| panic!("{f}: {e}"))).collect();
-                if let Err(e) = package::write_repository(&out, &key.1, &packages, &key) {
+                        exit(1);
+                    }
+                }
+            }
+            println!("serve it with: cargo xtask serve-repo {}", out.display());
+        }
+        Some("system-update") => {
+            // A system update built from this checkout, added to a repository.
+            let Some(version) = args.get(1).filter(|v| gina::version::valid(v)) else {
+                eprintln!("usage: cargo xtask system-update VERSION [--out REPO] [--min-from V] [--notes TEXT] [--sign KEY]");
+                exit(2);
+            };
+            let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+            let out = value("--out").map(PathBuf::from).unwrap_or_else(|| root().join("target/repo"));
+            let key = value("--sign").map(|k| package::load_key(Path::new(&k)).expect("key")).unwrap_or_else(store::system_key);
+            let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
+            let notes = value("--notes").unwrap_or_default();
+            let min_from = value("--min-from").unwrap_or_else(|| String::from("0.8"));
+            let b = store::Build { esp: &esp, version, min_from: &min_from, notes: &notes, broken: false };
+            fs::create_dir_all(&out).expect("create the repository folder");
+            match store::add_system_update(&out, &b, &key) {
+                Ok(r) => println!("added system update {} to {} (rewrite its catalogue with `cargo xtask repo`)", r.version, out.display()),
+                Err(e) => {
                     eprintln!("{e}");
                     exit(1);
                 }
-                println!("wrote a repository of {} packages to {}", packages.len(), out.display());
             }
-            println!("serve it with: python3 -m http.server -d {} 8000", out.display());
+        }
+        Some("serve-repo") => {
+            // Serves a repository (default: the demo one) to the guest, with
+            // byte ranges, at http://10.0.2.2:PORT/.
+            let dir = args.get(1).filter(|a| !a.starts_with("--")).map(PathBuf::from).unwrap_or_else(|| root().join("target/repo"));
+            let port = number("--port", 8000, 1, 65535) as u16;
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind the repository server");
+            println!("serving {} at http://127.0.0.1:{port}/ — in WaveOS: http://10.0.2.2:{port}/", dir.display());
+            // --slow sends packages slowly, to watch (and pause) downloads.
+            serve_files(listener, dir, if flag("--slow") { 60 } else { 0 });
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
         }
         Some("build") => {
             build(profile, false);
@@ -625,9 +692,13 @@ fn build(profile: Profile, test: bool) -> PathBuf {
     let mut programs = build_userland(profile);
     programs.extend(linux::programs());
     system_image(&programs, &esp.join("aurora/system.tar"));
-    package::sample_repository(&programs, &root().join("target/repo"));
+    // What a device starts from: its system described as an update, for
+    // the updater to work out which files a newer one changes.
+    let factory = store::describe_esp(&esp, env!("CARGO_PKG_VERSION")).expect("describe the system");
+    fs::write(esp.join("aurora/update.txt"), factory.encode()).expect("write update.txt");
+    store::demo_repository(&programs, &esp, &root().join("target/repo"));
     if test {
-        package::test_repository(&programs, &root().join("target/test-repo"));
+        store::test_repositories(&programs, &esp, &root().join("target/test-repo"));
     }
     esp
 }
@@ -815,6 +886,9 @@ fn system_image(programs: &[Program], out: &Path) {
     // by the system (see xtask/src/package.rs).
     t.dir("Keys");
     t.file("Keys/waveos-samples.pub", package::sample_public_key().as_bytes());
+    // Whom system updates are trusted from (never app publishers).
+    t.dir("Keys/Updates");
+    t.file("Keys/Updates/waveos-system.pub", store::system_public_key().as_bytes());
     if let Some(gallery) = package::gallery(programs, "1.0.0", Some(&package::sample_key())) {
         t.file("Developer/Examples/WaveUIGallery.gina", &gallery);
     }
@@ -1309,60 +1383,180 @@ fn start_test_http_server() -> u16 {
 }
 
 fn serve_test_http(listener: std::net::TcpListener) {
-    use std::io::{Read, Write};
+    use std::io::Write;
     std::thread::spawn(move || {
         let body = test_body();
         for conn in listener.incoming().map_while(Result::ok) {
             let body = body.clone();
             std::thread::spawn(move || {
                 let mut conn = conn;
-                let mut req = Vec::new();
-                let mut buf = [0u8; 1024];
-                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match conn.read(&mut buf) {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => req.extend_from_slice(&buf[..n]),
-                    }
-                }
-                let resp = if let Some(r) = repo_response(&req) {
-                    r
+                let Some(req) = read_request(&mut conn) else { return };
+                if let Some(r) = repo_response(&req) {
+                    r.send(&mut conn);
                 } else if req.starts_with(b"GET /big ") {
                     let mut r =
                         format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
                             .into_bytes();
                     r.extend_from_slice(&body);
-                    r
+                    let _ = conn.write_all(&r);
                 } else {
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
-                };
-                let _ = conn.write_all(&resp);
+                    let _ = conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                }
             });
         }
     });
 }
 
-/// The package tests' repository (`target/test-repo`) under `/repo/`, and
-/// under `/badrepo/` the same with an index altered after signing.
-fn repo_response(req: &[u8]) -> Option<Vec<u8>> {
-    let line = std::str::from_utf8(&req[..req.iter().position(|&b| b == b'\r')?]).ok()?;
+/// Reads one request's head.
+fn read_request(conn: &mut std::net::TcpStream) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut req = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+        match conn.read(&mut buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => req.extend_from_slice(&buf[..n]),
+        }
+        if req.len() > 64 * 1024 {
+            return None;
+        }
+    }
+    Some(req)
+}
+
+/// A response the test server sends, perhaps badly on purpose.
+struct Reply {
+    head: String,
+    body: Vec<u8>,
+    /// Send only this many body bytes, then hang up (a dropped connection).
+    cut: Option<usize>,
+    /// Send the body slowly: this many milliseconds per 16 KiB.
+    trickle_ms: u64,
+}
+
+impl Reply {
+    fn new(head: String, body: Vec<u8>) -> Reply {
+        Reply { head, body, cut: None, trickle_ms: 0 }
+    }
+
+    fn send(self, conn: &mut std::net::TcpStream) {
+        use std::io::Write;
+        if conn.write_all(self.head.as_bytes()).is_err() {
+            return;
+        }
+        let end = self.cut.unwrap_or(self.body.len()).min(self.body.len());
+        for chunk in self.body[..end].chunks(16 * 1024) {
+            if conn.write_all(chunk).is_err() {
+                return;
+            }
+            if self.trickle_ms > 0 {
+                std::thread::sleep(Duration::from_millis(self.trickle_ms));
+            }
+        }
+        let _ = conn.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// A file from `dir`, honouring `Range: bytes=N-`.
+fn file_reply(req: &str, dir: &Path, rest: &str) -> Reply {
+    let safe = !rest.is_empty() && rest.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
+    let Some(body) = safe.then(|| fs::read(dir.join(rest)).ok()).flatten() else {
+        return Reply::new(String::from("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), Vec::new());
+    };
+    let from = req
+        .lines()
+        .find_map(|l| l.strip_prefix("Range: bytes="))
+        .and_then(|r| r.trim().strip_suffix('-'))
+        .and_then(|n| n.parse::<usize>().ok());
+    match from {
+        Some(n) if n < body.len() => Reply::new(
+            format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {n}-{}/{}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                body.len() - 1,
+                body.len(),
+                body.len() - n
+            ),
+            body[n..].to_vec(),
+        ),
+        Some(_) => Reply::new(
+            format!(
+                "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                body.len()
+            ),
+            Vec::new(),
+        ),
+        None => Reply::new(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n", body.len()),
+            body,
+        ),
+    }
+}
+
+/// Serves a folder over HTTP until the program ends (`cargo xtask serve-repo`).
+fn serve_files(listener: std::net::TcpListener, dir: PathBuf, trickle_ms: u64) {
+    std::thread::spawn(move || {
+        for conn in listener.incoming().map_while(Result::ok) {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let mut conn = conn;
+                let Some(req) = read_request(&mut conn) else { return };
+                let text = String::from_utf8_lossy(&req).into_owned();
+                let path = text.strip_prefix("GET /").and_then(|r| r.split(' ').next()).unwrap_or("");
+                println!("{}", text.lines().next().unwrap_or(""));
+                let mut reply = file_reply(&text, &dir, path);
+                if path.starts_with("packages/") {
+                    reply.trickle_ms = trickle_ms;
+                }
+                reply.send(&mut conn);
+            });
+        }
+    });
+}
+
+/// The package tests' repositories (`target/test-repo`, see
+/// `store::test_repositories`), and copies that misbehave on purpose:
+///
+/// - `/repo/`, `/stale/`, `/expired/`, `/rotated/`: as built.
+/// - `/badrepo/`: the catalogue and index altered after signing.
+/// - `/flaky/`: packages and objects break off halfway unless resumed with a range.
+/// - `/corrupt/`: packages with one byte changed; `/truncated/`: packages cut short.
+/// - `/slow/`: packages sent slowly (to pause, cancel or kill mid-download).
+fn repo_response(req: &[u8]) -> Option<Reply> {
+    let text = String::from_utf8_lossy(req).into_owned();
+    let line = text.lines().next()?;
     let path = line.strip_prefix("GET ")?.split(' ').next()?;
-    let (bad, rest) = match (path.strip_prefix("/repo/"), path.strip_prefix("/badrepo/")) {
-        (Some(r), _) => (false, r),
-        (_, Some(r)) => (true, r),
+    let (prefix, rest) = path.strip_prefix('/')?.split_once('/')?;
+    let base = root().join("target/test-repo");
+    let dir = match prefix {
+        "repo" | "badrepo" | "flaky" | "corrupt" | "truncated" | "slow" => base.join("main"),
+        "stale" | "expired" | "rotated" => base.join(prefix),
         _ => return None,
     };
-    let safe = !rest.is_empty() && rest.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
-    let body = safe.then(|| fs::read(root().join("target/test-repo").join(rest)).ok()).flatten();
-    let body = match body {
-        Some(b) if bad && rest == "index.txt" => {
-            String::from_utf8_lossy(&b).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes()
+    let mut reply = file_reply(&text, &dir, rest);
+    let ranged = text.contains("\r\nRange: ");
+    let payload = rest.starts_with("packages/") || rest.starts_with("system/objects/");
+    if !reply.head.starts_with("HTTP/1.1 200") {
+        return Some(reply);
+    }
+    let whole = |body: &[u8]| format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    match prefix {
+        "badrepo" if rest == "index.txt" || rest == "catalog.txt" => {
+            reply.body = String::from_utf8_lossy(&reply.body).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes();
+            reply.head = whole(&reply.body);
         }
-        Some(b) => b,
-        None => return Some(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()),
-    };
-    let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
-    r.extend_from_slice(&body);
-    Some(r)
+        "flaky" if payload && !ranged => reply.cut = Some(reply.body.len() / 2),
+        "corrupt" if payload => {
+            let mid = reply.body.len() / 2;
+            reply.body[mid] ^= 0x40;
+        }
+        "truncated" if payload => {
+            reply.body.truncate(reply.body.len() / 3);
+            reply.head = whole(&reply.body);
+        }
+        "slow" if payload => reply.trickle_ms = 150,
+        _ => {}
+    }
+    Some(reply)
 }
 
 /// A free port on the host (for forwarding into the guest).
@@ -1404,7 +1598,11 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
     let mesa_root = mesa.then(mesa::root_dir);
     let (disk_size, memory_mib) = match &mesa_root {
         Some(r) => (dir_size(r) + 256 * 1024 * 1024, 2048),
-        None => (128 * 1024 * 1024, 512),
+        // Cards keep their 128 MiB (a size a card can have); a disk gets
+        // room for two system updates beside the home folder (see the
+        // system update test, which cards skip).
+        None if disk == "sd" || disk == "emmc" => (128 * 1024 * 1024, 512),
+        None => (384 * 1024 * 1024, 512),
     };
     let http_port = start_test_http_server();
     let fwd_port = free_port();
@@ -1465,10 +1663,20 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
         } else {
             img.clone()
         };
+        // Cards can't hold the power cut and system update tests (see
+        // installed.rs); the Mesa run is its tests alone.
+        let cards = disk == "sd" || disk == "emmc";
+        let power_cut = !cards && !mesa;
+        if power_cut {
+            image::set_boot_option(&img, "test_power_cut", "1").expect("write boot.conf");
+        }
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let media = TestMedia { img: &boot_img, sd_card: &sd_card };
+            if boot == 2 && power_cut {
+                image::set_boot_option(&img, "test_power_cut", "0").expect("write boot.conf");
+            }
+            let media = TestMedia { img: &boot_img, sd_card: &sd_card, allow_reboot: false };
             let output = match run_tests_once(&media, disk, (smp, memory_mib), net, gpu, usb, fwd_port, heads) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
@@ -1480,6 +1688,18 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
                 }
                 Err(_) => exit(1),
             };
+            // After the power cut, the home volume as the next start finds it
+            // (a copy, mounted and checked here: replaying its journal is the
+            // next start's own job) must be consistent.
+            if boot == 1 && output.contains("harness: power cut") {
+                match image::check_home_copy(&img) {
+                    Ok(()) => println!("harness: the home volume after the power cut checks clean"),
+                    Err(e) => {
+                        eprintln!("\npower cut check FAILED: the home volume after the cut: {e}");
+                        exit(1);
+                    }
+                }
+            }
             if boot == 2 && !output.contains("verified from previous boot") {
                 eprintln!("\npersistence check FAILED: the second boot did not find the first boot's file");
                 exit(1);
@@ -1511,6 +1731,19 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
                     exit(1);
                 }
                 println!("sound check: recorded audio peaks at {peak}");
+            }
+            // The second start armed a system update that never starts: a
+            // third start must come back on the previous system by itself.
+            if boot == 2 && output.contains("harness: expect fallback") {
+                println!("\n=== boot 3: a system update that never starts ===");
+                image::set_boot_option(&img, "test_filter", "system update").expect("write boot.conf");
+                let media = TestMedia { img: &boot_img, sd_card: &sd_card, allow_reboot: true };
+                let output = run_tests_once(&media, disk, (smp, memory_mib), net, gpu, usb, fwd_port, heads)
+                    .unwrap_or_else(|_| exit(1));
+                if !output.contains("never started; back on") {
+                    eprintln!("\nsystem update check FAILED: the broken update did not fall back");
+                    exit(1);
+                }
             }
         }
         break;
@@ -1706,6 +1939,9 @@ fn recorded_peak(path: &Path) -> i32 {
 struct TestMedia<'a> {
     img: &'a Path,
     sd_card: &'a Path,
+    /// Let the processor reset (a triple fault restarts instead of ending
+    /// the run): for the start of a system update that never comes up.
+    allow_reboot: bool,
 }
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
@@ -1734,7 +1970,7 @@ fn run_tests_once(
         gdb: false,
         log_int: false,
         disk,
-        allow_reboot: false,
+        allow_reboot: media.allow_reboot,
         telemetry: None,
         smp,
         audio: format!("wav:{}", audio.display()),
@@ -1827,6 +2063,13 @@ fn run_tests_once(
             if line.contains("awake after S3") {
                 woke_w.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+            // The package test's power cut: QEMU ends at once, so whatever
+            // the guest had not written yet is lost, as when the power goes.
+            if line.contains("harness: power cut") {
+                if let Err(e) = qmp_command("quit") {
+                    eprintln!("could not cut the power: {e}");
+                }
+            }
             if line.contains("power: entering S3") {
                 *slept_w.lock().unwrap() = Some(Instant::now());
                 // The sleep test: wake the machine like a key press would.
@@ -1866,8 +2109,13 @@ fn run_tests_once(
         eprintln!("\nmulti-monitor check FAILED: a head did not show what the compositor drew (see above)");
         return Err(output);
     }
+    let cut = output.contains("harness: power cut") && output.contains("\ntest result: ok.");
     match status.and_then(|s| s.code()) {
         Some(33) => Ok(output),
+        Some(_) if cut => {
+            println!("harness: the power was cut mid-install after the tests passed, as planned");
+            Ok(output)
+        }
         Some(code) => {
             eprintln!("\nkernel tests FAILED (qemu exit status {code})");
             Err(output)

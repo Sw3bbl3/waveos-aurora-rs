@@ -1,0 +1,3 @@
+featured=1
+about=The classic shooter, through doomgeneric. It plays Freedoom out of the box, or your own WAD files from Documents/Doom.\n\nIt shows up in Wave Play with your other games once installed, and plays with a game controller.
+notes.1.0.0=Packaged for the Store, with sound and controller support.

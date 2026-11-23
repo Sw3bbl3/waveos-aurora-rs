@@ -655,6 +655,13 @@ impl Desktop {
                 }
                 Request::Shutdown => self.power = Some(PowerAction::Shutdown),
                 Request::Reboot => self.power = Some(PowerAction::Reboot),
+                Request::UpdateAndRestart => match crate::gui::sysupdate::arm() {
+                    Ok(_) => self.power = Some(PowerAction::Reboot),
+                    Err(e) => crate::gui::notify::system(
+                        "Couldn't start the update",
+                        &alloc::format!("The update could not be prepared ({}).", aurora_abi::err::name(e)),
+                    ),
+                },
                 Request::Sleep => {
                     if let Some(id) = source {
                         self.close(id);

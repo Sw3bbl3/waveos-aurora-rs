@@ -10,6 +10,7 @@
 //!
 //! ```text
 //! <root>/<id>/active                 name of the live generation (one line)
+//! <root>/<id>/previous               the generation it replaced (kept for [`rollback`])
 //! <root>/<id>/<version>-<sha256>/    a generation: the package's files,
 //!     manifest.toml, META/hashes, META/signature, META/receipt
 //! <root>/.registry                   every installed app, one line each (derived)
@@ -22,11 +23,14 @@
 //! into place; only then is `active` replaced, by writing a new pointer,
 //! flushing and renaming it over the old one. An install interrupted at any
 //! point leaves either the old version or the new one live, never a mix,
-//! and the next install or removal clears what was left behind.
+//! and the next install or removal clears what was left behind. The
+//! generation an update replaced is kept, so [`rollback`] can switch back
+//! to it the same way.
 //!
 //! Privileged steps (anything under `/Applications`, trusting keys, adding
 //! repositories) go through [`authorize`].
 
+pub mod download;
 pub mod repo;
 pub mod trust;
 
@@ -151,7 +155,7 @@ fn io(e: crate::Error) -> String {
     }
 }
 
-fn mkdirs(path: &str) -> Result<()> {
+pub(crate) fn mkdirs(path: &str) -> Result<()> {
     let mut current = String::new();
     for part in path.split('/').filter(|p| !p.is_empty()) {
         current.push('/');
@@ -311,20 +315,31 @@ fn set_modes(path: &str, system: bool) -> Result<()> {
     Ok(())
 }
 
-/// Removes generations and staging folders other than the live one.
+/// Removes generations and staging folders other than the live one and
+/// the one it replaced.
 fn collect_garbage(root: &str) {
     let active = fs::read_to_string(&format!("{root}/active")).unwrap_or_default();
-    let live: Vec<u32> = process::list().iter().map(|p| p.pid).collect();
+    let previous = fs::read_to_string(&format!("{root}/previous")).unwrap_or_default();
+    let live: Vec<u32> =
+        process::list().iter().filter(|p| p.user == 1 && p.state != crate::abi::PROC_EXITED).map(|p| p.pid).collect();
+    // Process numbers start again with each start of the computer: what an
+    // installer left before this start is never someone's work in progress.
+    let booted = crate::time::boot_file_time().saturating_sub(2);
     for e in fs::read_dir(root).unwrap_or_default() {
         // Another installer's work in progress is left alone.
+        let path = format!("{root}/{}", e.name);
         let busy = e
             .name
             .strip_prefix(".pending-")
             .or_else(|| e.name.strip_prefix(".active-"))
+            .or_else(|| e.name.strip_prefix(".previous-"))
             .and_then(|p| p.parse::<u32>().ok())
-            .is_some_and(|pid| pid != process::pid() && live.contains(&pid));
-        if e.name != "active" && e.name != active.trim() && !busy {
-            let _ = fs::remove_all(&format!("{root}/{}", e.name));
+            .is_some_and(|pid| {
+                pid != process::pid() && live.contains(&pid) && fs::stat(&path).is_ok_and(|s| s.mtime >= booted)
+            });
+        let kept = e.name == "active" || e.name == "previous" || e.name == active.trim() || e.name == previous.trim();
+        if !kept && !busy {
+            let _ = fs::remove_all(&path);
         }
     }
 }
@@ -427,12 +442,12 @@ pub fn install_with(bytes: &[u8], opts: &Options, mut progress: impl FnMut(usize
             }
             fs::remove_all(&staging).map_err(io)?;
         }
-        let pending = format!("{root}/.active-{}", process::pid());
-        fs::write(&pending, generation.as_bytes()).map_err(io)?;
-        set_modes(&pending, system)?;
-        fs::try_sync_path(&pending).map_err(io)?;
-        fs::rename(&pending, &format!("{root}/active")).map_err(io)?;
-        fs::try_sync_path(&root).map_err(io)?;
+        // The version being replaced stays, for `rollback`.
+        let old = fs::read_to_string(&format!("{root}/active")).map(|s| String::from(s.trim())).unwrap_or_default();
+        if !old.is_empty() && old != generation && fs::is_dir(&format!("{root}/{old}")) {
+            set_pointer(&root, "previous", &old, system)?;
+        }
+        set_pointer(&root, "active", &generation, system)?;
         progress(total, total);
         installed_in(&id, scope)
     })();
@@ -445,6 +460,75 @@ pub fn install_with(bytes: &[u8], opts: &Options, mut progress: impl FnMut(usize
         refresh();
     }
     result
+}
+
+/// Points `<root>/<name>` at generation `to`: a new file, flushed, renamed
+/// over the old one.
+fn set_pointer(root: &str, name: &str, to: &str, system: bool) -> Result<()> {
+    let pending = format!("{root}/.{name}-{}", process::pid());
+    fs::write(&pending, to.as_bytes()).map_err(io)?;
+    set_modes(&pending, system)?;
+    fs::try_sync_path(&pending).map_err(io)?;
+    fs::rename(&pending, &format!("{root}/{name}")).map_err(io)?;
+    fs::try_sync_path(root).map_err(io)
+}
+
+/// The version an update replaced, if it is still there to go back to.
+pub fn previous_version(id: &str) -> Option<String> {
+    let app = installed(id).ok()?;
+    let root = format!("{}/{id}", app.scope.root());
+    let previous = fs::read_to_string(&format!("{root}/previous")).ok()?;
+    let previous = previous.trim();
+    if !valid_name(previous) || app.directory.ends_with(&format!("/{previous}")) {
+        return None;
+    }
+    let text = fs::read_to_string(&format!("{root}/{previous}/manifest.toml")).ok()?;
+    Manifest::parse(&text).ok().filter(|m| m.id == id).map(|m| m.version)
+}
+
+/// Goes back to the version an update replaced (its files are checked
+/// against its hash list first). The app's data is left as it is.
+pub fn rollback(id: &str) -> Result<Installed> {
+    let _install = INSTALL_LOCK.lock();
+    let app = installed(id)?;
+    let root = format!("{}/{id}", app.scope.root());
+    let previous = fs::read_to_string(&format!("{root}/previous")).map_err(|_| String::from("There is no earlier version to go back to."))?;
+    let previous = String::from(previous.trim());
+    let dir = format!("{root}/{previous}");
+    if !valid_name(&previous) || !fs::is_dir(&dir) || app.directory == dir {
+        return Err("There is no earlier version to go back to.".into());
+    }
+    let hashes = fs::read_to_string(&format!("{dir}/{}", gina::HASHES)).map_err(|_| String::from("The earlier version has no hash list."))?;
+    let bad = gina::verify_files(&hashes, |p| fs::read(&format!("{dir}/{p}")).ok()).map_err(ToString::to_string)?;
+    if !bad.is_empty() {
+        return Err(format!("The earlier version is damaged ({} files changed or missing).", bad.len()));
+    }
+    let system = app.scope == Scope::System;
+    if system {
+        authorize(&format!("change {} for everyone", app.manifest.name))?;
+    }
+    let current = String::from(fs::file_name(&app.directory));
+    set_pointer(&root, "active", &previous, system)?;
+    set_pointer(&root, "previous", &current, system)?;
+    let _ = write_registry(app.scope);
+    refresh();
+    installed_in(id, app.scope)
+}
+
+/// Clears what interrupted installs left behind (staging folders of
+/// installers no longer running) wherever this account may write.
+pub fn recover() {
+    for scope in [Scope::User, Scope::System] {
+        if scope == Scope::System && !users::is_admin() {
+            continue;
+        }
+        for e in fs::read_dir(&scope.root()).unwrap_or_default().into_iter().filter(|e| e.is_dir && !e.name.starts_with('.')) {
+            let root = format!("{}/{}", scope.root(), e.name);
+            if fs::read_dir(&root).unwrap_or_default().iter().any(|f| f.name.starts_with('.')) {
+                collect_garbage(&root);
+            }
+        }
+    }
 }
 
 /// Removes an app. Its data stays unless `delete_data` (only this account's

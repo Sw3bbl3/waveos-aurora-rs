@@ -18,6 +18,7 @@ pub mod screens;
 pub mod server;
 pub mod settings;
 pub mod stages;
+pub mod sysupdate;
 
 pub use lumen::{canvas, geom, icons, theme, wallpaper, widgets};
 

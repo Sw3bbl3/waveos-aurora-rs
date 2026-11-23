@@ -85,6 +85,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     telemetry::stage("vfs", "Virtual filesystem and system image");
     fs::init(initrd(boot_info));
     gui::init(fb, boot_info.flags & bootinfo::BOOT_DARK != 0);
+    gui::sysupdate::init(boot_info.flags);
 
     telemetry::stage("scheduler", "Scheduler and process manager");
     sched::init();

@@ -2,7 +2,9 @@
 //!
 //! Boot flow:
 //! 1. Pick a graphics mode through GOP.
-//! 2. Load `\aurora\kernel.elf` from the boot volume and place its PT_LOAD
+//! 2. Choose the system to start (`slots`: the EFI partition's own, or an
+//!    update in slot a or b on the home volume, going back to the previous
+//!    one when an update fails), load its kernel and place its PT_LOAD
 //!    segments in freshly allocated physical memory.
 //! 3. Build a new 4-level page table: all physical memory at `PHYS_OFFSET`,
 //!    an identity map (so this code survives the CR3 switch), and the kernel
@@ -16,6 +18,7 @@
 extern crate alloc;
 
 mod paging;
+mod slots;
 
 use alloc::vec::Vec;
 use bootinfo::{
@@ -50,9 +53,9 @@ fn main() -> Status {
     let rsdp_phys = find_rsdp();
     info!("ACPI RSDP at {:#x}", rsdp_phys);
 
-    // --- Load the kernel image -------------------------------------------------
-    let kernel_file =
-        read_file(cstr16!("\\aurora\\kernel.elf")).expect("could not read \\aurora\\kernel.elf from the boot volume");
+    // --- Choose and load the system ------------------------------------------------
+    let (slot, system) = choose_system();
+    let kernel_file = system.kernel;
     let image = aurora_elf::parse(&kernel_file).expect("kernel.elf is not a valid x86_64 ELF");
     let span = image.virt_end - image.virt_start;
     let kernel_pages = (span.div_ceil(PAGE)) as usize;
@@ -76,15 +79,7 @@ fn main() -> Status {
     drop(kernel_file);
 
     // --- System image (initrd) ----------------------------------------------------
-    // Optical discs carry it compressed (their boot image holds 32 MiB at most).
-    let system = read_file(cstr16!("\\aurora\\system.tar")).or_else(|| {
-        let packed = read_file(cstr16!("\\aurora\\system.tar.zlib"))?;
-        let data = miniz_oxide::inflate::decompress_to_vec_zlib(&packed);
-        if data.is_err() {
-            log::warn!("\\aurora\\system.tar.zlib is damaged");
-        }
-        data.ok()
-    });
+    let system = Some(system.image).filter(|i| !i.is_empty());
     let (initrd_phys, initrd_len) = match system {
         Some(data) => {
             let phys = alloc_pages(data.len().div_ceil(PAGE as usize).max(1));
@@ -196,7 +191,10 @@ fn main() -> Status {
             initrd_len,
             modes,
             mode_count,
-            flags: if conf.verbose { BOOT_VERBOSE } else { 0 } | if conf.light { 0 } else { BOOT_DARK },
+            flags: if conf.verbose { BOOT_VERBOSE } else { 0 }
+                | if conf.light { 0 } else { BOOT_DARK }
+                | slots::flag(&slot)
+                | bootinfo::BOOT_SLOTS,
             trampoline_phys,
         });
     }
@@ -357,4 +355,90 @@ fn read_file(path: &uefi::CStr16) -> Option<Vec<u8>> {
     let sfs = boot::get_image_file_system(boot::image_handle()).expect("boot volume");
     let mut fs = uefi::fs::FileSystem::new(sfs);
     fs.read(path).ok()
+}
+
+fn write_file(path: &uefi::CStr16, data: &[u8]) -> bool {
+    let Ok(sfs) = boot::get_image_file_system(boot::image_handle()) else { return false };
+    uefi::fs::FileSystem::new(sfs).write(path, data).is_ok()
+}
+
+/// The EFI partition's own system: `\aurora\kernel.elf` and the system
+/// image (optical discs carry it compressed: their boot image holds 32 MiB
+/// at most).
+fn esp_system() -> slots::System {
+    let kernel =
+        read_file(cstr16!("\\aurora\\kernel.elf")).expect("could not read \\aurora\\kernel.elf from the boot volume");
+    let image = read_file(cstr16!("\\aurora\\system.tar"))
+        .or_else(|| {
+            let packed = read_file(cstr16!("\\aurora\\system.tar.zlib"))?;
+            let data = miniz_oxide::inflate::decompress_to_vec_zlib(&packed);
+            if data.is_err() {
+                log::warn!("\\aurora\\system.tar.zlib is damaged");
+            }
+            data.ok()
+        })
+        .unwrap_or_else(|| {
+            log::warn!("no \\aurora\\system.tar found; booting without a system image");
+            Vec::new()
+        });
+    slots::System { kernel, image }
+}
+
+/// Picks the system to start (see `slots`), taking a try from a slot on
+/// trial and going back when one can't start. Returns the slot started.
+fn choose_system() -> (alloc::string::String, slots::System) {
+    use alloc::string::String;
+    let raw = read_file(cstr16!("\\aurora\\boot.conf")).and_then(|b| String::from_utf8(b).ok()).unwrap_or_default();
+    let choice = slots::Choice::parse(&raw);
+    let save = |text: &str| {
+        if !write_file(cstr16!("\\aurora\\boot.conf"), text.as_bytes()) {
+            log::warn!("could not update \\aurora\\boot.conf");
+        }
+    };
+    let mut failed: Option<String> = None;
+    let mut first = choice.system.clone();
+    if first != "esp" {
+        match choice.tries {
+            Some(0) => {
+                log::warn!("system {first} did not start after its tries; going back to {}", choice.previous);
+                failed = Some(first.clone());
+                first = choice.previous.clone();
+            }
+            Some(n) => {
+                // The try is taken before the attempt, so a crash still counts.
+                save(&slots::edit(&raw, &[("system_tries", Some(&alloc::format!("{}", n - 1)))]));
+                info!("starting system {first} on trial ({} tries left after this one)", n - 1);
+            }
+            None => {}
+        }
+    }
+    let mut order = alloc::vec![first];
+    for s in [choice.previous.clone(), String::from("esp")] {
+        if !order.contains(&s) {
+            order.push(s);
+        }
+    }
+    for slot in order {
+        let system = if slot == "esp" {
+            Some(esp_system())
+        } else {
+            slots::load(&slot, choice.tries.is_some() && slot == choice.system)
+        };
+        let Some(system) = system else {
+            log::warn!("system {slot} could not be read; trying the next one");
+            failed.get_or_insert(slot);
+            continue;
+        };
+        if slot != choice.system {
+            // Went back: say so, and stop trying the one that failed.
+            let conf = read_file(cstr16!("\\aurora\\boot.conf")).and_then(|b| String::from_utf8(b).ok()).unwrap_or(raw.clone());
+            save(&slots::edit(
+                &conf,
+                &[("system", Some(&slot)), ("system_tries", None), ("system_failed", failed.as_deref())],
+            ));
+        }
+        info!("starting system {slot}");
+        return (slot, system);
+    }
+    unreachable!("the EFI partition's system always loads or panics")
 }

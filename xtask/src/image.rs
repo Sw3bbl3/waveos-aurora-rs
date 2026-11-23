@@ -89,6 +89,28 @@ pub fn preference(img: &Path, key: &str) -> Option<String> {
     })
 }
 
+/// Mounts the home volume of a copy of `img` (replaying its journal, as a
+/// start would) and checks it with `fsck`; `img` itself is not changed.
+pub fn check_home_copy(img: &Path) -> Result<(), String> {
+    let copy = img.with_extension("check.img");
+    fs::copy(img, &copy).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let mut file = OpenOptions::new().read(true).write(true).open(&copy).map_err(|e| e.to_string())?;
+        let mut entry = [0u8; ENTRY_SIZE as usize];
+        file.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE)).map_err(|e| e.to_string())?;
+        file.read_exact(&mut entry).map_err(|e| e.to_string())?;
+        let start = u64::from_le_bytes(entry[32..40].try_into().unwrap());
+        let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
+        let bytes = (end - start + 1) * SECTOR;
+        let region = Region { file: &mut file, start: start * SECTOR, len: bytes, pos: 0 };
+        let mut vol = aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now)
+            .map_err(|e| format!("mount: {e:?}"))?;
+        vol.fsck()
+    })();
+    let _ = fs::remove_file(&copy);
+    result
+}
+
 /// Put the Linux root on the home volume as `/Linux`, preserving saved files.
 /// Existing installations receive updated settings and missing packages.
 pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io::Result<LinuxOnDisk> {
@@ -411,8 +433,21 @@ pub fn refresh_esp(esp: &Path, img: &Path) -> io::Result<bool> {
     if entry[0..16] != ESP_TYPE || start != ESP_START {
         return Ok(false);
     }
-    // Options written inside WaveOS (Settings → Display) survive the refresh.
-    let boot_conf = read_boot_conf(&mut file, start, end - start + 1);
+    // Options written inside WaveOS (Settings → Display) survive the refresh;
+    // a system update it was running is set aside (only the four slot
+    // lines go), so the new build starts. The home volume, and the slots on
+    // it, are never touched: only the EFI partition's sectors are written.
+    let boot_conf = read_boot_conf(&mut file, start, end - start + 1).map(|c| {
+        String::from_utf8_lossy(&c)
+            .lines()
+            .filter(|l| {
+                let key = l.split_once('=').map(|(k, _)| k.trim());
+                !matches!(key, Some("system" | "system_tries" | "system_previous" | "system_failed"))
+            })
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
+            .into_bytes()
+    });
     format_esp(&mut file, start, end - start + 1, esp)?;
     if let Some(conf) = boot_conf {
         let part = Region { file: &mut file, start: start * SECTOR, len: (end - start + 1) * SECTOR, pos: 0 };
@@ -558,25 +593,42 @@ fn format_esp_with_type(
     esp: &Path,
     fat_type: fatfs::FatType,
 ) -> io::Result<()> {
-    let mut part = Region { file, start: start * SECTOR, len: sectors * SECTOR, pos: 0 };
-    fatfs::format_volume(
-        &mut part,
-        fatfs::FormatVolumeOptions::new().fat_type(fat_type).volume_label(*b"AURORA-BOOT"),
-    )?;
-    part.pos = 0;
-    let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new())?;
-    copy_to_fat(esp, &fs.root_dir())?;
-    fs.unmount()?;
-    Ok(())
+    // The system image goes on as it is; when the partition is too small
+    // for it (64 MiB holds about 62 MiB of system), compressed instead
+    // (`system.tar.zlib`, which the bootloader inflates).
+    let attempt = |file: &mut File, pack: bool| -> io::Result<()> {
+        let mut part = Region { file, start: start * SECTOR, len: sectors * SECTOR, pos: 0 };
+        fatfs::format_volume(
+            &mut part,
+            fatfs::FormatVolumeOptions::new().fat_type(fat_type).volume_label(*b"AURORA-BOOT"),
+        )?;
+        part.pos = 0;
+        let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new())?;
+        copy_to_fat(esp, &fs.root_dir(), pack)?;
+        fs.unmount()?;
+        Ok(())
+    };
+    match attempt(file, false) {
+        Err(e) if e.kind() == io::ErrorKind::StorageFull || e.to_string().contains("No space") => {
+            println!("note: the system image doesn't fit the EFI partition as it is; writing it compressed");
+            attempt(file, true)
+        }
+        other => other,
+    }
 }
 
-fn copy_to_fat<T: fatfs::ReadWriteSeek>(src: &Path, dst: &fatfs::Dir<T>) -> io::Result<()> {
+fn copy_to_fat<T: fatfs::ReadWriteSeek>(src: &Path, dst: &fatfs::Dir<T>, pack: bool) -> io::Result<()> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if entry.file_type()?.is_dir() {
             let sub = dst.create_dir(&name)?;
-            copy_to_fat(&entry.path(), &sub)?;
+            copy_to_fat(&entry.path(), &sub, pack)?;
+        } else if pack && name == "system.tar" {
+            let packed = miniz_oxide::deflate::compress_to_vec_zlib(&fs::read(entry.path())?, 6);
+            let mut f = dst.create_file("system.tar.zlib")?;
+            f.truncate()?;
+            f.write_all(&packed)?;
         } else {
             let mut f = dst.create_file(&name)?;
             f.truncate()?;
@@ -800,5 +852,79 @@ impl Seek for Region<'_> {
         }
         self.pos = new as u64;
         Ok(self.pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home_volume(file: &mut File) -> aurorafs::Volume<WaveDisk<'_>> {
+        let mut entry = [0u8; ENTRY_SIZE as usize];
+        file.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE)).unwrap();
+        file.read_exact(&mut entry).unwrap();
+        let start = u64::from_le_bytes(entry[32..40].try_into().unwrap());
+        let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
+        let bytes = (end - start + 1) * SECTOR;
+        let region = Region { file, start: start * SECTOR, len: bytes, pos: 0 };
+        aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now).unwrap()
+    }
+
+    fn esp_file(file: &mut File, path: &str) -> Option<Vec<u8>> {
+        let part = Region { file, start: ESP_START * SECTOR, len: ESP_SECTORS * SECTOR, pos: 0 };
+        let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new()).ok()?;
+        let mut data = Vec::new();
+        fs.root_dir().open_file(path).ok()?.read_to_end(&mut data).ok()?;
+        Some(data)
+    }
+
+    /// What `cargo xtask run` does to an existing disk: the EFI partition
+    /// gets the new build and boot.conf loses only its system-update lines;
+    /// files on the home volume, installed system update slots among them,
+    /// are byte for byte as they were.
+    #[test]
+    fn refresh_keeps_the_home_volume_and_drops_only_slot_lines() {
+        let dir = std::env::temp_dir().join(format!("wv-refresh-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (old, new, home) = (dir.join("esp-old"), dir.join("esp-new"), dir.join("home"));
+        for (esp, kernel) in [(&old, b"old kernel"), (&new, b"new kernel")] {
+            fs::create_dir_all(esp.join("aurora")).unwrap();
+            fs::create_dir_all(esp.join("EFI/BOOT")).unwrap();
+            fs::write(esp.join("aurora/kernel.elf"), kernel).unwrap();
+            fs::write(esp.join("aurora/system.tar"), vec![7u8; 4096]).unwrap();
+            fs::write(esp.join("EFI/BOOT/BOOTX64.EFI"), b"MZ loader").unwrap();
+        }
+        fs::create_dir_all(home.join("Documents")).unwrap();
+        fs::write(home.join("Documents/letter.txt"), b"keep me").unwrap();
+        let img = dir.join("disk.img");
+        create_with(&old, &home, None, &img, 160 * 1024 * 1024).unwrap();
+        {
+            let mut file = OpenOptions::new().read(true).write(true).open(&img).unwrap();
+            let mut vol = home_volume(&mut file);
+            vol.mkdir_all("/.system/a").unwrap();
+            vol.write_file("/.system/a/update.txt", b"gina-system-update 1").unwrap();
+            vol.commit().unwrap();
+        }
+        for (k, v) in [
+            ("resolution", "1920x1080"),
+            ("system", "a"),
+            ("system_tries", "2"),
+            ("system_previous", "esp"),
+            ("system_failed", "b"),
+        ] {
+            set_boot_option(&img, k, v).unwrap();
+        }
+        assert!(refresh_esp(&new, &img).unwrap());
+        let mut file = OpenOptions::new().read(true).write(true).open(&img).unwrap();
+        assert_eq!(esp_file(&mut file, "aurora/kernel.elf").unwrap(), b"new kernel");
+        let conf = String::from_utf8(esp_file(&mut file, "aurora/boot.conf").unwrap()).unwrap();
+        assert!(conf.contains("resolution=1920x1080"), "{conf}");
+        assert!(!conf.lines().any(|l| l.starts_with("system")), "{conf}");
+        let mut vol = home_volume(&mut file);
+        assert_eq!(read_file(&mut vol, "/Documents/letter.txt"), b"keep me");
+        assert_eq!(read_file(&mut vol, "/.system/a/update.txt"), b"gina-system-update 1");
+        assert!(vol.fsck().is_ok());
+        drop(vol);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
