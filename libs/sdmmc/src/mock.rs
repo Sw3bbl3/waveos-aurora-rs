@@ -1024,6 +1024,11 @@ impl Ctl {
         if (data || resp == cmd::RESP_48_BUSY) && self.dat_busy && !abort {
             self.violation(format!("CMD{} issued while DAT inhibit was set", index));
         }
+        if self.card.is_none() {
+            // Pulled out (perhaps between the driver's last look and now).
+            self.raise_err(err::CMD_TIMEOUT);
+            return;
+        }
         let hz = self.clock();
         if hz == 0 || !self.powered() {
             self.violation(format!(
