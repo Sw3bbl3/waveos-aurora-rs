@@ -232,7 +232,8 @@ pub struct Desktop {
     displays: Vec<DisplayArea>,
     /// Index of the main display in `displays`.
     main: usize,
-    /// The rectangle around them all.
+    /// Their rectangles, and the rectangle around them all.
+    rects: Vec<Rect>,
     all_displays: Rect,
     /// The other displays' pictures (None at the main display's index).
     others: Vec<Option<displays::Caches>>,
@@ -319,6 +320,7 @@ impl Desktop {
             play: play::Play::new(),
             displays: Vec::new(),
             main: 0,
+            rects: Vec::new(),
             all_displays: Rect::default(),
             others: Vec::new(),
             input_origin: (0, 0),

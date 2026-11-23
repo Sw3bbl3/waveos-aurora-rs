@@ -81,7 +81,7 @@ impl Desktop {
         if self.displays.is_empty() {
             alloc::vec![self.screen()]
         } else {
-            self.displays.iter().map(|d| d.rect).collect()
+            self.rects.clone()
         }
     }
 
@@ -111,13 +111,15 @@ impl Desktop {
 
     /// Index of the display showing (`x`, `y`), or the nearest one.
     pub(super) fn display_at(&self, x: i32, y: i32) -> usize {
-        let rects = self.display_rects();
-        displays::at(&rects, x, y).unwrap_or_else(|| displays::nearest(&rects, x, y))
+        displays::at(&self.rects, x, y).unwrap_or_else(|| displays::nearest(&self.rects, x, y))
     }
 
     /// Index of the display a window with this rectangle is on.
     pub(super) fn display_of_rect(&self, r: Rect) -> usize {
-        displays::home(&self.display_rects(), r)
+        if self.rects.len() < 2 {
+            return 0;
+        }
+        displays::home(&self.rects, r)
     }
 
     /// The area windows use on display `i`: below the bar on the main
@@ -148,9 +150,12 @@ impl Desktop {
     /// display. Moves the devices' idea of the pointer along when it was
     /// stopped at an edge.
     pub(super) fn input_to_desktop(&self, x: i32, y: i32) -> (i32, i32) {
+        if self.rects.is_empty() {
+            return (x.clamp(0, self.w - 1), y.clamp(0, self.h - 1));
+        }
         let (ox, oy) = self.input_origin;
         let (gx, gy) = (x + ox, y + oy);
-        let (cx, cy) = displays::constrain(&self.display_rects(), gx, gy);
+        let (cx, cy) = displays::constrain(&self.rects, gx, gy);
         if (cx, cy) != (gx, gy) {
             crate::drivers::input::warp(cx - ox, cy - oy);
         }
@@ -197,7 +202,8 @@ impl Desktop {
                 }
             })
             .collect();
-        self.all_displays = displays::bounds(&areas.iter().map(|d| d.rect).collect::<Vec<_>>());
+        self.rects = areas.iter().map(|d| d.rect).collect();
+        self.all_displays = displays::bounds(&self.rects);
         self.displays = areas;
         self.main = main;
         if main_changed {

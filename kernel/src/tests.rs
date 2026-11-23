@@ -2099,21 +2099,23 @@ fn displays_screendump(c: &crate::gui::screens::Compositor) {
     sched::sleep_ms(1500);
 }
 
-/// Mean time (µs) of a frame that repaints every display: composing it,
+/// Median time (µs) of a frame that repaints every display: composing it,
 /// and until every display has taken it.
 fn displays_frame_cost(c: &mut crate::gui::screens::Compositor) -> (u64, u64) {
     c.settle(2000);
-    let (mut compose, mut total) = (0, 0);
-    const ROUNDS: u64 = 6;
-    for _ in 0..ROUNDS {
+    let (mut compose, mut total) = (Vec::new(), Vec::new());
+    for _ in 0..11 {
         c.desktop.damage_all();
         let t = time::now_ns();
         c.frame();
         c.wait_presented(2000);
-        total += time::now_ns() - t;
-        compose += c.last_frame_ns;
+        total.push((time::now_ns() - t) / 1000);
+        compose.push(c.last_frame_ns / 1000);
+        sched::sleep_ms(5);
     }
-    (compose / ROUNDS / 1000, total / ROUNDS / 1000)
+    compose.sort_unstable();
+    total.sort_unstable();
+    (compose[compose.len() / 2], total[total.len() / 2])
 }
 
 /// Several displays, on virtio-gpu with as many heads as `cargo xtask test

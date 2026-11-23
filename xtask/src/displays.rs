@@ -15,8 +15,9 @@
 //! - Otherwise (GTK only): display 1 in QEMU's window, the others on VNC,
 //!   opened with `remote-viewer` or `vncviewer` when one is installed.
 //!
-//! WaveOS's compositor draws only on the primary display today, so the
-//! other windows stay blank until multi-monitor desktop support lands.
+//! With `--gpu virtio` WaveOS extends its desktop over every display (see
+//! docs/developer/display-core.md); with `--gpu std` it drives the first
+//! VGA only, so the `secondary-vga` windows stay blank.
 
 use crate::runconfig::{shell_quote, QemuCaps};
 use std::hash::{BuildHasher, Hasher};
@@ -233,8 +234,8 @@ impl Displays {
         }
         if n > 1 {
             out.push(String::from(
-                "WaveOS draws its desktop on display 1 only for now; the other displays stay blank until \
-                 multi-monitor support lands.",
+                "With --gpu virtio WaveOS extends its desktop over every display (arrange them in Settings → \
+                 Display); with --gpu std only display 1 is used.",
             ));
         }
         out

@@ -55,7 +55,9 @@ Each display opens in its own host window. How depends on what your QEMU was bui
 
 QEMU's Cocoa window can show only one display at a time (View menu), so VNC is what gives macOS separate windows. When QEMU exits, the Screen Sharing windows stay open with a "connection lost" message: close them yourself.
 
-**Today the extra windows stay blank** (or keep showing the firmware's last boot text, with `--gpu std`). WaveOS's compositor draws the desktop on the primary display only. A native display core that enumerates every output is being written, and desktops that span several monitors come after it. The host side is ready for that.
+With `--gpu virtio` the desktop extends over every display: the menu bar and Harbor on display 1, the others to its right (arrange them in Settings → Display). QEMU switches outputs 2 to N on only when their window asks for a size, so they appear once their viewer opens. With `--gpu std` only display 1 is used (the `secondary-vga` windows keep showing the firmware's last text). One QEMU caveat: the USB tablet is absolute over the rectangle around all displays, so in a VM with several windows the pointer lands where that rectangle says rather than under the host cursor; use a mouse (`AURORA_QEMU_ARGS="-device usb-mouse"`) or move between displays at their shared edges.
+
+`cargo xtask test --gpu virtio --displays 3` runs the multi-monitor kernel test: the harness plugs the extra heads in and out through their VNC servers and compares a QMP screendump of each head with what the compositor drew.
 
 ## Everyday commands
 
