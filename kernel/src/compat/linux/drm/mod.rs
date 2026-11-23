@@ -29,6 +29,7 @@
 
 pub mod kms;
 pub mod props;
+pub mod stats;
 pub mod vblank;
 
 use super::fs::Special;
@@ -155,6 +156,38 @@ pub fn node_rdev(guest: &str) -> Option<u64> {
     Some(super::fs::makedev(MAJOR, minor as u64))
 }
 
+/// The records udev would keep for the nodes, `/run/udev/data/c226:<minor>`
+/// (as (file name, contents); the input layer's tree holds them with the
+/// input devices' records): libudev counts a device node as set up only
+/// once it has one, and its enumerators (glmark2's, wlroots', SDL's) skip
+/// the others. The tags are those udev's seat rules give a card
+/// (`master-of-seat`: it can drive a seat's display).
+pub fn udev_records() -> Vec<(String, Vec<u8>)> {
+    node_names()
+        .iter()
+        .filter_map(|name| {
+            let (_, minor, _) = node(name)?;
+            Some((alloc::format!("c{MAJOR}:{minor}"), udev_record(name)?))
+        })
+        .collect()
+}
+
+fn udev_record(name: &str) -> Option<Vec<u8>> {
+    let (dev, _, render) = node(name)?;
+    let slot = super::sysfs::pci_slot(&*dev);
+    let path = alloc::format!("pci-{slot}");
+    let tag = path.replace([':', '.'], "_");
+    let mut s = alloc::format!(
+        "I:{}\nE:ID_PATH={path}\nE:ID_PATH_TAG={tag}\nE:ID_FOR_SEAT=drm-{tag}\nG:seat\nG:uaccess\nQ:seat\nQ:uaccess\n",
+        crate::time::now_ns() / 1000
+    );
+    if !render {
+        s.push_str("G:master-of-seat\nQ:master-of-seat\n");
+    }
+    s.push_str("V:1\n");
+    Some(s.into_bytes())
+}
+
 /// What a card knows beyond its files: who is master, the bus id a master set.
 struct Card {
     dev: usize,
@@ -212,6 +245,9 @@ pub struct File {
     authenticated: AtomicBool,
     /// Became master once (may take it back without privileges, as on Linux).
     was_master: AtomicBool,
+    /// The program that opened it, and how its frames went ([`stats`]).
+    program: String,
+    pub flips: Mutex<stats::Flips>,
 }
 
 static NEXT_FILE: AtomicU64 = AtomicU64::new(1);
@@ -251,6 +287,7 @@ impl File {
 impl Drop for File {
     fn drop(&mut self) {
         FILES.lock().retain(|(id, _)| *id != self.id);
+        self.flips.lock().report(&self.program, self.minor);
         kms::forget_file(self.id);
         props::forget_file(self.id);
         let was = with_card(&*self.dev, |c| {
@@ -303,6 +340,8 @@ pub fn open(guest: &str) -> Option<Result<Arc<File>, isize>> {
         magic: id as u32 | 0x4000_0000,
         authenticated: AtomicBool::new(false),
         was_master: AtomicBool::new(false),
+        program: crate::proc::current().map(|p| p.name()).unwrap_or_default(),
+        flips: Mutex::new(stats::Flips::default()),
     });
     // The first to open a card while nobody is master becomes master.
     if !render {
@@ -640,7 +679,7 @@ fn get_cap(f: &File, a: &mut Args) -> Result<(), isize> {
         0x7 => 0,               // ASYNC_PAGE_FLIP
         0x8 => cursor.0 as u64, // CURSOR_WIDTH
         0x9 => cursor.1 as u64, // CURSOR_HEIGHT
-        0x10 => 0,              // ADDFB2_MODIFIERS
+        0x10 => 1,              // ADDFB2_MODIFIERS: linear (IN_FORMATS lists it)
         0x11 => 0,              // PAGE_FLIP_TARGET
         0x12 => 1,              // CRTC_IN_VBLANK_EVENT
         0x13..=0x15 => 0,       // SYNCOBJ, SYNCOBJ_TIMELINE, ATOMIC_ASYNC_PAGE_FLIP

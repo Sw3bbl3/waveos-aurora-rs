@@ -29,6 +29,7 @@
 use super::gpio::LevelPin;
 use super::{BusRef, I2cBus};
 use crate::acpi::devices::AcpiDevice;
+use crate::drivers::evdev;
 use crate::drivers::input::{self, InputEvent};
 use crate::sync::{IrqMutex, WaitQueue};
 use alloc::format;
@@ -221,6 +222,8 @@ struct Pad {
     frames: Frames,
     gestures: Gestures,
     buttons: u8,
+    /// The touchpad as a Linux device.
+    linux: (Arc<evdev::Device>, evdev::sources::Touches),
 }
 
 struct Screen {
@@ -232,6 +235,27 @@ struct Screen {
 struct Mouse {
     buttons: u8,
     remainder: (i32, i32),
+    linux: Arc<evdev::Device>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(p) = &self.pad {
+            evdev::remove(&p.linux.0);
+        }
+        if let Some(m) = &self.mouse {
+            evdev::remove(&m.linux);
+        }
+    }
+}
+
+/// How Linux names an I²C HID device ("TPD0:00 04F3:3060") and where it is.
+fn linux_name(cfg: &Config, d: &aurora_i2c::hid::HidDescriptor) -> (String, String, evdev::InputId) {
+    let node = cfg.path.rsplit(['.', '\\']).next().unwrap_or("I2C");
+    let name = format!("{node}:00 {:04X}:{:04X}", d.vendor, d.product);
+    let id =
+        evdev::InputId { bustype: evdev::codes::BUS_I2C, vendor: d.vendor, product: d.product, version: d.version };
+    (name, format!("i2c-{node}:00"), id)
 }
 
 struct Session {
@@ -314,7 +338,15 @@ impl Session {
                         None => "absent",
                     }
                 ));
-                Pad { frames: Frames::new(), gestures: Gestures::new(&info), buttons: 0 }
+                let (name, phys, id) = linux_name(cfg, &d);
+                let location = evdev::Location::I2c(cfg.path.clone());
+                let linux = evdev::sources::touchpad(&format!("{name} Touchpad"), id, &phys, location, &info);
+                Pad {
+                    frames: Frames::new(),
+                    gestures: Gestures::new(&info),
+                    buttons: 0,
+                    linux: (linux, evdev::sources::Touches::new()),
+                }
             })
         } else {
             None
@@ -334,7 +366,14 @@ impl Session {
         // refusing to leave) mouse mode.
         let mouse = pointer::is_pointer(&desc).then(|| {
             roles.push(String::from("mouse"));
-            Mouse { buttons: 0, remainder: (0, 0) }
+            let (name, phys, id) = linux_name(cfg, &d);
+            let absolute = desc.find(aurora_hid::Kind::Input, usage::X).is_some_and(|(f, _)| !f.is_relative());
+            let range =
+                |u| desc.find(aurora_hid::Kind::Input, u).map_or((0, 0x7FFF), |(f, _)| (f.logical_min, f.logical_max));
+            let ranges = absolute.then(|| (range(usage::X), range(usage::Y)));
+            let location = evdev::Location::I2c(cfg.path.clone());
+            let linux = evdev::sources::pointer(&format!("{name} Mouse"), id, &phys, location, ranges);
+            Mouse { buttons: 0, remainder: (0, 0), linux }
         });
         if desc.has_application(usage::KEYBOARD) {
             roles.push(String::from("keyboard (not supported over I2C yet)"));
@@ -415,6 +454,7 @@ impl Session {
         if let Some(p) = &mut self.pad {
             if let Some(r) = touchpad::read(d, report) {
                 if let Some(frame) = p.frames.feed(r) {
+                    p.linux.1.frame(&p.linux.0, &frame);
                     let o = p.gestures.frame(now, &frame, &input::touchpad_settings());
                     input::touchpad_output(o, &mut p.buttons);
                 }
@@ -435,6 +475,7 @@ impl Session {
         }
         if let Some(m) = &mut self.mouse {
             if let Some(r) = pointer::read(d, report) {
+                evdev::sources::pointer_report(&m.linux, r.buttons & 0x1F, r.x, r.y, r.wheel, r.pan);
                 let buttons = r.buttons & 0x07;
                 if r.absolute {
                     let (w, h) = input::screen_size();

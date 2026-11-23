@@ -11,7 +11,7 @@
 //! - **Who reads the pads.** While the shell has the controllers (Wave
 //!   Play's home or its overlay) or another window is focused, programs
 //!   read a neutral pad, so a game doesn't fire behind a menu. The
-//!   compositor names the owner ([`set_owner`]).
+//!   compositor names the owner ([`set_owners`]).
 //! - **Pad-aware programs.** [`polled_recently`] says whether a process has
 //!   been reading pads itself; for those that don't, the desktop turns the
 //!   d-pad, A and B into arrow keys, Enter and Escape.
@@ -100,12 +100,37 @@ pub fn take_changes() -> Vec<Change> {
 
 /// Registers a controller; returns its id.
 pub fn add(name: &str, vendor: u16, product: u16, family: u32, motors: Option<Arc<dyn Rumble>>) -> u32 {
+    add_at(name, vendor, product, family, motors, Linux::Shown(None, 0))
+}
+
+/// How a controller appears to Linux programs.
+pub enum Linux {
+    /// As its own `/dev/input` device, attached where given (version:
+    /// the device's release number).
+    Shown(Option<crate::drivers::evdev::Location>, u16),
+    /// Not again: a program made it through `/dev/uinput` and its
+    /// `/dev/input` device is already there.
+    Already,
+}
+
+/// [`add`], saying how it appears to Linux programs.
+pub fn add_at(
+    name: &str,
+    vendor: u16,
+    product: u16,
+    family: u32,
+    motors: Option<Arc<dyn Rumble>>,
+    linux: Linux,
+) -> u32 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let mut info = GamepadInfo { id, vendor, product, family, rumble: motors.is_some() as u32, ..Default::default() };
     let n = name.len().min(info.name.len());
     info.name[..n].copy_from_slice(&name.as_bytes()[..n]);
     info.name_len = n as u32;
     PADS.lock().push(Pad { info, state: GamepadState::default(), motors, rumble_until: None, digital: 0, latched: 0 });
+    if let Linux::Shown(location, version) = linux {
+        crate::drivers::evdev::pad::connected(&info, location, version);
+    }
     CHANGES.lock().push(Change::Connected(id));
     log!("gamepad", "{} connected (controller {})", name, id);
     wake();
@@ -120,6 +145,7 @@ pub fn remove(id: u32) {
         before != pads.len()
     };
     if gone {
+        crate::drivers::evdev::pad::disconnected(id);
         CHANGES.lock().push(Change::Disconnected(id));
         log!("gamepad", "controller {} disconnected", id);
         wake();
@@ -161,6 +187,7 @@ pub fn update(id: u32, s: &aurora_hid::gamepad::State) {
         MOVED.store(true, Ordering::Release);
         wake();
     }
+    crate::drivers::evdev::pad::update(id, s);
 }
 
 pub fn list() -> Vec<GamepadInfo> {
@@ -178,9 +205,24 @@ pub fn poll() -> Vec<(GamepadInfo, GamepadState, u32)> {
     PADS.lock().iter_mut().map(|p| (p.info, p.state, core::mem::take(&mut p.latched))).collect()
 }
 
-/// Says who may read the pads (see [`ANYONE`], [`SHELL`]).
-pub fn set_owner(owner: u64) {
-    OWNER.store(owner, Ordering::Relaxed);
+/// Says who may read the pads (see [`ANYONE`], [`SHELL`]), and the program
+/// the owner's window shows (a bridge's window: the Wayland program behind
+/// it may read too).
+pub fn set_owners(owner: u64, program: Option<u32>) {
+    let program = program.map_or(u64::MAX, |p| p as u64);
+    let changed = OWNER.swap(owner, Ordering::AcqRel) != owner;
+    if OWNER_PROGRAM.swap(program, Ordering::AcqRel) != program || changed {
+        crate::drivers::evdev::refocus();
+    }
+}
+
+/// The program the owner's window shows, if not the owner itself.
+static OWNER_PROGRAM: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Whether process `pid` may read the controllers now.
+pub fn may_read(pid: u32) -> bool {
+    let owner = OWNER.load(Ordering::Relaxed);
+    owner == ANYONE || owner == pid as u64 || OWNER_PROGRAM.load(Ordering::Relaxed) == pid as u64
 }
 
 /// `gamepad_state` for process `pid`: a neutral pad (same sequence, nothing
@@ -196,8 +238,7 @@ pub fn state_for(pid: u32, id: u32) -> Option<GamepadState> {
         });
         readers[slot] = (pid, now);
     }
-    let owner = OWNER.load(Ordering::Relaxed);
-    if owner == ANYONE || owner == pid as u64 {
+    if may_read(pid) {
         Some(st)
     } else {
         Some(GamepadState { sequence: st.sequence, ..Default::default() })
@@ -274,6 +315,23 @@ pub fn tick(now: u64) -> Option<u64> {
         m.rumble(0, 0);
     }
     next
+}
+
+/// What the keyboard-played controller's motors were last told (strong << 8
+/// | weak): it has none, but programs may rumble it, and tests check that
+/// their effects arrive.
+pub static VIRTUAL_FELT: AtomicU32 = AtomicU32::new(0);
+
+/// The keyboard-played controller's stand-in motors.
+pub struct VirtualMotors;
+
+impl Rumble for VirtualMotors {
+    fn rumble(&self, strong: u8, weak: u8) {
+        let v = (strong as u32) << 8 | weak as u32;
+        if VIRTUAL_FELT.swap(v, Ordering::AcqRel) != v {
+            log!("gamepad", "keyboard controller rumble: strong {} weak {}", strong, weak);
+        }
+    }
 }
 
 /// A display name from the USB strings, without the vendor's noise.

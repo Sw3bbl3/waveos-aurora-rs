@@ -214,8 +214,16 @@ fn ncm_config(value: u8) -> Vec<u8> {
     body.extend(interface(1, 1, 2, cdc::CLASS_DATA, 0, 1));
     body.extend(endpoint(0x82, 2, 1024, 0));
     body.extend(endpoint(0x01, 2, 1024, 0));
-    configuration(value, 2, &body)
+    // A dock's keyboard (hot keys) beside the network function: a
+    // composite device, both of whose functions must come and go together.
+    body.extend(interface(2, 0, 1, 3, 1, 1));
+    body.extend_from_slice(&[9, usb::DESC_HID, 0x11, 0x01, 0, 1, usb::DESC_REPORT, 63, 0]);
+    body.extend(endpoint(KEYBOARD_EP, 3, 8, 10));
+    configuration(value, 3, &body)
 }
+
+/// The simulated dock's keyboard endpoint (it never reports a key).
+const KEYBOARD_EP: u8 = 0x83;
 
 /// The NTB parameters the simulated NCM function states.
 fn ntb_parameters() -> [u8; 28] {
@@ -591,7 +599,10 @@ impl Hcd for SimHcd {
         true
     }
 
-    fn open_pipe(&self, dev: u8, _ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool {
+    fn open_pipe(&self, dev: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool {
+        if ep.address == KEYBOARD_EP {
+            return self.with(dev, |_| ()).is_some();
+        }
         // The device reports its link as soon as it is polled.
         let report = self.with(dev, |d| d.link_report());
         match report {

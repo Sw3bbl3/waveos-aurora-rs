@@ -37,6 +37,7 @@
 #define WAVE_WIN_SET_CURSOR 81
 #define WAVE_EVENT_FD 82
 #define WAVE_UNIX_MS 83
+#define WAVE_WIN_SET_PROGRAM 93
 
 /* Window flags for wave_win_create. */
 #define WAVE_WIN_RESIZABLE 1
@@ -190,6 +191,15 @@ static inline long wave_next_event(struct wave_event *e, long timeout_ms) {
 /* The pointer's shape over the window (WAVE_CURSOR_*). */
 static inline long wave_win_set_cursor(long window, int shape) {
     return wave_call(WAVE_WIN_SET_CURSOR, window, shape, 0, 0, 0);
+}
+/*
+ * For a bridge drawing another program's window (wl-bridge): says the
+ * window shows what process pid draws, which then gets the window's
+ * input focus (/dev/input, controllers). pid must be the caller's
+ * account's; 0 clears it.
+ */
+static inline long wave_win_set_program(long window, long pid) {
+    return wave_call(WAVE_WIN_SET_PROGRAM, window, pid, 0, 0, 0);
 }
 /*
  * A file descriptor that poll() and epoll report readable while the

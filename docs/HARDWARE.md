@@ -134,6 +134,7 @@ What to try and send back:
    - [ ] plugging a monitor in and out: an `intel: HDMI-A-1: Connected` (or `DP-1`) line should appear within a few seconds
 4. If something is wrong, try `cursor=software`, then `intel=off`, and say which one fixed it.
 5. Optional, on a Skylake to Comet Lake machine with an external monitor: add `intel=modeset`, choose a smaller resolution in Settings → Display, and send the `intel:` lines about it.
+6. Optional, with the Linux packages on the disk: run `kmscube` in Terminal (Return ends it). Mesa draws in software (llvmpipe) on any display device, but full-screen programs on the Intel driver, and llvmpipe's code generation on real processors (it picks instructions by `cpuid`, which `/proc/cpuinfo` now reports in full), have only run in QEMU. The `drm: kmscube on card0: …` line in the log gives its frame rate.
 
 ## AMD Radeon graphics
 
@@ -256,6 +257,7 @@ Then check:
 - **Input.**
   - Touchpads and touch screens that connect over I²C (common on laptops since about 2016) have a driver that has not yet run on real hardware (see [above](#i2c-touchpads-and-touch-screens)); on most Intel laptops it polls the touchpad, as there is no GPIO driver yet. Many such touchpads also have a PS/2 fallback, which works as a plain pointer. I²C keyboards and pens aren't supported. USB Precision Touchpads get the full gestures.
   - Bluetooth keyboards, mice and controllers aren't supported.
+  - Linux programs' view of input (`/dev/input`, `/dev/hidraw*`, see [developer/linux-input.md](developer/linux-input.md)) has been exercised in QEMU only, with the PS/2 keyboard, QEMU's USB keyboard and tablet, the keyboard-played controller, and a touchpad and a raw HID controller made in software. **Untested:** real Xbox, PlayStation and Switch Pro controllers through `/dev/input` (their codes follow the Linux drivers', checked by reading, not against SDL on hardware), raw HID reports of real controllers (SDL's and Steam's HIDAPI drivers: feature reports and output reports go to the device as `GET_REPORT`/`SET_REPORT` or its OUT endpoint), real USB and I²C touchpads' multi-touch events, PS/2 and real mice's motion events, and the Caps Lock light written by a program on real keyboards. I²C HID devices have no `/dev/hidraw*` node. The USB HID driver's new paths (Linux devices for USB keyboards, mice, touchpads and controllers, raw reports for `/dev/hidraw*`, the controllers' USB location in sysfs) have not run with the virtual USB devices either: the self-tests that exercise them need QEMU's `usb-redir`, which the development host's QEMU lacks (they are skipped there); only QEMU's own USB keyboard and tablet went through them.
 - **USB.**
   - xHCI (USB 3), EHCI (USB 2) with its OHCI or UHCI companions, and OHCI and UHCI on their own (USB 1.1) are all driven. EHCI, OHCI and UHCI have only been tested in QEMU.
   - Isochronous transfers (USB audio) work on xHCI only; on EHCI, OHCI and UHCI, `lsusb` shows audio devices as unsupported. No webcams yet.

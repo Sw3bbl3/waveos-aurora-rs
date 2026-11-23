@@ -115,6 +115,15 @@ static void memory(void) {
     CHECK(h[4096] == 42 && h[huge / 2] == 43, "touched pages keep what was written");
     CHECK(madvise(h, 2 * 4096, MADV_DONTNEED) == 0 && h[4096] == 0, "MADV_DONTNEED gives zeros back");
     CHECK(munmap(h, huge) == 0, "unmap 8 GiB");
+    // mincore: mapped pages answer, unmapped ones are ENOMEM (EGL tells a
+    // Wayland display from other pointers this way).
+    unsigned char vec[4];
+    char *mc = mmap(0, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(mc != MAP_FAILED && mincore(mc, 4 * 4096, vec) == 0, "mincore of mapped pages");
+    CHECK(munmap(mc + 2 * 4096, 2 * 4096) == 0, "unmap half");
+    errno = 0;
+    CHECK(mincore(mc, 4 * 4096, vec) == -1 && errno == ENOMEM, "mincore over unmapped pages");
+    munmap(mc, 2 * 4096);
     printf("PASS memory\n");
 }
 
@@ -326,6 +335,25 @@ static void machine(void) {
     char exe[256] = {0};
     CHECK(readlink("/proc/self/exe", exe, sizeof exe - 1) > 0 && strstr(exe, "linuxtest"), "/proc/self/exe");
     CHECK(sysconf(_SC_NPROCESSORS_ONLN) >= 1, "processor count");
+    // The processors as /proc and /sys describe them (cpuid's flags).
+    char *info = malloc(1 << 16);
+    fd = open("/proc/cpuinfo", O_RDONLY);
+    ssize_t in = fd >= 0 ? read(fd, info, (1 << 16) - 1) : -1;
+    close(fd);
+    CHECK(in > 0, "/proc/cpuinfo");
+    info[in] = 0;
+    CHECK(strstr(info, "flags\t\t: fpu") && strstr(info, " sse2") && strstr(info, "model name"), "cpuinfo flags");
+    free(info);
+    char online[32] = {0};
+    fd = open("/sys/devices/system/cpu/online", O_RDONLY);
+    CHECK(fd >= 0 && read(fd, online, sizeof online - 1) > 0 && online[0] == '0', "/sys/devices/system/cpu/online");
+    close(fd);
+    CHECK(sysconf(_SC_NPROCESSORS_CONF) == sysconf(_SC_NPROCESSORS_ONLN), "configured processors are online");
+    // close_range closes a run of descriptors (or marks them close-on-exec).
+    int a = dup(1), b = dup(1);
+    CHECK(a > 2 && b > a && syscall(436 /* close_range */, a, b, 4) == 0, "close_range CLOEXEC");
+    CHECK(fcntl(a, F_GETFD) == FD_CLOEXEC && fcntl(b, F_GETFD) == FD_CLOEXEC, "marked close-on-exec");
+    CHECK(syscall(436 /* close_range */, a, b, 0) == 0 && fcntl(a, F_GETFD) == -1 && fcntl(b, F_GETFD) == -1, "close_range");
     // glibc finds the main thread's stack in /proc/self/maps.
     static char maps[65536];
     fd = open("/proc/self/maps", O_RDONLY);
