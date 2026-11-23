@@ -654,7 +654,7 @@ pub fn desktop_request(req: usize, ptr: u64, len: u64) -> Result<u64, isize> {
         }
         EJECT => {
             let path = crate::fs::resolve("/", &user_str(ptr, len)?);
-            crate::drivers::usb::msc::eject(&path)?;
+            crate::drivers::block::removable::eject(&path)?;
             super::notify::system("Safe to remove", path.trim_start_matches("/Volumes/"));
             Ok(0)
         }

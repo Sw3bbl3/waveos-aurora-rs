@@ -80,6 +80,11 @@ const TESTS: &[Test] = &[
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
+    ("SD/eMMC: the card the system runs from, and the second reader's card", sd_cards),
+    ("SD card: data integrity by PIO, SDMA and ADMA2, across block and buffer boundaries", sd_integrity),
+    ("SD card: throughput by PIO, SDMA and ADMA2, against the system disk", sd_throughput),
+    ("SD card: pulled out and put back (QMP eject and change)", sd_hotplug),
+    ("SD/eMMC on a simulated controller: HS200, UHS-I, TRIM, cache, injected errors, hot-plug", sd_simulated),
     ("AuroraFS on RAM disk (kernel adapter)", wavefs_ramdisk),
     ("AuroraFS home volume", wavefs_home),
     ("FAT32 /Boot", fat_boot),
@@ -787,8 +792,17 @@ use crate::drivers::block::{self, BlockDevice, BlockResult};
 use alloc::string::String;
 use alloc::sync::Arc;
 
+/// The disk the system runs from (its "Aurora HD" is mounted), else the first.
 fn main_disk() -> Arc<dyn BlockDevice> {
-    block::devices().into_iter().find(|d| !d.name().contains('p')).expect("no disk found — is a disk attached?")
+    let disks: Vec<Arc<dyn BlockDevice>> = block::devices().into_iter().filter(|d| !d.name().contains('p')).collect();
+    let home_part = block::devices().into_iter().find(|p| {
+        block::partition_info(p).is_some_and(|i| i.type_guid == ::aurorafs::PARTITION_TYPE)
+            && fs::device_in_use(&p.name())
+    });
+    let home = home_part.and_then(|p| {
+        disks.iter().find(|d| p.name().strip_prefix(d.name().as_str()).is_some_and(|r| r.starts_with('p')))
+    });
+    home.or(disks.first()).cloned().expect("no disk found — is a disk attached?")
 }
 
 fn storage_devices() {
@@ -816,10 +830,18 @@ fn block_round_trip() {
         "ahci"
     } else if name.starts_with("nvme") {
         "nvme"
+    } else if name.starts_with("mmc") {
+        // A shared INTx line: the driver counts its own.
+        "sdhci"
     } else {
         "virtio-blk"
     };
-    let interrupts = || -> u64 { crate::arch::irq::list().iter().filter(|v| v.1 == owner).map(|v| v.2).sum() };
+    let interrupts = || -> u64 {
+        if owner == "sdhci" {
+            return crate::drivers::block::sdhci::interrupts();
+        }
+        crate::arch::irq::list().iter().filter(|v| v.1 == owner).map(|v| v.2).sum()
+    };
     let before = interrupts();
     disk.write(scratch, &pattern).unwrap();
     disk.flush().unwrap();
@@ -829,6 +851,321 @@ fn block_round_trip() {
     assert!(disk.read(disk.sectors(), &mut back[..ss as usize]).is_err(), "out-of-range read must fail");
     let after = interrupts();
     assert!(after > before, "no {} completion interrupts ({} → {})", owner, before, after);
+}
+
+/// The second SD reader's card: the block device whose volume is AURORA-SD.
+fn second_card() -> Arc<dyn BlockDevice> {
+    use crate::drivers::block::sdhci::test;
+    let found = || {
+        block::devices().into_iter().find(|d| {
+            let n = d.name();
+            n.starts_with("mmc") && !n.contains('p') && test::volumes(&n).iter().any(|v| v == "/Volumes/AURORA-SD")
+        })
+    };
+    assert!(
+        wait_for(|| found().is_some(), 10_000),
+        "no SD card with AURORA-SD; slots: {:?}",
+        crate::drivers::block::sdhci::list()
+    );
+    found().unwrap()
+}
+
+fn sd_cards() {
+    use crate::drivers::block::sdhci::{self, test};
+    use aurora_sdmmc::{CardKind, Timing};
+    for line in sdhci::list() {
+        crate::kprintln!("    {line}");
+    }
+    let card = second_card();
+    let info = test::card_info(&card.name()).expect("card info");
+    // QEMU's sd-card on a version 2 controller: 4 GiB SDHC, 4-bit, high speed.
+    assert_eq!(info.kind, CardKind::Sdhc);
+    assert!(info.block_addressed && info.width == 4 && info.timing == Timing::SdHs, "{info:?}");
+    assert!(test::removable(&card.name()));
+    assert_eq!(fs::read_all("/Volumes/AURORA-SD/Hello.txt").unwrap(), b"Hello from an SD card!\n");
+    // A file through FAT, flushed and read back.
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2_246_822_519) >> 20) as u8).collect();
+    fs::write_all("/Volumes/AURORA-SD/Written.bin", &data).unwrap();
+    fs::sync_all();
+    assert!(fs::read_all("/Volumes/AURORA-SD/Written.bin").unwrap() == data, "file read back from SD differs");
+    fs::unlink("/Volumes/AURORA-SD/Written.bin").unwrap();
+    // Running from a card: the system disk is it.
+    let disk = crate::gui::prefs::boot_option("test_disk");
+    if let Some(kind @ ("sd" | "emmc")) = disk.as_deref() {
+        let main = main_disk();
+        assert!(main.name().starts_with("mmc"), "the system disk is {}", main.name());
+        let info = test::card_info(&main.name()).unwrap();
+        crate::kprint!("[system on {}: {}] ", main.name(), info.summary());
+        if kind == "sd" {
+            // 128 MiB: standard capacity, byte-addressed.
+            assert_eq!(info.kind, CardKind::Sdsc);
+        } else {
+            assert_eq!(info.kind, CardKind::Mmc);
+            assert_eq!(info.width, 8);
+            assert_eq!(info.timing, Timing::MmcHs);
+            // The test image has 1 MiB boot partitions and 128 KiB of RPMB: seen, never exposed.
+            assert_eq!((info.boot_bytes, info.rpmb_bytes), (1 << 20, 128 << 10));
+        }
+        assert!(!block::devices().iter().any(|d| d.name().contains("boot") || d.name().contains("rpmb")));
+    }
+}
+
+/// Scratch space on the second card: past its FAT partition (the image
+/// leaves everything after 65 MiB unpartitioned).
+const SD_SCRATCH: u64 = 4 << 20; // sectors: 2 GiB in
+
+fn pattern(seed: u32, len: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(2_654_435_761) | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as u8
+        })
+        .collect()
+}
+
+fn sd_integrity() {
+    use crate::drivers::block::sdhci::{self, test};
+    use aurora_sdmmc::TransferMode;
+    let card = second_card();
+    let name = card.name();
+    let irq_before = sdhci::interrupts();
+    let modes = [TransferMode::Pio, TransferMode::Sdma, TransferMode::Adma32, TransferMode::Adma64];
+    // Runs that start and end on odd sectors, cross the 512-sector bounce
+    // buffer (several commands), and single blocks (CMD17/CMD24).
+    let runs: [(u64, usize); 9] =
+        [(0, 1), (1, 2), (7, 9), (63, 65), (130, 511), (700, 512), (1300, 513), (2000, 1100), (4095, 1)];
+    let mut used = Vec::new();
+    for (m, &mode) in modes.iter().enumerate() {
+        let got = test::set_mode(&name, mode).unwrap();
+        if got != mode {
+            // The reader can't (QEMU's has no 64-bit addressing): skip.
+            continue;
+        }
+        used.push(mode);
+        let base = SD_SCRATCH + m as u64 * 8192;
+        for (i, &(lba, n)) in runs.iter().enumerate() {
+            let data = pattern((m * 100 + i) as u32, n * 512);
+            card.write(base + lba, &data).unwrap();
+            let mut back = alloc::vec![0u8; n * 512];
+            card.read(base + lba, &mut back).unwrap();
+            if back != data {
+                let first = back.iter().zip(&data).position(|(a, b)| a != b).unwrap();
+                test::set_mode(&name, TransferMode::Pio);
+                let mut pio = alloc::vec![0u8; n * 512];
+                card.read(base + lba, &mut pio).unwrap();
+                let pfirst = pio.iter().zip(&data).position(|(a, b)| a != b);
+                panic!(
+                    "{}: {}+{} read back differs at byte {} ({:#x} vs {:#x}); by PIO: {:?}; phys {:#x}",
+                    mode.name(),
+                    lba,
+                    n,
+                    first,
+                    back[first],
+                    data[first],
+                    pfirst,
+                    test::buffer_phys(&name)
+                );
+            }
+        }
+    }
+    card.flush().unwrap();
+    // What one mode wrote, every other reads the same.
+    for (m, &writer) in modes.iter().enumerate().filter(|(_, m)| used.contains(m)) {
+        for &reader in &used {
+            test::set_mode(&name, reader);
+            let base = SD_SCRATCH + m as u64 * 8192;
+            let (lba, n) = runs[7];
+            let mut back = alloc::vec![0u8; n * 512];
+            card.read(base + lba, &mut back).unwrap();
+            assert!(
+                back == pattern((m * 100 + 7) as u32, n * 512),
+                "{} wrote, {} read: differs",
+                writer.name(),
+                reader.name()
+            );
+        }
+    }
+    // Discard (erase on SD): the sectors read back erased (all 0x00 or all 0xFF), the neighbours intact.
+    card.discard(SD_SCRATCH + 130, 100).unwrap();
+    let mut back = alloc::vec![0u8; 101 * 512];
+    card.read(SD_SCRATCH + 130, &mut back).unwrap();
+    let erased = &back[..100 * 512];
+    assert!(
+        erased.iter().all(|&b| b == erased[0]) && (erased[0] == 0 || erased[0] == 0xFF),
+        "discarded sectors not erased"
+    );
+    assert!(
+        back[100 * 512..] == pattern(4, 511 * 512)[100 * 512..101 * 512],
+        "the sector after the discarded ones changed"
+    );
+    // Out of range and unaligned requests fail cleanly.
+    assert!(card.read(card.sectors(), &mut back[..512]).is_err());
+    assert!(card.read(0, &mut back[..100]).is_err());
+    test::set_mode(&name, TransferMode::Adma64);
+    let irqs = sdhci::interrupts() - irq_before;
+    crate::kprint!("[{} modes, {} interrupts] ", used.len(), irqs);
+    assert!(used.len() >= 3, "PIO, SDMA and ADMA2 must all run: {:?}", used);
+    assert!(irqs > 0, "no SD host controller interrupts");
+}
+
+/// MB/s for `bytes` in `ns` (two decimals as an integer pair).
+fn rate(bytes: u64, ns: u64) -> (u64, u64) {
+    let x = bytes * 100_000 / ns.max(1) * 1_000_000_000 / 100_000 / 10_000;
+    (x / 100, x % 100)
+}
+
+/// Sequential and random throughput of `disk` in the `sectors` at `base`
+/// (writes only where `writes`).
+fn measure(disk: &Arc<dyn BlockDevice>, base: u64, sectors: u64, writes: bool) -> alloc::string::String {
+    let chunk = 256 * 1024;
+    let total = (sectors * 512).min(4 << 20) as usize;
+    let buf = pattern(9, chunk);
+    let mut back = alloc::vec![0u8; chunk];
+    let mut out = alloc::string::String::new();
+    let t = time::now_ns();
+    for i in 0..total / chunk {
+        disk.read(base + (i * chunk / 512) as u64, &mut back).unwrap();
+    }
+    let (a, b) = rate(total as u64, time::now_ns() - t);
+    out += &alloc::format!("seq read {a}.{b:02} MB/s");
+    if writes {
+        let t = time::now_ns();
+        for i in 0..total / chunk {
+            disk.write(base + (i * chunk / 512) as u64, &buf).unwrap();
+        }
+        disk.flush().unwrap();
+        let (a, b) = rate(total as u64, time::now_ns() - t);
+        out += &alloc::format!(", seq write {a}.{b:02} MB/s");
+    }
+    // Random 4 KiB reads (and writes) within the region.
+    let mut x = 12345u64;
+    let n = 200;
+    let span = sectors.min(total as u64 / 512) - 8;
+    let t = time::now_ns();
+    for _ in 0..n {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        disk.read(base + (x >> 33) % span, &mut back[..4096]).unwrap();
+    }
+    let ns = time::now_ns() - t;
+    out += &alloc::format!(", random 4K read {} IOPS", n as u64 * 1_000_000_000 / ns.max(1));
+    if writes {
+        let t = time::now_ns();
+        for _ in 0..n {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            disk.write(base + (x >> 33) % span, &buf[..4096]).unwrap();
+        }
+        disk.flush().unwrap();
+        let ns = time::now_ns() - t;
+        out += &alloc::format!(", random 4K write {} IOPS", n as u64 * 1_000_000_000 / ns.max(1));
+    }
+    out
+}
+
+fn sd_throughput() {
+    use crate::drivers::block::sdhci::test;
+    use aurora_sdmmc::TransferMode;
+    let card = second_card();
+    let name = card.name();
+    crate::kprintln!();
+    for mode in [TransferMode::Pio, TransferMode::Sdma, TransferMode::Adma32, TransferMode::Adma64] {
+        if test::set_mode(&name, mode) != Some(mode) {
+            continue;
+        }
+        crate::kprintln!("    sd-perf: {} {}: {}", name, mode.name(), measure(&card, SD_SCRATCH, 1 << 16, true));
+    }
+    test::set_mode(&name, TransferMode::Adma64);
+    // The system disk, for comparison: reads across its home volume, writes
+    // in the image's 1 MiB scratch area at the end.
+    let main = main_disk();
+    let ss = main.sector_size() as u64;
+    let scratch = main.sectors() - 33 - (1 << 20) / ss;
+    crate::kprintln!(
+        "    sd-perf: {} (system disk) {}",
+        main.name(),
+        measure(&main, 2048 + (64 << 20) / ss, 1 << 13, false)
+    );
+    crate::kprintln!(
+        "    sd-perf: {} (system disk, scratch) {}",
+        main.name(),
+        measure(&main, scratch, (1 << 20) / ss, true)
+    );
+    crate::kprint!("    ");
+}
+
+fn sd_hotplug() {
+    let file = "/Volumes/AURORA-SD/Hello.txt";
+    let card = second_card();
+    let name = card.name();
+    drop(card);
+    crate::kprintln!("\nharness: eject sd-card");
+    let gone = || fs::stat(file).is_err() && !block::devices().iter().any(|d| d.name() == name);
+    assert!(wait_for(gone, 15_000), "the SD card's volume and device stayed after it was pulled out");
+    crate::kprintln!("harness: insert sd-card");
+    let back = || fs::read_all(file).ok().as_deref() == Some(&b"Hello from an SD card!\n"[..]);
+    assert!(wait_for(back, 15_000), "the SD card did not come back; slots: {:?}", crate::drivers::block::sdhci::list());
+    crate::kprint!("    ");
+}
+
+fn sd_simulated() {
+    use crate::drivers::block::sdhci::test;
+    use aurora_sdmmc::mock::{CardSpec, Fault, CAPS_FULL};
+    use aurora_sdmmc::regs::version;
+    use aurora_sdmmc::{CardKind, Timing};
+    // An eMMC on a full version 3 controller: 8-bit HS200, cache, TRIM.
+    let mock = test::mock(CAPS_FULL, version::V3);
+    mock.insert(CardSpec::emmc(16 * 2048));
+    let name = test::attach_mock(&mock, false).expect("simulated slot");
+    let info = test::card_info(&name).expect("the simulated eMMC came up");
+    assert_eq!((info.kind, info.width, info.timing), (CardKind::MmcHc, 8, Timing::Hs200));
+    let disk = block::devices().into_iter().find(|d| d.name() == name).expect("registered");
+    let data = pattern(77, 700 * 512);
+    disk.write(100, &data).unwrap();
+    assert!(mock.card(|c| c.dirty).unwrap(), "writes sit in the eMMC cache");
+    disk.flush().unwrap();
+    assert!(!mock.card(|c| c.dirty).unwrap(), "flush empties the cache");
+    let mut back = alloc::vec![0u8; data.len()];
+    disk.read(100, &mut back).unwrap();
+    assert!(back == data);
+    // TRIM through the block layer.
+    disk.discard(200, 50).unwrap();
+    assert_eq!(mock.card(|c| c.erased.clone()).unwrap(), alloc::vec![(200, 249, 1)]);
+    // Injected errors: one-off CRC and timeout errors are retried.
+    let (retries, _) = test::recovery(&name).unwrap();
+    mock.inject(Some(18), Fault::DataCrc { after: 3 }, 1);
+    mock.inject(Some(25), Fault::CmdCrc, 1);
+    mock.inject(Some(18), Fault::Adma, 1);
+    disk.write(100, &data).unwrap();
+    disk.read(100, &mut back).unwrap();
+    disk.read(100, &mut back).unwrap();
+    assert!(back == data);
+    let (after, _) = test::recovery(&name).unwrap();
+    assert!(after >= retries + 3, "retries {retries} → {after}");
+    // A card that stops answering: the I/O fails, the kernel carries on.
+    mock.inject(Some(18), Fault::CmdTimeout, 1000);
+    assert!(disk.read(100, &mut back).is_err());
+    mock.clear_faults();
+    disk.read(100, &mut back).unwrap();
+    assert_eq!(mock.card(|c| c.hidden_touches).unwrap(), 0, "a boot or RPMB partition was touched");
+    let violations = mock.violations();
+    assert!(violations.is_empty(), "the driver broke the controller's rules: {violations:?}");
+    // A UHS-I card in a removable slot: 1.8 V, SDR104 and tuning, then hot-plug.
+    let mock = test::mock(CAPS_FULL, version::V3);
+    let name = test::attach_mock(&mock, true).expect("simulated slot");
+    mock.insert(CardSpec::uhs(8 * 2048));
+    test::poke(&name);
+    let present = || block::devices().iter().any(|d| d.name() == name);
+    assert!(wait_for(present, 5000), "the inserted card was not registered");
+    let info = test::card_info(&name).unwrap();
+    assert_eq!(info.timing, Timing::UhsSdr104);
+    assert!(info.signal_1v8);
+    mock.eject();
+    test::poke(&name);
+    assert!(wait_for(|| !present(), 5000), "the pulled card stayed registered");
+    let violations = mock.violations();
+    assert!(violations.is_empty(), "the driver broke the controller's rules: {violations:?}");
 }
 
 /// A block device in RAM.
@@ -1881,6 +2218,11 @@ fn sleep_and_wake() {
     assert!(
         wait_for(|| crate::fs::stat("/Volumes/AURORA-USB/Hello.txt").is_ok(), 10_000),
         "the USB stick did not come back after sleep"
+    );
+    assert_eq!(
+        crate::fs::read_all("/Volumes/AURORA-SD/Hello.txt").as_deref().ok(),
+        Some(&b"Hello from an SD card!\n"[..]),
+        "the SD card did not come back after sleep"
     );
     // Let USB finish re-enumerating (it allocates memory later tests count).
     assert!(wait_for(|| crate::drivers::usb::list().len() >= 4, 10_000), "USB devices missing after sleep");

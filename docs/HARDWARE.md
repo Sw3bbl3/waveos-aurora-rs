@@ -60,6 +60,9 @@ Options go in `\aurora\boot.conf` on the EFI partition, one `key=value` per line
 | `intel=modeset` | Let the Intel driver change resolutions (Skylake, Kaby, Coffee and Comet Lake, external displays only, no larger than the firmware's mode; untested) |
 | `timer=periodic` | Go back to a 1 kHz tick on every CPU (instead of tickless timers). `timer=oneshot` avoids the TSC-deadline timer. Try these if the machine hangs or stutters once the desktop is up. |
 | `idle=halt` | Idle with `hlt` only (no `mwait` C-states). `idle=mwait` uses `mwait` even in a virtual machine; `idle=poll` never sleeps (for measurements). |
+| `sdhci=pio` | How SD cards and eMMC move data: `pio`, `sdma`, `adma32` or `adma64` (default: the best the controller offers). Try `sdhci=pio` if a card reader corrupts data or hangs. |
+| `sdhci_speed=high` | Caps the SD/eMMC bus: `high` (no UHS-I, HS200 or HS400), `default` (25 MHz), `slow` (12.5 MHz). |
+| `emmc=hs400` | Allows eMMC HS400 (off by default: whether a controller can do it isn't discoverable). |
 
 ## What to check
 
@@ -75,6 +78,7 @@ Work through the list and note what happens. The boot log (below) records the de
 - [ ] **Game controllers.** Plug in an Xbox, PlayStation or generic USB controller; `lsusb` should list it as a game controller.
 - [ ] **USB stick.** Plug in a FAT32 stick: it should appear in Files under Locations. Open a file, copy one onto it, then eject it and unplug.
 - [ ] **Internal disk.** `lspci` should list the controller, and `df` should show whether a WaveOS volume was found.
+- [ ] **SD card reader and eMMC.** See [SD cards and eMMC](#sd-cards-and-emmc): a FAT32 card should appear in Files when inserted and go away when pulled out; `dmesg | grep sdhci` describes the controller and card.
 - [ ] **Network.** With a supported wired adapter (see below) plugged in, the menu-bar network item should show Connected and an address. In Terminal try `ifconfig`, `ping example.com` and `fetch https://example.com`, then open NetSurf.
 - [ ] **Sound.** Play `play /System/Sounds/startup.wav`, then `play --tone 440 1000`. Try the volume keys, the menu-bar slider, and headphones in and out.
 - [ ] **USB audio.** Plug in a USB headset, speaker or DAC: `lsusb` should show it as `audio: speaker` (and `microphone`), and `record --list` should list it. Choose it in the menu bar's sound card or Settings → Sound, play a sound, change the volume, then `record -t 5 test.wav` and `play test.wav`. Unplug it while it plays: sound should move back to the built-in output.
@@ -127,6 +131,56 @@ What to try and send back:
 4. If something is wrong, try `cursor=software`, then `intel=off`, and say which one fixed it.
 5. Optional, on a Skylake to Comet Lake machine with an external monitor: add `intel=modeset`, choose a smaller resolution in Settings → Display, and send the `intel:` lines about it.
 
+## SD cards and eMMC
+
+WaveOS drives SD Host Controllers (SDHCI, the standard most laptop card readers and every x86 eMMC controller follow), found as PCI functions of class 08/05 or as ACPI devices (`PNP0D40`, Intel Bay Trail/Cherry Trail/LPSS and Apollo Lake ids, AMD `AMDI0040`/`AMDI0041`). SD cards (SDSC, SDHC, SDXC) and eMMC work as disks: the system can be installed to and run from either, and a removable card's FAT32 volumes appear in Files under Locations when it is inserted and disappear when it is pulled out (or ejected). eMMC boot partitions and the RPMB partition are never read or written, and never shown.
+
+**What has run, and where.** The driver core (`libs/sdmmc`) runs on the host against a simulated controller and cards (`cargo test -p aurora-sdmmc`) and in the kernel self-test against the same simulation; QEMU provides the real controller for the rest. Nothing has run on physical hardware yet.
+
+| Feature | QEMU (`sdhci-pci`) | Simulation only | Not run at all |
+|---|---|---|---|
+| PCI discovery, register BARs, INTx interrupts (polled until ACPI routes them) | ✅ | | MSI (QEMU's has none) |
+| ACPI-enumerated controllers (`_CRS` registers and interrupt) | | | ✅ untested |
+| Controller versions 2.00 (8-bit divider) and 3.00 (10-bit divider) | ✅ | | 4.x controllers in their 4.0 mode (the driver uses the 3.00-compatible register layout throughout) |
+| PIO, SDMA, ADMA2 32-bit and 64-bit descriptors | ✅ (64-bit on the version 3 reader) | SDMA stopping at its 512 KiB boundary | |
+| SD init (CMD0/8/ACMD41/2/3/9/7), SDSC byte and SDHC block addressing, 4-bit bus, high speed (CMD6) | ✅ (128 MiB SDSC, 4 GiB SDHC) | | SDXC above 32 GB (same code path as SDHC) |
+| Multi-block with Auto CMD12 | ✅ (QEMU's SCR has no CMD23) | | |
+| Multi-block bounded by CMD23 | ✅ (eMMC) | ✅ (SD) | |
+| UHS-I: 1.8 V switch (CMD11), SDR50/SDR104/DDR50, tuning (CMD19) | | ✅ | ✅ real 1.8 V regulators, preset values |
+| eMMC init (CMD1, EXT_CSD), 8-bit bus, high speed, byte-addressed eMMC up to 2 GB | ✅ | | |
+| eMMC above 2 GB (sector mode), HS200 and tuning (CMD21), HS400 | | ✅ | ✅ on real parts |
+| eMMC boot and RPMB partitions left alone and hidden | ✅ (the harness checks QEMU's backing image) | ✅ | |
+| eMMC partition access left on a boot partition by firmware, switched back to the user area | | ✅ | |
+| eMMC cache on and flushed; TRIM; erase in whole erase groups | erase on SD ✅ (QEMU's eMMC has no cache or TRIM) | ✅ | |
+| Card insertion and removal | ✅ (QMP eject and change on the second reader) | ✅ | real card-detect switches and debounce |
+| Write-protect switch | | ✅ | QEMU refuses read-only cards |
+| Errors: command timeout and CRC, data CRC and timeout, ADMA error; retries, re-tuning, falling back to slower modes | | ✅ (injected) | |
+| Resume from S3 (controller reset, card brought up again) | ✅ | | |
+
+**Throughput in QEMU** (the self-test's `sd-perf:` lines; QEMU 11.1 under TCG on an 8-core Mac shared with other work, so only the ratios mean much). The card is QEMU's `sd-card` on the version 2.00 reader, 4-bit high speed at 26 MHz; sequential runs move 4 MiB in 256 KiB requests, random ones 200 single 4 KiB requests:
+
+| Path | Sequential read | Sequential write | Random 4 KiB read | Random 4 KiB write |
+|---|---|---|---|---|
+| SD, PIO | 3.2–4.1 MB/s | 3.7–4.2 MB/s | 870–973 IOPS | 907–1015 IOPS |
+| SD, SDMA | 6.6–7.7 MB/s | 6.6–7.6 MB/s | 1545–1870 IOPS | 1410–1765 IOPS |
+| SD, ADMA2 (32-bit) | 6.3–8.1 MB/s | 6.1–7.6 MB/s | 1460–1850 IOPS | 1430–1770 IOPS |
+| SD system disk (`--disk sd`: version 3.00 reader, ADMA2 64-bit) | 6.2–7.9 MB/s | 6.1–7.4 MB/s | 1450–1710 IOPS | 1350–1400 IOPS |
+| AHCI system disk (for comparison) | 640–1060 MB/s | 550–740 MB/s | 14 000–33 000 IOPS | 15 000–28 000 IOPS |
+
+DMA roughly doubles PIO here, where every 32-bit Buffer Data Port access is a trap into QEMU; SDMA and ADMA2 tie because QEMU's card model moves data a byte at a time either way, which also caps every SD figure two orders of magnitude below AHCI (whose reads come from the host's page cache). On real hardware the card's bus is the limit (about 23 MB/s at high speed, 90 MB/s at SDR104, 200 MB/s for HS200 eMMC), and ADMA2's single descriptor table per command should matter more than it does here.
+
+In the boot log, `sdhci:` lines name each controller (version, base clock, DMA mode, 8-bit, 1.8 V and UHS-I support, removable or embedded, interrupt), each card (kind, name, size, bus width, timing and clock, CID) and any recovery (`I/O failed (…), attempt N`, `brought up again: …` after falling back to a slower mode). Please include them in reports. If a card reader misbehaves, try `sdhci=pio`, then `sdhci_speed=high` or `default`.
+
+**Card readers that aren't SDHCI** are not supported. The boot log names them (`… card reader: not supported`):
+
+| Reader | PCI ids | What a driver would need |
+|---|---|---|
+| Realtek RTS5209, RTS5227, RTS5228, RTS5229, RTS522A, RTS5249, RTS524A, RTS525A, RTS5260, RTS5261, RTS5264, RTL8402, RTL8411, RTL8411B (very common in laptops) | 10ec:5209, 5227, 5228, 5229, 522a, 5249, 524a, 525a, 5260, 5261, 5264, 5286, 5287, 5289 | Realtek's own PCIe interface: a command/response ring in host memory (`RTSX_HCBAR`/`HCBCTLR`) through which the driver reads and writes the chip's internal registers and sends SD commands (`SD_CMD0`–`SD_CMD5`, `SD_TRANSFER`), one scatter-gather table for data, per-chip initialisation (PHY registers over `PHYDATA`/`PHYADDR`, the card power and OCP controls, LDO and SSC clock settings that differ for each of the models above), card detect from `RTSX_BIPR`, and the 1.8 V switch through the chip's own LDO registers. The SD protocol in `libs/sdmmc/src/card.rs` would sit on top unchanged, behind a second host implementation. |
+| Alcor Micro AU6601, AU6621, AU6625 | 1aea:6601, 6621, 6625 | A register interface of its own (command, block, DMA and interrupt registers at fixed offsets, a 4 KiB DMA page per transfer, PIO for short ones), with the same SD protocol on top. |
+| USB card readers (Realtek RTS5129/5139/5179, Genesys GL3224 and others) | — | Nothing: they are USB mass storage and already work. |
+
+O2 Micro, Genesys Logic GL9750/GL9755/GL9763E, JMicron JMB38x, Ricoh and BayHub readers present themselves as SDHCI and are driven, but without the per-vendor quirks other systems apply (for example GL975x clock and ASPM settings, JMicron's ADMA length limits). If one misbehaves, `sdhci=pio` is the first thing to try.
+
 ## Power management
 
 Timers, idle states and processor frequency were written from the Intel SDM, AMD's manuals and the ACPI specification, and only the parts QEMU emulates have run: one-shot LAPIC timers, tickless idle with `hlt`, the ACPI paths finding no `_CST`/`_PSS`. **TSC-deadline timers, `mwait` C-states, Intel HWP, AMD CPPC and ACPI P-states have not run on real hardware.**
@@ -157,7 +211,7 @@ Then check:
 
 - **Graphics.** On Intel graphics from Skylake to Raptor Lake a native display driver (untested on real hardware, see [above](#intel-graphics)) keeps the firmware's mode and adds a hardware pointer, EDID, hotplug detection and backlight control. Elsewhere WaveOS draws into the framebuffer the firmware set up (GOP). Either way the resolution changes only at boot (the Intel driver's `intel=modeset` aside). Several displays work in virtual machines (virtio-gpu with several scanouts); on real hardware they need a native display driver, and nothing of multi-monitor support (hotplug, per-display modes and scales, a separate presenting task per display, EDID identities for saved arrangements) has run on a real GPU or monitor. Two QEMU std VGAs (`secondary-vga`) are not driven together: only the first is used. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes. In virtual machines, Bochs/QEMU std VGA and virtio-gpu (WaveOS's own driver, with a hardware cursor and the window size followed live) change resolution at once and restore the picture after sleep.
 - **The Linux DRM device** (`/dev/dri/card0`) is tested in QEMU on Bochs VGA, the native virtio-gpu driver and the ported Linux one (`gpu=linux`). Untested: a card on the firmware framebuffer alone (`simpledrm`; QEMU always has Bochs or virtio), devices with real vblank interrupts (no driver has them yet: vblanks are counted from the mode's refresh rate), and more than one card.
-- **Storage.** AHCI, NVMe and virtio disks work, but Intel RST / RAID mode does not. USB storage must be FAT32 (exFAT and NTFS aren't supported).
+- **Storage.** AHCI, NVMe and virtio disks, SD cards and eMMC work, but Intel RST / RAID mode does not. USB storage and SD cards must be FAT32 (exFAT and NTFS aren't supported, and most SD cards above 32 GB come formatted exFAT). Realtek and Alcor PCIe card readers aren't supported (see [SD cards and eMMC](#sd-cards-and-emmc)). Installing to eMMC works the same as to any disk; booting from it needs firmware that can read it, as tablets' and laptops' firmware does (QEMU's OVMF can't, so the tests start the bootloader from a copy on another disk).
 - **Input.**
   - Touchpads and touch screens that connect over I²C (common on laptops since about 2016) have a driver that has not yet run on real hardware (see [above](#i2c-touchpads-and-touch-screens)); on most Intel laptops it polls the touchpad, as there is no GPIO driver yet. Many such touchpads also have a PS/2 fallback, which works as a plain pointer. I²C keyboards and pens aren't supported. USB Precision Touchpads get the full gestures.
   - Bluetooth keyboards, mice and controllers aren't supported.
@@ -198,7 +252,7 @@ Please add a row for each machine you try.
 
 | Machine | CPU | Boots | Display | Keyboard / pointer | USB storage | Disk | Network | Sound | Battery | Sleep | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| QEMU 11 (q35, Homebrew OVMF), macOS host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB | ✅ | ✅ AHCI, NVMe, virtio | ✅ virtio-net, e1000, e1000e, igb, RTL8139 | ✅ HDA, USB audio (xHCI) | ✅ test SSDT | ✅ | Development setup (`cargo xtask run` / `test`) |
+| QEMU 11 (q35, Homebrew OVMF), macOS host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB | ✅ | ✅ AHCI, NVMe, virtio, SD, eMMC | ✅ virtio-net, e1000, e1000e, igb, RTL8139 | ✅ HDA, USB audio (xHCI) | ✅ test SSDT | ✅ | Development setup (`cargo xtask run` / `test`) |
 | QEMU 8.2 (q35, Ubuntu OVMF), Linux host | TCG, 4 cores | ✅ | ✅ | ✅ PS/2, USB on xHCI, EHCI+UHCI, EHCI+OHCI, OHCI, UHCI; virtual touchpad, keyboard and controllers over usb-redir | ✅ every controller | ✅ AHCI | ✅ virtio-net | ✅ HDA | ✅ test SSDT | ⚠️ firmware doesn't resume | `cargo xtask test --usb …` |
 | QEMU and OVMF from Ubuntu 24.04 | TCG, 4 cores | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | CI. This firmware build faults while resuming from S3, before WaveOS runs, so the tests skip sleep there |
 | | | | | | | | | | | | |
