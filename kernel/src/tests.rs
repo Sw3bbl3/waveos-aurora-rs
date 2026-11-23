@@ -1212,6 +1212,9 @@ fn linux_fuzz() {
         (opt("fuzz_seed", "1"), opt("linuxfuzz_children", "6"), opt("linuxfuzz_calls", "300"));
     let before = free_frames();
     run_linux_test_with("linuxfuzz", &["linuxfuzz", &seed, &children, &calls], "linuxfuzz passed", 30 * 60_000);
+    // What its own clean-up could not remove (a child may have taken the
+    // permissions away): the next boot starts from the same place.
+    let _ = fs::remove_tree("/Linux/tmp/lfz");
     let deadline = time::uptime_ms() + 10_000;
     while free_frames() + FUZZ_SLACK < before && time::uptime_ms() < deadline {
         let _ = crate::gui::server::take_commands();
