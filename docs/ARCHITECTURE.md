@@ -13,6 +13,7 @@ This document is for someone about to read or change the code. It follows the ma
 | `libs/bootinfo/` | `bootinfo` | both | `#[repr(C)]` handoff contract |
 | `libs/abi/` | `aurora-abi` | kernel + user | System call numbers, errors, `#[repr(C)]` structs, key types |
 | `libs/gfx/` | `lumen` | kernel + user | Rasterizer, our TrueType engine, theme, icons, widgets, wallpapers |
+| `libs/edid/` | `aurora-edid` | kernel + host | EDID parsing (base block, CTA-861, DisplayID) and CVT timings |
 | `libs/image/` | `aurora-image` | kernel + user + host | PNG decoder and encoder; JPEG, GIF and BMP decoders |
 | `libs/elf/` | `aurora-elf` | bootloader + kernel | Overflow-checked ELF64 reader |
 | `libs/aurorafs/` | `aurorafs` | kernel + host | The AuroraFS filesystem engine (also used by `mkfs` in xtask) |
@@ -59,7 +60,8 @@ serial → GDT/TSS → IDT → syscall MSRs → FPU → mm (frames, heap, drop i
       → ACPI tables → HPET → TSC calibration → APIC → per-CPU data → PS/2 + IRQ routing
       → VFS (RamFS at /, TarFS at /System) → scheduler → reaper → sti
       → start the other CPUs (trampoline, INIT-SIPI-SIPI)
-      → PCI → display → block drivers + GPT (MSI/MSI-X) → mount AuroraFS at /, FAT32 at /Boot
+      → PCI → display (Bochs VGA or the firmware framebuffer) → block drivers + GPT (MSI/MSI-X)
+      → mount AuroraFS at /, FAT32 at /Boot → GPU drivers (virtio-gpu; `gpu=` in boot.conf)
       → USB (xHCI) → sound (HDA + mixer) → ACPI runtime (AML task)
       → flusher → spawn "lumen-server" (restores settings, launches Welcome) → idle
 ```
@@ -171,7 +173,7 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
   1. drains input
   2. applies client commands (`server::take_commands`: window created, closed, presented, retitled; open app/file; theme; power) and crash reports
   3. repaints only the **damaged rectangles** into a RAM back buffer
-  4. copies them to the GOP framebuffer
+  4. presents them on the display (`drivers/gpu`): the back buffer is the framebuffer the display scans out, so on virtio-gpu only the damaged rectangles are transferred, and on VGA-style devices they are copied to video memory
 - **Client windows** (`server.rs`, `apps/client.rs`):
   - **Surface:** each window owned by a process has a surface, which is frames mapped both into the kernel (`vmm::kmap`) and into the process (`map_shared`).
   - **Compositing:** `ClientApp` adapts it to the window manager. It blits the surface with rounded bottom corners, and turns clicks, keys, scrolls, focus and resizes into `aurora_abi::Event`s on the window's queue.
@@ -191,7 +193,8 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
 - **Notifications** (`notify.rs`, `desktop/notifications.rs`): `notify` from apps, or the system; banners slide in at the top right, and the Notification Center (click the clock) keeps the history next to a calendar and Do Not Disturb.
 - **Spotlight** (`desktop/spotlight.rs`, `fs/index.rs`): apps, files, settings panes, calculations and commands. The file index is built by a background task at boot and kept current by hooks in the VFS (create, mkdir, rename, unlink).
 - **Preferences** (`settings.rs`, `prefs.rs`): `key=value` lines in `/Settings/aurora.conf`, read and written with `pref_get`/`pref_set` and applied at once: dark mode, the accent colour, keyboard layout and key repeat, clock format, Do Not Disturb, volume.
-- **Display modes** (`drivers/display.rs`): on Bochs/QEMU VGA the resolution switches live (new framebuffer and back buffer, every window clamped, a `SCREEN` event to apps, then a 15-second "Keep this resolution?"). Elsewhere the firmware's GOP modes (passed in BootInfo v3) are offered and the choice goes to `\aurora\boot.conf` for the bootloader.
+- **The display core** (`drivers/gpu/`, see [developer/display-core.md](developer/display-core.md)): display drivers expose Linux KMS objects (CRTCs, primary and cursor planes, encoders, connectors with EDID, refcounted buffer objects and framebuffers) and take atomic commits. Drivers: the firmware framebuffer (GOP), Bochs/QEMU std VGA, a native virtio-gpu driver (zero-copy scanout of the compositor's buffer, damage-only transfers, hardware cursor, multiple scanouts, host window resizes as hotplug), and the ported Linux virtio-gpu driver (`gpu=linux`). Lumen Server is a client of it through `gpu::output::Output`, and puts the pointer on the cursor plane when there is one.
+- **Display modes** (`drivers/display.rs`): when the display can switch live (Bochs VGA, virtio-gpu) the resolution changes at once (new framebuffer, every window clamped, a `SCREEN` event to apps, then a 15-second "Keep this resolution?"); a virtio display also follows the host window. Elsewhere the firmware's GOP modes (passed in BootInfo v3) are offered and the choice goes to `\aurora\boot.conf` for the bootloader.
 - **Screenshots:** Print Screen or Super+Shift+3 saves a PNG to Pictures, encoded on a background task.
 
 ## 5. Storage (`drivers/pci.rs`, `drivers/block/`, `fs/`)
@@ -269,7 +272,7 @@ The driver reads and writes FAT32 with VFAT long file names, generating `NAME~N.
 2. The IOAPIC routes and the PCI configuration of every device are saved, the FACS waking vector is pointed at the trampoline page, and the CPU context is saved like `setjmp`.
 3. `SLP_TYP`/`SLP_EN` power everything down but RAM.
 4. On wake, the firmware starts CPU 0 in real mode at the trampoline, which enters long mode and calls `resume_entry`. That reloads the kernel page tables, the GDT and TSS (clearing its busy bit), the IDT, `syscall` and FPU setup, and returns into `suspend` as if the save had just returned.
-5. `suspend` then restores the clocks, the APICs, PCI configuration and MSI/MSI-X routes, each driver's hardware (`drivers::resume`: AHCI, NVMe, virtio, HDA, xHCI, display mode, PS/2), ACPI events and `\_WAK`, and finally restarts the other CPUs.
+5. `suspend` then restores the clocks, the APICs, PCI configuration and MSI/MSI-X routes, each driver's hardware (`drivers::resume`: AHCI, NVMe, virtio, HDA, xHCI, the display devices' committed state and picture, PS/2), ACPI events and `\_WAK`, and finally restarts the other CPUs.
 
 ## 7. Networking (`drivers/net/`, `net/`)
 

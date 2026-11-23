@@ -53,6 +53,8 @@ Options go in `\aurora\boot.conf` on the EFI partition, one `key=value` per line
 | `resolution=1920x1080` | The display mode the bootloader picks (Settings → Display writes it) |
 | `acpi=off` | Don't start the AML interpreter: no power button, battery or sleep, but everything else works. Try this if the machine misbehaves during boot. |
 | `sleep=off` | Hide Sleep, for machines whose firmware does not resume properly |
+| `gpu=linux` | Drive a virtio GPU with the ported Linux driver instead of the native one (virtual machines) |
+| `cursor=software` | Draw the pointer into the picture instead of on the display's cursor plane |
 
 ## What to check
 
@@ -85,7 +87,7 @@ Work through the list and note what happens. The boot log (below) records the de
 
 ## Known limits
 
-- **Graphics.** On real hardware there is no native GPU driver yet: WaveOS draws into the framebuffer the firmware set up (GOP). In virtual machines with a virtio display, Linux's virtio-gpu driver (run through WaveOS's compatibility layer) drives it. The resolution changes only at boot. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes.
+- **Graphics.** On real hardware there is no native GPU driver yet: WaveOS draws into the framebuffer the firmware set up (GOP), and the resolution changes only at boot. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes. In virtual machines, Bochs/QEMU std VGA and virtio-gpu (WaveOS's own driver, with a hardware cursor and the window size followed live) change resolution at once and restore the picture after sleep.
 - **Storage.** AHCI, NVMe and virtio disks work, but Intel RST / RAID mode does not. USB storage must be FAT32 (exFAT and NTFS aren't supported).
 - **Input.**
   - Touchpads that connect over I²C (common on laptops since about 2016) aren't supported yet. Many of them also have a PS/2 fallback, which works (as a plain pointer, without gestures). USB Precision Touchpads get the full gestures.
