@@ -473,10 +473,6 @@ pub fn adopt(frames: &[u64], holders: u32) {
     }
 }
 
-/// How many hold counted frame `f` (0: it isn't counted).
-pub fn holders(f: u64) -> u32 {
-    PAGES.lock().counted.get(&f).map_or(0, |c| c.holders)
-}
 
 /// A holder (an object if `object`) lets go of `f`; the last one frees it.
 pub fn release(f: u64, object: bool) {
@@ -727,8 +723,8 @@ pub fn load(stored: &Stored, f: u64) -> bool {
             true
         }
         Stored::Fill(v) => {
-            for w in page.chunks_exact_mut(8) {
-                w.copy_from_slice(&v.to_le_bytes());
+            for w in page.as_chunks_mut::<8>().0 {
+                *w = v.to_le_bytes();
             }
             true
         }
@@ -886,7 +882,7 @@ fn store(f: u64) -> Option<Stored> {
 pub fn store_in_memory(f: u64) -> Option<Stored> {
     let page = unsafe { core::slice::from_raw_parts(phys_to_virt(f) as *const u8, PAGE_SIZE as usize) };
     let first = u64::from_le_bytes(page[..8].try_into().unwrap());
-    if page.chunks_exact(8).all(|w| u64::from_le_bytes(w.try_into().unwrap()) == first) {
+    if page.as_chunks::<8>().0.iter().all(|w| u64::from_le_bytes(*w) == first) {
         return Some(if first == 0 { Stored::Zero } else { Stored::Fill(first) });
     }
     if PAGES.lock().zram_room() {

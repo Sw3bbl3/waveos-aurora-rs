@@ -40,14 +40,14 @@ fn pattern(seed: u64, page: u64, random: bool) -> [u8; PAGE_SIZE as usize] {
     let mut out = [0u8; PAGE_SIZE as usize];
     let mut x = seed ^ page.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x1234_5678;
     let mut block = [0u64; 8];
-    for (i, w) in out.chunks_exact_mut(8).enumerate() {
+    for (i, w) in out.as_chunks_mut::<8>().0.iter_mut().enumerate() {
         if random || i < 8 {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
             block[i % 8] = x;
         }
-        w.copy_from_slice(&if random { x } else { block[i % 8] }.to_le_bytes());
+        *w = if random { x } else { block[i % 8] }.to_le_bytes();
     }
     out
 }
@@ -192,11 +192,11 @@ pub fn semantics() {
 // ------------------------------------------------------- with programs
 
 /// Memory held here so programs get only `swap_test_ram` MiB.
-struct Balloon(Vec<u64>);
+pub struct Balloon(Vec<u64>);
 
 impl Balloon {
     /// Takes frames until about `leave_mib` MiB are left to programs.
-    fn leaving(leave_mib: Option<u64>) -> Balloon {
+    pub fn leaving(leave_mib: Option<u64>) -> Balloon {
         let mut held = Vec::new();
         if let Some(mib) = leave_mib {
             let keep = kswapd::high_watermark() + mib * 256;

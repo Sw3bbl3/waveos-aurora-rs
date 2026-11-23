@@ -371,6 +371,7 @@ const FUZZ_SLACK: u64 = 32;
 fn syscall_fuzz() {
     let opt = |k: &str, d: &str| crate::gui::prefs::boot_option(k).unwrap_or_else(|| alloc::string::String::from(d));
     let (seed, iters, rounds) = (opt("fuzz_seed", "1"), opt("fuzz_iters", "1500"), opt("fuzz_rounds", "4"));
+    let _squeezed = fuzz_pressure();
     let heap_before = mm::heap::usage().1;
     let before = free_frames();
     let pid = crate::proc::spawn(
@@ -652,10 +653,20 @@ impl MemReport {
 /// The Linux system-call fuzzer (`linux-tests/linuxfuzz.c`): random Linux
 /// calls from racing threads in disposable child processes. Longer runs:
 /// `AURORA_FUZZ_SEED`, `AURORA_LINUXFUZZ_CHILDREN`, `AURORA_LINUXFUZZ_CALLS`.
+/// Fuzzing under memory pressure: `fuzz_ram` (boot option;
+/// `AURORA_FUZZ_RAM`) MiB of memory left to programs while a fuzzer runs,
+/// the rest held here, so the fuzzers' processes swap and may meet the
+/// out-of-memory killer.
+fn fuzz_pressure() -> mm::swaptest::Balloon {
+    let mib = crate::gui::prefs::boot_option("fuzz_ram").and_then(|v| v.parse().ok());
+    mm::swaptest::Balloon::leaving(mib)
+}
+
 fn linux_fuzz() {
     let opt = |k: &str, d: &str| crate::gui::prefs::boot_option(k).unwrap_or_else(|| String::from(d));
     let (seed, children, calls) =
         (opt("fuzz_seed", "1"), opt("linuxfuzz_children", "6"), opt("linuxfuzz_calls", "300"));
+    let _squeezed = fuzz_pressure();
     let before = free_frames();
     run_linux_test_with("linuxfuzz", &["linuxfuzz", &seed, &children, &calls], "linuxfuzz passed", 30 * 60_000);
     let deadline = time::uptime_ms() + 10_000;

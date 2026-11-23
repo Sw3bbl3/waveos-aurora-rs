@@ -161,8 +161,8 @@ pub fn activate() -> Result<u64, isize> {
         let mut key = [0u8; 32];
         crate::random::fill(&mut key);
         let mut k = [0u32; 8];
-        for (w, b) in k.iter_mut().zip(key.chunks_exact(4)) {
-            *w = u32::from_le_bytes(b.try_into().unwrap());
+        for (w, b) in k.iter_mut().zip(key.as_chunks::<4>().0) {
+            *w = u32::from_le_bytes(*b);
         }
         let file = File {
             dev: extents.dev,
@@ -176,7 +176,7 @@ pub fn activate() -> Result<u64, isize> {
         *FILE.lock() = Some(file);
         FREE.store(total, Ordering::Relaxed);
         PAGES.store(total, Ordering::Release);
-        log!("swap", "swap file {} ready: {} MiB", PATH, total * PAGE_SIZE >> 20);
+        log!("swap", "swap file {} ready: {} MiB", PATH, (total * PAGE_SIZE) >> 20);
         Ok(total)
     })();
     match result {

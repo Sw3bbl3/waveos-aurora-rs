@@ -175,6 +175,22 @@ pub fn report(o: &mut impl core::fmt::Write) {
         kswapd::level(),
         kswapd::oom_kills(),
     );
+    let avg_us = |(n, ns): (u64, u64)| (ns / 1000).checked_div(n).unwrap_or(0);
+    let (reads, writes) = swapfile::io_counts();
+    let _ = write!(
+        o,
+        "mem: swap-in {} us compressed ({} pages), {} us from disk ({} pages); swap file {} reads, {} writes",
+        avg_us(s.in_zram),
+        s.in_zram.0,
+        avg_us(s.in_disk),
+        s.in_disk.0,
+        reads,
+        writes,
+    );
+    if let Some(e) = swapfile::failure() {
+        let _ = write!(o, " (none: {})", aurora_abi::err::name(e));
+    }
+    let _ = writeln!(o, "; {} counted frames", s.counted);
     let _ = write!(o, "mem: classes (size:live/slab KiB)");
     for c in 0..heap::CLASSES {
         let s = heap::class_stats_nowait(c);

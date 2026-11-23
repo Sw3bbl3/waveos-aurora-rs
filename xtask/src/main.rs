@@ -1331,6 +1331,8 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
             // and how many times that they fill (`mm::swaptest`).
             ("AURORA_SWAP_TEST_RAM", "swap_test_ram"),
             ("AURORA_SWAP_FACTOR", "swap_factor"),
+            // MiB left to programs while the fuzzers run (memory pressure).
+            ("AURORA_FUZZ_RAM", "fuzz_ram"),
         ] {
             if let Ok(v) = env::var(var) {
                 image::set_boot_option(&img, key, &v).expect("write boot.conf");

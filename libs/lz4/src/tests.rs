@@ -257,7 +257,7 @@ fn reference_tool() {
     let mut runs = Vec::new();
     while runs.len() < 60_000 {
         let n = (rng(&mut seed) % 200) as usize;
-        if rng(&mut seed) % 2 == 0 {
+        if rng(&mut seed).is_multiple_of(2) {
             runs.extend(core::iter::repeat_n(rng(&mut seed) as u8, n));
         } else {
             runs.extend((0..n).map(|_| rng(&mut seed) as u8));

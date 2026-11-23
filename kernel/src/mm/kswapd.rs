@@ -334,10 +334,6 @@ pub fn oom_kills() -> u64 {
     OOM_KILLS.load(Ordering::Relaxed)
 }
 
-/// Times `kswapd` went to work since boot.
-pub fn rounds() -> u64 {
-    ROUNDS.load(Ordering::Relaxed)
-}
 
 // ------------------------------------------------------------ out of memory
 
