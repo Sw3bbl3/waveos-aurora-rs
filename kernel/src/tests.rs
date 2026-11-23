@@ -692,7 +692,13 @@ use alloc::sync::Arc;
 /// The disk the system runs from (its "Aurora HD" is mounted), else the first.
 fn main_disk() -> Arc<dyn BlockDevice> {
     let disks: Vec<Arc<dyn BlockDevice>> = block::devices().into_iter().filter(|d| !d.name().contains('p')).collect();
-    let home = disks.iter().find(|d| (1..=8).any(|i| fs::device_in_use(&alloc::format!("{}p{}", d.name(), i))));
+    let home_part = block::devices().into_iter().find(|p| {
+        block::partition_info(p).is_some_and(|i| i.type_guid == ::aurorafs::PARTITION_TYPE)
+            && fs::device_in_use(&p.name())
+    });
+    let home = home_part.and_then(|p| {
+        disks.iter().find(|d| p.name().strip_prefix(d.name().as_str()).is_some_and(|r| r.starts_with('p')))
+    });
     home.or(disks.first()).cloned().expect("no disk found — is a disk attached?")
 }
 
@@ -1045,7 +1051,6 @@ fn sd_simulated() {
     // A UHS-I card in a removable slot: 1.8 V, SDR104 and tuning, then hot-plug.
     let mock = test::mock(CAPS_FULL, version::V3);
     let name = test::attach_mock(&mock, true).expect("simulated slot");
-    crate::drivers::block::sdhci::start();
     mock.insert(CardSpec::uhs(8 * 2048));
     test::poke(&name);
     let present = || block::devices().iter().any(|d| d.name() == name);

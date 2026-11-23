@@ -320,6 +320,7 @@ pub struct SdSlot {
 static SLOTS: IrqMutex<Vec<&'static SdSlot>> = IrqMutex::new(Vec::new());
 static CHANGES: WaitQueue = WaitQueue::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
+static WATCHING: AtomicBool = AtomicBool::new(false);
 
 /// A card, as a block device.
 pub struct SdCard {
@@ -584,6 +585,9 @@ pub fn probe_pci(dev: &pci::Device) {
 /// Once `/Boot` is mounted: applies the boot options, shows removable
 /// cards' volumes, and starts following card insertion and removal.
 pub fn start() {
+    if STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
     let limits = boot_limits();
     let slots: Vec<&'static SdSlot> = SLOTS.lock().clone();
     for slot in &slots {
@@ -598,7 +602,7 @@ pub fn start() {
             }
         }
     }
-    if !STARTED.swap(true, Ordering::AcqRel) {
+    if !WATCHING.swap(true, Ordering::AcqRel) {
         crate::sched::spawn("sdhci", watch);
     }
 }
@@ -735,7 +739,7 @@ fn acpi_task() {
             *slot.volumes.lock() = super::removable::mount_volumes(&dev, if emmc { "eMMC" } else { "SD Card" });
         }
     }
-    if !STARTED.swap(true, Ordering::AcqRel) {
+    if !WATCHING.swap(true, Ordering::AcqRel) {
         crate::sched::spawn("sdhci", watch);
     }
 }
