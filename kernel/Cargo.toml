@@ -17,7 +17,7 @@ heap-debug = []
 
 [dependencies]
 aurora-desktop = { path = "../libs/desktop" }
-gina = { path = "../libs/gina" }
+gina = { path = "../libs/gina", default-features = false }
 bootinfo = { path = "../libs/bootinfo" }
 lumen = { path = "../libs/gfx" }
 aurora-abi = { path = "../libs/abi" }

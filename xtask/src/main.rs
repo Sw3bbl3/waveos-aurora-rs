@@ -117,14 +117,67 @@ fn main() {
             println!("{}", help::build(&root()).unwrap_or_else(|e| panic!("{e}")).display());
         }
         Some("package") => {
-            if args.len() != 4 {
-                eprintln!("usage: cargo xtask package MANIFEST.toml APP.elf OUTPUT.gina");
+            let key = args.iter().position(|a| a == "--sign").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+            let plain: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).collect();
+            let plain: Vec<&String> = plain.into_iter().filter(|a| key.as_deref() != Some(Path::new(a))).collect();
+            if plain.len() != 3 {
+                eprintln!("usage: cargo xtask package MANIFEST.toml APP.elf OUTPUT.gina [--sign KEY]");
                 exit(2);
             }
-            if let Err(e) = package::package(Path::new(&args[1]), Path::new(&args[2]), Path::new(&args[3])) {
+            if let Err(e) =
+                package::package(Path::new(plain[0]), Path::new(plain[1]), Path::new(plain[2]), key.as_deref())
+            {
                 eprintln!("{e}");
                 exit(1);
             }
+        }
+        Some("keygen") => {
+            if args.len() < 3 {
+                eprintln!("usage: cargo xtask keygen OUTPUT.key \"Publisher Name\"");
+                exit(2);
+            }
+            match package::keygen(Path::new(&args[1]), &args[2..].join(" ")) {
+                Ok((seed, name)) => {
+                    let key = gina::sign::public_key(&seed);
+                    println!("wrote {} (secret: keep it private) and {}.pub", args[1], args[1]);
+                    println!("{name}: key fingerprint {}", gina::fingerprint(&key));
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    exit(1);
+                }
+            }
+        }
+        Some("repo") => {
+            // Packages built from this checkout, or the given .gina files.
+            let out = args.iter().position(|a| a == "--out").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+            let key = args.iter().position(|a| a == "--sign").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+            let files: Vec<&String> = args.iter().skip(1).filter(|a| a.ends_with(".gina")).collect();
+            let out = out.unwrap_or_else(|| root().join("target/repo"));
+            if files.is_empty() {
+                build(profile, false);
+                println!("wrote the sample repository to {}", root().join("target/repo").display());
+                if out != root().join("target/repo") {
+                    copy_tree(&root().join("target/repo"), &out).expect("copy the repository");
+                    println!("copied it to {}", out.display());
+                }
+            } else {
+                let key = match key {
+                    Some(k) => package::load_key(&k).unwrap_or_else(|e| {
+                        eprintln!("{e}");
+                        exit(1)
+                    }),
+                    None => package::sample_key(),
+                };
+                let packages: Vec<Vec<u8>> =
+                    files.iter().map(|f| fs::read(f).unwrap_or_else(|e| panic!("{f}: {e}"))).collect();
+                if let Err(e) = package::write_repository(&out, &key.1, &packages, &key) {
+                    eprintln!("{e}");
+                    exit(1);
+                }
+                println!("wrote a repository of {} packages to {}", packages.len(), out.display());
+            }
+            println!("serve it with: python3 -m http.server -d {} 8000", out.display());
         }
         Some("build") => {
             build(profile, false);
@@ -280,7 +333,7 @@ fn main() {
         Some("test262") => test262(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo xtask <build|run|launch|image|iso|test|test262|lint> [--debug] [--headless] [--no-build] [--gdb] [--int]"
+                "usage: cargo xtask <build|run|launch|image|iso|test|test262|lint|package|keygen|repo> [--debug] [--headless] [--no-build] [--gdb] [--int]"
             );
             exit(2);
         }
@@ -534,6 +587,10 @@ fn build(profile: Profile, test: bool) -> PathBuf {
     let mut programs = build_userland(profile);
     programs.extend(linux::programs());
     system_image(&programs, &esp.join("aurora/system.tar"));
+    package::sample_repository(&programs, &root().join("target/repo"));
+    if test {
+        package::test_repository(&programs, &root().join("target/test-repo"));
+    }
     esp
 }
 
@@ -716,20 +773,12 @@ fn system_image(programs: &[Program], out: &Path) {
     }
     bundle_sdk(&mut t);
     help::bundle(&mut t, &root());
-    if let Some((_, elf)) = programs.iter().find(|(p, _)| p == "Bin/gina-demo") {
-        let manifest = gina::Manifest {
-            id: "dev.example.gallery".into(),
-            name: "WaveUI Gallery".into(),
-            developer: "WaveSDK Example".into(),
-            version: "1.0.0".into(),
-            entry: "bin/app".into(),
-            icon: String::new(),
-            resources: Vec::new(),
-            extensions: Vec::new(),
-        };
-        let executable = fs::read(elf).unwrap();
-        let package = gina::pack(&manifest, &[("bin/app", &executable)]).expect("package gallery");
-        t.file("Developer/Examples/WaveUIGallery.gina", &package);
+    // The publisher key this build signs its sample packages with, trusted
+    // by the system (see xtask/src/package.rs).
+    t.dir("Keys");
+    t.file("Keys/waveos-samples.pub", package::sample_public_key().as_bytes());
+    if let Some(gallery) = package::gallery(programs, "1.0.0", Some(&package::sample_key())) {
+        t.file("Developer/Examples/WaveUIGallery.gina", &gallery);
     }
     t.finish(out).expect("write system.tar");
 }
@@ -1168,7 +1217,9 @@ fn serve_test_http(listener: std::net::TcpListener) {
                         Ok(n) => req.extend_from_slice(&buf[..n]),
                     }
                 }
-                let resp = if req.starts_with(b"GET /big ") {
+                let resp = if let Some(r) = repo_response(&req) {
+                    r
+                } else if req.starts_with(b"GET /big ") {
                     let mut r =
                         format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
                             .into_bytes();
@@ -1181,6 +1232,28 @@ fn serve_test_http(listener: std::net::TcpListener) {
             });
         }
     });
+}
+
+/// The package tests' repository (`target/test-repo`) under `/repo/`, and
+/// under `/badrepo/` the same with an index altered after signing.
+fn repo_response(req: &[u8]) -> Option<Vec<u8>> {
+    let line = std::str::from_utf8(&req[..req.iter().position(|&b| b == b'\r')?]).ok()?;
+    let path = line.strip_prefix("GET ")?.split(' ').next()?;
+    let (bad, rest) = match (path.strip_prefix("/repo/"), path.strip_prefix("/badrepo/")) {
+        (Some(r), _) => (false, r),
+        (_, Some(r)) => (true, r),
+        _ => return None,
+    };
+    let safe = !rest.is_empty() && rest.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
+    let body = safe.then(|| fs::read(root().join("target/test-repo").join(rest)).ok()).flatten();
+    let body = match body {
+        Some(b) if bad && rest == "index.txt" => String::from_utf8_lossy(&b).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes(),
+        Some(b) => b,
+        None => return Some(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()),
+    };
+    let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+    r.extend_from_slice(&body);
+    Some(r)
 }
 
 /// A free port on the host (for forwarding into the guest).

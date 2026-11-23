@@ -13,8 +13,22 @@ use nebula_web::Url;
 use waveui::lumen::icons::Icon;
 use waveui::prelude::*;
 
-/// The game itself.
+/// The game itself, in the system image.
 const GAME: &str = "/System/Games/Doom/doom";
+/// Where this program was started from (`args[0]`).
+static PROGRAM: Mutex<Option<String>> = Mutex::new(None);
+
+/// The game next to this program when it came in a package (`bin/doom`
+/// beside `bin/app`), else the system's.
+fn game() -> String {
+    PROGRAM
+        .lock()
+        .as_deref()
+        .filter(|p| !p.starts_with("/System/"))
+        .map(|p| fs::join(fs::parent(p), "doom"))
+        .filter(|p| fs::exists(p))
+        .unwrap_or_else(|| String::from(GAME))
+}
 /// Where game data lives: Freedoom goes here, and so can your own WAD files.
 const FOLDER: &str = "/Documents/Doom";
 /// Freedoom 0.13.0 (BSD-3-Clause): both phases and their license.
@@ -178,7 +192,7 @@ impl App for Doom {
         match msg {
             Msg::Play(i) => {
                 let Some(g) = self.games.get(i) else { return };
-                match corekit::process::spawn(GAME, &["-iwad", &g.path], corekit::process::Stdio::default()) {
+                match corekit::process::spawn(&game(), &["-iwad", &g.path], corekit::process::Stdio::default()) {
                     Ok(_) => cx.close(),
                     Err(e) => self.error = Some(format!("Doom couldn't start: {e}")),
                 }
@@ -279,6 +293,7 @@ impl App for Doom {
 
 corekit::entry!(main);
 
-fn main(_: corekit::Args) -> i32 {
+fn main(args: corekit::Args) -> i32 {
+    *PROGRAM.lock() = args.first().cloned();
     waveui::run(Doom::new())
 }

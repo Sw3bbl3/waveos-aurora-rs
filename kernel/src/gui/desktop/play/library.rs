@@ -114,8 +114,7 @@ struct Installed;
 impl Source for Installed {
     fn collect(&self, out: &mut Vec<Entry>) {
         for a in crate::gui::installed::list() {
-            let base = crate::fs::parent_path(&a.path);
-            let icon = format!("{}/{}", base, a.manifest.icon);
+            let icon = format!("{}/{}", a.dir, a.manifest.icon);
             out.push(Entry {
                 id: format!("gina:{}", a.manifest.id),
                 title: a.manifest.name.clone(),
@@ -124,7 +123,7 @@ impl Source for Installed {
                 } else {
                     a.manifest.developer.clone()
                 },
-                kind: Kind::App,
+                kind: if a.manifest.is_game() { Kind::Game } else { Kind::App },
                 art: if a.manifest.icon.is_empty() { Art::Icon(Icon::Installer) } else { Art::Picture(icon) },
                 launch: Launch::Program(a.path, Vec::new()),
             });

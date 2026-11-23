@@ -41,11 +41,12 @@ const COMMANDS: [(Command, &str, &str); 8] = [
 ];
 
 /// Settings panes Spotlight can open (the argument Settings understands).
-const PANES: [(&str, &str); 13] = [
+const PANES: [(&str, &str); 14] = [
     ("Appearance", "appearance"),
     ("Desktop & Harbor", "desktop"),
     ("Bar & Crest", "bar"),
     ("Login", "login"),
+    ("Apps", "apps"),
     ("Liquid Glass", "desktop"),
     ("Accessibility", "accessibility"),
     ("Wallpaper", "appearance"),
@@ -60,7 +61,8 @@ const PANES: [(&str, &str); 13] = [
 #[derive(Clone, PartialEq, Debug)]
 enum Result {
     App(AppKind),
-    Installed(String, String),
+    /// An installed app: name, program, icon, and what kind of app it is.
+    Installed(String, String, Icon, String),
     File { path: String, dir: bool },
     Pane(&'static str, &'static str),
     Calc(String),
@@ -233,8 +235,12 @@ impl Spotlight {
         apps.sort_by_key(|(p, _)| *p);
         out.extend(apps.into_iter().map(|(_, k)| Result::App(k)));
         for a in crate::gui::installed::list() {
-            if a.manifest.name.to_lowercase().contains(&q) {
-                out.push(Result::Installed(a.manifest.name, a.path));
+            if a.manifest.name.to_lowercase().contains(&q) || a.manifest.categories.contains(&q) {
+                let kind = match a.manifest.categories.first().map(String::as_str) {
+                    Some("game") => String::from("Game"),
+                    _ => String::from("Installed app"),
+                };
+                out.push(Result::Installed(a.manifest.name, a.path, a.icon, format!("{kind} · {}", a.manifest.version)));
             }
         }
         for (label, arg) in PANES {
@@ -295,7 +301,7 @@ impl Desktop {
         self.toggle_spotlight();
         match r {
             Result::App(k) => self.open(k),
-            Result::Installed(_, path) => self.spawn_program(&path, &[]),
+            Result::Installed(_, path, ..) => self.spawn_program(&path, &[]),
             Result::File { path, dir } => {
                 let files = apps::info(AppKind::Files).path;
                 if dir {
@@ -436,9 +442,9 @@ impl Desktop {
             let fg2 = if sel { 0xDDFF_FFFF } else { t.text_secondary };
             let ir = Rect::new(row.x + 10, row.y + 7, 32, 32);
             let (title, subtitle, kind): (String, String, &str) = match res {
-                Result::Installed(name, _) => {
-                    icons::draw(cv, Icon::Aurora, ir);
-                    (name.clone(), String::from("Installed app"), "Application")
+                Result::Installed(name, _, icon, kind) => {
+                    icons::draw(cv, *icon, ir);
+                    (name.clone(), kind.clone(), "Application")
                 }
                 Result::App(k) => {
                     let a = apps::info(*k);

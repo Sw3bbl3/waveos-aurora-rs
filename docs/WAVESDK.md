@@ -53,30 +53,107 @@ detail=Installed with the package manager
 
 ## GINA packages
 
-GINA uses restricted, uncompressed ustar archives. The root `manifest.toml` uses this supported subset of TOML (flat strings, integers and string arrays):
+An app reaches other people as a GINA package (`.gina`): a restricted, uncompressed ustar archive that holds a manifest, the app's files, a list of their hashes and, usually, its publisher's signature. `libs/gina` reads, writes and checks them (host and device share it); `corekit::apps` installs them; `pkg`, Installer and Settings → Apps are the front ends.
+
+### The manifest (format 2)
+
+The root `manifest.toml` uses a small subset of TOML (flat strings, integers and string arrays):
 
 ```toml
-format = 1
-id = "dev.example.gallery"
+format = 2
+id = "dev.example.gallery"          # lowercase reverse-DNS, unique per app
 name = "WaveUI Gallery"
-developer = "Example Developer"
-version = "1.0.0"
+author = "Example Developer"        # the publisher shown to people
+version = "1.2.0"                   # 1-4 numbers, optional -prerelease (1.2.0-beta.1)
+description = "Every WaveUI control, in a few lines each."
 architecture = "x86_64"
 sdk = "0.9"
 abi = 1
-entry = "bin/app"
-icon = ""
-resources = []
-extensions = []
+entry = "bin/app"                   # the program the launcher starts
+icon = "Resources/icon.png"         # PNG, at most 1024x1024 and 1 MiB
+resources = ["Resources/help.txt"]  # files that must be present
+extensions = ["gallery"]            # file associations: Files offers "Open with" for these
+categories = ["developer"]          # game, productivity, utility, developer, graphics,
+                                    # media, education, network, social, system (up to 4)
+permissions = ["network", "documents:read"]
+min_os = "0.8"                      # the oldest WaveOS it runs on ("" = any)
+dependencies = ["dev.example.runtime >= 1.0"]   # id, "id >= v" or "id = v"
 ```
 
-The shared validator checks archive checksums, bounded sizes, duplicate paths, path traversal, unsupported links, required resources, ABI/architecture and executable load bounds. It rejects unknown manifest keys, including attempts to designate a package as a built-in app. A package is limited to 64 MiB and 1024 entries. SDK versions 0.6 to 0.9 are accepted, so Constellation-era packages still install.
+Versions are ordered numerically (`1.10` > `1.9`; `1.2` = `1.2.0`; `2.0.0-rc.1` < `2.0.0`). Unknown keys are refused, so a package can't declare itself a built-in or privileged app.
 
-Payloads are staged under `/Applications/<app-id>/`, then selected by an atomically replaced `active` registration only after files are written and synced. Generations use the version and archive SHA-256. App data stays in `/AppData/<app-id>/`. Installation does not overwrite the active generation. Uninstall retains app data unless `--delete-data` or the installer deletion option is selected. This is a single-user prototype; package signatures, permissions and isolation between app data directories are future work.
+**Permissions** are shown before installing and recorded for the per-app sandbox ([developer/sandboxing.md](developer/sandboxing.md)), whose capability bits they map to: `network` (NET_CLIENT), `network-server` (NET_SERVER), `audio` (AUDIO_OUT), `microphone` (AUDIO_IN), `gamepad` (GAMEPADS), `clipboard` (CLIPBOARD_READ), `notifications` (NOTIFY), `preferences` (PREFS_WRITE), `spawn` (SPAWN), `linux` (LINUX), `elevate` (ELEVATE), `home` (USER_FILES), and folder grants `documents`, `pictures`, `downloads`, `music`, `movies` (read and write) or `documents:read`, `pictures:read`, `downloads:read`. Every app may always use its own data folder, `~/Library/Containers/<id>` (`corekit::apps::data_dir`). **The sandbox does not exist yet**: today permissions are informational.
 
-Open `.gina` in Files for install/update details, progress and launch. Installed apps appear in Launcher and desktop search, can run independently of Studio, and participate in file associations. Third-party dock icons are currently generic.
+Format 1 manifests (`format = 1`, `developer` instead of `author`, none of the format 2 keys) still install; they can't be signed and have no hash list.
 
-For a precompiled installation exercise, open `/System/Developer/Examples/WaveUIGallery.gina`. This example is compiled by the host when assembling the system image; it is **not evidence of native compilation**.
+### Inside the archive
+
+```
+manifest.toml
+META/hashes       one line per payload file, sorted: <sha256> <size> <path>
+META/signature    ed25519 <public key hex> <signature hex>   (optional)
+bin/app, Resources/…   the payload
+```
+
+The signature is Ed25519 (RustCrypto's `ed25519-dalek`, strict verification) over `"GINA-2 package signature\0" ‖ SHA-256(manifest.toml) ‖ SHA-256(META/hashes)`, so it covers the manifest and, through the hash list, every payload byte. The parser refuses: anything but regular files and folders (symbolic and hard links, devices, GNU/pax headers); absolute paths, `..`, `.`, empty components, backslashes, colons and control characters; names that differ only in case; more than 1024 entries, 16 levels or 64 MiB; sizes that run past the archive; bad header checksums; payload files missing from, extra to or different from the hash list; other files under `META/`; a manifest whose entry, icon or resources are missing; an entry that is not a WaveOS x86-64 executable. A signature that doesn't verify is an error, not "unsigned". The parsers are fuzzed (`cargo test -p gina`, which also runs thousands of mutated packages, manifests and indexes).
+
+### Build, sign and publish
+
+1. **Make a publisher key** (once; keep the secret file private and backed up):
+   ```sh
+   cargo xtask keygen ~/keys/example.key "Example Developer"
+   # writes example.key (secret) and example.key.pub (share this)
+   ```
+2. **Build the app** for `x86_64-aurora-user` (any program in `userland/apps` or a WaveSDK project).
+3. **Package and sign it:**
+   ```sh
+   cargo xtask package path/to/manifest.toml target/user/x86_64-aurora-user/release/app-myapp \
+       dist/dev.example.myapp-1.2.0.gina --sign ~/keys/example.key
+   ```
+   The icon and resources are read relative to the manifest. Without `--sign` the package is unsigned: it installs only after the person accepts a warning.
+4. **Publish a repository:** put the packages in a folder served over HTTPS (HTTP works for testing: the index is signed either way) with
+   ```sh
+   cargo xtask repo dist/*.gina --sign ~/keys/example.key --out site/stable
+   ```
+   which copies them to `packages/` and writes `index.txt` and its signature `index.sig`. Each index carries a `generated` date that only grows: devices refuse an older index from the same address (no rollback to old versions). Packages are checked against the size and SHA-256 the index names, and then their own signature is checked again.
+5. **Users add your key and repository** (both need an administrator):
+   ```sh
+   pkg trust example.key.pub
+   pkg source add https://example.dev/stable/
+   pkg search myapp
+   pkg install dev.example.myapp
+   ```
+
+Each build of WaveOS makes its own sample key (`target/keys/waveos-samples.key`, never committed) and trusts it (`/System/Keys/waveos-samples.pub`); `cargo xtask build` writes a sample repository to `target/repo` (WaveUI Gallery and Doom as a `game`), signed with it. Serve it with `python3 -m http.server -d target/repo 8000` and in the guest run `pkg source add http://10.0.2.2:8000/`.
+
+### Installing
+
+| Where | What |
+|---|---|
+| `/Applications/<id>/` | apps for everyone: the `admin` group's; others are asked for an administrator's password ([`authorize`](../userland/corekit/src/apps/trust.rs)) |
+| `~/Library/Applications/<id>/` | apps for one account (`pkg install --user`, "Install only for me") |
+| `<root>/<id>/active` | the live generation's folder name |
+| `<root>/<id>/<version>-<sha256>/` | a generation: the package's files, `META/hashes`, `META/signature`, and `META/receipt` (when, from where, signed by whom, size) |
+| `<root>/.registry` | every installed app, one tab-separated line each: id, version, name, categories, program, icon, folder, extensions, size, publisher (for programs such as Wave Play; `corekit::apps::in_category("game")` reads the same) |
+| `~/Library/Containers/<id>/` | the app's data, kept apart from its files |
+| `/System/Keys/*.pub`, `/Applications/.keys/*.pub` | trusted publisher keys (shipped; added by administrators) |
+| `/Applications/.sources` | repository addresses |
+
+An install stages the new generation in `.pending-<pid>`, flushes it, renames it into place, then writes `active` the same way (new file, flush, rename). Interrupted anywhere, the old version or the new one is live, never a mix; leftovers are cleared by the next install. Under `/Applications` files belong to `system:admin` (programs `rwxr-xr-x`, other files `rw-r--r--`, folders `rwxrwxr-x`) and the registry is `rw-r--r-- system`, so other accounts can run apps but not change them. Updates keep the app's data, must come from the same publisher key as the installed version, and may not go to an older version without `--allow-downgrade`. Missing dependencies and a too-old system stop an install before anything is written.
+
+Installed apps appear in Shoal (games also under Play), Seek and Settings → Apps with their own icons as soon as they're installed, removed the same way; `pkg pin ID` or the *In Dock* switch in Settings → Apps keeps one in the dock (the `dock_apps` preference), and running ones show their icon there. A program that is a Linux executable must say so (an interpreter, a GNU note or ELF OSABI 3); `xtask/src/package.rs` marks Doom's game binary that way.
+
+```sh
+pkg install FILE.gina | URL | ID [--user] [--version V] [--allow-untrusted] [--allow-downgrade]
+pkg remove ID [--delete-data]       pkg list [--category game]     pkg info ID|FILE
+pkg verify [ID]                     pkg update [ID] [--check]      pkg search [TERM]
+pkg source [list|add URL|remove URL]   pkg trust FILE.pub | untrust KEY | keys
+pkg pin ID | unpin ID               pkg registry
+```
+
+Opening a `.gina` file in Files starts Installer: name, version, publisher, signature status, requested permissions, size and category, then progress. Unsigned packages and keys you don't trust need the "I trust where this package came from" box ticked first.
+
+For a precompiled example, open `/System/Developer/Examples/WaveUIGallery.gina`. It is compiled by the host when assembling the system image; it is **not evidence of native compilation**. A graphical Store and whole-system updates are designed in [developer/store-and-updates.md](developer/store-and-updates.md).
 
 ## Native commands and Studio
 
@@ -92,7 +169,7 @@ wavesdk list
 wavesdk launch dev.example.gallery
 ```
 
-`constellation` remains an alias of `wavesdk`. `build` and `run` require the unported native tools in `/System/Developer/bin`. `package PROJECT` can export a validated package when an actual executable exists at `PROJECT/build/app.elf`. The host command `cargo xtask package MANIFEST APP.elf OUTPUT.gina` uses the same validator.
+`constellation` remains an alias of `wavesdk`. `build` and `run` require the unported native tools in `/System/Developer/bin`. `package PROJECT` can export a validated package when an actual executable exists at `PROJECT/build/app.elf`. The host command `cargo xtask package MANIFEST APP.elf OUTPUT.gina [--sign KEY]` uses the same validator.
 
 Studio provides project creation/opening, file navigation, Rust lexical highlighting, an editor, unsaved-change handling, a simple visual component palette/preview/property inspector, separate generated WaveUI source, background operation output, export and installation. Visual files live in `layouts/main.ui`; generated code lives in `src/generated_ui.rs`; handwritten `src/main.rs` is not regenerated. The first layout format is a flat column of `heading`, `label`, `button` and `toggle` lines.
 
