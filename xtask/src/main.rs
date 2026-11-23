@@ -49,6 +49,7 @@ mod help;
 mod i2c_ssdt;
 mod image;
 mod launcher;
+mod libdrm;
 mod linux;
 mod monitor;
 mod netsurf;

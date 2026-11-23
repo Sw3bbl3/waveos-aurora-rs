@@ -429,10 +429,13 @@ pub fn get_plane(f: &File, a: &mut Args) -> Result<(), isize> {
 }
 
 /// `struct drm_mode_crtc_lut`: no gamma tables (`gamma_size` 0), as Linux
-/// answers for devices without them.
-pub fn gamma(f: &File, a: &mut Args) -> Result<(), isize> {
+/// answers for devices without them (`SETGAMMA`: `ENOSYS`).
+pub fn gamma(f: &File, a: &mut Args, set: bool) -> Result<(), isize> {
     if !f.dev.crtcs().iter().any(|c| c.id == a.u32(0)) {
         return Err(ENOENT);
+    }
+    if set {
+        return Err(ENOSYS);
     }
     if a.u32(4) != 0 {
         return Err(EINVAL);
@@ -560,7 +563,11 @@ pub fn set_plane(f: &File, a: &mut Args) -> Result<(), isize> {
         return Err(ENOSPC);
     }
     let (cx, cy, cw, ch) = (a.i32(16), a.i32(20), a.u32(24), a.u32(28));
-    if cw > i32::MAX as u32 || ch > i32::MAX as u32 || cx.checked_add(cw as i32).is_none() || cy.checked_add(ch as i32).is_none() {
+    if cw > i32::MAX as u32
+        || ch > i32::MAX as u32
+        || cx.checked_add(cw as i32).is_none()
+        || cy.checked_add(ch as i32).is_none()
+    {
         return Err(ERANGE);
     }
     let mut p = PlaneState::show(plane, crtc, &fb, cx, cy);

@@ -200,18 +200,8 @@ pub fn destroy_blob(f: &File, id: u32) -> Result<(), isize> {
 /// `struct drm_mode_modeinfo` (68 bytes) for `m`.
 pub fn modeinfo(m: &Mode) -> [u8; 68] {
     let mut b = [0u8; 68];
-    let u16s = [
-        m.hdisplay,
-        m.hsync_start,
-        m.hsync_end,
-        m.htotal,
-        0,
-        m.vdisplay,
-        m.vsync_start,
-        m.vsync_end,
-        m.vtotal,
-        0,
-    ];
+    let u16s =
+        [m.hdisplay, m.hsync_start, m.hsync_end, m.htotal, 0, m.vdisplay, m.vsync_start, m.vsync_end, m.vtotal, 0];
     b[0..4].copy_from_slice(&m.clock.to_le_bytes());
     for (i, v) in u16s.iter().enumerate() {
         b[4 + 2 * i..6 + 2 * i].copy_from_slice(&(*v as u16).to_le_bytes());
@@ -342,7 +332,9 @@ fn props_of(f: &File, obj: &Obj, every: bool) -> Vec<P> {
         Obj::Connector(_) => alloc::vec![P::Edid, P::Dpms, P::LinkStatus, P::NonDesktop, P::CrtcId],
         Obj::Other(_) => Vec::new(),
     };
-    list.into_iter().filter(|p| caps.atomic || DEFS.iter().find(|d| d.p == *p).unwrap().flags & PROP_ATOMIC == 0).collect()
+    list.into_iter()
+        .filter(|p| caps.atomic || DEFS.iter().find(|d| d.p == *p).unwrap().flags & PROP_ATOMIC == 0)
+        .collect()
 }
 
 /// The current value of property `p` of `obj`.
@@ -488,7 +480,8 @@ impl<'a> Request<'a> {
 
     fn plane(&mut self, id: ObjId) -> &mut PlaneState {
         if !self.planes.iter().any(|p| p.plane == id) {
-            let cur = self.current.1.iter().find(|p| p.plane == id).cloned().unwrap_or_else(|| PlaneState::disabled(id));
+            let cur =
+                self.current.1.iter().find(|p| p.plane == id).cloned().unwrap_or_else(|| PlaneState::disabled(id));
             self.planes.push(cur);
         }
         self.planes.iter_mut().find(|p| p.plane == id).unwrap()
@@ -531,11 +524,8 @@ impl<'a> Request<'a> {
                 self.crtc(c.id)?.mode = mode;
             }
             (Obj::Plane(pl), p) => {
-                let fb = if p == P::FbId && v != 0 {
-                    Some(kms::fb_by_id(self.f, v as u32).ok_or(EINVAL)?)
-                } else {
-                    None
-                };
+                let fb =
+                    if p == P::FbId && v != 0 { Some(kms::fb_by_id(self.f, v as u32).ok_or(EINVAL)?) } else { None };
                 if p == P::CrtcId && v != 0 && !self.f.dev.crtcs().iter().any(|c| c.id == v as u32) {
                     return Err(EINVAL);
                 }

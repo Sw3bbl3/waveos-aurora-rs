@@ -152,7 +152,11 @@ fn tree() -> BTreeMap<String, Entry> {
             let modes: String = c.modes.iter().map(|m| format!("{}\n", m.name())).collect();
             file(&mut t, format!("{cdir}/modes"), modes.as_bytes());
             file(&mut t, format!("{cdir}/edid"), c.edid.as_deref().map_or(&[][..], |e| &e[..]));
-            link(&mut t, format!("/sys/class/drm/{name}"), format!("../../devices/pci0000:00/{slot}/drm/card{i}/{name}"));
+            link(
+                &mut t,
+                format!("/sys/class/drm/{name}"),
+                format!("../../devices/pci0000:00/{slot}/drm/card{i}/{name}"),
+            );
         }
     }
     t

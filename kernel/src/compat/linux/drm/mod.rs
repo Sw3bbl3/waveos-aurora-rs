@@ -292,7 +292,12 @@ pub fn open(guest: &str) -> Option<Result<Arc<File>, isize>> {
         dev,
         minor,
         render,
-        state: Mutex::new(State { handles: BTreeMap::new(), next_handle: 1, fbs: Vec::new(), caps: ClientCaps::default() }),
+        state: Mutex::new(State {
+            handles: BTreeMap::new(),
+            next_handle: 1,
+            fbs: Vec::new(),
+            caps: ClientCaps::default(),
+        }),
         events: IrqMutex::new(vblank::Events::default()),
         // Any number that no other open file has.
         magic: id as u32 | 0x4000_0000,
@@ -425,55 +430,55 @@ const RENDER: u8 = 2;
 
 /// (number, argument size, flags) of the ioctls there are.
 const IOCTLS: &[(u32, usize, u8)] = &[
-    (0x00, 64, RENDER), // VERSION
-    (0x01, 16, 0),      // GET_UNIQUE
-    (0x02, 4, 0),       // GET_MAGIC
-    (0x07, 16, MASTER), // SET_VERSION
-    (0x08, 8, 0),       // MODESET_CTL
-    (0x09, 8, RENDER),  // GEM_CLOSE
-    (0x0c, 16, RENDER), // GET_CAP
-    (0x0d, 16, 0),      // SET_CLIENT_CAP
-    (0x11, 4, MASTER),  // AUTH_MAGIC
-    (0x1e, 0, 0),       // SET_MASTER
-    (0x1f, 0, 0),       // DROP_MASTER
-    (0x2d, 12, RENDER), // PRIME_HANDLE_TO_FD
-    (0x2e, 12, RENDER), // PRIME_FD_TO_HANDLE
-    (0x3a, 24, 0),      // WAIT_VBLANK
-    (0x3b, 24, 0),      // CRTC_GET_SEQUENCE
-    (0x3c, 24, 0),      // CRTC_QUEUE_SEQUENCE
-    (0xA0, 64, 0),      // MODE_GETRESOURCES
-    (0xA1, 104, 0),     // MODE_GETCRTC
+    (0x00, 64, RENDER),  // VERSION
+    (0x01, 16, 0),       // GET_UNIQUE
+    (0x02, 4, 0),        // GET_MAGIC
+    (0x07, 16, MASTER),  // SET_VERSION
+    (0x08, 8, 0),        // MODESET_CTL
+    (0x09, 8, RENDER),   // GEM_CLOSE
+    (0x0c, 16, RENDER),  // GET_CAP
+    (0x0d, 16, 0),       // SET_CLIENT_CAP
+    (0x11, 4, MASTER),   // AUTH_MAGIC
+    (0x1e, 0, 0),        // SET_MASTER
+    (0x1f, 0, 0),        // DROP_MASTER
+    (0x2d, 12, RENDER),  // PRIME_HANDLE_TO_FD
+    (0x2e, 12, RENDER),  // PRIME_FD_TO_HANDLE
+    (0x3a, 24, 0),       // WAIT_VBLANK
+    (0x3b, 24, 0),       // CRTC_GET_SEQUENCE
+    (0x3c, 24, 0),       // CRTC_QUEUE_SEQUENCE
+    (0xA0, 64, 0),       // MODE_GETRESOURCES
+    (0xA1, 104, 0),      // MODE_GETCRTC
     (0xA2, 104, MASTER), // MODE_SETCRTC
-    (0xA3, 28, MASTER), // MODE_CURSOR
-    (0xA4, 32, 0),      // MODE_GETGAMMA
-    (0xA5, 32, MASTER), // MODE_SETGAMMA
-    (0xA6, 20, 0),      // MODE_GETENCODER
-    (0xA7, 80, 0),      // MODE_GETCONNECTOR
-    (0xA8, 72, MASTER), // MODE_ATTACHMODE
-    (0xA9, 72, MASTER), // MODE_DETACHMODE
-    (0xAA, 64, 0),      // MODE_GETPROPERTY
-    (0xAB, 16, MASTER), // MODE_SETPROPERTY
-    (0xAC, 16, 0),      // MODE_GETPROPBLOB
-    (0xAD, 28, 0),      // MODE_GETFB
-    (0xAE, 28, 0),      // MODE_ADDFB
-    (0xAF, 4, 0),       // MODE_RMFB
-    (0xB0, 24, MASTER), // MODE_PAGE_FLIP
-    (0xB1, 24, MASTER), // MODE_DIRTYFB
-    (0xB2, 32, 0),      // MODE_CREATE_DUMB
-    (0xB3, 16, 0),      // MODE_MAP_DUMB
-    (0xB4, 4, 0),       // MODE_DESTROY_DUMB
-    (0xB5, 16, 0),      // MODE_GETPLANERESOURCES
-    (0xB6, 32, 0),      // MODE_GETPLANE
-    (0xB7, 48, MASTER), // MODE_SETPLANE
-    (0xB8, 104, 0),     // MODE_ADDFB2
-    (0xB9, 32, 0),      // MODE_OBJ_GETPROPERTIES
-    (0xBA, 24, MASTER), // MODE_OBJ_SETPROPERTY
-    (0xBB, 36, MASTER), // MODE_CURSOR2
-    (0xBC, 56, MASTER), // MODE_ATOMIC
-    (0xBD, 16, 0),      // MODE_CREATEPROPBLOB
-    (0xBE, 4, 0),       // MODE_DESTROYPROPBLOB
-    (0xCE, 104, 0),     // MODE_GETFB2
-    (0xD0, 8, 0),       // MODE_CLOSEFB
+    (0xA3, 28, MASTER),  // MODE_CURSOR
+    (0xA4, 32, 0),       // MODE_GETGAMMA
+    (0xA5, 32, MASTER),  // MODE_SETGAMMA
+    (0xA6, 20, 0),       // MODE_GETENCODER
+    (0xA7, 80, 0),       // MODE_GETCONNECTOR
+    (0xA8, 72, MASTER),  // MODE_ATTACHMODE
+    (0xA9, 72, MASTER),  // MODE_DETACHMODE
+    (0xAA, 64, 0),       // MODE_GETPROPERTY
+    (0xAB, 16, MASTER),  // MODE_SETPROPERTY
+    (0xAC, 16, 0),       // MODE_GETPROPBLOB
+    (0xAD, 28, 0),       // MODE_GETFB
+    (0xAE, 28, 0),       // MODE_ADDFB
+    (0xAF, 4, 0),        // MODE_RMFB
+    (0xB0, 24, MASTER),  // MODE_PAGE_FLIP
+    (0xB1, 24, MASTER),  // MODE_DIRTYFB
+    (0xB2, 32, 0),       // MODE_CREATE_DUMB
+    (0xB3, 16, 0),       // MODE_MAP_DUMB
+    (0xB4, 4, 0),        // MODE_DESTROY_DUMB
+    (0xB5, 16, 0),       // MODE_GETPLANERESOURCES
+    (0xB6, 32, 0),       // MODE_GETPLANE
+    (0xB7, 48, MASTER),  // MODE_SETPLANE
+    (0xB8, 104, 0),      // MODE_ADDFB2
+    (0xB9, 32, 0),       // MODE_OBJ_GETPROPERTIES
+    (0xBA, 24, MASTER),  // MODE_OBJ_SETPROPERTY
+    (0xBB, 36, MASTER),  // MODE_CURSOR2
+    (0xBC, 56, MASTER),  // MODE_ATOMIC
+    (0xBD, 16, 0),       // MODE_CREATEPROPBLOB
+    (0xBE, 4, 0),        // MODE_DESTROYPROPBLOB
+    (0xCE, 104, 0),      // MODE_GETFB2
+    (0xD0, 8, 0),        // MODE_CLOSEFB
 ];
 
 /// Driver-private ioctls: `DRM_COMMAND_BASE` up to `DRM_COMMAND_END`.
@@ -482,7 +487,8 @@ const COMMAND_END: u32 = 0xA0;
 
 /// An ioctl on an open card.
 pub fn ioctl(p: &Process, f: &Arc<File>, request: u64, arg: u64) -> Result<u64, isize> {
-    let (dir, size, kind, nr) = ((request >> 30) & 3, ((request >> 16) & 0x3FFF) as usize, (request >> 8) & 0xFF, (request & 0xFF) as u32);
+    let (dir, size, kind, nr) =
+        ((request >> 30) & 3, ((request >> 16) & 0x3FFF) as usize, (request >> 8) & 0xFF, (request & 0xFF) as u32);
     if kind != 0x64 {
         return Err(ENOTTY);
     }
@@ -504,11 +510,8 @@ pub fn ioctl(p: &Process, f: &Arc<File>, request: u64, arg: u64) -> Result<u64, 
     if dir & 1 != 0 && size > 0 {
         user::get_bytes(arg, &mut data[..size])?;
     }
-    let r = if private {
-        f.driver().ioctl(f, nr - COMMAND_BASE, &mut data)
-    } else {
-        call(p, f, nr, &mut Args(&mut data))
-    };
+    let r =
+        if private { f.driver().ioctl(f, nr - COMMAND_BASE, &mut data) } else { call(p, f, nr, &mut Args(&mut data)) };
     if dir & 2 != 0 && size > 0 {
         user::put_bytes(arg, &data[..size])?;
     }
@@ -540,7 +543,8 @@ fn call(p: &Process, f: &Arc<File>, nr: u32, a: &mut Args) -> Result<(), isize> 
         0xA1 => kms::get_crtc(f, a),
         0xA2 => kms::set_crtc(f, a),
         0xA3 => kms::cursor(f, a, false),
-        0xA4 | 0xA5 => kms::gamma(f, a),
+        0xA4 => kms::gamma(f, a, false),
+        0xA5 => kms::gamma(f, a, true),
         0xA6 => kms::get_encoder(f, a),
         0xA7 => kms::get_connector(f, a),
         0xAA => props::get_property(f, a),
@@ -627,19 +631,19 @@ fn get_cap(f: &File, a: &mut Args) -> Result<(), isize> {
     let caps = f.dev.caps();
     let cursor = caps.cursor.unwrap_or((64, 64));
     let v = match a.u64(0) {
-        0x1 => 1,                  // DUMB_BUFFER
-        0x2 => 1,                  // VBLANK_HIGH_CRTC
-        0x3 => 24,                 // DUMB_PREFERRED_DEPTH
-        0x4 => 0,                  // DUMB_PREFER_SHADOW: buffers are system memory
-        0x5 => 3,                  // PRIME: import and export
-        0x6 => 1,                  // TIMESTAMP_MONOTONIC
-        0x7 => 0,                  // ASYNC_PAGE_FLIP
-        0x8 => cursor.0 as u64,    // CURSOR_WIDTH
-        0x9 => cursor.1 as u64,    // CURSOR_HEIGHT
-        0x10 => 0,                 // ADDFB2_MODIFIERS
-        0x11 => 0,                 // PAGE_FLIP_TARGET
-        0x12 => 1,                 // CRTC_IN_VBLANK_EVENT
-        0x13..=0x15 => 0, // SYNCOBJ, SYNCOBJ_TIMELINE, ATOMIC_ASYNC_PAGE_FLIP
+        0x1 => 1,               // DUMB_BUFFER
+        0x2 => 1,               // VBLANK_HIGH_CRTC
+        0x3 => 24,              // DUMB_PREFERRED_DEPTH
+        0x4 => 0,               // DUMB_PREFER_SHADOW: buffers are system memory
+        0x5 => 3,               // PRIME: import and export
+        0x6 => 1,               // TIMESTAMP_MONOTONIC
+        0x7 => 0,               // ASYNC_PAGE_FLIP
+        0x8 => cursor.0 as u64, // CURSOR_WIDTH
+        0x9 => cursor.1 as u64, // CURSOR_HEIGHT
+        0x10 => 0,              // ADDFB2_MODIFIERS
+        0x11 => 0,              // PAGE_FLIP_TARGET
+        0x12 => 1,              // CRTC_IN_VBLANK_EVENT
+        0x13..=0x15 => 0,       // SYNCOBJ, SYNCOBJ_TIMELINE, ATOMIC_ASYNC_PAGE_FLIP
         _ => return Err(EINVAL),
     };
     // Render nodes answer only what does not concern the display.

@@ -218,6 +218,9 @@ vblank waits, dumb buffers mapped through the card, and PRIME: a buffer as
 a dma-buf descriptor that can be mapped and passed to another program over
 a local socket. `drmGetDevices2` finds the card through `/sys`, as on Linux.
 The driver names are Linux's (`virtio_gpu`, `bochs-drm`, `simpledrm`).
+libdrm's test program is included: `modetest -M virtio_gpu` (or
+`bochs-drm`) lists the card, and `modetest -M virtio_gpu -s 9:1280x800 -v`
+sets a mode and page-flips until you press Return.
 
 The first program to open a card is its master, as on Linux when no
 display server runs. Looking costs nothing; its first mode set or page
