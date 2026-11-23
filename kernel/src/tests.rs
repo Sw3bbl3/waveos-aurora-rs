@@ -2888,7 +2888,14 @@ fn network() {
     // To the host (10.0.2.2) through QEMU's NAT: 1 MiB over HTTP each way,
     // timed (with the CPU time it took) to compare network cards.
     if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
-        let (body, ms, cpu) = measured(|| download(port, 20_000).expect("download from the host"));
+        let (body, ms, cpu) = measured(|| {
+            download(port, 20_000).unwrap_or_else(|e| {
+                for line in crate::drivers::usb::net::describe() {
+                    log!("net-test", "{line}");
+                }
+                panic!("download from the host: {}", aurora_abi::err::name(e))
+            })
+        });
         assert_eq!(body.len(), 1 << 20, "short body from the host");
         assert!(body.iter().enumerate().all(|(i, &b)| b as u32 == (i as u32).wrapping_mul(31).wrapping_add(7) % 251));
         crate::kprintln!(
@@ -2898,6 +2905,11 @@ fn network() {
             cpu
         );
         let (stored, ms, cpu) = measured(|| upload(port, 1 << 20));
+        if stored != Some(1 << 20) {
+            for line in crate::drivers::usb::net::describe() {
+                log!("net-test", "{line}");
+            }
+        }
         assert_eq!(stored, Some(1 << 20), "the host did not get the upload");
         crate::kprintln!(
             "net-test: 1 MiB to the host in {} ms ({} KiB/s), {} CPU ms",

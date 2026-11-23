@@ -95,6 +95,10 @@ pub struct Stats {
     pub rx_errors: AtomicU64,
     /// Transmit transfers that failed.
     pub tx_errors: AtomicU64,
+    /// When the last receive and transmit transfers completed (uptime ms):
+    /// which way a stalled adapter stopped.
+    pub last_rx_ms: AtomicU64,
+    pub last_tx_ms: AtomicU64,
 }
 
 /// Transmit buffers of `size` bytes, carved out of 64 KiB regions (a
@@ -246,6 +250,7 @@ impl UsbNic {
             return;
         }
         self.stats.rx_transfers.fetch_add(1, Ordering::Relaxed);
+        self.stats.last_rx_ms.store(crate::time::uptime_ms(), Ordering::Relaxed);
         let mut frames = 0u64;
         let mut bytes = 0u64;
         let mut deliver = |f: &[u8]| {
@@ -480,6 +485,7 @@ impl UsbNic {
                 let bytes: usize = bufs.iter().map(|b| b.1).sum();
                 self.stats.tx_transfers.fetch_add(bufs.len() as u64, Ordering::Relaxed);
                 self.stats.tx_batches.fetch_add(1, Ordering::Relaxed);
+                self.stats.last_tx_ms.store(crate::time::uptime_ms(), Ordering::Relaxed);
                 self.stats.tx_frames.fetch_add(frames as u64, Ordering::Relaxed);
                 self.stats.tx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
             }
@@ -817,13 +823,19 @@ pub fn describe() -> Vec<String> {
         .iter()
         .map(|n| {
             let s = &n.stats;
+            let now = crate::time::uptime_ms();
+            // Frames packed but not yet handed to the controller.
+            let waiting: usize = {
+                let tx = n.tx.lock();
+                tx.frames.iter().sum()
+            };
             let rx_t = s.rx_transfers.load(Ordering::Relaxed);
             let tx_t = s.tx_transfers.load(Ordering::Relaxed);
             let per = |frames: u64, transfers: u64| (frames * 10).checked_div(transfers).unwrap_or(0);
             let (rx_per, tx_per) =
                 (per(s.rx_frames.load(Ordering::Relaxed), rx_t), per(s.tx_frames.load(Ordering::Relaxed), tx_t));
             alloc::format!(
-                "{} {}: link {}, {} Mb/s; rx {} frames in {} transfers ({}.{}/transfer), tx {} in {} ({}.{}/transfer, {} batches), {} dropped, {}/{} rx/tx errors",
+                "{} {}: link {}, {} Mb/s; rx {} frames in {} transfers ({}.{}/transfer), tx {} in {} ({}.{}/transfer, {} batches), {} dropped, {}/{} rx/tx errors; last rx {} ms ago, last tx {} ms ago, {} frames waiting",
                 n.label,
                 crate::net::wire::mac_str(n.mac),
                 if n.link() { "up" } else { "down" },
@@ -840,6 +852,9 @@ pub fn describe() -> Vec<String> {
                 s.tx_dropped.load(Ordering::Relaxed),
                 s.rx_errors.load(Ordering::Relaxed),
                 s.tx_errors.load(Ordering::Relaxed),
+                now.saturating_sub(s.last_rx_ms.load(Ordering::Relaxed)),
+                now.saturating_sub(s.last_tx_ms.load(Ordering::Relaxed)),
+                waiting,
             )
         })
         .collect()
