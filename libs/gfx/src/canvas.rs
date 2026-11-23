@@ -751,9 +751,34 @@ impl<'a> Canvas<'a> {
     /// Like [`blit`](Self::blit) for a surface with transparency (glass regions).
     fn blit_alpha_px(&mut self, src: &[u32], sw: u32, sh: u32, dst: Rect, radius: i32) {
         let img = Rect::new(dst.x, dst.y, (sw as i32).min(dst.w), (sh as i32).min(dst.h));
-        self.with_pclip(img, |cv| {
-            cv.fill_round_rect_with_px(dst, radius, |x, y| src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize])
-        });
+        let radius = radius.min(dst.w / 2).min(dst.h / 2).max(0);
+        // Between the corner bands every pixel is its own opacity: copy the
+        // solid ones, skip the clear ones, blend the rest.
+        let straight = Rect::new(img.x, dst.y + radius, img.w, dst.h - 2 * radius);
+        let area = img.intersect(&straight).intersect(&self.pclip());
+        for y in area.y..area.bottom() {
+            let s0 = ((y - dst.y) as u32 * sw + (area.x - dst.x) as u32) as usize;
+            let d0 = (y * self.width + area.x) as usize;
+            let n = area.w as usize;
+            for (d, &p) in self.buf[d0..d0 + n].iter_mut().zip(&src[s0..s0 + n]) {
+                let a = p >> 24;
+                if a == 255 {
+                    *d = p;
+                } else if a != 0 {
+                    *d = blend(*d, p, a);
+                }
+            }
+        }
+        if radius > 0 {
+            for band in [Rect::new(dst.x, dst.y, dst.w, radius), Rect::new(dst.x, dst.bottom() - radius, dst.w, radius)]
+            {
+                self.with_pclip(band.intersect(&img), |cv| {
+                    cv.fill_round_rect_with_px(dst, radius, |x, y| {
+                        src[((y - dst.y) as u32 * sw + (x - dst.x) as u32) as usize]
+                    })
+                });
+            }
+        }
     }
 
     /// Draws a `src_w`×`src_h` image with straight alpha scaled into `dst`

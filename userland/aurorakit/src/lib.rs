@@ -46,6 +46,7 @@ pub enum Request {
     SetWallpaper(u8),
     /// Use a picture file as the wallpaper.
     SetWallpaperImage(String),
+    StartTour,
 }
 
 pub struct Env {
@@ -58,6 +59,10 @@ pub struct Env {
 }
 
 pub trait App {
+    /// Cursor at the last pointer position; changes are sent only when needed.
+    fn cursor(&self) -> u32 {
+        corekit::abi::cursor::ARROW
+    }
     /// Opt-in transparent regions, in window-local coordinates. Opaque is the default.
     fn materials(&self, _area: Rect) -> Vec<corekit::abi::MaterialRegion> {
         Vec::new()
@@ -65,6 +70,10 @@ pub trait App {
     fn title(&self) -> String;
     /// Initial content size.
     fn size(&self) -> (i32, i32);
+    /// Minimum useful content size, excluding compositor chrome.
+    fn min_size(&self) -> (i32, i32) {
+        (240, 160)
+    }
     fn resizable(&self) -> bool {
         true
     }
@@ -228,6 +237,9 @@ fn apply(requests: Vec<Request>) {
             Request::Reboot => desktop::reboot(),
             Request::SetDark(d) => desktop::set_dark(d),
             Request::SetWallpaper(i) => desktop::set_wallpaper(i),
+            Request::StartTour => {
+                let _ = desktop::start_tour();
+            }
             Request::SetWallpaperImage(p) => {
                 let _ = desktop::set_wallpaper_image(&p);
             }
@@ -276,8 +288,10 @@ pub fn run<A: App>(mut app: A) -> i32 {
     let (w, h) = (w.min(screen.0 - 48), h.min(screen.1 - 150));
     let mut title = app.title();
     let [tp, tl] = str_args(&title);
-    let flags = if app.resizable() { win::RESIZABLE } else { 0 };
-    let id = match call(nr::WIN_CREATE, &[w as u64, h as u64, tp, tl, flags as u64]) {
+    let flags = (if app.resizable() { win::RESIZABLE } else { 0 }) | win::MINIMUM_SIZE;
+    let (mw, mh) = app.min_size();
+    let minimum = ((mw.clamp(120, 8192) as u64) << 32) | mh.clamp(80, 8192) as u64;
+    let id = match call(nr::WIN_CREATE, &[w as u64, h as u64, tp, tl, flags as u64, minimum]) {
         Ok(id) => id,
         Err(e) => {
             corekit::eprintln!("could not create window: {}", e);
@@ -295,6 +309,7 @@ pub fn run<A: App>(mut app: A) -> i32 {
     };
     let mut dirty = true;
     let mut next_tick = 0;
+    let mut pointer_shape = u32::MAX;
     // Opt-in validation counters; ordinary sessions do not collect these.
     let metrics = corekit::fs::exists("/Settings/runtime-metrics");
     let mut sample_at = env.now_ms;
@@ -363,6 +378,11 @@ pub fn run<A: App>(mut app: A) -> i32 {
             title = new_title;
         }
         apply(core::mem::take(&mut env.requests));
+        let shape = app.cursor().min(corekit::abi::cursor::MAX);
+        if shape != pointer_shape {
+            let _ = call(nr::WIN_SET_CURSOR, &[id, shape as u64]);
+            pointer_shape = shape;
+        }
 
         // Layout can reveal an offscreen focus target and request another
         // frame; honor that deadline before sleeping as well as after input.

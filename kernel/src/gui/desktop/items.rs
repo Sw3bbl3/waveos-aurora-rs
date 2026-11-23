@@ -330,22 +330,17 @@ impl Desktop {
             let f = theme::ui(12);
             let width = f.width(&name).min(r.w - 10);
             let x = r.x + (r.w - width) / 2;
-            cv.text_clipped(
-                x + 1,
-                r.y + 64,
-                &name,
-                f,
-                if theme::current().dark || selected { 0xDD000000 } else { 0xCCFFFFFF },
-                r.w - 10,
-            );
-            cv.text_clipped(
-                x,
-                r.y + 63,
-                &name,
-                f,
-                if theme::current().dark || selected { 0xFFFFFFFF } else { 0xFF17223B },
-                r.w - 10,
-            );
+            // A quiet label surface stays readable over both bright skies and
+            // dark water, independently of the selected system appearance.
+            let t = theme::current();
+            if !selected {
+                cv.fill_round_rect(
+                    Rect::new(x - 6, r.y + 49, width + 12, 20),
+                    6,
+                    super::super::canvas::with_alpha(t.window_bg, 200),
+                );
+            }
+            cv.text_clipped(x, r.y + 63, &name, f, if selected { 0xFFFFFFFF } else { t.text }, r.w - 10);
         }
         let capacity = Grid::new(self.w, self.h, MENUBAR_H).capacity();
         if self.items.list.len() > capacity {

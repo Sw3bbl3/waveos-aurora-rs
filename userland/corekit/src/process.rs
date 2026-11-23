@@ -93,6 +93,10 @@ pub fn fixed_str(bytes: &[u8], len: u32) -> String {
 pub mod desktop {
     use super::*;
 
+    pub fn start_tour() -> Result<()> {
+        call(nr::DESKTOP, &[abi::desktop::START_TOUR as u64, 0, 0]).map(|_| ())
+    }
+
     fn req(r: usize, arg: &str) -> Result<u64> {
         let [p, l] = str_args(arg);
         call(nr::DESKTOP, &[r as u64, p, l])

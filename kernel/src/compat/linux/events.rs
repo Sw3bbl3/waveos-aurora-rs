@@ -41,7 +41,7 @@ impl EventFd {
             return Err(EINVAL);
         }
         loop {
-            let gen = readiness::generation();
+            let watch = (!self.nonblocking).then(|| readiness::Watch::new(&[readiness::key(self)]));
             {
                 let mut v = self.value.lock();
                 if *v > 0 {
@@ -59,7 +59,7 @@ impl EventFd {
             if crate::proc::interrupted() {
                 return Err(EINTR);
             }
-            readiness::wait(gen, &[readiness::key(self)], 1000);
+            watch.unwrap().wait(1000);
         }
     }
 
@@ -69,7 +69,7 @@ impl EventFd {
             return Err(EINVAL);
         }
         loop {
-            let gen = readiness::generation();
+            let watch = (!self.nonblocking).then(|| readiness::Watch::new(&[readiness::key(self)]));
             {
                 let mut v = self.value.lock();
                 if EVENT_MAX - *v >= add {
@@ -85,7 +85,7 @@ impl EventFd {
             if crate::proc::interrupted() {
                 return Err(EINTR);
             }
-            readiness::wait(gen, &[readiness::key(self)], 1000);
+            watch.unwrap().wait(1000);
         }
     }
 }
@@ -359,6 +359,9 @@ impl Epoll {
             if hup {
                 got |= EPOLLHUP;
             }
+            if super::fs::descriptor_error(p, fd as usize) {
+                got |= EPOLLERR;
+            }
             if got != 0 {
                 out.push((got, *data));
                 if *events & EPOLLONESHOT != 0 {
@@ -370,7 +373,6 @@ impl Epoll {
         for fd in closed {
             set.remove(&fd);
         }
-        let _ = EPOLLERR;
         out
     }
 
@@ -390,20 +392,26 @@ impl Epoll {
             .collect()
     }
 
-    /// The soonest a watched timer expires (ms), to bound the sleep.
     /// What to wait on for a change: this set (`epoll_ctl`) and what it watches.
-    fn wait_keys(&self, p: &Process) -> Vec<usize> {
+    fn watch(&self, p: &Process) -> readiness::Watch {
+        // Register while holding the interest lock, so a concurrent ADD/MOD
+        // cannot change the keys before this waiter subscribes to epoll_ctl.
+        let set = self.interest.lock();
         let mut keys = alloc::vec![readiness::key(self)];
-        for &fd in self.interest.lock().keys() {
+        for (&fd, (events, _)) in set.iter() {
+            if *events & !(EPOLLONESHOT | 1 << 31) == 0 {
+                continue;
+            }
             super::fs::wait_keys(p, fd as usize, &mut keys);
         }
-        keys
+        readiness::Watch::new(&keys)
     }
 
     fn next_timer(&self, p: &Process) -> Option<u64> {
         let set = self.interest.lock();
-        set.keys()
-            .filter_map(|&fd| match &*p.fd(fd as usize).ok()? {
+        set.iter()
+            .filter(|(_, (events, _))| *events & !(EPOLLONESHOT | 1 << 31) != 0)
+            .filter_map(|(&fd, _)| match &*p.fd(fd as usize).ok()? {
                 Handle::Special(s) => match &*s.lock() {
                     Special::Timer(t) => t.due_in(),
                     _ => None,
@@ -425,7 +433,7 @@ pub fn epoll_wait(p: &Process, epfd: u64, events: u64, max: u64, timeout_ms: i64
     }
     let deadline = (timeout_ms >= 0).then(|| time::uptime_ms() + timeout_ms as u64);
     loop {
-        let gen = readiness::generation();
+        let watch = (timeout_ms != 0).then(|| ep.watch(p));
         let ready = ep.ready(p, max as usize, 0);
         if !ready.is_empty() {
             for (i, (ev, data)) in ready.iter().enumerate() {
@@ -447,6 +455,6 @@ pub fn epoll_wait(p: &Process, epfd: u64, events: u64, max: u64, timeout_ms: i64
         if let Some(t) = ep.next_timer(p) {
             wait = wait.min(t.max(1));
         }
-        readiness::wait(gen, &ep.wait_keys(p), wait.max(1));
+        watch.unwrap().wait(wait.max(1));
     }
 }

@@ -85,6 +85,9 @@ fn send(s: &mut Stack, i: usize, kind: u8) {
 
 pub fn tick(s: &mut Stack, now: u64) {
     for i in 0..s.ifaces.len() {
+        if !s.ifaces[i].link {
+            continue;
+        }
         let Some(c) = s.ifaces[i].dhcp.as_mut() else { continue };
         if c.state == State::Bound && now >= c.lease_until {
             log!("dhcp", "{}: lease expired", s.ifaces[i].name);

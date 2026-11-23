@@ -16,6 +16,7 @@ pub mod notify;
 pub mod prefs;
 pub mod server;
 pub mod settings;
+pub mod stages;
 
 pub use lumen::{canvas, geom, icons, theme, wallpaper, widgets};
 
@@ -336,7 +337,7 @@ fn run() {
             cv.clip = r;
             desktop.paint(&mut cv);
             let px = cv.to_px(r);
-            flush(front, &back, &fb, px);
+            stages::time(stages::Stage::Flush, || flush(front, &back, &fb, px));
             let elapsed = time::now_ns() - started;
             if r.area() == i64::from(w) * i64::from(h) {
                 frame_stats.0 += 1;
@@ -380,6 +381,11 @@ fn run() {
                 w,
                 h
             );
+            let mut spent = alloc::string::String::new();
+            stages::take(&mut spent);
+            if !spent.is_empty() {
+                log!("lumen", "time by stage: {}", spent);
+            }
             frame_stats = (0, 0, 0, time::uptime_ms());
             partial_stats = (0, 0);
         }

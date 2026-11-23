@@ -22,6 +22,7 @@ pub mod exec;
 pub mod fs;
 mod links;
 mod misc;
+pub(crate) use misc::realtime_ns;
 mod mm;
 mod net;
 mod process;
@@ -331,6 +332,7 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::NOTIFY
         | w::PREF_GET
         | w::DISPLAY_MODES
+        | w::UNIX_MS
         | w::TIME_MS => crate::syscall::handle(n as usize, a),
         _ => Err(ENOSYS),
     }

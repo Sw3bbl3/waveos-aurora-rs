@@ -62,12 +62,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub use aurorakit::{load_fonts, text, KeyCode, KeyEvent, Modifiers, Request};
+pub use corekit::abi::cursor;
 pub use lumen;
 pub use style::{Align, Color, Insets, TextStyle};
 pub use view::*;
 
 /// Everything an app usually needs: `use waveui::prelude::*;`.
 pub mod prelude {
+    pub use crate::cursor;
     pub use crate::style::{radius, size, space, Align, Color, Insets, TextStyle};
     pub use crate::view::*;
     pub use crate::{App, Context, Env, KeyCode, KeyEvent};
@@ -126,6 +128,10 @@ pub trait App: Sized {
     /// Can the window be resized?
     fn resizable(&self) -> bool {
         true
+    }
+    /// Minimum useful content size. The compositor adds its own control strip.
+    fn min_size(&self) -> (i32, i32) {
+        (240, 160)
     }
 
     /// Changes the state for a message. The interface is redrawn after.

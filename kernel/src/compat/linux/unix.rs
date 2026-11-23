@@ -190,7 +190,7 @@ impl Socket {
     /// The next connection on a listening socket.
     pub fn accept(&self, nonblock: bool, pid: u32) -> Result<Arc<Socket>, isize> {
         loop {
-            let gen = readiness::generation();
+            let watch = (!nonblock).then(|| readiness::Watch::new(&[readiness::key(self)]));
             {
                 let mut s = self.st.lock();
                 if !s.listening {
@@ -202,7 +202,7 @@ impl Socket {
                     return Ok(c);
                 }
             }
-            wait(gen, &[readiness::key(self)], nonblock)?;
+            wait(watch)?;
         }
     }
 
@@ -236,7 +236,7 @@ impl Socket {
         let mut fds = Some(fds);
         let mut done = 0;
         loop {
-            let gen = readiness::generation();
+            let watch = (!nonblock).then(|| readiness::Watch::new(&[readiness::key(Arc::as_ptr(&queue))]));
             {
                 let mut q = queue.lock();
                 if q.reader_gone {
@@ -270,7 +270,7 @@ impl Socket {
             if done > 0 && nonblock {
                 return Ok(done);
             }
-            wait(gen, &[readiness::key(Arc::as_ptr(&queue))], nonblock)?;
+            wait(watch)?;
         }
     }
 
@@ -278,7 +278,8 @@ impl Socket {
     /// whether a datagram was cut short. `Ok((0, ..))` at end of file.
     pub fn recv(&self, out: &mut [u8], peek: bool, nonblock: bool) -> Result<Received, isize> {
         loop {
-            let gen = readiness::generation();
+            let watch = (!nonblock)
+                .then(|| readiness::Watch::new(&[readiness::key(Arc::as_ptr(&self.rx)), readiness::key(self)]));
             {
                 let mut q = self.rx.lock();
                 if !q.segs.is_empty() {
@@ -294,7 +295,7 @@ impl Socket {
                     return Ok(Received::default());
                 }
             }
-            wait(gen, &[readiness::key(Arc::as_ptr(&self.rx)), readiness::key(self)], nonblock)?;
+            wait(watch)?;
         }
     }
 
@@ -444,13 +445,11 @@ pub struct Received {
 }
 
 /// Waits for the next change to `keys` (or fails at once without blocking).
-fn wait(gen: u64, keys: &[usize], nonblock: bool) -> Result<(), isize> {
-    if nonblock {
-        return Err(EAGAIN);
-    }
+fn wait(watch: Option<readiness::Watch>) -> Result<(), isize> {
+    let watch = watch.ok_or(EAGAIN)?;
     if crate::proc::interrupted() {
         return Err(EINTR);
     }
-    readiness::wait(gen, keys, 1000);
+    watch.wait(1000);
     Ok(())
 }

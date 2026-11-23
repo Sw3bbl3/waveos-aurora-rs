@@ -13,10 +13,12 @@ mod dragdrop;
 mod handle;
 mod harbor;
 mod notifications;
+mod reveal;
 mod shell;
 mod shoal;
 mod shore;
 mod spotlight;
+mod tour;
 
 #[cfg(feature = "ktest")]
 pub use spotlight::calc_for_test;
@@ -62,7 +64,6 @@ fn picture_wallpaper(path: &str, w: i32, h: i32) -> Option<Vec<u32>> {
 
 const SHADOW_BLUR: i32 = 30;
 const SHADOW_OFFSET: i32 = 10;
-const RESIZE_GRIP: i32 = 14;
 const DOUBLE_CLICK_MS: u64 = 450;
 
 pub struct Window {
@@ -76,22 +77,26 @@ pub struct Window {
     pub animating: bool,
     /// A client window waits (up to a moment) for its first frame before it appears.
     pub awaiting_frame: Option<u64>,
+    chrome: lumen::motion::Fade,
+    chrome_hover: Option<usize>,
+    chrome_focus: Option<usize>,
 }
 
 impl Window {
-    /// Apps get the whole window: there is no title bar (see `handle`).
+    /// App surface coordinates exclude the stable hover-control strip.
     pub fn content(&self) -> Rect {
-        self.rect
+        windowing::content(self.rect)
+    }
+
+    fn minimum(&self) -> (i32, i32) {
+        let (w, h) = self.app.min_size();
+        (w, h + windowing::CHROME_H)
     }
 
     /// Everything this window paints, including its shadow.
     pub fn bounds(&self) -> Rect {
         let r = self.rect;
         Rect::new(r.x - SHADOW_BLUR, r.y - SHADOW_BLUR, r.w + 2 * SHADOW_BLUR, r.h + 2 * SHADOW_BLUR + SHADOW_OFFSET)
-    }
-
-    fn grip(&self) -> Rect {
-        Rect::new(self.rect.right() - RESIZE_GRIP, self.rect.bottom() - RESIZE_GRIP, RESIZE_GRIP, RESIZE_GRIP)
     }
 }
 
@@ -108,6 +113,7 @@ struct Drag {
     start_x: i32,
     start_y: i32,
     start_rect: Rect,
+    started: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -119,6 +125,9 @@ pub enum PowerAction {
 pub struct Desktop {
     pub w: i32,
     pub h: i32,
+    tour: Option<tour::Tour>,
+    reveal: Option<reveal::Reveal>,
+    tour_keyboard: bool,
     water: lumen::water::Water,
     water_coarse: bool,
     items: items::Items,
@@ -126,6 +135,13 @@ pub struct Desktop {
     blurred: Vec<u32>,
     scene: Vec<u32>,
     scene_dirty: bool,
+    /// While a window is moved: the scene below it (wallpaper, desktop
+    /// items, the windows under it), composed once and reused every frame.
+    backdrop: Vec<u32>,
+    backdrop_ok: bool,
+    /// Set while the move itself damages the screen (its old and new
+    /// bounds, the layouts row), which leaves the backdrop valid.
+    drag_damage: bool,
     windows: Vec<Window>,
     mru: Vec<u32>,
     switcher: Option<Switcher>,
@@ -147,9 +163,6 @@ pub struct Desktop {
     harbor: harbor::HarborState,
     /// Where a dragged window would moor, and as what.
     snap_preview: Option<(Rect, Placement)>,
-    /// The handle of the window the pointer is near, and the pill button under it.
-    handle: Option<handle::Handle>,
-    handle_button: Option<usize>,
     /// Moorings' layouts row is showing (a window is dragged near the top).
     moorings_open: bool,
     mooring_zone: Option<(u8, u8, u8, u8)>,
@@ -208,6 +221,9 @@ impl Desktop {
         let mut d = Self {
             w,
             h,
+            tour: None,
+            reveal: None,
+            tour_keyboard: false,
             water: lumen::water::Water::new(),
             water_coarse: false,
             items: items::Items::new(),
@@ -215,6 +231,9 @@ impl Desktop {
             blurred,
             scene: alloc::vec![0; (w*h) as usize],
             scene_dirty: true,
+            backdrop: Vec::new(),
+            backdrop_ok: false,
+            drag_damage: false,
             windows: Vec::new(),
             mru: Vec::new(),
             switcher: None,
@@ -230,8 +249,7 @@ impl Desktop {
             menu: None,
             harbor: harbor::HarborState::default(),
             snap_preview: None,
-            handle: None,
-            handle_button: None,
+
             moorings_open: false,
             mooring_zone: None,
             super_down: false,
@@ -307,12 +325,14 @@ impl Desktop {
         let r = r.intersect(&self.screen());
         if !r.is_empty() {
             self.scene_dirty = true;
+            self.backdrop_ok &= self.drag_damage;
             self.damage.push(r);
         }
     }
 
     pub fn damage_all(&mut self) {
         self.scene_dirty = true;
+        self.backdrop_ok &= self.drag_damage;
         self.damage.clear();
         self.damage.push(self.screen());
     }
@@ -386,7 +406,7 @@ impl Desktop {
         let (cw, ch) = app.size();
         let wa = self.work_area();
         let w = cw.min(wa.w);
-        let h = ch.min(wa.h);
+        let h = (ch + windowing::CHROME_H).min(wa.h);
         let cascade = (self.windows.len() as i32 % 6) * 28;
         let x = wa.x + (wa.w - w) / 2 + cascade - 56;
         let y = wa.y + (wa.h - h) / 3 + cascade - 28;
@@ -409,6 +429,9 @@ impl Desktop {
             placement: Placement::Floating,
             animating: client,
             awaiting_frame,
+            chrome: lumen::motion::Fade::default(),
+            chrome_hover: None,
+            chrome_focus: None,
         });
         if let Some(p) = prev {
             self.damage_window(p);
@@ -530,7 +553,7 @@ impl Desktop {
         }
         let w = &mut self.windows[i];
         let old = w.rect;
-        let (mw, mh) = w.app.min_size();
+        let (mw, mh) = w.minimum();
         let next = if placement == Placement::Floating {
             windowing::clamp(w.saved.unwrap_or(old), area)
         } else {
@@ -605,10 +628,16 @@ impl Desktop {
             | pref::DOCK_SIZE
             | pref::DOCK_AUTOHIDE => {
                 super::prefs::apply_appearance();
+                if key == pref::REDUCE_MOTION && theme::reduce_motion() {
+                    self.water.clear();
+                    self.step_animations();
+                    self.step_notifications();
+                    self.reveal = None;
+                }
                 if matches!(key, pref::DOCK_SIZE | pref::DOCK_AUTOHIDE) {
                     let wa = self.work_area();
                     for win in &mut self.windows {
-                        let (mw, mh) = win.app.min_size();
+                        let (mw, mh) = win.minimum();
                         if let Some(r) = windowing::target(win.placement, wa, (mw, mh)) {
                             win.rect = r;
                         }
@@ -654,6 +683,7 @@ impl Desktop {
         self.cursor = (self.cursor.0.min(w - 1), self.cursor.1.min(h - 1));
         let wa = self.work_area();
         for win in &mut self.windows {
+            let minimum = win.minimum();
             let r = &mut win.rect;
             r.w = r.w.min(wa.w);
             r.h = r.h.min(wa.h);
@@ -663,7 +693,7 @@ impl Desktop {
                 *saved = windowing::clamp(*saved, wa);
             }
             if win.placement != Placement::Floating {
-                let (mw, mh) = win.app.min_size();
+                let (mw, mh) = minimum;
                 if let Some(target) = windowing::target(win.placement, wa, (mw, mh)) {
                     *r = target;
                 } else {
@@ -672,12 +702,13 @@ impl Desktop {
                 }
             }
         }
+        self.reveal = None;
         self.ghosts.clear();
         for win in &mut self.windows {
             win.animating = win.awaiting_frame.is_some();
         }
         if core::mem::take(&mut self.confirm_resolution) {
-            self.add_window(Box::new(apps::DisplayConfirm::new((w, h))));
+            self.add_window(Box::new(apps::DisplayConfirm::new(super::screen_pixels())));
         }
         self.damage_all();
     }
@@ -765,10 +796,14 @@ impl Desktop {
                     if let Some(i) = self.window_of_client(id).and_then(|w| self.index_of(w)) {
                         if !self.windows[i].minimized {
                             let c = self.windows[i].content();
+                            // The moved window is drawn over the backdrop, not in it.
+                            self.drag_damage = self.drag.is_some_and(|d| d.window == self.windows[i].id);
                             self.damage(Rect::new(c.x + r.x, c.y + r.y, r.w, r.h).intersect(&c));
+                            self.drag_damage = false;
                         }
                     }
                 }
+                Command::StartTour => self.start_tour(),
                 Command::Cursor => {
                     let (x, y) = self.cursor;
                     self.damage.push(cursor::bounds(x, y).intersect(&self.screen()));
@@ -835,6 +870,10 @@ impl Desktop {
             || self.crest_moving()
             || self.shore_moving()
             || self.harbor_moving()
+            || self.reveal_moving()
+            || self.tour_moving()
+            || self.windows.iter().any(|w| w.chrome.moving(self.now_ms, theme::reduce_motion()))
+            || (!theme::reduce_motion() && cursor::animated(self.cursor_shape()))
     }
 
     /// Absolute deadline, recalculated after input and client commands. Client
@@ -941,9 +980,11 @@ impl Desktop {
                 self.mooring_zone = None;
                 if let Some((target, placement)) = self.snap_preview.take() {
                     if let Some(i) = self.index_of(d.window) {
+                        let old = self.windows[i].rect;
                         self.windows[i].saved = Some(d.start_rect);
                         self.windows[i].rect = target;
                         self.windows[i].placement = placement;
+                        self.animate_zoom(d.window, old);
                     }
                     self.damage_all();
                 }
@@ -983,17 +1024,72 @@ impl Desktop {
         self.with_app(id, |app, area, _| app.scroll(notches, (dx, dy), area));
     }
 
-    /// The pointer's shape: what the client window under it asked for.
-    fn cursor_shape(&self) -> u32 {
+    fn damage_cursor(&mut self) {
         let (x, y) = self.cursor;
-        if self.shore.is_some() || self.drag.is_some() || self.dnd.is_some() {
-            return aurora_abi::cursor::ARROW;
+        self.damage.push(cursor::bounds(x, y).intersect(&self.screen()));
+    }
+
+    fn step_cursor(&mut self) -> bool {
+        let busy = cursor::animated(self.cursor_shape()) && !theme::reduce_motion();
+        if busy {
+            self.damage_cursor();
         }
-        self.window_at(x, y)
-            .map(|i| &self.windows[i])
-            .filter(|w| w.content().contains(x, y))
-            .and_then(|w| w.app.client_id())
-            .map_or(aurora_abi::cursor::ARROW, crate::gui::server::cursor_of)
+        busy
+    }
+
+    /// Shell operations take precedence over client cursor requests.
+    fn cursor_shape(&self) -> u32 {
+        use aurora_abi::cursor as c;
+        let (x, y) = self.cursor;
+        if self.shore.is_some() {
+            return c::ARROW;
+        }
+        if let Some(shape) = self.tour_cursor(x, y) {
+            return shape;
+        }
+        if let Some(d) = self.drag {
+            return match d.kind {
+                DragKind::Move => c::GRABBING,
+                DragKind::Resize(e) => cursor::resize_shape(e),
+            };
+        }
+        if let Some(dnd) = &self.dnd {
+            return if dnd.target == dragdrop::Target::Nothing {
+                c::NOT_ALLOWED
+            } else if crate::drivers::input::modifiers().ctrl {
+                c::COPY
+            } else {
+                c::GRABBING
+            };
+        }
+        if self.launcher.is_some()
+            || self.menu.is_some()
+            || self.spotlight_open()
+            || self.current_open()
+            || self.center_open()
+            || self.switcher.is_some()
+            || y < MENUBAR_H
+            || self.dock_rect().contains(x, y)
+        {
+            return c::ARROW;
+        }
+        if let Some(w) = self.window_at(x, y).map(|i| &self.windows[i]) {
+            let e = if w.app.resizable() { windowing::resize_edges(w.rect, x, y) } else { 0 };
+            if e != 0 {
+                return cursor::resize_shape(e);
+            }
+            if !w.content().contains(x, y) {
+                return if w.chrome_hover.is_some() { c::POINTER } else { c::GRAB };
+            }
+            if let Some(client) = w.app.client_id() {
+                return server::cursor_of(client);
+            }
+        }
+        if !self.launching.is_empty() {
+            c::PROGRESS
+        } else {
+            c::ARROW
+        }
     }
 
     /// The client windows that presented since this was last asked.
@@ -1019,45 +1115,56 @@ impl Desktop {
         if self.items_motion(x, y) {
             return;
         }
-        if let Some(d) = self.drag {
+        if let Some(mut d) = self.drag {
             let Some(i) = self.index_of(d.window) else {
                 self.drag = None;
                 return;
             };
             let old = self.windows[i].bounds();
             let (dx, dy) = (x - d.start_x, y - d.start_y);
+            if !d.started {
+                if dx.abs().max(dy.abs()) < 4 {
+                    return;
+                }
+                d.started = true;
+                self.backdrop_ok = false;
+                if let Some(mut restored) = self.windows[i].saved.take() {
+                    let offset =
+                        ((d.start_x - d.start_rect.x) as i64 * restored.w as i64 / d.start_rect.w.max(1) as i64) as i32;
+                    restored.x = (d.start_x - offset).clamp(8, (self.w - 8 - restored.w).max(8));
+                    restored.y = d.start_y - (d.start_y - d.start_rect.y).clamp(8, windowing::CHROME_H - 8);
+                    d.start_rect = restored;
+                }
+                self.drag = Some(d);
+            }
             let w = &mut self.windows[i];
             match d.kind {
                 DragKind::Move => {
-                    let ny = (d.start_rect.y + dy).clamp(MENUBAR_H, self.h - 40);
-                    w.rect = Rect::new(d.start_rect.x + dx, ny, d.start_rect.w, d.start_rect.h);
+                    let ny =
+                        (d.start_rect.y + dy).clamp(MENUBAR_H + 8, (self.h - 8 - d.start_rect.h).max(MENUBAR_H + 8));
+                    let nx = (d.start_rect.x + dx).clamp(8, (self.w - 8 - d.start_rect.w).max(8));
+                    w.rect = Rect::new(nx, ny, d.start_rect.w, d.start_rect.h);
                 }
                 DragKind::Resize(edges) => {
-                    let (mw, mh) = w.app.min_size();
-                    let min_h = mh;
-                    if edges & 1 != 0 {
-                        w.rect.x = (d.start_rect.x + dx).min(d.start_rect.right() - mw);
-                        w.rect.w = d.start_rect.right() - w.rect.x;
-                    }
-                    if edges & 2 != 0 {
-                        w.rect.w = (d.start_rect.w + dx).max(mw);
-                    }
-                    if edges & 4 != 0 {
-                        w.rect.y = (d.start_rect.y + dy).clamp(MENUBAR_H, d.start_rect.bottom() - min_h);
-                        w.rect.h = d.start_rect.bottom() - w.rect.y;
-                    }
-                    if edges & 8 != 0 {
-                        w.rect.h = (d.start_rect.h + dy).max(min_h);
-                    }
+                    w.rect = windowing::resized(
+                        d.start_rect,
+                        edges,
+                        dx,
+                        dy,
+                        w.minimum(),
+                        Rect::new(8, MENUBAR_H + 8, self.w - 16, self.h - MENUBAR_H - 16),
+                    );
                 }
             }
             w.saved = None;
             w.placement = Placement::Floating;
             let new = w.bounds();
+            self.drag_damage = matches!(d.kind, DragKind::Move);
             if matches!(d.kind, DragKind::Move) {
                 self.moorings_drag(i, x, y);
             }
             self.damage(old.union(&new));
+            self.drag_damage = false;
             return;
         }
 
@@ -1083,8 +1190,19 @@ impl Desktop {
 
         // Hover inside the focused window's content.
         if let Some(f) = self.focused_id() {
-            let over_top = self.window_at(x, y).map(|i| self.windows[i].id) == Some(f);
-            let (hx, hy) = if over_top && self.launcher.is_none() && self.menu.is_none() { (x, y) } else { (-1, -1) };
+            let over_top = self
+                .window_at(x, y)
+                .is_some_and(|i| self.windows[i].id == f && self.windows[i].content().contains(x, y));
+            let (hx, hy) = if over_top
+                && self.launcher.is_none()
+                && self.menu.is_none()
+                && !self.current_open()
+                && !self.center_open()
+            {
+                (x, y)
+            } else {
+                (-1, -1)
+            };
             self.with_app(f, |app, area, _| app.hover(hx, hy, area));
         }
     }
@@ -1101,6 +1219,13 @@ impl Desktop {
             && (y - self.last_click.2).abs() < 5;
         self.last_click = if double { (0, x, y) } else { (self.now_ms, x, y) };
 
+        if self.tour_press(x, y) {
+            return;
+        }
+        self.tour_keyboard = false;
+        for w in &mut self.windows {
+            w.chrome_focus = None;
+        }
         if self.spotlight_press(x, y) || self.center_press(x, y) {
             return;
         }
@@ -1110,7 +1235,7 @@ impl Desktop {
         if self.shell_press(x, y) {
             return;
         }
-        if self.handle_press(x, y, double) {
+        if self.resize_press(x, y) || self.handle_press(x, y, double) {
             return;
         }
 
@@ -1130,35 +1255,7 @@ impl Desktop {
         if self.focused_id() != Some(id) {
             self.raise(id);
         }
-        let i = self.index_of(id).unwrap();
-        let w = &self.windows[i];
-        let mut edges = 0u8;
-        if w.app.resizable() {
-            if x < w.rect.x + 5 {
-                edges |= 1;
-            }
-            if x >= w.rect.right() - 5 {
-                edges |= 2;
-            }
-            if y < w.rect.y + 5 {
-                edges |= 4;
-            }
-            if y >= w.rect.bottom() - 5 {
-                edges |= 8;
-            }
-            if w.grip().contains(x, y) {
-                edges |= 10;
-            }
-        }
-        if edges != 0 {
-            self.drag =
-                Some(Drag { window: id, kind: DragKind::Resize(edges), start_x: x, start_y: y, start_rect: w.rect });
-            return;
-        }
-        if w.app.resizable() && w.grip().contains(x, y) {
-            self.drag =
-                Some(Drag { window: id, kind: DragKind::Resize(10), start_x: x, start_y: y, start_rect: w.rect });
-        } else if double {
+        if double {
             self.grab = Some(id);
             self.with_app(id, |app, area, env| app.double_click(x, y, area, env));
         } else {
@@ -1195,6 +1292,9 @@ impl Desktop {
     fn key(&mut self, k: KeyEvent) {
         if self.shore.is_some() {
             self.shore_key(&k);
+            return;
+        }
+        if self.tour_key(&k) || self.handle_key(&k) {
             return;
         }
         if self.items.menu.is_some() || self.items.rename.is_some() {
@@ -1393,6 +1493,10 @@ impl Desktop {
             self.reveal_window(id);
         }
         let mut busy = self.step_animations();
+        busy |= self.step_reveal();
+        busy |= self.step_tour();
+        busy |= self.step_handle();
+        busy |= self.step_cursor();
         busy |= self.step_water();
         busy |= self.step_notifications();
         busy |= self.step_bar();
@@ -1425,6 +1529,24 @@ impl Desktop {
             let screen = self.screen();
             for r in rects.iter_mut() {
                 *r = r.intersect(&screen);
+            }
+            // Each rectangle repaints the whole scene inside it: overlapping
+            // ones become their union rather than painting the overlap twice.
+            // (Splitting instead would cut through glass, which must sample
+            // a backdrop rebuilt within the same rectangle.)
+            let mut merged = true;
+            while merged {
+                merged = false;
+                'scene: for i in 0..rects.len() {
+                    for j in i + 1..rects.len() {
+                        if rects[i].intersects(&rects[j]) {
+                            rects[i] = rects[i].union(&rects[j]);
+                            rects.swap_remove(j);
+                            merged = true;
+                            break 'scene;
+                        }
+                    }
+                }
             }
             let area: i64 = rects.iter().map(|r| r.area()).sum();
             if rects.len() > 12 || area * 10 > screen.area() * 7 {
@@ -1465,7 +1587,9 @@ impl Desktop {
     }
     /// Whether damage may be repainted piecemeal (`take_damage` grows it
     /// around glass). A dragged window damages exactly its old and new
-    /// bounds, so drags qualify; overlays and animations repaint everything.
+    /// bounds, so drags qualify, and so do crossfades (bounded to their
+    /// surface) and the window switcher (glass, listed in `material_rects`);
+    /// other overlays and animations repaint everything.
     fn partial_safe(&self) -> bool {
         let k = super::scale();
         !(self.scene.len() != (self.w * k * self.h * k) as usize
@@ -1483,7 +1607,7 @@ impl Desktop {
             || self.harbor.peek.is_some()
             || self.dnd.is_some()
             || self.power.is_some()
-            || self.switcher.is_some())
+            || self.tour.is_some())
     }
 
     /// Every glass surface on screen (they sample what lies beneath them).
@@ -1492,6 +1616,9 @@ impl Desktop {
         let mut materials =
             alloc::vec![self.left_bubble().0, self.right_bubble().0, self.crest_area(), self.dock_rect()];
         materials.extend(self.shore_materials());
+        if self.switcher.is_some() {
+            materials.push(self.switcher_glass());
+        }
         for w in &self.windows {
             if w.minimized {
                 continue;
@@ -1505,13 +1632,14 @@ impl Desktop {
         if let Some(cache) = cv.materials.as_deref_mut() {
             cache.set_moving(self.drag.is_some() || self.animating());
         }
+        use crate::gui::stages::{time as staged, Stage};
         if !self.scene_dirty && self.scene.len() == cv.buf.len() {
-            cv.blit_same(&self.scene, cv.clip);
-            cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape());
+            staged(Stage::Scene, || cv.blit_same(&self.scene, cv.clip));
+            staged(Stage::Cursor, || cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape(), self.now_ms));
             return;
         }
-        cv.blit_same(&self.wallpaper, cv.clip);
         if self.shore.is_some() {
+            staged(Stage::Wallpaper, || cv.blit_same(&self.wallpaper, cv.clip));
             self.paint_shore(cv);
             if self.shore.as_ref().is_some_and(|s| s.mode != shore::Mode::Setup) {
                 self.paint_bar(cv);
@@ -1520,34 +1648,36 @@ impl Desktop {
                 self.paint_power_overlay(cv, p);
             }
             self.save_scene(cv);
-            cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape());
+            cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape(), self.now_ms);
             return;
         }
-        let water_start = crate::time::now_ns();
-        self.water.paint(cv, &self.wallpaper, self.water_coarse);
-        if self.water.active() {
-            let elapsed = crate::time::now_ns().saturating_sub(water_start);
-            // Hysteresis avoids alternating between expensive and cheap frames.
-            if elapsed > 8_000_000 {
-                self.water_coarse = true;
-            } else if elapsed < 4_000_000 {
-                self.water_coarse = false;
+        let above = match self.backdrop_window() {
+            Some(i) => {
+                if !self.backdrop_ok || self.backdrop.len() != cv.buf.len() {
+                    // Compose what lies below the moved window once, over the whole screen.
+                    let built = crate::time::now_ns();
+                    let mut buf = core::mem::take(&mut self.backdrop);
+                    buf.resize(cv.buf.len(), 0);
+                    {
+                        let mut below = Canvas::new(&mut buf, cv.width, cv.height).with_scale(cv.scale);
+                        below.materials = cv.materials.as_deref_mut();
+                        self.paint_below(&mut below, i);
+                    }
+                    self.backdrop = buf;
+                    self.backdrop_ok = true;
+                    crate::gui::stages::add(Stage::Backdrop, crate::time::now_ns() - built);
+                }
+                staged(Stage::Wallpaper, || cv.blit_same(&self.backdrop, cv.clip));
+                i
             }
-        }
-        self.paint_items(cv);
-        let focused = self.focused_id();
-        let clip = cv.clip;
-        for i in 0..self.windows.len() {
-            let w = &self.windows[i];
-            if w.minimized || w.animating || !w.bounds().intersects(&clip) {
-                continue;
+            None => {
+                self.paint_below(cv, self.windows.len());
+                self.windows.len()
             }
-            let is_focused = Some(self.windows[i].id) == focused;
-            let env = self.env(is_focused);
-            paint_window(cv, &mut self.windows[i], is_focused, &env, true);
-        }
+        };
+        self.paint_windows(cv, above..self.windows.len());
+        let overlays = crate::time::now_ns();
         self.paint_ghosts(cv);
-        self.paint_handle(cv);
         self.paint_moorings(cv);
         self.paint_shoal(cv);
         self.paint_harbor(cv);
@@ -1558,11 +1688,58 @@ impl Desktop {
         self.paint_drag(cv);
         self.paint_switcher(cv);
         self.paint_item_overlay(cv);
+        self.paint_tour(cv);
+        self.paint_reveal(cv);
         if let Some(p) = self.power {
             self.paint_power_overlay(cv, p);
         }
-        self.save_scene(cv);
-        cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape());
+        crate::gui::stages::add(Stage::Overlays, crate::time::now_ns() - overlays);
+        staged(Stage::Scene, || self.save_scene(cv));
+        staged(Stage::Cursor, || cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape(), self.now_ms));
+    }
+
+    /// The window being moved, when the scene below it can be reused: its
+    /// index, everything under it being the backdrop.
+    fn backdrop_window(&self) -> Option<usize> {
+        let d = self.drag?;
+        if !d.started || !matches!(d.kind, DragKind::Move) || self.water.active() || self.animating() {
+            return None;
+        }
+        self.index_of(d.window)
+    }
+
+    /// The wallpaper (with any water), desktop items and the windows below
+    /// index `upto`.
+    fn paint_below(&mut self, cv: &mut Canvas, upto: usize) {
+        use crate::gui::stages::{time as staged, Stage};
+        staged(Stage::Wallpaper, || cv.blit_same(&self.wallpaper, cv.clip));
+        let water_start = crate::time::now_ns();
+        staged(Stage::Water, || self.water.paint(cv, &self.wallpaper, self.water_coarse));
+        if self.water.active() {
+            let elapsed = crate::time::now_ns().saturating_sub(water_start);
+            // Hysteresis avoids alternating between expensive and cheap frames.
+            if elapsed > 8_000_000 {
+                self.water_coarse = true;
+            } else if elapsed < 4_000_000 {
+                self.water_coarse = false;
+            }
+        }
+        staged(Stage::Items, || self.paint_items(cv));
+        self.paint_windows(cv, 0..upto);
+    }
+
+    fn paint_windows(&mut self, cv: &mut Canvas, range: core::ops::Range<usize>) {
+        let focused = self.focused_id();
+        let clip = cv.clip;
+        for i in range {
+            let w = &self.windows[i];
+            if w.minimized || w.animating || !w.bounds().intersects(&clip) {
+                continue;
+            }
+            let is_focused = Some(self.windows[i].id) == focused;
+            let env = self.env(is_focused);
+            paint_window(cv, &mut self.windows[i], is_focused, &env, true);
+        }
     }
 
     /// Keeps the composed scene (without the pointer) under the clip, to
@@ -1588,12 +1765,16 @@ impl Desktop {
 }
 
 fn paint_window(cv: &mut Canvas, w: &mut Window, focused: bool, env: &Env, shadow: bool) {
+    use crate::gui::stages::{time as staged, Stage};
     let t = theme::current();
     let r = w.rect;
     if shadow {
         let strength = if focused { t.shadow } else { t.shadow * 6 / 10 };
-        cv.shadow(r, WINDOW_RADIUS, SHADOW_BLUR, if focused { SHADOW_OFFSET } else { 6 }, strength);
+        staged(Stage::Shadow, || {
+            cv.shadow(r, WINDOW_RADIUS, SHADOW_BLUR, if focused { SHADOW_OFFSET } else { 6 }, strength)
+        });
     }
+    let body = crate::time::now_ns();
     let regions = w.app.materials();
     if regions.is_empty() && w.app.covers_window() {
         // The app paints the inside; only the anti-aliased corners blend
@@ -1607,16 +1788,21 @@ fn paint_window(cv: &mut Canvas, w: &mut Window, focused: bool, env: &Env, shado
         cv.fill_round_rect(r, WINDOW_RADIUS, t.window_bg);
     } else {
         for region in regions {
-            let region = region.offset(r.x, r.y).intersect(&r);
+            let c = w.content();
+            let region = region.offset(c.x, c.y).intersect(&c);
             cv.frosted(region, 12, t.glass_tint);
         }
     }
-    // App content: the whole window, its corners rounded.
-    cv.with_clip(r, |cv| w.app.draw(cv, r, env));
+    crate::gui::stages::add(Stage::Body, crate::time::now_ns() - body);
+    let content = w.content();
+    staged(Stage::App, || cv.with_clip(content, |cv| w.app.draw(cv, content, env)));
+    let chrome = crate::time::now_ns();
+    handle::paint_chrome(cv, w, focused, env.now_ms);
     if focused && shadow {
         cv.stroke_round_rect(r, WINDOW_RADIUS, if t.dark { 0x28FF_FFFF } else { 0x200E_1530 });
         handle::paint_waterline(cv, r, WINDOW_RADIUS);
     } else {
         cv.stroke_round_rect(r, WINDOW_RADIUS, t.window_border);
     }
+    crate::gui::stages::add(Stage::Chrome, crate::time::now_ns() - chrome);
 }

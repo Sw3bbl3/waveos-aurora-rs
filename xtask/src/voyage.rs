@@ -16,8 +16,14 @@ use std::process::Command;
 pub const PATH_IN_ROOT: &str = "/usr/lib/voyage/voyage";
 
 /// The libraries it calls, in `linux`'s library folders.
-const LIBS: &[&str] =
-    &["libwebkit2gtk-4.1.so.0", "libgtk-3.so.0", "libgdk-3.so.0", "libgobject-2.0.so.0", "libglib-2.0.so.0"];
+const LIBS: &[&str] = &[
+    "libwebkit2gtk-4.1.so.0",
+    "libjavascriptcoregtk-4.1.so.0",
+    "libgtk-3.so.0",
+    "libgdk-3.so.0",
+    "libgobject-2.0.so.0",
+    "libglib-2.0.so.0",
+];
 
 /// Builds Voyage against the Linux root `linux` (if it has WebKitGTK);
 /// returns the program, or `None` (with a warning) when it can't be built.

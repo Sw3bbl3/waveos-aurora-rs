@@ -33,6 +33,7 @@
 #define WAVE_AUDIO_CONTROL 71
 #define WAVE_WIN_SET_CURSOR 81
 #define WAVE_EVENT_FD 82
+#define WAVE_UNIX_MS 83
 
 /* Window flags for wave_win_create. */
 #define WAVE_WIN_RESIZABLE 1
@@ -62,6 +63,12 @@
 #define WAVE_CURSOR_RESIZE_NS 7
 #define WAVE_CURSOR_MOVE 8
 #define WAVE_CURSOR_HIDDEN 9
+#define WAVE_CURSOR_RESIZE_NWSE 10
+#define WAVE_CURSOR_RESIZE_NESW 11
+#define WAVE_CURSOR_GRAB 12
+#define WAVE_CURSOR_GRABBING 13
+#define WAVE_CURSOR_COPY 14
+#define WAVE_CURSOR_PROGRESS 15
 
 /* Key codes (wave_event.a for WAVE_EV_KEY). */
 enum wave_key {

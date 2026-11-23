@@ -39,6 +39,7 @@ mod sounds;
 mod tar;
 mod usbredir;
 mod voyage;
+mod webcheck;
 
 use std::env;
 use std::fs;
@@ -94,6 +95,7 @@ fn main() {
     }
 
     match args.first().map(String::as_str) {
+        Some("web-check") => webcheck::run(&args[1..]),
         Some("docs") => {
             println!("{}", help::build(&root()).unwrap_or_else(|e| panic!("{e}")).display());
         }
@@ -661,8 +663,7 @@ fn system_image(programs: &[Program], out: &Path) {
         let name = f.file_name().unwrap().to_string_lossy().into_owned();
         t.file(&format!("Fonts/{name}"), &fs::read(&f).unwrap());
     }
-    // Living water design assets: app icons, wallpapers (day and night, with
-    // small pictures for Settings) and the WayV marks.
+    // Shared icons, photographic wallpapers and thumbnails, and WayV marks.
     for (dir, src) in [
         ("Icons", "assets/icons"),
         ("Wallpapers", "assets/wallpapers"),
@@ -677,6 +678,7 @@ fn system_image(programs: &[Program], out: &Path) {
             t.file(&format!("{dir}/{name}"), &fs::read(&f).unwrap());
         }
     }
+    t.file("Wallpapers/CREDITS.md", &fs::read(root().join("assets/WALLPAPER-CREDITS.md")).unwrap());
     t.dir("Sounds");
     for (name, wav) in sounds::all() {
         t.file(&format!("Sounds/{name}"), &wav);
@@ -793,8 +795,16 @@ fn find_ovmf() -> PathBuf {
 }
 
 /// OVMF needs a writable variable store next to its read-only code flash.
+/// Give isolated checks their own control sockets and firmware state, without
+/// interrupting a developer's interactive VM.
+fn session_dir() -> PathBuf {
+    let dir = env::var_os("AURORA_SESSION_DIR").map(PathBuf::from).unwrap_or_else(|| root().join("target"));
+    fs::create_dir_all(&dir).expect("create QEMU session directory");
+    dir
+}
+
 fn ovmf_vars(code: &Path) -> PathBuf {
-    let vars = root().join("target/ovmf-vars.fd");
+    let vars = session_dir().join("ovmf-vars.fd");
     if vars.exists() {
         return vars;
     }
@@ -887,11 +897,28 @@ fn accelerators() -> Vec<String> {
     list
 }
 
+fn rtc_timestamp(unix: i64) -> String {
+    // Civil date from a Unix timestamp, using the guest's fixed UTC offset.
+    let seconds = (unix - 946_684_800).max(0) as u64;
+    let days = (seconds / 86400) as i64 + 10957;
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = era * 400 + yoe + i64::from(month <= 2);
+    let rem = seconds % 86400;
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}", rem / 3600, rem / 60 % 60, rem % 60)
+}
+
 fn qemu(img: &Path, opts: &RunOpts) -> Command {
     let code = find_ovmf();
     let vars = ovmf_vars(&code);
-    let monitor = root().join("target/qemu-monitor.sock");
-    let qmp = root().join("target/qemu-qmp.sock");
+    let monitor = session_dir().join("qemu-monitor.sock");
+    let qmp = session_dir().join("qemu-qmp.sock");
     let _ = fs::remove_file(&monitor);
     let _ = fs::remove_file(&qmp);
 
@@ -1007,10 +1034,22 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
             "e1000e" => "e1000e,netdev=net0",
             _ => "virtio-net-pci,netdev=net0,disable-legacy=on",
         });
+    } else {
+        // Without an explicit opt-out, QEMU silently creates a default NIC.
+        cmd.args(["-nic", "none"]);
     }
     // Allow S3 (suspend to RAM); wake with QMP `system_wakeup` or a key press.
     cmd.args(["-global", "ICH9-LPC.disable_s3=0"]);
-    cmd.args(["-rtc", "base=localtime"]);
+    // The guest's RTC is local to its chosen offset, not the host's zone.
+    // A fresh guest defaults to UTC. Using host localtime made its TLS clock
+    // several hours wrong, especially around DST and new certificates.
+    let offset = image::preference(img, "utc_offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| (-720..=840).contains(v))
+        .unwrap_or(0);
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let rtc = rtc_timestamp(unix + offset * 60);
+    cmd.args(["-rtc", &format!("base={rtc},clock=host")]);
     cmd.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     cmd.args(["-serial", "stdio"]);
     if let Some(sock) = &opts.telemetry {
@@ -1173,7 +1212,7 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
 /// Sends one QMP command to the running VM.
 fn qmp_command(command: &str) -> std::io::Result<()> {
     use std::io::{BufRead, BufReader, Write};
-    let sock = std::os::unix::net::UnixStream::connect(root().join("target/qemu-qmp.sock"))?;
+    let sock = std::os::unix::net::UnixStream::connect(session_dir().join("qemu-qmp.sock"))?;
     let mut reader = BufReader::new(sock.try_clone()?);
     let mut greeting = String::new();
     reader.read_line(&mut greeting)?;
@@ -1302,5 +1341,14 @@ fn run_tests_once(
             eprintln!("\nkernel tests timed out after {:?}", timeout);
             Err(output)
         }
+    }
+}
+
+#[cfg(test)]
+mod rtc_tests {
+    #[test]
+    fn seed_utc_and_guest_offset() {
+        assert_eq!(super::rtc_timestamp(946684800), "2000-01-01T00:00:00");
+        assert_eq!(super::rtc_timestamp(946684800 + 366 * 86400 - 18000), "2000-12-31T19:00:00");
     }
 }

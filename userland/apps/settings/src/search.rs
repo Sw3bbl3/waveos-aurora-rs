@@ -47,7 +47,7 @@ pub const SETTINGS: &[Setting] = &[
     item!("login/auto", "Log in automatically", "password account startup", Login),
     item!("desktop/dock-size", "Harbor size", "dock desktop icons magnification", Desktop),
     item!("desktop/dock-autohide", "Hide Harbor until pointed at", "dock autohide desktop space", Desktop),
-    item!("desktop/glass", "Liquid glass intensity", "desktop blur transparency lumen", Desktop),
+    item!("desktop/glass", "Glass intensity", "desktop blur transparency lumen", Desktop),
     item!("accessibility/transparency", "Reduce transparency", "solid surfaces glass blur", Accessibility),
     item!("accessibility/motion", "Reduce motion", "animations accessibility", Accessibility),
     item!("accessibility/contrast", "Increase contrast", "accessibility visibility text", Accessibility),

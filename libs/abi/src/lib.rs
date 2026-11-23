@@ -12,6 +12,8 @@
 pub mod input;
 
 /// System call numbers.
+pub mod calendar;
+
 pub mod nr {
     pub const EXIT: usize = 0;
     pub const YIELD: usize = 1;
@@ -51,7 +53,9 @@ pub mod nr {
     pub const SYS_INFO: usize = 23;
     /// `desktop(request, arg_ptr, arg_len) -> value` (see [`desktop`])
     pub const DESKTOP: usize = 24;
-    /// `win_create(width, height, title, title_len, flags) -> window id`
+    /// `win_create(width, height, title, title_len, flags, minimum) -> window id`.
+    /// With `win::MINIMUM_SIZE`, `minimum` packs content width in the high
+    /// 32 bits and height in the low 32 bits. Otherwise it is ignored.
     pub const WIN_CREATE: usize = 25;
     /// `win_surface(window, *mut SurfaceInfo)` — current pixel buffer of a window
     pub const WIN_SURFACE: usize = 26;
@@ -181,7 +185,9 @@ pub mod nr {
     /// report readable while the program has window events waiting (read
     /// gives their number); `next_event` takes them.
     pub const EVENT_FD: usize = 82;
-    pub const COUNT: usize = 83;
+    /// UTC milliseconds since 1970; changes immediately when the clock is corrected.
+    pub const UNIX_MS: usize = 83;
+    pub const COUNT: usize = 84;
 }
 
 #[repr(C)]
@@ -852,6 +858,7 @@ pub mod drag {
 /// Window creation flags.
 pub mod win {
     pub const RESIZABLE: usize = 1;
+    pub const MINIMUM_SIZE: usize = 2;
 }
 
 /// Event kinds delivered by `next_event`.
@@ -873,6 +880,14 @@ pub mod cursor {
     pub const MOVE: u32 = 8;
     /// No pointer over the window (a video playing full screen).
     pub const HIDDEN: u32 = 9;
+    pub const RESIZE_NWSE: u32 = 10;
+    pub const RESIZE_NESW: u32 = 11;
+    pub const GRAB: u32 = 12;
+    pub const GRABBING: u32 = 13;
+    pub const COPY: u32 = 14;
+    /// Work continues in the background; the arrow stays available.
+    pub const PROGRESS: u32 = 15;
+    pub const MAX: u32 = PROGRESS;
 }
 
 pub mod event {
@@ -952,6 +967,8 @@ pub mod desktop {
     pub const PLAY_SOUND: usize = 12;
     /// Writes out and unmounts a removable volume (a path under /Volumes).
     pub const EJECT: usize = 13;
+    /// Starts the optional shell-owned interactive introduction. No arguments.
+    pub const START_TOUR: usize = 15;
 }
 
 /// Where user programs are linked and where the kernel places things.

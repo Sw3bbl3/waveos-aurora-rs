@@ -3,7 +3,7 @@ Great WaveOS apps feel calm, clear and quick. These guidelines describe how buil
 
 ## Principles
 - **Clarity.** Content comes first. Use plenty of space, a clear type hierarchy and only a few colours, so the important things stand out.
-- **Depth.** Sidebars and toolbars use translucent materials, like living water over the desktop. Cards and sheets lift the content they hold. Use depth to show structure, not as decoration.
+- **Depth.** Keep reading and editing surfaces solid. Reserve restrained translucent materials for navigation and floating system controls. Cards and sheets lift the content they hold. Use depth to show structure, not as decoration.
 - **Deference.** The interface supports the work and stays out of its way. Prefer familiar controls to custom ones, and keep chrome quiet.
 - **Respect.** Follow the person's settings: appearance, accent colour, text size, Reduce Motion and Reduce Transparency. Never lose their work.
 
@@ -57,7 +57,7 @@ Write in sentence case ("Show battery level", not "Show Battery Level"). Keep la
 - Give every symbol-only button an accessibility label.
 
 ## Motion
-- Keep animations short (under 250 milliseconds) and purposeful. Show where something came from or went.
+- Use the shared motion timings: 120 ms for feedback, 180 ms for reveals, and 240 ms for larger transitions. Keep input immediate and let interrupted animations continue from their current position.
 - Never animate when Reduce Motion is on. WaveUI does this for its own animations; check `env.reduce_motion` for yours.
 - Don't move content the person is reading or typing into.
 
@@ -73,3 +73,15 @@ Write in sentence case ("Show battery level", not "Show Battery Level"). Keep la
 - Ship your app in every language you can. WaveOS comes in English and Canadian French.
 
 See [WaveUI](developer-waveui.md) for the views behind these guidelines.
+
+## Window chrome and pointers
+
+The compositor reserves a 34-point top strip inside each window. The app surface starts below it; do not include this strip in your layout, pointer coordinates, or minimum content size. Hovering reveals minimize, maximize/restore, and close without covering content. Alt+Space focuses these controls; Tab, Return, and Escape operate them. All four edges and corners resize with matching directional pointers.
+
+WaveUI chooses text, link, and drag pointers from real hit targets. Use `.cursor(waveui::cursor::CROSSHAIR)` for a drawing canvas, `GRAB`/`GRABBING` for panning, and `PROGRESS` for background work. Reserve `WAIT` for temporarily blocked interaction; remove activity feedback when the operation completes. Shapes are additive ABI values: existing programs retain their original identifiers.
+
+## Photography and getting started
+
+Six credited photographs form the default wallpaper collection, with the same natural image in both appearances. Keep custom choices and existing preference slots. Source masters, licenses, and preparation instructions live in `assets/wallpaper-sources/manifest.json` and `assets/WALLPAPER-CREDITS.md`.
+
+Welcome offers an optional interactive tour, also available from the WayV menu under **Take a Tour**. Tips anchor to real controls and a temporary practice window; they never open or write a user document. F1 focuses the tips, Escape skips, and completion persists.

@@ -732,6 +732,10 @@ impl App for Terminal {
     fn title(&self) -> String {
         format!("Terminal — {}", self.tabs[self.active].cwd)
     }
+    fn min_size(&self) -> (i32, i32) {
+        (400, 240)
+    }
+
     fn size(&self) -> (i32, i32) {
         (1000, 680)
     }

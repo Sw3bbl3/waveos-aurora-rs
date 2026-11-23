@@ -15,7 +15,7 @@ use waveui::Request;
 
 /// Where the wallpapers' small pictures are drawn from: decoded once per
 /// wallpaper and appearance.
-type Thumbs = RefCell<[[Option<Rc<Pixmap>>; 2]; 3]>;
+type Thumbs = RefCell<[[Option<Rc<Pixmap>>; 2]; 6]>;
 
 pub struct Welcome {
     thumbs: Thumbs,
@@ -28,17 +28,10 @@ pub enum Msg {
     Learn,
     Later,
     Start,
+    Tour,
 }
 
-/// The things to try: a symbol, a title and a line.
-const TIPS: [(Symbol, &str, &str); 3] = [
-    (Symbol::Clock, "Meet Crest", "It shows the time and rises when something happens."),
-    (Symbol::Grid, "Pin your apps", "Drag from Shoal into the first bay of Harbor."),
-    (Symbol::Document, "Learn in short dips", "Six lessons, a few minutes each."),
-];
-
-/// The colour of each wallpaper's chip.
-const DOTS: [Color; 3] = [Color::Blue, Color::Teal, Color::Orange];
+const DOTS: [Color; 6] = [Color::Blue, Color::Teal, Color::Orange, Color::Blue, Color::Teal, Color::Gray];
 
 impl Welcome {
     fn thumb(&self, i: u8, dark: bool) -> Option<Rc<Pixmap>> {
@@ -75,7 +68,7 @@ impl Welcome {
                 cv.stroke_round_rect(r.inset(1), 13, theme::accent());
             }
         })
-        .height(128)
+        .height(104)
         .fill_width();
         let chip = HStack::new()
             .push(
@@ -101,37 +94,9 @@ impl Welcome {
                 .padding(12)
                 .fill(),
         ])
-        .height(128)
+        .height(104)
         .on_tap(Msg::Wallpaper(i))
         .grow(1)
-    }
-
-    fn tip<'a>(symbol: Symbol, title: &str, body: &str) -> View<'a, Msg> {
-        HStack::new()
-            .push(
-                Image::symbol(symbol)
-                    .symbol_size(18)
-                    .foreground(Color::AccentText)
-                    .size(40, 40)
-                    .background_rounded(Color::Custom(waveui::lumen::canvas::with_alpha(theme::accent(), 0x2E)), 12),
-            )
-            .push(
-                VStack::new()
-                    .push(Text::new(title).style(TextStyle::Sized(14, waveui::style::Weight::Bold)))
-                    .push(
-                        Text::paragraph(body)
-                            .style(TextStyle::Sized(12, waveui::style::Weight::Regular))
-                            .foreground(Color::SecondaryLabel),
-                    )
-                    .spacing(2)
-                    .alignment(Align::Start)
-                    .grow(1),
-            )
-            .spacing(14)
-            .padding(16)
-            .background_rounded(Color::Fill, 14)
-            .border(Color::Separator, 14)
-            .grow(1)
     }
 }
 
@@ -142,7 +107,7 @@ impl App for Welcome {
         "Welcome to WaveOS Aurora".into()
     }
     fn size(&self) -> (i32, i32) {
-        (980, 660)
+        (900, 620)
     }
     fn resizable(&self) -> bool {
         false
@@ -157,6 +122,11 @@ impl App for Welcome {
                 corekit::prefs::set_bool("welcome_again", true);
                 cx.close();
             }
+            Msg::Tour => {
+                corekit::prefs::set_bool("welcome_again", false);
+                cx.request(Request::StartTour);
+                cx.close();
+            }
             Msg::Start => {
                 corekit::prefs::set_bool("welcome_again", false);
                 cx.close();
@@ -165,67 +135,52 @@ impl App for Welcome {
     }
 
     fn view(&self, env: &Env) -> View<'_, Msg> {
-        let heading = |s: &'static str| Text::new(s).style(TextStyle::Sized(15, waveui::style::Weight::Bold));
-        let walls = HStack::with((0..3u8).map(|i| self.wallpaper_card(i, env.dark)).collect()).spacing(20).fill_width();
-        let tips = HStack::with(
-            TIPS.iter()
-                .enumerate()
-                .map(|(i, &(s, t, b))| {
-                    let card = Self::tip(s, t, b);
-                    if i == 2 {
-                        card.on_tap(Msg::Learn)
-                    } else {
-                        card
-                    }
-                })
-                .collect(),
-        )
-        .spacing(14)
-        .alignment(Align::Stretch)
-        .fill_width();
+        let mut walls = Grid::new(220).spacing(12);
+        for i in 0..wallpaper::NAMES.len() as u8 {
+            walls = walls.push(self.wallpaper_card(i, env.dark));
+        }
+        let content = VStack::new()
+            .push(HStack::new()
+                .push(Image::app_icon(Icon::Aurora, 42))
+                .push(VStack::new()
+                    .push(Text::new("Welcome to WAVEOS").style(TextStyle::LargeTitle))
+                    .push(Text::new("A little space to make your own.").foreground(Color::SecondaryLabel))
+                    .alignment(Align::Start).spacing(4).grow(1))
+                .spacing(16).fill_width())
+            .push(HStack::new()
+                .push(Text::new("Choose your view").style(TextStyle::Headline).grow(1))
+                .push(Picker::new(["Light", "Dark"], env.dark as usize).on_change(Msg::Appearance).width(160))
+                .fill_width())
+            .push(walls.fill_width())
+            .push(HStack::new()
+                .push(Image::symbol(Symbol::Mouse).symbol_size(24).foreground(Color::AccentText).size(40,40))
+                .push(VStack::new()
+                    .push(Text::new("Get comfortable, one step at a time").style(TextStyle::Headline))
+                    .push(Text::paragraph("Try animated tips for Apps, Search, window controls, and layouts. Skip anytime; come back from Help.")
+                        .style(TextStyle::Callout).foreground(Color::SecondaryLabel))
+                    .spacing(4).alignment(Align::Start).grow(1))
+                .spacing(14).padding(16).min_height(96).background_rounded(Color::Fill,12).fill_width())
+            .spacing(20).alignment(Align::Stretch).padding(24).fill_width();
         VStack::new()
-            .push(Image::app_icon(Icon::Aurora, 56))
-            .push(
-                VStack::new()
-                    .push(
-                        Text::new("Welcome to WaveOS Aurora")
-                            .style(TextStyle::Sized(34, waveui::style::Weight::Display)),
-                    )
-                    .push(
-                        Text::new("Three quick choices and you're in the water.")
-                            .style(TextStyle::Sized(15, waveui::style::Weight::Regular)),
-                    )
-                    .spacing(8)
-                    .padding_insets(Insets { top: 6, leading: 0, bottom: 18, trailing: 0 }),
-            )
+            .push(ScrollView::new(content).fill())
+            .push(Divider::new())
             .push(
                 HStack::new()
-                    .push(heading("1 · Pick a wallpaper. The colours follow it.").grow(1))
-                    .push(Picker::new(["Light", "Dark"], env.dark as usize).on_change(Msg::Appearance).width(170))
-                    .fill_width(),
-            )
-            .push(walls)
-            .push(heading("2 · Then try these").padding_insets(Insets { top: 10, leading: 0, bottom: 0, trailing: 0 }))
-            .push(tips)
-            .push(Spacer::new())
-            .push(
-                HStack::new()
+                    .push(Button::new("Help").action(Msg::Learn).button_style(ButtonStyle::Plain))
+                    .push(Button::new("Remind me later").action(Msg::Later).button_style(ButtonStyle::Plain))
                     .push(Spacer::new())
-                    .push(Button::new("Show this again later").action(Msg::Later).button_style(ButtonStyle::Plain))
+                    .push(Button::new("Explore on my own").action(Msg::Start))
                     .push(
-                        Button::new("Start")
-                            .action(Msg::Start)
+                        Button::new("Take a tour")
+                            .action(Msg::Tour)
                             .button_style(ButtonStyle::Prominent)
-                            .control_size(ControlSize::Large)
-                            .shortcut(Shortcut::default_action())
-                            .min_width(90),
+                            .shortcut(Shortcut::default_action()),
                     )
-                    .spacing(22)
+                    .spacing(12)
+                    .padding_xy(24, 16)
                     .fill_width(),
             )
-            .spacing(14)
-            .alignment(Align::Stretch)
-            .padding_insets(Insets { top: 30, leading: 30, bottom: 28, trailing: 30 })
+            .spacing(0)
             .fill()
     }
 }

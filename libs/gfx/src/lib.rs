@@ -12,6 +12,7 @@ pub mod geom;
 pub mod icons;
 pub mod material;
 pub mod math;
+pub mod motion;
 pub mod simd;
 pub mod theme;
 pub mod ttf;

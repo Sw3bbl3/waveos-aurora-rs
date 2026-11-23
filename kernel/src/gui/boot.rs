@@ -25,9 +25,9 @@ static SCREEN: spin::Mutex<Option<Screen>> = spin::Mutex::new(None);
 fn colors(dark: bool) -> (u32, u32, u32) {
     // (background, track, version text)
     if dark {
-        (rgb(0x04, 0x06, 0x1A), rgb(0x23, 0x25, 0x37), rgb(0x84, 0x88, 0x9A))
+        (rgb(0x18, 0x1D, 0x25), rgb(0x2A, 0x32, 0x3D), rgb(0xA9, 0xB2, 0xBF))
     } else {
-        (rgb(0xF7, 0xF9, 0xFF), rgb(0xDE, 0xE0, 0xE8), rgb(0x6A, 0x70, 0x84))
+        (rgb(0xF7, 0xF9, 0xFC), rgb(0xE0, 0xE5, 0xEB), rgb(0x5E, 0x68, 0x76))
     }
 }
 
@@ -49,7 +49,7 @@ pub fn show(fb: Framebuffer, dark: bool) {
         cv.fill_rect(cv.clip, bg);
         // A soft violet-blue glow behind the logo, strongest at the centre.
         let glow = rgb(0x4A, 0x63, 0xFF);
-        let strength = if dark { 56 } else { 24 };
+        let strength = if dark { 24 } else { 12 };
         let (cx, cy, rx, ry) = (w / 2, h / 2 - h / 40, w * 5 / 16, h * 5 / 16);
         for y in (cy - ry).max(0)..(cy + ry).min(h) {
             let dy = (y - cy) * 1024 / ry;

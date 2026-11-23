@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 /// The band the top bubbles live in (8 + 38 + 8).
 pub const MENUBAR_H: i32 = 54;
 pub const TITLEBAR_H: i32 = 40;
-pub const WINDOW_RADIUS: i32 = 18;
+pub const WINDOW_RADIUS: i32 = 16;
 pub const DOCK_ICON: i32 = 48;
 pub const DOCK_PAD: i32 = 9;
 pub const DOCK_H: i32 = DOCK_ICON + 2 * DOCK_PAD + 4;
@@ -42,10 +42,10 @@ pub struct Tones {
 }
 
 /// Tones of the built-in wallpapers, by index (Tide, Aurora, Dunes).
-pub const WALLPAPER_TONES: [Tones; 3] = [
+pub const WALLPAPER_TONES: [Tones; 6] = [
     Tones {
-        fill: rgb(0x2F, 0x62, 0xF5),
-        glow: rgb(0x6F, 0xE3, 0xFF),
+        fill: rgb(0x2F, 0x67, 0xAE),
+        glow: rgb(0x8A, 0xC5, 0xE8),
         ink_dark: rgb(0x86, 0xB4, 0xFF),
         ink_light: rgb(0x1F, 0x4F, 0xD6),
     },
@@ -56,10 +56,28 @@ pub const WALLPAPER_TONES: [Tones; 3] = [
         ink_light: rgb(0x08, 0x75, 0x63),
     },
     Tones {
-        fill: rgb(0xC8, 0x45, 0x2C),
+        fill: rgb(0x9D, 0x63, 0x36),
         glow: rgb(0xFF, 0xB3, 0x8A),
         ink_dark: rgb(0xFF, 0x9B, 0x7A),
         ink_light: rgb(0xA8, 0x3A, 0x24),
+    },
+    Tones {
+        fill: rgb(0x2C, 0x64, 0x85),
+        glow: rgb(0x8B, 0xC8, 0xDE),
+        ink_dark: rgb(0x8B, 0xC8, 0xDE),
+        ink_light: rgb(0x25, 0x58, 0x78),
+    },
+    Tones {
+        fill: rgb(0x23, 0x6D, 0x72),
+        glow: rgb(0x83, 0xCD, 0xCA),
+        ink_dark: rgb(0x83, 0xCD, 0xCA),
+        ink_light: rgb(0x20, 0x63, 0x68),
+    },
+    Tones {
+        fill: rgb(0x59, 0x69, 0x79),
+        glow: rgb(0xB8, 0xC9, 0xD4),
+        ink_dark: rgb(0xB8, 0xC9, 0xD4),
+        ink_light: rgb(0x4B, 0x5C, 0x6C),
     },
 ];
 
@@ -223,40 +241,40 @@ pub struct Theme {
 // Mist material; `panel_tint` is Shallows (menus, popovers, Current).
 pub static LIGHT: Theme = Theme {
     dark: false,
-    window_bg: rgb(0xFB, 0xFC, 0xFF),
-    window_bg_alt: rgb(0xF1, 0xF4, 0xFC),
+    window_bg: rgb(0xFB, 0xFC, 0xFD),
+    window_bg_alt: rgb(0xF0, 0xF2, 0xF5),
     window_border: 0x1A0E_1530,
-    titlebar: rgb(0xF3, 0xF6, 0xFD),
+    titlebar: rgb(0xF3, 0xF5, 0xF7),
     separator: 0x140E_1530,
-    text: rgb(0x0E, 0x15, 0x30),
-    text_secondary: rgb(0x5F, 0x64, 0x76),
-    text_on_glass: rgb(0x0E, 0x15, 0x30),
-    glass_tint: 0x8CFF_FFFF,
-    panel_tint: 0xF5FF_FFFF,
+    text: rgb(0x20, 0x28, 0x34),
+    text_secondary: rgb(0x5E, 0x68, 0x76),
+    text_on_glass: rgb(0x20, 0x28, 0x34),
+    glass_tint: 0xBBF8_FAFC,
+    panel_tint: 0xF8FA_FBFD,
     hover: 0x130E_1530,
     control_bg: rgb(0xFF, 0xFF, 0xFF),
     control_border: 0x1F0E_1530,
     traffic_inactive: rgb(0xD4, 0xD8, 0xE4),
-    shadow: 80,
+    shadow: 62,
 };
 
 pub static DARK: Theme = Theme {
     dark: true,
-    window_bg: rgb(0x11, 0x15, 0x27),
-    window_bg_alt: rgb(0x17, 0x1C, 0x32),
+    window_bg: rgb(0x18, 0x1D, 0x25),
+    window_bg_alt: rgb(0x20, 0x26, 0x30),
     window_border: 0x1CFF_FFFF,
-    titlebar: rgb(0x17, 0x1C, 0x32),
+    titlebar: rgb(0x20, 0x26, 0x30),
     separator: 0x16FF_FFFF,
     text: rgb(0xF2, 0xF4, 0xFA),
-    text_secondary: rgb(0xA3, 0xA7, 0xB7),
+    text_secondary: rgb(0xA9, 0xB2, 0xBF),
     text_on_glass: rgb(0xF2, 0xF4, 0xFA),
-    glass_tint: 0x7510_162E,
-    panel_tint: 0xF51E_243C,
+    glass_tint: 0xB31D_2632,
+    panel_tint: 0xF526_2D38,
     hover: 0x1AFF_FFFF,
-    control_bg: rgb(0x1F, 0x24, 0x3A),
+    control_bg: rgb(0x29, 0x31, 0x3D),
     control_border: 0x24FF_FFFF,
     traffic_inactive: rgb(0x3A, 0x40, 0x58),
-    shadow: 150,
+    shadow: 128,
 };
 
 static DARK_MODE: AtomicBool = AtomicBool::new(false);

@@ -16,6 +16,8 @@
 //! once if one already is), leaving it running: launchers start it that way
 //! before a program.
 
+mod damage;
+use damage::Rect;
 mod keys;
 mod protocol;
 mod sys;
@@ -113,6 +115,8 @@ struct Pending {
     buffer: Option<Option<Id>>,
     offset: (i32, i32),
     scale: Option<i32>,
+    damage: Option<Rect>,
+    buffer_damage: Option<Rect>,
     frames: Vec<Id>,
     /// `Some(None)`: input everywhere again.
     input: Option<Option<Region>>,
@@ -120,6 +124,8 @@ struct Pending {
 
 struct Surface {
     pending: Pending,
+    attached: Option<Id>,
+    geometry_changed: bool,
     pixels: Vec<u32>,
     /// Buffer size in pixels.
     bw: i32,
@@ -145,6 +151,8 @@ impl Surface {
     fn new() -> Surface {
         Surface {
             pending: Pending::default(),
+            attached: None,
+            geometry_changed: false,
             pixels: Vec::new(),
             bw: 0,
             bh: 0,
@@ -170,6 +178,19 @@ impl Surface {
             return (w as i32, h as i32);
         }
         (self.bw / self.scale.max(1), self.bh / self.scale.max(1))
+    }
+
+    /// An explicitly set identity viewport needs no damage expansion. Firefox
+    /// uses viewports even at integer scales; treating all of them as scaled
+    /// made a changing video or caret repaint the entire browser window.
+    fn identity_viewport(&self) -> bool {
+        let k = self.scale.max(1);
+        self.bw % k == 0
+            && self.bh % k == 0
+            && self.dst.is_none_or(|d| d == (self.bw / k, self.bh / k))
+            && self.src.is_none_or(|(x, y, w, h)| {
+                x == 0.0 && y == 0.0 && w * k as f64 == self.bw as f64 && h * k as f64 == self.bh as f64
+            })
     }
 }
 
@@ -434,6 +455,7 @@ struct Window {
     surface: sys::Surface,
     focused: bool,
     dirty: bool,
+    damage: Option<Rect>,
 }
 
 struct Server {
@@ -532,7 +554,9 @@ impl Server {
     fn run_once(&mut self, wake: Fd, events: &std::sync::mpsc::Receiver<sys::Event>) {
         let now = sys::now_ms();
         let timeout = if self.frames.is_empty() {
-            1000
+            // Client sockets, native events and clipboard pipes all wake poll.
+            // No timer is needed when no frame callback is outstanding.
+            -1
         } else {
             FRAME_MS.saturating_sub(now.wrapping_sub(self.last_frame)) as i32
         };
@@ -938,6 +962,7 @@ impl Server {
                 let Some(s) = c.surfaces.get_mut(&sid) else { return };
                 match op {
                     wp_viewport::req::DESTROY => {
+                        s.geometry_changed |= s.src.is_some() || s.dst.is_some();
                         s.src = None;
                         s.dst = None;
                         c.viewports.remove(&obj);
@@ -945,11 +970,15 @@ impl Server {
                     }
                     wp_viewport::req::SET_SOURCE => {
                         let r = (a[0].fixed(), a[1].fixed(), a[2].fixed(), a[3].fixed());
-                        s.src = (r.2 > 0.0 && r.3 > 0.0).then_some(r);
+                        let source = (r.2 > 0.0 && r.3 > 0.0).then_some(r);
+                        s.geometry_changed |= s.src != source;
+                        s.src = source;
                     }
                     wp_viewport::req::SET_DESTINATION => {
                         let d = (a[0].int(), a[1].int());
-                        s.dst = (d.0 > 0 && d.1 > 0).then_some(d);
+                        let destination = (d.0 > 0 && d.1 > 0).then_some(d);
+                        s.geometry_changed |= s.dst != destination;
+                        s.dst = destination;
                     }
                     _ => {}
                 }
@@ -1093,6 +1122,19 @@ impl Server {
                 s.pending.buffer = Some((b != 0).then_some(b));
                 s.pending.offset = (a[1].int(), a[2].int());
             }
+            wl_surface::req::DAMAGE | wl_surface::req::DAMAGE_BUFFER => {
+                if let Some(s) = c.surfaces.get_mut(&sid) {
+                    let r = Rect::new(a[0].int(), a[1].int(), a[2].int(), a[3].int());
+                    damage::add(
+                        if op == wl_surface::req::DAMAGE {
+                            &mut s.pending.damage
+                        } else {
+                            &mut s.pending.buffer_damage
+                        },
+                        r,
+                    );
+                }
+            }
             wl_surface::req::FRAME => {
                 let cb = a[0].uint();
                 c.objects.insert(cb, (wl_callback::NAME, 1));
@@ -1126,6 +1168,11 @@ impl Server {
         let c = self.clients.get_mut(&cid).unwrap();
         let Some(s) = c.surfaces.get_mut(&sid) else { return };
         let p = std::mem::take(&mut s.pending);
+        let geometry_changed = std::mem::take(&mut s.geometry_changed)
+            || p.scale.is_some_and(|scale| scale != s.scale)
+            || s.pending_pos.is_some_and(|pos| pos != s.pos);
+        let mut changed = geometry_changed || p.buffer.is_some() || p.damage.is_some() || p.buffer_damage.is_some();
+        let mut copied = None;
         if let Some(scale) = p.scale {
             s.scale = scale;
         }
@@ -1136,10 +1183,29 @@ impl Server {
             s.pos = pos;
         }
         let mut released = None;
-        match p.buffer {
+        if let Some(buffer) = p.buffer {
+            s.attached = buffer;
+        }
+        let buffer = if p.buffer.is_some() || p.damage.is_some() || p.buffer_damage.is_some() {
+            s.attached.map(Some).or(Some(None))
+        } else {
+            None
+        };
+        match buffer {
             Some(Some(bid)) => {
                 if let Some(b) = c.buffers.get(&bid) {
-                    copy_buffer(b, s);
+                    let mut region = p.buffer_damage;
+                    if let Some(r) = p.damage {
+                        if !s.identity_viewport() {
+                            region = None;
+                        } else {
+                            damage::add(&mut region, r.scaled(s.scale));
+                        }
+                    }
+                    copied = copy_buffer(b, s, if geometry_changed { None } else { region });
+                    if !geometry_changed && copied.is_some_and(Rect::empty) {
+                        changed = false;
+                    }
                     s.has_content = true;
                     released = Some(bid);
                 }
@@ -1176,9 +1242,13 @@ impl Server {
                         self.check_size(cid, top);
                     }
                 }
-                self.surface_changed(cid, sid);
+                if changed {
+                    self.surface_changed_damage(cid, sid, if geometry_changed { None } else { copied });
+                }
             }
-            Role::Sub(_) => self.surface_changed(cid, sid),
+            Role::Sub(_) if changed => {
+                self.surface_changed_damage(cid, sid, if geometry_changed { None } else { copied })
+            }
             _ => {}
         }
     }
@@ -1189,6 +1259,51 @@ impl Server {
         let Some(top) = c.xdg_of(sid).and_then(|x| c.toplevel_of(x)) else { return };
         let Some(wid) = c.toplevels.get(&top).and_then(|t| t.window) else { return };
         if let Some(w) = self.windows.get_mut(&wid) {
+            w.dirty = true;
+            w.damage = None;
+        }
+    }
+
+    fn surface_changed_damage(&mut self, cid: ClientId, sid: Id, region: Option<Rect>) {
+        let Some(c) = self.clients.get(&cid) else { return };
+        let Some(xid) = c.xdg_of(sid) else { return };
+        let Some(top) = c.toplevel_of(xid) else { return };
+        let Some(t) = c.toplevels.get(&top) else { return };
+        let Some(wid) = t.window else { return };
+        let mut partial = region;
+        let mut at = sid;
+        let mut offset = c.origin(xid);
+        for _ in 0..64 {
+            let Some(surface) = c.surfaces.get(&at) else {
+                partial = None;
+                break;
+            };
+            if !surface.identity_viewport() {
+                partial = None;
+            }
+            if at == sid {
+                partial = partial.map(|r| r.points(surface.scale));
+            }
+            match surface.role {
+                Role::Sub(parent) => {
+                    offset.0 += surface.pos.0;
+                    offset.1 += surface.pos.1;
+                    at = parent;
+                }
+                _ => break,
+            }
+        }
+        let g = c.geometry(t.xdg);
+        if let Some(w) = self.windows.get_mut(&wid) {
+            partial =
+                partial.map(|r| r.translated(offset.0 - g.0, offset.1 - g.1).scaled(w.surface.scale.max(1) as i32));
+            if !w.dirty {
+                w.damage = partial;
+            } else if let (Some(a), Some(b)) = (w.damage, partial) {
+                w.damage = Some(a.union(b));
+            } else {
+                w.damage = None;
+            }
             w.dirty = true;
         }
     }
@@ -1228,7 +1343,13 @@ impl Server {
             xdg_surface::req::SET_WINDOW_GEOMETRY => {
                 if let Some(x) = c.xdg.get_mut(&xid) {
                     let g = (a[0].int(), a[1].int(), a[2].int(), a[3].int());
-                    x.geometry = (g.2 > 0 && g.3 > 0).then_some(g);
+                    let geometry = (g.2 > 0 && g.3 > 0).then_some(g);
+                    if x.geometry != geometry {
+                        if let Some(surface) = c.surfaces.get_mut(&x.surface) {
+                            surface.geometry_changed = true;
+                        }
+                        x.geometry = geometry;
+                    }
                 }
             }
             _ => {}
@@ -1371,7 +1492,10 @@ impl Server {
         let surface = sys::win_surface(id);
         let size =
             (surface.width as i32 / surface.scale.max(1) as i32, surface.height as i32 / surface.scale.max(1) as i32);
-        self.windows.insert(id, Window { client: cid, toplevel: top, size, surface, focused: false, dirty: true });
+        self.windows.insert(
+            id,
+            Window { client: cid, toplevel: top, size, surface, focused: false, dirty: true, damage: None },
+        );
         if size != (w, h) {
             self.configure_toplevel(cid, top, size);
         }
@@ -1414,14 +1538,23 @@ impl Server {
             return;
         }
         let px = unsafe { std::slice::from_raw_parts_mut(surf.addr as *mut u32, (surf.stride * surf.height) as usize) };
+        let bounds = Rect::new(0, 0, surf.width as i32, surf.height as i32);
+        let clip = w.damage.take().unwrap_or(bounds).intersect(bounds);
+        if clip.empty() {
+            return;
+        }
         let target = Target {
+            clip,
             px,
             width: surf.width as i32,
             height: surf.height as i32,
             stride: surf.stride as i32,
             scale: surf.scale.max(1) as i32,
         };
-        target.px.fill(0xffff_ffff);
+        for y in clip.y..clip.bottom() {
+            let start = y as usize * target.stride as usize + clip.x as usize;
+            target.px[start..start + clip.w as usize].fill(0xffff_ffff);
+        }
         let mut target = target;
         let g = c.geometry(t.xdg);
         draw_tree(c, &mut target, x.surface, -g.0, -g.1);
@@ -1435,7 +1568,7 @@ impl Server {
                 draw_tree(c, &mut target, px.surface, ox - g.0, oy - g.1);
             }
         }
-        sys::win_present(wid, surf.width, surf.height);
+        sys::win_present(wid, clip);
     }
 
     // ------------------------------------------------------ WaveOS events
@@ -1485,6 +1618,7 @@ impl Server {
                     w.size = size;
                     w.surface = surface;
                     w.dirty = true;
+                    w.damage = None;
                 }
                 self.configure_toplevel(cid, top, size);
             }
@@ -1728,8 +1862,17 @@ impl Server {
     }
 
     fn key(&mut self, cid: ClientId, e: &sys::Event) {
+        // The native ABI carries translated text, not a physical identity, for
+        // Char keys. Their releases have no character and cannot be matched.
+        // Deliver balanced text keystrokes; native repeat supplies repetition.
+        if e.a == 0 && e.c == 0 {
+            return;
+        }
         let Some(code) = keys::evdev(e.a, e.b) else { return };
         self.send_key(cid, code, e.c != 0, e.d);
+        if e.a == 0 {
+            self.send_key(cid, code, false, e.d);
+        }
     }
 
     fn send_key(&mut self, cid: ClientId, code: u32, pressed: bool, mods: u32) {
@@ -1854,6 +1997,7 @@ impl Server {
 // ------------------------------------------------------------------ pixels
 
 struct Target<'a> {
+    clip: Rect,
     px: &'a mut [u32],
     width: i32,
     height: i32,
@@ -1862,21 +2006,45 @@ struct Target<'a> {
 }
 
 /// Copies a committed buffer into the surface.
-fn copy_buffer(b: &Buffer, s: &mut Surface) {
+fn copy_buffer(b: &Buffer, s: &mut Surface, requested: Option<Rect>) -> Option<Rect> {
     let pool = b.pool.borrow();
     let (w, h, stride) = (b.width.max(0) as usize, b.height.max(0) as usize, b.stride.max(0) as usize);
-    let need = b.offset + stride * h.saturating_sub(1) + w * 4;
+    let need = b.offset.checked_add(stride.checked_mul(h.saturating_sub(1))?)?.checked_add(w.checked_mul(4)?)?;
     if w == 0 || h == 0 || stride < w * 4 || need > pool.size {
-        return;
+        return None;
     }
+    let bounds = Rect::new(0, 0, w as i32, h as i32);
+    let same = s.bw == w as i32 && s.bh == h as i32 && s.opaque == (b.format == 1) && s.has_content;
+    let clip = if same { requested.unwrap_or(bounds).intersect(bounds) } else { bounds };
     s.pixels.resize(w * h, 0);
-    for y in 0..h {
+    let mut actual = if same { Rect::default() } else { bounds };
+    let mask = if b.format == 1 { 0x00ff_ffff } else { u32::MAX };
+    for y in clip.y as usize..clip.bottom() as usize {
         let row = unsafe { std::slice::from_raw_parts(pool.ptr.add(b.offset + y * stride) as *const u32, w) };
-        s.pixels[y * w..(y + 1) * w].copy_from_slice(row);
+        let start = y * w + clip.x as usize;
+        let source = &row[clip.x as usize..clip.right() as usize];
+        let destination = &mut s.pixels[start..start + clip.w as usize];
+        let (left, right) = if same {
+            // GTK/WebKit may declare full damage for a caret or an identical
+            // buffer swap. Equal rows use the optimized slice comparison;
+            // only changed rows need a precise scan. Ignore unused XRGB bits.
+            if source == destination {
+                continue;
+            }
+            let differs = |(a, b): (&u32, &u32)| (a ^ b) & mask != 0;
+            let Some(left) = source.iter().zip(destination.iter()).position(differs) else { continue };
+            let right = source.iter().zip(destination.iter()).rposition(differs).unwrap() + 1;
+            actual = actual.union(Rect::new(clip.x + left as i32, y as i32, (right - left) as i32, 1));
+            (left, right)
+        } else {
+            (0, source.len())
+        };
+        destination[left..right].copy_from_slice(&source[left..right]);
     }
     s.bw = w as i32;
     s.bh = h as i32;
     s.opaque = b.format == 1;
+    Some(actual)
 }
 
 /// Draws a surface and its sub-surfaces at (`x`, `y`) points.
@@ -1928,8 +2096,8 @@ fn blit(t: &mut Target, s: &Surface, x: i32, y: i32) {
         None => (0, 0, s.bw, s.bh),
     };
     let same = sw == tw && sh == th;
-    let rows = y0.max(0)..(y0 + th).min(t.height);
-    let cols = x0.max(0)..(x0 + tw).min(t.width);
+    let rows = y0.max(t.clip.y).max(0)..(y0 + th).min(t.clip.bottom()).min(t.height);
+    let cols = x0.max(t.clip.x).max(0)..(x0 + tw).min(t.clip.right()).min(t.width);
     if cols.is_empty() {
         return;
     }
@@ -1963,6 +2131,128 @@ fn blit(t: &mut Target, s: &Surface, x: i32, y: i32) {
                     (sv + (dv * inv + 127) / 255).min(255) << sh
                 };
                 *d = 0xff00_0000 | ch(16) | ch(8) | ch(0);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    #[test]
+    fn identity_viewport_partial_repaint_matches_full_at_both_scales() {
+        for scale in [1, 2] {
+            let mut s = Surface::new();
+            s.bw = 8;
+            s.bh = 8;
+            s.scale = scale;
+            s.has_content = true;
+            s.opaque = true;
+            s.pixels = vec![0xff123456; 64];
+            s.src = Some((0.0, 0.0, 8.0 / scale as f64, 8.0 / scale as f64));
+            s.dst = Some((8 / scale, 8 / scale));
+            assert!(s.identity_viewport());
+            let mut full = vec![0; 64];
+            blit(
+                &mut Target { px: &mut full, width: 8, height: 8, stride: 8, scale, clip: Rect::new(0, 0, 8, 8) },
+                &s,
+                0,
+                0,
+            );
+            let mut partial = full.clone();
+            s.pixels[19] = 0xffabcdef;
+            blit(
+                &mut Target { px: &mut full, width: 8, height: 8, stride: 8, scale, clip: Rect::new(0, 0, 8, 8) },
+                &s,
+                0,
+                0,
+            );
+            let clip = Rect::new(3, 2, 1, 1).points(scale).scaled(scale);
+            blit(&mut Target { px: &mut partial, width: 8, height: 8, stride: 8, scale, clip }, &s, 0, 0);
+            assert_eq!(partial, full);
+            s.dst = Some((4 / scale, 4 / scale));
+            assert!(!s.identity_viewport(), "real scaling must still expand damage");
+            s.dst = None;
+            s.src = Some((1.0, 0.0, 4.0, 4.0));
+            assert!(!s.identity_viewport(), "real cropping must still expand damage");
+        }
+    }
+
+    #[test]
+    fn full_damage_is_reduced_to_visible_pixel_changes() {
+        let mut source = vec![0xff112233u32; 16];
+        let pool = Rc::new(RefCell::new(Pool { fd: -1, ptr: source.as_mut_ptr() as *mut u8, size: 64 }));
+        let mut buffer = Buffer { pool: pool.clone(), offset: 0, width: 4, height: 4, stride: 16, format: 1 };
+        let mut surface = Surface::new();
+        assert_eq!(copy_buffer(&buffer, &mut surface, None), Some(Rect::new(0, 0, 4, 4)));
+        surface.has_content = true;
+        assert!(copy_buffer(&buffer, &mut surface, None).unwrap().empty());
+        source[14] = 0xff445566;
+        assert_eq!(copy_buffer(&buffer, &mut surface, None), Some(Rect::new(2, 3, 1, 1)));
+        assert_eq!(surface.pixels, source);
+        // XRGB's unused byte is not a visible change. ARGB's alpha is.
+        source[0] ^= 0xff000000;
+        assert!(copy_buffer(&buffer, &mut surface, None).unwrap().empty());
+        buffer.format = 0;
+        assert_eq!(copy_buffer(&buffer, &mut surface, None), Some(Rect::new(0, 0, 4, 4)));
+        source[0] ^= 0xff000000;
+        assert_eq!(copy_buffer(&buffer, &mut surface, None), Some(Rect::new(0, 0, 1, 1)));
+        std::mem::forget(pool);
+        std::mem::forget(buffer);
+    }
+
+    #[test]
+    fn damage_copy_preserves_unchanged_pixels_and_resizes_in_full() {
+        let mut source = vec![0xff224466u32; 16];
+        let pool = Rc::new(RefCell::new(Pool { fd: -1, ptr: source.as_mut_ptr() as *mut u8, size: 64 }));
+        let mut buffer = Buffer { pool: pool.clone(), offset: 0, width: 4, height: 4, stride: 16, format: 1 };
+        let mut surface = Surface::new();
+        assert_eq!(copy_buffer(&buffer, &mut surface, Some(Rect::new(1, 1, 1, 1))), Some(Rect::new(0, 0, 4, 4)));
+        surface.has_content = true;
+        source.fill(0xffabcdef);
+        let patch = Rect::new(1, 1, 1, 1);
+        assert_eq!(copy_buffer(&buffer, &mut surface, Some(patch)), Some(patch));
+        assert_eq!(surface.pixels[5], 0xffabcdef);
+        assert_eq!(surface.pixels[6], 0xff224466);
+        buffer.width = 2;
+        buffer.height = 2;
+        assert_eq!(copy_buffer(&buffer, &mut surface, Some(patch)), Some(Rect::new(0, 0, 2, 2)));
+        assert!(surface.pixels.iter().all(|p| *p == 0xffabcdef));
+        buffer.offset = usize::MAX;
+        assert_eq!(copy_buffer(&buffer, &mut surface, None), None);
+        // The pool refers to host-owned memory, not a guest mmap.
+        std::mem::forget(pool);
+        std::mem::forget(buffer);
+    }
+    #[test]
+    fn partial_composition_matches_full_with_transparency_and_scaling() {
+        for scale in [1, 2] {
+            for opaque in [true, false] {
+                let mut surface = Surface::new();
+                surface.bw = 4;
+                surface.bh = 4;
+                surface.scale = scale;
+                surface.has_content = true;
+                surface.opaque = opaque;
+                surface.pixels = vec![0x80402010; 16];
+                let mut full = vec![0xff202830; 64];
+                let mut partial = full.clone();
+                let clip = Rect::new(1, 1, 2, 2);
+                blit(
+                    &mut Target { px: &mut full, width: 8, height: 8, stride: 8, scale, clip: Rect::new(0, 0, 8, 8) },
+                    &surface,
+                    0,
+                    0,
+                );
+                blit(&mut Target { px: &mut partial, width: 8, height: 8, stride: 8, scale, clip }, &surface, 0, 0);
+                for y in 0..8 {
+                    for x in 0..8 {
+                        assert_eq!(
+                            partial[y * 8 + x],
+                            if (1..3).contains(&x) && (1..3).contains(&y) { full[y * 8 + x] } else { 0xff202830 }
+                        );
+                    }
+                }
             }
         }
     }

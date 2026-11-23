@@ -429,6 +429,20 @@ pub struct Table {
 }
 
 impl Table {
+    pub fn network_lost(&mut self, addresses: &[Ip]) {
+        for c in self.conns.values_mut() {
+            if addresses.contains(&c.local.0) && !matches!(c.state, State::Listen | State::Closed) {
+                c.error = Some(ENETUNREACH);
+                c.state = State::Closed;
+                c.rexmit_at = None;
+                c.ack_at = None;
+                c.ack_now = false;
+                c.syn_pending = false;
+                c.send_buf.clear();
+            }
+        }
+    }
+
     fn insert(&mut self, c: Conn) -> ConnId {
         self.next_id = self.next_id.wrapping_add(1).max(1);
         while self.conns.contains_key(&self.next_id) {
@@ -629,6 +643,11 @@ pub type ConnInfo = (State, (Ip, u16), (Ip, u16), Option<isize>);
 
 pub fn state(s: &Stack, id: ConnId) -> Option<ConnInfo> {
     s.tcp.conns.get(&id).map(|c| (c.state, c.local, c.remote, c.error))
+}
+
+/// Read and clear the pending socket error, as Linux SO_ERROR requires.
+pub fn take_error(s: &mut Stack, id: ConnId) -> Option<isize> {
+    s.tcp.conns.get_mut(&id)?.error.take()
 }
 
 // ---------------------------------------------------------------- segments
@@ -865,7 +884,9 @@ pub fn input(s: &mut Stack, src: Ip, dst: Ip, p: &[u8]) {
 }
 
 /// Retransmissions, delayed ACKs, TIME-WAIT, and cleaning up.
-pub fn tick(s: &mut Stack, now: u64) {
+/// Returns whether maintenance changed socket readiness.
+pub fn tick(s: &mut Stack, now: u64) -> bool {
+    let mut changed = false;
     let ids: Vec<ConnId> = s.tcp.conns.keys().copied().collect();
     for id in ids {
         let Some(c) = s.tcp.conns.get_mut(&id) else { continue };
@@ -876,6 +897,7 @@ pub fn tick(s: &mut Stack, now: u64) {
                 c.error = Some(ETIMEDOUT);
                 c.state = State::Closed;
                 c.rexmit_at = None;
+                changed = true;
             } else {
                 // Go back to the first unacknowledged byte, slowly.
                 let mss = c.mss.min(c.our_mss()) as u32;
@@ -899,16 +921,19 @@ pub fn tick(s: &mut Stack, now: u64) {
         }
         if c.state == State::TimeWait && now >= c.timewait_until {
             c.state = State::Closed;
+            changed = true;
         }
         // Half-open connections whose listener went away.
         let orphaned_child = c.parent.is_some_and(|p| !s.tcp.conns.contains_key(&p));
         let c = s.tcp.conns.get_mut(&id).unwrap();
         if (c.state == State::Closed && c.orphan) || (orphaned_child && c.state == State::SynReceived) {
             s.tcp.conns.remove(&id);
+            changed = true;
             continue;
         }
         flush(s, id, now);
     }
+    changed
 }
 
 /// Delayed cumulative ACKs remain valid after the retransmission cursor rewinds.

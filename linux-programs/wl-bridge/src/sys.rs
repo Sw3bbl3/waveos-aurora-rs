@@ -2,11 +2,13 @@
 //! descriptors, `poll`, `mmap`, `memfd`) and WaveOS's window calls, which
 //! Linux programs reach at `0x5741_0000 + n` (see `libs/linux/include/waveos.h`).
 
+#[cfg(any(not(test), target_arch = "x86_64"))]
 use std::arch::asm;
 
 pub type Fd = i32;
 
 /// A Linux system call; negative results are `-errno`.
+#[cfg(any(not(test), target_arch = "x86_64"))]
 pub fn call(n: i64, a: [i64; 6]) -> i64 {
     let ret: i64;
     unsafe {
@@ -18,6 +20,11 @@ pub fn call(n: i64, a: [i64; 6]) -> i64 {
             options(nostack));
     }
     ret
+}
+
+#[cfg(all(test, not(target_arch = "x86_64")))]
+pub fn call(_: i64, _: [i64; 6]) -> i64 {
+    panic!("Guest syscall attempted in a host renderer test")
 }
 
 const SOCKET: i64 = 41;
@@ -280,8 +287,8 @@ pub fn win_surface(id: u32) -> Surface {
     s
 }
 
-pub fn win_present(id: u32, w: u32, h: u32) {
-    call(WAVE + WIN_PRESENT, [id as i64, 0, 0, w as i64, h as i64, 0]);
+pub fn win_present(id: u32, r: crate::damage::Rect) {
+    call(WAVE + WIN_PRESENT, [id as i64, r.x as i64, r.y as i64, r.w as i64, r.h as i64, 0]);
 }
 
 pub fn win_set_title(id: u32, title: &str) {

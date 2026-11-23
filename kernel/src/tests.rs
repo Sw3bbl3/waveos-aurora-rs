@@ -26,6 +26,7 @@ const TESTS: &[Test] = &[
     ("system image", system_image),
     ("timer", timer),
     ("scheduler", scheduler),
+    ("scoped readiness: unrelated notifications and check/sleep race", crate::proc::readiness::self_test),
     ("wallpaper + blur", wallpaper),
     ("TrueType text", truetype),
     ("Spotlight: calculator and file index", spotlight),

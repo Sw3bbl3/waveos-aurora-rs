@@ -23,7 +23,7 @@ SPECIAL = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash", "=":
            "%": "shift+5", "^": "shift+6", "@": "shift+2", '"': "shift+apostrophe", "?": "shift+slash", "(": "shift+9", ")": "shift+0"}
 
 sock = socket.socket(socket.AF_UNIX)
-sock.connect(os.path.join(ROOT, "target/qemu-qmp.sock"))
+sock.connect(os.path.join(os.environ.get("AURORA_SESSION_DIR", os.path.join(ROOT, "target")), "qemu-qmp.sock"))
 f = sock.makefile("rw")
 
 def rd():

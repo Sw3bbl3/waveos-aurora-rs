@@ -539,6 +539,7 @@ impl Desktop {
                 if self.center_open() {
                     self.toggle_center();
                 }
+                self.begin_reveal(self.current_rect());
                 self.current = Some(Current::default());
                 let r = self.current_rect();
                 self.damage(r.inset(-40));
@@ -803,6 +804,9 @@ impl Desktop {
     }
 
     pub(super) fn close_current(&mut self) {
+        if self.current.is_some() {
+            self.begin_reveal(self.current_rect());
+        }
         if self.current.take().is_some() {
             let r = self.current_rect();
             self.damage(r);
@@ -940,7 +944,7 @@ impl Desktop {
             rect(CurrentHit::Calm),
             calm,
             hov(CurrentHit::Calm),
-            "Calm",
+            "Do Not Disturb",
             if calm { "On" } else { "Off" },
             &|cv, x, y, col| {
                 // A crescent moon.

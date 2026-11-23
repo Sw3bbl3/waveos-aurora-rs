@@ -24,9 +24,64 @@
 #include <string.h>
 
 static GtkWidget *window, *address, *back_button, *forward_button, *reload_button, *tabs;
-static GtkWidget *find_bar, *find_entry;
+static GtkWidget *find_bar, *find_entry, *downloads;
+static gboolean benchmark_mode;
+static gint64 app_started;
 static WebKitWebContext *context;
 static WebKitSettings *settings;
+
+typedef struct {
+    gint64 started, committed;
+    guint sequence, tls;
+    gboolean internal, failed, cancelled;
+    gchar *retry;
+} Navigation;
+
+static Navigation *navigation(WebKitWebView *view) { return g_object_get_data(view, "voyage-navigation"); }
+static void free_navigation(gpointer raw) { Navigation *n = raw; g_free(n->retry); free(n); }
+static void user_navigation(WebKitWebView *view) {
+    Navigation *n = navigation(view);
+    if (!n) return;
+    n->internal = n->failed = n->cancelled = FALSE;
+    n->tls = 0;
+    g_free(n->retry); n->retry = NULL;
+}
+static void json_string(const char *s) {
+    putchar('"');
+    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++) {
+        if (*p == '"' || *p == '\\') printf("\\%c", *p);
+        else if (*p < 32) printf("\\u%04x", *p);
+        else putchar(*p);
+    }
+    putchar('"');
+}
+static void trace(WebKitWebView *view, const char *event, int code) {
+    if (!benchmark_mode) return;
+    Navigation *n = navigation(view);
+    printf("[voyage] {\"event\":"); json_string(event);
+    printf(",\"url\":"); json_string(n->failed && n->retry ? n->retry : webkit_web_view_get_uri(view));
+    printf(",\"title\":"); json_string(webkit_web_view_get_title(view));
+    printf(",\"sequence\":%u,\"elapsed_ms\":%lld,\"app_ms\":%lld,\"code\":%d,\"tls\":%u}\n",
+        n->sequence, n->started ? (g_get_monotonic_time() - n->started) / 1000 : 0,
+        (g_get_monotonic_time() - app_started) / 1000, code, n->tls);
+    fflush(stdout);
+}
+
+typedef struct { WebKitWebView *view; guint sequence; } Probe;
+static void on_probe(GObject *object, GAsyncResult *result, gpointer raw) {
+    Probe *probe = raw;
+    GError *error = NULL;
+    JSCValue *value = webkit_web_view_evaluate_javascript_finish((WebKitWebView *)object, result, &error);
+    Navigation *n = navigation(probe->view);
+    if (value && n->sequence == probe->sequence && !n->failed && !n->internal) {
+        gchar *json = jsc_value_to_string(value);
+        printf("[voyage-probe] {\"sequence\":%u,\"page\":%s}\n", probe->sequence, json ? json : "null");
+        fflush(stdout); g_free(json);
+    }
+    if (value) g_object_unref(value);
+    if (error) g_error_free(error);
+    g_object_unref(probe->view); free(probe);
+}
 
 static const char START_PAGE[] =
     "<!doctype html><html><head><meta charset=utf-8><title>New Tab</title>"
@@ -88,6 +143,13 @@ static void sync_toolbar(void) {
         gtk_entry_set_text((GtkEntry *)address, uri && strncmp(uri, "about:", 6) ? uri : "");
     gtk_widget_set_sensitive(back_button, webkit_web_view_can_go_back(view));
     gtk_widget_set_sensitive(forward_button, webkit_web_view_can_go_forward(view));
+    gboolean loading = webkit_web_view_is_loading(view);
+    if ((g_object_get_data(reload_button, "loading") != NULL) != loading) {
+        g_object_set_data(reload_button, "loading", loading ? reload_button : NULL);
+        gtk_button_set_image((GtkButton *)reload_button, gtk_image_new_from_icon_name(
+            loading ? "process-stop-symbolic" : "view-refresh-symbolic", GTK_ICON_SIZE_BUTTON));
+        gtk_widget_set_tooltip_text(reload_button, loading ? "Stop loading (Esc)" : "Reload (Ctrl+R)");
+    }
     double progress = webkit_web_view_get_estimated_load_progress(view);
     gtk_entry_set_progress_fraction((GtkEntry *)address,
                                     webkit_web_view_is_loading(view) && progress < 1.0 ? progress : 0.0);
@@ -96,8 +158,8 @@ static void sync_toolbar(void) {
 }
 
 static void on_view_changed(GObject *object, GParamSpec *spec, gpointer data) {
-    (void)spec;
     (void)data;
+    if (spec && !strcmp(g_param_spec_get_name(spec), "title")) trace((WebKitWebView *)object, "title", 0);
     WebKitWebView *view = (WebKitWebView *)object;
     GtkLabel *label = g_object_get_data(view, "voyage-label");
     const gchar *title = webkit_web_view_get_title(view);
@@ -107,8 +169,62 @@ static void on_view_changed(GObject *object, GParamSpec *spec, gpointer data) {
 }
 
 static void on_load_changed(WebKitWebView *view, int event, gpointer data) {
-    (void)event;
+    Navigation *n = navigation(view);
+    if (!n->internal) {
+        if (event == WEBKIT_LOAD_STARTED) {
+            n->started = g_get_monotonic_time(); n->committed = 0;
+            n->failed = n->cancelled = FALSE; n->tls = 0; n->sequence++;
+            trace(view, "started", 0);
+        } else if (event == WEBKIT_LOAD_COMMITTED) {
+            n->committed = g_get_monotonic_time(); trace(view, "committed", 0);
+        } else if (event == WEBKIT_LOAD_FINISHED && !n->failed && !n->cancelled) {
+            trace(view, "finished", 0);
+            if (benchmark_mode) {
+                Probe *probe = malloc(sizeof *probe);
+                if (probe) {
+                    probe->view = g_object_ref(view); probe->sequence = n->sequence;
+                    webkit_web_view_evaluate_javascript(view,
+                        "JSON.stringify({title:document.title,ready:document.readyState,nodes:document.getElementsByTagName('*').length,paint:performance.getEntriesByType('paint').map(x=>({name:x.name,ms:x.startTime})),navigation:performance.getEntriesByType('navigation').map(x=>({dns:x.domainLookupEnd-x.domainLookupStart,connect:x.connectEnd-x.connectStart,response:x.responseStart,dom:x.domContentLoadedEventEnd,load:x.loadEventEnd}))})",
+                        -1, NULL, NULL, NULL, on_probe, probe);
+                }
+            }
+        }
+    }
     on_view_changed((GObject *)view, NULL, data);
+}
+
+static gboolean on_tls_failed(WebKitWebView *view, const gchar *uri, gpointer cert, guint errors, gpointer data) {
+    (void)uri; (void)cert; (void)data;
+    navigation(view)->tls = errors;
+    return FALSE; /* Keep verification enabled; load-failed supplies our error page. */
+}
+static gboolean on_load_failed(WebKitWebView *view, int event, const gchar *uri, GError *error, gpointer data) {
+    (void)event; (void)data;
+    Navigation *n = navigation(view);
+    if (n->internal) return FALSE;
+    if (error && error->domain == webkit_policy_error_quark() && error->code == 102) {
+        trace(view, "download-navigation", 0);
+        return FALSE;
+    }
+    n->failed = TRUE;
+    if (n->cancelled || (error && error->domain == webkit_network_error_quark() && error->code == 302)) {
+        trace(view, "cancelled", error ? error->code : 0); return TRUE;
+    }
+    g_free(n->retry); n->retry = g_strdup(uri);
+    trace(view, "failed", error ? error->code : 0);
+    gchar *safe_uri = g_markup_escape_text(uri ? uri : "", -1);
+    gchar *safe_error = g_markup_escape_text(error && error->message ? error->message : "The connection ended.", -1);
+    gchar *html = g_strdup_printf(
+        "<!doctype html><meta charset=utf-8><meta name=color-scheme content='light dark'><title>Connection needs attention</title>"
+        "<style>body{font:16px sans-serif;max-width:650px;margin:12vh auto;padding:24px;line-height:1.6}p{overflow-wrap:anywhere}</style>"
+        "<h1>%s</h1><p>%s</p><p>%s</p><p>%s</p><p>Choose Reload to try again, go Back, or enter another address.</p>",
+        n->tls ? "This connection could not be verified" : "This page could not be opened",
+        safe_uri, safe_error, n->tls ? "Check the system date and time. The site's certificate must be valid before this connection can open."
+            : "Check Network in Settings. A network address alone does not confirm DNS or Internet access.");
+    n->internal = TRUE;
+    webkit_web_view_load_alternate_html(view, html, uri, NULL);
+    g_free(html); g_free(safe_uri); g_free(safe_error);
+    return TRUE;
 }
 
 static GtkWidget *new_tab(const gchar *uri, gboolean focus);
@@ -122,6 +238,10 @@ static void on_ready_to_show(WebKitWebView *view, gpointer data) {
 }
 
 static void close_view(GtkWidget *view) {
+    webkit_web_view_try_close((WebKitWebView *)view);
+}
+
+static void remove_view(GtkWidget *view) {
     gint page = gtk_notebook_page_num((GtkNotebook *)tabs, view);
     if (page < 0) return;
     gtk_notebook_remove_page((GtkNotebook *)tabs, page);
@@ -130,7 +250,7 @@ static void close_view(GtkWidget *view) {
 
 static void on_close_requested(WebKitWebView *view, gpointer data) {
     (void)data;
-    close_view((GtkWidget *)view);
+    remove_view((GtkWidget *)view);
 }
 
 static void on_close_clicked(GtkButton *button, gpointer view) {
@@ -139,8 +259,12 @@ static void on_close_clicked(GtkButton *button, gpointer view) {
 }
 
 static void on_crashed(WebKitWebView *view, int reason, gpointer data) {
-    (void)reason;
     (void)data;
+    trace(view, "crashed", reason);
+    navigation(view)->failed = TRUE;
+    navigation(view)->internal = TRUE;
+    g_free(navigation(view)->retry);
+    navigation(view)->retry = g_strdup(webkit_web_view_get_uri(view));
     webkit_web_view_load_html(view,
                               "<body style='font-family:sans-serif;padding:40px'><h2>This page stopped</h2>"
                               "<p>Its web process ended. Reload to try again.</p></body>",
@@ -148,6 +272,11 @@ static void on_crashed(WebKitWebView *view, int reason, gpointer data) {
 }
 
 static GtkWidget *add_view(GtkWidget *view, gboolean focus) {
+    Navigation *navigation_state = calloc(1, sizeof *navigation_state);
+    if (!navigation_state) exit(1);
+    g_object_set_data_full(view, "voyage-navigation", navigation_state, free_navigation);
+    g_signal_connect(view, "load-failed", on_load_failed, NULL);
+    g_signal_connect(view, "load-failed-with-tls-errors", on_tls_failed, NULL);
     GtkWidget *label = gtk_label_new("New Tab");
     gtk_label_set_ellipsize((GtkLabel *)label, PANGO_ELLIPSIZE_END);
     gtk_label_set_width_chars((GtkLabel *)label, 14);
@@ -207,13 +336,13 @@ static GtkWidget *new_tab(const gchar *uri, gboolean focus) {
 static gchar *resolve(const gchar *text) {
     while (*text == ' ') text++;
     if (!*text) return NULL;
+    if (text[0] == '/') return g_filename_to_uri(text, NULL, NULL);
     if (strstr(text, "://") || !strncmp(text, "about:", 6) || !strncmp(text, "file:", 5) ||
         !strncmp(text, "data:", 5))
         return g_strdup(text);
     gboolean spaces = strchr(text, ' ') != NULL;
-    gboolean dotted = strchr(text, '.') != NULL || !strncmp(text, "localhost", 9);
+    gboolean dotted = strchr(text, '.') != NULL || !strncmp(text, "localhost", 9) || text[0] == '[';
     if (!spaces && dotted) return g_strdup_printf("https://%s", text);
-    if (text[0] == '/') return g_strdup_printf("file://%s", text);
     gchar *q = g_uri_escape_string(text, NULL, TRUE);
     gchar *uri = g_strdup_printf("https://duckduckgo.com/?q=%s", q);
     g_free(q);
@@ -225,6 +354,7 @@ static void on_address_activate(GtkEntry *entry, gpointer data) {
     gchar *uri = resolve(gtk_entry_get_text(entry));
     WebKitWebView *view = current_view();
     if (uri && view) {
+        user_navigation(view);
         webkit_web_view_load_uri(view, uri);
         gtk_widget_grab_focus((GtkWidget *)view);
     }
@@ -234,24 +364,34 @@ static void on_address_activate(GtkEntry *entry, gpointer data) {
 static void on_back(GtkButton *b, gpointer d) {
     (void)b;
     (void)d;
-    if (current_view()) webkit_web_view_go_back(current_view());
+    if (current_view()) { user_navigation(current_view()); webkit_web_view_go_back(current_view()); }
 }
 
 static void on_forward(GtkButton *b, gpointer d) {
     (void)b;
     (void)d;
-    if (current_view()) webkit_web_view_go_forward(current_view());
+    if (current_view()) { user_navigation(current_view()); webkit_web_view_go_forward(current_view()); }
+}
+
+static void reload_view(void) {
+    WebKitWebView *view = current_view();
+    if (!view) return;
+    Navigation *n = navigation(view);
+    const gchar *target = n->retry ? n->retry : webkit_web_view_is_loading(view) ? webkit_web_view_get_uri(view) : NULL;
+    if (target) {
+        gchar *uri = g_strdup(target); user_navigation(view);
+        webkit_web_view_load_uri(view, uri); g_free(uri);
+    } else { user_navigation(view); webkit_web_view_reload(view); }
 }
 
 static void on_reload(GtkButton *b, gpointer d) {
-    (void)b;
-    (void)d;
+    (void)b; (void)d;
     WebKitWebView *view = current_view();
     if (!view) return;
-    if (webkit_web_view_is_loading(view))
+    if (webkit_web_view_is_loading(view)) {
+        navigation(view)->cancelled = TRUE;
         webkit_web_view_stop_loading(view);
-    else
-        webkit_web_view_reload(view);
+    } else reload_view();
 }
 
 static void on_new_tab(GtkButton *b, gpointer d) {
@@ -271,6 +411,13 @@ static void on_switch_page(GtkNotebook *notebook, GtkWidget *page, guint num, gp
     gtk_entry_set_text((GtkEntry *)address, uri && strncmp(uri, "about:", 6) ? uri : "");
     gtk_widget_set_sensitive(back_button, webkit_web_view_can_go_back(view));
     gtk_widget_set_sensitive(forward_button, webkit_web_view_can_go_forward(view));
+    gboolean loading = webkit_web_view_is_loading(view);
+    if ((g_object_get_data(reload_button, "loading") != NULL) != loading) {
+        g_object_set_data(reload_button, "loading", loading ? reload_button : NULL);
+        gtk_button_set_image((GtkButton *)reload_button, gtk_image_new_from_icon_name(
+            loading ? "process-stop-symbolic" : "view-refresh-symbolic", GTK_ICON_SIZE_BUTTON));
+        gtk_widget_set_tooltip_text(reload_button, loading ? "Stop loading (Esc)" : "Reload (Ctrl+R)");
+    }
     const gchar *title = webkit_web_view_get_title(view);
     gtk_window_set_title((GtkWindow *)window, title && *title ? title : "Voyage");
 }
@@ -343,7 +490,7 @@ static gboolean on_key(GtkWidget *widget, GdkEvent *event, gpointer data) {
     } else if (ctrl && (key == GDK_KEY_Tab || key == GDK_KEY_ISO_Left_Tab)) {
         gtk_notebook_set_current_page((GtkNotebook *)tabs, (at + (shift || key == GDK_KEY_ISO_Left_Tab ? n - 1 : 1)) % n);
     } else if ((ctrl && key == 'r') || key == GDK_KEY_F5) {
-        if (current_view()) webkit_web_view_reload(current_view());
+        reload_view();
     } else if (alt && key == GDK_KEY_Left) {
         on_back(NULL, NULL);
     } else if (alt && key == GDK_KEY_Right) {
@@ -355,6 +502,8 @@ static gboolean on_key(GtkWidget *widget, GdkEvent *event, gpointer data) {
         find(shift);
     } else if (key == GDK_KEY_Escape && gtk_revealer_get_reveal_child((GtkRevealer *)find_bar)) {
         close_find();
+    } else if (key == GDK_KEY_Escape && current_view() && webkit_web_view_is_loading(current_view())) {
+        on_reload(NULL, NULL);
     } else if (ctrl && (key == GDK_KEY_plus || key == GDK_KEY_equal)) {
         zoom(1.1);
     } else if (ctrl && key == GDK_KEY_minus) {
@@ -367,29 +516,90 @@ static gboolean on_key(GtkWidget *widget, GdkEvent *event, gpointer data) {
     return TRUE;
 }
 
-/* Downloads go to WaveOS's Downloads folder (the Files app shows them). */
-static gboolean on_decide_destination(WebKitDownload *download, gchar *suggested, gpointer data) {
-    (void)data;
+/* Each transfer has its own progress and cancellation; names never overwrite. */
+typedef struct {
+    WebKitDownload *download;
+    GtkWidget *row, *label, *button;
+    gchar *path;
+    gboolean failed, finished, cancelled;
+    int percent;
+} DownloadState;
+static void free_download(gpointer raw) {
+    DownloadState *state = raw;
+    /* Disconnect by user data before cancellation can emit signals. */
+    g_signal_handlers_disconnect_matched(state->download, 1u << 4, 0, 0, NULL, NULL, state);
+    if (!state->finished) webkit_download_cancel(state->download);
+    g_object_unref(state->download); g_free(state->path); free(state);
+}
+static void download_button(GtkButton *button, gpointer raw) {
+    (void)button; DownloadState *state = raw;
+    if (state->finished) gtk_widget_destroy(state->row);
+    else { state->cancelled = TRUE; webkit_download_cancel(state->download); }
+}
+static gboolean on_decide_destination(WebKitDownload *download, gchar *suggested, gpointer raw) {
+    DownloadState *state = raw;
     gchar *name = g_path_get_basename(suggested && *suggested ? suggested : "download");
-    gchar *path = g_build_filename("/Downloads", name, NULL);
-    for (int i = 1; g_file_test(path, G_FILE_TEST_EXISTS) && i < 1000; i++) {
+    if (!strcmp(name, ".") || !strcmp(name, "/") || !*name) { g_free(name); name = g_strdup("download"); }
+    gchar *path = NULL;
+    for (int i = 0; i < 10000; i++) {
         g_free(path);
-        gchar *numbered = g_strdup_printf("%d %s", i, name);
-        path = g_build_filename("/Downloads", numbered, NULL);
-        g_free(numbered);
+        path = i ? g_strdup_printf("/Downloads/%d %s", i, name) : g_build_filename("/Downloads", name, NULL);
+        if (!g_file_test(path, G_FILE_TEST_EXISTS)) break;
+        if (i == 9999) { state->failed = TRUE; webkit_download_cancel(download); g_free(path); g_free(name); return TRUE; }
     }
+    state->path = path;
     gchar *uri = g_filename_to_uri(path, NULL, NULL);
+    webkit_download_set_allow_overwrite(download, FALSE);
     webkit_download_set_destination(download, uri);
-    g_free(uri);
-    g_free(path);
-    g_free(name);
+    if (benchmark_mode) { printf("[voyage-download] {\"event\":\"started\",\"path\":"); json_string(path); printf("}\n"); }
+    gtk_label_set_text((GtkLabel *)state->label, path);
+    g_free(uri); g_free(name);
     return TRUE;
 }
-
+static void on_download_data(WebKitDownload *download, guint64 bytes, gpointer raw) {
+    (void)bytes; DownloadState *state = raw;
+    int percent = (int)(webkit_download_get_estimated_progress(download) * 100.0);
+    if (percent == state->percent) return;
+    state->percent = percent;
+    gchar *label = g_strdup_printf("%s — %d%% (%llu bytes)", state->path ? state->path : "Downloading", percent,
+                                   webkit_download_get_received_data_length(download));
+    gtk_label_set_text((GtkLabel *)state->label, label); g_free(label);
+}
+static void on_download_failed(WebKitDownload *download, GError *error, gpointer raw) {
+    (void)download; DownloadState *state = raw; state->failed = TRUE;
+    gchar *label = g_strdup_printf("%s — %s", state->path ? state->path : "Download",
+        state->cancelled ? "Canceled" : error && error->message ? error->message : "Could not save this file");
+    gtk_label_set_text((GtkLabel *)state->label, label); g_free(label);
+    if (benchmark_mode) { printf("[voyage-download] {\"event\":\"failed\",\"cancelled\":%s}\n", state->cancelled ? "true" : "false"); }
+}
+static void on_download_finished(WebKitDownload *download, gpointer raw) {
+    DownloadState *state = raw; state->finished = TRUE;
+    if (!state->failed) {
+        gchar *label = g_strdup_printf("Saved to %s", state->path ? state->path : "/Downloads");
+        gtk_label_set_text((GtkLabel *)state->label, label); g_free(label);
+        if (benchmark_mode) { printf("[voyage-download] {\"event\":\"finished\",\"bytes\":%llu,\"path\":", webkit_download_get_received_data_length(download)); json_string(state->path); printf("}\n"); }
+    }
+    gtk_button_set_label((GtkButton *)state->button, "Dismiss");
+}
 static void on_download(WebKitWebContext *ctx, WebKitDownload *download, gpointer data) {
-    (void)ctx;
-    (void)data;
-    g_signal_connect(download, "decide-destination", on_decide_destination, NULL);
+    (void)ctx; (void)data;
+    DownloadState *state = calloc(1, sizeof *state);
+    if (!state) { webkit_download_cancel(download); return; }
+    state->download = g_object_ref(download); state->percent = -1;
+    state->row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    state->label = gtk_label_new("Starting download…");
+    gtk_label_set_ellipsize((GtkLabel *)state->label, PANGO_ELLIPSIZE_END);
+    state->button = gtk_button_new_with_label("Cancel");
+    gtk_box_pack_start((GtkBox *)state->row, state->label, TRUE, TRUE, 8);
+    gtk_box_pack_end((GtkBox *)state->row, state->button, FALSE, FALSE, 8);
+    g_object_set_data_full(state->row, "voyage-download", state, free_download);
+    g_signal_connect(state->button, "clicked", download_button, state);
+    g_signal_connect(download, "decide-destination", on_decide_destination, state);
+    g_signal_connect(download, "received-data", on_download_data, state);
+    g_signal_connect(download, "failed", on_download_failed, state);
+    g_signal_connect(download, "finished", on_download_finished, state);
+    gtk_box_pack_start((GtkBox *)downloads, state->row, FALSE, FALSE, 4);
+    gtk_widget_show_all(state->row);
 }
 
 static GtkWidget *tool_button(const gchar *icon, const gchar *tip, void (*handler)(GtkButton *, gpointer)) {
@@ -402,6 +612,15 @@ static GtkWidget *tool_button(const gchar *icon, const gchar *tip, void (*handle
 }
 
 int main(int argc, char **argv) {
+    app_started = g_get_monotonic_time();
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    benchmark_mode = getenv("WAVEOS_WEB_TRACE") != NULL;
+    int kept = 1;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--waveos-benchmark")) benchmark_mode = TRUE;
+        else argv[kept++] = argv[i];
+    }
+    argc = kept; argv[kept] = NULL;
     gtk_init(&argc, &argv);
 
     const char *theme = getenv("GTK_THEME");
@@ -424,6 +643,7 @@ int main(int argc, char **argv) {
                                                  WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
     context = webkit_web_context_new_with_website_data_manager(data);
     webkit_web_context_set_cache_model(context, WEBKIT_CACHE_MODEL_WEB_BROWSER);
+    webkit_web_context_set_tls_errors_policy(context, 1); /* FAIL: never bypass certificate validation. */
     g_signal_connect(context, "download-started", on_download, NULL);
     settings = webkit_settings_new();
     webkit_settings_set_enable_smooth_scrolling(settings, FALSE);
@@ -463,6 +683,8 @@ int main(int argc, char **argv) {
     gtk_box_pack_start((GtkBox *)find_row, find_entry, FALSE, FALSE, 0);
     gtk_container_add((GtkContainer *)find_bar, find_row);
     gtk_box_pack_start((GtkBox *)body, find_bar, FALSE, FALSE, 0);
+    downloads = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_pack_start((GtkBox *)body, downloads, FALSE, FALSE, 0);
     tabs = gtk_notebook_new();
     gtk_notebook_set_scrollable((GtkNotebook *)tabs, TRUE);
     gtk_notebook_set_show_border((GtkNotebook *)tabs, FALSE);

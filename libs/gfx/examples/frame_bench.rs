@@ -99,6 +99,18 @@ fn main() {
                 }
             }),
         ));
+        // What a moving window or a changing backdrop costs: sampled,
+        // blurred and rendered again every time.
+        results.push((
+            "6 glass panels (re-rendered)",
+            time(runs, || {
+                let cache = cv.materials.as_deref_mut().unwrap();
+                cache.clear();
+                for r in glass {
+                    cv.frosted(r, 19, 0x7510_162E);
+                }
+            }),
+        ));
         cv.materials = None;
         let f = theme::ui(13);
         results.push((

@@ -277,6 +277,10 @@ impl App for Preview {
         }
     }
 
+    fn min_size(&self) -> (i32, i32) {
+        (440, 280)
+    }
+
     fn size(&self) -> (i32, i32) {
         match &self.image {
             Some(img) => {
@@ -359,6 +363,7 @@ impl App for Preview {
                 cv.fill_rect(r, backdrop);
                 self.picture(cv, r);
             })
+            .cursor(if self.drag_from.is_some() { cursor::GRABBING } else { cursor::GRAB })
             .on_input(|e| match e {
                 CanvasEvent::Press { clicks: 2, .. } => Some(Msg::ToggleActual),
                 CanvasEvent::Press { x, y, button: 1, .. } => Some(Msg::Grab(x, y)),

@@ -227,10 +227,19 @@ pub fn listen(p: &Process, fd: u64, backlog: u64) -> Result<u64, isize> {
 }
 
 pub fn connect(p: &Process, fd: u64, addr: u64, len: u64) -> Result<u64, isize> {
+    if len >= 2 && user::get::<u16>(addr)? == 0 {
+        return match sock(p, fd)? {
+            net @ Sock::Net(_) => net.net().disconnect_datagram().map(|_| 0),
+            _ => Err(EAFNOSUPPORT),
+        };
+    }
     match (sock(p, fd)?, read_addr(p, addr, len)?) {
         (Sock::Local(u), Addr::Local(name)) => u.connect(name, p.pid).map(|_| 0),
         (s @ Sock::Net(_), Addr::Net(peer)) => {
             let net = s.net();
+            if !net.v6 && crate::net::as_v4(&peer.0).is_none() {
+                return Err(EAFNOSUPPORT);
+            }
             if net.connecting() {
                 return Err(EALREADY);
             }
@@ -628,7 +637,7 @@ pub fn getsockopt(p: &Process, fd: u64, level: u64, name: u64, val: u64, len_ptr
         }),
         // SO_ERROR
         4 => int(match &s {
-            Sock::Net(_) => s.net().error().unwrap_or(0).unsigned_abs() as i32,
+            Sock::Net(_) => s.net().take_error().unwrap_or(0).unsigned_abs() as i32,
             Sock::Local(_) => 0,
         }),
         // SO_SNDBUF, SO_RCVBUF

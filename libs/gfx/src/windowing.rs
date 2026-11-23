@@ -1,6 +1,75 @@
 //! Host-tested window placement and stable MRU selection, independent of input/rendering.
 use crate::geom::Rect;
 use alloc::vec::Vec;
+
+/// Reserved compositor chrome, in logical points. Client surfaces never include it.
+pub const CHROME_H: i32 = 34;
+pub const EDGE: i32 = 7;
+pub const CORNER: i32 = 18;
+pub const LEFT: u8 = 1;
+pub const RIGHT: u8 = 2;
+pub const TOP: u8 = 4;
+pub const BOTTOM: u8 = 8;
+
+pub fn content(r: Rect) -> Rect {
+    Rect::new(r.x, r.y + CHROME_H, r.w, (r.h - CHROME_H).max(1))
+}
+
+/// One hit test for both the visible resize pointer and the actual drag.
+/// Corners have a generous square target; edges stay clear of app toolbars.
+pub fn resize_edges(r: Rect, x: i32, y: i32) -> u8 {
+    if !r.contains(x, y) {
+        return 0;
+    }
+    let horizontal = if x < r.x + CORNER {
+        LEFT
+    } else if x >= r.right() - CORNER {
+        RIGHT
+    } else {
+        0
+    };
+    let vertical = if y < r.y + CORNER {
+        TOP
+    } else if y >= r.bottom() - CORNER {
+        BOTTOM
+    } else {
+        0
+    };
+    if horizontal != 0 && vertical != 0 {
+        return horizontal | vertical;
+    }
+    if x < r.x + EDGE {
+        LEFT
+    } else if x >= r.right() - EDGE {
+        RIGHT
+    } else if y < r.y + EDGE {
+        TOP
+    } else if y >= r.bottom() - EDGE {
+        BOTTOM
+    } else {
+        0
+    }
+}
+
+/// Resize from the original rectangle, anchoring the opposite edges. Bounds
+/// and minimum sizes are resolved together, including very small displays.
+pub fn resized(start: Rect, edges: u8, dx: i32, dy: i32, minimum: (i32, i32), area: Rect) -> Rect {
+    let (mw, mh) = (minimum.0.min(area.w).max(1), minimum.1.min(area.h).max(1));
+    let (mut l, mut r, mut t, mut b) = (start.x, start.right(), start.y, start.bottom());
+    if edges & LEFT != 0 {
+        l = (l + dx).clamp(area.x, (r - mw).max(area.x));
+    }
+    if edges & RIGHT != 0 {
+        r = (r + dx).clamp((l + mw).min(area.right()), area.right());
+    }
+    if edges & TOP != 0 {
+        t = (t + dy).clamp(area.y, (b - mh).max(area.y));
+    }
+    if edges & BOTTOM != 0 {
+        b = (b + dy).clamp((t + mh).min(area.bottom()), area.bottom());
+    }
+    Rect::new(l, t, r - l, b - t)
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Placement {
     #[default]
@@ -130,6 +199,55 @@ pub fn safe_damage(damage: &[Rect], materials: &[Rect], padding: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn all_edges_and_corners_share_unambiguous_hit_targets() {
+        let r = Rect::new(100, 100, 600, 400);
+        for (x, y, expected) in [
+            (102, 102, LEFT | TOP),
+            (697, 102, RIGHT | TOP),
+            (102, 497, LEFT | BOTTOM),
+            (697, 497, RIGHT | BOTTOM),
+            (101, 300, LEFT),
+            (698, 300, RIGHT),
+            (400, 101, TOP),
+            (400, 498, BOTTOM),
+            (116, 116, LEFT | TOP),
+            (400, 117, 0),
+            (400, 300, 0),
+            (99, 100, 0),
+            (700, 300, 0),
+        ] {
+            assert_eq!(resize_edges(r, x, y), expected, "{x},{y}");
+        }
+        assert_eq!(content(r), Rect::new(100, 134, 600, 366));
+    }
+
+    #[test]
+    fn resize_anchors_opposite_edges_and_respects_minimum_and_screen() {
+        let area = Rect::new(8, 62, 1264, 730);
+        let start = Rect::new(200, 160, 600, 400);
+        for edges in [LEFT, RIGHT, TOP, BOTTOM, LEFT | TOP, RIGHT | TOP, LEFT | BOTTOM, RIGHT | BOTTOM] {
+            for (dx, dy) in [(-2000, -2000), (2000, 2000), (22, 31), (0, 0)] {
+                let r = resized(start, edges, dx, dy, (300, 234), area);
+                assert_eq!(r.intersect(&area), r);
+                assert!(r.w >= 300 && r.h >= 234);
+                if edges & LEFT != 0 {
+                    assert_eq!(r.right(), start.right());
+                }
+                if edges & RIGHT != 0 {
+                    assert_eq!(r.x, start.x);
+                }
+                if edges & TOP != 0 {
+                    assert_eq!(r.bottom(), start.bottom());
+                }
+                if edges & BOTTOM != 0 {
+                    assert_eq!(r.y, start.y);
+                }
+            }
+        }
+        let tiny = Rect::new(0, 0, 200, 120);
+        assert_eq!(resized(tiny, RIGHT | BOTTOM, 1000, 1000, (300, 234), tiny), tiny);
+    }
     #[test]
     fn placements_fit_and_reject_small_targets() {
         let a = Rect::new(0, 30, 1280, 690);
