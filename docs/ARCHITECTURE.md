@@ -75,8 +75,8 @@ serial → GDT/TSS → IDT → syscall MSRs → FPU → mm (frames, heap, drop i
 | `0xffff_c000_0000_0000 …` | kernel mappings of window surfaces (`vmm::kmap`) |
 | `0xffff_ffff_8000_0000 …` | kernel image (`kernel/linker.ld`) |
 
-- **Frames** (`mm/frame.rs`): one bit per 4 KiB frame, covering the usable regions above 1 MiB. The bitmap is carved from the first region that is large enough. Frames can be allocated singly (next-fit) or as a contiguous run.
-- **Heap** (`mm/heap.rs`): a quarter of RAM, clamped to between 16 and 128 MiB. It is taken as one contiguous run and used through the physical window, so it needs no extra mappings. It is managed by `linked_list_allocator`, with interrupts disabled around each allocation.
+- **Frames** (`mm/frame.rs`): a buddy allocator over the usable regions above 1 MiB (including RAM above 4 GiB), with free blocks of 4 KiB to 4 MiB on lists linked through the free frames, in two zones: below 4 GiB (`alloc_contiguous_below`, for 32-bit devices) and above. Normal allocations take low memory first. Single frames go through a 64-frame cache per CPU, refilled and drained 32 at a time; runs come from the lists without scanning (runs over 4 MiB fall back to a scan). Two bitmaps (in use; free block starts here) catch double frees. When memory runs out, the caches are drained and the heap gives back its idle slabs before an allocation fails.
+- **Heap** (`mm/heap.rs`): grows on demand from the frame allocator, used through the physical window, so it needs no mappings and anything under a megabyte is physically contiguous. Up to 32 KiB, 40 size classes (four per power of two) come from slabs of 64–512 KiB; each CPU keeps a small stack of free objects per class, so most allocations and frees are a push or pop under that CPU's own lock with interrupts off for a few instructions, and batches move to and from the slabs under a per-class lock. Empty slabs go back to the frame allocator. Bigger allocations are runs of frames, and a megabyte or more is mapped into the kernel virtual area. The `heap-debug` feature adds red zones and poisoning. Statistics (per-class use, cache hit rates, free frames, the longest interrupts-off stretch) go out with the telemetry snapshot.
 - **Paging** (`mm/paging.rs`): removes the identity map. It also provides `map_mmio` for devices beyond the physical window.
 
 ### Clocks
@@ -317,7 +317,7 @@ Lines are written while holding the port lock and without allocating, so events 
 ## 10. Testing
 
 - **`cargo xtask test`.** It builds the kernel with `--features ktest`. The tests in `kernel/src/tests.rs` cover:
-  - the frame allocator and the heap
+  - the frame allocator and the heap: size classes, buddy runs and the 4 GiB limit, stress from every CPU with cross-CPU frees, running out of memory, and a micro-benchmark (`mm-bench:` lines)
   - integer math and rectangle math
   - the keyboard decoder and RamFS
   - timer accuracy

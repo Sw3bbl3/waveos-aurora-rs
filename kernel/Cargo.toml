@@ -11,6 +11,9 @@ bench = false
 
 [features]
 ktest = []
+# Red zones and poisoning in the kernel heap (catches overflows and writes
+# after free, at some cost in speed and memory).
+heap-debug = []
 
 [dependencies]
 aurora-desktop = { path = "../libs/desktop" }
@@ -27,7 +30,6 @@ aurora-wifi = { path = "../libs/wifi" }
 aurora-hid = { path = "../libs/hid" }
 x86_64 = "0.15"
 spin = "0.9"
-linked_list_allocator = "0.10"
 acpi = "6.1"
 log = "0.4"
 # Not used directly: the kernel is soft-float and never saves SIMD state, so

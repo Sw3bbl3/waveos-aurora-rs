@@ -465,7 +465,7 @@ const NODES = [
   // Kernel core
   { id: "mm", x: 40, y: 410, w: 190, h: 70, kind: "kernel", title: "Memory manager",
     summary: "Frames, heap, address spaces.",
-    detail: "Tracks every 4 KiB page of RAM in a bitmap, runs the kernel heap, and builds a private page table for each process, sharing the kernel half. User pages are no-execute unless they hold code.",
+    detail: "Hands out 4 KiB pages of RAM from a buddy allocator with per-CPU caches, runs the kernel heap (size-class slabs that grow on demand), and builds a private page table for each process, sharing the kernel half. User pages are no-execute unless they hold code.",
     files: ["kernel/src/mm/frame.rs", "kernel/src/mm/heap.rs", "kernel/src/mm/vmm.rs", "kernel/src/mm/paging.rs"] },
   { id: "input", x: 250, y: 410, w: 190, h: 70, kind: "kernel", title: "Input",
     summary: "PS/2 keyboard, absolute mouse.",

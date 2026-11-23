@@ -276,9 +276,11 @@ fn snapshot() -> String {
     let m = crate::mm::stats();
     let _ = write!(
         o,
-        "],\"mem\":{{\"total\":{},\"used\":{},\"heap\":{},\"heapUsed\":{}}}",
+        "],\"mem\":{{\"total\":{},\"used\":{},\"heap\":{},\"heapUsed\":{}",
         m.total_bytes, m.used_bytes, m.heap_size, m.heap_used
     );
+    crate::mm::write_telemetry(&mut o);
+    let _ = write!(o, "}}");
 
     // Syscalls and interrupts.
     let _ = write!(o, ",\"sys\":[");
