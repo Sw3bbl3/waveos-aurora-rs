@@ -91,6 +91,7 @@ dependencies = [
  "aurora-elf",
  "aurora-hid",
  "aurora-i2c",
+ "aurora-igfx",
  "aurora-image",
  "aurora-wav",
  "aurora-wifi",
@@ -149,6 +150,14 @@ name = "aurora-i2c"
 version = "0.8.0"
 dependencies = [
  "aurora-hid",
+]
+
+[[package]]
+name = "aurora-igfx"
+version = "0.8.0"
+dependencies = [
+ "aurora-edid",
+ "aurora-i2c",
 ]
 
 [[package]]

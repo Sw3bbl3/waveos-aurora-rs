@@ -30,8 +30,10 @@ pub fn init(boot: &BootInfo) {
 
 /// Starts the GPU drivers. Needs the disks (`gpu=` in boot.conf chooses
 /// the virtio-gpu driver: `native`, the default, or `linux` for the ported
-/// Linux driver).
+/// Linux driver; `intel=` the Intel driver's policy: `off`, `takeover`, the
+/// default, or `modeset`).
 pub fn gpu_start() {
+    gpu::intel::probe();
     let linux = crate::gui::prefs::boot_option("gpu").as_deref() == Some("linux");
     crate::linux::init(linux);
     #[cfg(linuxkpi)]

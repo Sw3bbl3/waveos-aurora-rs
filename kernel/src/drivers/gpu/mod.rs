@@ -1,8 +1,9 @@
 //! The display core: GPU and display drivers, modelled on Linux KMS.
 //!
 //! Every display driver — the firmware framebuffer (`gop`), Bochs/QEMU
-//! std VGA (`bochs`), the native virtio-gpu driver (`virtio`), and the
-//! ported Linux virtio-gpu driver (`linux`) — implements [`KmsDevice`] and
+//! std VGA (`bochs`), Intel integrated graphics (`intel`), the native
+//! virtio-gpu driver (`virtio`), and the ported Linux virtio-gpu driver
+//! (`linux`) — implements [`KmsDevice`] and
 //! exposes the same objects as Linux's kernel mode setting:
 //!
 //! - **CRTCs** scan a picture out with a [`Mode`] (one per head/scanout).
@@ -35,6 +36,7 @@
 pub mod bo;
 pub mod bochs;
 pub mod gop;
+pub mod intel;
 #[cfg(linuxkpi)]
 pub mod linux;
 pub mod mode;
@@ -384,6 +386,41 @@ pub fn devices() -> Vec<Arc<dyn KmsDevice>> {
 /// The device the desktop runs on: the first real driver, else the firmware's.
 pub fn primary() -> Option<Arc<dyn KmsDevice>> {
     DEVICES.lock().first().cloned()
+}
+
+// ------------------------------------------------------------ backlight
+
+/// The internal panel's backlight, as a display driver controls it.
+pub trait Backlight: Send + Sync {
+    /// The level now, 0–100.
+    fn get(&self) -> u32;
+    /// Sets the level (drivers keep a minimum so the panel never goes black).
+    fn set(&self, percent: u32);
+}
+
+static BACKLIGHT: IrqMutex<Option<Arc<dyn Backlight>>> = IrqMutex::new(None);
+
+/// A driver found the internal panel's backlight.
+pub fn set_backlight(b: Arc<dyn Backlight>) {
+    *BACKLIGHT.lock() = Some(b);
+}
+
+/// The panel's brightness, 0–100, if a driver controls it.
+pub fn brightness() -> Option<u32> {
+    let b = BACKLIGHT.lock().clone();
+    b.map(|b| b.get())
+}
+
+/// Sets the panel's brightness; false if no driver controls it.
+pub fn set_brightness(percent: u32) -> bool {
+    let b = BACKLIGHT.lock().clone();
+    match b {
+        Some(b) => {
+            b.set(percent.min(100));
+            true
+        }
+        None => false,
+    }
 }
 
 // --------------------------------------------------------------- events

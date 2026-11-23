@@ -14,6 +14,7 @@ This document is for someone about to read or change the code. It follows the ma
 | `libs/abi/` | `aurora-abi` | kernel + user | System call numbers, errors, `#[repr(C)]` structs, key types |
 | `libs/gfx/` | `lumen` | kernel + user | Rasterizer, our TrueType engine, theme, icons, widgets, wallpapers |
 | `libs/edid/` | `aurora-edid` | kernel + host | EDID parsing (base block, CTA-861, DisplayID) and CVT timings |
+| `libs/igfx/` | `aurora-igfx` | kernel + host | Intel display engine programming (display 9–13): device table, firmware readback, planes, DDB/watermarks, GGTT, GMBUS, DP AUX and link training, Skylake DPLLs, backlight, mode set sequences, and a simulated engine for tests |
 | `libs/image/` | `aurora-image` | kernel + user + host | PNG decoder and encoder; JPEG, GIF and BMP decoders |
 | `libs/elf/` | `aurora-elf` | bootloader + kernel | Overflow-checked ELF64 reader |
 | `libs/aurorafs/` | `aurorafs` | kernel + host | The AuroraFS filesystem engine (also used by `mkfs` in xtask) |
@@ -65,7 +66,7 @@ serial → GDT/TSS → IDT → syscall MSRs → FPU → mm (frames, heap, drop i
       → VFS (RamFS at /, TarFS at /System) → scheduler → reaper → sti
       → start the other CPUs (trampoline, INIT-SIPI-SIPI)
       → PCI → display (Bochs VGA or the firmware framebuffer) → block drivers + GPT (MSI/MSI-X)
-      → mount AuroraFS at /, FAT32 at /Boot → GPU drivers (virtio-gpu; `gpu=` in boot.conf)
+      → mount AuroraFS at /, FAT32 at /Boot → GPU drivers (Intel display, `intel=`; virtio-gpu, `gpu=`)
       → USB (xHCI) → sound (HDA, device registry + mixer) → ACPI runtime (AML task)
       → flusher → spawn "lumen-server" (restores settings, launches Welcome) → idle
 ```
@@ -221,7 +222,7 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
 - **Notifications** (`notify.rs`, `desktop/notifications.rs`): `notify` from apps, or the system; banners slide in at the top right, and the Notification Center (click the clock) keeps the history next to a calendar and Do Not Disturb.
 - **Spotlight** (`desktop/spotlight.rs`, `fs/index.rs`): apps, files, settings panes, calculations and commands. The file index is built by a background task at boot and kept current by hooks in the VFS (create, mkdir, rename, unlink).
 - **Preferences** (`settings.rs`, `prefs.rs`): `key=value` lines in `/Settings/aurora.conf`, read and written with `pref_get`/`pref_set` and applied at once: dark mode, the accent colour, keyboard layout and key repeat, clock format, Do Not Disturb, volume.
-- **The display core** (`drivers/gpu/`, see [developer/display-core.md](developer/display-core.md)): display drivers expose Linux KMS objects (CRTCs, primary and cursor planes, encoders, connectors with EDID, refcounted buffer objects and framebuffers) and take atomic commits. Drivers: the firmware framebuffer (GOP), Bochs/QEMU std VGA, a native virtio-gpu driver (zero-copy scanout of the compositor's buffer, damage-only transfers, hardware cursor, multiple scanouts, host window resizes as hotplug), and the ported Linux virtio-gpu driver (`gpu=linux`). Lumen Server is a client of it through `gpu::output::Output`, and puts the pointer on the cursor plane when there is one.
+- **The display core** (`drivers/gpu/`, see [developer/display-core.md](developer/display-core.md)): display drivers expose Linux KMS objects (CRTCs, primary and cursor planes, encoders, connectors with EDID, refcounted buffer objects and framebuffers) and take atomic commits. Drivers: the firmware framebuffer (GOP), Bochs/QEMU std VGA, a native virtio-gpu driver (zero-copy scanout of the compositor's buffer, damage-only transfers, hardware cursor, multiple scanouts, host window resizes as hotplug), the ported Linux virtio-gpu driver (`gpu=linux`), and an Intel display driver (`drivers/gpu/intel` over `libs/igfx`, see [developer/intel-display.md](developer/intel-display.md): takes over the firmware's pipes, scans out of RAM through the GGTT with a cache flush per damaged row, carves the cursor plane's display buffer share, GMBUS/AUX EDID, polled hotplug, PWM backlight via `gpu::set_backlight`; Skylake-class mode sets behind `intel=modeset`). Lumen Server is a client of it through `gpu::output::Output`, and puts the pointer on the cursor plane when there is one.
 - **Display modes** (`drivers/display.rs`): when the display can switch live (Bochs VGA, virtio-gpu) the resolution changes at once (new framebuffer, every window clamped, a `SCREEN` event to apps, then a 15-second "Keep this resolution?"); a virtio display also follows the host window. Elsewhere the firmware's GOP modes (passed in BootInfo v3) are offered and the choice goes to `\aurora\boot.conf` for the bootloader.
 - **Screenshots:** Print Screen or Super+Shift+3 saves a PNG to Pictures, encoded on a background task.
 

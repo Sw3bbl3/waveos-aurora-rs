@@ -55,7 +55,9 @@ Options go in `\aurora\boot.conf` on the EFI partition, one `key=value` per line
 | `sleep=off` | Hide Sleep, for machines whose firmware does not resume properly |
 | `i2c=off` | Leave the I²C controllers alone (no I²C touchpad or touch screen). The `i2c:` lines in the log still list what the firmware describes. |
 | `gpu=linux` | Drive a virtio GPU with the ported Linux driver instead of the native one (virtual machines) |
-| `cursor=software` | Draw the pointer into the picture instead of on the display's cursor plane |
+| `cursor=software` | Draw the pointer into the picture instead of on the display's cursor plane (on Intel graphics this also leaves the display buffer as the firmware set it up) |
+| `intel=off` | Leave Intel graphics to the firmware framebuffer, as before the Intel driver existed |
+| `intel=modeset` | Let the Intel driver change resolutions (Skylake, Kaby, Coffee and Comet Lake, external displays only, no larger than the firmware's mode; untested) |
 | `timer=periodic` | Go back to a 1 kHz tick on every CPU (instead of tickless timers). `timer=oneshot` avoids the TSC-deadline timer. Try these if the machine hangs or stutters once the desktop is up. |
 | `idle=halt` | Idle with `hlt` only (no `mwait` C-states). `idle=mwait` uses `mwait` even in a virtual machine; `idle=poll` never sleeps (for measurements). |
 
@@ -64,7 +66,7 @@ Options go in `\aurora\boot.conf` on the EFI partition, one `key=value` per line
 Work through the list and note what happens. The boot log (below) records the details.
 
 - [ ] **Boots to the desktop.** Note the time it takes and whether the picture looks right.
-- [ ] **Display.** Check the resolution, and whether the text is sharp.
+- [ ] **Display.** Check the resolution, and whether the text is sharp. On Intel graphics, see [Intel graphics](#intel-graphics) below.
 - [ ] **All CPU cores.** In Terminal, `cpuinfo` should list every core; Activity Monitor shows a graph per core.
 - [ ] **Keyboard.** Check the built-in keyboard and a USB keyboard, including a non-US layout (Settings → Keyboard) and key repeat.
 - [ ] **Pointer.** Check the touchpad, a USB mouse (with the scroll wheel and, if it has them, the back and forward buttons), and clicking and dragging windows. On a USB touchpad, check tap to click, two-finger scrolling and the two-finger click.
@@ -97,6 +99,34 @@ How the driver knows a report is waiting:
 
 Please send back the lines starting with `i2c:` from the boot log (and the `== I2C ==` section near its top). They name each touchpad's ACPI path and ID, its controller, address and speed, the HID descriptor register, the interrupt resource and which of the three modes above was used, the controller's component version, FIFO depths and bus timings, and the touchpad's USB-style vendor and product id, report descriptor size and whether it accepted touchpad mode. Lines such as `not responding`, `the device stopped answering`, `not a DesignWare I2C controller` or `no driver for this controller` say where it stopped.
 
+## Intel graphics
+
+Laptops and desktops with Intel integrated graphics from Skylake (6th generation Core, 2015) to Raptor Lake (13th/14th generation, 2023), Alder Lake-N and the Atom-class Apollo, Gemini, Elkhart and Jasper Lake get a native display driver. It keeps the mode the firmware set at boot (no resolution change, no flicker), shows WaveOS's picture straight from memory, adds a hardware pointer, reads the monitors' EDID, notices monitors plugged in and out, and lets the brightness keys set the internal panel's backlight.
+
+**This is untested on real hardware.** It was written from Intel's public Programmer's Reference Manuals and checked against a simulated display engine (host tests and a kernel self-test). It reads everything first and declines (leaving the firmware framebuffer in charge, exactly as before) if anything about the firmware's setup is unexpected. The details are in [developer/intel-display.md](developer/intel-display.md).
+
+| Platform | Display version | Device ids | Default (takeover) | `intel=modeset` |
+|---|---|---|---|---|
+| Skylake, Kaby Lake, Kaby Lake R, Amber Lake, Coffee Lake, Whiskey Lake, Comet Lake | 9 | 8086:19xx, 59xx, 87c0, 3e9x, 3eax, 87ca, 9bxx | Untested on real hardware | Untested on real hardware |
+| Apollo Lake, Gemini Lake | 9, 10 | 8086:0a84, 1a84, 1a85, 5a84, 5a85, 3184, 3185 | Untested on real hardware | — |
+| Ice Lake, Elkhart Lake, Jasper Lake | 11 | 8086:8a5x, 8a70, 8a71, 45xx, 4exx | Untested on real hardware | — |
+| Tiger Lake, Rocket Lake, Alder Lake-S, Raptor Lake-S | 12 | 8086:9a4x–9afx, 4c8x, 4c9x, 468x, 469x, a78x | Untested on real hardware | — |
+| Alder Lake-P, Alder Lake-N, Raptor Lake-P/U | 13 | 8086:46ax, 46bx, 46cx, 462x, 46dx, a72x, a7ax | Untested on real hardware | — |
+
+Not driven (the firmware framebuffer as before): Broadwell and older, Meteor Lake and newer, Arc and other discrete GPUs. Monitors the firmware didn't light at boot are detected and listed, but can't be turned on yet; the resolution still changes at the next start (Settings → Display), as before. After sleep the screen may stay dark, as with the firmware framebuffer.
+
+What to try and send back:
+
+1. Boot without any `intel=` option. The desktop should look exactly as it did before, at the same resolution.
+2. In the boot log (`\aurora\boot.log`, or `dmesg`), every line starting `intel:`. They name the GPU and platform, the graphics memory layout, each display the firmware lit (pipe, connection type, port, resolution, refresh, link lanes), the pointer's display buffer share or why there is none, the backlight, each connector with its monitor's name, and either `took the display over from the firmware` or `declining: …` with the reason.
+3. Check:
+   - [ ] no flicker, flashing lines or corruption, especially around the pointer and while dragging windows
+   - [ ] the pointer's shape, and that clicks land at its tip
+   - [ ] the brightness keys (laptops)
+   - [ ] plugging a monitor in and out: an `intel: HDMI-A-1: Connected` (or `DP-1`) line should appear within a few seconds
+4. If something is wrong, try `cursor=software`, then `intel=off`, and say which one fixed it.
+5. Optional, on a Skylake to Comet Lake machine with an external monitor: add `intel=modeset`, choose a smaller resolution in Settings → Display, and send the `intel:` lines about it.
+
 ## Power management
 
 Timers, idle states and processor frequency were written from the Intel SDM, AMD's manuals and the ACPI specification, and only the parts QEMU emulates have run: one-shot LAPIC timers, tickless idle with `hlt`, the ACPI paths finding no `_CST`/`_PSS`. **TSC-deadline timers, `mwait` C-states, Intel HWP, AMD CPPC and ACPI P-states have not run on real hardware.**
@@ -125,7 +155,7 @@ Then check:
 
 ## Known limits
 
-- **Graphics.** On real hardware there is no native GPU driver yet: WaveOS draws into the framebuffer the firmware set up (GOP), and the resolution changes only at boot. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes. In virtual machines, Bochs/QEMU std VGA and virtio-gpu (WaveOS's own driver, with a hardware cursor and the window size followed live) change resolution at once and restore the picture after sleep.
+- **Graphics.** On Intel graphics from Skylake to Raptor Lake a native display driver (untested on real hardware, see [above](#intel-graphics)) keeps the firmware's mode and adds a hardware pointer, EDID, hotplug detection and backlight control. Elsewhere WaveOS draws into the framebuffer the firmware set up (GOP). Either way the resolution changes only at boot (the Intel driver's `intel=modeset` aside). After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes. In virtual machines, Bochs/QEMU std VGA and virtio-gpu (WaveOS's own driver, with a hardware cursor and the window size followed live) change resolution at once and restore the picture after sleep.
 - **Storage.** AHCI, NVMe and virtio disks work, but Intel RST / RAID mode does not. USB storage must be FAT32 (exFAT and NTFS aren't supported).
 - **Input.**
   - Touchpads and touch screens that connect over I²C (common on laptops since about 2016) have a driver that has not yet run on real hardware (see [above](#i2c-touchpads-and-touch-screens)); on most Intel laptops it polls the touchpad, as there is no GPIO driver yet. Many such touchpads also have a PS/2 fallback, which works as a plain pointer. I²C keyboards and pens aren't supported. USB Precision Touchpads get the full gestures.
