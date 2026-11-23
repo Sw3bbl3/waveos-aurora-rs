@@ -454,11 +454,23 @@ fn read_boot_conf(file: &mut File, start: u64, sectors: u64) -> Option<Vec<u8>> 
 /// A 64 MiB "USB stick" for the tests: an MBR with one FAT32 partition
 /// labelled AURORA-USB, holding `Hello.txt`.
 pub fn create_usb_stick(out: &Path) -> io::Result<()> {
-    const SIZE: u64 = 64 * 1024 * 1024;
+    create_fat_medium(out, 64 * 1024 * 1024, 64 * 1024 * 1024, *b"AURORA-USB ", b"Hello from a USB stick!\n")
+}
+
+/// The tests' second SD card: 4 GiB (so high capacity, block-addressed),
+/// a 64 MiB FAT32 partition labelled AURORA-SD with `Hello.txt`, and the
+/// rest unpartitioned (the data-integrity tests' scratch space).
+pub fn create_sd_card(out: &Path) -> io::Result<()> {
+    create_fat_medium(out, 4 << 30, 65 * 1024 * 1024, *b"AURORA-SD  ", b"Hello from an SD card!\n")
+}
+
+/// A sparse medium of `size` bytes with an MBR and one FAT32 partition
+/// from 1 MiB to `end`, holding `Hello.txt`.
+fn create_fat_medium(out: &Path, size: u64, end: u64, label: [u8; 11], hello: &[u8]) -> io::Result<()> {
     const START: u64 = 2048;
     let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(out)?;
-    file.set_len(SIZE)?;
-    let sectors = SIZE / SECTOR - START;
+    file.set_len(size)?;
+    let sectors = end / SECTOR - START;
     let mut mbr = [0u8; 512];
     let e = &mut mbr[446..462];
     e[4] = 0x0C; // FAT32 (LBA)
@@ -470,13 +482,69 @@ pub fn create_usb_stick(out: &Path) -> io::Result<()> {
     let mut part = Region { file: &mut file, start: START * SECTOR, len: sectors * SECTOR, pos: 0 };
     fatfs::format_volume(
         &mut part,
-        fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat32).volume_label(*b"AURORA-USB "),
+        fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat32).volume_label(label),
     )?;
     part.pos = 0;
     let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new())?;
-    fs.root_dir().create_file("Hello.txt")?.write_all(b"Hello from a USB stick!\n")?;
+    fs.root_dir().create_file("Hello.txt")?.write_all(hello)?;
     fs.unmount()?;
     Ok(())
+}
+
+/// Whether QEMU takes an image of `bytes` as an SD card or eMMC user area:
+/// up to 2 GiB a power of two, above it a multiple of 512 KiB.
+pub fn sd_size_ok(bytes: u64) -> bool {
+    if bytes <= 2 << 30 {
+        bytes.is_power_of_two()
+    } else {
+        bytes.is_multiple_of(512 * 1024)
+    }
+}
+
+/// Copies the EFI System Partition of the GPT disk image that starts
+/// `offset` bytes into `img` to `out`, as a whole-disk FAT volume. UEFI
+/// firmware boots from it like from any disk; QEMU's has no SD or eMMC
+/// driver, so this is how it starts a system that lives on a card.
+pub fn esp_stub(img: &Path, offset: u64, out: &Path) -> io::Result<()> {
+    let mut file = File::open(img)?;
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    file.seek(SeekFrom::Start(offset + 2 * SECTOR))?;
+    file.read_exact(&mut entry)?;
+    if entry[0..16] != ESP_TYPE {
+        return Err(io::Error::other("the first partition is not an EFI System Partition"));
+    }
+    let start = u64::from_le_bytes(entry[32..40].try_into().unwrap());
+    let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
+    file.seek(SeekFrom::Start(offset + start * SECTOR))?;
+    let mut stub = OpenOptions::new().write(true).create(true).truncate(true).open(out)?;
+    io::copy(&mut (&mut file).take((end - start + 1) * SECTOR), &mut stub)?;
+    Ok(())
+}
+
+/// eMMC images for QEMU: two boot partitions and an RPMB partition come
+/// before the user area. Each boot partition is filled with its own byte
+/// (0xB1, 0xB2) and RPMB with 0xEE, so the tests can tell they were never written.
+pub const EMMC_BOOT_BYTES: u64 = 1024 * 1024;
+pub const EMMC_RPMB_BYTES: u64 = 128 * 1024;
+
+/// `img` (the user area) behind eMMC boot and RPMB partitions, in `out`.
+pub fn create_emmc(img: &Path, out: &Path) -> io::Result<()> {
+    let mut f = OpenOptions::new().write(true).create(true).truncate(true).open(out)?;
+    f.write_all(&vec![0xB1; EMMC_BOOT_BYTES as usize])?;
+    f.write_all(&vec![0xB2; EMMC_BOOT_BYTES as usize])?;
+    f.write_all(&vec![0xEE; EMMC_RPMB_BYTES as usize])?;
+    io::copy(&mut File::open(img)?, &mut f)?;
+    Ok(())
+}
+
+/// Whether an eMMC image's boot and RPMB partitions are as [`create_emmc`] left them.
+pub fn emmc_hidden_intact(out: &Path) -> io::Result<bool> {
+    let mut f = File::open(out)?;
+    let mut buf = vec![0u8; (2 * EMMC_BOOT_BYTES + EMMC_RPMB_BYTES) as usize];
+    f.read_exact(&mut buf)?;
+    let (b1, rest) = buf.split_at(EMMC_BOOT_BYTES as usize);
+    let (b2, rpmb) = rest.split_at(EMMC_BOOT_BYTES as usize);
+    Ok(b1.iter().all(|&b| b == 0xB1) && b2.iter().all(|&b| b == 0xB2) && rpmb.iter().all(|&b| b == 0xEE))
 }
 
 fn format_esp(file: &mut File, start: u64, sectors: u64, esp: &Path) -> io::Result<()> {

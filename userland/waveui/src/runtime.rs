@@ -1595,6 +1595,11 @@ impl<A: App> aurorakit::App for Host<A> {
         self.update_hover(x, y) || self.redraw
     }
 
+    /// Views may depend on the display (`Env::display`): build them again.
+    fn display_changed(&mut self, _env: &mut aurorakit::Env) -> bool {
+        true
+    }
+
     fn drag(&mut self, x: i32, y: i32, area: Rect, env: &mut aurorakit::Env) -> bool {
         self.env.mods = env.mods;
         self.rt.pointer = (x, y);

@@ -5,6 +5,9 @@
 //! `linux-libc-dev`, fetched and checked like the other packages) and the
 //! Rust toolchain's lld; its own declarations of GTK and WebKit
 //! (`webkit.h`) stand in for those libraries' development packages.
+//!
+//! `sdlprobe` (`linux-programs/sdlprobe`), which checks that Debian's SDL
+//! recognises WaveOS's game controllers, is built the same way.
 
 use super::debian;
 use super::root;
@@ -14,6 +17,9 @@ use std::process::Command;
 
 /// Where the program goes in the Linux tree.
 pub const PATH_IN_ROOT: &str = "/usr/lib/voyage/voyage";
+
+/// Where `sdlprobe` goes in the Linux tree.
+pub const SDLPROBE_IN_ROOT: &str = "/usr/lib/waveos-tests/sdlprobe";
 
 /// The libraries it calls, in `linux`'s library folders.
 const LIBS: &[&str] = &[
@@ -28,6 +34,19 @@ const LIBS: &[&str] = &[
 /// Builds Voyage against the Linux root `linux` (if it has WebKitGTK);
 /// returns the program, or `None` (with a warning) when it can't be built.
 pub fn build(linux: &Path) -> Option<PathBuf> {
+    let src = root().join("linux-programs/voyage");
+    build_c(linux, "voyage", "Voyage (the web browser)", &[src.join("voyage.c"), src.join("webkit.h")], LIBS)
+}
+
+/// Builds `sdlprobe` against the root's libSDL2, if it has one.
+pub fn build_sdlprobe(linux: &Path) -> Option<PathBuf> {
+    let src = root().join("linux-programs/sdlprobe/sdlprobe.c");
+    build_c(linux, "sdlprobe", "sdlprobe (the SDL controller check)", &[src], &["libSDL2-2.0.so.0"])
+}
+
+/// Builds the C program `sources[0]` (the others are files it includes)
+/// against the libraries `libs` of the root `linux`, as `target/linux/<name>`.
+fn build_c(linux: &Path, name: &str, what: &str, sources: &[PathBuf], libs: &[&str]) -> Option<PathBuf> {
     // Library names are often symbolic links, which the root lists in `.links`.
     let links = fs::read_to_string(linux.join(".links")).unwrap_or_default();
     let find = |name: &str| {
@@ -42,21 +61,19 @@ pub fn build(linux: &Path) -> Option<PathBuf> {
             file.exists().then_some(file)
         })
     };
-    let libs: Option<Vec<PathBuf>> = LIBS.iter().map(|l| find(l)).collect();
+    let libs: Option<Vec<PathBuf>> = libs.iter().map(|l| find(l)).collect();
     let (Some(libs), Some(libc)) = (libs, find("libc.so.6")) else {
-        eprintln!("warning: the Linux packages have no WebKitGTK, so Voyage is left out");
+        eprintln!("warning: the Linux packages lack its libraries, so {what} is left out");
         return None;
     };
-    let src = root().join("linux-programs/voyage");
     let out_dir = root().join("target/linux");
-    let exe = out_dir.join("voyage");
-    let sources = [src.join("voyage.c"), src.join("webkit.h")];
+    let exe = out_dir.join(name);
     let newest = sources.iter().filter_map(|s| fs::metadata(s).and_then(|m| m.modified()).ok()).max();
     if fs::metadata(&exe).and_then(|m| m.modified()).ok() >= newest && newest.is_some() {
         return Some(exe);
     }
-    let warn = |what: &str| {
-        eprintln!("warning: Voyage (the web browser) is left out: {what}");
+    let warn = |why: &str| {
+        eprintln!("warning: {what} is left out: {why}");
         None
     };
     if Command::new("clang").arg("--version").output().is_err() {
@@ -70,7 +87,7 @@ pub fn build(linux: &Path) -> Option<PathBuf> {
     let resource = Command::new("clang").arg("-print-resource-dir").output().ok()?;
     let builtins = PathBuf::from(String::from_utf8_lossy(&resource.stdout).trim()).join("include");
     fs::create_dir_all(&out_dir).ok()?;
-    let obj = out_dir.join("voyage.o");
+    let obj = out_dir.join(format!("{name}.o"));
     let compiled = Command::new("clang")
         .args(["--target=x86_64-linux-gnu", "-nostdinc", "-fno-pie", "-O2", "-Wall", "-Werror"])
         .args(["-Wno-unused-function", "-Werror=implicit-function-declaration"])
@@ -85,7 +102,7 @@ pub fn build(linux: &Path) -> Option<PathBuf> {
         .arg("-isystem")
         .arg(kernel_dev.join("usr/include"))
         .arg("-c")
-        .arg(src.join("voyage.c"))
+        .arg(&sources[0])
         .arg("-o")
         .arg(&obj)
         .status()

@@ -2,9 +2,8 @@
 //!
 //! Each command is a 31-byte Command Block Wrapper sent on the bulk OUT
 //! endpoint, an optional data phase, and a 13-byte status wrapper on bulk
-//! IN. The disk becomes a `BlockDevice`; FAT volumes on it (GPT, MBR or a
-//! whole-disk "superfloppy") are mounted at `/Volumes/<label>` and unmounted
-//! when it is unplugged.
+//! IN. The disk becomes a `BlockDevice`; its volumes appear under
+//! `/Volumes` until it is unplugged (see `block::removable`).
 
 use super::{Bus, Endpoint, Interface, Setup, UsbDevice, STALL};
 use crate::drivers::block::{self, check_io, BlockDevice, BlockResult, Dma};
@@ -200,60 +199,6 @@ impl BlockDevice for UsbDisk {
     }
 }
 
-/// The FAT volume label from a boot sector ("NO NAME" when unset).
-fn fat_label(sector: &[u8]) -> Option<String> {
-    let raw = if &sector[82..87] == b"FAT32" { &sector[71..82] } else { &sector[43..54] };
-    let s = core::str::from_utf8(raw).ok()?.trim();
-    (!s.is_empty() && s != "NO NAME").then(|| String::from(s))
-}
-
-/// Mounts each FAT volume of `disk` under `/Volumes`; returns the mount points.
-fn mount_volumes(disk: &Arc<dyn BlockDevice>, fallback: &str) -> Vec<String> {
-    let mut volumes: Vec<Arc<dyn BlockDevice>> = Vec::new();
-    let mut s0 = vec![0u8; disk.sector_size() as usize];
-    if disk.read(0, &mut s0).is_ok() && block::mbr::is_superfloppy(&s0) {
-        volumes.push(disk.clone());
-    } else {
-        let mut parts = block::gpt::partitions(disk);
-        if parts.is_empty() {
-            parts = block::mbr::partitions(disk);
-        }
-        for p in parts {
-            let home = p.type_guid == ::aurorafs::PARTITION_TYPE;
-            let esp = p.type_guid == block::gpt::ESP_TYPE;
-            let dev = block::register_counted(Arc::new(p));
-            // Booted from this stick with no WaveOS disk inside the computer:
-            // its "Aurora HD" is the home volume and its EFI partition /Boot.
-            if home {
-                crate::fs::adopt_home(dev);
-            } else if esp && crate::fs::adopt_boot(dev.clone()) {
-                continue;
-            } else {
-                volumes.push(dev);
-            }
-        }
-    }
-    let _ = crate::fs::mkdir("/Volumes");
-    let mut mounted = Vec::new();
-    for v in volumes {
-        let mut boot = vec![0u8; v.sector_size() as usize];
-        if v.read(0, &mut boot).is_err() {
-            continue;
-        }
-        let Ok(fs) = crate::fs::fat::FatFs::mount(v.clone()) else { continue };
-        let base = fat_label(&boot).unwrap_or_else(|| String::from(fallback));
-        let mut path = format!("/Volumes/{}", base);
-        let mut n = 2;
-        while crate::fs::mounts().iter().any(|m| m.0 == path) {
-            path = format!("/Volumes/{} {}", base, n);
-            n += 1;
-        }
-        crate::fs::mount(&path, Arc::new(fs));
-        mounted.push(path);
-    }
-    mounted
-}
-
 pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
     let bulk_in = *iface.endpoints.iter().find(|e| e.kind == 2 && e.is_in())?;
     let bulk_out = *iface.endpoints.iter().find(|e| e.kind == 2 && !e.is_in())?;
@@ -321,7 +266,7 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
     let name = disk.name();
     let registered = block::register_counted(disk.clone());
     let fallback = if disk.model.is_empty() { String::from("USB Drive") } else { disk.model.clone() };
-    let volumes = mount_volumes(&registered, &fallback);
+    let volumes = block::removable::mount_volumes(&registered, &fallback);
     if dev.bus.announce() {
         for v in &volumes {
             crate::gui::notify::system("Disk connected", v.trim_start_matches("/Volumes/"));
@@ -333,19 +278,8 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
         dev.dev,
         Box::new(move || {
             gone_disk.gone.store(true, Ordering::Release);
-            for v in &volumes {
-                let _ = crate::fs::unmount(v);
-            }
-            block::unregister(&name);
+            block::removable::forget(&name, &volumes);
         }),
     );
     Some("storage")
-}
-
-/// Safely removes a USB volume: writes it out and unmounts it.
-pub fn eject(path: &str) -> Result<(), isize> {
-    if !path.starts_with("/Volumes/") {
-        return Err(EINVAL);
-    }
-    crate::fs::unmount(path)
 }

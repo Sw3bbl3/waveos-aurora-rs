@@ -260,7 +260,9 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         }
         nr::DISPLAY_MODES => {
             let (w, h) = crate::gui::screen_pixels();
-            let modes = crate::drivers::display::modes((w as u32, h as u32), crate::gui::prefs::boot_resolution());
+            let main = crate::gui::screens::published().first().map(|d| d.id);
+            let modes =
+                crate::drivers::display::modes(main, (w as u32, h as u32), crate::gui::prefs::boot_resolution());
             let max = (a[1] as usize).min(64);
             let size = core::mem::size_of::<aurora_abi::DisplayMode>();
             let mut out = user::slice_mut(a[0], (max * size) as u64)?;
@@ -490,6 +492,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         | nr::WIN_PRESENT
         | nr::WIN_SET_TITLE
         | nr::WIN_SET_CURSOR
+        | nr::WIN_SET_PROGRAM
         | nr::WIN_CLOSE
         | nr::WIN_RESIZE
         | nr::NEXT_EVENT => crate::gui::server::syscall(nr, a),

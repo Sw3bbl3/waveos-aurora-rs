@@ -86,6 +86,7 @@ dependencies = [
  "acpi",
  "aurora-abi",
  "aurora-acpi-res",
+ "aurora-amdgfx",
  "aurora-desktop",
  "aurora-edid",
  "aurora-elf",
@@ -93,6 +94,8 @@ dependencies = [
  "aurora-i2c",
  "aurora-igfx",
  "aurora-image",
+ "aurora-nvgfx",
+ "aurora-sdmmc",
  "aurora-wav",
  "aurora-wifi",
  "aurorafs",
@@ -114,6 +117,14 @@ version = "0.8.0"
 [[package]]
 name = "aurora-acpi-res"
 version = "0.8.0"
+
+[[package]]
+name = "aurora-amdgfx"
+version = "0.8.0"
+dependencies = [
+ "aurora-edid",
+ "aurora-igfx",
+]
 
 [[package]]
 name = "aurora-desktop"
@@ -174,6 +185,14 @@ dependencies = [
 
 [[package]]
 name = "aurora-mutate"
+version = "0.8.0"
+
+[[package]]
+name = "aurora-nvgfx"
+version = "0.8.0"
+
+[[package]]
+name = "aurora-sdmmc"
 version = "0.8.0"
 
 [[package]]

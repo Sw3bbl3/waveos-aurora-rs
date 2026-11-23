@@ -95,6 +95,29 @@ fn main(args: corekit::Args) -> i32 {
     check("unknown syscall → ENOSYS", errno(call(9999, &[])) == ENOSYS);
     check("bad fd → EBADF", errno(call(nr::CLOSE, &[57])) == EBADF);
 
+    // Displays (published by the compositor, or by the self-tests' one):
+    // the main display first, at the origin; a window that isn't ours is refused.
+    let displays = corekit::display::displays();
+    check(
+        "displays: the main display first, at (0, 0)",
+        displays.is_empty()
+            || (displays[0].is_primary()
+                && (displays[0].x, displays[0].y) == (0, 0)
+                && displays.iter().filter(|d| d.is_primary()).count() == 1),
+    );
+    check(
+        "displays: sizes in points times the scale are the resolution",
+        displays.iter().all(|d| d.width * d.scale as i32 == d.pixel_width as i32 && d.scale >= 1),
+    );
+    check(
+        "displays: each lists its modes",
+        displays.iter().all(|d| {
+            let modes = corekit::display::modes(d.id);
+            modes.iter().any(|m| m.flags & corekit::abi::display::CURRENT != 0 && m.width == d.pixel_width)
+        }),
+    );
+    check("window_display of another's window → EBADF", corekit::display::window_display(999_999).is_none());
+
     // Files.
     check("open missing → ENOENT", errno(fs::read("/Documents/does-not-exist")) == ENOENT);
     check("write to /System → EROFS", errno(fs::write("/System/nope", b"x")) == EROFS);

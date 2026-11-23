@@ -15,6 +15,7 @@
 extern crate alloc;
 
 pub mod diagnostics;
+pub mod display;
 
 pub mod apps;
 pub mod audio;

@@ -13,6 +13,8 @@ For engineers working on the Intel integrated graphics display driver. It is a d
 | `kernel/src/drivers/gpu/intel/hw.rs` | BAR 0 as `Mmio` + `gtt::Table` (registers in the first 2 MiB, the GGTT from 8 MiB) |
 | `kernel/src/drivers/gpu/intel/selftest.rs` | The driver against `aurora_igfx::mock` in `cargo xtask test` |
 
+The DisplayPort side of AUX (DEFER retries, DPCD, I²C-over-AUX, EDID) is the `aux::Transport` trait's, over any controller that moves one message; the AMD driver (`libs/amdgfx`) implements it for its AUX engine, and the simulated sink's replies (`mock::Sink::handle`) are shared the same way.
+
 The kernel driver is generic over `Hw: Mmio + gtt::Table`, so the self-test runs the real takeover, GGTT, flip, cursor and hotplug code against the simulated engine.
 
 ## Coverage

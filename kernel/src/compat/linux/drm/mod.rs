@@ -156,16 +156,24 @@ pub fn node_rdev(guest: &str) -> Option<u64> {
     Some(super::fs::makedev(MAJOR, minor as u64))
 }
 
-/// The record udev would keep for a node, `/run/udev/data/c226:<minor>`:
-/// libudev counts a device node as set up only once it has one, and its
-/// enumerators (glmark2's, wlroots', SDL's) skip the others. The tags are
-/// those udev's seat rules give a card (`master-of-seat`: it can drive a
-/// seat's display).
-pub fn udev_data(guest: &str) -> Option<Vec<u8>> {
-    let minor: u32 = guest.strip_prefix("/run/udev/data/c226:")?.parse().ok()?;
-    let render = minor >= RENDER_MINOR;
-    let name = if render { alloc::format!("renderD{minor}") } else { alloc::format!("card{minor}") };
-    let (dev, _, _) = node(&name)?;
+/// The records udev would keep for the nodes, `/run/udev/data/c226:<minor>`
+/// (as (file name, contents); the input layer's tree holds them with the
+/// input devices' records): libudev counts a device node as set up only
+/// once it has one, and its enumerators (glmark2's, wlroots', SDL's) skip
+/// the others. The tags are those udev's seat rules give a card
+/// (`master-of-seat`: it can drive a seat's display).
+pub fn udev_records() -> Vec<(String, Vec<u8>)> {
+    node_names()
+        .iter()
+        .filter_map(|name| {
+            let (_, minor, _) = node(name)?;
+            Some((alloc::format!("c{MAJOR}:{minor}"), udev_record(name)?))
+        })
+        .collect()
+}
+
+fn udev_record(name: &str) -> Option<Vec<u8>> {
+    let (dev, _, render) = node(name)?;
     let slot = super::sysfs::pci_slot(&*dev);
     let path = alloc::format!("pci-{slot}");
     let tag = path.replace([':', '.'], "_");

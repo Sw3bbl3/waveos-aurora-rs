@@ -140,6 +140,11 @@ pub fn shade_row(row: &mut [u32], shade: &[u32]) {
 /// pixels, and shapes, text and images are drawn at the full device
 /// resolution. `buf`, `width` and `height` are in device pixels; `clip` and
 /// every drawing call's coordinates are in points.
+///
+/// A canvas may show part of a larger space: with an `origin` (in points),
+/// point (`origin.0`, `origin.1`) lands on the buffer's top-left pixel. The
+/// compositor uses that to draw one desktop across several displays, each
+/// with a canvas over its own buffer at its own scale.
 pub struct Canvas<'a> {
     pub materials: Option<&'a mut crate::material::MaterialCache>,
     pub buf: &'a mut [u32],
@@ -151,6 +156,8 @@ pub struct Canvas<'a> {
     pub clip: Rect,
     /// Device pixels per point.
     pub scale: i32,
+    /// The point drawn at the buffer's top-left pixel (0, 0 for most canvases).
+    pub origin: (i32, i32),
     /// A clip in device pixels that overrides `clip` (internal, see `with_pclip`).
     px_clip: Option<Rect>,
 }
@@ -184,7 +191,16 @@ fn round_rect_coverage(r: &Rect, radius: i32, x: i32, y: i32) -> u32 {
 
 impl<'a> Canvas<'a> {
     pub fn new(buf: &'a mut [u32], width: i32, height: i32) -> Self {
-        Self { buf, width, height, clip: Rect::new(0, 0, width, height), materials: None, scale: 1, px_clip: None }
+        Self {
+            buf,
+            width,
+            height,
+            clip: Rect::new(0, 0, width, height),
+            materials: None,
+            scale: 1,
+            origin: (0, 0),
+            px_clip: None,
+        }
     }
 
     /// Runs `f` with the clip narrowed to `r`, restoring it afterwards.
@@ -200,8 +216,28 @@ impl<'a> Canvas<'a> {
     /// Draws at `scale` device pixels per point.
     pub fn with_scale(mut self, scale: i32) -> Self {
         self.scale = scale.max(1);
-        self.clip = Rect::new(0, 0, self.width / self.scale, self.height / self.scale);
+        self.clip = Rect::new(self.origin.0, self.origin.1, self.width / self.scale, self.height / self.scale);
         self
+    }
+
+    /// Shows the part of a larger space that starts at point (`x`, `y`)
+    /// (see the type's documentation). Call after [`with_scale`](Self::with_scale).
+    pub fn with_origin(mut self, x: i32, y: i32) -> Self {
+        self.origin = (x, y);
+        self.clip = Rect::new(x, y, self.width / self.scale, self.height / self.scale);
+        self
+    }
+
+    /// The point (`x`, `y`) in device pixels of this buffer.
+    #[inline]
+    pub fn to_px_point(&self, x: i32, y: i32) -> (i32, i32) {
+        ((x - self.origin.0) * self.scale, (y - self.origin.1) * self.scale)
+    }
+
+    /// The point under device pixel (`x`, `y`) of this buffer.
+    #[inline]
+    pub fn to_point(&self, x: i32, y: i32) -> (i32, i32) {
+        (x.div_euclid(self.scale) + self.origin.0, y.div_euclid(self.scale) + self.origin.1)
     }
 
     /// The canvas size in points.
@@ -213,25 +249,34 @@ impl<'a> Canvas<'a> {
     #[inline]
     pub fn to_px(&self, r: Rect) -> Rect {
         let s = self.scale;
+        let (x, y) = (r.x - self.origin.0, r.y - self.origin.1);
         if s == 1 {
-            r
+            Rect::new(x, y, r.w, r.h)
         } else {
-            Rect::new(r.x * s, r.y * s, r.w * s, r.h * s)
+            Rect::new(x * s, y * s, r.w * s, r.h * s)
         }
     }
 
-    /// The colour already drawn at point (x, y) (its top-left device pixel).
+    /// The colour already drawn at point (x, y) (its top-left device pixel;
+    /// black outside the buffer).
     pub fn pixel(&self, x: i32, y: i32) -> u32 {
-        self.buf[(y * self.scale * self.width + x * self.scale) as usize]
+        let (px, py) = self.to_px_point(x, y);
+        if px < 0 || py < 0 || px >= self.width {
+            return 0xFF00_0000;
+        }
+        self.buf.get((py * self.width + px) as usize).copied().unwrap_or(0xFF00_0000)
     }
 
     /// The clip in device pixels.
     #[inline]
     pub fn pclip(&self) -> Rect {
-        match self.px_clip {
+        // Never past the buffer, whatever `clip` was set to: the fills index
+        // rows of the buffer directly.
+        let r = match self.px_clip {
             Some(r) => r,
             None => self.to_px(self.clip),
-        }
+        };
+        r.intersect(&Rect::new(0, 0, self.width, self.height))
     }
 
     /// Runs `f` with the device-pixel clip narrowed to `r`.
@@ -253,8 +298,8 @@ impl<'a> Canvas<'a> {
 
     /// Fills `r` with a colour (and alpha) computed per point.
     pub fn fill_rect_with(&mut self, r: Rect, color: impl Fn(i32, i32) -> u32) {
-        let s = self.scale;
-        self.fill_rect_with_px(self.to_px(r), |x, y| color(x.div_euclid(s), y.div_euclid(s)))
+        let (s, (ox, oy)) = (self.scale, self.origin);
+        self.fill_rect_with_px(self.to_px(r), |x, y| color(x.div_euclid(s) + ox, y.div_euclid(s) + oy))
     }
 
     pub fn fill_round_rect(&mut self, r: Rect, radius: i32, c: u32) {
@@ -262,8 +307,10 @@ impl<'a> Canvas<'a> {
     }
 
     pub fn fill_round_rect_with(&mut self, r: Rect, radius: i32, color: impl Fn(i32, i32) -> u32) {
-        let s = self.scale;
-        self.fill_round_rect_with_px(self.to_px(r), radius * s, |x, y| color(x.div_euclid(s), y.div_euclid(s)))
+        let (s, (ox, oy)) = (self.scale, self.origin);
+        self.fill_round_rect_with_px(self.to_px(r), radius * s, |x, y| {
+            color(x.div_euclid(s) + ox, y.div_euclid(s) + oy)
+        })
     }
 
     /// An anti-aliased outline of a rounded rectangle, one point wide.
@@ -357,6 +404,7 @@ impl<'a> Canvas<'a> {
     pub fn blit_opaque(&mut self, src: &[u32], src_w: u32, src_h: u32, x: i32, y: i32) {
         let s = self.scale;
         if s == 1 {
+            let (x, y) = self.to_px_point(x, y);
             return self.blit_opaque_px(src, src_w, src_h, x, y);
         }
         let dst = self.to_px(Rect::new(x, y, src_w as i32, src_h as i32));
@@ -391,23 +439,25 @@ impl<'a> Canvas<'a> {
     pub fn text(&mut self, x: i32, y: i32, s: &str, font: Font, c: u32) -> i32 {
         let k = self.scale;
         let f = self.device_font(font);
-        (self.text_px(x * k, y * k, s, f, c) + k / 2) / k
+        let (px, py) = self.to_px_point(x, y);
+        (self.text_px(px, py, s, f, c) + k / 2) / k
     }
 
     /// Draws `s` slanted about 12° (a synthesized italic). Returns the advance in points.
     pub fn text_slanted(&mut self, x: i32, y: i32, s: &str, font: Font, c: u32) -> i32 {
         let k = self.scale;
         let f = self.device_font(font);
-        (self.text_slanted_px(x * k, y * k, s, f, c) + k / 2) / k
+        let (px, py) = self.to_px_point(x, y);
+        (self.text_slanted_px(px, py, s, f, c) + k / 2) / k
     }
 
     /// Anti-aliased thick polyline, blended once per pixel (no darkened joints).
     pub fn polyline(&mut self, pts: &[(i32, i32)], width: i32, c: u32) {
         let s = self.scale;
-        if s == 1 {
+        if s == 1 && self.origin == (0, 0) {
             return self.polyline_px(pts, width, c);
         }
-        let pts: alloc::vec::Vec<(i32, i32)> = pts.iter().map(|&(x, y)| (x * s, y * s)).collect();
+        let pts: alloc::vec::Vec<(i32, i32)> = pts.iter().map(|&(x, y)| self.to_px_point(x, y)).collect();
         self.polyline_px(&pts, width * s, c)
     }
 
@@ -417,13 +467,15 @@ impl<'a> Canvas<'a> {
     #[allow(clippy::too_many_arguments)] // a circle, a pen and an angle range
     pub fn stroke_arc(&mut self, cx: i32, cy: i32, r: i32, width: i32, start: i32, sweep: i32, c: u32) {
         let s = self.scale;
-        self.stroke_arc_px(cx * s, cy * s, r * s, width * s, start, sweep, c)
+        let (ox, oy) = (self.origin.0 * 16, self.origin.1 * 16);
+        self.stroke_arc_px((cx - ox) * s, (cy - oy) * s, r * s, width * s, start, sweep, c)
     }
 
     /// Anti-aliased thick line segment (round caps).
     pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, width: i32, c: u32) {
         let s = self.scale;
-        self.line_px(x0 * s, y0 * s, x1 * s, y1 * s, width * s, c)
+        let ((x0, y0), (x1, y1)) = (self.to_px_point(x0, y0), self.to_px_point(x1, y1));
+        self.line_px(x0, y0, x1, y1, width * s, c)
     }
 
     // ---------------------------------------- drawing, in device pixels
@@ -1276,6 +1328,37 @@ mod scale_tests {
         let src = alloc::vec![0xFFFF_FFFFu32; 16];
         cv.blit_alpha(&src, 4, 4, Rect::new(2, 4, 4, 4), 0);
         assert!(buf.iter().all(|&p| p == 0));
+    }
+
+    #[test]
+    fn a_clip_past_the_buffer_does_not_reach_outside_it() {
+        let mut buf = alloc::vec![0u32; 8 * 6];
+        let mut cv = Canvas::new(&mut buf, 8, 6);
+        cv.clip = Rect::new(-4, -4, 40, 40);
+        cv.fill_round_rect(Rect::new(-2, -2, 30, 30), 3, 0xff00_00ff);
+        cv.stroke_round_rect(Rect::new(1, 1, 30, 30), 3, 0xffff_ffff);
+    }
+
+    #[test]
+    fn an_origin_shows_part_of_a_larger_space() {
+        // Two 4x3-point displays side by side at 2x: the right one starts at x = 4.
+        let mut buf = alloc::vec![0u32; 8 * 6];
+        let mut cv = Canvas::new(&mut buf, 8, 6).with_scale(2).with_origin(4, 0);
+        assert_eq!(cv.clip, Rect::new(4, 0, 4, 3));
+        assert_eq!(cv.to_px(Rect::new(5, 1, 1, 1)), Rect::new(2, 2, 2, 2));
+        // A rectangle across both: only the right display's part lands here.
+        cv.fill_rect(Rect::new(2, 1, 3, 1), 0xFF00_00FF);
+        assert_eq!(cv.pixel(4, 1), 0xFF00_00FF);
+        assert_eq!(cv.pixel(5, 1), 0);
+        assert_eq!(cv.to_point(3, 3), (5, 1));
+        let seen = core::cell::Cell::new(true);
+        cv.fill_rect_with(Rect::new(4, 0, 1, 1), |x, y| {
+            seen.set(seen.get() && (x, y) == (4, 0));
+            0xFF00_FF00
+        });
+        assert!(seen.get(), "the colour function gets points of the larger space");
+        let filled: alloc::vec::Vec<usize> = (0..48).filter(|&i| buf[i] == 0xFF00_00FF).collect();
+        assert_eq!(filled, [16, 17, 24, 25]);
     }
 
     #[test]

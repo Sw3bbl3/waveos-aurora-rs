@@ -341,6 +341,24 @@ impl Mock {
             s.regs.insert(c, aux::TIME_OUT_ERROR | aux::DONE);
             return;
         };
+        let reply = sink.handle(&msg[..len.min(20)]);
+        let packed = aux::pack(&reply);
+        for (i, d) in packed.iter().enumerate() {
+            s.regs.insert(c + 4 + i as u32 * 4, *d);
+        }
+        s.regs.insert(c, aux::DONE | (reply.len() as u32) << aux::SIZE_SHIFT);
+    }
+}
+
+impl Sink {
+    /// The sink's reply to one AUX request (header and data): the reply
+    /// byte, then any data. Shared by every simulated AUX controller.
+    pub fn handle(&mut self, msg: &[u8]) -> Vec<u8> {
+        let sink = self;
+        let len = msg.len();
+        let mut msg20 = [0u8; 20];
+        msg20[..len.min(20)].copy_from_slice(&msg[..len.min(20)]);
+        let msg = msg20;
         let cmd = msg[0] >> 4;
         let addr = ((msg[0] as u32 & 0xF) << 16 | (msg[1] as u32) << 8 | msg[2] as u32) as usize;
         let n = if len > 3 { msg[3] as usize + 1 } else { 0 };
@@ -353,7 +371,7 @@ impl Mock {
                         *b = msg[4 + i];
                     }
                 }
-                Self::train_step(sink);
+                Mock::train_step(sink);
             }
             c if c & !aux::I2C_MOT == aux::I2C_WRITE => match addr {
                 0x50 if n > 0 => sink.i2c_offset = msg[4] as usize,
@@ -374,13 +392,11 @@ impl Mock {
             },
             _ => reply[0] = 0x10, // native NACK
         }
-        let packed = aux::pack(&reply);
-        for (i, d) in packed.iter().enumerate() {
-            s.regs.insert(c + 4 + i as u32 * 4, *d);
-        }
-        s.regs.insert(c, aux::DONE | (reply.len() as u32) << aux::SIZE_SHIFT);
+        reply
     }
+}
 
+impl Mock {
     /// The sink's side of link training, after any DPCD write.
     fn train_step(sink: &mut Sink) {
         let lanes = (sink.dpcd[dpcd::LANE_COUNT_SET as usize] & 0x1F).max(1);

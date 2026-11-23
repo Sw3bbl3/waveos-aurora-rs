@@ -17,11 +17,14 @@
 //! [`WAVE_BASE`] up: `WAVE_BASE + n` is WaveOS's call `n`, with WaveOS's
 //! arguments (`libs/linux/include/waveos.h` describes them for C).
 
+pub mod chardev;
 mod cpu;
 pub mod drm;
 mod events;
 pub mod exec;
 pub mod fs;
+pub mod inotify;
+pub mod input;
 mod links;
 mod misc;
 pub(crate) use misc::realtime_ns;
@@ -32,6 +35,7 @@ mod shm;
 pub mod signal;
 mod syscount;
 mod sysfs;
+pub mod uevent;
 pub mod unix;
 pub mod vdso;
 
@@ -297,6 +301,10 @@ mod nr {
     pub const PSELECT6: u64 = 270;
     pub const PPOLL: u64 = 271;
     pub const SET_ROBUST_LIST: u64 = 273;
+    pub const INOTIFY_INIT: u64 = 253;
+    pub const INOTIFY_ADD_WATCH: u64 = 254;
+    pub const INOTIFY_RM_WATCH: u64 = 255;
+    pub const INOTIFY_INIT1: u64 = 294;
     pub const UTIMENSAT: u64 = 280;
     pub const EPOLL_PWAIT: u64 = 281;
     pub const ACCEPT4: u64 = 288;
@@ -340,6 +348,7 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::WIN_PRESENT
         | w::WIN_SET_TITLE
         | w::WIN_SET_CURSOR
+        | w::WIN_SET_PROGRAM
         | w::WIN_CLOSE
         | w::WIN_RESIZE
         | w::NEXT_EVENT
@@ -391,9 +400,14 @@ fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u
     // The path a call names, if it names one (which argument holds it).
     let path_arg = match nr {
         nr::OPEN | nr::STAT | nr::LSTAT | nr::ACCESS | nr::READLINK | nr::EXECVE | nr::MKDIR | nr::UNLINK => Some(0),
-        nr::OPENAT | nr::NEWFSTATAT | nr::STATX | nr::FACCESSAT | nr::FACCESSAT2 | nr::READLINKAT | nr::MKDIRAT => {
-            Some(1)
-        }
+        nr::OPENAT
+        | nr::NEWFSTATAT
+        | nr::STATX
+        | nr::FACCESSAT
+        | nr::FACCESSAT2
+        | nr::READLINKAT
+        | nr::MKDIRAT
+        | nr::INOTIFY_ADD_WATCH => Some(1),
         _ => None,
     };
     let path = path_arg.and_then(|i| crate::syscall::user::cstr(a[i]).ok()).unwrap_or_default();
@@ -467,8 +481,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::READLINKAT => fs::readlinkat(&p, a[0], a[1], a[2], a[3]),
         nr::TRUNCATE => fs::truncate(&p, a[0], a[1]),
         nr::FTRUNCATE => fs::ftruncate(&p, a[0], a[1]),
-        nr::STATFS => fs::statfs(a[1]),
-        nr::FSTATFS => fs::statfs(a[1]),
+        nr::STATFS => fs::statfs_path(&p, a[0], a[1]),
+        nr::FSTATFS => fs::fstatfs(&p, a[0], a[1]),
         nr::FALLOCATE => fs::fallocate(&p, a[0], a[1], a[2], a[3]),
         nr::FSYNC | nr::FDATASYNC | nr::FLOCK | nr::FADVISE64 | nr::READAHEAD => {
             p.fd(a[0] as usize)?;
@@ -516,6 +530,10 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::SETSOCKOPT => net::setsockopt(&p, a[0], a[1], a[2], a[3], a[4]),
         nr::GETSOCKOPT => net::getsockopt(&p, a[0], a[1], a[2], a[3], a[4]),
         nr::MEMFD_CREATE => fs::memfd_create(&p, a[0], a[1]),
+        nr::INOTIFY_INIT => inotify::init1(&p, 0),
+        nr::INOTIFY_INIT1 => inotify::init1(&p, a[0]),
+        nr::INOTIFY_ADD_WATCH => inotify::add_watch(&p, a[0], a[1], a[2]),
+        nr::INOTIFY_RM_WATCH => inotify::rm_watch(&p, a[0], a[1]),
         nr::EVENTFD => events::eventfd(&p, a[0], 0),
         nr::EVENTFD2 => events::eventfd(&p, a[0], a[1]),
         nr::TIMERFD_CREATE => events::timerfd_create(&p, a[0], a[1]),

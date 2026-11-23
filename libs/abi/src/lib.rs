@@ -218,7 +218,13 @@ pub mod nr {
     /// password (the caller never sees them). 0 once granted (for a few
     /// minutes), `-EPERM` if refused. Returns 0 at once for administrators.
     pub const ELEVATE: usize = 92;
-    pub const COUNT: usize = 93;
+    /// `win_set_program(window, pid)` — says the window shows what process
+    /// `pid` draws (a bridge such as `wl-bridge` showing a Wayland
+    /// program): that program then gets the window's input focus for
+    /// `/dev/input` and the controllers. `pid` must belong to the caller's
+    /// account; 0 clears it.
+    pub const WIN_SET_PROGRAM: usize = 93;
+    pub const COUNT: usize = 94;
 }
 
 /// A process's identity (`cred_get`, `cred_set`).
@@ -1050,6 +1056,97 @@ pub mod display {
     pub const FOLLOWS_WINDOW: u32 = 16;
 }
 
+/// One display of the desktop (`desktop::DISPLAYS`). Places and sizes are
+/// in points, in one space for all displays: the main display (the one
+/// with the menu bar) is at (0, 0) and the others touch it or each other.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayInfo {
+    /// Stays the same while the display is connected (`desktop::WINDOW_DISPLAY`,
+    /// `event::DISPLAY`); a display plugged in again may get another.
+    pub id: u32,
+    /// [`display_info`] flags.
+    pub flags: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    /// The resolution, in device pixels (`scale` per point).
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub scale: u32,
+    /// Refresh rate in millihertz (0 when unknown).
+    pub refresh_mhz: u32,
+    /// Physical size in millimetres (0 when unknown).
+    pub mm_width: u32,
+    pub mm_height: u32,
+    /// The display's identity (from its EDID and connector): the same
+    /// whenever it is plugged in. Settings keeps its arrangement under the
+    /// preference `display_` followed by these 8 hex digits.
+    pub key: u32,
+    /// Its wallpaper (as `desktop::SET_WALLPAPER` numbers them), or -1 for
+    /// the main display's.
+    pub wallpaper: i32,
+    /// A name for people ("DEL U2720Q", "Virtual-2"), NUL-padded UTF-8.
+    pub name: [u8; 32],
+    /// The connector ("HDMI-A-1", "Virtual-2"), NUL-padded.
+    pub connector: [u8; 16],
+}
+
+impl Default for DisplayInfo {
+    fn default() -> Self {
+        DisplayInfo {
+            id: 0,
+            flags: 0,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            pixel_width: 0,
+            pixel_height: 0,
+            scale: 1,
+            refresh_mhz: 0,
+            mm_width: 0,
+            mm_height: 0,
+            key: 0,
+            wallpaper: -1,
+            name: [0; 32],
+            connector: [0; 16],
+        }
+    }
+}
+
+impl DisplayInfo {
+    fn text(b: &[u8]) -> &str {
+        let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        core::str::from_utf8(&b[..n]).unwrap_or("")
+    }
+
+    pub fn name(&self) -> &str {
+        Self::text(&self.name)
+    }
+
+    pub fn connector(&self) -> &str {
+        Self::text(&self.connector)
+    }
+
+    pub fn is_primary(&self) -> bool {
+        self.flags & display_info::PRIMARY != 0
+    }
+}
+
+/// [`DisplayInfo::flags`].
+pub mod display_info {
+    /// The main display: the menu bar, Harbor and new full-screen things go here.
+    pub const PRIMARY: u32 = 1;
+    /// Shows the main display's picture (mirroring) rather than a part of the desktop of its own.
+    pub const MIRROR: u32 = 2;
+    /// The resolution can change while running (`desktop::DISPLAY_MODES`).
+    pub const LIVE: u32 = 4;
+    /// A virtual machine's display, which follows the size of its window.
+    pub const FOLLOWS_WINDOW: u32 = 8;
+}
+
 /// Drag images for `drag_start`.
 pub mod drag {
     pub const DOCUMENT: usize = 0;
@@ -1114,7 +1211,8 @@ pub mod event {
     pub const DROP: u32 = 12;
     /// Sent to the window a drag started from: `a` = 1 if it was dropped somewhere.
     pub const DRAG_END: u32 = 13;
-    /// The screen changed size: `x` = width, `y` = height.
+    /// The screen changed size: `x` = width, `y` = height (the main display;
+    /// see [`DISPLAY`] for the others).
     pub const SCREEN: u32 = 14;
     /// The compositor has shown what the window presented last (a window
     /// presents again after this to draw at the screen's pace). At most
@@ -1126,6 +1224,11 @@ pub mod event {
     /// (while it may read the controllers), connections to every window;
     /// `gamepad_state` has the rest (sticks, triggers).
     pub const GAMEPAD: u32 = 16;
+    /// The window is on another display, or the displays changed: `a` = the
+    /// id of the display it is on (see `desktop::DISPLAYS`), `x`, `y` = that
+    /// display's size in points, `b` = its scale, `c` = how many displays
+    /// there are. Every window gets one when it first appears.
+    pub const DISPLAY: u32 = 17;
 }
 
 /// A single input/window event. Field meaning depends on `kind`:
@@ -1181,6 +1284,14 @@ pub mod desktop {
     /// Wave Play, the controller layout: arg_len = 1 enters it, 0 goes back
     /// to the desktop (no argument pointer).
     pub const PLAY: usize = 16;
+    /// The displays: arg = `*mut DisplayInfo`, arg_len = how many fit →
+    /// how many there are (the main display first).
+    pub const DISPLAYS: usize = 17;
+    /// arg_len = one of the caller's windows → the id of the display it is on.
+    pub const WINDOW_DISPLAY: usize = 18;
+    /// A display's resolutions: arg = `*mut DisplayMode`, arg_len = the
+    /// display's id << 32 | how many fit → how many there are.
+    pub const DISPLAY_MODES: usize = 19;
 }
 
 /// Where user programs are linked and where the kernel places things.

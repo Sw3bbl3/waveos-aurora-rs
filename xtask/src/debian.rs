@@ -219,6 +219,10 @@ pub fn waveos_settings(dir: &Path) -> Vec<(String, PathBuf)> {
     if let Some(voyage) = super::voyage::build(dir) {
         files.push((super::voyage::PATH_IN_ROOT, voyage));
     }
+    // The SDL controller check (linux-programs/sdlprobe).
+    if let Some(probe) = super::voyage::build_sdlprobe(dir) {
+        files.push((super::voyage::SDLPROBE_IN_ROOT, probe));
+    }
     if let Some(bundle) = ca_bundle(dir) {
         files.push(("/etc/ssl/certs/ca-certificates.crt", bundle));
     }

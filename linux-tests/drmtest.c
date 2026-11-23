@@ -1022,6 +1022,14 @@ static void close_gives_back(void) {
     close(card);
     int fd = open_card();
     struct drm_mode_crtc g = {.crtc_id = crtc_id};
+    // The last reference to the card may go a moment after close() returns
+    // (a forked child being reaped, a helper task): wait for the desktop.
+    for (int i = 0; i < 300; i++) {
+        g = (struct drm_mode_crtc){.crtc_id = crtc_id};
+        if (ioctl(fd, DRM_IOCTL_MODE_GETCRTC, &g) != 0 || (g.fb_id != a.fb && g.fb_id != b.fb && g.fb_id != 0))
+            break;
+        usleep(10000);
+    }
     CHECK(ioctl(fd, DRM_IOCTL_MODE_GETCRTC, &g) == 0, "GETCRTC after close");
     CHECK(g.fb_id != a.fb && g.fb_id != b.fb && g.fb_id != 0, "the desktop's picture is back (fb %u)", g.fb_id);
     close(fd);

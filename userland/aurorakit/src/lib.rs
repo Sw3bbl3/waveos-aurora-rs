@@ -23,6 +23,8 @@ fn refresh_effects() {
 }
 
 pub use corekit::abi::input::{KeyCode, KeyEvent, Modifiers};
+/// The displays (`displays()`, `window_display`, `modes`): see `corekit::display`.
+pub use corekit::display;
 pub use lumen::{canvas, font, geom, icons, math, theme, wallpaper, widgets};
 
 use alloc::string::String;
@@ -52,7 +54,12 @@ pub enum Request {
 pub struct Env {
     pub now_ms: u64,
     pub focused: bool,
+    /// The main display's size in points.
     pub screen: (i32, i32),
+    /// The display the window is on (an id for `display::display`; 0 until
+    /// the window first appears) and its size in points.
+    pub display: u32,
+    pub display_size: (i32, i32),
     pub requests: Vec<Request>,
     /// Modifier keys currently held (as last reported by the keyboard).
     pub mods: Modifiers,
@@ -94,6 +101,11 @@ pub trait App {
         false
     }
     fn release(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
+        false
+    }
+    /// The window moved to another display (`env.display`), or displays
+    /// were plugged in, removed or rearranged. Return true to redraw.
+    fn display_changed(&mut self, _env: &mut Env) -> bool {
         false
     }
     /// Pointer moved inside the window (`x < 0` when it left).
@@ -304,6 +316,8 @@ pub fn run<A: App>(mut app: A) -> i32 {
         now_ms: corekit::time::uptime_ms(),
         focused: true,
         screen,
+        display: 0,
+        display_size: screen,
         requests: Vec::new(),
         mods: Modifiers::default(),
     };
@@ -442,6 +456,11 @@ pub fn run<A: App>(mut app: A) -> i32 {
             event::SCREEN => {
                 env.screen = (ev.x, ev.y);
                 true
+            }
+            event::DISPLAY => {
+                env.display = ev.a;
+                env.display_size = (ev.x, ev.y);
+                app.display_changed(&mut env)
             }
             event::CLOSE_REQUESTED => {
                 if if ev.a == 1 { app.close_tab_requested(&mut env) } else { app.close_requested(&mut env) } {

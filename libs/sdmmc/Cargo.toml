@@ -1,0 +1,9 @@
+[package]
+name = "aurora-sdmmc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Integer-only and no_std: the soft-float kernel runs it, the host tests it
+# (against a simulated SDHCI controller with simulated SD cards and eMMC).
+[dependencies]

@@ -14,6 +14,10 @@
 //! That is what libdrm reads to enumerate devices (`drmGetDevices2`,
 //! `drmGetDevice2`, `drmGetDeviceNameFromFd2`) without udev. The tree is
 //! made afresh on each lookup from the display devices and PCI bus.
+//!
+//! It is one half of `/sys`: the input devices' (`super::input`) are the
+//! other, and `input::lookup` and `input::entries` answer for both (its
+//! own entries first, then these; folders both have list both).
 
 use super::drm;
 use crate::drivers::gpu::{KmsDevice, Status};
@@ -211,9 +215,4 @@ pub fn entries(path: &str) -> Vec<(String, u8)> {
             })
         })
         .collect()
-}
-
-/// True for paths in `/sys`.
-pub fn owns(path: &str) -> bool {
-    is_sys(path)
 }

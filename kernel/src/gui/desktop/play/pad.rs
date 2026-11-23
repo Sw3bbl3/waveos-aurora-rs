@@ -199,7 +199,8 @@ impl Virtual {
             Some(id) => gamepad::remove(id),
             None => {
                 self.buttons = 0;
-                self.id = Some(gamepad::add("Virtual Controller (keyboard)", 0, 0, abi::XBOX, None));
+                let motors: alloc::sync::Arc<dyn gamepad::Rumble> = alloc::sync::Arc::new(gamepad::VirtualMotors);
+                self.id = Some(gamepad::add("Virtual Controller (keyboard)", 0, 0, abi::XBOX, Some(motors)));
             }
         }
     }
