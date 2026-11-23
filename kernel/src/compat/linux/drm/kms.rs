@@ -22,8 +22,8 @@ use aurora_abi::err::*;
 /// Every framebuffer programs made: (id, file, the framebuffer).
 static FBS: Mutex<Vec<(ObjId, u64, Weak<Framebuffer>)>> = Mutex::new(Vec::new());
 
-/// A framebuffer by id: one a program made, or one on screen now (the
-/// desktop's).
+/// A framebuffer by id: one a program made, or one on screen now or kept
+/// aside while a program holds the display (the desktop's).
 pub fn fb_by_id(f: &File, id: u32) -> Option<Arc<Framebuffer>> {
     if id == 0 {
         return None;
@@ -31,7 +31,8 @@ pub fn fb_by_id(f: &File, id: u32) -> Option<Arc<Framebuffer>> {
     if let Some(fb) = FBS.lock().iter().find(|e| e.0 == id).and_then(|e| e.2.upgrade()) {
         return Some(fb);
     }
-    f.dev.state().1.into_iter().filter_map(|p| p.fb).find(|fb| fb.id == id)
+    let shown = f.dev.state().1.into_iter().filter_map(|p| p.fb);
+    shown.chain(gpu::owner::kept_framebuffers(&*f.dev)).find(|fb| fb.id == id)
 }
 
 /// A file's framebuffers go with it.

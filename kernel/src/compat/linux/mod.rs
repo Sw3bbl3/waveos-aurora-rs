@@ -320,6 +320,7 @@ mod nr {
     pub const RSEQ: u64 = 334;
     pub const CLONE3: u64 = 435;
     pub const CLOSE_RANGE: u64 = 436;
+    pub const MINCORE: u64 = 27;
     pub const FACCESSAT2: u64 = 439;
     pub const EPOLL_PWAIT2: u64 = 441;
 }
@@ -387,32 +388,29 @@ fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u
     let (nr, a) = (f.rax, [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
     let r = call(f, p);
     let tid = misc::tid(p);
-    match r {
-        Ok(v) => log!(
-            "strace",
-            "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) = {:#x}",
-            a[0],
-            a[1],
-            a[2],
-            a[3],
-            a[4],
-            a[5],
-            v
-        ),
-        Err(e) => {
-            log!(
-                "strace",
-                "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) = -{}",
-                a[0],
-                a[1],
-                a[2],
-                a[3],
-                a[4],
-                a[5],
-                e.abs()
-            )
+    // The path a call names, if it names one (which argument holds it).
+    let path_arg = match nr {
+        nr::OPEN | nr::STAT | nr::LSTAT | nr::ACCESS | nr::READLINK | nr::EXECVE | nr::MKDIR | nr::UNLINK => Some(0),
+        nr::OPENAT | nr::NEWFSTATAT | nr::STATX | nr::FACCESSAT | nr::FACCESSAT2 | nr::READLINKAT | nr::MKDIRAT => {
+            Some(1)
         }
-    }
+        _ => None,
+    };
+    let path = path_arg.and_then(|i| crate::syscall::user::cstr(a[i]).ok()).unwrap_or_default();
+    let result = match r {
+        Ok(v) => alloc::format!("{v:#x}"),
+        Err(e) => alloc::format!("-{}", e.abs()),
+    };
+    log!(
+        "strace",
+        "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) {path} = {result}",
+        a[0],
+        a[1],
+        a[2],
+        a[3],
+        a[4],
+        a[5]
+    );
     r
 }
 
@@ -545,6 +543,7 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::MREMAP => mm::mremap(&p, a[0], a[1], a[2], a[3]),
         nr::MADVISE => mm::madvise(&p, a[0], a[1], a[2]),
         nr::MSYNC => Ok(0),
+        nr::MINCORE => mm::mincore(&p, a[0], a[1], a[2]),
 
         nr::EXIT => misc::exit_thread(&p, a[0] as i64),
         nr::EXIT_GROUP => {

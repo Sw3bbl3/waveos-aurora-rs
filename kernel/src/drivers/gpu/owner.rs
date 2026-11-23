@@ -37,6 +37,15 @@ pub fn holder(dev: &dyn KmsDevice) -> Option<u64> {
     TAKEN.lock().iter().find(|t| t.dev == key(dev)).map(|t| t.client)
 }
 
+/// The framebuffers the desktop showed on `dev` when a program took it.
+/// (Programs put back the picture they found when they end, as on Linux,
+/// by the framebuffer id they read then.)
+pub fn kept_framebuffers(dev: &dyn KmsDevice) -> Vec<Arc<Framebuffer>> {
+    let taken = TAKEN.lock();
+    let Some(t) = taken.iter().find(|t| t.dev == key(dev)) else { return Vec::new() };
+    t.desktop.1.iter().filter_map(|p| p.fb.clone()).collect()
+}
+
 /// A commit of the desktop's: applied, or kept for later while a program
 /// holds the device (checked against the kept state all the same).
 pub fn desktop_commit(dev: &dyn KmsDevice, c: &Commit) -> Result<()> {

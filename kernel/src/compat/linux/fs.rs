@@ -294,6 +294,9 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
             Err(()) => Err(ENOENT),
         });
     }
+    if let Some(data) = super::drm::udev_data(guest) {
+        return Some(Ok(Special::Mem { data, pos: 0 }));
+    }
     let user = account_user();
     Some(Ok(match guest {
         "/dev" | "/proc" | "/proc/self" | "/dev/shm" | "/dev/dri" => {

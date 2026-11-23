@@ -156,6 +156,30 @@ pub fn node_rdev(guest: &str) -> Option<u64> {
     Some(super::fs::makedev(MAJOR, minor as u64))
 }
 
+/// The record udev would keep for a node, `/run/udev/data/c226:<minor>`:
+/// libudev counts a device node as set up only once it has one, and its
+/// enumerators (glmark2's, wlroots', SDL's) skip the others. The tags are
+/// those udev's seat rules give a card (`master-of-seat`: it can drive a
+/// seat's display).
+pub fn udev_data(guest: &str) -> Option<Vec<u8>> {
+    let minor: u32 = guest.strip_prefix("/run/udev/data/c226:")?.parse().ok()?;
+    let render = minor >= RENDER_MINOR;
+    let name = if render { alloc::format!("renderD{minor}") } else { alloc::format!("card{minor}") };
+    let (dev, _, _) = node(&name)?;
+    let slot = super::sysfs::pci_slot(&*dev);
+    let path = alloc::format!("pci-{slot}");
+    let tag = path.replace([':', '.'], "_");
+    let mut s = alloc::format!(
+        "I:{}\nE:ID_PATH={path}\nE:ID_PATH_TAG={tag}\nE:ID_FOR_SEAT=drm-{tag}\nG:seat\nG:uaccess\nQ:seat\nQ:uaccess\n",
+        crate::time::now_ns() / 1000
+    );
+    if !render {
+        s.push_str("G:master-of-seat\nQ:master-of-seat\n");
+    }
+    s.push_str("V:1\n");
+    Some(s.into_bytes())
+}
+
 /// What a card knows beyond its files: who is master, the bus id a master set.
 struct Card {
     dev: usize,

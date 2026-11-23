@@ -54,6 +54,7 @@ mod image;
 mod launcher;
 mod libdrm;
 mod linux;
+mod mesa;
 mod monitor;
 mod netsurf;
 mod package;
@@ -1293,27 +1294,13 @@ fn inbound_check(port: u16) {
     });
 }
 
-/// `target/mesa-root`: Debian's Mesa and the programs `cargo xtask test
-/// --mesa` runs (`debian::MESA_PACKAGES`), fetched once.
-fn mesa_root() -> PathBuf {
-    let dir = root().join("target/mesa-root");
-    let installed = fs::read_to_string(dir.join("packages.txt")).unwrap_or_default();
-    let complete = dir.join(".links").exists()
-        && debian::MESA_PACKAGES.iter().all(|p| installed.lines().any(|l| l.split(' ').next() == Some(*p)));
-    if complete {
-        dir
-    } else {
-        debian::build_into(&dir, &debian::MESA_PACKAGES.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-    }
-}
-
 fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str, mesa: bool) {
     let esp = build(profile, true);
     let img = root().join("target/test-disk.img");
     println!("running kernel tests with the disk on {disk}, network {net}, display {gpu}, USB on {usb}");
     // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux and
     // the memory LLVM's code generator needs.
-    let mesa_root = mesa.then(mesa_root);
+    let mesa_root = mesa.then(mesa::root_dir);
     let (disk_size, memory_mib) = match &mesa_root {
         Some(r) => (dir_size(r) + 256 * 1024 * 1024, 2048),
         None => (128 * 1024 * 1024, 512),
@@ -1438,14 +1425,17 @@ fn ppm_pixel(data: &[u8], fx: f32, fy: f32) -> Option<(u8, u8, u8)> {
 /// The pictures the tests asked for show what they put on the screen:
 /// `drmtest`'s red/green/blue/white quadrants while it held the display,
 /// and the stand-in desktop's colour after it was killed; kmscube's grey
-/// background around a cube that is anything but grey (or the desktop).
+/// background around a cube that is anything but grey (or the desktop);
+/// glmark2's scenes instead of the desktop.
 fn check_screendumps(output: &str) -> Result<(), String> {
     // (x, y as fractions of the size, colour, whether the pixel must be
     // near that colour or far from it)
     type Point = (f32, f32, (u8, u8, u8), bool);
     let desktop = (0x33, 0x66, 0x99);
     let grey = (0x80, 0x80, 0x80);
-    let checks: [(&str, &[Point]); 3] = [
+    // glmark2's scenes move: only that its picture replaced the desktop's.
+    let not_desktop: &[Point] = &[(0.5, 0.5, desktop, false), (0.05, 0.05, desktop, false)];
+    let checks: [(&str, &[Point]); 5] = [
         (
             "drm-client",
             &[
@@ -1466,6 +1456,8 @@ fn check_screendumps(output: &str) -> Result<(), String> {
                 (0.5, 0.5, (0, 0, 0), false),
             ],
         ),
+        ("mesa-glmark2", not_desktop),
+        ("mesa-glmark2-es2", not_desktop),
     ];
     for (name, points) in checks {
         if !output.contains(&format!("harness: screendump {name}")) {
