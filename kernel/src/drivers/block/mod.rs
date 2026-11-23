@@ -232,6 +232,16 @@ impl Dma {
         d.bytes_mut().fill(0);
         Some(d)
     }
+    /// A buffer aligned to its own size rounded up to a power of two (so a
+    /// buffer of up to 64 KiB never crosses a 64 KiB boundary, as xHCI's
+    /// transfer descriptors require).
+    pub fn new_aligned(bytes: usize) -> Option<Dma> {
+        let pages = (bytes as u64).div_ceil(PAGE_SIZE).max(1).next_power_of_two();
+        let phys = frame::alloc_run(pages, pages.trailing_zeros(), u64::MAX)?;
+        let mut d = Dma { phys, pages };
+        d.bytes_mut().fill(0);
+        Some(d)
+    }
     /// A buffer below 4 GiB, for devices with 32-bit addresses (USB 1.1 controllers).
     pub fn new32(bytes: usize) -> Option<Dma> {
         let pages = (bytes as u64).div_ceil(PAGE_SIZE).max(1);

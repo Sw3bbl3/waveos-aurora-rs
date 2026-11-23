@@ -63,6 +63,8 @@ const TESTS: &[Test] = &[
     ("I2C: ACPI scan, HID over I2C touchpad (software bus)", i2c_touchpad),
     ("TCP: retransmission ACK bounds", crate::net::tcp::retransmission_ack_test),
     ("network: DHCP, ICMP, UDP, TCP", network),
+    ("USB network: two adapters, unplug mid-transfer, routes move, replug, DHCP", usb_network),
+    ("USB network on simulated devices: CDC-NCM (RTL8156 dock), ASIX AX88179 and AX88772", usb_network_simulated),
     ("Wi-Fi: scan, WPA2 join, DHCP over CCMP (simulated network)", wifi),
     ("sleep (S3) and wake", sleep_and_wake),
     ("clock: the vDSO agrees with the kernel's clocks (after sleep, set-clock, zone)", vdso_clock),
@@ -2278,11 +2280,15 @@ fn network() {
     // The harness names the card it gave QEMU: that driver must be the one in use.
     if let Some(want) = crate::gui::prefs::boot_option("test_net_driver") {
         let ifs = crate::net::interfaces();
-        let card = ifs.iter().find(|i| i.name.starts_with(b"eth")).expect("no wired interface");
+        let card = ifs
+            .iter()
+            .find(|i| i.flags & aurora_abi::net::IF_LOOPBACK == 0 && !i.name.starts_with(b"wlan"))
+            .expect("no wired interface");
         let driver = core::str::from_utf8(&card.driver[..card.driver_len as usize]).unwrap_or("");
-        assert!(driver.contains(want.as_str()), "eth0 is driven by {driver:?}, expected {want:?}");
+        let name = core::str::from_utf8(&card.name[..card.name_len as usize]).unwrap_or("");
+        assert!(driver.contains(want.as_str()), "{name} is driven by {driver:?}, expected {want:?}");
         assert!(card.flags & aurora_abi::net::IF_LINK != 0, "{driver}: no link");
-        crate::kprint!("[{driver}] ");
+        crate::kprint!("[{name}: {driver}] ");
     }
 
     // ICMP echo, to ourselves over loopback and on our own address.
@@ -2363,25 +2369,17 @@ fn network() {
     );
     drop(c);
 
-    // To the host (10.0.2.2) through QEMU's NAT: 1 MiB over HTTP.
+    // To the host (10.0.2.2) through QEMU's NAT: 1 MiB over HTTP each way,
+    // timed (with the CPU time it took) to compare network cards.
     if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
-        let c = Socket::new(Kind::Tcp, false);
-        c.connect((crate::net::v4([10, 0, 2, 2]), port)).expect("connect to the host");
-        c.write(b"GET /big HTTP/1.1\r\nHost: host\r\n\r\n").unwrap();
-        c.option(aurora_abi::net::OPT_TIMEOUT, 20_000).unwrap();
-        let mut resp = Vec::new();
-        loop {
-            let n = c.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            resp.extend_from_slice(&buf[..n]);
-        }
-        let head = resp.windows(4).position(|w| w == b"\r\n\r\n").expect("HTTP header") + 4;
-        let body = &resp[head..];
+        let (body, ms, cpu) = measured(|| download(port, 20_000).expect("download from the host"));
         assert_eq!(body.len(), 1 << 20, "short body from the host");
         assert!(body.iter().enumerate().all(|(i, &b)| b as u32 == (i as u32).wrapping_mul(31).wrapping_add(7) % 251));
-        crate::kprint!("[1 MiB from the host] ");
+        crate::kprintln!("net-test: 1 MiB from the host in {} ms ({} KiB/s), {} CPU ms", ms, 1024 * 1000 / ms.max(1), cpu);
+        let (stored, ms, cpu) = measured(|| upload(port, 1 << 20));
+        assert_eq!(stored, Some(1 << 20), "the host did not get the upload");
+        crate::kprintln!("net-test: 1 MiB to the host in {} ms ({} KiB/s), {} CPU ms", ms, 1024 * 1000 / ms.max(1), cpu);
+        crate::kprint!("[1 MiB from and to the host] ");
 
         // From the host: QEMU forwards a host port to our 8080.
         let l = Socket::new(Kind::Tcp, false);
@@ -2405,6 +2403,213 @@ fn network() {
         crate::sched::sleep_ms(100);
     }
     network6();
+}
+
+/// Runs `f`; returns its result, the milliseconds it took and the CPU time
+/// (busy milliseconds over every CPU) the system spent meanwhile.
+fn measured<R>(f: impl FnOnce() -> R) -> (R, u64, u64) {
+    let busy = || crate::sched::cpu_times().iter().map(|c| c.0).sum::<u64>();
+    let (t0, b0) = (time::uptime_ms(), busy());
+    let r = f();
+    (r, time::uptime_ms() - t0, busy().saturating_sub(b0))
+}
+
+/// `GET /big` from the test HTTP server on the host: the body.
+fn download(port: u16, timeout_ms: u64) -> Result<Vec<u8>, isize> {
+    use crate::net::socket::{Kind, Socket};
+    let c = Socket::new(Kind::Tcp, false);
+    c.option(aurora_abi::net::OPT_TIMEOUT, timeout_ms)?;
+    c.connect((crate::net::v4([10, 0, 2, 2]), port))?;
+    c.write(b"GET /big HTTP/1.1\r\nHost: host\r\n\r\n")?;
+    let mut resp = Vec::new();
+    let mut buf = alloc::vec![0u8; 16384];
+    loop {
+        let n = c.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        resp.extend_from_slice(&buf[..n]);
+    }
+    let head = resp.windows(4).position(|w| w == b"\r\n\r\n").ok_or(aurora_abi::err::EIO)? + 4;
+    Ok(resp.split_off(head))
+}
+
+/// `POST /sink` with `len` bytes: how many the host says it stored.
+fn upload(port: u16, len: usize) -> Option<usize> {
+    use crate::net::socket::{Kind, Socket};
+    let c = Socket::new(Kind::Tcp, false);
+    c.option(aurora_abi::net::OPT_TIMEOUT, 20_000).ok()?;
+    c.connect((crate::net::v4([10, 0, 2, 2]), port)).ok()?;
+    c.write(alloc::format!("POST /sink HTTP/1.1\r\nHost: host\r\nContent-Length: {len}\r\n\r\n").as_bytes()).ok()?;
+    let data: Vec<u8> = (0..len).map(|i| (i * 7) as u8).collect();
+    let mut sent = 0;
+    while sent < len {
+        sent += c.write(&data[sent..]).ok()?;
+    }
+    let mut resp = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        match c.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => resp.extend_from_slice(&buf[..n]),
+        }
+    }
+    let head = resp.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    core::str::from_utf8(&resp[head..]).ok()?.trim().parse().ok()
+}
+
+/// USB networking end to end, with QEMU's usb-net (`--net usb-ecm` or
+/// `usb-rndis`): two adapters, each on its own user network, configured by
+/// DHCP; the first pulled out (QMP `device_del`) in the middle of a
+/// download, which must fail at once rather than at TCP's retry limit; its
+/// interface, routes and memory gone; traffic moving to the second; then
+/// plugged back in (`device_add`), as `usb0` again, with an address.
+fn usb_network() {
+    use crate::drivers::usb::net;
+    use crate::net::socket::{Kind, Socket};
+    let Some(mode) = crate::gui::prefs::boot_option("test_usb_net") else {
+        crate::kprint!("[no USB network adapter] ");
+        return;
+    };
+    let want = if mode == "usb-rndis" { "RNDIS" } else { "CDC-ECM" };
+    let port = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+    let name = |i: &aurora_abi::NetInterface| alloc::string::String::from_utf8_lossy(&i.name[..i.name_len as usize]).into_owned();
+    let usb = || crate::net::interfaces().into_iter().filter(|i| i.name.starts_with(b"usb")).collect::<Vec<_>>();
+    let configured = |n: &str| usb().iter().any(|i| name(i) == n && i.ip != [0; 4]);
+    assert!(
+        wait_for(|| net::adapters().len() == 2 && configured("usb0") && configured("usb1"), 20_000),
+        "two configured USB adapters expected: {:?}",
+        usb().iter().map(|i| (name(i), i.ip)).collect::<Vec<_>>()
+    );
+    for i in usb() {
+        let driver = core::str::from_utf8(&i.driver[..i.driver_len as usize]).unwrap_or("");
+        assert!(driver.contains(want), "{}: driver {driver:?}", name(&i));
+        crate::kprint!("[{} {} {} Mb/s] ", name(&i), driver, i.speed_mbps);
+    }
+    for line in net::describe() {
+        log!("net-test", "{line}");
+    }
+    // What two idle adapters cost (interrupt endpoints, receive streams).
+    let ((), _, idle_cpu) = measured(|| crate::sched::sleep_ms(1000));
+    log!("net-test", "idle with two USB adapters: {idle_cpu} CPU ms per second");
+    let route_name = || {
+        crate::net::with(|s| s.route([10, 0, 2, 2]).map(|(i, _)| s.ifaces[i].name.clone())).unwrap_or_default()
+    };
+    assert_eq!(route_name(), "usb0", "the first adapter carries the default route");
+
+    // Pulled out mid-download (reading slowly, so most of the body is still
+    // to come): the transfer fails promptly, the interface and its memory go.
+    let first = net::adapters().into_iter().find(|a| a.mac[5] == 0x56).expect("adapter 0");
+    let weak = Arc::downgrade(&first);
+    drop(first);
+    let c = Socket::new(Kind::Tcp, false);
+    c.option(aurora_abi::net::OPT_TIMEOUT, 30_000).unwrap();
+    c.connect((crate::net::v4([10, 0, 2, 2]), port)).expect("connect over usb0");
+    c.write(b"GET /big HTTP/1.1\r\nHost: host\r\n\r\n").unwrap();
+    let mut buf = alloc::vec![0u8; 4096];
+    let mut got = 0;
+    while got < 32 * 1024 {
+        got += c.read(&mut buf).expect("download over usb0");
+    }
+    let t0 = time::uptime_ms();
+    crate::kprintln!("harness: unplug usbnet0");
+    assert!(wait_for(|| !usb().iter().any(|i| name(i) == "usb0"), 10_000), "usb0 did not go away");
+    let gone_ms = time::uptime_ms() - t0;
+    let failed = loop {
+        match c.read(&mut buf) {
+            Ok(0) => break false,
+            Ok(n) => got += n,
+            Err(_) => break true,
+        }
+    };
+    let failed_ms = time::uptime_ms() - t0;
+    assert!(failed && got < 1 << 20, "the download over the unplugged adapter went on ({got} bytes)");
+    assert!(failed_ms < 15_000, "the connection took {failed_ms} ms to fail");
+    drop(c);
+    assert!(wait_for(|| weak.upgrade().is_none(), 5000), "the unplugged adapter was not freed");
+    assert_eq!(route_name(), "usb1", "the route did not move to the second adapter");
+    crate::kprint!("[unplugged: gone in {gone_ms} ms, connection failed in {failed_ms} ms] ");
+    let body = download(port, 20_000).expect("download over usb1");
+    assert_eq!(body.len(), 1 << 20, "short download over usb1");
+
+    // Plugged back in: usb0 again, with an address, and the route back.
+    let t0 = time::uptime_ms();
+    crate::kprintln!("harness: replug usbnet0");
+    assert!(wait_for(|| usb().iter().any(|i| name(i) == "usb0"), 15_000), "usb0 did not come back");
+    let up_ms = time::uptime_ms() - t0;
+    assert!(wait_for(|| configured("usb0"), 15_000), "no address for usb0 after replugging");
+    let dhcp_ms = time::uptime_ms() - t0 - up_ms;
+    assert_eq!(route_name(), "usb0", "the route did not return to the first adapter");
+    let body = download(port, 20_000).expect("download after replugging");
+    assert_eq!(body.len(), 1 << 20);
+    crate::kprint!("[replugged: interface after {up_ms} ms, address {dhcp_ms} ms later] ");
+}
+
+/// The CDC-NCM driver (in a Realtek RTL8156 dock adapter's NCM
+/// configuration, chosen over its vendor one) and the ASIX AX88179 and
+/// AX88772 drivers, against simulated devices (`usb::net::sim`): each comes
+/// up with its MAC address, link speed and a DHCP address, answers ping and
+/// echoes a burst of UDP datagrams (batched into NCM blocks and ASIX
+/// aggregates), and goes away cleanly when unplugged.
+fn usb_network_simulated() {
+    use crate::drivers::usb::net::{self, sim::{self, Model}};
+    use crate::net::socket::{Kind, Socket};
+    let hcd = sim::controller();
+    let models = [Model::Ncm, Model::Ax88179, Model::Ax88772];
+    let text = |b: &[u8]| alloc::string::String::from_utf8_lossy(b).into_owned();
+    let iface = |m: Model| crate::net::interfaces().into_iter().find(|i| i.mac == m.mac());
+    for m in models {
+        hcd.plug(m);
+    }
+    for m in models {
+        let up = wait_for(|| iface(m).is_some_and(|i| i.ip == m.client_ip()), 15_000);
+        assert!(up, "{m:?}: no address ({:?}); USB: {:?}", iface(m).map(|i| i.ip), crate::drivers::usb::list());
+        let i = iface(m).unwrap();
+        let (name, driver) = (text(&i.name[..i.name_len as usize]), text(&i.driver[..i.driver_len as usize]));
+        let want = match m {
+            Model::Ncm => "Realtek RTL8156 (CDC-NCM)",
+            Model::Ax88179 => "ASIX AX88179 (USB)",
+            Model::Ax88772 => "ASIX AX88772 (USB)",
+        };
+        assert_eq!(driver, want);
+        assert!(name.starts_with("eth"), "{driver} is {name}: an adapter with a vendor's address is ethN");
+        assert!(wait_for(|| iface(m).is_some_and(|i| i.speed_mbps == m.speed()), 2000), "{driver}: link speed");
+        assert!(m == Model::Ncm || hcd.seen(m).receiver_started, "{driver}: the receiver was not started");
+        let peer = crate::net::v4(m.peer_ip());
+        let ping = Socket::new(Kind::Icmp, false);
+        ping.option(aurora_abi::net::OPT_TIMEOUT, 3000).unwrap();
+        ping.send_to(&[8u8, 0, 0, 0, 0, 0, 0, 3, b'u', b's', b'b'], (peer, 0)).unwrap();
+        let mut buf = [0u8; 512];
+        let (n, from) = ping.recv_from(&mut buf).unwrap_or_else(|e| panic!("{driver}: no echo reply ({e})"));
+        assert_eq!((n, from.0, buf[0], &buf[8..11]), (11, peer, 0, &b"usb"[..]));
+        // A burst: every datagram comes back.
+        let u = Socket::new(Kind::Udp, false);
+        u.option(aurora_abi::net::OPT_TIMEOUT, 3000).unwrap();
+        for k in 0..24u8 {
+            u.send_to(&[k; 300], (peer, 7)).unwrap();
+        }
+        let mut echoed = 0;
+        while echoed < 24 {
+            match u.recv_from(&mut buf) {
+                Ok((300, _)) => echoed += 1,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert_eq!(echoed, 24, "{driver}: UDP echoes missing");
+        let seen = hcd.seen(m);
+        assert_eq!(seen.bad_transfers, 0, "{driver}: the device could not parse what we sent");
+        crate::kprint!("[{name} {driver}: {} Mb/s, up to {} frames per transfer] ", m.speed(), seen.most_per_transfer);
+    }
+    assert!(hcd.seen(Model::Ncm).most_per_transfer > 1, "no NCM block carried more than one frame");
+    let weak: Vec<_> =
+        net::adapters().iter().filter(|a| models.iter().any(|m| a.mac == m.mac())).map(Arc::downgrade).collect();
+    assert_eq!(weak.len(), 3);
+    for m in models {
+        hcd.unplug(m);
+    }
+    assert!(wait_for(|| models.iter().all(|&m| iface(m).is_none()), 10_000), "simulated adapters not removed");
+    assert!(wait_for(|| weak.iter().all(|w| w.upgrade().is_none()), 10_000), "simulated adapters not freed");
 }
 
 /// IPv6: a link-local address at once, a global one from QEMU's router

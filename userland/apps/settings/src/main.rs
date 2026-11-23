@@ -914,7 +914,17 @@ impl Settings {
                 (false, _) if wireless => ("Not connected", Color::Gray),
                 (false, _) => ("Cable unplugged", Color::Red),
             };
-            let kind = if wireless { "Wi-Fi" } else { "Ethernet" };
+            let usb = corekit::net::name_of(i).starts_with("usb") || corekit::net::driver_of(i).contains("USB");
+            let kind = match (wireless, usb) {
+                (true, _) => "Wi-Fi",
+                (false, true) => "USB Ethernet",
+                (false, false) => "Ethernet",
+            };
+            let speed = match i.speed_mbps {
+                0 => String::from("—"),
+                m if m >= 1000 && m % 1000 == 0 => format!("{} Gb/s", m / 1000),
+                m => format!("{m} Mb/s"),
+            };
             let mac = i.mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
             let mut dns: Vec<String> =
                 i.dns.iter().filter(|d| **d != [0; 4]).map(|d| corekit::net::ip_string(*d)).collect();
@@ -932,6 +942,7 @@ impl Settings {
                 ("Router", ip(i.gateway)),
                 ("DNS servers", if dns.is_empty() { String::from("—") } else { dns.join(", ") }),
                 ("Hardware address", mac),
+                ("Link speed", speed),
                 ("DHCP lease", lease),
                 ("Received", format!("{} ({} packets)", human(i.rx_bytes), i.rx_packets)),
                 ("Sent", format!("{} ({} packets)", human(i.tx_bytes), i.tx_packets)),

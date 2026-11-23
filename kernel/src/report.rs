@@ -59,6 +59,10 @@ pub fn usb() -> String {
     for line in crate::drivers::usb::controllers().iter().chain(crate::drivers::usb::list().iter()) {
         let _ = writeln!(s, "{line}");
     }
+    // Network adapters: link, and how well transfers are batched.
+    for line in crate::drivers::usb::net::describe() {
+        let _ = writeln!(s, "{line}");
+    }
     if s.is_empty() {
         s.push_str("No USB devices.\n");
     }

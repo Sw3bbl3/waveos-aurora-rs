@@ -83,12 +83,39 @@ pub trait Nic: Send + Sync {
     fn wireless(&self) -> bool {
         false
     }
+    /// The interface name's prefix: `eth`, `wlan`, or `usb` for a USB
+    /// link that isn't a real Ethernet card (a tethered phone).
+    fn name_prefix(&self) -> &'static str {
+        if self.wireless() {
+            "wlan"
+        } else {
+            "eth"
+        }
+    }
+    /// Route preference (lower wins) when several interfaces have a
+    /// default gateway: built-in wired cards, then USB Ethernet adapters,
+    /// then tethered phones, then Wi-Fi.
+    fn metric(&self) -> u32 {
+        if self.wireless() {
+            600
+        } else {
+            100
+        }
+    }
+    /// Link speed in Mb/s (0: unknown).
+    fn speed_mbps(&self) -> u32 {
+        0
+    }
 }
 
 pub struct Interface {
     pub name: String,
     nic: Option<Arc<dyn Nic>>,
+    /// The card was unplugged: this slot waits for the next one.
+    gone: bool,
     link: bool,
+    /// See [`Nic::metric`].
+    metric: u32,
     pub mac: [u8; 6],
     pub ip: Ip,
     pub mask: Ip,
@@ -104,7 +131,7 @@ pub struct Interface {
 
 impl Interface {
     fn loopback(&self) -> bool {
-        self.nic.is_none()
+        self.nic.is_none() && !self.gone
     }
     fn in_subnet(&self, dst: Ip) -> bool {
         self.ip != ANY && (0..4).all(|k| dst[k] & self.mask[k] == self.ip[k] & self.mask[k])
@@ -164,7 +191,9 @@ pub fn init() {
     let lo = Interface {
         name: String::from("lo"),
         nic: None,
+        gone: false,
         link: true,
+        metric: 0,
         mac: [0; 6],
         ip: LOOPBACK,
         mask: [255, 0, 0, 0],
@@ -192,18 +221,26 @@ pub fn init() {
     crate::sched::spawn("net", task);
 }
 
-/// A driver found a card: it becomes `eth<n>` and asks DHCP for an address.
+/// A driver found a card: it becomes `eth<n>` (`wlan<n>`, `usb<n>`) and
+/// asks DHCP for an address. An unplugged card's slot (and so its index)
+/// is reused; the number is the lowest free one.
 pub fn register(nic: Arc<dyn Nic>) -> usize {
     let mac = nic.mac();
     let driver = nic.driver();
     let link = nic.link_up();
-    let prefix = if nic.wireless() { "wlan" } else { "eth" };
+    let prefix = nic.name_prefix();
+    let metric = nic.metric();
     let index = with(|s| {
-        let n = s.ifaces.iter().filter(|i| i.name.starts_with(prefix)).count();
-        s.ifaces.push(Interface {
+        let taken = |n: usize| {
+            s.ifaces.iter().any(|i| !i.gone && i.name.strip_prefix(prefix) == Some(alloc::format!("{n}").as_str()))
+        };
+        let n = (0..).find(|&n| !taken(n)).unwrap_or(0);
+        let iface = Interface {
             name: alloc::format!("{prefix}{n}"),
             nic: Some(nic),
+            gone: false,
             link,
+            metric,
             mac,
             ip: ANY,
             mask: ANY,
@@ -215,12 +252,48 @@ pub fn register(nic: Arc<dyn Nic>) -> usize {
             rx_bytes: 0,
             tx_bytes: 0,
             v6: ip6::Config::new(mac),
-        });
-        s.ifaces.len() - 1
+        };
+        match s.ifaces.iter().position(|i| i.gone) {
+            Some(free) => {
+                s.ifaces[free] = iface;
+                free
+            }
+            None => {
+                s.ifaces.push(iface);
+                s.ifaces.len() - 1
+            }
+        }
     });
     log!("net", "{}: {} ({})", with(|s| s.ifaces[index].name.clone()), mac_str(mac), driver);
     WAKE.wake_all();
+    crate::gui::network_changed();
     index
+}
+
+/// A card went away (a USB adapter was unplugged): connections through it
+/// fail at once, its addresses, routes and queued packets go, and its
+/// slot waits for the next card. The driver must not call [`receive`]
+/// with this index afterwards.
+pub fn unregister(index: usize) {
+    let name = with(|s| {
+        if index == 0 || index >= s.ifaces.len() || s.ifaces[index].gone {
+            return None;
+        }
+        s.update_link(index, false);
+        let f = &mut s.ifaces[index];
+        f.nic = None;
+        f.gone = true;
+        f.dhcp = None;
+        f.v6 = ip6::Config::gone();
+        Some(core::mem::take(&mut f.name))
+    });
+    let Some(name) = name else { return };
+    // Frames it received that the task has not processed yet.
+    RX.lock().retain(|f| !matches!(f, Frame::Ether(i, _) if *i == index));
+    log!("net", "{name}: removed");
+    notify_changed();
+    WAKE.wake_all();
+    crate::gui::network_changed();
 }
 
 /// A card's link came up or went down (Wi-Fi joined or left a network):
@@ -317,7 +390,7 @@ impl Stack {
     // ---------------------------------------------------------------- input
 
     fn ether_input(&mut self, i: usize, f: &[u8]) {
-        if f.len() < 14 || i >= self.ifaces.len() {
+        if f.len() < 14 || i >= self.ifaces.len() || self.ifaces[i].gone {
             return;
         }
         let iface = &mut self.ifaces[i];
@@ -445,13 +518,20 @@ impl Stack {
         if let Some(i) = self.ifaces.iter().position(|f| f.ip == dst) {
             return Some((i, dst));
         }
-        if let Some(i) = self.ifaces.iter().position(|f| !f.loopback() && f.link && f.in_subnet(dst)) {
+        // On a link: the best interface on that subnet; otherwise the best
+        // one with a gateway (wired before USB before Wi-Fi: `Nic::metric`).
+        let best = |ok: &dyn Fn(&Interface) -> bool| {
+            self.ifaces
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| !f.loopback() && !f.gone && f.link && ok(f))
+                .min_by_key(|(i, f)| (f.metric, *i))
+                .map(|(i, _)| i)
+        };
+        if let Some(i) = best(&|f| f.in_subnet(dst)) {
             return Some((i, dst));
         }
-        self.ifaces
-            .iter()
-            .position(|f| !f.loopback() && f.link && f.ip != ANY && f.gateway != ANY)
-            .map(|i| (i, self.ifaces[i].gateway))
+        best(&|f| f.ip != ANY && f.gateway != ANY).map(|i| (i, self.ifaces[i].gateway))
     }
 
     /// Our address on the interface that reaches `dst` (None: no route, or
@@ -636,6 +716,7 @@ pub fn interfaces() -> Vec<aurora_abi::NetInterface> {
     with(|s| {
         s.ifaces
             .iter()
+            .filter(|f| !f.gone)
             .map(|f| {
                 let mut n = aurora_abi::NetInterface::default();
                 let name = f.name.as_bytes();
@@ -667,6 +748,7 @@ pub fn interfaces() -> Vec<aurora_abi::NetInterface> {
                 n.tx_packets = f.tx_packets;
                 n.rx_bytes = f.rx_bytes;
                 n.tx_bytes = f.tx_bytes;
+                n.speed_mbps = f.nic.as_ref().map_or(0, |d| d.speed_mbps());
                 n
             })
             .collect()
@@ -678,6 +760,7 @@ pub fn interfaces6() -> Vec<aurora_abi::NetInterface6> {
     with(|s| {
         s.ifaces
             .iter()
+            .filter(|f| !f.gone)
             .map(|f| {
                 let mut n = aurora_abi::NetInterface6::default();
                 for (k, (a, len, _)) in f.v6.addrs.iter().take(4).enumerate() {

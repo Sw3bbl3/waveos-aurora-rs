@@ -840,7 +840,10 @@ impl Hcd for Ehci {
             self.unlink_periodic(p.qh);
             self.free_tds(&[p.qh, p.td, p.dummy]);
         }
-        if let Some(d) = self.devices.lock().remove(&dev) {
+        // The table's lock (interrupts off) is let go before waiting on
+        // transfers in flight and the controller.
+        let removed = self.devices.lock().remove(&dev);
+        if let Some(d) = removed {
             for ep in core::iter::once(&d.ep0).chain(d.eps.values()) {
                 let dummy = ep.dummy.lock();
                 if ep.periodic {

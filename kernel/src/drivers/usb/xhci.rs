@@ -74,6 +74,7 @@ const TRB_ADDRESS_DEVICE: u32 = 11;
 const TRB_CONFIGURE_EP: u32 = 12;
 const TRB_EVALUATE_CTX: u32 = 13;
 const TRB_RESET_EP: u32 = 14;
+const TRB_STOP_EP: u32 = 15;
 const TRB_SET_DEQUEUE: u32 = 16;
 const TRB_TRANSFER_EVENT: u32 = 32;
 const TRB_COMMAND_DONE: u32 = 33;
@@ -163,11 +164,15 @@ pub struct Completion {
     pub slot: u8,
 }
 
+/// An IN endpoint kept busy with queued transfers: an interrupt pipe
+/// (reports), or a bulk stream (a network adapter's receive path).
 struct Pipe {
     handler: Arc<dyn PipeHandler>,
-    buf: Dma,
+    /// One buffer per queued transfer, shared with the handler while it
+    /// reads a completed one (so a pipe closed meanwhile can't free it).
+    bufs: Vec<Arc<Dma>>,
     size: usize,
-    /// Queued TRB → its slice of `buf`.
+    /// Queued TRB → its buffer.
     trbs: BTreeMap<u64, usize>,
 }
 
@@ -176,7 +181,11 @@ struct SlotState {
     input: Dma,
     rings: [Option<Ring>; 32],
     speed: Speed,
+    /// Which device this is: slots are reused once a device is unplugged.
+    epoch: u64,
 }
+
+static EPOCH: AtomicU64 = AtomicU64::new(1);
 
 struct Inner {
     cmd: Ring,
@@ -473,27 +482,27 @@ impl Controller {
     }
 
     fn pipe_event(&self, slot: u8, ep: u8, trb: u64, code: u8, residual: u32) {
-        let (handler, data) = {
+        let (handler, buf, index, n) = {
             let mut pipes = self.pipes.lock();
             let Some(p) = pipes.get_mut(&(slot, ep)) else { return };
-            let Some(off) = p.trbs.remove(&trb) else { return };
+            let Some(index) = p.trbs.remove(&trb) else { return };
             let n = p.size.saturating_sub(residual as usize);
-            let data = p.buf.bytes()[off..off + n].to_vec();
-            (p.handler.clone(), (off, data))
+            (p.handler.clone(), p.bufs[index].clone(), index, n)
         };
+        // Read in place: the controller is done with this buffer until it is queued again.
         if code == CC_SUCCESS || code == CC_SHORT {
-            handler.data(&data.1);
+            handler.data(&buf.bytes()[..n]);
         }
         if code == CC_STALL {
             self.recover(slot, ep);
         }
         // Queue the buffer again (unless the device has gone).
-        self.queue_pipe_buffer(slot, ep, data.0);
+        self.queue_pipe_buffer(slot, ep, index);
     }
 
-    fn queue_pipe_buffer(&self, slot: u8, ep: u8, off: usize) {
+    fn queue_pipe_buffer(&self, slot: u8, ep: u8, index: usize) {
         let (phys, size) = match self.pipes.lock().get(&(slot, ep)) {
-            Some(p) => (p.buf.phys + off as u64, p.size),
+            Some(p) => (p.bufs[index].phys, p.size),
             None => return,
         };
         let trb = {
@@ -502,20 +511,54 @@ impl Controller {
             ring.push(phys, size as u32, TRB_NORMAL << 10 | TRB_IOC | TRB_ISP)
         };
         if let Some(p) = self.pipes.lock().get_mut(&(slot, ep)) {
-            p.trbs.insert(trb, off);
+            p.trbs.insert(trb, index);
         }
         self.doorbell(slot, ep);
     }
 
-    fn open_pipe_inner(&self, slot: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool {
-        const BUFFERS: usize = 4;
-        let size = (ep.max_packet as usize).clamp(8, 1024);
-        let Some(buf) = Dma::new(size * BUFFERS) else { return false };
-        self.pipes.lock().insert((slot, ep.dci()), Pipe { handler, buf, size, trbs: BTreeMap::new() });
-        for i in 0..BUFFERS {
-            self.queue_pipe_buffer(slot, ep.dci(), i * size);
+    /// Keeps `count` transfers of `size` bytes (at most 64 KiB) queued on an
+    /// IN endpoint. Each buffer is aligned to its size, so none crosses the
+    /// 64 KiB boundary a single TRB must not span.
+    fn open_stream_inner(
+        &self,
+        slot: u8,
+        ep: &Endpoint,
+        size: usize,
+        count: usize,
+        handler: Arc<dyn PipeHandler>,
+    ) -> bool {
+        let size = size.clamp(8, 64 * 1024);
+        let mut bufs = Vec::with_capacity(count);
+        for _ in 0..count.max(1) {
+            let Some(b) = Dma::new_aligned(size) else { return false };
+            bufs.push(Arc::new(b));
+        }
+        let n = bufs.len();
+        self.pipes.lock().insert((slot, ep.dci()), Pipe { handler, bufs, size, trbs: BTreeMap::new() });
+        for i in 0..n {
+            self.queue_pipe_buffer(slot, ep.dci(), i);
         }
         true
+    }
+
+    /// Takes the transfers queued on an endpoint back (after a timeout):
+    /// stop it, and move its dequeue pointer past them.
+    fn cancel(&self, slot: u8, epoch: u64, dci: u8, trbs: &[u64]) {
+        // Unplugged meanwhile (and the slot perhaps given to another device).
+        if self.inner.lock().slots.get(&slot).map(|s| s.epoch) != Some(epoch) {
+            self.completions.lock().retain(|t, _| !trbs.contains(t));
+            return;
+        }
+        self.command(0, TRB_STOP_EP << 10 | (dci as u32) << 16 | (slot as u32) << 24);
+        let dequeue = {
+            let inner = self.inner.lock();
+            inner.slots.get(&slot).and_then(|s| s.rings[dci as usize].as_ref()).map(|r| r.dequeue_pointer())
+        };
+        if let Some(d) = dequeue {
+            self.command(d, TRB_SET_DEQUEUE << 10 | (dci as u32) << 16 | (slot as u32) << 24);
+        }
+        // A completion that slipped in before the stop has nobody to read it.
+        self.completions.lock().retain(|t, _| !trbs.contains(t));
     }
 
     /// Waits for the completion of any of `trbs`: the last one, or an earlier
@@ -622,9 +665,11 @@ impl Controller {
     /// 64 KiB boundaries as TRBs require. Returns the bytes transferred.
     fn bulk(&self, slot: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8> {
         let dci = ep.dci();
-        let trbs = {
+        let (trbs, epoch) = {
             let mut inner = self.inner.lock();
-            let ring = inner.slots.get_mut(&slot).and_then(|s| s.rings[dci as usize].as_mut()).ok_or(CC_TIMEOUT)?;
+            let state = inner.slots.get_mut(&slot).ok_or(CC_TIMEOUT)?;
+            let epoch = state.epoch;
+            let ring = state.rings[dci as usize].as_mut().ok_or(CC_TIMEOUT)?;
             let mut trbs = Vec::new();
             let mut done = 0usize;
             let max_packet = ep.max_packet.max(1) as usize;
@@ -641,13 +686,17 @@ impl Controller {
                     break;
                 }
             }
-            trbs
+            (trbs, epoch)
         };
         self.doorbell(slot, dci);
         let c = self.wait_completion(&trbs, timeout_ms);
         if c.code != CC_SUCCESS {
-            if c.code == CC_STALL {
-                self.recover(slot, dci);
+            match c.code {
+                CC_STALL => self.recover(slot, dci),
+                // Still queued: a later transfer must not land in this one's
+                // buffer (which its owner may reuse or free).
+                CC_TIMEOUT => self.cancel(slot, epoch, dci, &trbs),
+                _ => {}
             }
             return Err(c.code);
         }
@@ -867,7 +916,8 @@ impl Hcd for Controller {
             inner.dcbaa.write::<u64>(slot as usize * 8, output.phys);
             let mut rings: [Option<Ring>; 32] = Default::default();
             rings[1] = Some(ep0);
-            inner.slots.insert(slot, SlotState { output, input, rings, speed: pos.speed });
+            let epoch = EPOCH.fetch_add(1, Ordering::Relaxed);
+            inner.slots.insert(slot, SlotState { output, input, rings, speed: pos.speed, epoch });
         }
         let c = self.command(input_phys, TRB_ADDRESS_DEVICE << 10 | (slot as u32) << 24);
         if c.code != CC_SUCCESS {
@@ -905,7 +955,11 @@ impl Hcd for Controller {
     }
 
     fn open_pipe(&self, slot: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool {
-        self.open_pipe_inner(slot, ep, handler)
+        self.open_stream_inner(slot, ep, (ep.max_packet as usize).clamp(8, 1024), 4, handler)
+    }
+
+    fn open_stream(&self, slot: u8, ep: &Endpoint, size: usize, count: usize, handler: Arc<dyn PipeHandler>) -> bool {
+        self.open_stream_inner(slot, ep, size, count, handler)
     }
 
     fn release(&self, slot: u8) {

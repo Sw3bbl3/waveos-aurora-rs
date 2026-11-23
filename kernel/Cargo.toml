@@ -30,6 +30,7 @@ aurora-wifi = { path = "../libs/wifi" }
 aurora-hid = { path = "../libs/hid" }
 aurora-i2c = { path = "../libs/i2c" }
 aurora-sdmmc = { path = "../libs/sdmmc" }
+aurora-usbnet = { path = "../libs/usbnet" }
 aurora-acpi-res = { path = "../libs/acpires" }
 aurora-edid = { path = "../libs/edid" }
 aurora-igfx = { path = "../libs/igfx" }

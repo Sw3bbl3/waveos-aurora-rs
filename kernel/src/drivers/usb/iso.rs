@@ -190,10 +190,11 @@ impl UsbDevice {
     /// descriptors [`super::Configuration`] skips (audio, video).
     pub fn raw_configuration(&self) -> Option<alloc::vec::Vec<u8>> {
         let mut head = [0u8; 9];
-        self.control(Setup::get_descriptor(super::DESC_CONFIG, 0, 0, 9), Some(&mut head)).ok()?;
+        let index = self.config_index;
+        self.control(Setup::get_descriptor(super::DESC_CONFIG, index, 0, 9), Some(&mut head)).ok()?;
         let total = u16::from_le_bytes([head[2], head[3]]).clamp(9, 8192);
         let mut full = alloc::vec![0u8; total as usize];
-        let n = self.control(Setup::get_descriptor(super::DESC_CONFIG, 0, 0, total), Some(&mut full)).ok()?;
+        let n = self.control(Setup::get_descriptor(super::DESC_CONFIG, index, 0, total), Some(&mut full)).ok()?;
         full.truncate(n);
         Some(full)
     }
