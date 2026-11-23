@@ -631,7 +631,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         // Ordinary policies (OTHER, BATCH, IDLE: Mesa's worker threads ask
         // for IDLE) are all the scheduler's one; real-time ones need a
         // privilege programs don't have, as on Linux without RLIMIT_RTPRIO.
-        nr::SCHED_SETSCHEDULER => match a[1] {
+        // (SCHED_RESET_ON_FORK, 0x4000_0000, may come with any of them.)
+        nr::SCHED_SETSCHEDULER => match a[1] & !0x4000_0000 {
             0 | 3 | 5 => Ok(0),
             1 | 2 => Err(EPERM),
             _ => Err(EINVAL),

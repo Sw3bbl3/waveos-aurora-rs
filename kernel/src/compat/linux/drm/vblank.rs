@@ -74,7 +74,8 @@ fn queue(f: &File, due: u64, bytes: Vec<u8>) -> Result<(), isize> {
     if due <= now {
         wake(key);
     } else {
-        crate::timer::call_after_ms((due - now).div_ceil(1_000_000), wake, key, "drm-event");
+        // At the frame's start to the nanosecond, not the millisecond after.
+        crate::timer::add(due, crate::timer::Action::Call { f: wake, arg: key, name: "drm-event" });
     }
     Ok(())
 }
