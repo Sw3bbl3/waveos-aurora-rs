@@ -247,6 +247,23 @@ fn manifest_validation() {
     assert_eq!(manifest2().dependencies()[0].id, "dev.example.runtime");
 }
 
+/// The sandbox's permissions: packages may declare the new ones, never the
+/// system's own (only the manifests built into the system may).
+#[test]
+fn permissions_for_the_sandbox() {
+    let with = |perms: &[&str]| Manifest { permissions: perms.iter().map(|p| (*p).into()).collect(), ..manifest2() };
+    let text = with(&["camera", "screen-capture", "launch", "ipc", "background", "desktop:read"]).encode();
+    assert!(Manifest::parse(&text).is_ok());
+    for system in ["system", "admin", "privacy", "processes", "linux-home", "all-files"] {
+        let text = with(&["network", system]).encode();
+        assert_eq!(Manifest::parse(&text), Err("Unknown permission"), "{system} in a package");
+        assert!(Manifest::parse_first_party(&text).is_ok(), "{system} in the system's own manifest");
+    }
+    assert!(Manifest::parse_first_party(&with(&["root"]).encode()).is_err());
+    assert!(sensitive_permission("camera") && !sensitive_permission("launch"));
+    assert_eq!(describe_permission("all-files"), "Read and change every file you may");
+}
+
 #[test]
 fn installed_file_verification() {
     let bytes = signed();

@@ -224,7 +224,246 @@ pub mod nr {
     /// `/dev/input` and the controllers. `pid` must belong to the caller's
     /// account; 0 clears it.
     pub const WIN_SET_PROGRAM: usize = 93;
-    pub const COUNT: usize = 94;
+    /// `sandbox(op, a, b, c, d) -> value` — the calling app's sandbox, the
+    /// system open and save panel, file bookmarks and (for Settings) the
+    /// privacy decisions; see [`super::sandbox`].
+    pub const SANDBOX: usize = 94;
+    pub const COUNT: usize = 95;
+}
+
+/// Per-app sandboxing (`sandbox`, see docs/developer/sandboxing.md).
+///
+/// A sandboxed process may do only what its app's manifest declares and
+/// its user allowed. Capabilities and folder grants share one bit set:
+/// the low half are capabilities a package may declare, bits 32–39 are
+/// for the system's own apps only, and bits 40 and up are folders.
+pub mod sandbox {
+    /// Outgoing connections (`socket`, `connect`).
+    pub const NET_CLIENT: u64 = 1 << 0;
+    /// Accepting connections from other computers (`listen` beyond loopback).
+    pub const NET_SERVER: u64 = 1 << 1;
+    /// Playing sound.
+    pub const AUDIO_OUT: u64 = 1 << 2;
+    /// Recording from a microphone (asks the person first).
+    pub const MICROPHONE: u64 = 1 << 3;
+    /// A camera (reserved: no camera drivers yet; asks first).
+    pub const CAMERA: u64 = 1 << 4;
+    /// Seeing other apps' windows or the screen, including through the
+    /// DRM device (asks first).
+    pub const SCREEN_CAPTURE: u64 = 1 << 5;
+    /// Observing input meant for other apps (asks first).
+    pub const INPUT_MONITOR: u64 = 1 << 6;
+    pub const GAMEPADS: u64 = 1 << 7;
+    /// Raw USB and other devices (asks first).
+    pub const USB: u64 = 1 << 8;
+    /// Starting programs of its own (they inherit the sandbox).
+    pub const SPAWN: u64 = 1 << 9;
+    /// Asking the desktop to open other apps and documents.
+    pub const LAUNCH: u64 = 1 << 10;
+    /// Talking to other apps: their local sockets, shared memory, signals.
+    pub const IPC: u64 = 1 << 11;
+    pub const NOTIFY: u64 = 1 << 12;
+    /// Running on without a window.
+    pub const BACKGROUND: u64 = 1 << 13;
+    /// Reading the clipboard while another app is in front.
+    pub const CLIPBOARD_READ: u64 = 1 << 14;
+    /// Changing system preferences (appearance, wallpaper, volume).
+    pub const PREFS_WRITE: u64 = 1 << 15;
+    /// Running Linux programs.
+    pub const LINUX: u64 = 1 << 16;
+    /// Asking for the administrator capability (the system prompt).
+    pub const ELEVATE: u64 = 1 << 17;
+    /// Driving a display directly (the DRM device).
+    pub const DISPLAY: u64 = 1 << 18;
+
+    /// System apps only: power, displays, network setup, the kernel log.
+    pub const SYSTEM: u64 = 1 << 32;
+    /// System apps only: keeps an administrator account's capability.
+    pub const ADMIN: u64 = 1 << 33;
+    /// System apps only: reads and changes every app's privacy decisions.
+    pub const PRIVACY: u64 = 1 << 34;
+    /// System apps only: signals and ends the account's other programs.
+    pub const PROCESSES: u64 = 1 << 35;
+    /// System apps only: the account's Linux home and temporary folders.
+    pub const LINUX_HOME: u64 = 1 << 36;
+
+    /// Folders in the home folder (read, or read and write).
+    pub const DOCUMENTS_READ: u64 = 1 << 40;
+    pub const DOCUMENTS: u64 = 1 << 41;
+    pub const DOWNLOADS_READ: u64 = 1 << 42;
+    pub const DOWNLOADS: u64 = 1 << 43;
+    pub const PICTURES_READ: u64 = 1 << 44;
+    pub const PICTURES: u64 = 1 << 45;
+    pub const MUSIC_READ: u64 = 1 << 46;
+    pub const MUSIC: u64 = 1 << 47;
+    pub const MOVIES_READ: u64 = 1 << 48;
+    pub const MOVIES: u64 = 1 << 49;
+    pub const DESKTOP_READ: u64 = 1 << 50;
+    pub const DESKTOP: u64 = 1 << 51;
+    /// Every file of the account (other apps' containers excepted).
+    pub const HOME: u64 = 1 << 52;
+    /// System apps only: every file the account may use.
+    pub const ALL_FILES: u64 = 1 << 53;
+
+    /// What only the system's own apps may hold.
+    pub const SYSTEM_ONLY: u64 = SYSTEM | ADMIN | PRIVACY | PROCESSES | LINUX_HOME | ALL_FILES;
+    /// What the person is asked about the first time an app uses it.
+    pub const GUARDED: u64 = MICROPHONE
+        | CAMERA
+        | SCREEN_CAPTURE
+        | INPUT_MONITOR
+        | USB
+        | DOCUMENTS_READ
+        | DOCUMENTS
+        | DOWNLOADS_READ
+        | DOWNLOADS
+        | PICTURES_READ
+        | PICTURES
+        | MUSIC_READ
+        | MUSIC
+        | MOVIES_READ
+        | MOVIES
+        | DESKTOP_READ
+        | DESKTOP
+        | HOME;
+    /// Every bit with a meaning.
+    pub const ALL: u64 = 0x7_FFFF | SYSTEM_ONLY | (0x3F_FF << 40);
+
+    /// The permission names of manifests (`gina`), and their bits.
+    pub const NAMES: &[(&str, u64)] = &[
+        ("network", NET_CLIENT),
+        ("network-server", NET_SERVER),
+        ("audio", AUDIO_OUT),
+        ("microphone", MICROPHONE),
+        ("camera", CAMERA),
+        ("screen-capture", SCREEN_CAPTURE),
+        ("input-monitoring", INPUT_MONITOR),
+        ("gamepad", GAMEPADS),
+        ("usb", USB),
+        ("spawn", SPAWN),
+        ("launch", LAUNCH),
+        ("ipc", IPC),
+        ("notifications", NOTIFY),
+        ("background", BACKGROUND),
+        ("clipboard", CLIPBOARD_READ),
+        ("preferences", PREFS_WRITE),
+        ("linux", LINUX),
+        ("elevate", ELEVATE),
+        ("display", DISPLAY),
+        ("system", SYSTEM),
+        ("admin", ADMIN),
+        ("privacy", PRIVACY),
+        ("processes", PROCESSES),
+        ("linux-home", LINUX_HOME),
+        ("documents:read", DOCUMENTS_READ),
+        ("documents", DOCUMENTS),
+        ("downloads:read", DOWNLOADS_READ),
+        ("downloads", DOWNLOADS),
+        ("pictures:read", PICTURES_READ),
+        ("pictures", PICTURES),
+        ("music:read", MUSIC_READ),
+        ("music", MUSIC),
+        ("movies:read", MOVIES_READ),
+        ("movies", MOVIES),
+        ("desktop:read", DESKTOP_READ),
+        ("desktop", DESKTOP),
+        ("home", HOME),
+        ("all-files", ALL_FILES),
+    ];
+
+    /// The bit for permission `name`.
+    pub fn bit(name: &str) -> Option<u64> {
+        NAMES.iter().find(|(n, _)| *n == name).map(|(_, b)| *b)
+    }
+
+    /// The permission name of a single bit.
+    pub fn name(bit: u64) -> Option<&'static str> {
+        NAMES.iter().find(|(_, b)| *b == bit).map(|(n, _)| *n)
+    }
+
+    /// `sandbox(INFO, *mut Info)`.
+    pub const INFO: usize = 1;
+    /// `sandbox(RESTRICT, keep)`: drops every capability not in `keep`
+    /// (forever, for the caller and the programs it starts from then on).
+    /// An unconfined program becomes sandboxed with a container of its own.
+    pub const RESTRICT: usize = 2;
+    /// `sandbox(PANEL, mode, name, name_len, out, out_len) -> path length`:
+    /// the system open (or save) panel. The person picks a file or folder;
+    /// the caller may then use exactly that (and, for a folder, what is in
+    /// it) until it exits. `-ECANCELED` if they cancel.
+    pub const PANEL: usize = 3;
+    /// `sandbox(BOOKMARK, path, len, out)`: a bookmark (32 hex digits at
+    /// `out`) for a file or folder the person gave the app, that brings
+    /// the same access back in later runs.
+    pub const BOOKMARK: usize = 4;
+    /// `sandbox(RESOLVE, token, len, out, out_len) -> path length`.
+    pub const RESOLVE: usize = 5;
+    /// `sandbox(PRIVACY_LIST, out, out_len) -> full length`: every app and
+    /// what it may do, as text lines (see `PRIVACY_SET`). Settings only.
+    pub const PRIVACY_LIST: usize = 6;
+    /// `sandbox(PRIVACY_SET, line, len)`: `"<app id>\t<permission>\t<allow|deny|ask>"`,
+    /// or `"<app id>\tbookmark\t<token>\tforget"`. Takes effect at once,
+    /// also for running programs. Settings only.
+    pub const PRIVACY_SET: usize = 7;
+    /// `sandbox(IN_USE) -> bits`: guarded capabilities in use right now
+    /// (the microphone while anything records).
+    pub const IN_USE: usize = 8;
+
+    /// [`PANEL`] modes.
+    pub const PANEL_OPEN: u64 = 0;
+    pub const PANEL_SAVE: u64 = 1;
+    pub const PANEL_FOLDER: u64 = 2;
+
+    /// [`Info`] flags.
+    pub const SANDBOXED: u32 = 1;
+    /// One of the system's own apps (its manifest comes with the system).
+    pub const SYSTEM_APP: u32 = 2;
+    /// A program without a manifest of its own (the default profile).
+    pub const LEGACY: u32 = 4;
+
+    /// The calling process's sandbox (`sandbox(INFO)`).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct Info {
+        pub flags: u32,
+        pub id_len: u32,
+        /// What it may do right now.
+        pub caps: u64,
+        /// What its manifest declares.
+        pub declared: u64,
+        /// Guarded capabilities the person allowed, and refused.
+        pub allowed: u64,
+        pub denied: u64,
+        pub container_len: u32,
+        pub _pad: u32,
+        /// The app's id (`org.example.app`).
+        pub id: [u8; 96],
+        /// Its private folder.
+        pub container: [u8; 192],
+    }
+
+    impl Info {
+        pub const fn zeroed() -> Self {
+            Info {
+                flags: 0,
+                id_len: 0,
+                caps: 0,
+                declared: 0,
+                allowed: 0,
+                denied: 0,
+                container_len: 0,
+                _pad: 0,
+                id: [0; 96],
+                container: [0; 192],
+            }
+        }
+        pub fn id(&self) -> &str {
+            core::str::from_utf8(&self.id[..(self.id_len as usize).min(96)]).unwrap_or("")
+        }
+        pub fn container(&self) -> &str {
+            core::str::from_utf8(&self.container[..(self.container_len as usize).min(192)]).unwrap_or("")
+        }
+    }
 }
 
 /// A process's identity (`cred_get`, `cred_set`).
@@ -745,10 +984,13 @@ pub mod err {
     pub const EINPROGRESS: isize = 115;
     pub const ECONNREFUSED: isize = 111;
     pub const EHOSTUNREACH: isize = 113;
+    /// The person cancelled (the open and save panel).
+    pub const ECANCELED: isize = 125;
 
     pub fn name(e: isize) -> &'static str {
         match e.abs() {
             EPERM => "operation not permitted",
+            ECANCELED => "cancelled",
             ENOENT => "no such file or directory",
             ESRCH => "no such process",
             EINTR => "interrupted",

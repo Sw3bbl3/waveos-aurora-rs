@@ -25,6 +25,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -596,6 +597,19 @@ static void objects(void) {
     CHECK(conn_id && crtc_id, "a connected connector with a CRTC");
     struct drm_mode_crtc cr = {.crtc_id = crtc_id};
     CHECK(ioctl(card, DRM_IOCTL_MODE_GETCRTC, &cr) == 0, "GETCRTC");
+    // The desktop's framebuffer (ids are global): its size, but its buffer
+    // (to map, which reads the screen) only with the sandbox's
+    // `screen-capture` — this program runs in the default profile, where
+    // nobody has answered that question.
+    if (cr.fb_id) {
+        struct drm_mode_fb_cmd q = {.fb_id = cr.fb_id};
+        CHECK(ioctl(card, DRM_IOCTL_MODE_GETFB, &q) == 0 && q.width && q.height, "GETFB of the desktop's framebuffer");
+        // sandbox(INFO): flags (1: sandboxed), then the capabilities at 8.
+        uint64_t info[64] = {0};
+        long r = syscall(0x57410000L + 94, 1L, (long)info);
+        int may_capture = r != 0 || !(info[0] & 1) || (info[1] & (1u << 5));
+        CHECK(may_capture || q.handle == 0, "no handle to the desktop's buffer without screen-capture");
+    }
     // The mode the desktop is in goes first: the test uses modes[0].
     for (uint32_t i = 1; cr.mode_valid && i < mode_count; i++)
         if (modes[i].hdisplay == cr.mode.hdisplay && modes[i].vdisplay == cr.mode.vdisplay) {

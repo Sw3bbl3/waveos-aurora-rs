@@ -25,13 +25,13 @@ pub mod exec;
 pub mod fs;
 pub mod inotify;
 pub mod input;
-mod links;
+pub mod links;
 mod misc;
 pub(crate) use misc::realtime_ns;
 mod mm;
 mod net;
 mod process;
-mod shm;
+pub mod shm;
 pub mod signal;
 mod syscount;
 mod sysfs;
@@ -337,8 +337,8 @@ mod nr {
 pub const WAVE_BASE: u64 = 0x5741_0000;
 
 /// The WaveOS calls Linux programs may make: windows, events, sound,
-/// the clipboard, notifications, preferences, the screen's size and game
-/// controllers.
+/// the clipboard, notifications, preferences, the screen's size, game
+/// controllers and their sandbox (the open and save panel, bookmarks).
 fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
     use aurora_abi::nr as w;
     match n as usize {
@@ -363,7 +363,8 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::TIME_MS
         | w::GAMEPADS
         | w::GAMEPAD_STATE
-        | w::GAMEPAD_RUMBLE => crate::syscall::handle(n as usize, a),
+        | w::GAMEPAD_RUMBLE
+        | w::SANDBOX => crate::syscall::handle(n as usize, a),
         _ => Err(ENOSYS),
     }
 }

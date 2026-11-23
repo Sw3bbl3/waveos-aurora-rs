@@ -196,8 +196,15 @@ impl Uinput {
         self.dev.lock().clone()
     }
 
-    /// `UI_DEV_CREATE`.
+    /// `UI_DEV_CREATE`. A made device is real to everybody: from a sandbox,
+    /// a controller takes `gamepad`, a keyboard or pointer (input into
+    /// whatever window has the focus) `input-monitoring`.
     fn create(&self) -> Result<(), isize> {
+        if classify(&self.setup.lock().caps) == Class::Joystick {
+            crate::sandbox::require(aurora_abi::sandbox::GAMEPADS)?;
+        } else {
+            crate::sandbox::may_inject_input()?;
+        }
         let mut slot = self.dev.lock();
         if slot.is_some() {
             return Err(EINVAL);

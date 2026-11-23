@@ -274,6 +274,11 @@ impl File {
         h
     }
 
+    /// Whether this file has a handle for `bo` already (made or imported it).
+    pub fn has_handle(&self, bo: &Arc<BufferObject>) -> bool {
+        self.state.lock().handles.values().any(|b| Arc::ptr_eq(b, bo))
+    }
+
     pub fn bo(&self, handle: u32) -> Option<Arc<BufferObject>> {
         self.state.lock().handles.get(&handle).cloned()
     }

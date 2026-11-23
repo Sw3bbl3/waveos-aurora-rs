@@ -86,6 +86,15 @@ Effect delays and envelopes are ignored. A controller's joystick-API node
 - **Injection.** Keys and motion written to a `/dev/uinput` device go to
   WaveOS's input like a keyboard's, so to the focused window, as on Linux;
   `/dev/uinput` is therefore the logged-in account's only.
+- **Sandboxes** ([sandboxing.md](sandboxing.md)) narrow this per app:
+  controllers' nodes (event, `js`, `hidraw`) and making a controller need
+  `gamepad`; other raw HID nodes `usb`; making a keyboard or pointer with
+  uinput, grabbing one without the focus, and reading one while another
+  program has the focus need `input-monitoring` (which the person must
+  allow). A sandboxed bridge may name only its own app's processes in
+  `win_set_program`. Programs without a manifest (the default profile)
+  keep everything above (made keyboards included); only unfocused reading
+  and grabs without the focus need the person's permission.
 
 ## Finding devices
 

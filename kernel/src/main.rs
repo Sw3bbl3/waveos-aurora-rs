@@ -22,6 +22,7 @@ mod power;
 mod proc;
 mod random;
 mod report;
+mod sandbox;
 mod sched;
 mod stackguard;
 mod sync;
@@ -90,6 +91,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     telemetry::stage("scheduler", "Scheduler and process manager");
     sched::init();
     proc::init();
+    sandbox::init();
     x86_64::instructions::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
     log!("boot", "protections: {}", arch::protect::report());

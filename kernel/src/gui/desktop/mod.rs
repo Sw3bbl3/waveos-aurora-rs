@@ -452,10 +452,26 @@ impl Desktop {
     }
 
     /// Starts a program (its window appears when it calls `win_create`).
+    /// The files among `args` are what the person opened with it.
     fn spawn_program(&mut self, path: &str, args: &[&str]) {
+        self.spawn_with(path, args, None);
+    }
+
+    /// Starts a program in its app's sandbox (see `sandbox`), given the
+    /// files `grants` names (None: the files among `args`).
+    fn spawn_with(&mut self, path: &str, args: &[&str], grants: Option<Vec<(String, bool)>>) {
         let mut argv = alloc::vec![path];
         argv.extend_from_slice(args);
-        if let Err(e) = crate::proc::spawn(path, &argv, [None, None, None], 0) {
+        let sandbox = crate::sandbox::for_launch(path);
+        match grants {
+            Some(list) => list.iter().for_each(|(p, w)| sandbox.grant(p, *w)),
+            None => args
+                .iter()
+                .filter(|a| a.starts_with('/') && crate::fs::stat(a).is_ok())
+                .for_each(|a| sandbox.grant(a, true)),
+        }
+        let confine = crate::sandbox::Confine::With(Some(sandbox));
+        if let Err(e) = crate::proc::spawn_confined(path, &argv, None, [None, None, None], 0, confine) {
             log!("gui", "could not start {}: {}", path, aurora_abi::err::name(e));
         }
     }
@@ -884,9 +900,12 @@ impl Desktop {
                         self.damage(Rect::new(0, 0, self.w, MENUBAR_H));
                     }
                 }
-                Command::OpenApp(path) => match apps::by_path(&path) {
-                    Some(a) => self.open(a.kind),
-                    None => self.spawn_program(&path, &[]),
+                Command::OpenApp(path, args, grants) => match apps::by_path(&path) {
+                    Some(a) if args.is_empty() => self.open(a.kind),
+                    _ => {
+                        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                        self.spawn_with(&path, &args, grants)
+                    }
                 },
                 Command::OpenFile(path) => self.open_file(&path),
                 Command::SetDark(d) => self.set_dark(d),
@@ -910,6 +929,9 @@ impl Desktop {
                     self.damage_all();
                 }
                 Command::Elevate => self.sync_elevation(),
+                Command::Consent => self.sync_consent(),
+                Command::Panel => self.sync_panel(),
+                Command::Indicators => self.damage(Rect::new(0, 0, self.w, MENUBAR_H)),
                 Command::AccountsChanged => self.accounts_changed(),
                 Command::NetworkChanged => self.damage(Rect::new(0, 0, self.w, MENUBAR_H)),
                 // A display was plugged in or out, or a host window resized:

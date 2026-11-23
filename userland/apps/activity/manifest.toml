@@ -1,0 +1,14 @@
+# What Activity may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.activity"
+name = "Activity"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Activity.elf"
+description = "Programs, memory and the network at a glance."
+categories = ["system"]
+permissions = ["processes", "admin", "launch"]

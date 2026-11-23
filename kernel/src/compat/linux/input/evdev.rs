@@ -205,8 +205,19 @@ impl CharDev for EvdevFile {
             (1, 0x81) => d.erase(&self.c, arg as i32).map(|_| 0),
             // EVIOCGEFFECTS.
             (2, 0x84) => put_int(d.ff_max as i32),
-            // EVIOCGRAB.
-            (1, 0x90) => d.grab(&self.c, arg != 0).map(|_| 0),
+            // EVIOCGRAB. From a sandbox: a controller's takes `gamepad`; a
+            // keyboard's or pointer's, unless the program has the focus,
+            // `input-monitoring`.
+            (1, 0x90) => {
+                if arg != 0 {
+                    if d.class == crate::drivers::evdev::Class::Joystick {
+                        crate::sandbox::require(aurora_abi::sandbox::GAMEPADS)?;
+                    } else if !crate::drivers::evdev::has_focus(self.c.pid) {
+                        crate::sandbox::require(aurora_abi::sandbox::INPUT_MONITOR)?;
+                    }
+                }
+                d.grab(&self.c, arg != 0).map(|_| 0)
+            }
             // EVIOCREVOKE: this descriptor reads nothing more.
             (1, 0x91) => {
                 if arg != 0 {

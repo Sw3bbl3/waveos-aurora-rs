@@ -162,6 +162,23 @@ pub fn rm_fb(f: &File, id: u32, disable: bool) -> Result<(), isize> {
     gpu::owner::client_commit(&*f.dev, holder, &c).map_err(errno)
 }
 
+/// The handle `GETFB`/`GETFB2` give for `fb`: only to the master (as on
+/// Linux), and for a framebuffer whose buffer the file doesn't have itself
+/// (the desktop's, or another program's: framebuffer ids are global) only
+/// with `screen-capture` — mapping it would read what is on the screen.
+/// Without one the program still gets the framebuffer's size and format,
+/// and may show it again by id (programs put back the CRTC they found).
+fn fb_handle(f: &File, fb: &Framebuffer) -> u32 {
+    if !f.is_master() {
+        return 0;
+    }
+    if f.has_handle(&fb.bo) || crate::sandbox::require(aurora_abi::sandbox::SCREEN_CAPTURE).is_ok() {
+        f.handle_for(&fb.bo)
+    } else {
+        0
+    }
+}
+
 /// `GETFB`: the buffer's handle only for the master (as on Linux).
 pub fn get_fb(f: &File, a: &mut Args) -> Result<(), isize> {
     let fb = fb_by_id(f, a.u32(0)).ok_or(ENOENT)?;
@@ -171,7 +188,7 @@ pub fn get_fb(f: &File, a: &mut Args) -> Result<(), isize> {
     a.set32(12, fb.pitch);
     a.set32(16, cpp * 8);
     a.set32(20, depth);
-    a.set32(24, if f.is_master() { f.handle_for(&fb.bo) } else { 0 });
+    a.set32(24, fb_handle(f, &fb));
     Ok(())
 }
 
@@ -182,7 +199,7 @@ pub fn get_fb2(f: &File, a: &mut Args) -> Result<(), isize> {
     a.set32(12, fb.format);
     // DRM_MODE_FB_MODIFIERS, with the linear modifier (0) in `modifier[0]`.
     a.set32(16, 2);
-    a.set32(20, if f.is_master() { f.handle_for(&fb.bo) } else { 0 });
+    a.set32(20, fb_handle(f, &fb));
     a.set32(36, fb.pitch);
     a.set32(52, fb.offset);
     a.set64(72, 0);

@@ -1,0 +1,14 @@
+# What Doom may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.doom"
+name = "Doom"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Doom.elf"
+description = "The classic shooter, with Freedoom or your own WAD files from Documents/Doom."
+categories = ["system"]
+permissions = ["documents", "network", "audio", "gamepad", "linux", "spawn", "launch", "background"]

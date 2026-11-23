@@ -113,6 +113,18 @@ pub mod desktop {
         req(abi::desktop::OPEN_APP, &path).map(|_| ())
     }
 
+    /// Opens an app with arguments (the way the desktop would): it runs as
+    /// itself, not in the caller's sandbox, and is given the files among
+    /// `args` the caller may use. Needs `launch` in a sandbox.
+    pub fn open_app_with(name: &str, args: &[&str]) -> Result<()> {
+        let mut payload = if name.starts_with('/') { String::from(name) } else { alloc::format!("/System/Apps/{name}.elf") };
+        for a in args {
+            payload.push('\0');
+            payload.push_str(a);
+        }
+        req(abi::desktop::OPEN_APP, &payload).map(|_| ())
+    }
+
     pub fn open_file(path: &str) -> Result<()> {
         req(abi::desktop::OPEN_FILE, path).map(|_| ())
     }

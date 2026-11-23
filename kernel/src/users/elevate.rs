@@ -36,6 +36,11 @@ static NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(
 
 /// Asks for the administrator capability for `p` (blocks until answered).
 pub fn ask(p: &Arc<Process>, reason: &str) -> Result<(), isize> {
+    // A sandboxed app asks only if its manifest says it may.
+    let sandbox = p.sandbox.lock().clone();
+    if sandbox.is_some_and(|s| s.require(aurora_abi::sandbox::ELEVATE).is_err()) {
+        return Err(EPERM);
+    }
     if !crate::gui::server::running() {
         return Err(EPERM);
     }

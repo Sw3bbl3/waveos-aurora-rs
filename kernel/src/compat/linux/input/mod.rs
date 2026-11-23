@@ -152,6 +152,27 @@ pub fn open(p: &Process, guest: &str, flags: u64) -> Option<Result<Special, isiz
             return Some(Err(EACCES));
         }
     }
+    // From a sandbox: controllers take `gamepad`, other raw HID devices
+    // `usb`. (Keyboards and pointers read only while their program has the
+    // focus, or with `input-monitoring`: `drivers::evdev`.)
+    let need = match dev {
+        Dev::Js(_) => aurora_abi::sandbox::GAMEPADS,
+        Dev::Event(n) => match core_evdev::by_num(n) {
+            Some(d) if d.class == core_evdev::Class::Joystick => aurora_abi::sandbox::GAMEPADS,
+            _ => 0,
+        },
+        Dev::Hidraw(n) => match core_evdev::hidraw::by_num(n) {
+            Some(h) if h.class == core_evdev::Class::Joystick => aurora_abi::sandbox::GAMEPADS,
+            _ => aurora_abi::sandbox::USB,
+        },
+        // Checked when it makes a device (`uinput::Uinput::create`).
+        Dev::Uinput => 0,
+    };
+    if need != 0 {
+        if let Err(e) = crate::sandbox::require(need) {
+            return Some(Err(e));
+        }
+    }
     let pid = p.pid;
     let node: Result<Arc<dyn super::chardev::CharDev>, isize> = match dev {
         Dev::Event(n) => core_evdev::by_num(n)

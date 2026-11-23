@@ -33,6 +33,7 @@ pub mod power;
 pub mod prefs;
 pub mod process;
 pub mod rt;
+pub mod sandbox;
 pub mod sync;
 pub mod sys;
 pub mod thread;

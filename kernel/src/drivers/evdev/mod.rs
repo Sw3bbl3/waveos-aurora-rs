@@ -514,7 +514,8 @@ impl Device {
         }
         match self.class {
             Class::Joystick => crate::drivers::gamepad::may_read(pid),
-            _ => has_focus(pid),
+            // Unfocused only for a sandboxed app the person let monitor input.
+            _ => has_focus(pid) || crate::sandbox::monitors_input(pid),
         }
     }
 

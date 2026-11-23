@@ -51,6 +51,13 @@ fn in_system_dirs(guest: &str) -> bool {
 /// Something new is made on the disk when its folder is there.
 pub fn to_host(guest: &str) -> String {
     let first = guest.trim_start_matches('/').split('/').next().unwrap_or("");
+    // A sandboxed app's Linux programs keep their temporary files and home
+    // folder in its container (see `sandbox::linux_private`).
+    if WRITABLE_DIRS.contains(&first) {
+        if let Some(private) = crate::sandbox::linux_private(guest) {
+            return private;
+        }
+    }
     if SYSTEM_DIRS.contains(&first) {
         let disk = format!("{WRITABLE_ROOT}{guest}");
         if fs::stat(&disk).is_ok() {
@@ -70,6 +77,9 @@ pub fn to_host(guest: &str) -> String {
 
 /// The Linux path for the WaveOS path `host`.
 pub fn to_guest(host: &str) -> String {
+    if let Some(guest) = crate::sandbox::linux_guest(host) {
+        return guest;
+    }
     for (root, dirs) in
         [(SYSTEM_ROOT, &SYSTEM_DIRS[..]), (WRITABLE_ROOT, &WRITABLE_DIRS[..]), (WRITABLE_ROOT, &SYSTEM_DIRS[..])]
     {
@@ -740,9 +750,14 @@ fn open_guest_mode(p: &Process, guest: &str, flags: u64, mode: u64) -> Result<Ar
     // OSS sound, which GStreamer and SDL can play through: a WaveOS sound
     // stream (`ENODEV` without a sound device).
     if guest == "/dev/dsp" {
+        crate::sandbox::require(aurora_abi::sandbox::AUDIO_OUT)?;
         return crate::drivers::audio::open().map(|s| Arc::new(Handle::Audio(s)));
     }
-    // The display devices' DRM nodes.
+    // The display devices' DRM nodes. A card drives the display (and can
+    // read what it shows); render nodes only draw.
+    if guest.starts_with("/dev/dri/card") {
+        crate::sandbox::require(aurora_abi::sandbox::DISPLAY)?;
+    }
     if let Some(f) = super::drm::open(guest) {
         return Ok(special(Special::Drm(f?)));
     }
@@ -974,6 +989,13 @@ pub fn getdents64(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize
     let mut s = s.lock();
     let Special::Dir { host, entries, pos } = &mut *s else { return Err(ENOTDIR) };
     if entries.is_none() {
+        // A sandbox may refuse a real folder's list (the made-up ones in
+        // /dev, /proc, /sys and /run/udev are everyone's).
+        let made_up =
+            ["/dev", "/proc"].iter().any(|d| crate::sandbox::under(host, d)) || super::input::lookup(host).is_some();
+        if !made_up {
+            crate::sandbox::check_path(host, crate::sandbox::Access::Read)?;
+        }
         let mut list = alloc::vec![(String::from("."), DT_DIR), (String::from(".."), DT_DIR)];
         list.extend(dir_entries(host));
         *entries = Some(list);
@@ -1850,8 +1872,10 @@ pub fn chdir(p: &Process, ptr: u64) -> Result<u64, isize> {
 
 fn set_cwd(p: &Process, guest: &str) -> Result<u64, isize> {
     let host = to_host(guest);
-    if !fs::is_dir(&host) {
-        return Err(if fs::stat(&host).is_ok() { ENOTDIR } else { ENOENT });
+    match fs::stat(&host) {
+        Ok((m, _)) if m.kind == Kind::Dir => {}
+        Ok(_) => return Err(ENOTDIR),
+        Err(e) => return Err(e),
     }
     *p.cwd.lock() = host;
     Ok(0)
@@ -1885,6 +1909,7 @@ pub fn unlinkat(p: &Process, dirfd: u64, ptr: u64, flags: u64) -> Result<u64, is
         if crate::users::current().is_some_and(|c| !c.is_root()) {
             fs::perm::access(&fs::parent_path(&to_host(&guest)), fs::perm::W | fs::perm::X)?;
         }
+        super::links::may_change()?;
         return fs::perm::system(|| super::links::remove(&guest)).map(|_| 0);
     }
     let host = to_host(&guest);
@@ -1962,6 +1987,7 @@ pub fn symlinkat(p: &Process, target: u64, dirfd: u64, ptr: u64) -> Result<u64, 
     if crate::users::current().is_some_and(|c| !c.is_root()) {
         fs::perm::access(&fs::parent_path(&host), fs::perm::W | fs::perm::X)?;
     }
+    super::links::may_change()?;
     fs::perm::system(|| super::links::create(&guest, &to)).map(|_| 0)
 }
 

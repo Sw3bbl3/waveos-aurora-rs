@@ -90,6 +90,12 @@ const TESTS: &[Test] = &[
     ("Linux programs: Mesa's Vulkan (lavapipe), a triangle read back (vkcheck)", linux_mesa_vulkan),
     ("Linux programs: Mesa in a WaveOS window (es2gears through wl-bridge)", linux_mesa_window),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
+    ("sandbox: policy, consent, grants, bookmarks, system manifests", crate::sandbox::selftest::policy),
+    ("sandbox: a native program refused, given files, allowed and revoked (sbxtest)", crate::sandbox::selftest::programs),
+    ("sandbox: a Linux program tries every way out (sandboxtest)", crate::sandbox::selftest::linux),
+    ("sandbox: windowless apps end only when idle and without background", crate::sandbox::selftest::background),
+    ("sandbox: the native fuzzer never reaches the oracle", crate::sandbox::selftest::fuzz_native),
+    ("sandbox: the Linux fuzzer never reaches the oracle", crate::sandbox::selftest::fuzz_linux),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
     ("SD/eMMC: the card the system runs from, and the second reader's card", sd_cards),
@@ -481,8 +487,17 @@ fn linux_input() {
     }
     let (in_r, in_w) = crate::proc::new_pipe(false);
     let (out_r, out_w) = crate::proc::new_pipe(false);
-    let pid = crate::proc::spawn(path, &["inputtest"], [Some(in_r), Some(out_w.clone()), Some(out_w)], 0)
-        .expect("spawn inputtest");
+    // In the default profile, as the desktop would start it: nothing it
+    // does may need an answer nobody is here to give.
+    let pid = crate::proc::spawn_confined(
+        path,
+        &["inputtest"],
+        None,
+        [Some(in_r), Some(out_w.clone()), Some(out_w)],
+        0,
+        default_profile(path),
+    )
+    .expect("spawn inputtest");
     let p = crate::proc::get(pid).unwrap();
     let (to_test, from_test) = match (&*in_w, &*out_r) {
         (crate::proc::Handle::PipeWrite(w), crate::proc::Handle::PipeRead { pipe, .. }) => (w.clone(), pipe.clone()),
@@ -1207,6 +1222,9 @@ fn linux_fuzz() {
         (opt("fuzz_seed", "1"), opt("linuxfuzz_children", "6"), opt("linuxfuzz_calls", "300"));
     let before = free_frames();
     run_linux_test_with("linuxfuzz", &["linuxfuzz", &seed, &children, &calls], "linuxfuzz passed", 30 * 60_000);
+    // What its own clean-up could not remove (a child may have taken the
+    // permissions away): the next boot starts from the same place.
+    let _ = fs::remove_tree("/Linux/tmp/lfz");
     let deadline = time::uptime_ms() + 10_000;
     while free_frames() + FUZZ_SLACK < before && time::uptime_ms() < deadline {
         let _ = crate::gui::server::take_commands();
@@ -1229,6 +1247,13 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
     let (code, text) = run_linux_program(&path, argv, None, None, timeout_ms);
     assert_eq!(code, Some(0), "{name} failed");
     assert!(text.contains(passed), "{name} did not finish");
+}
+
+/// Linux programs run in the default profile, as the desktop starts them
+/// (see `sandbox`): their account's rights; the guarded devices would ask,
+/// and nobody answers in the tests, so a program needing one fails.
+fn default_profile(path: &str) -> crate::sandbox::Confine {
+    crate::sandbox::Confine::With(Some(crate::sandbox::for_launch(path)))
 }
 
 /// Runs a Linux program to its end (or `timeout_ms`), shows its output and
@@ -1265,7 +1290,8 @@ fn run_linux_program_watched(
         }
         None => (None, None),
     };
-    let pid = crate::proc::spawn(path, argv, [stdin, Some(w.clone()), Some(w)], 0).expect("spawn Linux program");
+    let pid = crate::proc::spawn_confined(path, argv, None, [stdin, Some(w.clone()), Some(w)], 0, default_profile(path))
+        .expect("spawn Linux program");
     let p = crate::proc::get(pid).unwrap();
     let stdin_until = time::uptime_ms() + stdin_ms.unwrap_or(0);
     let mut out = alloc::vec::Vec::new();

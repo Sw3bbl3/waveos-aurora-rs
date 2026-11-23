@@ -159,11 +159,12 @@ pub fn require_admin(reason: &str) -> Result<(), isize> {
 }
 
 /// May the calling process signal (or end) `target`? Its own account's
-/// processes, or any with the administrator capability.
+/// processes, or any with the administrator capability — and, from a
+/// sandbox, only its own app's (see `sandbox::may_signal`).
 pub fn may_signal(target: &crate::proc::Process) -> bool {
     match current() {
         None => true,
-        Some(me) => me.is_admin() || me.uid == target.cred.lock().uid,
+        Some(me) => (me.is_admin() || me.uid == target.cred.lock().uid) && crate::sandbox::may_signal(target),
     }
 }
 

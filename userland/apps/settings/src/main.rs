@@ -25,6 +25,7 @@ use waveui::Request;
 
 mod displays;
 mod installed;
+mod privacy;
 mod search;
 mod update;
 mod users;
@@ -54,11 +55,12 @@ pub enum Pane {
     Login,
     Apps,
     Update,
+    Privacy,
     Accessibility,
     About,
 }
 
-const PANES: [(Pane, &str, &str, u32); 19] = [
+const PANES: [(Pane, &str, &str, u32); 20] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
@@ -76,6 +78,7 @@ const PANES: [(Pane, &str, &str, u32); 19] = [
     (Pane::Login, "Users & Login", "login", 0xFF8E5CF5),
     (Pane::Apps, "Apps", "apps", 0xFF32ADE6),
     (Pane::Update, "Software Update", "update", 0xFF2C7BE5),
+    (Pane::Privacy, "Privacy & Security", "privacy", 0xFF0A84FF),
     (Pane::Accessibility, "Accessibility", "accessibility", 0xFF147EFB),
     (Pane::About, "About", "about", 0xFF30B0C7),
 ];
@@ -120,6 +123,7 @@ pub enum Msg {
     Users(users::UserMsg),
     Apps(installed::AppMsg),
     Update(update::UpdMsg),
+    Privacy(privacy::PrivacyMsg),
     /// Several displays: arrangement, main display, mirroring, each display's settings.
     Displays(displays::DisplayMsg),
 }
@@ -156,6 +160,8 @@ pub struct Settings {
     apps: installed::AppsState,
     /// Software Update.
     update: update::UpdateState,
+    /// What apps may do.
+    privacy: privacy::PrivacyState,
     /// Display, with several displays.
     displays: displays::DisplaysState,
 }
@@ -198,6 +204,7 @@ impl Settings {
             users: Default::default(),
             apps: Default::default(),
             update: Default::default(),
+            privacy: Default::default(),
             displays: Default::default(),
         };
         s.load_custom_thumb();
@@ -264,6 +271,7 @@ impl Settings {
                 self.update.refresh();
                 self.update.check_on_open();
             }
+            Pane::Privacy => self.privacy.refresh(),
             _ => {}
         }
     }
@@ -1524,6 +1532,7 @@ impl App for Settings {
             Msg::Displays(m) => self.displays_update(m, cx),
             Msg::Apps(m) => self.apps_update(m, cx),
             Msg::Update(m) => self.update_update(m, cx),
+            Msg::Privacy(m) => self.privacy_update(m, cx),
         }
     }
 
@@ -1546,7 +1555,7 @@ impl App for Settings {
         match self.pane {
             Pane::Controllers => Some(50),
             Pane::DateTime | Pane::Network => Some(1000),
-            Pane::Appearance | Pane::About => Some(2000),
+            Pane::Appearance | Pane::About | Pane::Privacy => Some(2000),
             Pane::Update => Some(if self.update.busy() { 150 } else { 1000 }),
             _ => None,
         }
@@ -1605,6 +1614,7 @@ impl App for Settings {
                 Pane::Login => self.users_pane(),
                 Pane::Apps => self.apps_pane(),
                 Pane::Update => self.update_pane(),
+                Pane::Privacy => self.privacy_pane(),
                 Pane::Accessibility => self.accessibility(),
                 Pane::About => self.about(env),
             };
@@ -1714,6 +1724,13 @@ fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
             cv.stroke_arc(cx * 16, cy * 16, 6 * 16, 2 * 16, 569, 398, w);
             cv.fill_circle(cx + 6, cy - 3, 2, w);
             cv.fill_circle(cx - 6, cy + 3, 2, w);
+        }
+        Pane::Privacy => {
+            // A hand raised: stop.
+            cv.fill_round_rect(Rect::new(cx - 5, cy - 3, 10, 10), 3, w);
+            for k in 0..4 {
+                cv.fill_round_rect(Rect::new(cx - 5 + k * 3, cy - 7, 2, 6), 1, w);
+            }
         }
         Pane::Login => {
             cv.fill_circle(cx, cy - 3, 3, w);

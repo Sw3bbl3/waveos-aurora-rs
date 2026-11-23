@@ -1,0 +1,14 @@
+# What Voyage may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.voyage"
+name = "Voyage"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Voyage.elf"
+description = "The web browser (WebKitGTK)."
+categories = ["system"]
+permissions = ["network", "audio", "microphone", "camera", "notifications", "spawn", "linux", "linux-home", "home", "display", "launch", "ipc", "clipboard", "background", "gamepad"]

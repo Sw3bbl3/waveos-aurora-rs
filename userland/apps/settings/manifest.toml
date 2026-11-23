@@ -1,0 +1,14 @@
+# What Settings may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.settings"
+name = "Settings"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Settings.elf"
+description = "How this computer looks and works."
+categories = ["system"]
+permissions = ["system", "admin", "elevate", "privacy", "preferences", "network", "audio", "gamepad", "launch", "spawn", "all-files", "notifications"]
