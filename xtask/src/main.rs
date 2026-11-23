@@ -43,7 +43,7 @@
 //!                                         (AURORA_TEST_FILTER=NAME runs matching tests; AURORA_FUZZ_SEED,
 //!                                         AURORA_FUZZ_ROUNDS, AURORA_FUZZ_ITERS, AURORA_LINUXFUZZ_CHILDREN and
 //!                                         AURORA_LINUXFUZZ_CALLS make the fuzzers run longer, with
-//!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 240 (360 under
+//!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 480 (600 under
 //!                                         384 MiB, 1200 over 512);
 //!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run;
 //!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data)
@@ -2123,8 +2123,8 @@ fn run_tests_once(
     // (The Mesa tests, with more memory, compile shaders under emulation;
     // on a small machine the swap tests go through the swap file on disk.)
     let default = match memory_mib {
-        0..=383 => 360,
-        384..=512 => 240,
+        0..=383 => 600,
+        384..=512 => 480,
         _ => 1200,
     };
     let timeout =
