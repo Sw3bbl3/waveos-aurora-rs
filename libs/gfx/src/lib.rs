@@ -10,10 +10,12 @@ pub mod canvas;
 pub mod font;
 pub mod geom;
 pub mod icons;
+pub mod layer;
 pub mod material;
 pub mod math;
 pub mod motion;
 pub mod simd;
+pub mod spring;
 pub mod theme;
 pub mod ttf;
 /// Lyra font parsing and rasterization; `ttf` remains a compatibility alias.

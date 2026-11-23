@@ -13,6 +13,7 @@ mod dragdrop;
 mod handle;
 mod harbor;
 mod notifications;
+mod play;
 mod reveal;
 mod shell;
 mod shoal;
@@ -20,6 +21,8 @@ mod shore;
 mod spotlight;
 mod tour;
 
+#[cfg(feature = "ktest")]
+pub use play::self_test as play_self_test;
 #[cfg(feature = "ktest")]
 pub use spotlight::calc_for_test;
 
@@ -213,6 +216,8 @@ pub struct Desktop {
     account: Option<Account>,
     /// Shore: setup, login or lock (nothing else gets input while it's up).
     shore: Option<shore::Shore>,
+    /// Wave Play, the controller layout (see `play`).
+    play: play::Play,
 }
 
 impl Desktop {
@@ -281,6 +286,7 @@ impl Desktop {
             last_ac: None,
             account: None,
             shore: None,
+            play: play::Play::new(),
         };
         d.account = Account::load();
         d.shore = Self::startup_shore(d.account.as_ref());
@@ -441,6 +447,7 @@ impl Desktop {
         }
         self.damage_window(id);
         self.damage_shell();
+        self.play_adopt(id);
     }
 
     /// Shows a client window that has drawn its first frame (or took too long).
@@ -501,6 +508,7 @@ impl Desktop {
     }
 
     pub fn close(&mut self, id: u32) {
+        self.play_window_closing(id);
         self.mru.retain(|v| *v != id);
         if let Some(s) = &mut self.switcher {
             s.remove(id);
@@ -710,6 +718,7 @@ impl Desktop {
         if core::mem::take(&mut self.confirm_resolution) {
             self.add_window(Box::new(apps::DisplayConfirm::new(super::screen_pixels())));
         }
+        self.play_resized();
         self.damage_all();
     }
 
@@ -793,6 +802,10 @@ impl Desktop {
                     if let Some(w) = self.window_of_client(id) {
                         self.reveal_window(w);
                     }
+                    // Hidden under Wave Play (or frozen under its overlay).
+                    if self.play_presented(id) {
+                        continue;
+                    }
                     if let Some(i) = self.window_of_client(id).and_then(|w| self.index_of(w)) {
                         if !self.windows[i].minimized {
                             let c = self.windows[i].content();
@@ -804,6 +817,7 @@ impl Desktop {
                     }
                 }
                 Command::StartTour => self.start_tour(),
+                Command::Play(on) => self.play_command(on),
                 Command::Cursor => {
                     let (x, y) = self.cursor;
                     self.damage.push(cursor::bounds(x, y).intersect(&self.screen()));
@@ -856,6 +870,7 @@ impl Desktop {
             let name = app.map(|a| String::from(a.name)).unwrap_or(c.name);
             self.add_window(Box::new(CrashDialog::new(name, c.reason, app.map(|a| a.kind))));
         }
+        self.play_poll();
         self.take_notifications();
         if self.power.is_some() {
             self.damage_all();
@@ -872,6 +887,7 @@ impl Desktop {
             || self.harbor_moving()
             || self.reveal_moving()
             || self.tour_moving()
+            || self.play_moving()
             || self.windows.iter().any(|w| w.chrome.moving(self.now_ms, theme::reduce_motion()))
             || (!theme::reduce_motion() && cursor::animated(self.cursor_shape()))
     }
@@ -902,7 +918,10 @@ impl Desktop {
         if self.shore.is_some() {
             next = next.min(self.last_tick + 530);
         }
-        next.min(self.notification_deadline()).min(self.bar_deadline()).min(self.harbor_deadline())
+        next.min(self.notification_deadline())
+            .min(self.bar_deadline())
+            .min(self.harbor_deadline())
+            .min(self.play_deadline())
     }
 
     /// Runs `f` against window `id`'s app and applies its requests.
@@ -955,6 +974,9 @@ impl Desktop {
             self.shore_pointer(x, y, pressed & BUTTON_LEFT != 0);
             return;
         }
+        if self.play_pointer(x, y, moved, pressed & BUTTON_LEFT != 0, released & BUTTON_LEFT != 0) {
+            return;
+        }
 
         if moved {
             self.pointer_moved(x, y);
@@ -1003,7 +1025,7 @@ impl Desktop {
     /// notches for apps that step, and the exact amount for smooth ones.
     fn scroll(&mut self, dx: i32, dy: i32) {
         use crate::drivers::input::NOTCH;
-        if self.shore.is_some() || self.switcher.is_some() {
+        if self.shore.is_some() || self.switcher.is_some() || self.play_covers() {
             return;
         }
         let (x, y) = self.cursor;
@@ -1043,6 +1065,9 @@ impl Desktop {
         let (x, y) = self.cursor;
         if self.shore.is_some() {
             return c::ARROW;
+        }
+        if self.play_pointer_hidden() {
+            return c::HIDDEN;
         }
         if let Some(shape) = self.tour_cursor(x, y) {
             return shape;
@@ -1294,6 +1319,9 @@ impl Desktop {
             self.shore_key(&k);
             return;
         }
+        if self.play_key(&k) {
+            return;
+        }
         if self.tour_key(&k) || self.handle_key(&k) {
             return;
         }
@@ -1505,6 +1533,7 @@ impl Desktop {
             self.update_harbor();
         }
         busy |= self.step_harbor();
+        busy |= self.step_play();
         if busy {
             16
         } else {
@@ -1516,6 +1545,7 @@ impl Desktop {
 
     /// Merges pending damage into a small set of rectangles and clears it.
     pub fn take_damage(&mut self) -> Vec<Rect> {
+        self.play_frame_begin(!self.damage.is_empty() || self.scene_dirty);
         // Reconstruct the scene bottom-up before sampling any backdrop. Cursor-only
         // updates reuse the composited scene and never re-blur it.
         if self.scene_dirty && !self.partial_safe() {
@@ -1583,6 +1613,7 @@ impl Desktop {
         self.scene_dirty
     }
     pub fn finish_frame(&mut self) {
+        self.play_frame_end();
         self.scene_dirty = false;
     }
     /// Whether damage may be repainted piecemeal (`take_damage` grows it
@@ -1607,11 +1638,15 @@ impl Desktop {
             || self.harbor.peek.is_some()
             || self.dnd.is_some()
             || self.power.is_some()
-            || self.tour.is_some())
+            || self.tour.is_some()
+            || self.play_full_frames())
     }
 
     /// Every glass surface on screen (they sample what lies beneath them).
     fn material_rects(&self) -> Vec<Rect> {
+        if self.play_covers() {
+            return Vec::new();
+        }
         // The bar's glass is its bubbles, not the whole strip.
         let mut materials =
             alloc::vec![self.left_bubble().0, self.right_bubble().0, self.crest_area(), self.dock_rect()];
@@ -1649,6 +1684,11 @@ impl Desktop {
             }
             self.save_scene(cv);
             cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape(), self.now_ms);
+            return;
+        }
+        if self.play_paint(cv) {
+            staged(Stage::Scene, || self.save_scene(cv));
+            staged(Stage::Cursor, || cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape(), self.now_ms));
             return;
         }
         let above = match self.backdrop_window() {
@@ -1690,6 +1730,7 @@ impl Desktop {
         self.paint_item_overlay(cv);
         self.paint_tour(cv);
         self.paint_reveal(cv);
+        self.paint_play_over_desktop(cv);
         if let Some(p) = self.power {
             self.paint_power_overlay(cv, p);
         }

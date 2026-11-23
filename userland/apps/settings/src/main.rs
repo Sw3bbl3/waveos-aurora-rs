@@ -1,5 +1,5 @@
 //! Settings — appearance, display, keyboard, trackpad and mouse, game
-//! controllers, network, date and time, sound, notifications, the desktop,
+//! controllers and Wave Play, network, date and time, sound, notifications, the desktop,
 //! login, accessibility, and information about this computer.
 //!
 //! Start with a pane name (`Settings.elf keyboard`) or a setting
@@ -36,6 +36,7 @@ pub enum Pane {
     Trackpad,
     Mouse,
     Controllers,
+    Play,
     Network,
     DateTime,
     Sound,
@@ -47,13 +48,14 @@ pub enum Pane {
     About,
 }
 
-const PANES: [(Pane, &str, &str, u32); 15] = [
+const PANES: [(Pane, &str, &str, u32); 16] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
     (Pane::Trackpad, "Trackpad", "trackpad", 0xFF64D2FF),
     (Pane::Mouse, "Mouse", "mouse", 0xFF6E6E80),
     (Pane::Controllers, "Game Controllers", "controllers", 0xFF34C759),
+    (Pane::Play, "Wave Play", "play", 0xFF1F9E9A),
     (Pane::Network, "Network", "network", 0xFF30D158),
     (Pane::DateTime, "Date & Time", "datetime", 0xFFFF9F0A),
     (Pane::Sound, "Sound", "sound", 0xFFFF375F),
@@ -95,6 +97,8 @@ pub enum Msg {
     WifiDisconnect,
     CheckNetwork,
     Rumble(u32),
+    /// Enter (true) or leave Wave Play.
+    Play(bool),
     OpenAbout,
     ClearNote,
 }
@@ -716,6 +720,56 @@ impl Settings {
              WaveSDK's gamepad module.",
         ));
         page("Game Controllers", sections)
+    }
+
+    fn play(&self) -> View<'_, Msg> {
+        let item = |id: &'static str, label: &str, detail: &str, key: &'static str| {
+            row_detail(label, detail, Toggle::new("", prefs::get_bool(key)).on_change(move |on| Msg::Toggle(key, on)))
+                .id(id)
+        };
+        page(
+            "Wave Play",
+            vec![
+                card(vec![row_detail(
+                    "Wave Play",
+                    "Your games and apps in large rows, full screen, for a controller. Press the \
+                     controller's home button for the quick menu.",
+                    Button::new("Enter Wave Play").action(Msg::Play(true)),
+                )
+                .id("play/enter")]),
+                titled(
+                    "Controllers",
+                    vec![
+                        item(
+                            "play/auto-enter",
+                            "Open when a controller connects",
+                            "Connecting a controller turns the desktop into Wave Play.",
+                            pref::PLAY_AUTO_ENTER,
+                        ),
+                        item(
+                            "play/sounds",
+                            "Sounds and vibration",
+                            "Quiet clicks as you move, and a light vibration on controllers that have it.",
+                            pref::PLAY_SOUNDS,
+                        ),
+                    ],
+                ),
+                titled(
+                    "Motion",
+                    vec![item(
+                        "play/motion",
+                        "Reduce motion",
+                        "Switch between the desktop and Wave Play without the animated transformation.",
+                        pref::REDUCE_MOTION,
+                    )],
+                ),
+                footer(
+                    "Without a controller: the arrow keys move, Enter opens, Escape goes back and \
+                     Super+Escape opens the quick menu. Games and apps can be added to the library by \
+                     placing a .play file in /Settings/Play/Library.",
+                ),
+            ],
+        )
     }
 
     fn network(&self) -> View<'_, Msg> {
@@ -1387,6 +1441,11 @@ impl App for Settings {
                     pad.rumble(0.8, 0.5, 400);
                 }
             }
+            Msg::Play(on) => {
+                if let Err(e) = corekit::process::desktop::play(on) {
+                    self.flash(cx, format!("Couldn't open Wave Play: {e}"));
+                }
+            }
             Msg::OpenAbout => cx.open_app("About"),
             Msg::ClearNote => self.note = None,
         }
@@ -1457,6 +1516,7 @@ impl App for Settings {
                 Pane::Trackpad => self.trackpad(),
                 Pane::Mouse => self.mouse(),
                 Pane::Controllers => self.controllers(),
+                Pane::Play => self.play(),
                 Pane::Network => self.network(),
                 Pane::DateTime => self.date_time(),
                 Pane::Sound => self.sound(),
@@ -1522,6 +1582,10 @@ fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
             cv.fill_rect(Rect::new(cx - 6, cy, 4, 1), tile);
             cv.fill_rect(Rect::new(cx - 4, cy - 2, 1, 5), tile);
             cv.fill_circle(cx + 4, cy, 1, tile);
+        }
+        Pane::Play => {
+            cv.polyline(&[(cx - 3, cy - 6), (cx + 6, cy), (cx - 3, cy + 6), (cx - 3, cy - 6)], 2, w);
+            cv.fill_rect(Rect::new(cx - 2, cy - 3, 3, 6), w);
         }
         Pane::Network => {
             cv.line(cx - 5, cy + 4, cx, cy - 4, 2, w);

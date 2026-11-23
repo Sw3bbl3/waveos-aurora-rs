@@ -108,7 +108,7 @@ pub fn start() {
 
 /// SSE2 drawing is safe only in a kernel task that owns saved SIMD state,
 /// and never inside an interrupt handler (which runs with interrupts off).
-fn simd_allowed() -> bool {
+pub(crate) fn simd_allowed() -> bool {
     crate::arch::percpu::this().simd.load(core::sync::atomic::Ordering::Relaxed)
         && x86_64::instructions::interrupts::are_enabled()
 }
@@ -222,6 +222,7 @@ fn flush(front: &mut [u32], back: &[u32], fb: &Framebuffer, r: Rect) {
 fn run() {
     let mut fb = current_fb().expect("gui::init not called");
     input::set_consumer(sched::current_id());
+    crate::drivers::gamepad::set_consumer(sched::current_id());
     server::set_compositor(sched::current_id());
 
     crate::telemetry::stage("gui", "Lumen Server window server");
@@ -413,7 +414,9 @@ fn run() {
             }
         }
         let wait = next_tick.saturating_sub(time::uptime_ms()).max(1);
-        sched::wait_until(wait, || input::pending() || server::pending() || notify::pending());
+        sched::wait_until(wait, || {
+            input::pending() || server::pending() || notify::pending() || crate::drivers::gamepad::pending()
+        });
     }
 }
 

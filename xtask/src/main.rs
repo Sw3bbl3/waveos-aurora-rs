@@ -10,8 +10,11 @@
 //!       --audio-wav PATH                  record guest audio to a WAV file
 //!       --gpu std|virtio                  display adapter (default std; virtio runs the ported Linux driver)
 //!       --resolution WxH                  virtio's starting screen size (default 1920x1080; WaveOS then
-//!                                         follows the QEMU window when you resize it)
-//!       --wifi-sim                        simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
+//!                                         follows the QEMU window when you resize it); on the standard
+//!                                         display, the resolution the bootloader picks (kept on the disk)
+//!       --wifi-sim                       simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
+//!       --virtual-gamepad                 a game controller played on the keyboard, connected at start-up
+//!                                         (Super+G connects and disconnects it at any time; see Wave Play)
 //!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
 //!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
 //!       --headless --no-build --debug --gdb --int
@@ -140,6 +143,15 @@ fn main() {
             // Simulated Wi-Fi networks (the kernel's software radio).
             image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
                 .expect("write boot.conf");
+            // A keyboard-driven game controller, for Wave Play without one.
+            image::set_boot_option(&img, "virtual_gamepad", if flag("--virtual-gamepad") { "1" } else { "0" })
+                .expect("write boot.conf");
+            // On the standard display, --resolution is the bootloader's choice (as Settings makes it).
+            if gpu != "virtio" {
+                if let Some(r) = args.iter().position(|a| a == "--resolution").and_then(|i| args.get(i + 1)) {
+                    image::set_boot_option(&img, "resolution", r).expect("write boot.conf");
+                }
+            }
             let mon = flag("--monitor").then(|| monitor::Monitor::start(&root()));
             let opts = RunOpts {
                 memory_mib: number("--memory-mib", 4096, 256, 32768),

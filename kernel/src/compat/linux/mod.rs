@@ -312,7 +312,8 @@ mod nr {
 pub const WAVE_BASE: u64 = 0x5741_0000;
 
 /// The WaveOS calls Linux programs may make: windows, events, sound,
-/// the clipboard, notifications, preferences and the screen's size.
+/// the clipboard, notifications, preferences, the screen's size and game
+/// controllers.
 fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
     use aurora_abi::nr as w;
     match n as usize {
@@ -333,7 +334,10 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::PREF_GET
         | w::DISPLAY_MODES
         | w::UNIX_MS
-        | w::TIME_MS => crate::syscall::handle(n as usize, a),
+        | w::TIME_MS
+        | w::GAMEPADS
+        | w::GAMEPAD_STATE
+        | w::GAMEPAD_RUMBLE => crate::syscall::handle(n as usize, a),
         _ => Err(ENOSYS),
     }
 }

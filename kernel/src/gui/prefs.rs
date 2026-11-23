@@ -14,7 +14,7 @@ fn valid_key(k: &str) -> bool {
 /// Defaults for preferences that have one.
 fn default(key: &str) -> Option<&'static str> {
     Some(match key {
-        pref::DARK | pref::CREST | pref::DESKTOP_WATER => "1",
+        pref::DARK | pref::CREST | pref::DESKTOP_WATER | pref::PLAY_AUTO_ENTER | pref::PLAY_SOUNDS => "1",
         pref::BATTERY_LEVEL | pref::AUTO_LOGIN => "0",
         pref::CLOCK_24H
         | pref::CLOCK_SECONDS
@@ -69,6 +69,8 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         | pref::DOCK_AUTOHIDE
         | pref::TAP_TO_CLICK
         | pref::NATURAL_SCROLLING
+        | pref::PLAY_AUTO_ENTER
+        | pref::PLAY_SOUNDS
             if value != "0" && value != "1" =>
         {
             return Err(EINVAL)

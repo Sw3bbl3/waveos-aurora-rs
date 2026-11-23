@@ -17,9 +17,11 @@ pub enum Stage {
     Cursor,
     Flush,
     Backdrop,
+    /// Wave Play's home, cards and overlay.
+    Play,
 }
 
-const NAMES: [&str; 12] = [
+const NAMES: [&str; 13] = [
     "wallpaper",
     "water",
     "items",
@@ -32,9 +34,10 @@ const NAMES: [&str; 12] = [
     "cursor",
     "flush",
     "backdrop",
+    "play",
 ];
 
-static TOTALS: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+static TOTALS: [AtomicU64; 13] = [const { AtomicU64::new(0) }; 13];
 
 /// Times `f` as part of `stage`.
 #[inline]
