@@ -664,6 +664,14 @@ impl Controller {
     /// A bulk (or interrupt OUT) transfer of `len` bytes at `phys`, split at
     /// 64 KiB boundaries as TRBs require. Returns the bytes transferred.
     fn bulk(&self, slot: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8> {
+        self.bulk_batch(slot, ep, &[(phys, len)], timeout_ms)
+    }
+
+    /// Several transfers (TDs) queued at once with one doorbell, and one
+    /// completion to wait for (the last; an error on any ends the wait).
+    /// Returns the bytes moved (all of them, less a short last IN transfer's
+    /// residual).
+    fn bulk_batch(&self, slot: u8, ep: &Endpoint, parts: &[(u64, usize)], timeout_ms: u64) -> Result<usize, u8> {
         let dci = ep.dci();
         let (trbs, epoch) = {
             let mut inner = self.inner.lock();
@@ -671,23 +679,34 @@ impl Controller {
             let epoch = state.epoch;
             let ring = state.rings[dci as usize].as_mut().ok_or(CC_TIMEOUT)?;
             let mut trbs = Vec::new();
-            let mut done = 0usize;
             let max_packet = ep.max_packet.max(1) as usize;
-            loop {
-                let addr = phys + done as u64;
-                let chunk = ((0x1_0000 - (addr & 0xFFFF)) as usize).min(len - done);
-                let last = done + chunk >= len;
-                // TD size: packets still to come after this TRB (capped at 31).
-                let remaining = (len - done - chunk).div_ceil(max_packet).min(31) as u32;
-                let flags = if last { TRB_IOC | TRB_ISP } else { TRB_CHAIN | TRB_ISP };
-                trbs.push(ring.push(addr, chunk as u32 | remaining << 17, TRB_NORMAL << 10 | flags));
-                done += chunk;
-                if last {
-                    break;
+            for (k, &(phys, len)) in parts.iter().enumerate() {
+                let final_td = k + 1 == parts.len();
+                let mut done = 0usize;
+                loop {
+                    let addr = phys + done as u64;
+                    let chunk = ((0x1_0000 - (addr & 0xFFFF)) as usize).min(len - done);
+                    let last = done + chunk >= len;
+                    // TD size: packets still to come after this TRB (capped at 31).
+                    let remaining = (len - done - chunk).div_ceil(max_packet).min(31) as u32;
+                    let flags = match (last, final_td) {
+                        (true, true) => TRB_IOC | TRB_ISP,
+                        // Earlier TDs complete silently (errors still report).
+                        (true, false) => TRB_ISP,
+                        _ => TRB_CHAIN | TRB_ISP,
+                    };
+                    trbs.push(ring.push(addr, chunk as u32 | remaining << 17, TRB_NORMAL << 10 | flags));
+                    done += chunk;
+                    if last {
+                        break;
+                    }
                 }
             }
             (trbs, epoch)
         };
+        if trbs.is_empty() {
+            return Ok(0);
+        }
         self.doorbell(slot, dci);
         let c = self.wait_completion(&trbs, timeout_ms);
         if c.code != CC_SUCCESS {
@@ -700,7 +719,8 @@ impl Controller {
             }
             return Err(c.code);
         }
-        Ok(len.saturating_sub(c.residual as usize))
+        let total: usize = parts.iter().map(|p| p.1).sum();
+        Ok(total.saturating_sub(c.residual as usize))
     }
 
     // ------------------------------------------------------------ devices
@@ -948,6 +968,10 @@ impl Hcd for Controller {
 
     fn transfer(&self, slot: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8> {
         self.bulk(slot, ep, phys, len, timeout_ms)
+    }
+
+    fn transfer_batch(&self, slot: u8, ep: &Endpoint, parts: &[(u64, usize)], timeout_ms: u64) -> Result<usize, u8> {
+        self.bulk_batch(slot, ep, parts, timeout_ms)
     }
 
     fn configure(&self, slot: u8, eps: &[Endpoint], hub: Option<HubInfo>) -> bool {

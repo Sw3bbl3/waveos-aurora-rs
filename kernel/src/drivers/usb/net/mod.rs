@@ -85,6 +85,8 @@ pub struct Stats {
     pub rx_frames: AtomicU64,
     pub rx_bytes: AtomicU64,
     pub tx_transfers: AtomicU64,
+    /// Times the controller was handed transfers (several at once when they queue up).
+    pub tx_batches: AtomicU64,
     pub tx_frames: AtomicU64,
     pub tx_bytes: AtomicU64,
     /// Frames the transmit ring had no room for.
@@ -395,68 +397,95 @@ impl UsbNic {
         self.wake.wake_all();
     }
 
-    /// Sends what is waiting in the ring, oldest first.
+    /// Sends what is waiting in the ring, oldest first: every buffer ready
+    /// goes to the controller at once (one doorbell, one wait), so the
+    /// per-transfer cost is paid once per batch.
     fn flush(&self) {
+        const BATCH: usize = 32;
         loop {
-            let (phys, len, frames, head) = {
+            let (first, ready) = {
                 let mut tx = self.tx.lock();
                 let tx = &mut *tx;
-                let head = tx.head;
-                if head == tx.fill {
-                    // The buffer being filled goes now; filling moves on.
-                    let empty = tx.lens[head] == 0 && tx.ncm.as_ref().is_none_or(|b| b.is_empty());
-                    if empty {
-                        return;
-                    }
+                let count = tx.bufs.len();
+                let mut ready = (tx.fill + count - tx.head) % count;
+                // The buffer being filled goes too, if there is room to move on.
+                let open = tx.lens[tx.fill] != 0 || tx.ncm.as_ref().is_some_and(|b| !b.is_empty());
+                if open && ready < BATCH && (tx.fill + 1) % count != tx.head {
                     self.seal(tx);
-                    let next = (head + 1) % tx.bufs.len();
+                    let next = (tx.fill + 1) % count;
                     tx.fill = next;
                     tx.lens[next] = 0;
                     tx.frames[next] = 0;
                     if let Framing::Ncm { layout, .. } = &self.framing {
                         tx.ncm = Some(ncm::Builder::new(*layout));
                     }
+                    ready += 1;
                 }
-                (tx.bufs.phys(head), tx.lens[head], tx.frames[head], head)
+                if ready == 0 {
+                    return;
+                }
+                let ready = ready.min(BATCH);
+                let parts: Vec<(u64, usize, usize)> = (0..ready)
+                    .map(|k| {
+                        let i = (tx.head + k) % count;
+                        (tx.bufs.phys(i), tx.lens[i], tx.frames[i])
+                    })
+                    .collect();
+                (tx.head, parts)
             };
-            self.transmit(phys, len, frames);
+            self.transmit(&ready);
             let mut tx = self.tx.lock();
-            tx.lens[head] = 0;
-            tx.frames[head] = 0;
-            tx.head = (head + 1) % tx.bufs.len();
+            let count = tx.bufs.len();
+            for k in 0..ready.len() {
+                let i = (first + k) % count;
+                tx.lens[i] = 0;
+                tx.frames[i] = 0;
+            }
+            tx.head = (first + ready.len()) % count;
         }
     }
 
-    /// One transfer on the bulk OUT endpoint, ended by a short packet.
-    fn transmit(&self, phys: u64, len: usize, frames: usize) {
-        if len == 0 || self.gone() {
+    /// Transfers on the bulk OUT endpoint, each ended by a short packet.
+    fn transmit(&self, bufs: &[(u64, usize, usize)]) {
+        if self.gone() {
             return;
         }
         let mps = self.bulk_out.max_packet.max(8) as usize;
-        match self.bus.transfer(self.dev, &self.bulk_out, phys, len, 1000) {
+        // A transfer that fills whole packets needs a zero-length one to end
+        // it (ASIX pads instead; an NCM block of the largest size ends itself).
+        let zlp = |len: usize| {
+            len.is_multiple_of(mps)
+                && match &self.framing {
+                    Framing::Ax772(_) | Framing::Ax179 => false,
+                    Framing::Ncm { layout, .. } => len < layout.max,
+                    _ => true,
+                }
+        };
+        let mut parts = Vec::with_capacity(bufs.len() + 2);
+        for &(phys, len, _) in bufs.iter().filter(|b| b.1 > 0) {
+            parts.push((phys, len));
+            if zlp(len) {
+                parts.push((phys, 0));
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+        match self.bus.transfer_batch(self.dev, &self.bulk_out, &parts, 1000) {
             Ok(_) => {
-                self.stats.tx_transfers.fetch_add(1, Ordering::Relaxed);
+                let frames: usize = bufs.iter().map(|b| b.2).sum();
+                let bytes: usize = bufs.iter().map(|b| b.1).sum();
+                self.stats.tx_transfers.fetch_add(bufs.len() as u64, Ordering::Relaxed);
+                self.stats.tx_batches.fetch_add(1, Ordering::Relaxed);
                 self.stats.tx_frames.fetch_add(frames as u64, Ordering::Relaxed);
-                self.stats.tx_bytes.fetch_add(len as u64, Ordering::Relaxed);
+                self.stats.tx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
             }
             Err(code) => {
                 self.stats.tx_errors.fetch_add(1, Ordering::Relaxed);
                 if code == STALL {
                     self.clear_halt(&self.bulk_out);
                 }
-                return;
             }
-        }
-        // A transfer that fills whole packets needs a zero-length one to end
-        // it (ASIX pads instead; an NCM block of the largest size ends itself).
-        let zlp = len.is_multiple_of(mps)
-            && match &self.framing {
-                Framing::Ax772(_) | Framing::Ax179 => false,
-                Framing::Ncm { layout, .. } => len < layout.max,
-                _ => true,
-            };
-        if zlp {
-            let _ = self.bus.transfer(self.dev, &self.bulk_out, phys, 0, 1000);
         }
     }
 
@@ -776,7 +805,7 @@ pub fn describe() -> Vec<String> {
             let (rx_per, tx_per) =
                 (per(s.rx_frames.load(Ordering::Relaxed), rx_t), per(s.tx_frames.load(Ordering::Relaxed), tx_t));
             alloc::format!(
-                "{} {}: link {}, {} Mb/s; rx {} frames in {} transfers ({}.{}/transfer), tx {} in {} ({}.{}/transfer), {} dropped, {}/{} rx/tx errors",
+                "{} {}: link {}, {} Mb/s; rx {} frames in {} transfers ({}.{}/transfer), tx {} in {} ({}.{}/transfer, {} batches), {} dropped, {}/{} rx/tx errors",
                 n.label,
                 crate::net::wire::mac_str(n.mac),
                 if n.link() { "up" } else { "down" },
@@ -789,6 +818,7 @@ pub fn describe() -> Vec<String> {
                 tx_t,
                 tx_per / 10,
                 tx_per % 10,
+                s.tx_batches.load(Ordering::Relaxed),
                 s.tx_dropped.load(Ordering::Relaxed),
                 s.rx_errors.load(Ordering::Relaxed),
                 s.tx_errors.load(Ordering::Relaxed),

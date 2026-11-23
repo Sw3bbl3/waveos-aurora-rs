@@ -2375,10 +2375,20 @@ fn network() {
         let (body, ms, cpu) = measured(|| download(port, 20_000).expect("download from the host"));
         assert_eq!(body.len(), 1 << 20, "short body from the host");
         assert!(body.iter().enumerate().all(|(i, &b)| b as u32 == (i as u32).wrapping_mul(31).wrapping_add(7) % 251));
-        crate::kprintln!("net-test: 1 MiB from the host in {} ms ({} KiB/s), {} CPU ms", ms, 1024 * 1000 / ms.max(1), cpu);
+        crate::kprintln!(
+            "net-test: 1 MiB from the host in {} ms ({} KiB/s), {} CPU ms",
+            ms,
+            1024 * 1000 / ms.max(1),
+            cpu
+        );
         let (stored, ms, cpu) = measured(|| upload(port, 1 << 20));
         assert_eq!(stored, Some(1 << 20), "the host did not get the upload");
-        crate::kprintln!("net-test: 1 MiB to the host in {} ms ({} KiB/s), {} CPU ms", ms, 1024 * 1000 / ms.max(1), cpu);
+        crate::kprintln!(
+            "net-test: 1 MiB to the host in {} ms ({} KiB/s), {} CPU ms",
+            ms,
+            1024 * 1000 / ms.max(1),
+            cpu
+        );
         crate::kprint!("[1 MiB from and to the host] ");
 
         // From the host: QEMU forwards a host port to our 8080.
@@ -2473,7 +2483,9 @@ fn usb_network() {
     };
     let want = if mode == "usb-rndis" { "RNDIS" } else { "CDC-ECM" };
     let port = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
-    let name = |i: &aurora_abi::NetInterface| alloc::string::String::from_utf8_lossy(&i.name[..i.name_len as usize]).into_owned();
+    let name = |i: &aurora_abi::NetInterface| {
+        alloc::string::String::from_utf8_lossy(&i.name[..i.name_len as usize]).into_owned()
+    };
     let usb = || crate::net::interfaces().into_iter().filter(|i| i.name.starts_with(b"usb")).collect::<Vec<_>>();
     let configured = |n: &str| usb().iter().any(|i| name(i) == n && i.ip != [0; 4]);
     assert!(
@@ -2492,9 +2504,8 @@ fn usb_network() {
     // What two idle adapters cost (interrupt endpoints, receive streams).
     let ((), _, idle_cpu) = measured(|| crate::sched::sleep_ms(1000));
     log!("net-test", "idle with two USB adapters: {idle_cpu} CPU ms per second");
-    let route_name = || {
-        crate::net::with(|s| s.route([10, 0, 2, 2]).map(|(i, _)| s.ifaces[i].name.clone())).unwrap_or_default()
-    };
+    let route_name =
+        || crate::net::with(|s| s.route([10, 0, 2, 2]).map(|(i, _)| s.ifaces[i].name.clone())).unwrap_or_default();
     assert_eq!(route_name(), "usb0", "the first adapter carries the default route");
 
     // Pulled out mid-download (reading slowly, so most of the body is still
@@ -2552,7 +2563,10 @@ fn usb_network() {
 /// echoes a burst of UDP datagrams (batched into NCM blocks and ASIX
 /// aggregates), and goes away cleanly when unplugged.
 fn usb_network_simulated() {
-    use crate::drivers::usb::net::{self, sim::{self, Model}};
+    use crate::drivers::usb::net::{
+        self,
+        sim::{self, Model},
+    };
     use crate::net::socket::{Kind, Socket};
     let hcd = sim::controller();
     let models = [Model::Ncm, Model::Ax88179, Model::Ax88772];
@@ -2602,6 +2616,18 @@ fn usb_network_simulated() {
         crate::kprint!("[{name} {driver}: {} Mb/s, up to {} frames per transfer] ", m.speed(), seen.most_per_transfer);
     }
     assert!(hcd.seen(Model::Ncm).most_per_transfer > 1, "no NCM block carried more than one frame");
+    // The default route: a built-in card wins over USB adapters, and USB
+    // adapters over a tethering link (QEMU's usb-net has a local address).
+    let names: Vec<_> = models.iter().filter_map(|&m| iface(m)).map(|i| text(&i.name[..i.name_len as usize])).collect();
+    let via = crate::net::with(|s| s.route([192, 0, 2, 1]).map(|(i, _)| s.ifaces[i].name.clone())).unwrap_or_default();
+    if crate::gui::prefs::boot_option("test_usb_net").is_some() {
+        assert!(names.contains(&via), "the default route is on {via}, not a USB Ethernet adapter ({names:?})");
+    } else if crate::net::interfaces()
+        .iter()
+        .any(|i| i.name.starts_with(b"eth") && !names.iter().any(|n| n.as_bytes() == &i.name[..i.name_len as usize]))
+    {
+        assert!(!names.contains(&via), "the default route moved from the built-in card to {via}");
+    }
     let weak: Vec<_> =
         net::adapters().iter().filter(|a| models.iter().any(|m| a.mac == m.mac())).map(Arc::downgrade).collect();
     assert_eq!(weak.len(), 3);

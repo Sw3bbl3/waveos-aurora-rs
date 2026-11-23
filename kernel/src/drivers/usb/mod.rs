@@ -374,6 +374,16 @@ pub trait Hcd: Send + Sync {
     fn control(&self, dev: u8, setup: Setup, data: Option<&mut [u8]>) -> Result<usize, u8>;
     /// A bulk or interrupt-OUT transfer of `len` bytes at physical `phys`.
     fn transfer(&self, dev: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8>;
+    /// Several OUT transfers `(phys, len)` in a row, each its own transfer
+    /// (a zero length is a zero-length packet), waiting once for all of
+    /// them: a network adapter's queued frames. Returns the bytes moved.
+    fn transfer_batch(&self, dev: u8, ep: &Endpoint, parts: &[(u64, usize)], timeout_ms: u64) -> Result<usize, u8> {
+        let mut moved = 0;
+        for &(phys, len) in parts {
+            moved += self.transfer(dev, ep, phys, len, timeout_ms)?;
+        }
+        Ok(moved)
+    }
     /// Sets up endpoints (and, for a hub, its properties) once a class driver picks them.
     fn configure(&self, dev: u8, eps: &[Endpoint], hub: Option<HubInfo>) -> bool;
     /// Starts polling an interrupt IN endpoint: `handler` gets every report.
@@ -637,6 +647,11 @@ impl Bus {
 
     pub fn transfer(&self, dev: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8> {
         self.hcd.transfer(dev, ep, phys, len, timeout_ms)
+    }
+
+    /// See [`Hcd::transfer_batch`].
+    pub fn transfer_batch(&self, dev: u8, ep: &Endpoint, parts: &[(u64, usize)], timeout_ms: u64) -> Result<usize, u8> {
+        self.hcd.transfer_batch(dev, ep, parts, timeout_ms)
     }
 
     pub fn configure(&self, dev: u8, eps: &[Endpoint], hub: Option<HubInfo>) -> bool {

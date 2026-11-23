@@ -123,7 +123,10 @@ fn launcher_serves_the_page_and_the_command() {
     let state: serde_json::Value = serde_json::from_str(&state).unwrap();
     let disks: Vec<&str> =
         state["options"]["disk"].as_array().unwrap().iter().map(|d| d["value"].as_str().unwrap()).collect();
-    assert_eq!(disks, ["ahci", "virtio", "nvme"]);
+    assert_eq!(disks, ["ahci", "virtio", "nvme", "sd", "emmc"]);
+    let nets: Vec<&str> =
+        state["options"]["net"].as_array().unwrap().iter().map(|d| d["value"].as_str().unwrap()).collect();
+    assert!(nets.contains(&"usb-ecm") && nets.contains(&"usb-rndis"), "USB networking in the launcher: {nets:?}");
     assert!(state["presets"].as_array().unwrap().iter().any(|p| p["name"] == "Dual display"));
 
     let (code, cmd) = l.post(
