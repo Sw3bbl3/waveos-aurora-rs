@@ -168,9 +168,11 @@ pub struct Completion {
 /// (reports), or a bulk stream (a network adapter's receive path).
 struct Pipe {
     handler: Arc<dyn PipeHandler>,
-    /// One buffer per queued transfer, shared with the handler while it
-    /// reads a completed one (so a pipe closed meanwhile can't free it).
-    bufs: Vec<Arc<Dma>>,
+    /// One buffer per queued transfer, `stride` apart in one allocation,
+    /// shared with the handler while it reads a completed one (so a pipe
+    /// closed meanwhile can't free it).
+    buf: Arc<Dma>,
+    stride: usize,
     size: usize,
     /// Queued TRB → its buffer.
     trbs: BTreeMap<u64, usize>,
@@ -482,16 +484,16 @@ impl Controller {
     }
 
     fn pipe_event(&self, slot: u8, ep: u8, trb: u64, code: u8, residual: u32) {
-        let (handler, buf, index, n) = {
+        let (handler, buf, index, at, n) = {
             let mut pipes = self.pipes.lock();
             let Some(p) = pipes.get_mut(&(slot, ep)) else { return };
             let Some(index) = p.trbs.remove(&trb) else { return };
             let n = p.size.saturating_sub(residual as usize);
-            (p.handler.clone(), p.bufs[index].clone(), index, n)
+            (p.handler.clone(), p.buf.clone(), index, index * p.stride, n)
         };
         // Read in place: the controller is done with this buffer until it is queued again.
         if code == CC_SUCCESS || code == CC_SHORT {
-            handler.data(&buf.bytes()[..n]);
+            handler.data(&buf.bytes()[at..at + n]);
         }
         if code == CC_STALL {
             self.recover(slot, ep);
@@ -502,7 +504,7 @@ impl Controller {
 
     fn queue_pipe_buffer(&self, slot: u8, ep: u8, index: usize) {
         let (phys, size) = match self.pipes.lock().get(&(slot, ep)) {
-            Some(p) => (p.bufs[index].phys, p.size),
+            Some(p) => (p.buf.phys + (index * p.stride) as u64, p.size),
             None => return,
         };
         let trb = {
@@ -517,8 +519,9 @@ impl Controller {
     }
 
     /// Keeps `count` transfers of `size` bytes (at most 64 KiB) queued on an
-    /// IN endpoint. Each buffer is aligned to its size, so none crosses the
-    /// 64 KiB boundary a single TRB must not span.
+    /// IN endpoint. The buffers sit a power of two apart in an allocation
+    /// aligned to its own size, so none crosses the 64 KiB boundary a
+    /// single TRB must not span.
     fn open_stream_inner(
         &self,
         slot: u8,
@@ -528,13 +531,11 @@ impl Controller {
         handler: Arc<dyn PipeHandler>,
     ) -> bool {
         let size = size.clamp(8, 64 * 1024);
-        let mut bufs = Vec::with_capacity(count);
-        for _ in 0..count.max(1) {
-            let Some(b) = Dma::new_aligned(size) else { return false };
-            bufs.push(Arc::new(b));
-        }
-        let n = bufs.len();
-        self.pipes.lock().insert((slot, ep.dci()), Pipe { handler, bufs, size, trbs: BTreeMap::new() });
+        let stride = size.next_power_of_two();
+        let n = count.max(1);
+        let Some(buf) = Dma::new_aligned(stride * n) else { return false };
+        let buf = Arc::new(buf);
+        self.pipes.lock().insert((slot, ep.dci()), Pipe { handler, buf, stride, size, trbs: BTreeMap::new() });
         for i in 0..n {
             self.queue_pipe_buffer(slot, ep.dci(), i);
         }
