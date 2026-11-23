@@ -269,12 +269,15 @@ fn with_memory(p: &Process, mut op: impl FnMut(&mut AddressSpace) -> crate::mm::
         if p.killed.load(Ordering::Acquire) || !x86_64::instructions::interrupts::are_enabled() {
             return false;
         }
+        let round = kswapd::rounds();
         if kswapd::wait_for_memory() {
             continue;
         }
         without_room += 1;
-        if kswapd::futile() || without_room >= 10 {
-            kswapd::out_of_memory();
+        if kswapd::futile_since(round) {
+            kswapd::out_of_memory("reclaim found nothing more to free");
+        } else if without_room >= 10 {
+            kswapd::out_of_memory("a fault waited ten seconds for memory");
         }
         if p.killed.load(Ordering::Acquire) {
             return false;

@@ -27,8 +27,8 @@
 //! for a page fault, the out-of-memory killer.
 //!
 //! **Out of memory.** When reclaim can't keep up — a page fault finds no
-//! memory after ten seconds of waiting, or `kswapd` finds swap full or
-//! nothing left to swap out — [`out_of_memory`] ends one program, chosen by
+//! memory after ten seconds of waiting, or `kswapd`, in a round begun
+//! since it started waiting, finds swap full or nothing left to swap out — [`out_of_memory`] ends one program, chosen by
 //! [`badness`]: the memory killing it frees (pages in memory and swapped
 //! out), a fraction of it for the program the user is using (1/8) and for
 //! programs with windows (1/2), and nothing for system services (processes
@@ -254,9 +254,18 @@ fn evict_round(want: u64) -> (super::vmm::Reclaimed, u32) {
     (total, busy)
 }
 
-/// Whether `kswapd` last found nothing it could free.
-pub fn futile() -> bool {
-    FUTILE.load(Ordering::Relaxed)
+/// Rounds of reclaim done so far: pass it to [`futile_since`].
+pub fn rounds() -> u64 {
+    ROUNDS.load(Ordering::Acquire)
+}
+
+/// Whether `kswapd` found nothing it could free in a round that started
+/// after `rounds()` said `round`. (An older verdict says nothing about
+/// now: the round when the last program ended found nothing to swap out,
+/// and the next program's first fault, waiting for a round on a slow
+/// disk, took that for hopeless and went to the out-of-memory killer.)
+pub fn futile_since(round: u64) -> bool {
+    FUTILE.load(Ordering::Acquire) && ROUNDS.load(Ordering::Acquire) >= round + 2
 }
 
 // ---------------------------------------------------------------- pressure
@@ -421,7 +430,8 @@ pub fn choose_victim() -> Option<(alloc::sync::Arc<crate::proc::Process>, u64)> 
 /// Reclaim can't keep up: ends one program to free memory (or, if one is
 /// already on its way out, waits for it). Call only where the caller may
 /// wait (see [`wait_for_memory`]), holding no address-space lock.
-pub fn out_of_memory() {
+/// `why`: what made the caller give up, for the log.
+pub fn out_of_memory(why: &str) {
     if !may_wait() {
         return;
     }
@@ -442,7 +452,8 @@ pub fn out_of_memory() {
     let name = victim.name();
     log!(
         "mm",
-        "out of memory: ending pid {} '{}' (score {}, {} KiB in memory)",
+        "out of memory ({}): ending pid {} '{}' (score {}, {} KiB in memory)",
+        why,
         victim.pid,
         name,
         score,
