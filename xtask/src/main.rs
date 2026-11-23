@@ -1316,12 +1316,13 @@ fn usb_net_device(bus: &str, hub: &str, n: usize) -> String {
     format!("usb-net,id=usbnet{n},netdev=net{n},bus={bus},port={port},mac=52:54:00:12:35:{:02x}", 0x56 + n)
 }
 
-/// Which configuration of QEMU's usb-net the kernel picks (`usbnet=` in boot.conf).
+/// Which configuration of QEMU's usb-net the kernel picks (`usbnet=` in
+/// boot.conf); empty (the kernel's own choice) for other cards.
 fn usb_net_mode(net: &str) -> &'static str {
-    if net == "usb-rndis" {
-        "rndis"
-    } else {
-        "ecm"
+    match net {
+        "usb-rndis" => "rndis",
+        "usb-ecm" => "ecm",
+        _ => "",
     }
 }
 

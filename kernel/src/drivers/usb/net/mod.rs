@@ -170,6 +170,9 @@ pub struct UsbNic {
     wake: WaitQueue,
     /// Interrupt-endpoint news for the task (a copy of the last report).
     status: IrqMutex<Option<Vec<u8>>>,
+    /// The interrupt endpoint has said something (else, see `tick`).
+    heard: AtomicBool,
+    started: u64,
     pub stats: Stats,
     /// Driver-specific state the task keeps (RNDIS request IDs, PHY address).
     pub aux: AtomicU32,
@@ -525,6 +528,7 @@ impl UsbNic {
 
     /// A report from the interrupt endpoint (in the adapter's task).
     fn on_status(&self, report: &[u8]) {
+        self.heard.store(true, Ordering::Release);
         match self.kind {
             Kind::Cdc(Function::Rndis) => rndis::status(self, report),
             Kind::Cdc(_) => cdc::status(self, report),
@@ -532,10 +536,21 @@ impl UsbNic {
         }
     }
 
-    /// Once a second: devices without link interrupts are asked.
+    /// Once a second: devices without link interrupts are asked; an ECM or
+    /// NCM function that never reports its link (some don't, despite the
+    /// specification) is taken to be connected after a few seconds.
     fn tick(&self) {
-        if let Kind::Chip(chip) = self.kind {
-            asix::tick(self, chip);
+        match self.kind {
+            Kind::Chip(chip) => asix::tick(self, chip),
+            Kind::Cdc(Function::Ecm | Function::Ncm) => {
+                if !self.link() && !self.heard.load(Ordering::Acquire) && crate::time::uptime_ms() - self.started > 3000
+                {
+                    log!("usbnet", "{}: no link notification; assuming connected", self.label);
+                    self.heard.store(true, Ordering::Release);
+                    self.set_link(true);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -673,6 +688,8 @@ pub fn start(dev: &UsbDevice, s: Setup2) -> Option<&'static str> {
         }),
         wake: WaitQueue::new(),
         status: IrqMutex::new(None),
+        heard: AtomicBool::new(false),
+        started: crate::time::uptime_ms(),
         stats: Stats::default(),
         aux: AtomicU32::new(s.aux),
     });
