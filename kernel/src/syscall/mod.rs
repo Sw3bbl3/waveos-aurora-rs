@@ -446,6 +446,19 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             }
             Ok(crate::drivers::audio::state())
         }
+        nr::AUDIO_DEVICES => {
+            let all = crate::drivers::audio::devices();
+            let max = a[1].min(64) as usize;
+            for (i, d) in all.iter().take(max).enumerate() {
+                user::put(a[0] + (i * core::mem::size_of::<aurora_abi::audio::AudioDevice>()) as u64, d)?;
+            }
+            Ok(all.len() as u64)
+        }
+        nr::AUDIO_CAPTURE => {
+            let capture = crate::drivers::audio::capture::open(a[0] as u32)?;
+            let p = proc::current().ok_or(EPERM)?;
+            p.install_fd(Arc::new(Handle::AudioIn(capture))).map(|fd| fd as u64)
+        }
         nr::AUDIO_CONTROL => match &*proc::current().ok_or(EPERM)?.fd(a[0] as usize)? {
             Handle::Audio(stream) => stream.control(a[1]),
             _ => Err(EINVAL),
@@ -543,6 +556,7 @@ pub(crate) fn read(fd: usize, ptr: u64, len: u64) -> SysResult {
         Handle::PipeRead { pipe, nonblocking } => pipe.read(&mut buf, *nonblocking)?,
         Handle::Socket(s) => s.read(&mut buf)?,
         Handle::Special(s) => s.lock().read(&mut buf)?,
+        Handle::AudioIn(capture) => capture.read(&mut buf)?,
         Handle::PipeWrite(_) | Handle::Log | Handle::Audio(_) => return Err(EBADF),
     };
     buf.commit(n)?;
@@ -562,7 +576,7 @@ pub(crate) fn write(fd: usize, ptr: u64, len: u64) -> SysResult {
         Handle::Audio(stream) => stream.write(&buf)?,
         Handle::Socket(s) => s.write(&buf)?,
         Handle::Special(s) => s.lock().write(&buf)?,
-        Handle::PipeRead { .. } => return Err(EBADF),
+        Handle::PipeRead { .. } | Handle::AudioIn(_) => return Err(EBADF),
     };
     Ok(n as u64)
 }

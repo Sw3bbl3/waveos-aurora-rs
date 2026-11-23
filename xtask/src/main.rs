@@ -8,6 +8,8 @@
 //!       --smp N                           number of CPUs (default 4)
 //!       --memory-mib N                    guest RAM in MiB (default 4096)
 //!       --audio-wav PATH                  record guest audio to a WAV file
+//!       --usb-audio                       add a USB speaker (QEMU's usb-audio, isochronous; with --audio-wav
+//!                                         it records to PATH-usb.wav)
 //!       --gpu std|virtio                  display adapter (default std; virtio runs the ported Linux driver)
 //!       --resolution WxH                  virtio's starting screen size (default 1920x1080; WaveOS then
 //!                                         follows the QEMU window when you resize it)
@@ -184,6 +186,7 @@ fn main() {
                 ),
                 usb,
                 virtual_hid: Vec::new(),
+                usb_audio: flag("--usb-audio"),
                 usb_stick: flag("--usb-stick").then(|| {
                     let stick = root().join("target/usb-stick.img");
                     image::create_usb_stick(&stick).expect("USB stick image");
@@ -839,6 +842,9 @@ struct RunOpts<'a> {
     host_battery: Option<battery::Source>,
     /// A raw disk image to attach as a USB stick.
     usb_stick: Option<PathBuf>,
+    /// A USB speaker (`usb-audio`, id `usbaudio`): a UAC 1 device with an
+    /// isochronous endpoint.
+    usb_audio: bool,
     /// Network card: virtio, e1000, e1000e or none (QEMU user networking).
     net: &'a str,
     /// Extra user-networking options, e.g. host port forwards.
@@ -984,6 +990,17 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         cmd.arg("-drive").arg(format!("id=stick,if=none,format=raw,file={}", stick.display()));
         cmd.arg("-device").arg(format!("usb-storage,bus={bus},port={stick_port},drive=stick"));
     }
+    if opts.usb_audio {
+        // Recorded on its own when recording, so tests can tell it played.
+        let audiodev = match opts.audio.strip_prefix("wav:") {
+            Some(path) => {
+                cmd.arg("-audiodev").arg(format!("wav,id=usbsnd,path={}", usb_audio_wav(Path::new(path)).display()));
+                "usbsnd"
+            }
+            None => "snd",
+        };
+        cmd.arg("-device").arg(usb_audio_device(bus, audiodev));
+    }
     if let Some(source) = opts.host_battery {
         let page = battery::start(source, root().join("target/battery-page"));
         cmd.arg("-object").arg(format!(
@@ -1127,6 +1144,9 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
     'attempt: loop {
         image::create(&esp, &root().join("assets/home"), &img, 128 * 1024 * 1024).expect("test disk creation failed");
         image::set_boot_option(&img, "test_http_port", &http_port.to_string()).expect("write boot.conf");
+        // A USB speaker plays on xHCI; elsewhere it must be reported unsupported.
+        let usb_audio = if usb == "xhci" { "1" } else { "unsupported" };
+        image::set_boot_option(&img, "test_usb_audio", usb_audio).expect("write boot.conf");
         if let Ok(filter) = env::var("AURORA_TEST_FILTER") {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
         }
@@ -1154,6 +1174,17 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
             if boot == 2 && !output.contains("verified from previous boot") {
                 eprintln!("\npersistence check FAILED: the second boot did not find the first boot's file");
                 exit(1);
+            }
+            if output.contains("usb-audio: tone played") {
+                let wav = usb_audio_wav(&root().join("target/test-audio.wav"));
+                let (peak, loud_ms) = (recorded_peak(&wav), recorded_loud_ms(&wav));
+                // The guest played over a second of tone through it; QEMU records
+                // less under load, but far more than a few stray packets.
+                if peak < 1000 || loud_ms < 400 {
+                    eprintln!("\nUSB audio check FAILED: the USB speaker recorded {loud_ms} ms of sound (peak {peak})");
+                    exit(1);
+                }
+                println!("USB audio check: {loud_ms} ms of sound recorded, peaking at {peak}");
             }
             if output.contains("test sound: HDA playback") {
                 // The guest played a test tone; QEMU recorded everything it output.
@@ -1186,6 +1217,63 @@ fn qmp_command(command: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Sends one QMP command (a JSON object) to the running VM and returns its reply.
+fn qmp_execute(json: &str) -> std::io::Result<String> {
+    use std::io::{BufRead, BufReader, Write};
+    let sock = std::os::unix::net::UnixStream::connect(root().join("target/qemu-qmp.sock"))?;
+    sock.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut reader = BufReader::new(sock.try_clone()?);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let mut w = sock;
+    writeln!(w, r#"{{"execute": "qmp_capabilities"}}"#)?;
+    line.clear();
+    reader.read_line(&mut line)?;
+    writeln!(w, "{json}")?;
+    // Skip asynchronous events until the command's own reply.
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 || !line.contains("\"event\"") {
+            break;
+        }
+    }
+    if line.contains("\"error\"") {
+        return Err(std::io::Error::other(line.trim().to_string()));
+    }
+    Ok(line)
+}
+
+/// How long a 16-bit stereo WAV recording is audible (frames above a
+/// whisper), in milliseconds, at the rate its header gives.
+fn recorded_loud_ms(path: &Path) -> u64 {
+    let data = fs::read(path).unwrap_or_default();
+    let rate = data.get(24..28).map_or(48_000, |r| u32::from_le_bytes([r[0], r[1], r[2], r[3]])).max(1);
+    let frames = data.get(44..).unwrap_or_default().as_chunks::<4>().0;
+    let loud = frames
+        .iter()
+        .filter(|f| {
+            i16::from_le_bytes([f[0], f[1]]).unsigned_abs().max(i16::from_le_bytes([f[2], f[3]]).unsigned_abs()) > 500
+        })
+        .count();
+    loud as u64 * 1000 / rate as u64
+}
+
+/// The xHCI root port the test's USB speaker sits on (1-3 are taken).
+const USB_AUDIO_PORT: &str = "4";
+
+/// Where the USB speaker's sound is recorded, next to the main recording.
+fn usb_audio_wav(main: &Path) -> PathBuf {
+    let stem = main.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+    main.with_file_name(format!("{stem}-usb.wav"))
+}
+
+/// The `-device` argument for QEMU's USB speaker on `bus`.
+fn usb_audio_device(bus: &str, audiodev: &str) -> String {
+    // A free port: the root port after the hub, or the hub's third port on UHCI's two.
+    let port = if bus == "uhci.0" { "2.3" } else { USB_AUDIO_PORT };
+    format!("usb-audio,id=usbaudio,bus={bus},port={port},audiodev={audiodev}")
+}
+
 /// The loudest sample in a 16-bit PCM WAV recording (0 if unreadable). The
 /// header is skipped by size, since QEMU may not have finalized it.
 fn recorded_peak(path: &Path) -> i32 {
@@ -1214,6 +1302,7 @@ fn run_tests_once(
     use std::io::{BufRead, BufReader};
     let audio = root().join("target/test-audio.wav");
     let _ = fs::remove_file(&audio);
+    let _ = fs::remove_file(usb_audio_wav(&audio));
     let opts = RunOpts {
         memory_mib: 512,
         keyboard_capture: false,
@@ -1237,6 +1326,7 @@ fn run_tests_once(
         },
         battery: true,
         host_battery: None,
+        usb_audio: true,
         usb_stick: Some({
             let stick = root().join("target/test-usb-stick.img");
             image::create_usb_stick(&stick).expect("USB stick image");
@@ -1257,6 +1347,20 @@ fn run_tests_once(
             println!("{line}");
             if line.contains("net-test: listening on 8080") {
                 inbound_check(fwd_port);
+            }
+            // The USB audio test unplugs and replugs the speaker mid-stream.
+            if line.contains("harness: unplug usb-audio") {
+                if let Err(e) = qmp_execute(r#"{"execute": "device_del", "arguments": {"id": "usbaudio"}}"#) {
+                    eprintln!("could not unplug the USB speaker: {e}");
+                }
+            }
+            if line.contains("harness: replug usb-audio") {
+                let add = format!(
+                    r#"{{"execute": "device_add", "arguments": {{"driver": "usb-audio", "id": "usbaudio", "bus": "xhci.0", "port": "{USB_AUDIO_PORT}", "audiodev": "usbsnd"}}}}"#
+                );
+                if let Err(e) = qmp_execute(&add) {
+                    eprintln!("could not plug the USB speaker back in: {e}");
+                }
             }
             if line.contains("awake after S3") {
                 woke_w.store(true, std::sync::atomic::Ordering::Relaxed);

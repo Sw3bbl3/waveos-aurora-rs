@@ -1,8 +1,8 @@
 //! USB: host controller drivers — [`xhci`] (USB 3, and every device speed
 //! on PCs since about 2012), [`ehci`] (USB 2), [`ohci`] and [`uhci`] (USB 1.1,
 //! often as EHCI's companions) — and class drivers for hubs ([`hub`]),
-//! keyboards, pointing devices, touchpads and game controllers ([`hid`]) and
-//! storage ([`msc`]).
+//! keyboards, pointing devices, touchpads and game controllers ([`hid`]),
+//! storage ([`msc`]) and sound ([`uac`], over isochronous streams: [`iso`]).
 //!
 //! A controller driver implements [`Hcd`]: root ports, addressing a device
 //! and moving data. Everything above that is shared and lives in [`Bus`]:
@@ -16,8 +16,10 @@ pub mod ehci;
 mod hcutil;
 pub mod hid;
 pub mod hub;
+pub mod iso;
 pub mod msc;
 pub mod ohci;
+pub mod uac;
 pub mod uhci;
 pub mod xhci;
 
@@ -50,6 +52,7 @@ pub const DESC_ENDPOINT: u8 = 5;
 pub const DESC_HID: u8 = 0x21;
 pub const DESC_REPORT: u8 = 0x22;
 
+pub const CLASS_AUDIO: u8 = 1;
 pub const CLASS_HID: u8 = 3;
 pub const CLASS_MSC: u8 = 8;
 pub const CLASS_HUB: u8 = 9;
@@ -170,7 +173,9 @@ pub struct Endpoint {
     pub kind: u8,
     pub max_packet: u16,
     pub interval: u8,
-    /// SuperSpeed companion: max burst.
+    /// Extra packets per service interval, as xHCI's Max Burst Size: the
+    /// SuperSpeed companion's max burst, or a high-speed periodic endpoint's
+    /// additional transactions per microframe.
     pub burst: u8,
 }
 
@@ -231,12 +236,14 @@ impl Configuration {
                 }),
                 DESC_ENDPOINT if len >= 7 => {
                     if let Some(iface) = c.interfaces.last_mut() {
+                        let size = u16::from_le_bytes([d[4], d[5]]);
+                        let periodic = d[3] & 1 != 0; // isochronous or interrupt
                         iface.endpoints.push(Endpoint {
                             address: d[2],
                             kind: d[3] & 3,
-                            max_packet: u16::from_le_bytes([d[4], d[5]]) & 0x7FF,
+                            max_packet: size & 0x7FF,
                             interval: d[6],
-                            burst: 0,
+                            burst: if periodic { ((size >> 11) & 3) as u8 } else { 0 },
                         });
                     }
                 }
@@ -352,6 +359,25 @@ pub trait Hcd: Send + Sync {
     fn open_pipe(&self, dev: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool;
     /// The device cleared an endpoint's halt: its data toggle starts over.
     fn reset_toggle(&self, _dev: u8, _ep_address: u8) {}
+    /// Takes endpoints (of an alternate setting being left) off the schedule.
+    fn drop_endpoints(&self, _dev: u8, _eps: &[Endpoint]) -> bool {
+        true
+    }
+    /// Starts an isochronous stream on a configured endpoint (see [`iso`]).
+    fn open_iso(
+        &self,
+        _dev: u8,
+        _ep: &Endpoint,
+        _depth: usize,
+        _handler: Arc<dyn iso::IsoHandler>,
+    ) -> Result<(), iso::IsoError> {
+        Err(iso::IsoError::Unsupported)
+    }
+    /// Stops an isochronous stream; its handler's `stopped` runs.
+    fn close_iso(&self, _dev: u8, _ep_address: u8) {}
+    fn iso_stats(&self, _dev: u8, _ep_address: u8) -> Option<Arc<iso::IsoStats>> {
+        None
+    }
     /// The device is gone: stop its pipes and free its handle.
     fn release(&self, dev: u8);
     /// After sleep: reset and start again (every device is gone).
@@ -751,6 +777,8 @@ pub fn attach(dev: &UsbDevice) -> String {
     for iface in dev.config.interfaces.iter().filter(|i| i.alternate == 0) {
         let taken = match (iface.class, iface.subclass, iface.protocol) {
             (CLASS_HID, ..) => hid::attach(dev, iface),
+            // Audio Control: the audio function (its streaming interfaces follow).
+            (CLASS_AUDIO, 0x01, _) => uac::attach(dev, iface),
             // SCSI commands over bulk-only transport.
             (CLASS_MSC, 0x06, 0x50) => msc::attach(dev, iface),
             // Xbox controllers have their own (vendor) protocols.

@@ -92,3 +92,55 @@ pub fn volume() -> Volume {
 pub fn set_volume(level: u32, muted: bool) -> Volume {
     state(call(nr::AUDIO_VOLUME, &[abi::SET, level.min(100) as u64, muted as u64]).unwrap_or(0))
 }
+
+/// A sound device (see [`devices`]).
+pub use abi::AudioDevice;
+
+/// Every output and input device, the ones in use flagged `abi::DEFAULT`.
+pub fn devices() -> Vec<AudioDevice> {
+    let mut buf = [AudioDevice::default(); 16];
+    let n = call(nr::AUDIO_DEVICES, &[buf.as_mut_ptr() as u64, buf.len() as u64]).unwrap_or(0) as usize;
+    buf[..n.min(buf.len())].to_vec()
+}
+
+/// Plays to the output device named `name` from now on, and whenever it is
+/// plugged in (saved as a preference).
+pub fn select_output(name: &str) -> Result<()> {
+    crate::prefs::set(crate::abi::pref::AUDIO_OUTPUT, name)
+}
+
+/// Records from the input device named `name` by default (saved as a preference).
+pub fn select_input(name: &str) -> Result<()> {
+    crate::prefs::set(crate::abi::pref::AUDIO_INPUT, name)
+}
+
+/// A capture stream: what an input device records, as 48 kHz stereo samples.
+pub struct Capture {
+    fd: u64,
+}
+
+impl Capture {
+    /// Opens input `device` (an id from [`devices`]; 0 for the default
+    /// input). Fails with `ENODEV` when there is none.
+    pub fn open(device: u32) -> Result<Capture> {
+        call(nr::AUDIO_CAPTURE, &[device as u64]).map(|fd| Capture { fd })
+    }
+
+    /// Reads interleaved stereo samples, blocking until some arrive. Returns
+    /// how many were read; 0 means the device went away.
+    pub fn read(&self, out: &mut [i16]) -> Result<usize> {
+        let bytes = unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, out.len() * 2) };
+        crate::io::read_fd(self.fd, bytes).map(|n| n / 2)
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        let _ = call(nr::CLOSE, &[self.fd]);
+    }
+}
+
+/// Encodes 48 kHz stereo samples as a WAV file.
+pub fn encode_wav(samples: &[i16]) -> Vec<u8> {
+    aurora_wav::encode(samples, abi::CHANNELS as u16, RATE)
+}

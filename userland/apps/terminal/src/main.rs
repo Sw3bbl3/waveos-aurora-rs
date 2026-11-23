@@ -303,7 +303,7 @@ impl Session {
             "help" => self.out(
                 "Built-in:\n  cd DIR · clear · history · theme light|dark · exit\n\nPrograms in /System/Bin (each runs as \
                  its own process):\n  files: ls cat echo mkdir rm mv cp touch grep wc df sync\n  system: ps kill uname \
-                 uptime date mem cpuinfo lspci lsusb dmesg battery neofetch\n  sound: play volume\n  network: ping \
+                 uptime date mem cpuinfo lspci lsusb dmesg battery neofetch\n  sound: play record volume\n  network: ping \
                  ifconfig nslookup fetch (http and https)\n\nLinux programs in /System/Linux/bin run too: \
                  busybox ls, busybox vi, busybox awk…\n\nAlso: open APP|FILE · shutdown · reboot\nPipelines and \
                  redirection: ls | grep txt, echo hi > note.txt, cmd >> log\nLists: a && b (b if a worked), a || b (b \

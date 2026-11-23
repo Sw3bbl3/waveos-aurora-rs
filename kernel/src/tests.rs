@@ -35,8 +35,11 @@ const TESTS: &[Test] = &[
     ("clock: TSC/HPET monotonic", clock),
     ("user copies recover from faults", user_copy_fault),
     ("sound: HDA playback", sound),
+    ("sound: format and rate conversion", crate::drivers::audio::convert::self_test),
+    ("sound: device registry and capture streams", sound_devices),
     ("ACPI: AML, sleep states, battery", acpi_runtime),
     ("USB: hub, keyboard, tablet, storage", usb),
+    ("sound: USB audio (isochronous), unplug and replug mid-stream", usb_audio),
     ("USB HID: media keys, lights, touchpad gestures, game controllers (virtual devices)", usb_hid),
     ("TCP: retransmission ACK bounds", crate::net::tcp::retransmission_ack_test),
     ("network: DHCP, ICMP, UDP, TCP", network),
@@ -801,6 +804,145 @@ fn sound() {
     crate::kprint!("[{} frames, {} underruns] ", frames, underruns);
 }
 
+/// A 440 Hz triangle wave (integer maths: the kernel has no floats).
+fn test_tone(ms: usize) -> Vec<i16> {
+    use crate::drivers::audio::RATE;
+    let period = RATE / 440;
+    let frames = RATE * ms / 1000;
+    let mut tone = Vec::with_capacity(frames * 2);
+    for i in 0..frames {
+        let phase = (i % period) as i32 * 4 * 12_000 / period as i32;
+        let v = if phase < 2 * 12_000 { phase - 12_000 } else { 3 * 12_000 - phase };
+        tone.push(v as i16);
+        tone.push(v as i16);
+    }
+    tone
+}
+
+/// Plays `ms` of tone on the active output and checks it went out.
+fn check_playing(what: &str, ms: u64) {
+    use crate::drivers::audio;
+    let (played0, _, _) = audio::counters();
+    audio::play(&test_tone(ms as usize * 2 / 3));
+    let mut loudest = 0;
+    let start = time::uptime_ms();
+    while time::uptime_ms() - start < ms {
+        loudest = loudest.max(audio::counters().2);
+        crate::sched::sleep_ms(10);
+    }
+    let frames = audio::counters().0 - played0;
+    let expect = audio::RATE as u64 * ms / 1000 / 2;
+    assert!(frames > expect, "{what}: the device played only {frames} frames in {ms} ms");
+    assert!(loudest > 1000, "{what}: the mixer never produced the tone (peak {loudest})");
+    crate::kprint!("[{what}: {frames} frames in {ms} ms] ");
+}
+
+/// The device layer without hardware: a pretend microphone records a
+/// ramp into two capture streams, and outputs can be listed and chosen.
+fn sound_devices() {
+    use crate::drivers::audio::{self, capture, Format, Input};
+    use alloc::sync::Arc;
+    use core::sync::atomic::AtomicBool;
+    struct Mic {
+        on: AtomicBool,
+    }
+    impl Input for Mic {
+        fn describe(&self) -> alloc::string::String {
+            "Test Microphone".into()
+        }
+        fn format(&self) -> Format {
+            Format::MIXER
+        }
+        fn start(&self) -> bool {
+            self.on.store(true, Ordering::Relaxed);
+            true
+        }
+        fn stop(&self) {
+            self.on.store(false, Ordering::Relaxed);
+        }
+    }
+    let mic = Arc::new(Mic { on: AtomicBool::new(false) });
+    let id = audio::add_input(mic.clone());
+    assert!(audio::devices().iter().any(|d| d.id == id && d.flags & aurora_abi::audio::INPUT != 0));
+    let a = capture::open(id).expect("capture stream");
+    let b = capture::open(id).expect("second capture stream");
+    assert!(mic.on.load(Ordering::Relaxed), "the microphone did not start");
+    let ramp: Vec<i16> = (0..960).map(|i| i as i16).collect();
+    capture::captured(id, &ramp);
+    assert_eq!(a.take(10_000), ramp);
+    assert_eq!(b.available(), 960);
+    // A second of backlog at most: the oldest samples go first.
+    capture::captured(id, &alloc::vec![7i16; audio::RATE * 2 + 100]);
+    assert_eq!((b.available(), b.dropped()), (audio::RATE * 2, 1060));
+    a.close();
+    assert!(mic.on.load(Ordering::Relaxed), "stopped while a stream still records");
+    b.close();
+    assert!(!mic.on.load(Ordering::Relaxed), "the microphone kept recording");
+    // Unplugged while recording: the stream ends.
+    let c = capture::open(id).unwrap();
+    audio::remove_input(id);
+    assert!(c.gone() && c.take(1).is_empty());
+    let mut buf = [0u8; 4];
+    assert_eq!(c.read(&mut buf), Ok(0));
+    c.close();
+    if audio::present() {
+        let active = audio::active_output();
+        assert!(audio::devices().iter().any(|d| d.id == active && d.flags & aurora_abi::audio::DEFAULT != 0));
+    }
+}
+
+/// QEMU's usb-audio on xHCI: a UAC 1 speaker with an adaptive isochronous
+/// endpoint. The harness records what it plays and unplugs and replugs it.
+fn usb_audio() {
+    use crate::drivers::audio;
+    use aurora_abi::audio::{OUTPUT, USB};
+    match crate::gui::prefs::boot_option("test_usb_audio").as_deref() {
+        Some("1") => {}
+        Some("unsupported") => {
+            // Only xHCI streams: other controllers decline the device cleanly.
+            let declined = || crate::drivers::usb::list().iter().any(|l| l.contains("audio (unsupported controller)"));
+            assert!(wait_for(declined, 10_000), "USB speaker not reported: {:?}", crate::drivers::usb::list());
+            assert!(!audio::devices().iter().any(|d| d.flags & USB != 0));
+            crate::kprint!("[declined: no isochronous support] ");
+            return;
+        }
+        _ => {
+            crate::kprint!("[no USB speaker] ");
+            return;
+        }
+    }
+    let find = || audio::devices().into_iter().find(|d| d.flags & USB != 0 && d.flags & OUTPUT != 0);
+    assert!(wait_for(|| find().is_some(), 10_000), "no USB audio output; USB: {:?}", crate::drivers::usb::list());
+    let usb = find().unwrap();
+    let builtin = audio::active_output();
+    assert_ne!(builtin, usb.id, "a USB device took over without being chosen");
+    assert!(crate::drivers::usb::list().iter().any(|l| l.contains("audio: speaker")));
+    crate::kprint!("[{}, {} Hz] ", usb.name(), usb.rate);
+    assert!(audio::select_output(usb.id));
+    assert!(wait_for(|| audio::active_output() == usb.id, 1000));
+    check_playing("USB speaker", 900);
+    crate::kprintln!("usb-audio: tone played");
+
+    // Unplugged mid-stream: the mixer moves back to the built-in device.
+    audio::play(&test_tone(3000));
+    crate::sched::sleep_ms(300);
+    crate::kprintln!("harness: unplug usb-audio");
+    assert!(wait_for(|| find().is_none(), 10_000), "the USB speaker did not go away");
+    assert!(wait_for(|| audio::active_output() == builtin, 2000), "the mixer did not move back");
+    if builtin != 0 {
+        check_playing("built-in output after unplug", 400);
+    }
+    // Plugged back in: the choice made this session brings it back.
+    crate::kprintln!("harness: replug usb-audio");
+    assert!(wait_for(|| find().is_some(), 15_000), "the USB speaker did not come back");
+    let again = find().unwrap();
+    assert!(wait_for(|| audio::active_output() == again.id, 2000), "the USB speaker was not chosen again");
+    check_playing("USB speaker after replug", 600);
+    if builtin != 0 {
+        assert!(audio::select_output(builtin));
+    }
+}
+
 fn acpi_runtime() {
     use aurora_abi::power::*;
     // The AML task starts during boot; give it a moment.
@@ -977,6 +1119,15 @@ fn sleep_and_wake() {
     );
     // Let USB finish re-enumerating (it allocates memory later tests count).
     assert!(wait_for(|| crate::drivers::usb::list().len() >= 4, 10_000), "USB devices missing after sleep");
+    if crate::gui::prefs::boot_option("test_usb_audio").as_deref() == Some("1") {
+        use crate::drivers::audio;
+        let usb = || audio::devices().into_iter().find(|d| d.flags & aurora_abi::audio::USB != 0);
+        assert!(wait_for(|| usb().is_some(), 10_000), "the USB speaker did not come back after sleep");
+        let builtin = audio::active_output();
+        assert!(audio::select_output(usb().unwrap().id));
+        check_playing("USB speaker after sleep", 500);
+        audio::select_output(builtin);
+    }
     sched::sleep_ms(200);
     // And the restarted CPUs really run work again.
     smp_work();

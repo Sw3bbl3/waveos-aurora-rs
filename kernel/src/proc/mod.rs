@@ -48,6 +48,8 @@ pub enum Handle {
     Log,
     /// A sound playback stream.
     Audio(Arc<crate::drivers::audio::Stream>),
+    /// A sound capture stream (read).
+    AudioIn(Arc<crate::drivers::audio::Capture>),
     /// A network socket.
     Socket(crate::net::socket::Socket),
     /// A directory, generated file or device opened by a Linux program.
@@ -60,6 +62,7 @@ impl Drop for Handle {
             Handle::PipeRead { pipe, .. } => pipe.close_reader(),
             Handle::PipeWrite(pipe) => pipe.close_writer(),
             Handle::Audio(stream) => stream.close(),
+            Handle::AudioIn(capture) => capture.close(),
             _ => {}
         }
     }
