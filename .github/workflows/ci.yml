@@ -53,6 +53,10 @@ jobs:
           - disk: nvme
             smp: 4
             net: e1000e
+          # And the Realtek RTL8139 (legacy INTx, 32-bit DMA, a receive ring buffer).
+          - disk: virtio
+            smp: 4
+            net: rtl8139
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU and OVMF

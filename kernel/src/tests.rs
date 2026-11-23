@@ -1007,6 +1007,15 @@ fn network() {
     );
     let me = crate::net::interfaces().into_iter().find(|i| i.flags & aurora_abi::net::IF_LOOPBACK == 0).unwrap().ip;
     log!("net-test", "address {}", crate::net::wire::ip_str(me));
+    // The harness names the card it gave QEMU: that driver must be the one in use.
+    if let Some(want) = crate::gui::prefs::boot_option("test_net_driver") {
+        let ifs = crate::net::interfaces();
+        let card = ifs.iter().find(|i| i.name.starts_with(b"eth")).expect("no wired interface");
+        let driver = core::str::from_utf8(&card.driver[..card.driver_len as usize]).unwrap_or("");
+        assert!(driver.contains(want.as_str()), "eth0 is driven by {driver:?}, expected {want:?}");
+        assert!(card.flags & aurora_abi::net::IF_LINK != 0, "{driver}: no link");
+        crate::kprint!("[{driver}] ");
+    }
 
     // ICMP echo, to ourselves over loopback and on our own address.
     for dst in [[127, 0, 0, 1], me] {

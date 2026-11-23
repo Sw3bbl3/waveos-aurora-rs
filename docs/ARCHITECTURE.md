@@ -269,16 +269,19 @@ The driver reads and writes FAT32 with VFAT long file names, generating `NAME~N.
 2. The IOAPIC routes and the PCI configuration of every device are saved, the FACS waking vector is pointed at the trampoline page, and the CPU context is saved like `setjmp`.
 3. `SLP_TYP`/`SLP_EN` power everything down but RAM.
 4. On wake, the firmware starts CPU 0 in real mode at the trampoline, which enters long mode and calls `resume_entry`. That reloads the kernel page tables, the GDT and TSS (clearing its busy bit), the IDT, `syscall` and FPU setup, and returns into `suspend` as if the save had just returned.
-5. `suspend` then restores the clocks, the APICs, PCI configuration and MSI/MSI-X routes, each driver's hardware (`drivers::resume`: AHCI, NVMe, virtio, HDA, xHCI, display mode, PS/2), ACPI events and `\_WAK`, and finally restarts the other CPUs.
+5. `suspend` then restores the clocks, the APICs, PCI configuration and MSI/MSI-X routes, each driver's hardware (`drivers::resume`: AHCI, NVMe, virtio, HDA, xHCI, network cards, display mode, PS/2), ACPI events and `\_WAK`, and finally restarts the other CPUs.
 
 ## 7. Networking (`drivers/net/`, `net/`)
 
 ### Adapters
 
-Both drivers implement the `net::Nic` trait (`mac`, `link_up`, `send`, `poll`) and hand received frames to `net::receive`.
+Every driver implements the `net::Nic` trait (`mac`, `link_up`, `send`, `poll`) and hands received frames to `net::receive`. `drivers/net/mod.rs` matches PCI ids to drivers and names known adapters for `lspci`; [HARDWARE.md](HARDWARE.md#wired-network-adapters) lists which are tested.
 
 - **virtio-net** (`drivers/net/virtio.rs`) uses the shared modern virtio-pci transport (`drivers/virtio.rs`): receive queue 0 with MSI-X, transmit queue 1 whose buffers are reclaimed lazily, a 12-byte header per frame.
-- **e1000/e1000e** (`drivers/net/e1000.rs`) runs 256-entry descriptor rings with 2 KiB buffers. The 82574L uses MSI-X (routed through `IVAR`); cards without MSI are polled by the network task.
+- **e1000/e1000e** (`drivers/net/e1000.rs`) runs 256-entry descriptor rings with 2 KiB buffers. The 82574L uses MSI-X (routed through `IVAR`); cards without MSI are polled by the network task. Intel's chipset LAN (I217–I219) is recognized but not driven.
+- **igb/igc** (`drivers/net/igb.rs`: 82576, 82580, I350, I210/I211, I225/I226) uses queue 0 with 256 advanced descriptors, MSI-X in extended mode (both queues and link changes on vector 0 through `IVAR`), and restarts auto-negotiation through MDIO when the MAC sees no link after reset.
+- **RTL8139** (`drivers/net/rtl8139.rs`): a 32 KiB receive ring the card fills with header-prefixed frames, four transmit slots in turn, 32-bit DMA; its legacy INTx line once ACPI routes it, polled until then.
+- **RTL8168/8111/8125** (`drivers/net/rtl8169.rs`): C+ descriptor rings (OWN bit), the generation picked from the chip revision in `TCR`; RTL8168G and later are taken out of out-of-band mode first and reach the PHY through the OCP window. Written from the datasheets; QEMU can't emulate it.
 
 ### The stack
 
@@ -335,7 +338,7 @@ Lines are written while holding the port lock and without allocating, so events 
   - ACPI: AML, sleep types, the test battery, adapter and lid; and that a failing AML task leaves the system running
   - USB: a hub with a keyboard behind it, a tablet, and a FAT32 stick mounted, read and written
   - sleep: S3 (the harness wakes the VM over QMP), then CPUs, work on every CPU, disk I/O, sound, USB and the network after waking
-  - networking: DHCP, ping to loopback and our own address, UDP and TCP over loopback (a megabyte each way), a megabyte over HTTP from a server xtask runs on the host, and an inbound connection through a QEMU port forward
+  - networking (on the card `--net` chose, which the test checks is the one in use): DHCP, ping to loopback and our own address, UDP and TCP over loopback (a megabyte each way), a megabyte over HTTP from a server xtask runs on the host, and an inbound connection through a QEMU port forward
 
   `usertest` also covers threads, futexes and SIMD state surviving preemption.
 
@@ -343,4 +346,4 @@ Lines are written while holding the port lock and without allocating, so events 
 - **Headless boots.** `cargo xtask run --headless` exposes QEMU's HMP monitor at `target/qemu-monitor.sock` and QMP at `target/qemu-qmp.sock`. That makes it possible to script screenshots and input (`screendump`, `input-send-event`).
 - **Host tests.** `cargo test -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling), the image codecs (against the `png`, `jpeg-encoder`, `jpeg-decoder` and `gif` crates), WAV decoding, URLs and HTTP (redirects, keep-alive, gzip), TLS (every cipher suite and version against a rustls server, RFC 8448 key schedule, bad certificates), the browser engine (parsing, selectors, the cascade and layout) and the AML assembler for the test SSDT.
 - **Scripted UI.** `tools/qmp.py` clicks, types and takes screenshots in a running VM.
-- **CI.** On every push, CI runs the host tests, the kernel suite on AHCI, virtio-blk and NVMe with 4 CPUs (and AHCI with 1 CPU), with virtio-net (and e1000e on one job), and a headless boot to the desktop.
+- **CI.** On every push, CI runs the host tests, the kernel suite on AHCI, virtio-blk and NVMe with 4 CPUs (and AHCI with 1 CPU), with virtio-net (and e1000e and RTL8139 on one job each), and a headless boot to the desktop.

@@ -59,7 +59,7 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 
 ## ✅ M6: Networking and the web
 
-- **Adapters:** virtio-net (modern virtio-pci, MSI-X) and Intel e1000/e1000e (82540EM, 82574L and relatives; MSI or polled). Both come back after sleep.
+- **Adapters:** virtio-net (modern virtio-pci, MSI-X) and Intel e1000/e1000e (82540EM, 82574L and relatives; MSI or polled). Both come back after sleep. Later: Intel igb (82576, tested in QEMU; also I210/I211/I350) and igc (I225/I226), Realtek RTL8139 (tested in QEMU) and RTL8168/8111/8125; none of them yet tried on real hardware.
 - **Our own IPv4 stack** in the kernel (`net/`): ARP with a pending queue, ICMP echo and unreachable, UDP, and TCP with RFC 6298 retransmission timers, slow start and congestion avoidance, fast retransmit, delayed ACKs, window scaling, zero-window probes and TIME_WAIT. A DHCP client renews its lease, and loopback works.
 - **Sockets** for programs (`SOCKET`, `CONNECT`, `BIND`, `LISTEN`, `ACCEPT`, `SENDTO`, `RECVFROM`, …) with timeouts and non-blocking mode; `GETRANDOM` from a ChaCha20 generator seeded by RDSEED/RDRAND.
 - **The web** (host-tested `no_std` libraries):

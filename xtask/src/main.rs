@@ -5,6 +5,7 @@
 //!       --disk ahci|virtio|nvme           storage controller for the disk (default: ahci)
 //!       --fresh-disk                      recreate the disk (erases files saved inside WaveOS)
 //!       --monitor                         open the live System Explorer (http://127.0.0.1:7777)
+//!       --net virtio|e1000|e1000e|igb|rtl8139|none  network card (default virtio; also for `test`)
 //!       --smp N                           number of CPUs (default 4)
 //!       --memory-mib N                    guest RAM in MiB (default 4096)
 //!       --audio-wav PATH                  record guest audio to a WAV file
@@ -76,8 +77,8 @@ fn main() {
     }
     let net =
         args.iter().position(|a| a == "--net").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("virtio");
-    if !["virtio", "e1000", "e1000e", "none"].contains(&net) {
-        eprintln!("--net must be virtio, e1000, e1000e or none");
+    if !["virtio", "e1000", "e1000e", "igb", "rtl8139", "none"].contains(&net) {
+        eprintln!("--net must be virtio, e1000, e1000e, igb, rtl8139 or none");
         exit(2);
     }
     let gpu = args.iter().position(|a| a == "--gpu").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("std");
@@ -839,7 +840,7 @@ struct RunOpts<'a> {
     host_battery: Option<battery::Source>,
     /// A raw disk image to attach as a USB stick.
     usb_stick: Option<PathBuf>,
-    /// Network card: virtio, e1000, e1000e or none (QEMU user networking).
+    /// Network card: virtio, e1000, e1000e, igb, rtl8139 or none (QEMU user networking).
     net: &'a str,
     /// Extra user-networking options, e.g. host port forwards.
     netdev_extra: String,
@@ -1005,6 +1006,8 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         cmd.arg("-device").arg(match opts.net {
             "e1000" => "e1000,netdev=net0",
             "e1000e" => "e1000e,netdev=net0",
+            "igb" => "igb,netdev=net0",
+            "rtl8139" => "rtl8139,netdev=net0",
             _ => "virtio-net-pci,netdev=net0,disable-legacy=on",
         });
     }
@@ -1127,6 +1130,10 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
     'attempt: loop {
         image::create(&esp, &root().join("assets/home"), &img, 128 * 1024 * 1024).expect("test disk creation failed");
         image::set_boot_option(&img, "test_http_port", &http_port.to_string()).expect("write boot.conf");
+        // The network tests check that the card QEMU was given is the one in use.
+        if let Some(driver) = test_net_driver(net) {
+            image::set_boot_option(&img, "test_net_driver", driver).expect("write boot.conf");
+        }
         if let Ok(filter) = env::var("AURORA_TEST_FILTER") {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
         }
@@ -1168,6 +1175,18 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
         break;
     }
     println!("\nall kernel tests passed (both boots){}", if sleep { "" } else { " — without the sleep test" });
+}
+
+/// Part of the driver name the kernel reports for each `--net` card.
+fn test_net_driver(net: &str) -> Option<&'static str> {
+    Some(match net {
+        "virtio" => "virtio-net",
+        "e1000" => "82540EM",
+        "e1000e" => "82574L",
+        "igb" => "82576",
+        "rtl8139" => "RTL8139",
+        _ => return None,
+    })
 }
 
 /// Sends one QMP command to the running VM.

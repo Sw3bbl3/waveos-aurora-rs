@@ -58,12 +58,44 @@ pub fn supported(id: u16) -> bool {
     matches!(id, 0x100E | 0x100F | 0x1010 | 0x1011 | 0x1015 | 0x1026 | 0x1027 | 0x1028 | 0x107C | 0x10D3 | 0x10F6)
 }
 
-fn model(id: u16) -> &'static str {
+pub fn model(id: u16) -> &'static str {
     match id {
         0x10D3 | 0x10F6 => "Intel 82574L (e1000e)",
         0x100E => "Intel 82540EM (e1000)",
         _ => "Intel PRO/1000",
     }
+}
+
+/// The LAN built into Intel chipsets (82579, I217, I218, I219): the MAC is
+/// in the PCH and talks to a separate PHY chip over PCIe or SMBus. These
+/// need PHY workarounds this driver doesn't have yet (taking the PHY out of
+/// SMBus and ultra-low-power mode in step with the management engine, the
+/// software semaphore around PHY access, the I219's descriptor-ring flush
+/// before reset), so they are recognized and reported but not driven.
+pub fn pch_lan(id: u16) -> Option<&'static str> {
+    Some(match id {
+        0x1502 | 0x1503 => "Intel 82579 (PCH LAN)",
+        0x153A | 0x153B => "Intel I217 (PCH LAN)",
+        0x1559 | 0x155A | 0x15A0..=0x15A3 => "Intel I218 (PCH LAN)",
+        0x156F | 0x1570 | 0x15B7..=0x15B9 | 0x15BB..=0x15BE | 0x15D6..=0x15D8 | 0x15DF..=0x15E3 => {
+            "Intel I219 (PCH LAN)"
+        }
+        0x0D4C..=0x0D4F | 0x0D53 | 0x0D55 | 0x15F4 | 0x15F5 | 0x15F9..=0x15FC | 0x1A1C..=0x1A1F => {
+            "Intel I219 (PCH LAN)"
+        }
+        0x550A..=0x5511 | 0x57A0 | 0x57A1 => "Intel I219 (PCH LAN)",
+        _ => return None,
+    })
+}
+
+/// Logs a chipset LAN adapter that was found but isn't driven (see [`pch_lan`]).
+pub fn unsupported_pch(dev: &pci::Device) {
+    log!(
+        "e1000",
+        "{} [8086:{:04x}]: not supported yet (needs the PCH PHY workarounds); no wired network on it",
+        pch_lan(dev.device).unwrap_or("Intel PCH LAN"),
+        dev.device
+    );
 }
 
 struct Rx {

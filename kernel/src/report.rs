@@ -42,7 +42,7 @@ pub fn pci() -> String {
             d.func,
             d.vendor,
             d.device,
-            class_name(d.class, d.subclass, d.prog_if),
+            crate::drivers::net::model(d.vendor, d.device).unwrap_or(class_name(d.class, d.subclass, d.prog_if)),
             d.class,
             d.subclass,
             d.prog_if
