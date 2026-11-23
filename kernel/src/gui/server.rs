@@ -89,6 +89,10 @@ pub enum Command {
     Resumed,
     /// A network interface got (or lost) an address.
     NetworkChanged,
+    /// A process asks for an administrator's password (see `users::elevate`).
+    Elevate,
+    /// Accounts were added, removed or changed (`users::db`).
+    AccountsChanged,
 }
 
 /// Queues a command for the compositor.
@@ -126,6 +130,11 @@ fn send(cmd: Command) {
     if t != u64::MAX {
         sched::wake(t);
     }
+}
+
+/// True once the window server runs (system prompts can be shown).
+pub fn running() -> bool {
+    COMPOSITOR.load(Ordering::Relaxed) != u64::MAX
 }
 
 /// Wakes the compositor (e.g. a notification arrived).

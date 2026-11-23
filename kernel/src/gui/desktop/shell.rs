@@ -19,6 +19,7 @@ enum MenuAction {
     Power,
     Sleep,
     Lock,
+    LogOut,
     Minimize,
     Zoom,
     Close,
@@ -101,6 +102,11 @@ impl Desktop {
                 item("Apps — Shoal", "Super", MenuAction::Launcher),
                 SEPARATOR,
                 item("Lock Screen", "Super L", MenuAction::Lock),
+                if self.several_accounts() {
+                    item("Switch User…", "", MenuAction::LogOut)
+                } else {
+                    item("Log Out…", "", MenuAction::LogOut)
+                },
                 item("Sleep", "", MenuAction::Sleep),
                 item("Restart…", "", MenuAction::Power),
                 item("Shut Down…", "", MenuAction::Power),
@@ -144,6 +150,7 @@ impl Desktop {
             MenuAction::Power => self.open(AppKind::Power),
             MenuAction::Sleep => crate::power::sleep(),
             MenuAction::Lock => self.lock(),
+            MenuAction::LogOut => self.log_out(),
             MenuAction::Open(k) => self.open(k),
             MenuAction::Minimize => {
                 if let Some(id) = focused {

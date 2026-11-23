@@ -24,6 +24,7 @@ use waveui::style::Weight;
 use waveui::Request;
 
 mod search;
+mod users;
 
 const THUMB_W: i32 = 208;
 const THUMB_H: i32 = 130;
@@ -60,7 +61,7 @@ const PANES: [(Pane, &str, &str, u32); 15] = [
     (Pane::Notifications, "Notifications", "notifications", 0xFFFF453A),
     (Pane::Desktop, "Desktop & Dock", "desktop", 0xFF5856D6),
     (Pane::Bar, "Top Bar & Clock", "bar", 0xFF2F62F5),
-    (Pane::Login, "Login", "login", 0xFF8E5CF5),
+    (Pane::Login, "Users & Login", "login", 0xFF8E5CF5),
     (Pane::Accessibility, "Accessibility", "accessibility", 0xFF147EFB),
     (Pane::About, "About", "about", 0xFF30B0C7),
 ];
@@ -97,6 +98,7 @@ pub enum Msg {
     Rumble(u32),
     OpenAbout,
     ClearNote,
+    Users(users::UserMsg),
 }
 
 pub struct Settings {
@@ -125,6 +127,8 @@ pub struct Settings {
     now: corekit::abi::DateTime,
     network_check: Option<corekit::thread::JoinHandle<corekit::diagnostics::NetworkCheck>>,
     network_report: Option<corekit::diagnostics::NetworkCheck>,
+    /// Users & Login.
+    users: users::UsersState,
 }
 
 fn days_in(y: i64, m: i64) -> i64 {
@@ -162,6 +166,7 @@ impl Settings {
             wifi_password: String::new(),
             pads: Vec::new(),
             now: corekit::time::now(),
+            users: Default::default(),
         };
         s.load_custom_thumb();
         s.sync_clock();
@@ -221,6 +226,7 @@ impl Settings {
                     .collect();
             }
             Pane::About => self.info = corekit::process::sys_info(),
+            Pane::Login => self.users.refresh(),
             _ => {}
         }
     }
@@ -1058,40 +1064,6 @@ impl Settings {
         )
     }
 
-    fn login(&self) -> View<'_, Msg> {
-        let name = prefs::get("account_name").unwrap_or_else(|| String::from("This computer"));
-        let initials: String =
-            name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect::<String>().to_uppercase();
-        let avatar = Canvas::new(move |cv, r| {
-            cv.fill_round_rect_dgradient(r, r.w / 2, theme::accent(), theme::ACCENT_2);
-            cv.text_centered(r, &initials, theme::ui_bold(18), 0xFFFF_FFFF);
-        })
-        .size(52, 52);
-        page(
-            "Login",
-            vec![
-                card(vec![HStack::new()
-                    .push(avatar)
-                    .push(
-                        VStack::new()
-                            .push(Text::new(name).style(TextStyle::Title2))
-                            .push(Text::new("Owner · password protected").foreground(Color::SecondaryLabel))
-                            .spacing(2)
-                            .alignment(Align::Start),
-                    )
-                    .push(Spacer::new())
-                    .spacing(16)
-                    .padding_xy(0, 14)
-                    .fill_width()]),
-                card(vec![pref_toggle("login/auto", "Log in automatically", pref::AUTO_LOGIN)]),
-                footer(
-                    "With automatic login, WaveOS opens straight to the desktop when it starts. Lock Screen \
-                     (Super L) and waking from sleep still ask for your password.",
-                ),
-            ],
-        )
-    }
-
     fn accessibility(&self) -> View<'_, Msg> {
         let item = |id: &'static str, label: &str, detail: &str, key: &'static str| {
             row_detail(label, detail, Toggle::new("", prefs::get_bool(key)).on_change(move |on| Msg::Toggle(key, on)))
@@ -1389,6 +1361,7 @@ impl App for Settings {
             }
             Msg::OpenAbout => cx.open_app("About"),
             Msg::ClearNote => self.note = None,
+            Msg::Users(m) => self.users_update(m, cx),
         }
     }
 
@@ -1463,7 +1436,7 @@ impl App for Settings {
                 Pane::Notifications => self.notifications(),
                 Pane::Desktop => self.desktop(),
                 Pane::Bar => self.bar(),
-                Pane::Login => self.login(),
+                Pane::Login => self.users_pane(),
                 Pane::Accessibility => self.accessibility(),
                 Pane::About => self.about(env),
             };

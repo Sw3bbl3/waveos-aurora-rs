@@ -45,6 +45,8 @@ pub const SETTINGS: &[Setting] = &[
     item!("bar/crest", "Show Crest", "clock time top bar notch", Bar),
     item!("bar/battery", "Show battery level", "percent power status ring", Bar),
     item!("login/auto", "Log in automatically", "password account startup", Login),
+    item!("login/password", "Change your password", "account security passwd lock", Login),
+    item!("login/add", "Add an account", "users people family new user administrator", Login),
     item!("desktop/dock-size", "Harbor size", "dock desktop icons magnification", Desktop),
     item!("desktop/dock-autohide", "Hide Harbor until pointed at", "dock autohide desktop space", Desktop),
     item!("desktop/glass", "Glass intensity", "desktop blur transparency lumen", Desktop),

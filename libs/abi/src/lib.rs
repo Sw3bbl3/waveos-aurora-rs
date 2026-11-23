@@ -187,7 +187,153 @@ pub mod nr {
     pub const EVENT_FD: usize = 82;
     /// UTC milliseconds since 1970; changes immediately when the clock is corrected.
     pub const UNIX_MS: usize = 83;
-    pub const COUNT: usize = 84;
+    // 84 and 85 are sound calls on the integration branch.
+    /// `cred_get(*mut Cred)` — who the calling process acts as.
+    pub const CRED_GET: usize = 86;
+    /// `cred_set(*const Cred)` — changes it. Only the system may become
+    /// another account; anyone may drop the administrator capability or
+    /// groups, or change the umask.
+    pub const CRED_SET: usize = 87;
+    /// `chmod(path, len, mode)` — the owner (or an administrator) sets the
+    /// permission bits.
+    pub const CHMOD: usize = 88;
+    /// `chown(path, len, uid, gid)` — `u32::MAX` leaves one unchanged.
+    /// Changing the owner takes the administrator capability; the owner
+    /// may give the file to a group they are in.
+    pub const CHOWN: usize = 89;
+    /// `stat_owner(path, len, *mut FileOwner)`
+    pub const STAT_OWNER: usize = 90;
+    /// `users(op, uid, buf, buf_len, out, out_len) -> value` — the
+    /// accounts; see [`super::users`].
+    pub const USERS: usize = 91;
+    /// `elevate(reason, reason_len)` — asks for the administrator
+    /// capability: the system prompt asks for an administrator's name and
+    /// password (the caller never sees them). 0 once granted (for a few
+    /// minutes), `-EPERM` if refused. Returns 0 at once for administrators.
+    pub const ELEVATE: usize = 92;
+    pub const COUNT: usize = 93;
+}
+
+/// A process's identity (`cred_get`, `cred_set`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cred {
+    pub uid: u32,
+    /// Primary group.
+    pub gid: u32,
+    /// [`cred`] flags.
+    pub flags: u32,
+    pub ngroups: u32,
+    /// Supplementary groups (the first `ngroups`).
+    pub groups: [u32; 16],
+    /// Permission bits taken away from new files.
+    pub umask: u32,
+    pub _pad: u32,
+}
+
+pub mod cred {
+    /// Holds the administrator capability now.
+    pub const ADMIN: u32 = 1;
+    /// ...because an administrator approved it (it runs out).
+    pub const ELEVATED: u32 = 2;
+    /// The system's well-known ids.
+    pub const ROOT_UID: u32 = 0;
+    pub const ADMIN_GID: u32 = 80;
+    pub const USERS_GID: u32 = 100;
+}
+
+/// Who a file belongs to (`stat_owner`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileOwner {
+    pub uid: u32,
+    pub gid: u32,
+    /// Permission bits, `0o7777`.
+    pub mode: u32,
+    /// [`owner`] flags.
+    pub flags: u32,
+}
+
+pub mod owner {
+    /// The file carries its owner itself (otherwise it is its volume's
+    /// default, or where the volume is mounted decides).
+    pub const OWN: u32 = 1;
+}
+
+/// An account as anyone may see it (`users(LIST)`): no password material.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UserInfo {
+    pub uid: u32,
+    /// [`users`] flags.
+    pub flags: u32,
+    pub name_len: u32,
+    pub full_len: u32,
+    pub home_len: u32,
+    pub avatar_len: u32,
+    pub name: [u8; 32],
+    pub full: [u8; 64],
+    pub home: [u8; 64],
+    pub avatar: [u8; 128],
+}
+
+impl UserInfo {
+    pub const fn zeroed() -> Self {
+        Self {
+            uid: 0,
+            flags: 0,
+            name_len: 0,
+            full_len: 0,
+            home_len: 0,
+            avatar_len: 0,
+            name: [0; 32],
+            full: [0; 64],
+            home: [0; 64],
+            avatar: [0; 128],
+        }
+    }
+    fn text(b: &[u8], n: u32) -> &str {
+        core::str::from_utf8(&b[..(n as usize).min(b.len())]).unwrap_or("?")
+    }
+    pub fn name(&self) -> &str {
+        Self::text(&self.name, self.name_len)
+    }
+    pub fn full(&self) -> &str {
+        Self::text(&self.full, self.full_len)
+    }
+    pub fn home(&self) -> &str {
+        Self::text(&self.home, self.home_len)
+    }
+    pub fn avatar(&self) -> &str {
+        Self::text(&self.avatar, self.avatar_len)
+    }
+}
+
+/// `users` operations. Strings go in `buf` as NUL-separated fields.
+pub mod users {
+    /// `out` = `*mut UserInfo`, `out_len` = how many fit → number of accounts.
+    pub const LIST: usize = 1;
+    /// `buf` = "name\0full name\0password\0", `uid` = 1 for an
+    /// administrator → the new uid. Administrators only.
+    pub const ADD: usize = 2;
+    /// Removes account `uid` (its home folder stays). Administrators only;
+    /// the last administrator and the logged-in account can't go.
+    pub const REMOVE: usize = 3;
+    /// `buf` = "old\0new\0": sets account `uid`'s password (an empty new
+    /// one removes it). Your own needs the old one; someone else's needs
+    /// the administrator capability.
+    pub const SET_PASSWORD: usize = 4;
+    /// Makes `uid` an administrator (`buf_len` = 1) or not (0).
+    pub const SET_ADMIN: usize = 5;
+    /// `buf` = "full name\0hint\0picture\0"; an empty field stays as it
+    /// is, a single `-` clears the hint. Your own, or with the capability.
+    pub const SET_DETAILS: usize = 6;
+
+    /// [`super::UserInfo`] flags.
+    pub const ADMIN: u32 = 1;
+    pub const HAS_PASSWORD: u32 = 2;
+    /// The account logged in now.
+    pub const CURRENT: u32 = 4;
 }
 
 #[repr(C)]
@@ -512,6 +658,7 @@ pub mod err {
     pub const ENOMEM: isize = 12;
     pub const EACCES: isize = 13;
     pub const EFAULT: isize = 14;
+    pub const EBUSY: isize = 16;
     pub const EEXIST: isize = 17;
     pub const ENODEV: isize = 19;
     pub const ENOTDIR: isize = 20;
@@ -563,6 +710,7 @@ pub mod err {
             EAGAIN => "try again",
             ENOMEM => "out of memory",
             EACCES => "permission denied",
+            EBUSY => "busy",
             EFAULT => "bad address",
             EEXIST => "already exists",
             ENODEV => "no such device",

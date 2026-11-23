@@ -29,6 +29,7 @@ mod telemetry;
 #[cfg(feature = "ktest")]
 mod tests;
 mod time;
+mod users;
 
 use bootinfo::{BootInfo, BOOTINFO_MAGIC};
 use core::panic::PanicInfo;
@@ -113,6 +114,8 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     telemetry::stage("acpi", "ACPI runtime (AML, power button, battery)");
     acpi::start(boot_info.rsdp_phys);
     telemetry::start();
+    // Accounts and file owners, once the home volume is there.
+    users::init();
 
     #[cfg(feature = "ktest")]
     sched::spawn("ktest", tests::run);

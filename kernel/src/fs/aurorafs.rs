@@ -113,8 +113,36 @@ impl Filesystem for AuroraFs {
         Ok(entries.into_iter().map(|e| DirEntry { name: e.name, ino: e.ino, kind: kind(e.kind) }).collect())
     }
     fn create(&self, dir: Ino, name: &str, k: Kind) -> FsResult<Ino> {
+        self.create_owned(dir, name, k, None)
+    }
+    fn create_owned(&self, dir: Ino, name: &str, k: Kind, owner: Option<Owner>) -> FsResult<Ino> {
         let k = if k == Kind::Dir { ::aurorafs::Kind::Dir } else { ::aurorafs::Kind::File };
-        self.vol.lock().create(dir, name, k).map_err(errno)
+        let owner = owner.map(|o| ::aurorafs::Owner { uid: o.uid, gid: o.gid, mode: o.mode });
+        self.vol.lock().create_owned(dir, name, k, owner).map_err(errno)
+    }
+    fn owner(&self, ino: Ino) -> Option<(Owner, bool)> {
+        let mut v = self.vol.lock();
+        let o = v.owner(ino).ok()?;
+        let explicit = v.has_own_owner(ino).ok()?;
+        // Before owners are turned on, everything is the first account's.
+        let (uid, gid) = if explicit || v.features() & ::aurorafs::FEATURE_OWNERS != 0 {
+            (o.uid, o.gid)
+        } else {
+            (::aurorafs::FIRST_UID, ::aurorafs::FIRST_GID)
+        };
+        Some((Owner { uid, gid, mode: o.mode }, explicit))
+    }
+    fn set_owner(&self, ino: Ino, o: Owner) -> FsResult<()> {
+        let owner = ::aurorafs::Owner { uid: o.uid, gid: o.gid, mode: o.mode };
+        self.vol.lock().set_owner(ino, owner).map_err(errno)
+    }
+    fn enable_owners(&self, uid: u32, gid: u32) -> FsResult<bool> {
+        let mut v = self.vol.lock();
+        if v.features() & ::aurorafs::FEATURE_OWNERS != 0 {
+            return Ok(false);
+        }
+        v.enable_owners(uid, gid).map_err(errno)?;
+        Ok(true)
     }
     fn unlink(&self, dir: Ino, name: &str) -> FsResult<()> {
         self.vol.lock().unlink(dir, name).map_err(errno)

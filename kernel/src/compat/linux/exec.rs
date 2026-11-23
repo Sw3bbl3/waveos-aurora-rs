@@ -136,6 +136,9 @@ pub fn load(
     let addr = |off: usize| strings_at + off as u64;
 
     let hwcap = core::arch::x86_64::__cpuid(1).edx as u64;
+    // Who the program runs as (its parent's, or the session's for the desktop's).
+    let cred = crate::users::current().unwrap_or_else(crate::users::session);
+    let (uid, gid) = (cred.uid as u64, cred.gid as u64);
     let auxv: [(u64, u64); 18] = [
         (3, phdr_address(image, bias)), // AT_PHDR
         (4, image.phentsize as u64),    // AT_PHENT
@@ -144,10 +147,10 @@ pub fn load(
         (7, interp_base),               // AT_BASE: where the interpreter is
         (8, 0),                         // AT_FLAGS
         (9, image.entry + bias),        // AT_ENTRY
-        (11, super::UID),               // AT_UID
-        (12, super::UID),               // AT_EUID
-        (13, super::UID),               // AT_GID
-        (14, super::UID),               // AT_EGID
+        (11, uid),                      // AT_UID
+        (12, uid),                      // AT_EUID
+        (13, gid),                      // AT_GID
+        (14, gid),                      // AT_EGID
         (16, hwcap),                    // AT_HWCAP
         (17, 100),                      // AT_CLKTCK
         (15, addr(platform)),           // AT_PLATFORM

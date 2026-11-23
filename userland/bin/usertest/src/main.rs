@@ -42,6 +42,10 @@ fn main(args: corekit::Args) -> i32 {
         println!("child says {}", args[2..].join(" "));
         return 7;
     }
+    if args.get(1).map(String::as_str) == Some("perm") {
+        // Permissions mode: without the administrator capability.
+        return without_admin();
+    }
     if args.get(1).map(String::as_str) == Some("spinner") {
         // Exit while another thread is busy: the whole process must go away.
         let _ = thread::spawn(|| loop {
@@ -123,6 +127,7 @@ fn main(args: corekit::Args) -> i32 {
     }
 
     threads_and_simd();
+    identity();
 
     let failed = unsafe { FAILED };
     println!("usertest: {}", if failed == 0 { String::from("all passed") } else { alloc::format!("{failed} FAILED") });
@@ -184,4 +189,61 @@ fn threads_and_simd() {
         Ok(pid) => check("exit tears down other threads", process::wait(pid, Some(5000)).ok() == Some(5)),
         Err(_) => check("spawn spinner", false),
     }
+}
+
+/// Credentials, owners and modes, as the account the desktop starts things as.
+fn identity() {
+    use corekit::users;
+    let c = users::cred();
+    check("cred_get: an account (uid >= 1000)", c.uid >= 1000 && c.ngroups >= 1);
+    check("cred_get: administrator capability", c.flags & corekit::abi::cred::ADMIN != 0);
+    let f = "/Documents/ut-owner.txt";
+    check("create file", fs::write(f, b"mine").is_ok());
+    let o = users::owner(f);
+    check(
+        "new file belongs to its creator, rw-r--r--",
+        o.is_ok_and(|o| o.uid == c.uid && o.mode == 0o644 && o.flags & corekit::abi::owner::OWN != 0),
+    );
+    check("chmod 600", users::chmod(f, 0o600).is_ok() && users::owner(f).is_ok_and(|o| o.mode == 0o600));
+    check("system image belongs to the system", users::owner("/System/version.txt").is_ok_and(|o| o.uid == 0));
+    check("cred_set to another account → EPERM", {
+        let mut other = c;
+        other.uid = c.uid + 1;
+        errno(users::set_cred(&other)) == EPERM
+    });
+    let _ = fs::remove(f);
+    match process::spawn("/System/Bin/usertest", &["perm"], Stdio::default()) {
+        Ok(pid) => {
+            check("checks without the administrator capability", process::wait(pid, Some(20_000)).ok() == Some(0))
+        }
+        Err(_) => check("spawn usertest perm", false),
+    }
+}
+
+/// Run in a child: drops the administrator capability, then everything
+/// privileged must be refused (no window server runs under the tests, so
+/// asking for approval fails at once).
+fn without_admin() -> i32 {
+    use corekit::users;
+    check("drop the administrator capability", users::drop_admin().is_ok() && !users::is_admin());
+    let mut back = users::cred();
+    back.flags |= corekit::abi::cred::ADMIN;
+    check("taking it back → EPERM", errno(users::set_cred(&back)) == EPERM);
+    check("elevate without a prompt → EPERM", errno(users::elevate("a test")) == EPERM);
+    check("write in /Applications → EACCES", errno(fs::write("/Applications/ut.txt", b"x")) == EACCES);
+    check("list /Security → EACCES", errno(fs::read_dir("/Security")) == EACCES);
+    check("read the account database → EACCES", errno(fs::read("/Security/accounts.db")) == EACCES);
+    check("rename /Security → EPERM", errno(fs::rename("/Security", "/Elsewhere")) == EPERM);
+    check("add an account → EPERM", errno(users::add("mallory", "Mallory", "", true)) == EPERM);
+    check(
+        "change who logs in automatically → EPERM",
+        errno(corekit::prefs::set(corekit::abi::pref::AUTO_LOGIN, "1")) == EPERM,
+    );
+    let f = "/Documents/ut-mode.txt";
+    check("own file", fs::write(f, b"secret").is_ok());
+    check("chmod 000 locks even the owner out", users::chmod(f, 0).is_ok() && errno(fs::read(f)) == EACCES);
+    check("the owner can chmod back", users::chmod(f, 0o644).is_ok() && fs::read(f).is_ok());
+    check("give a file away → EPERM", errno(users::chown(f, 0, u32::MAX)) == EPERM);
+    check("remove own file", fs::remove(f).is_ok());
+    unsafe { FAILED }
 }

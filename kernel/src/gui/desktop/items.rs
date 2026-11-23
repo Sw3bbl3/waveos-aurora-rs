@@ -162,7 +162,10 @@ fn worker() {
                 error = Some(format!("Desktop: {}", aurora_abi::err::name(e)));
             }
         }
-        match fs::readdir("/Desktop") {
+        // The desktop shows the first account's Desktop folder only to
+        // accounts allowed to read it (per-account desktops: next step).
+        let visible = fs::perm::session_allows("/Desktop", fs::perm::R | fs::perm::X);
+        match if visible { fs::readdir("/Desktop") } else { Ok(Vec::new()) } {
             Ok(entries) => {
                 let mut items = Vec::new();
                 for e in entries {
@@ -740,6 +743,7 @@ pub(super) fn builtin_id(a: &apps::AppInfo) -> String {
         Doom => "doom",
         Firefox => "firefox",
         Voyage => "voyage",
+        Elevate => "elevate",
     };
     id.into()
 }
