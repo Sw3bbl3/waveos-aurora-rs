@@ -590,6 +590,24 @@ pub fn alloc_user_nowait() -> Option<u64> {
     alloc_user_with(false)
 }
 
+/// A frame to bring a program's page back from swap: like
+/// [`alloc_user_nowait`], but it may take the top eighth of the kernel's
+/// reserve. Bringing a page back frees its swap slot, so `kswapd` can swap
+/// out another (idle) page in its place: when memory and swap are both
+/// full, a program touching its own memory goes on, rather than meeting
+/// the out-of-memory killer, as long as there is anything idle to swap
+/// out instead.
+pub fn alloc_user_refault() -> Option<u64> {
+    if let Some(f) = alloc_user_with(false) {
+        return Some(f);
+    }
+    if counts().1 > kernel_reserve() * 7 / 8 {
+        super::kswapd::wake();
+        return alloc();
+    }
+    None
+}
+
 fn alloc_user_with(wait: bool) -> Option<u64> {
     if USER_ALLOCS.fetch_add(1, Ordering::Relaxed).is_multiple_of(32) || LOW.load(Ordering::Relaxed) {
         let free = counts().1;

@@ -212,10 +212,11 @@ impl Balloon {
         Balloon(held)
     }
 
-    /// Takes frames until a little of the kernel's reserve is gone too
-    /// (kernel memory growing under the programs): theirs must shrink.
+    /// Takes frames until more of the kernel's reserve is gone than
+    /// programs bringing pages back from swap may dip into (kernel memory
+    /// growing under the programs): theirs must shrink.
     fn squeeze(&mut self) {
-        let target = frame::kernel_reserve() - 256;
+        let target = frame::kernel_reserve() * 7 / 8 - 256;
         while frame::counts().1 > target {
             match frame::alloc() {
                 Some(f) => self.0.push(f),

@@ -728,12 +728,14 @@ impl AddressSpace {
     /// Brings the page at `page` back from swap slot `entry` holds.
     fn swap_in(&mut self, page: u64, entry: u64) -> Fault {
         let slot = slot_of(entry);
-        // The frame comes first: waiting for memory must not keep the slot busy.
+        // The frame comes first: waiting for memory must not keep the slot
+        // busy. (Bringing a page back may dip into the reserve a little:
+        // it is memory the program had, and its slot is freed for the next.)
         let mut spare = None;
         let mut waits = 0u32;
         let map = loop {
             if spare.is_none() && !swap::is_cached(slot) {
-                match user_frame() {
+                match frame::alloc_user_refault() {
                     Some(f) => spare = Some(f),
                     None => return Fault::NoMemory,
                 }
