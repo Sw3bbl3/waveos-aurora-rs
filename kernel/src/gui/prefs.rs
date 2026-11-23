@@ -6,6 +6,7 @@ use super::settings;
 use crate::drivers::{audio, display, keymap, ps2};
 use alloc::string::String;
 use aurora_abi::{err::*, pref};
+use lumen::displays;
 
 fn valid_key(k: &str) -> bool {
     !k.is_empty() && k.len() <= 32 && k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
@@ -14,7 +15,7 @@ fn valid_key(k: &str) -> bool {
 /// Defaults for preferences that have one.
 fn default(key: &str) -> Option<&'static str> {
     Some(match key {
-        pref::DARK | pref::CREST | pref::DESKTOP_WATER => "1",
+        pref::DARK | pref::CREST | pref::DESKTOP_WATER | pref::PLAY_AUTO_ENTER | pref::PLAY_SOUNDS => "1",
         pref::BATTERY_LEVEL | pref::AUTO_LOGIN => "0",
         pref::CLOCK_24H
         | pref::CLOCK_SECONDS
@@ -34,6 +35,7 @@ fn default(key: &str) -> Option<&'static str> {
         pref::TAP_TO_CLICK | pref::NATURAL_SCROLLING => "1",
         pref::TRACKING_SPEED | pref::POINTER_SPEED => "5",
         pref::VOLUME => "70",
+        pref::ENERGY_MODE => "balanced",
         _ => return None,
     })
 }
@@ -59,6 +61,7 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         return Err(EINVAL);
     }
     match key {
+        "utc_offset" if !value.parse::<i64>().is_ok_and(|v| (-720..=840).contains(&v)) => return Err(EINVAL),
         pref::GLASS if !value.parse::<u8>().is_ok_and(|v| v <= 100) => return Err(EINVAL),
         pref::DOCK_SIZE if !value.parse::<u8>().is_ok_and(|v| (32..=64).contains(&v)) => return Err(EINVAL),
         pref::DESKTOP_WATER
@@ -68,6 +71,8 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         | pref::DOCK_AUTOHIDE
         | pref::TAP_TO_CLICK
         | pref::NATURAL_SCROLLING
+        | pref::PLAY_AUTO_ENTER
+        | pref::PLAY_SOUNDS
             if value != "0" && value != "1" =>
         {
             return Err(EINVAL)
@@ -75,12 +80,35 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         pref::KEYBOARD if !keymap::LAYOUTS.iter().any(|l| l.id == value) => return Err(EINVAL),
         pref::ACCENT if value.parse::<u8>().is_err() => return Err(EINVAL),
         pref::DISPLAY_SCALE if !matches!(value, "0" | "1" | "2") => return Err(EINVAL),
+        // Several displays (see `lumen::displays`): the main one, mirroring,
+        // and each display's place, resolution, scale and wallpaper.
+        displays::PRIMARY_PREF if !(value.len() == 8 && value.bytes().all(|b| b.is_ascii_hexdigit())) => {
+            return Err(EINVAL)
+        }
+        displays::MIRROR_PREF if value != "0" && value != "1" => return Err(EINVAL),
+        k if k.starts_with("display_")
+            && k != pref::DISPLAY_SCALE
+            && k != displays::PRIMARY_PREF
+            && k != displays::MIRROR_PREF =>
+        {
+            let hex = &k["display_".len()..];
+            if hex.len() != 8 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) || displays::Record::parse(value).is_none()
+            {
+                return Err(EINVAL);
+            }
+        }
+        pref::ENERGY_MODE if !matches!(value, "saver" | "balanced" | "performance") => return Err(EINVAL),
         pref::TRACKING_SPEED | pref::POINTER_SPEED if !value.parse::<u8>().is_ok_and(|v| (1..=10).contains(&v)) => {
             return Err(EINVAL)
         }
         _ => {}
     }
     settings::try_set(key, value)?;
+    if key == "utc_offset" {
+        // The RTC stores local time; changing its presentation zone must not
+        // change the UTC instant used by TLS, cookies or Linux applications.
+        crate::time::change_zone(value.parse::<i64>().unwrap());
+    }
     server::command(Command::Pref(String::from(key)));
     Ok(())
 }
@@ -110,6 +138,8 @@ pub fn apply_system(key: &str) {
             let volume = get(pref::VOLUME).and_then(|v| v.parse().ok()).unwrap_or(70u32);
             audio::set_volume(volume.min(100), get_bool(pref::MUTED));
         }
+        pref::AUDIO_OUTPUT | pref::AUDIO_INPUT => audio::preference_changed(),
+        pref::ENERGY_MODE => crate::power::set_energy_mode(&get(pref::ENERGY_MODE).unwrap_or_default()),
         pref::POINTER_SPEED | pref::TRACKING_SPEED | pref::TAP_TO_CLICK | pref::NATURAL_SCROLLING => {
             let speed = |k| get(k).and_then(|v| v.parse().ok()).unwrap_or(5u8);
             crate::drivers::input::set_pointer_settings(
@@ -132,7 +162,9 @@ pub fn set_volume(volume: u32, muted: bool) {
 }
 
 pub fn apply_all_system() {
-    for k in [pref::KEYBOARD, pref::REPEAT_DELAY, pref::VOLUME, pref::POINTER_SPEED] {
+    for k in
+        [pref::KEYBOARD, pref::REPEAT_DELAY, pref::VOLUME, pref::POINTER_SPEED, pref::AUDIO_OUTPUT, pref::ENERGY_MODE]
+    {
         apply_system(k);
     }
 }

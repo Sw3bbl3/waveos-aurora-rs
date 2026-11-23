@@ -43,13 +43,8 @@ fn layout(size: u64) -> Layout {
 }
 
 /// Creates a fresh image: GPT, FAT32 ESP with `esp`'s contents, and a AuroraFS
-/// home volume seeded from `home` (a directory tree).
-pub fn create(esp: &Path, home: &Path, out: &Path, size: u64) -> io::Result<()> {
-    create_with(esp, home, None, out, size)
-}
-
-/// Like [`create`], with a Linux system root (`cargo xtask linux-root`)
-/// put on the home volume as `/Linux`.
+/// home volume seeded from `home` (a directory tree), with a Linux system
+/// root (`cargo xtask linux-root`), if given, on it as `/Linux`.
 pub fn create_with(esp: &Path, home: &Path, linux: Option<&Path>, out: &Path, size: u64) -> io::Result<()> {
     let l = layout(size);
     let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(out)?;
@@ -73,11 +68,29 @@ pub enum LinuxOnDisk {
     NoRoom { need: u64, free: u64 },
 }
 
-/// Puts the Linux root (`cargo xtask linux-root`) on an existing image's
-/// home volume as `/Linux`, keeping the files saved there: all of it when
-/// Firefox isn't on the disk yet and it fits; otherwise `settings` (paths
-/// in the root and their sources), which change with WaveOS, and, when the
-/// root has other packages than the disk, the files the disk doesn't have.
+/// Read a persisted guest preference before starting QEMU.
+pub fn preference(img: &Path, key: &str) -> Option<String> {
+    let mut file = OpenOptions::new().read(true).write(true).open(img).ok()?;
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    file.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE)).ok()?;
+    file.read_exact(&mut entry).ok()?;
+    if entry[0..16] != aurorafs::PARTITION_TYPE {
+        return None;
+    }
+    let start = u64::from_le_bytes(entry[32..40].try_into().ok()?);
+    let end = u64::from_le_bytes(entry[40..48].try_into().ok()?);
+    let bytes = end.checked_sub(start)?.checked_add(1)?.checked_mul(SECTOR)?;
+    let region = Region { file: &mut file, start: start * SECTOR, len: bytes, pos: 0 };
+    let mut volume = aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now).ok()?;
+    let data = read_file(&mut volume, "/Settings/aurora.conf");
+    core::str::from_utf8(&data).ok()?.lines().find_map(|line| {
+        let (k, v) = line.split_once('=')?;
+        (k.trim() == key).then(|| v.trim().to_owned())
+    })
+}
+
+/// Put the Linux root on the home volume as `/Linux`, preserving saved files.
+/// Existing installations receive updated settings and missing packages.
 pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io::Result<LinuxOnDisk> {
     let mut file = OpenOptions::new().read(true).write(true).open(img)?;
     let mut entry = [0u8; ENTRY_SIZE as usize];
@@ -166,8 +179,18 @@ pub fn grow(img: &Path, size: u64) -> io::Result<()> {
                 blocks: bytes / 4096,
             };
             let mut to = aurorafs::Volume::format(disk, &from.label(), pseudo_guid(3), now).map_err(err)?;
+            // Owners as they were: the same default owner (a volume from
+            // before owners gets the first account, as the kernel would
+            // give it), and each inode's own.
+            if from.features() & aurorafs::FEATURE_OWNERS != 0 {
+                let (uid, gid) = from.default_owner();
+                to.enable_owners(uid, gid).map_err(err)?;
+            }
             copy_tree(&mut from, &mut to, aurorafs::ROOT, "").map_err(err)?;
             let root = from.stat(aurorafs::ROOT).map_err(err)?;
+            if from.has_own_owner(aurorafs::ROOT).map_err(err)? {
+                to.set_owner(aurorafs::ROOT, root.owner).map_err(err)?;
+            }
             to.set_times(aurorafs::ROOT, root.ctime, root.mtime).map_err(err)?;
             to.commit().map_err(err)?;
             to.fsck().map_err(io::Error::other)?;
@@ -211,7 +234,8 @@ fn copy_tree<A: aurorafs::Disk, B: aurorafs::Disk>(
     let mut buf = vec![0u8; 1 << 20];
     for e in from.readdir(dir)? {
         let meta = from.stat(e.ino)?;
-        let ino = to.create(parent, &e.name, e.kind)?;
+        let owner = from.has_own_owner(e.ino)?.then_some(meta.owner);
+        let ino = to.create_owned(parent, &e.name, e.kind, owner)?;
         if e.kind == aurorafs::Kind::Dir {
             copy_tree(from, to, e.ino, &format!("{path}/{}", e.name))?;
         } else {
@@ -248,7 +272,11 @@ fn same_tree<A: aurorafs::Disk, B: aurorafs::Disk>(
     let (mut x, mut y) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
     for (l, r) in left.iter().zip(&right) {
         let (ml, mr) = (from.stat(l.ino)?, to.stat(r.ino)?);
-        if l.name != r.name || ml.kind != mr.kind || ml.size != mr.size || (ml.ctime, ml.mtime) != (mr.ctime, mr.mtime)
+        if l.name != r.name
+            || ml.kind != mr.kind
+            || ml.size != mr.size
+            || (ml.ctime, ml.mtime) != (mr.ctime, mr.mtime)
+            || own_owner(from, l.ino)? != own_owner(to, r.ino)?
         {
             return Ok(false);
         }
@@ -268,6 +296,11 @@ fn same_tree<A: aurorafs::Disk, B: aurorafs::Disk>(
         }
     }
     Ok(true)
+}
+
+/// The owner an inode carries itself (None: the volume's default).
+fn own_owner<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, ino: u64) -> aurorafs::Result<Option<aurorafs::Owner>> {
+    Ok(if vol.has_own_owner(ino)? { Some(vol.owner(ino)?) } else { None })
 }
 
 /// A file's contents on the volume (empty if it isn't there).
@@ -308,9 +341,28 @@ fn seed_missing<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, src: &Path, pr
             vol.mkdir_all(&path)?;
             seed_missing(vol, &entry.path(), &path)?;
         } else if vol.resolve(&path).is_err() {
-            vol.write_file(&path, &fs::read(entry.path()).map_err(|_| aurorafs::Error::Io)?)?;
+            let ino = vol.write_file(&path, &fs::read(entry.path()).map_err(|_| aurorafs::Error::Io)?)?;
+            keep_exec_bit(vol, ino, &entry.path())?;
         }
     }
+    Ok(())
+}
+
+/// Files the host marks executable (programs in the Linux tree) stay
+/// executable: `rwxr-xr-x`, owned by the first account. Others keep the
+/// volume's default owner and `rw-r--r--`.
+fn keep_exec_bit<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, ino: u64, host: &Path) -> aurorafs::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = fs::metadata(host).is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
+        if executable {
+            let (uid, gid) = vol.default_owner();
+            vol.set_owner(ino, aurorafs::Owner { uid, gid, mode: 0o755 })?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (vol, ino, host);
     Ok(())
 }
 
@@ -402,11 +454,23 @@ fn read_boot_conf(file: &mut File, start: u64, sectors: u64) -> Option<Vec<u8>> 
 /// A 64 MiB "USB stick" for the tests: an MBR with one FAT32 partition
 /// labelled AURORA-USB, holding `Hello.txt`.
 pub fn create_usb_stick(out: &Path) -> io::Result<()> {
-    const SIZE: u64 = 64 * 1024 * 1024;
+    create_fat_medium(out, 64 * 1024 * 1024, 64 * 1024 * 1024, *b"AURORA-USB ", b"Hello from a USB stick!\n")
+}
+
+/// The tests' second SD card: 4 GiB (so high capacity, block-addressed),
+/// a 64 MiB FAT32 partition labelled AURORA-SD with `Hello.txt`, and the
+/// rest unpartitioned (the data-integrity tests' scratch space).
+pub fn create_sd_card(out: &Path) -> io::Result<()> {
+    create_fat_medium(out, 4 << 30, 65 * 1024 * 1024, *b"AURORA-SD  ", b"Hello from an SD card!\n")
+}
+
+/// A sparse medium of `size` bytes with an MBR and one FAT32 partition
+/// from 1 MiB to `end`, holding `Hello.txt`.
+fn create_fat_medium(out: &Path, size: u64, end: u64, label: [u8; 11], hello: &[u8]) -> io::Result<()> {
     const START: u64 = 2048;
     let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(out)?;
-    file.set_len(SIZE)?;
-    let sectors = SIZE / SECTOR - START;
+    file.set_len(size)?;
+    let sectors = end / SECTOR - START;
     let mut mbr = [0u8; 512];
     let e = &mut mbr[446..462];
     e[4] = 0x0C; // FAT32 (LBA)
@@ -418,13 +482,69 @@ pub fn create_usb_stick(out: &Path) -> io::Result<()> {
     let mut part = Region { file: &mut file, start: START * SECTOR, len: sectors * SECTOR, pos: 0 };
     fatfs::format_volume(
         &mut part,
-        fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat32).volume_label(*b"AURORA-USB "),
+        fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat32).volume_label(label),
     )?;
     part.pos = 0;
     let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new())?;
-    fs.root_dir().create_file("Hello.txt")?.write_all(b"Hello from a USB stick!\n")?;
+    fs.root_dir().create_file("Hello.txt")?.write_all(hello)?;
     fs.unmount()?;
     Ok(())
+}
+
+/// Whether QEMU takes an image of `bytes` as an SD card or eMMC user area:
+/// up to 2 GiB a power of two, above it a multiple of 512 KiB.
+pub fn sd_size_ok(bytes: u64) -> bool {
+    if bytes <= 2 << 30 {
+        bytes.is_power_of_two()
+    } else {
+        bytes.is_multiple_of(512 * 1024)
+    }
+}
+
+/// Copies the EFI System Partition of the GPT disk image that starts
+/// `offset` bytes into `img` to `out`, as a whole-disk FAT volume. UEFI
+/// firmware boots from it like from any disk; QEMU's has no SD or eMMC
+/// driver, so this is how it starts a system that lives on a card.
+pub fn esp_stub(img: &Path, offset: u64, out: &Path) -> io::Result<()> {
+    let mut file = File::open(img)?;
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    file.seek(SeekFrom::Start(offset + 2 * SECTOR))?;
+    file.read_exact(&mut entry)?;
+    if entry[0..16] != ESP_TYPE {
+        return Err(io::Error::other("the first partition is not an EFI System Partition"));
+    }
+    let start = u64::from_le_bytes(entry[32..40].try_into().unwrap());
+    let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
+    file.seek(SeekFrom::Start(offset + start * SECTOR))?;
+    let mut stub = OpenOptions::new().write(true).create(true).truncate(true).open(out)?;
+    io::copy(&mut (&mut file).take((end - start + 1) * SECTOR), &mut stub)?;
+    Ok(())
+}
+
+/// eMMC images for QEMU: two boot partitions and an RPMB partition come
+/// before the user area. Each boot partition is filled with its own byte
+/// (0xB1, 0xB2) and RPMB with 0xEE, so the tests can tell they were never written.
+pub const EMMC_BOOT_BYTES: u64 = 1024 * 1024;
+pub const EMMC_RPMB_BYTES: u64 = 128 * 1024;
+
+/// `img` (the user area) behind eMMC boot and RPMB partitions, in `out`.
+pub fn create_emmc(img: &Path, out: &Path) -> io::Result<()> {
+    let mut f = OpenOptions::new().write(true).create(true).truncate(true).open(out)?;
+    f.write_all(&vec![0xB1; EMMC_BOOT_BYTES as usize])?;
+    f.write_all(&vec![0xB2; EMMC_BOOT_BYTES as usize])?;
+    f.write_all(&vec![0xEE; EMMC_RPMB_BYTES as usize])?;
+    io::copy(&mut File::open(img)?, &mut f)?;
+    Ok(())
+}
+
+/// Whether an eMMC image's boot and RPMB partitions are as [`create_emmc`] left them.
+pub fn emmc_hidden_intact(out: &Path) -> io::Result<bool> {
+    let mut f = File::open(out)?;
+    let mut buf = vec![0u8; (2 * EMMC_BOOT_BYTES + EMMC_RPMB_BYTES) as usize];
+    f.read_exact(&mut buf)?;
+    let (b1, rest) = buf.split_at(EMMC_BOOT_BYTES as usize);
+    let (b2, rpmb) = rest.split_at(EMMC_BOOT_BYTES as usize);
+    Ok(b1.iter().all(|&b| b == 0xB1) && b2.iter().all(|&b| b == 0xB2) && rpmb.iter().all(|&b| b == 0xEE))
 }
 
 fn format_esp(file: &mut File, start: u64, sectors: u64, esp: &Path) -> io::Result<()> {
@@ -543,7 +663,8 @@ fn seed<D: aurorafs::Disk>(vol: &mut aurorafs::Volume<D>, src: &Path, prefix: &s
             vol.mkdir_all(&path)?;
             seed(vol, &entry.path(), &path)?;
         } else {
-            vol.write_file(&path, &fs::read(entry.path()).map_err(|_| aurorafs::Error::Io)?)?;
+            let ino = vol.write_file(&path, &fs::read(entry.path()).map_err(|_| aurorafs::Error::Io)?)?;
+            keep_exec_bit(vol, ino, &entry.path())?;
         }
     }
     Ok(())

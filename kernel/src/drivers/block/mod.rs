@@ -1,13 +1,16 @@
 //! Block devices: the driver-independent layer.
 //!
-//! Drivers (AHCI, virtio-blk, NVMe) implement [`BlockDevice`] with polled
-//! I/O through DMA bounce buffers, and register themselves here. GPT
-//! partitions are exposed as [`Partition`] devices on top.
+//! Drivers (AHCI, virtio-blk, NVMe, SD/eMMC) implement [`BlockDevice`]
+//! with I/O through DMA bounce buffers, and register themselves here. GPT
+//! partitions are exposed as [`Partition`] devices on top; removable media
+//! show their volumes under `/Volumes` ([`removable`]).
 
 pub mod ahci;
 pub mod gpt;
 pub mod mbr;
 pub mod nvme;
+pub mod removable;
+pub mod sdhci;
 pub mod virtio;
 
 use crate::mm::{frame, phys_to_virt, PAGE_SIZE};
@@ -30,6 +33,13 @@ pub trait BlockDevice: Send + Sync {
     fn write(&self, lba: u64, buf: &[u8]) -> BlockResult<()>;
     /// Makes previously written data durable.
     fn flush(&self) -> BlockResult<()>;
+    /// The data in `count` sectors at `lba` is no longer needed (TRIM).
+    /// Afterwards they may read as anything. `EOPNOTSUPP` when the device
+    /// can't tell its media. (No filesystem issues discards yet.)
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+    fn discard(&self, _lba: u64, _count: u64) -> BlockResult<()> {
+        Err(EOPNOTSUPP)
+    }
     /// Human-readable description ("AHCI SATA — QEMU HARDDISK").
     fn describe(&self) -> String {
         self.name()
@@ -88,6 +98,9 @@ impl BlockDevice for Counted {
     fn flush(&self) -> BlockResult<()> {
         self.flushes.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         self.inner.flush()
+    }
+    fn discard(&self, lba: u64, count: u64) -> BlockResult<()> {
+        self.inner.discard(lba, count)
     }
 }
 
@@ -178,6 +191,20 @@ pub fn init() {
         match (d.class, d.subclass, d.prog_if, d.vendor, d.device) {
             (0x01, 0x06, 0x01, ..) => ahci::probe(&d),
             (0x01, 0x08, 0x02, ..) => nvme::probe(&d),
+            (0x08, 0x05, ..) => sdhci::probe_pci(&d),
+            (_, _, _, vendor, device) if sdhci::unsupported_reader(vendor, device).is_some() => {
+                let what = sdhci::unsupported_reader(vendor, device).unwrap();
+                log!(
+                    "sdhci",
+                    "PCI {:02x}:{:02x}.{} {:04x}:{:04x}: {} card reader: not supported (not an SD host controller; see HARDWARE.md)",
+                    d.bus,
+                    d.dev,
+                    d.func,
+                    vendor,
+                    device,
+                    what
+                );
+            }
             (_, _, _, 0x1AF4, 0x1001 | 0x1042) => virtio::probe(&d),
             _ => {}
         }
@@ -317,6 +344,12 @@ impl BlockDevice for Partition {
     }
     fn flush(&self) -> BlockResult<()> {
         self.disk.flush()
+    }
+    fn discard(&self, lba: u64, count: u64) -> BlockResult<()> {
+        if lba.checked_add(count).is_none_or(|end| end > self.count) {
+            return Err(EINVAL);
+        }
+        self.disk.discard(self.start + lba, count)
     }
     fn describe(&self) -> String {
         alloc::format!("partition \"{}\" on {}", self.label, self.disk.describe())

@@ -18,6 +18,7 @@ fn class_name(class: u8, sub: u8, prog_if: u8) -> &'static str {
         (0x03, _, _) => "Display controller",
         (0x04, 0x03, _) => "Audio device (HD Audio)",
         (0x04, _, _) => "Multimedia device",
+        (0x08, 0x05, _) => "SD host controller",
         (0x06, 0x00, _) => "Host bridge",
         (0x06, 0x01, _) => "ISA bridge",
         (0x06, 0x04, _) => "PCI bridge",
@@ -42,7 +43,9 @@ pub fn pci() -> String {
             d.func,
             d.vendor,
             d.device,
-            class_name(d.class, d.subclass, d.prog_if),
+            crate::drivers::net::model(d.vendor, d.device)
+                .or_else(|| crate::drivers::block::sdhci::unsupported_reader(d.vendor, d.device))
+                .unwrap_or(class_name(d.class, d.subclass, d.prog_if)),
             d.class,
             d.subclass,
             d.prog_if
@@ -58,6 +61,32 @@ pub fn usb() -> String {
     }
     if s.is_empty() {
         s.push_str("No USB devices.\n");
+    }
+    s
+}
+
+/// SD host controller slots and the cards in them; the `sdhci:` log lines
+/// have the details.
+pub fn sd() -> String {
+    let mut s = String::new();
+    for line in crate::drivers::block::sdhci::list() {
+        let _ = writeln!(s, "{line}");
+    }
+    if s.is_empty() {
+        s.push_str("No SD host controllers.\n");
+    }
+    s
+}
+
+/// HID over I²C devices (touchpads, touch screens) and how each is driven;
+/// the `i2c:` log lines have the ACPI details.
+pub fn i2c() -> String {
+    let mut s = String::new();
+    for line in crate::drivers::i2c::list() {
+        let _ = writeln!(s, "{line}");
+    }
+    if s.is_empty() {
+        s.push_str("No I2C HID devices.\n");
     }
     s
 }
@@ -118,6 +147,7 @@ pub fn cpu() -> String {
         let total = (busy + idle).max(1);
         let _ = writeln!(s, "CPU {:<2}      {:>3}% busy since boot", i, busy * 100 / total);
     }
+    crate::power::report(&mut s);
     s
 }
 
@@ -129,11 +159,13 @@ pub fn log() -> Vec<u8> {
 /// it can be read on another computer).
 pub fn save_boot_log() {
     let mut text = format!(
-        "WaveOS Aurora {} boot log\n\n== CPU ==\n{}\n== PCI ==\n{}\n== USB ==\n{}\n== Log ==\n",
+        "WaveOS Aurora {} boot log\n\n== CPU ==\n{}\n== PCI ==\n{}\n== USB ==\n{}\n== I2C ==\n{}\n== SD ==\n{}\n== Log ==\n",
         crate::VERSION,
         cpu(),
         pci(),
-        usb()
+        usb(),
+        i2c(),
+        sd()
     );
     text.push_str(&String::from_utf8_lossy(&log()));
     match crate::fs::write_all("/Boot/aurora/boot.log", text.as_bytes()) {

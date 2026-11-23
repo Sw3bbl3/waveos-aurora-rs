@@ -6,6 +6,10 @@
 //! changes on the event ring (and raises an MSI). Device state lives in
 //! contexts the controller owns (output) and that we fill in to change it
 //! (input).
+//!
+//! Isochronous streams (audio, video) live in [`iso`].
+
+mod iso;
 
 use super::{Bus, Endpoint, Hcd, HubInfo, PipeHandler, Position, Setup, Speed};
 use crate::drivers::block::Dma;
@@ -197,6 +201,8 @@ pub struct Controller {
     irq: WaitQueue,
     has_irq: AtomicBool,
     pipes: IrqMutex<BTreeMap<(u8, u8), Pipe>>,
+    /// Isochronous streams by (slot, endpoint DCI).
+    isos: IrqMutex<BTreeMap<(u8, u8), iso::Stream>>,
     interrupts: AtomicU64,
     bus: spin::Once<&'static Bus>,
 }
@@ -331,6 +337,7 @@ pub fn probe(dev: &pci::Device) {
         irq: WaitQueue::new(),
         has_irq: AtomicBool::new(false),
         pipes: IrqMutex::new(BTreeMap::new()),
+        isos: IrqMutex::new(BTreeMap::new()),
         interrupts: AtomicU64::new(0),
         bus: spin::Once::new(),
     }));
@@ -446,7 +453,11 @@ impl Controller {
             TRB_TRANSFER_EVENT => {
                 let ep = ((control >> 16) & 0x1F) as u8;
                 let residual = status & 0xFF_FFFF;
-                if self.pipes.lock().contains_key(&(slot, ep)) {
+                if self.isos.lock().contains_key(&(slot, ep)) {
+                    self.iso_event(slot, ep, param, code, residual);
+                } else if code == iso::CC_STOPPED || code == iso::CC_STOPPED_LENGTH {
+                    // A stream's last words after it was closed.
+                } else if self.pipes.lock().contains_key(&(slot, ep)) {
                     self.pipe_event(slot, ep, param, code, residual);
                 } else {
                     self.completions.lock().insert(param, Completion { code, residual, slot });
@@ -648,6 +659,7 @@ impl Controller {
     /// Resets the controller and starts it again on the same memory.
     fn reset_and_start(&self) -> bool {
         self.pipes.lock().clear();
+        self.stop_isos(|_| true);
         self.completions.lock().clear();
         let op = self.op;
         w32(op + USBCMD, r32(op + USBCMD) & !CMD_RUN);
@@ -740,20 +752,31 @@ impl Controller {
                     (2, true) => 6,
                     _ => 7,
                 };
+                // In 125 µs units, as 2^interval.
                 let interval = match (e.kind, speed) {
                     (3, Speed::Low | Speed::Full) => (e.interval.max(1) as u32 * 8).ilog2().clamp(3, 10),
+                    // Full-speed isochronous: 2^(bInterval-1) frames of 8 microframes.
+                    (1, Speed::Low | Speed::Full) => (e.interval.clamp(1, 16) as u32 - 1 + 3).min(15),
                     (3 | 1, _) => (e.interval.clamp(1, 16) - 1) as u32,
                     _ => 0,
                 };
                 for i in 0..5 {
                     input.write::<u32>(off + i * 4, 0);
                 }
-                input.write::<u32>(off, interval << 16);
-                input.write::<u32>(off + 4, 3 << 1 | kind << 3 | (e.burst as u32) << 8 | (e.max_packet as u32) << 16);
+                // Periodic endpoints: the payload per service interval.
+                let esit = if e.kind & 1 != 0 { super::iso::esit_payload(e) as u32 } else { 0 };
+                input.write::<u32>(off, interval << 16 | (esit >> 16) << 24);
+                // Isochronous endpoints never retry (error count 0).
+                let cerr = if e.kind == 1 { 0 } else { 3 };
+                input
+                    .write::<u32>(off + 4, cerr << 1 | kind << 3 | (e.burst as u32) << 8 | (e.max_packet as u32) << 16);
                 input.write::<u64>(off + 8, ring.phys() | 1);
-                let avg = if e.kind == 3 { e.max_packet as u32 } else { 3072 };
-                let esit = if e.kind == 3 { e.max_packet as u32 * (e.burst as u32 + 1) } else { 0 };
-                input.write::<u32>(off + 16, avg | esit << 16);
+                let avg = match e.kind {
+                    3 => e.max_packet as u32,
+                    1 => esit.clamp(1, 0xFFFF),
+                    _ => 3072,
+                };
+                input.write::<u32>(off + 16, avg | (esit & 0xFFFF) << 16);
                 st.rings[e.dci() as usize] = Some(ring);
             }
             input.phys
@@ -778,6 +801,10 @@ impl Hcd for Controller {
     /// Port changes arrive as events (and go straight to the bus).
     fn changed_ports(&self) -> Vec<u8> {
         Vec::new()
+    }
+
+    fn polls_ports(&self) -> bool {
+        false
     }
 
     fn port_connected(&self, port: u8) -> bool {
@@ -883,7 +910,33 @@ impl Hcd for Controller {
 
     fn release(&self, slot: u8) {
         self.pipes.lock().retain(|&(s, _), _| s != slot);
+        self.stop_isos(|(s, _)| s == slot);
         self.release_slot(slot);
+        // Completions of transfers nobody waits for any more.
+        self.completions.lock().retain(|_, c| c.slot != slot);
+    }
+
+    fn drop_endpoints(&self, slot: u8, eps: &[Endpoint]) -> bool {
+        self.drop_endpoints_inner(slot, eps)
+    }
+
+    fn open_iso(
+        &self,
+        slot: u8,
+        ep: &Endpoint,
+        depth: usize,
+        handler: Arc<dyn super::iso::IsoHandler>,
+    ) -> Result<(), super::iso::IsoError> {
+        self.open_iso_inner(slot, ep, depth, handler)
+    }
+
+    fn close_iso(&self, slot: u8, ep_address: u8) {
+        self.close_iso_inner(slot, ep_address)
+    }
+
+    fn iso_stats(&self, slot: u8, ep_address: u8) -> Option<Arc<super::iso::IsoStats>> {
+        let dci = (ep_address & 0x0F) * 2 + (ep_address >> 7);
+        self.isos.lock().get(&(slot, dci)).map(|s| s.stats.clone())
     }
 
     fn restart(&self) -> bool {

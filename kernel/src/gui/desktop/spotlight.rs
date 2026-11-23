@@ -26,9 +26,11 @@ enum Command {
     Sleep,
     EmptyTrash,
     Screenshot,
+    Play,
 }
 
-const COMMANDS: [(Command, &str, &str); 7] = [
+const COMMANDS: [(Command, &str, &str); 8] = [
+    (Command::Play, "Wave Play", "Play with a controller: games and apps, full screen"),
     (Command::DarkMode, "Dark Mode", "Switch the appearance to dark"),
     (Command::LightMode, "Light Mode", "Switch the appearance to light"),
     (Command::Screenshot, "Take Screenshot", "Save the screen to Pictures"),
@@ -39,11 +41,12 @@ const COMMANDS: [(Command, &str, &str); 7] = [
 ];
 
 /// Settings panes Spotlight can open (the argument Settings understands).
-const PANES: [(&str, &str); 13] = [
+const PANES: [(&str, &str); 14] = [
     ("Appearance", "appearance"),
     ("Desktop & Harbor", "desktop"),
     ("Bar & Crest", "bar"),
     ("Login", "login"),
+    ("Apps", "apps"),
     ("Liquid Glass", "desktop"),
     ("Accessibility", "accessibility"),
     ("Wallpaper", "appearance"),
@@ -58,7 +61,8 @@ const PANES: [(&str, &str); 13] = [
 #[derive(Clone, PartialEq, Debug)]
 enum Result {
     App(AppKind),
-    Installed(String, String),
+    /// An installed app: name, program, icon, and what kind of app it is.
+    Installed(String, String, Icon, String),
     File { path: String, dir: bool },
     Pane(&'static str, &'static str),
     Calc(String),
@@ -231,8 +235,12 @@ impl Spotlight {
         apps.sort_by_key(|(p, _)| *p);
         out.extend(apps.into_iter().map(|(_, k)| Result::App(k)));
         for a in crate::gui::installed::list() {
-            if a.manifest.name.to_lowercase().contains(&q) {
-                out.push(Result::Installed(a.manifest.name, a.path));
+            if a.manifest.name.to_lowercase().contains(&q) || a.manifest.categories.contains(&q) {
+                let kind = match a.manifest.categories.first().map(String::as_str) {
+                    Some("game") => String::from("Game"),
+                    _ => String::from("Installed app"),
+                };
+                out.push(Result::Installed(a.manifest.name, a.path, a.icon, format!("{kind} · {}", a.manifest.version)));
             }
         }
         for (label, arg) in PANES {
@@ -274,6 +282,7 @@ impl Desktop {
 
     pub(super) fn toggle_spotlight(&mut self) {
         let a = self.spotlight_area();
+        self.begin_reveal(a);
         self.damage(a);
         if self.spotlight.take().is_none() {
             if self.launcher.is_some() {
@@ -292,7 +301,7 @@ impl Desktop {
         self.toggle_spotlight();
         match r {
             Result::App(k) => self.open(k),
-            Result::Installed(_, path) => self.spawn_program(&path, &[]),
+            Result::Installed(_, path, ..) => self.spawn_program(&path, &[]),
             Result::File { path, dir } => {
                 let files = apps::info(AppKind::Files).path;
                 if dir {
@@ -323,6 +332,7 @@ impl Desktop {
                     self.refresh_trash();
                 }
                 Command::Screenshot => self.screenshot = true,
+                Command::Play => self.play_enter(false),
             },
         }
     }
@@ -413,7 +423,7 @@ impl Desktop {
         let f = theme::ui(22);
         let base = r.y + (FIELD_H + f.ascent as i32 + f.descent as i32) / 2;
         if s.query.is_empty() {
-            cv.text(r.x + 56, base, "Seek apps, files and settings", f, t.text_secondary);
+            cv.text(r.x + 56, base, "Search apps, files, settings, or calculate", f, t.text_secondary);
         } else {
             let w = cv.text(r.x + 56, base, &s.query, f, t.text);
             cv.fill_rect(Rect::new(r.x + 58 + w, r.y + 14, 2, FIELD_H - 28), theme::accent());
@@ -432,9 +442,9 @@ impl Desktop {
             let fg2 = if sel { 0xDDFF_FFFF } else { t.text_secondary };
             let ir = Rect::new(row.x + 10, row.y + 7, 32, 32);
             let (title, subtitle, kind): (String, String, &str) = match res {
-                Result::Installed(name, _) => {
-                    icons::draw(cv, Icon::Aurora, ir);
-                    (name.clone(), String::from("Installed app"), "Application")
+                Result::Installed(name, _, icon, kind) => {
+                    icons::draw(cv, *icon, ir);
+                    (name.clone(), kind.clone(), "Application")
                 }
                 Result::App(k) => {
                     let a = apps::info(*k);

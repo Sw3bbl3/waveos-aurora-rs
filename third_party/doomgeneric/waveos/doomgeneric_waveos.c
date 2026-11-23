@@ -23,6 +23,7 @@
 
 #include "doomgeneric.h"
 #include "doomkeys.h"
+#include "doomstat.h"
 #include "i_sound.h"
 #include "w_wad.h"
 #include "z_zone.h"
@@ -140,8 +141,101 @@ static unsigned char doom_key(const struct wave_event *e)
     }
 }
 
+// ---- Controllers -----------------------------------------------------------
+//
+// The first controller plays: the left stick or d-pad moves and turns, the
+// right stick turns, the shoulders strafe, the right trigger (or X) fires,
+// A uses (and confirms in menus), B goes back in menus, Y or the left
+// trigger runs, View shows the map and Menu opens Doom's menu. Changes
+// become key presses and releases, queued for DG_GetKey.
+
+static unsigned char pad_queue[32][2];
+static int pad_head, pad_len;
+static uint32_t pad_down; // the keys the controller holds, one bit per slot below
+static long pad_next_check;
+
+static void pad_push(int pressed, unsigned char key)
+{
+    if (pad_len < 32)
+    {
+        pad_queue[(pad_head + pad_len) % 32][0] = pressed;
+        pad_queue[(pad_head + pad_len) % 32][1] = key;
+        pad_len++;
+    }
+}
+
+static void pad_poll(void)
+{
+    static uint32_t pad_id;
+    struct wave_gamepad_state s;
+    long now = (long)DG_GetTicksMs();
+    if (pad_id == 0 || wave_gamepad_state(pad_id, &s) < 0)
+    {
+        // None (or it was unplugged): nothing held. Look for one at most
+        // twice a second.
+        memset(&s, 0, sizeof s);
+        pad_id = 0;
+        struct wave_gamepad_info info[4];
+        if (now >= pad_next_check)
+        {
+            pad_next_check = now + 500;
+            if (wave_gamepads(info, 4) > 0)
+            {
+                pad_id = info[0].id;
+                if (wave_gamepad_state(pad_id, &s) < 0)
+                    memset(&s, 0, sizeof s);
+            }
+        }
+        if (pad_id == 0 && pad_down == 0)
+            return;
+    }
+    uint32_t b = s.buttons;
+    int lx = s.axes[0], ly = s.axes[1], rx = s.axes[2];
+    const int on = 14000;
+    // (held?, key) for each slot.
+    struct { int held; unsigned char key; } slots[] = {
+        {(b & WAVE_PAD_UP) || ly < -on, KEY_UPARROW},
+        {(b & WAVE_PAD_DOWN) || ly > on, KEY_DOWNARROW},
+        {(b & WAVE_PAD_LEFT) || lx < -on || rx < -on, KEY_LEFTARROW},
+        {(b & WAVE_PAD_RIGHT) || lx > on || rx > on, KEY_RIGHTARROW},
+        {(b & WAVE_PAD_LEFT_SHOULDER) != 0, KEY_STRAFE_L},
+        {(b & WAVE_PAD_RIGHT_SHOULDER) != 0, KEY_STRAFE_R},
+        {(b & (WAVE_PAD_RIGHT_TRIGGER | WAVE_PAD_WEST)) != 0 && !menuactive, KEY_FIRE},
+        {(b & WAVE_PAD_SOUTH) != 0, menuactive ? KEY_ENTER : KEY_USE},
+        {(b & WAVE_PAD_EAST) != 0 && menuactive, KEY_BACKSPACE},
+        {(b & (WAVE_PAD_NORTH | WAVE_PAD_LEFT_TRIGGER)) != 0, KEY_RSHIFT},
+        {(b & WAVE_PAD_BACK) != 0, KEY_TAB},
+        {(b & WAVE_PAD_START) != 0, KEY_ESCAPE},
+    };
+    static unsigned char last_key[12];
+    for (int i = 0; i < 12; i++)
+    {
+        int was = (pad_down >> i) & 1;
+        if (slots[i].held && !was)
+        {
+            pad_push(1, slots[i].key);
+            last_key[i] = slots[i].key;
+            pad_down |= 1u << i;
+        }
+        else if (!slots[i].held && was)
+        {
+            pad_push(0, last_key[i]);
+            pad_down &= ~(1u << i);
+        }
+    }
+}
+
 int DG_GetKey(int *pressed, unsigned char *key)
 {
+    pad_poll();
+    if (pad_len > 0)
+    {
+        *pressed = pad_queue[pad_head][0];
+        *key = pad_queue[pad_head][1];
+        pad_head = (pad_head + 1) % 32;
+        pad_len--;
+        return 1;
+    }
     struct wave_event e;
     while (wave_next_event(&e, 0) == 1)
     {

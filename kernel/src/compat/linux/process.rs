@@ -127,6 +127,7 @@ fn exec_guest(
     if crate::fs::is_dir(&host) {
         return Err(EACCES);
     }
+    crate::fs::perm::check_exec(&host)?;
     let data = crate::fs::read_all(&host)?;
     // A script: run its interpreter, with the script's path as an argument.
     if data.starts_with(b"#!") {
@@ -264,7 +265,7 @@ pub fn waitid(p: &Process, idtype: u64, id: u64, info_ptr: u64, options: u64) ->
             let (cld, st) = if code < 0 { (2i32, (-code) as i32) } else { (1i32, code as i32) };
             si[8..12].copy_from_slice(&cld.to_le_bytes());
             si[16..20].copy_from_slice(&child.to_le_bytes());
-            si[20..24].copy_from_slice(&(super::UID as u32).to_le_bytes());
+            si[20..24].copy_from_slice(&super::ids_of(child).0.to_le_bytes());
             si[24..28].copy_from_slice(&st.to_le_bytes());
         }
         user::put_bytes(info_ptr, &si)?;

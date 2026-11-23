@@ -58,6 +58,16 @@ pref("browser.tabs.remote.separatePrivilegedContentProcess", false);
 pref("network.process.enabled", false);
 pref("extensions.webextensions.remote", false);
 
+// Decoder-process startup stalls on the current Linux compatibility layer:
+// YouTube buffers media but never delivers its first frame, even when paused.
+// Decode in the existing content process until those IPC/startup paths work.
+// Keep all codecs available and let the site/user choose playback quality.
+// This sacrifices decoder crash isolation; the launcher's unsupported Linux
+// sandboxes are already disabled. User preferences still override these defaults.
+pref("media.rdd-process.enabled", false);
+pref("media.utility-process.enabled", false);
+pref("media.allow-audio-non-utility", true);
+
 // Less to do while starting (each is work on Firefox's main thread, or a
 // process, that WaveOS has no use for):
 // - accessibility, which looks for a desktop accessibility bus WaveOS

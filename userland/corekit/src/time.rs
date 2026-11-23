@@ -35,26 +35,17 @@ pub fn utc_offset_minutes() -> i64 {
     crate::prefs::get_int("utc_offset", 0)
 }
 
-/// Milliseconds since the Unix epoch (UTC). The real-time clock keeps local
-/// time; sub-second precision comes from the uptime counter.
+/// UTC milliseconds since 1970. Real-time clock corrections are visible
+/// immediately; monotonic durations should use `uptime_ms` instead.
 pub fn unix_ms() -> f64 {
-    static mut BASE: Option<(f64, u64)> = None;
-    // SAFETY: programs read the clock from one thread at a time in practice;
-    // a race only re-reads the clock.
-    let base = unsafe { *core::ptr::addr_of!(BASE) };
-    let (epoch, up) = match base {
-        Some(b) => b,
-        None => {
-            let d = now();
-            let days = days_from_civil(d.year as i64, d.month as i64, d.day as i64);
-            let local = days * 86400 + d.hour as i64 * 3600 + d.minute as i64 * 60 + d.second as i64;
-            let utc = local - utc_offset_minutes() * 60;
-            let b = (utc as f64 * 1000.0, uptime_ms());
-            unsafe { *core::ptr::addr_of_mut!(BASE) = Some(b) };
-            b
-        }
-    };
-    epoch + (uptime_ms() - up) as f64
+    if let Ok(ms) = call(nr::UNIX_MS, &[]) {
+        return ms as f64;
+    }
+    // Compatibility with older kernels, without the former racy static cache.
+    let d = now();
+    let days = days_from_civil(d.year as i64, d.month as i64, d.day as i64);
+    let local = days * 86400 + d.hour as i64 * 3600 + d.minute as i64 * 60 + d.second as i64;
+    ((local - utc_offset_minutes() * 60) * 1000) as f64
 }
 
 pub const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];

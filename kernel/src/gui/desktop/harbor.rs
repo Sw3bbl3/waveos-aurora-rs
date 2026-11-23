@@ -13,6 +13,7 @@ use crate::gui::apps::{self, AppKind, CATALOG};
 use crate::gui::canvas::{with_alpha, Canvas};
 use crate::gui::geom::Rect;
 use crate::gui::icons::{self, Icon};
+use crate::gui::installed;
 use crate::gui::theme;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -37,6 +38,9 @@ pub(super) enum DockItem {
     Launcher,
     App(AppKind),
     External(u32),
+    /// An installed app (an index into [`Desktop::package_apps`]): pinned
+    /// with the `dock_apps` preference, or running.
+    Package(u16),
     Stack(Stack),
     Trash,
 }
@@ -57,6 +61,8 @@ pub(super) struct HarborState {
     changed_at: u64,
     pub peek: Option<Peek>,
     peek_pending: Option<(usize, u64)>,
+    /// Installed apps, for the session's account (None: load again).
+    apps: core::cell::RefCell<Option<(u32, alloc::rc::Rc<Vec<installed::App>>)>>,
 }
 
 fn ease_out(t: i64) -> i64 {
@@ -74,17 +80,60 @@ impl Desktop {
         self.icon_size() + 24
     }
 
+    /// Installed apps (cached until they change or another account logs in).
+    pub(super) fn package_apps(&self) -> alloc::rc::Rc<Vec<installed::App>> {
+        let uid = crate::users::session().uid;
+        if let Some((u, apps)) = self.harbor.apps.borrow().as_ref() {
+            if *u == uid {
+                return apps.clone();
+            }
+        }
+        let apps = alloc::rc::Rc::new(installed::list());
+        *self.harbor.apps.borrow_mut() = Some((uid, apps.clone()));
+        apps
+    }
+
+    /// Apps were installed, updated or removed.
+    pub(super) fn forget_package_apps(&self) {
+        *self.harbor.apps.borrow_mut() = None;
+    }
+
+    /// The installed app (index into `apps`) whose program shows window `w`.
+    fn window_package(w: &super::Window, apps: &[installed::App]) -> Option<u16> {
+        if w.app.kind() != AppKind::Other {
+            return None;
+        }
+        let pid = crate::gui::server::info(w.app.client_id()?)?.0;
+        let path = crate::proc::get(pid)?.path();
+        apps.iter()
+            .position(|a| path.strip_prefix(a.dir.as_str()).is_some_and(|rest| rest.starts_with('/')))
+            .map(|i| i as u16)
+    }
+
     /// The bays' contents, in order.
     fn bays(&self) -> [Vec<DockItem>; 3] {
         let mut pinned = alloc::vec![DockItem::Launcher];
         pinned.extend(CATALOG.iter().filter(|a| a.pinned).map(|a| DockItem::App(a.kind)));
+        let packages = self.package_apps();
+        for id in crate::gui::prefs::get("dock_apps").unwrap_or_default().split(',').take(16) {
+            if let Some(i) = packages.iter().position(|a| a.manifest.id == id) {
+                if !pinned.contains(&DockItem::Package(i as u16)) {
+                    pinned.push(DockItem::Package(i as u16));
+                }
+            }
+        }
         let mut running: Vec<DockItem> = Vec::new();
         for w in &self.windows {
             let k = w.app.kind();
-            let item = if k == AppKind::Other { DockItem::External(w.id) } else { DockItem::App(k) };
+            let item = match Self::window_package(w, &packages) {
+                Some(i) => DockItem::Package(i),
+                None if k == AppKind::Other => DockItem::External(w.id),
+                None => DockItem::App(k),
+            };
             if !apps::info(k).pinned
                 && !matches!(k, AppKind::Power | AppKind::Crash | AppKind::DisplayConfirm)
                 && !running.contains(&item)
+                && !pinned.contains(&item)
             {
                 running.push(item);
             }
@@ -170,6 +219,9 @@ impl Desktop {
     }
 
     pub(super) fn harbor_moving(&self) -> bool {
+        if theme::reduce_motion() {
+            return false;
+        }
         self.now_ms < self.harbor.changed_at + SLIDE_MS + 16
             || self.launching.iter().any(|&(_, t)| self.now_ms < t + 3000)
     }
@@ -181,12 +233,15 @@ impl Desktop {
     /// The icon of the app owning window `id` (for minimize and restore).
     pub(super) fn dock_icon_of(&self, id: u32) -> Rect {
         let kind = self.index_of(id).map(|i| self.windows[i].app.kind());
+        let packages = self.package_apps();
+        let package = self.index_of(id).and_then(|i| Self::window_package(&self.windows[i], &packages));
         let (dock, items) = self.dock_layout();
         items
             .into_iter()
             .find(|(it, _)| match it {
                 DockItem::App(k) => Some(*k) == kind,
                 DockItem::External(w) => *w == id,
+                DockItem::Package(p) => Some(*p) == package,
                 _ => false,
             })
             .map(|(_, r)| r)
@@ -214,6 +269,7 @@ impl Desktop {
     fn open_peek(&mut self, index: usize) {
         let (_, items) = self.dock_layout();
         let Some((item, _)) = items.get(index).copied() else { return };
+        let packages = self.package_apps();
         let ids: Vec<u32> = self
             .windows
             .iter()
@@ -222,6 +278,7 @@ impl Desktop {
             .filter(|w| match item {
                 DockItem::App(k) => w.app.kind() == k,
                 DockItem::External(id) => w.id == id,
+                DockItem::Package(p) => Self::window_package(w, &packages) == Some(p),
                 _ => false,
             })
             .map(|w| w.id)
@@ -268,8 +325,9 @@ impl Desktop {
     pub(super) fn harbor_hover(&mut self, x: i32, y: i32) {
         let (dock, items) = self.dock_layout();
         // The bottom edge (or Harbor itself) brings it up over a window.
-        let reveal = y >= self.h - 3
-            || (self.harbor.revealed && y >= dock.y - 24)
+        // (Only from the main display's bottom edge: a display below it continues there.)
+        let reveal = (y >= self.h - 3 && self.on_main(x, y))
+            || (self.harbor.revealed && y >= dock.y - 24 && self.on_main(x, y))
             || (!self.harbor.hidden && dock.contains(x, y));
         if reveal != self.harbor.revealed {
             self.harbor.revealed = reveal;
@@ -299,6 +357,7 @@ impl Desktop {
                 .filter(|&i| {
                     matches!(items[i].0, DockItem::App(k) if self.is_running(k))
                         || matches!(items[i].0, DockItem::External(_))
+                        || matches!(items[i].0, DockItem::Package(p) if self.package_running(p))
                 })
                 .map(|i| (i, self.now_ms));
             if self.harbor.peek.as_ref().is_some_and(|p| Some(p.item) != hover) {
@@ -333,8 +392,34 @@ impl Desktop {
         true
     }
 
+    /// Is installed app `p` (an index into [`Self::package_apps`]) showing a window?
+    fn package_running(&self, p: u16) -> bool {
+        let packages = self.package_apps();
+        self.windows.iter().any(|w| Self::window_package(w, &packages) == Some(p))
+    }
+
     fn dock_click(&mut self, item: DockItem) {
         match item {
+            DockItem::Package(p) => {
+                let packages = self.package_apps();
+                let focused = self.focused_id();
+                let topmost = self
+                    .windows
+                    .iter()
+                    .rev()
+                    .find(|w| Self::window_package(w, &packages) == Some(p))
+                    .map(|w| (w.id, w.minimized));
+                match topmost {
+                    Some((id, false)) if focused == Some(id) => self.minimize(id),
+                    Some((id, _)) => self.raise(id),
+                    None => {
+                        if let Some(a) = packages.get(p as usize) {
+                            let path = a.path.clone();
+                            self.spawn_program(&path, &[]);
+                        }
+                    }
+                }
+            }
             DockItem::External(id) => {
                 if self.focused_id() == Some(id) {
                     self.minimize(id);
@@ -377,6 +462,8 @@ impl Desktop {
             cv.frosted(*b, 24, t.glass_tint);
         }
         let focused = self.focused().map(|w| (w.app.kind(), w.id));
+        let packages = self.package_apps();
+        let focused_package = self.focused().and_then(|w| Self::window_package(w, &packages));
         for (idx, (item, r)) in items.iter().enumerate() {
             let hovered = self.harbor.hover == Some(idx);
             // Pointing lifts and enlarges the icon.
@@ -388,7 +475,7 @@ impl Desktop {
             };
             let base = items[idx].1;
             let launching = matches!(item, DockItem::App(k) if self.launching.iter().any(|&(lk, at)| lk == *k && self.now_ms < at + 3000));
-            if launching {
+            if launching && !theme::reduce_motion() {
                 // Two rings spread from the icon while the app starts.
                 let (cx, cy) = base.center();
                 for k in 0..2u64 {
@@ -416,6 +503,9 @@ impl Desktop {
                 DockItem::Launcher => icons::draw(cv, Icon::Launcher, r),
                 DockItem::App(kind) => icons::draw(cv, apps::info(*kind).icon, r),
                 DockItem::External(_) => icons::draw(cv, Icon::Aurora, r),
+                DockItem::Package(p) => {
+                    icons::draw(cv, packages.get(*p as usize).map_or(Icon::Aurora, |a| a.icon), r)
+                }
                 DockItem::Trash => icons::draw(cv, if self.trash_full { Icon::TrashFull } else { Icon::Trash }, r),
                 DockItem::Stack(stack) => paint_stack(cv, r, *stack),
             }
@@ -423,6 +513,7 @@ impl Desktop {
             let open = match item {
                 DockItem::App(k) => self.is_running(*k),
                 DockItem::External(_) => true,
+                DockItem::Package(p) => self.package_running(*p),
                 DockItem::Launcher => self.launcher.is_some(),
                 _ => false,
             };
@@ -430,6 +521,7 @@ impl Desktop {
                 let is_focused = match item {
                     DockItem::App(k) => focused.is_some_and(|(fk, _)| fk == *k),
                     DockItem::External(id) => focused.is_some_and(|(_, fid)| fid == *id),
+                    DockItem::Package(p) => focused_package == Some(*p),
                     DockItem::Launcher => self.launcher.is_some(),
                     _ => false,
                 };
@@ -451,7 +543,11 @@ impl Desktop {
                         external = self.windows.iter().find(|w| w.id == *id).map(|w| w.app.title()).unwrap_or_default();
                         external.as_str()
                     }
-                    DockItem::Launcher => "Shoal",
+                    DockItem::Package(p) => {
+                        external = packages.get(*p as usize).map(|a| a.manifest.name.clone()).unwrap_or_default();
+                        external.as_str()
+                    }
+                    DockItem::Launcher => "Apps — Shoal",
                     DockItem::App(k) => apps::info(*k).name,
                     DockItem::Stack(Stack::Downloads) => "Downloads",
                     DockItem::Stack(Stack::Documents) => "Documents",
@@ -476,6 +572,9 @@ impl Desktop {
         let (_, items) = self.dock_layout();
         let name = match items.get(peek.item).map(|(i, _)| *i) {
             Some(DockItem::App(k)) => String::from(apps::info(k).name),
+            Some(DockItem::Package(p)) => {
+                self.package_apps().get(p as usize).map(|a| a.manifest.name.clone()).unwrap_or_default()
+            }
             _ => String::from("Window"),
         };
         cv.text(p.x + 14, p.y + 22, &name, theme::ui_bold(13), t.text);

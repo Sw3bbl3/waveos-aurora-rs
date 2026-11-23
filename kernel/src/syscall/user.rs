@@ -6,11 +6,11 @@
 //! unmap the memory at any moment; if that makes the copy fault, the page
 //! fault handler resumes `user_copy` at its fault exit (the fixup below) and
 //! the system call returns `EFAULT` — the kernel never touches user memory
-//! outside this one routine.
+//! outside this one routine. With SMAP (`arch::protect`) that is enforced:
+//! the routine's SMAP variant alone opens user access (`stac`/`clac`).
 
 use crate::proc;
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 use aurora_abi::err::*;
 use core::arch::global_asm;
@@ -33,21 +33,61 @@ global_asm!(
     "aurora_user_copy_fault:",
     "mov eax, 1",
     "ret",
+    // The same with SMAP on: user pages are reachable only between `stac`
+    // and `clac`. A fault returns through the trap, whose `iretq` restores
+    // RFLAGS.AC, so the fault exit closes access again too.
+    ".global aurora_user_copy_smap",
+    "aurora_user_copy_smap:",
+    "mov rcx, rdx",
+    "stac",
+    ".global aurora_user_copy_smap_insn",
+    "aurora_user_copy_smap_insn:",
+    "rep movsb",
+    "clac",
+    "xor eax, eax",
+    "ret",
+    ".global aurora_user_copy_smap_fault",
+    "aurora_user_copy_smap_fault:",
+    "clac",
+    "mov eax, 1",
+    "ret",
 );
 
 extern "sysv64" {
-    /// Copies `len` bytes; returns 0, or 1 if a page fault cut it short.
     fn aurora_user_copy(dst: *mut u8, src: *const u8, len: usize) -> u32;
     static aurora_user_copy_insn: u8;
     static aurora_user_copy_fault: u8;
+    fn aurora_user_copy_smap(dst: *mut u8, src: *const u8, len: usize) -> u32;
+    static aurora_user_copy_smap_insn: u8;
+    static aurora_user_copy_smap_fault: u8;
+}
+
+/// Copies `len` bytes; returns 0, or 1 if a page fault cut it short. The
+/// only place the kernel touches user memory.
+unsafe fn raw_copy(dst: *mut u8, src: *const u8, len: usize) -> u32 {
+    if crate::arch::protect::smap() {
+        aurora_user_copy_smap(dst, src, len)
+    } else {
+        aurora_user_copy(dst, src, len)
+    }
 }
 
 /// Called by the page fault handler for a kernel-mode fault at `rip`:
 /// returns where to resume if the fault happened inside `user_copy`.
 pub fn fixup(rip: u64, addr: u64) -> Option<u64> {
-    let insn = unsafe { &aurora_user_copy_insn as *const u8 as u64 };
-    (rip == insn && addr < aurora_abi::layout::USER_END)
-        .then_some(unsafe { &aurora_user_copy_fault as *const u8 as u64 })
+    if addr >= aurora_abi::layout::USER_END {
+        return None;
+    }
+    let (plain, smap) = unsafe {
+        (&aurora_user_copy_insn as *const u8 as u64, &aurora_user_copy_smap_insn as *const u8 as u64)
+    };
+    if rip == plain {
+        Some(unsafe { &aurora_user_copy_fault as *const u8 as u64 })
+    } else if rip == smap {
+        Some(unsafe { &aurora_user_copy_smap_fault as *const u8 as u64 })
+    } else {
+        probe::fixup(rip, addr)
+    }
 }
 
 /// Checks the range against the page tables the CPU runs on (the calling
@@ -73,7 +113,7 @@ fn copy_in(dst: &mut [u8], ptr: u64) -> Result<(), isize> {
         return Ok(());
     }
     check(ptr, dst.len() as u64, false)?;
-    match unsafe { aurora_user_copy(dst.as_mut_ptr(), ptr as *const u8, dst.len()) } {
+    match unsafe { raw_copy(dst.as_mut_ptr(), ptr as *const u8, dst.len()) } {
         0 => Ok(()),
         _ => Err(EFAULT),
     }
@@ -84,15 +124,25 @@ fn copy_out(ptr: u64, src: &[u8]) -> Result<(), isize> {
         return Ok(());
     }
     check(ptr, src.len() as u64, true)?;
-    match unsafe { aurora_user_copy(ptr as *mut u8, src.as_ptr(), src.len()) } {
+    match unsafe { raw_copy(ptr as *mut u8, src.as_ptr(), src.len()) } {
         0 => Ok(()),
         _ => Err(EFAULT),
     }
 }
 
+/// A zeroed kernel buffer of `len` bytes for a system call, or `ENOMEM`:
+/// its size is the program's to choose, so running out of memory for it
+/// fails the call, not the kernel.
+pub fn buffer(len: usize) -> Result<Vec<u8>, isize> {
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len).map_err(|_| ENOMEM)?;
+    buf.resize(len, 0);
+    Ok(buf)
+}
+
 /// Copies `len` bytes in from user memory (at most `MAX_BUF`).
 pub fn slice(ptr: u64, len: u64) -> Result<Vec<u8>, isize> {
-    let mut buf = vec![0u8; len.min(MAX_BUF) as usize];
+    let mut buf = buffer(len.min(MAX_BUF) as usize)?;
     copy_in(&mut buf, ptr)?;
     Ok(buf)
 }
@@ -127,7 +177,7 @@ impl DerefMut for UserOut {
 pub fn slice_mut(ptr: u64, len: u64) -> Result<UserOut, isize> {
     let len = len.min(MAX_BUF);
     check(ptr, len, true)?;
-    Ok(UserOut { ptr, buf: vec![0u8; len as usize] })
+    Ok(UserOut { ptr, buf: buffer(len as usize)? })
 }
 
 /// Checks that `len` bytes at `ptr` are writable (without copying).
@@ -204,7 +254,7 @@ pub fn read_u32(addr: u64) -> Result<u32, isize> {
         return Err(EFAULT);
     }
     let mut v = 0u32;
-    match unsafe { aurora_user_copy(&mut v as *mut u32 as *mut u8, addr as *const u8, 4) } {
+    match unsafe { raw_copy(&mut v as *mut u32 as *mut u8, addr as *const u8, 4) } {
         0 => Ok(v),
         _ => Err(EFAULT),
     }
@@ -215,8 +265,81 @@ pub fn write_u32(addr: u64, v: u32) -> Result<(), isize> {
     if addr.checked_add(4).is_none_or(|end| end > aurora_abi::layout::USER_END) {
         return Err(EFAULT);
     }
-    match unsafe { aurora_user_copy(addr as *mut u8, &v as *const u32 as *const u8, 4) } {
+    match unsafe { raw_copy(addr as *mut u8, &v as *const u32 as *const u8, 4) } {
         0 => Ok(()),
         _ => Err(EFAULT),
+    }
+}
+
+/// Self-test probes: a kernel read of a user address *without* opening
+/// access, and a kernel call into a user page, each recovering from its
+/// fault — they show SMAP and SMEP at work (`tests::cpu_protections`).
+pub mod probe {
+    #[cfg(feature = "ktest")]
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    #[cfg(feature = "ktest")]
+    core::arch::global_asm!(
+        "aurora_probe_read:",
+        "aurora_probe_read_insn:",
+        "mov al, byte ptr [rdi]",
+        "xor eax, eax",
+        "ret",
+        "aurora_probe_read_fault:",
+        "mov eax, 1",
+        "ret",
+        "aurora_probe_exec:",
+        "call rdi",
+        "xor eax, eax",
+        "ret",
+        // The call pushed its return address before the fetch faulted.
+        "aurora_probe_exec_fault:",
+        "add rsp, 8",
+        "mov eax, 1",
+        "ret",
+    );
+
+    #[cfg(feature = "ktest")]
+    extern "sysv64" {
+        fn aurora_probe_read(addr: u64) -> u32;
+        static aurora_probe_read_insn: u8;
+        static aurora_probe_read_fault: u8;
+        fn aurora_probe_exec(addr: u64) -> u32;
+        static aurora_probe_exec_fault: u8;
+    }
+
+    /// The user address [`exec_faults`] is calling (0: none).
+    #[cfg(feature = "ktest")]
+    static EXEC_TARGET: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(feature = "ktest")]
+    pub fn fixup(rip: u64, addr: u64) -> Option<u64> {
+        if rip == unsafe { &aurora_probe_read_insn as *const u8 as u64 } {
+            return Some(unsafe { &aurora_probe_read_fault as *const u8 as u64 });
+        }
+        let target = EXEC_TARGET.load(Ordering::Relaxed);
+        (target != 0 && rip == target && addr == target)
+            .then_some(unsafe { &aurora_probe_exec_fault as *const u8 as u64 })
+    }
+
+    #[cfg(not(feature = "ktest"))]
+    pub fn fixup(_rip: u64, _addr: u64) -> Option<u64> {
+        None
+    }
+
+    /// Reads a byte at `addr` the way a careless kernel would: true if it faulted.
+    #[cfg(feature = "ktest")]
+    pub fn read_faults(addr: u64) -> bool {
+        unsafe { aurora_probe_read(addr) != 0 }
+    }
+
+    /// Calls code at user address `addr` from the kernel: true if it faulted.
+    /// (The code must be a `ret` if it runs.)
+    #[cfg(feature = "ktest")]
+    pub fn exec_faults(addr: u64) -> bool {
+        EXEC_TARGET.store(addr, Ordering::Relaxed);
+        let r = unsafe { aurora_probe_exec(addr) != 0 };
+        EXEC_TARGET.store(0, Ordering::Relaxed);
+        r
     }
 }

@@ -55,22 +55,62 @@ impl App for ClientApp {
     fn resizable(&self) -> bool {
         self.resizable
     }
-    fn draw(&mut self, cv: &mut Canvas, area: Rect, _env: &Env) {
-        // A new size, or a new scale: the client draws its surface again.
-        if (area.w, area.h, cv.scale) != self.reported {
-            self.reported = (area.w, area.h, cv.scale);
+    fn min_size(&self) -> (i32, i32) {
+        server::minimum(self.id)
+    }
+    fn draw(&mut self, cv: &mut Canvas, area: Rect, env: &Env) {
+        // A new size, or a new scale (the window went to a display with
+        // another one): the client draws its surface again.
+        if (area.w, area.h, env.scale) != self.reported {
+            self.reported = (area.w, area.h, env.scale);
+            server::set_window_scale(self.id, env.scale);
             server::push_event(
                 self.id,
-                Event { kind: event::RESIZE, x: area.w, y: area.h, a: cv.scale as u32, ..Default::default() },
+                Event { kind: event::RESIZE, x: area.w, y: area.h, a: env.scale as u32, ..Default::default() },
             );
         }
         let bg = theme::current().window_bg;
-        let glass = !self.materials().is_empty();
-        let drawn = server::with_surface(self.id, |px, w, h| {
-            if glass {
-                cv.blit_alpha(px, w, h, area, WINDOW_RADIUS);
-            } else {
-                cv.blit(px, w, h, area, WINDOW_RADIUS);
+        // Glass regions (content points) are the only see-through parts of
+        // the surface: blend there, copy everywhere else.
+        let glass: alloc::vec::Vec<Rect> =
+            self.materials().into_iter().map(|r| r.offset(area.x, area.y).intersect(&area)).collect();
+        let drawn = server::with_surface_scaled(self.id, |px, w, h, k| {
+            let k = k.max(1) as i32;
+            // Drawn for another scale (the window is on its way to a display
+            // with this one, or straddles two): scaled until it catches up.
+            if k != cv.scale {
+                let dst = Rect::new(area.x, area.y, w as i32 / k, h as i32 / k);
+                cv.with_clip(area, |cv| cv.draw_image(px, w, h, dst, 255));
+                return (w as i32 / k, h as i32 / k);
+            }
+            // The top of the content joins the compositor strip squarely;
+            // only the window's bottom corners belong to this surface.
+            for (clip, radius) in [
+                (Rect::new(area.x, area.y, area.w, WINDOW_RADIUS), 0),
+                (Rect::new(area.x, area.y + WINDOW_RADIUS, area.w, (area.h - WINDOW_RADIUS).max(0)), WINDOW_RADIUS),
+            ] {
+                let clip = clip.intersect(&cv.clip);
+                if clip.is_empty() {
+                    continue;
+                }
+                // The opaque parts: the clip minus every glass region.
+                let mut opaque = alloc::vec![clip];
+                for g in &glass {
+                    opaque = opaque.iter().flat_map(|p| p.subtract(g)).filter(|p| !p.is_empty()).collect();
+                }
+                for part in opaque {
+                    cv.with_clip(part, |cv| cv.blit(px, w, h, area, radius));
+                }
+                // Each glass pixel once, even where regions overlap.
+                for (i, g) in glass.iter().enumerate() {
+                    let mut parts = alloc::vec![clip.intersect(g)];
+                    for earlier in &glass[..i] {
+                        parts = parts.iter().flat_map(|p| p.subtract(earlier)).filter(|p| !p.is_empty()).collect();
+                    }
+                    for part in parts {
+                        cv.with_clip(part, |cv| cv.blit_alpha(px, w, h, area, radius));
+                    }
+                }
             }
             // The part covered, in points.
             (w as i32 / cv.scale, h as i32 / cv.scale)

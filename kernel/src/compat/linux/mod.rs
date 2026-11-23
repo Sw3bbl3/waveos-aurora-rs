@@ -17,16 +17,25 @@
 //! [`WAVE_BASE`] up: `WAVE_BASE + n` is WaveOS's call `n`, with WaveOS's
 //! arguments (`libs/linux/include/waveos.h` describes them for C).
 
+pub mod chardev;
+mod cpu;
+pub mod drm;
 mod events;
 pub mod exec;
 pub mod fs;
+pub mod inotify;
+pub mod input;
 mod links;
 mod misc;
+pub(crate) use misc::realtime_ns;
 mod mm;
 mod net;
 mod process;
 mod shm;
 pub mod signal;
+mod syscount;
+mod sysfs;
+pub mod uevent;
 pub mod unix;
 pub mod vdso;
 
@@ -51,6 +60,8 @@ pub struct Linux {
     pub signals: signal::Signals,
     /// Log every system call (`WAVEOS_STRACE=1` in the environment).
     pub trace: core::sync::atomic::AtomicBool,
+    /// Count them (`WAVEOS_SYSCOUNT=1`).
+    counts: syscount::Counts,
 }
 
 impl Linux {
@@ -62,7 +73,14 @@ impl Linux {
             nonblock: Mutex::new([0; 16]),
             signals: signal::Signals::new(),
             trace: core::sync::atomic::AtomicBool::new(false),
+            counts: syscount::Counts::default(),
         }
+    }
+
+    /// Tracing and counting as the program's environment asks.
+    pub fn configure(&self, env: &[alloc::string::String]) {
+        self.trace.store(tracing(env), core::sync::atomic::Ordering::Relaxed);
+        self.counts.reset(syscount::wanted(env));
     }
 
     /// A forked child's copy.
@@ -74,12 +92,13 @@ impl Linux {
             nonblock: Mutex::new(*self.nonblock.lock()),
             signals: self.signals.for_child(),
             trace: core::sync::atomic::AtomicBool::new(self.trace.load(core::sync::atomic::Ordering::Relaxed)),
+            counts: syscount::Counts::new(self.counts.on()),
         }
     }
 
     /// A new program (`exec`) with its heap at `brk`.
     pub fn exec_reset(&self, brk: u64, env: &[alloc::string::String]) {
-        self.trace.store(tracing(env), core::sync::atomic::Ordering::Relaxed);
+        self.configure(env);
         *self.mm.lock() = mm::Memory::new(brk);
         self.clear_tid.lock().clear();
         self.signals.exec_reset();
@@ -243,6 +262,7 @@ mod nr {
     pub const SCHED_GET_PRIORITY_MAX: u64 = 146;
     pub const SCHED_GET_PRIORITY_MIN: u64 = 147;
     pub const SCHED_GETSCHEDULER: u64 = 145;
+    pub const SCHED_SETSCHEDULER: u64 = 144;
     pub const PRCTL: u64 = 157;
     pub const ARCH_PRCTL: u64 = 158;
     pub const SETRLIMIT: u64 = 160;
@@ -281,6 +301,10 @@ mod nr {
     pub const PSELECT6: u64 = 270;
     pub const PPOLL: u64 = 271;
     pub const SET_ROBUST_LIST: u64 = 273;
+    pub const INOTIFY_INIT: u64 = 253;
+    pub const INOTIFY_ADD_WATCH: u64 = 254;
+    pub const INOTIFY_RM_WATCH: u64 = 255;
+    pub const INOTIFY_INIT1: u64 = 294;
     pub const UTIMENSAT: u64 = 280;
     pub const EPOLL_PWAIT: u64 = 281;
     pub const ACCEPT4: u64 = 288;
@@ -303,6 +327,8 @@ mod nr {
     pub const EXECVEAT: u64 = 322;
     pub const RSEQ: u64 = 334;
     pub const CLONE3: u64 = 435;
+    pub const CLOSE_RANGE: u64 = 436;
+    pub const MINCORE: u64 = 27;
     pub const FACCESSAT2: u64 = 439;
     pub const EPOLL_PWAIT2: u64 = 441;
 }
@@ -311,7 +337,8 @@ mod nr {
 pub const WAVE_BASE: u64 = 0x5741_0000;
 
 /// The WaveOS calls Linux programs may make: windows, events, sound,
-/// the clipboard, notifications, preferences and the screen's size.
+/// the clipboard, notifications, preferences, the screen's size and game
+/// controllers.
 fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
     use aurora_abi::nr as w;
     match n as usize {
@@ -321,6 +348,7 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::WIN_PRESENT
         | w::WIN_SET_TITLE
         | w::WIN_SET_CURSOR
+        | w::WIN_SET_PROGRAM
         | w::WIN_CLOSE
         | w::WIN_RESIZE
         | w::NEXT_EVENT
@@ -331,7 +359,11 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::NOTIFY
         | w::PREF_GET
         | w::DISPLAY_MODES
-        | w::TIME_MS => crate::syscall::handle(n as usize, a),
+        | w::UNIX_MS
+        | w::TIME_MS
+        | w::GAMEPADS
+        | w::GAMEPAD_STATE
+        | w::GAMEPAD_RUMBLE => crate::syscall::handle(n as usize, a),
         _ => Err(ENOSYS),
     }
 }
@@ -341,21 +373,58 @@ pub fn tracing(env: &[alloc::string::String]) -> bool {
     env.iter().any(|e| e == "WAVEOS_STRACE=1")
 }
 
-/// The uid and gid every Linux program runs as.
-pub const UID: u64 = 1000;
+/// The uid and gid of process `pid` (the session's if it is gone).
+pub fn ids_of(pid: u32) -> (u32, u32) {
+    let c = proc::get(pid).map(|p| *p.cred.lock()).unwrap_or_else(crate::users::session);
+    (c.uid, c.gid)
+}
 
 /// Entry for a Linux process's system call (from `syscall::dispatch`).
 pub fn dispatch(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
+    if let Some(l) = p.linux.as_ref().filter(|l| l.counts.on()) {
+        let (nr, start) = (f.rax, crate::time::now_ns());
+        let r = traced(f, p);
+        l.counts.record(|| p.name(), nr, crate::time::now_ns() - start);
+        return r;
+    }
+    traced(f, p)
+}
+
+fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
     if !p.linux.as_ref().is_some_and(|l| l.trace.load(core::sync::atomic::Ordering::Relaxed)) {
         return call(f, p);
     }
     let (nr, a) = (f.rax, [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
     let r = call(f, p);
     let tid = misc::tid(p);
-    match r {
-        Ok(v) => log!("strace", "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}) = {:#x}", a[0], a[1], a[2], a[3], v),
-        Err(e) => log!("strace", "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}) = -{}", a[0], a[1], a[2], a[3], e.abs()),
-    }
+    // The path a call names, if it names one (which argument holds it).
+    let path_arg = match nr {
+        nr::OPEN | nr::STAT | nr::LSTAT | nr::ACCESS | nr::READLINK | nr::EXECVE | nr::MKDIR | nr::UNLINK => Some(0),
+        nr::OPENAT
+        | nr::NEWFSTATAT
+        | nr::STATX
+        | nr::FACCESSAT
+        | nr::FACCESSAT2
+        | nr::READLINKAT
+        | nr::MKDIRAT
+        | nr::INOTIFY_ADD_WATCH => Some(1),
+        _ => None,
+    };
+    let path = path_arg.and_then(|i| crate::syscall::user::cstr(a[i]).ok()).unwrap_or_default();
+    let result = match r {
+        Ok(v) => alloc::format!("{v:#x}"),
+        Err(e) => alloc::format!("-{}", e.abs()),
+    };
+    log!(
+        "strace",
+        "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) {path} = {result}",
+        a[0],
+        a[1],
+        a[2],
+        a[3],
+        a[4],
+        a[5]
+    );
     r
 }
 
@@ -370,6 +439,7 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::CREAT => fs::openat(&p, fs::AT_FDCWD, a[0], fs::O_CREAT | fs::O_WRONLY | fs::O_TRUNC, a[1]),
         nr::OPENAT => fs::openat(&p, a[0], a[1], a[2], a[3]),
         nr::CLOSE => fs::close(&p, a[0]),
+        nr::CLOSE_RANGE => fs::close_range(&p, a[0], a[1], a[2]),
         nr::STAT => fs::stat_path(&p, fs::AT_FDCWD, a[0], a[1], 0),
         nr::LSTAT => fs::stat_path(&p, fs::AT_FDCWD, a[0], a[1], fs::AT_SYMLINK_NOFOLLOW),
         // Hard links: WaveOS's file systems have none. EPERM is what Linux
@@ -400,8 +470,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::GETCWD => fs::getcwd(&p, a[0], a[1]),
         nr::CHDIR => fs::chdir(&p, a[0]),
         nr::FCHDIR => fs::fchdir(&p, a[0]),
-        nr::MKDIR => fs::mkdirat(&p, fs::AT_FDCWD, a[0]),
-        nr::MKDIRAT => fs::mkdirat(&p, a[0], a[1]),
+        nr::MKDIR => fs::mkdirat(&p, fs::AT_FDCWD, a[0], a[1]),
+        nr::MKDIRAT => fs::mkdirat(&p, a[0], a[1], a[2]),
         nr::RMDIR => fs::unlinkat(&p, fs::AT_FDCWD, a[0], fs::AT_REMOVEDIR),
         nr::UNLINK => fs::unlinkat(&p, fs::AT_FDCWD, a[0], 0),
         nr::UNLINKAT => fs::unlinkat(&p, a[0], a[1], a[2]),
@@ -411,8 +481,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::READLINKAT => fs::readlinkat(&p, a[0], a[1], a[2], a[3]),
         nr::TRUNCATE => fs::truncate(&p, a[0], a[1]),
         nr::FTRUNCATE => fs::ftruncate(&p, a[0], a[1]),
-        nr::STATFS => fs::statfs(a[1]),
-        nr::FSTATFS => fs::statfs(a[1]),
+        nr::STATFS => fs::statfs_path(&p, a[0], a[1]),
+        nr::FSTATFS => fs::fstatfs(&p, a[0], a[1]),
         nr::FALLOCATE => fs::fallocate(&p, a[0], a[1], a[2], a[3]),
         nr::FSYNC | nr::FDATASYNC | nr::FLOCK | nr::FADVISE64 | nr::READAHEAD => {
             p.fd(a[0] as usize)?;
@@ -422,10 +492,20 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
             crate::fs::sync_all();
             Ok(0)
         }
-        // Files have no owners or permission bits on WaveOS: accepted, and nothing changes.
-        nr::CHMOD | nr::FCHMOD | nr::CHOWN | nr::FCHOWN | nr::LCHOWN | nr::FCHOWNAT | nr::FCHMODAT => Ok(0),
+        // Owners and permission bits (volumes without them accept and keep nothing).
+        nr::CHMOD => fs::chmod(&p, fs::AT_FDCWD, a[0], a[1]),
+        nr::FCHMODAT => fs::chmod(&p, a[0], a[1], a[2]),
+        nr::FCHMOD => fs::fchmod(&p, a[0], Some(a[1]), (0, 0)),
+        nr::CHOWN | nr::LCHOWN => fs::chown(&p, fs::AT_FDCWD, a[0], a[1], a[2]),
+        nr::FCHOWNAT => fs::chown(&p, a[0], a[1], a[2], a[3]),
+        nr::FCHOWN => fs::fchmod(&p, a[0], None, (a[1], a[2])),
         nr::UTIMES | nr::UTIMENSAT => Ok(0),
-        nr::UMASK => Ok(0o022),
+        nr::UMASK => {
+            let mut c = p.cred.lock();
+            let old = c.umask;
+            c.umask = (a[0] & 0o777) as u16;
+            Ok(old as u64)
+        }
         nr::POLL => fs::poll(&p, a[0], a[1], a[2] as i64),
         nr::PPOLL => fs::ppoll(&p, a[0], a[1], a[2], a[3]),
         nr::SELECT => fs::select(&p, a[0], [a[1], a[2], a[3]], fs::Timeout::Timeval(a[4]), 0),
@@ -450,6 +530,10 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::SETSOCKOPT => net::setsockopt(&p, a[0], a[1], a[2], a[3], a[4]),
         nr::GETSOCKOPT => net::getsockopt(&p, a[0], a[1], a[2], a[3], a[4]),
         nr::MEMFD_CREATE => fs::memfd_create(&p, a[0], a[1]),
+        nr::INOTIFY_INIT => inotify::init1(&p, 0),
+        nr::INOTIFY_INIT1 => inotify::init1(&p, a[0]),
+        nr::INOTIFY_ADD_WATCH => inotify::add_watch(&p, a[0], a[1], a[2]),
+        nr::INOTIFY_RM_WATCH => inotify::rm_watch(&p, a[0], a[1]),
         nr::EVENTFD => events::eventfd(&p, a[0], 0),
         nr::EVENTFD2 => events::eventfd(&p, a[0], a[1]),
         nr::TIMERFD_CREATE => events::timerfd_create(&p, a[0], a[1]),
@@ -477,21 +561,61 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::MREMAP => mm::mremap(&p, a[0], a[1], a[2], a[3]),
         nr::MADVISE => mm::madvise(&p, a[0], a[1], a[2]),
         nr::MSYNC => Ok(0),
+        nr::MINCORE => mm::mincore(&p, a[0], a[1], a[2]),
 
         nr::EXIT => misc::exit_thread(&p, a[0] as i64),
-        nr::EXIT_GROUP => proc::exit_current((a[0] & 0xFF) as i64),
+        nr::EXIT_GROUP => {
+            if let Some(l) = &p.linux {
+                l.counts.report();
+            }
+            proc::exit_current((a[0] & 0xFF) as i64)
+        }
         nr::GETPID => Ok(p.pid as u64),
         nr::GETTID => Ok(misc::tid(&p)),
         nr::GETPPID => Ok(p.parent as u64),
-        nr::GETUID | nr::GETEUID | nr::GETGID | nr::GETEGID => Ok(UID),
+        nr::GETUID | nr::GETEUID => Ok(p.cred.lock().uid as u64),
+        nr::GETGID | nr::GETEGID => Ok(p.cred.lock().gid as u64),
         nr::GETRESUID | nr::GETRESGID => {
+            let c = *p.cred.lock();
+            let id = if f.rax == nr::GETRESUID { c.uid } else { c.gid };
             for ptr in [a[0], a[1], a[2]] {
-                crate::syscall::user::put(ptr, &(UID as u32))?;
+                crate::syscall::user::put(ptr, &id)?;
             }
             Ok(0)
         }
-        nr::SETUID | nr::SETGID => Ok(0),
-        nr::GETGROUPS => Ok(0),
+        // Becoming someone else takes being the system (no account is);
+        // "becoming" who you already are is fine.
+        nr::SETUID | nr::SETGID => {
+            let mut c = p.cred.lock();
+            let id = a[0] as u32;
+            let same = if f.rax == nr::SETUID { c.uid == id } else { c.gid == id };
+            if same {
+                Ok(0)
+            } else if c.is_root() {
+                if f.rax == nr::SETUID {
+                    c.uid = id;
+                } else {
+                    c.gid = id;
+                }
+                Ok(0)
+            } else {
+                Err(EPERM)
+            }
+        }
+        nr::GETGROUPS => {
+            let c = *p.cred.lock();
+            let groups = c.groups();
+            if a[0] == 0 {
+                return Ok(groups.len() as u64);
+            }
+            if (a[0] as usize) < groups.len() {
+                return Err(EINVAL);
+            }
+            for (i, g) in groups.iter().enumerate() {
+                crate::syscall::user::put(a[1] + i as u64 * 4, g)?;
+            }
+            Ok(groups.len() as u64)
+        }
         nr::GETPGRP => process::getpgid(&p, 0),
         nr::GETPGID => process::getpgid(&p, a[0]),
         nr::GETSID => process::getsid(&p, a[0]),
@@ -522,6 +646,15 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         }
         nr::SCHED_GETAFFINITY => misc::sched_getaffinity(a[1], a[2]),
         nr::SCHED_SETAFFINITY | nr::SCHED_GETPARAM | nr::SCHED_GETSCHEDULER | nr::SETPRIORITY => Ok(0),
+        // Ordinary policies (OTHER, BATCH, IDLE: Mesa's worker threads ask
+        // for IDLE) are all the scheduler's one; real-time ones need a
+        // privilege programs don't have, as on Linux without RLIMIT_RTPRIO.
+        // (SCHED_RESET_ON_FORK, 0x4000_0000, may come with any of them.)
+        nr::SCHED_SETSCHEDULER => match a[1] & !0x4000_0000 {
+            0 | 3 | 5 => Ok(0),
+            1 | 2 => Err(EPERM),
+            _ => Err(EINVAL),
+        },
         // One priority for every policy (as SCHED_OTHER has on Linux).
         nr::SCHED_GET_PRIORITY_MAX | nr::SCHED_GET_PRIORITY_MIN => Ok(0),
         nr::GETPRIORITY => Ok(20),

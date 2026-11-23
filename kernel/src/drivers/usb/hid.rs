@@ -19,7 +19,7 @@
 use super::{Endpoint, Interface, PipeHandler, Setup, UsbDevice, DESC_REPORT};
 use crate::drivers::block::Dma;
 use crate::drivers::input::{self, InputEvent, KeyCode, KeyEvent, Modifiers};
-use crate::drivers::{gamepad, keymap};
+use crate::drivers::{evdev, gamepad, keymap};
 use crate::sync::{IrqMutex, Mutex};
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -124,7 +124,8 @@ fn media(u: u32) -> Option<KeyCode> {
 }
 
 /// A key going down or up as a `KeyEvent` (`None`: unknown or a dead key).
-fn key_event(u: u32, pressed: bool, held: &[u32]) -> Option<KeyEvent> {
+/// (Keys programs type through `/dev/uinput` come here too.)
+pub(crate) fn key_event(u: u32, pressed: bool, held: &[u32]) -> Option<KeyEvent> {
     let (mods, altgr) = modifiers(held, input::caps());
     if usage::page(u) != usage::KEYBOARD_PAGE {
         return media(u).map(|code| KeyEvent { code, ch: None, pressed, mods });
@@ -163,6 +164,8 @@ struct Keys {
     /// The held key that repeats (its usage and event), and when it next fires.
     repeat: Option<(u32, KeyEvent, u64)>,
     timing: (u64, u64),
+    /// The keyboard as a Linux device.
+    linux: Option<Arc<evdev::Device>>,
 }
 
 impl Keys {
@@ -170,6 +173,15 @@ impl Keys {
         let changes = self.keys.feed(d, report);
         if changes.is_empty() {
             return Vec::new();
+        }
+        if let Some(dev) = &self.linux {
+            for c in &changes {
+                if let Some(k) = evdev::codes::hid_key(c.usage) {
+                    dev.emit(evdev::codes::EV_MSC, evdev::codes::MSC_SCAN, c.usage as i32);
+                    dev.emit(evdev::codes::EV_KEY, k, c.pressed as i32);
+                }
+            }
+            dev.sync();
         }
         let held = self.keys.all_held();
         let now = crate::time::uptime_ms();
@@ -231,10 +243,14 @@ struct Pointer {
     /// Back and forward (bits 0, 1), sent as keys.
     side: u8,
     remainder: (i32, i32),
+    linux: Option<Arc<evdev::Device>>,
 }
 
 impl Pointer {
     fn feed(&mut self, r: &pointer::Report) {
+        if let Some(d) = &self.linux {
+            evdev::sources::pointer_report(d, r.buttons & 0x1F, r.x, r.y, r.wheel, r.pan);
+        }
         let buttons = r.buttons & 0x07;
         if r.absolute {
             let (w, h) = input::screen_size();
@@ -271,19 +287,13 @@ struct Touchpad {
     frames: touchpad::Frames,
     gestures: Gestures,
     buttons: u8,
+    linux: Option<(Arc<evdev::Device>, evdev::sources::Touches)>,
 }
 
 impl Touchpad {
     fn apply(&mut self, o: aurora_hid::gestures::Output) {
-        let buttons = o.buttons & 0x07;
-        if o.dx != 0 || o.dy != 0 || buttons != self.buttons {
-            input::pointer_moved(o.dx, o.dy, buttons);
-            self.buttons = buttons;
-        }
-        if o.scroll_x != 0 || o.scroll_y != 0 {
-            // Pixels to 1/120 notch, at 40 px a notch.
-            input::push(InputEvent::Scroll { dx: o.scroll_x * 3, dy: o.scroll_y * 3 });
-        }
+        // Shared with I²C touchpads (drivers::i2c::hid).
+        input::touchpad_output(o, &mut self.buttons);
     }
 }
 
@@ -300,6 +310,8 @@ pub struct HidDevice {
     bus: &'static super::Bus,
     dev: u8,
     interface: u8,
+    /// Its raw reports for Linux programs (`/dev/hidraw*`).
+    hidraw: IrqMutex<Option<Arc<evdev::hidraw::Hidraw>>>,
 }
 
 impl HidDevice {
@@ -315,6 +327,9 @@ impl HidDevice {
 
 impl PipeHandler for HidDevice {
     fn data(&self, report: &[u8]) {
+        if let Some(raw) = &*self.hidraw.lock() {
+            raw.input(report);
+        }
         let d = &self.desc;
         if let Some(k) = &self.keys {
             let events = k.lock().feed(d, report);
@@ -329,6 +344,9 @@ impl PipeHandler for HidDevice {
             if let Some(r) = touchpad::read(d, report) {
                 let mut t = t.lock();
                 if let Some(frame) = t.frames.feed(r) {
+                    if let Some((dev, touches)) = &mut t.linux {
+                        touches.frame(dev, &frame);
+                    }
                     let o = t.gestures.frame(crate::time::uptime_ms(), &frame, &input::touchpad_settings());
                     t.apply(o);
                     super::kick_ticks();
@@ -425,23 +443,28 @@ fn role_name(keys: bool, pointer: Option<bool>, touchpad: bool, pad: bool) -> &'
     }
 }
 
+/// HID devices so far, numbered as Linux's HID bus does (`0003:VVVV:PPPP.NNNN`).
+static HID_SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+
 pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
     let ep_in = *iface.endpoints.iter().find(|e| e.kind == 3 && e.is_in())?;
     let ep_out = iface.endpoints.iter().find(|e| e.kind == 3 && !e.is_in()).copied();
     let boot = iface.subclass == 1;
-    let parsed = report_descriptor(dev, iface).and_then(|d| Descriptor::parse(&d).ok());
-    let desc = match parsed {
+    let raw = report_descriptor(dev, iface);
+    let parsed = raw.as_ref().and_then(|d| Descriptor::parse(d).ok());
+    let (desc, raw) = match parsed {
         Some(d) => {
             if boot {
                 // Firmware may have left it in the boot protocol.
                 let _ = dev.control(Setup::class_interface(SET_PROTOCOL, 1, iface.number, 0, false), None);
             }
-            d
+            (d, raw.unwrap_or_default())
         }
         // Unreadable or unparsable: boot devices still work in the boot protocol.
         None if boot && matches!(iface.protocol, 1 | 2) => {
             let _ = dev.control(Setup::class_interface(SET_PROTOCOL, 0, iface.number, 0, false), None);
-            Descriptor::parse(if iface.protocol == 1 { BOOT_KEYBOARD } else { BOOT_MOUSE }).ok()?
+            let bytes = if iface.protocol == 1 { BOOT_KEYBOARD } else { BOOT_MOUSE };
+            (Descriptor::parse(bytes).ok()?, bytes.to_vec())
         }
         None => return None,
     };
@@ -455,6 +478,21 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
         // Report only on changes (we repeat keys ourselves).
         let _ = dev.control(Setup::class_interface(SET_IDLE, 0, iface.number, 0, false), None);
     }
+    // As Linux: where it is, and its name (manufacturer, then product).
+    let mut place = dev.place(iface.number);
+    place.hid = HID_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let location = evdev::Location::Usb(place.clone());
+    let phys = alloc::format!("usb-{}-{}/input{}", place.pci, place.ports, iface.number);
+    let hid_name = match (place.maker.is_empty(), place.model.is_empty()) {
+        (false, false) => alloc::format!("{} {}", place.maker, place.model),
+        _ => dev.name.clone(),
+    };
+    let id = evdev::InputId {
+        bustype: evdev::codes::BUS_USB,
+        vendor: dev.desc.vendor,
+        product: dev.desc.product,
+        version: dev.desc.release,
+    };
     let touch = if is_touchpad {
         // Switch to reporting contacts; turn on surface and button reports.
         if let Some(r) = touchpad::input_mode_report(&desc) {
@@ -466,13 +504,27 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
             set_report(dev, iface.number, REPORT_FEATURE, &r, desc.numbered);
         }
         touchpad::info(&desc).map(|info| {
-            IrqMutex::new(Touchpad { frames: touchpad::Frames::new(), gestures: Gestures::new(&info), buttons: 0 })
+            let name = alloc::format!("{hid_name} Touchpad");
+            let linux = evdev::sources::touchpad(&name, id, &phys, location.clone(), &info);
+            IrqMutex::new(Touchpad {
+                frames: touchpad::Frames::new(),
+                gestures: Gestures::new(&info),
+                buttons: 0,
+                linux: Some((linux, evdev::sources::Touches::new())),
+            })
         })
     } else {
         None
     };
-    let pointer = (!is_touchpad && pointer::is_pointer(&desc))
-        .then(|| IrqMutex::new(Pointer { buttons: 0, side: 0, remainder: (0, 0) }));
+    let absolute = desc.find(aurora_hid::Kind::Input, usage::X).is_some_and(|(f, _)| !f.is_relative());
+    let pointer = (!is_touchpad && pointer::is_pointer(&desc)).then(|| {
+        let range =
+            |u| desc.find(aurora_hid::Kind::Input, u).map_or((0, 0x7FFF), |(f, _)| (f.logical_min, f.logical_max));
+        let ranges = absolute.then(|| (range(usage::X), range(usage::Y)));
+        let name = if has_keys { alloc::format!("{hid_name} Mouse") } else { hid_name.clone() };
+        let linux = evdev::sources::pointer(&name, id, &phys, location.clone(), ranges);
+        IrqMutex::new(Pointer { buttons: 0, side: 0, remainder: (0, 0), linux: Some(linux) })
+    });
     let pad = HidGamepad::new(&desc, dev.desc.vendor, dev.desc.product);
 
     let eps: Vec<Endpoint> = core::iter::once(ep_in).chain(ep_out).collect();
@@ -492,13 +544,22 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
                 product: dev.desc.product,
             }) as Arc<dyn gamepad::Rumble>
         });
-        gamepad::add(&gamepad::name(&dev.name), dev.desc.vendor, dev.desc.product, family, motors)
+        let linux = gamepad::Linux::Shown(Some(location.clone()), dev.desc.release);
+        gamepad::add_at(&gamepad::name(&dev.name), dev.desc.vendor, dev.desc.product, family, motors, linux)
     });
-    let absolute = desc.find(aurora_hid::Kind::Input, usage::X).is_some_and(|(f, _)| !f.is_relative());
     let name = role_name(has_keys, pointer.as_ref().map(|_| absolute), touch.is_some(), pad_id.is_some());
+    let keys = has_keys.then(|| {
+        let linux = evdev::sources::keyboard(&hid_name, id, &phys, location.clone());
+        IrqMutex::new(Keys { keys: keyboard::Keys::new(), repeat: None, timing: repeat_timing(), linux: Some(linux) })
+    });
+    let class = match (pad_id.is_some(), touch.is_some(), has_keys, pointer.is_some()) {
+        (true, ..) => evdev::Class::Joystick,
+        (_, true, ..) => evdev::Class::Touchpad,
+        (_, _, true, _) => evdev::Class::Keyboard,
+        _ => evdev::Class::Mouse,
+    };
     let device = Arc::new(HidDevice {
-        keys: has_keys
-            .then(|| IrqMutex::new(Keys { keys: keyboard::Keys::new(), repeat: None, timing: repeat_timing() })),
+        keys,
         pointer,
         touchpad: touch,
         gamepad: pad.zip(pad_id),
@@ -506,7 +567,21 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
         dev: dev.dev,
         interface: iface.number,
         desc,
+        hidraw: IrqMutex::new(None),
     });
+    let io = Arc::new(RawIo { out: OutPipe::new(dev, ep_out), iface: iface.number, numbered: device.desc.numbered });
+    *device.hidraw.lock() = Some(evdev::hidraw::add(evdev::hidraw::Spec {
+        name: hid_name,
+        phys,
+        uniq: place.serial.clone(),
+        bustype: evdev::codes::BUS_USB,
+        vendor: dev.desc.vendor,
+        product: dev.desc.product,
+        descriptor: raw,
+        location,
+        class,
+        io,
+    }));
     if has_keys && device.desc.find(aurora_hid::Kind::Output, usage::LED_CAPS_LOCK).is_some() {
         KEYBOARDS.lock().push(Arc::downgrade(&device));
         input::add_light_sink(set_all_lights);
@@ -518,11 +593,15 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
         dev.dev,
         alloc::boxed::Box::new(move || {
             if let Some(k) = &gone.keys {
-                let held = k.lock().keys.all_held();
+                let k = k.lock();
+                let held = k.keys.all_held();
                 for u in held.iter().copied() {
                     if let Some(e) = key_event(u, false, &held) {
                         input::push(InputEvent::Key(e));
                     }
+                }
+                if let Some(d) = &k.linux {
+                    evdev::remove(d);
                 }
             }
             if gone.pointer.as_ref().is_some_and(|p| p.lock().buttons != 0)
@@ -530,12 +609,63 @@ pub fn attach(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
             {
                 input::pointer_moved(0, 0, 0);
             }
+            if let Some(d) = gone.pointer.as_ref().and_then(|p| p.lock().linux.clone()) {
+                evdev::remove(&d);
+            }
+            if let Some(d) = gone.touchpad.as_ref().and_then(|t| t.lock().linux.as_ref().map(|l| l.0.clone())) {
+                evdev::remove(&d);
+            }
             if let Some((_, id)) = gone.gamepad {
                 gamepad::remove(id);
+            }
+            if let Some(raw) = gone.hidraw.lock().take() {
+                evdev::hidraw::remove(&raw);
             }
         }),
     );
     dev.bus.open_pipe(dev.dev, &ep_in, device).then_some(name)
+}
+
+/// Raw reports to and from the device, for `/dev/hidraw*`.
+struct RawIo {
+    out: OutPipe,
+    iface: u8,
+    numbered: bool,
+}
+
+const GET_REPORT: u8 = 0x01;
+
+impl evdev::hidraw::HidIo for RawIo {
+    fn output(&self, report: &[u8]) -> Result<usize, isize> {
+        use aurora_abi::err::*;
+        let id = *report.first().ok_or(EINVAL)?;
+        // A device without report ids takes the report without the 0 in front.
+        let data = if id == 0 { &report[1..] } else { report };
+        if data.len() <= 64 && self.out.send(data) {
+            return Ok(report.len());
+        }
+        self.set_report(REPORT_OUTPUT as u8, report)
+    }
+
+    fn get_report(&self, kind: u8, buf: &mut [u8]) -> Result<usize, isize> {
+        use aurora_abi::err::*;
+        let id = *buf.first().ok_or(EINVAL)?;
+        let skip = (id == 0 || !self.numbered) as usize;
+        let len = (buf.len() - skip).min(4096) as u16;
+        let setup = Setup::class_interface(GET_REPORT, (kind as u16) << 8 | id as u16, self.iface, len, true);
+        let n = self.out.bus.control(self.out.dev, setup, Some(&mut buf[skip..])).map_err(|_| EPIPE)?;
+        Ok(n + skip)
+    }
+
+    fn set_report(&self, kind: u8, report: &[u8]) -> Result<usize, isize> {
+        use aurora_abi::err::*;
+        let id = *report.first().ok_or(EINVAL)?;
+        let mut data = if id == 0 { report[1..].to_vec() } else { report.to_vec() };
+        let setup =
+            Setup::class_interface(SET_REPORT, (kind as u16) << 8 | id as u16, self.iface, data.len() as u16, false);
+        self.out.bus.control(self.out.dev, setup, Some(&mut data)).map_err(|_| EPIPE)?;
+        Ok(report.len())
+    }
 }
 
 // ------------------------------------------------------- output reports
@@ -661,7 +791,8 @@ pub fn attach_xbox(dev: &UsbDevice, iface: &Interface) -> Option<&'static str> {
     let motors: Arc<dyn gamepad::Rumble> =
         Arc::new(XboxMotors { kind, out, sequence: core::sync::atomic::AtomicU8::new(1) });
     let name = if dev.name.starts_with("USB device") { "Xbox Controller" } else { dev.name.as_str() };
-    let id = gamepad::add(name, dev.desc.vendor, dev.desc.product, aurora_abi::gamepad::XBOX, Some(motors));
+    let linux = gamepad::Linux::Shown(Some(evdev::Location::Usb(dev.place(iface.number))), dev.desc.release);
+    let id = gamepad::add_at(name, dev.desc.vendor, dev.desc.product, aurora_abi::gamepad::XBOX, Some(motors), linux);
     dev.bus.on_detach(dev.dev, alloc::boxed::Box::new(move || gamepad::remove(id)));
     let pad = Arc::new(XboxPad { kind, id, state: IrqMutex::new(Default::default()) });
     dev.bus.open_pipe(dev.dev, &ep_in, pad).then_some("game controller")

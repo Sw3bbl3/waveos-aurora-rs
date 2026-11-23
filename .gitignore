@@ -12,3 +12,6 @@
 
 __pycache__/
 /linux-programs/*/target/
+
+# The launcher's presets and last configuration (cargo xtask launch).
+/.waveos-launcher.json

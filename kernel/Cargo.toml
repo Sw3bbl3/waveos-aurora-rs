@@ -11,10 +11,13 @@ bench = false
 
 [features]
 ktest = []
+# Red zones and poisoning in the kernel heap (catches overflows and writes
+# after free, at some cost in speed and memory).
+heap-debug = []
 
 [dependencies]
 aurora-desktop = { path = "../libs/desktop" }
-gina = { path = "../libs/gina" }
+gina = { path = "../libs/gina", default-features = false }
 bootinfo = { path = "../libs/bootinfo" }
 lumen = { path = "../libs/gfx" }
 aurora-abi = { path = "../libs/abi" }
@@ -25,9 +28,15 @@ aurora-image = { path = "../libs/image" }
 aurora-wav = { path = "../libs/wav" }
 aurora-wifi = { path = "../libs/wifi" }
 aurora-hid = { path = "../libs/hid" }
+aurora-i2c = { path = "../libs/i2c" }
+aurora-sdmmc = { path = "../libs/sdmmc" }
+aurora-acpi-res = { path = "../libs/acpires" }
+aurora-edid = { path = "../libs/edid" }
+aurora-igfx = { path = "../libs/igfx" }
+aurora-amdgfx = { path = "../libs/amdgfx" }
+aurora-nvgfx = { path = "../libs/nvgfx" }
 x86_64 = "0.15"
 spin = "0.9"
-linked_list_allocator = "0.10"
 acpi = "6.1"
 log = "0.4"
 # Not used directly: the kernel is soft-float and never saves SIMD state, so

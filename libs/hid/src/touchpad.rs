@@ -53,13 +53,18 @@ pub struct Info {
     pub max_contacts: u32,
 }
 
-fn is_contact_field(f: &Field) -> bool {
-    f.kind == Kind::Input && !f.is_constant() && f.application == usage::TOUCH_PAD
+fn is_contact_field_of(f: &Field, app: u32) -> bool {
+    f.kind == Kind::Input && !f.is_constant() && f.application == app
 }
 
 /// Whether the device is a Precision Touchpad.
 pub fn is_touchpad(d: &Descriptor) -> bool {
-    d.fields.iter().any(|f| is_contact_field(f) && f.collection_usage == usage::FINGER && f.has_usage(usage::X))
+    has_contacts(d, usage::TOUCH_PAD)
+}
+
+/// Whether application collection `app` reports Finger contacts with a position.
+pub fn has_contacts(d: &Descriptor, app: u32) -> bool {
+    d.fields.iter().any(|f| is_contact_field_of(f, app) && f.collection_usage == usage::FINGER && f.has_usage(usage::X))
 }
 
 /// A length in the field's physical units, in hundredths of a millimetre.
@@ -89,6 +94,12 @@ fn physical_hmm(f: &Field) -> Option<u32> {
 }
 
 pub fn info(d: &Descriptor) -> Option<Info> {
+    info_of(d, usage::TOUCH_PAD)
+}
+
+/// Geometry of the contacts of application collection `app` (a touch pad or touch screen).
+pub fn info_of(d: &Descriptor, app: u32) -> Option<Info> {
+    let is_contact_field = |f: &Field| is_contact_field_of(f, app);
     let field =
         |u: u32| d.fields.iter().find(|f| is_contact_field(f) && f.collection_usage == usage::FINGER && f.has_usage(u));
     let x = field(usage::X)?;
@@ -109,6 +120,12 @@ pub fn info(d: &Descriptor) -> Option<Info> {
 
 /// Reads a touchpad report (`None`: the report is about something else).
 pub fn read(d: &Descriptor, report: &[u8]) -> Option<Report> {
+    read_of(d, report, usage::TOUCH_PAD)
+}
+
+/// Reads the contacts of application collection `app` (a touch pad or touch screen).
+pub fn read_of(d: &Descriptor, report: &[u8], app: u32) -> Option<Report> {
+    let is_contact_field = |f: &Field| is_contact_field_of(f, app);
     let (id, data) = d.split(report)?;
     let mut out = Report::default();
     // Contacts by their Finger collection, in descriptor order.
@@ -158,10 +175,16 @@ pub fn read(d: &Descriptor, report: &[u8]) -> Option<Report> {
 /// The feature report that switches the pad to reporting contacts (Input
 /// Mode = 3), if it has one.
 pub fn input_mode_report(d: &Descriptor) -> Option<Vec<u8>> {
+    input_mode_report_with(d, 3)
+}
+
+/// The Input Mode feature report set to `mode` (0 mouse, 1 single input,
+/// 2 multi-input as touch screens use, 3 touchpad).
+pub fn input_mode_report_with(d: &Descriptor, mode: u32) -> Option<Vec<u8>> {
     let (f, entry) = d.find(Kind::Feature, usage::INPUT_MODE)?;
     let mut r = d.new_report(Kind::Feature, f.report_id);
     let data = if d.numbered { &mut r[1..] } else { &mut r[..] };
-    f.set(data, entry, 3);
+    f.set(data, entry, mode);
     Some(r)
 }
 

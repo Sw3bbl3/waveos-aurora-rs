@@ -23,12 +23,15 @@ mod proc;
 mod random;
 mod report;
 mod sched;
+mod stackguard;
 mod sync;
 mod syscall;
 mod telemetry;
 #[cfg(feature = "ktest")]
 mod tests;
 mod time;
+mod timer;
+mod users;
 
 use bootinfo::{BootInfo, BOOTINFO_MAGIC};
 use core::panic::PanicInfo;
@@ -39,6 +42,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
+    // First of all: nothing protected has been entered yet that will return.
+    stackguard::init();
     drivers::serial::init();
     telemetry::init();
     telemetry::stage("kernel", "Aster kernel entry");
@@ -51,6 +56,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     arch::idt::init();
     arch::syscall::init();
     arch::fpu::init();
+    arch::protect::init();
     arch::pat::init();
     log!("boot", "GDT, TSS and IDT loaded");
 
@@ -85,6 +91,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     proc::init();
     x86_64::instructions::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
+    log!("boot", "protections: {}", arch::protect::report());
 
     telemetry::stage("smp", "Starting the other CPUs");
     arch::smp::start_aps(&cpu_ids, boot_info.trampoline_phys);
@@ -93,10 +100,13 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     telemetry::stage("storage", "PCI, disk drivers and filesystems");
     drivers::pci::init(ecam);
     drivers::display::init(boot_info);
-    telemetry::stage("gpu", "GPU drivers");
-    linux::init();
     drivers::block::init();
     fs::mount_disks();
+    // boot.conf is readable now: SD options, and removable cards' volumes.
+    drivers::block::sdhci::start();
+    // After the disks: boot.conf chooses the virtio-gpu driver.
+    telemetry::stage("gpu", "GPU drivers");
+    drivers::display::gpu_start();
     telemetry::stage("network", "Network cards and the TCP/IP stack");
     net::init();
     drivers::net::init();
@@ -112,7 +122,10 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     drivers::audio::init();
     telemetry::stage("acpi", "ACPI runtime (AML, power button, battery)");
     acpi::start(boot_info.rsdp_phys);
+    power::start();
     telemetry::start();
+    // Accounts and file owners, once the home volume is there.
+    users::init();
 
     #[cfg(feature = "ktest")]
     sched::spawn("ktest", tests::run);

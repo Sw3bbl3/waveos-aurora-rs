@@ -1,5 +1,5 @@
 //! Settings — appearance, display, keyboard, trackpad and mouse, game
-//! controllers, network, date and time, sound, notifications, the desktop,
+//! controllers and Wave Play, network, date and time, sound, notifications, the desktop,
 //! login, accessibility, and information about this computer.
 //!
 //! Start with a pane name (`Settings.elf keyboard`) or a setting
@@ -23,10 +23,16 @@ use waveui::prelude::*;
 use waveui::style::Weight;
 use waveui::Request;
 
+mod displays;
+mod installed;
 mod search;
+mod users;
 
-const THUMB_W: i32 = 132;
-const THUMB_H: i32 = 84;
+/// The `energy_mode` values, in the order the picker shows them.
+const ENERGY_MODES: [&str; 3] = ["saver", "balanced", "performance"];
+
+const THUMB_W: i32 = 208;
+const THUMB_H: i32 = 130;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Pane {
@@ -36,31 +42,37 @@ pub enum Pane {
     Trackpad,
     Mouse,
     Controllers,
+    Play,
     Network,
     DateTime,
     Sound,
+    Battery,
     Notifications,
     Desktop,
     Bar,
     Login,
+    Apps,
     Accessibility,
     About,
 }
 
-const PANES: [(Pane, &str, &str, u32); 15] = [
+const PANES: [(Pane, &str, &str, u32); 18] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
     (Pane::Trackpad, "Trackpad", "trackpad", 0xFF64D2FF),
     (Pane::Mouse, "Mouse", "mouse", 0xFF6E6E80),
     (Pane::Controllers, "Game Controllers", "controllers", 0xFF34C759),
+    (Pane::Play, "Wave Play", "play", 0xFF1F9E9A),
     (Pane::Network, "Network", "network", 0xFF30D158),
     (Pane::DateTime, "Date & Time", "datetime", 0xFFFF9F0A),
     (Pane::Sound, "Sound", "sound", 0xFFFF375F),
+    (Pane::Battery, "Battery", "battery", 0xFF32D74B),
     (Pane::Notifications, "Notifications", "notifications", 0xFFFF453A),
-    (Pane::Desktop, "Desktop & Harbor", "desktop", 0xFF5856D6),
-    (Pane::Bar, "Bar & Crest", "bar", 0xFF2F62F5),
-    (Pane::Login, "Login", "login", 0xFF8E5CF5),
+    (Pane::Desktop, "Desktop & Dock", "desktop", 0xFF5856D6),
+    (Pane::Bar, "Top Bar & Clock", "bar", 0xFF2F62F5),
+    (Pane::Login, "Users & Login", "login", 0xFF8E5CF5),
+    (Pane::Apps, "Apps", "apps", 0xFF32ADE6),
     (Pane::Accessibility, "Accessibility", "accessibility", 0xFF147EFB),
     (Pane::About, "About", "about", 0xFF30B0C7),
 ];
@@ -81,6 +93,7 @@ pub enum Msg {
     CustomWallpaper,
     Mode(usize),
     Scale(usize),
+    Energy(usize),
     Layout(&'static str),
     Try(String),
     Toggle(&'static str, bool),
@@ -93,9 +106,18 @@ pub enum Msg {
     WifiJoin,
     WifiCancel,
     WifiDisconnect,
+    CheckNetwork,
     Rumble(u32),
+    /// Saves a text preference (the sound output or input, by name).
+    Pref(&'static str, String),
+    /// Enter (true) or leave Wave Play.
+    Play(bool),
     OpenAbout,
     ClearNote,
+    Users(users::UserMsg),
+    Apps(installed::AppMsg),
+    /// Several displays: arrangement, main display, mirroring, each display's settings.
+    Displays(displays::DisplayMsg),
 }
 
 pub struct Settings {
@@ -122,6 +144,14 @@ pub struct Settings {
     wifi_password: String,
     pads: Vec<(Gamepad, Option<PadState>)>,
     now: corekit::abi::DateTime,
+    network_check: Option<corekit::thread::JoinHandle<corekit::diagnostics::NetworkCheck>>,
+    network_report: Option<corekit::diagnostics::NetworkCheck>,
+    /// Users & Login.
+    users: users::UsersState,
+    /// Apps installed from packages.
+    apps: installed::AppsState,
+    /// Display, with several displays.
+    displays: displays::DisplaysState,
 }
 
 fn days_in(y: i64, m: i64) -> i64 {
@@ -140,6 +170,8 @@ impl Settings {
             .collect();
         let mut s = Self {
             pane: Pane::Appearance,
+            network_check: None,
+            network_report: None,
             query: String::new(),
             selected: 0,
             target: None,
@@ -157,6 +189,9 @@ impl Settings {
             wifi_password: String::new(),
             pads: Vec::new(),
             now: corekit::time::now(),
+            users: Default::default(),
+            apps: Default::default(),
+            displays: Default::default(),
         };
         s.load_custom_thumb();
         s.sync_clock();
@@ -193,7 +228,7 @@ impl Settings {
     /// Re-reads what the open pane shows.
     fn refresh(&mut self) {
         match self.pane {
-            Pane::Display => self.modes = prefs::display_modes(),
+            Pane::Display => self.modes = self.display_modes_now(),
             Pane::DateTime => {
                 self.now = corekit::time::now();
                 if !self.clock_edited {
@@ -216,6 +251,8 @@ impl Settings {
                     .collect();
             }
             Pane::About => self.info = corekit::process::sys_info(),
+            Pane::Login => self.users.refresh(),
+            Pane::Apps => self.apps.refresh(),
             _ => {}
         }
     }
@@ -267,7 +304,7 @@ fn card<'a>(rows: Vec<View<'a, Msg>>) -> View<'a, Msg> {
 }
 
 fn footer<'a>(text: &str) -> View<'a, Msg> {
-    Text::paragraph(text).style(TextStyle::Callout).foreground(Color::SecondaryLabel).padding_xy(4, 0)
+    Text::paragraph(text).style(TextStyle::Callout).foreground(Color::SecondaryLabel).padding_xy(4, 0).fill_width()
 }
 
 /// A switch bound to a yes/no preference.
@@ -399,7 +436,7 @@ impl Settings {
                         mode_preview(cv, r.inset(3), dark);
                         ring(cv, r.inset(3), selected);
                     })
-                    .size(THUMB_W + 6, THUMB_H + 6),
+                    .size(138, 90),
                 )
                 .push(Text::new(if dark { "Dark" } else { "Light" }))
                 .spacing(6)
@@ -501,8 +538,16 @@ impl Settings {
     }
 
     fn display_pane(&self) -> View<'_, Msg> {
-        let live = self.modes.iter().any(|m| m.flags & display::LIVE != 0);
-        let follows = self.modes.iter().any(|m| m.flags & display::FOLLOWS_WINDOW != 0);
+        // Several displays: their arrangement, and settings for each.
+        let list = corekit::display::displays();
+        if list.len() > 1 {
+            return self.displays_pane(list);
+        }
+        // A SCREEN event redraws this view after the asynchronous mode switch.
+        // Read the current flags then, rather than showing the previous mode.
+        let modes = prefs::display_modes();
+        let live = modes.iter().any(|m| m.flags & display::LIVE != 0);
+        let follows = modes.iter().any(|m| m.flags & display::FOLLOWS_WINDOW != 0);
         let sub = if follows {
             "Changes apply right away. In a virtual machine, WaveOS also follows the window: make it larger or full screen for more room."
         } else if live {
@@ -510,7 +555,7 @@ impl Settings {
         } else {
             "This display is set up by the firmware: changes apply when you restart."
         };
-        let current = self.modes.iter().find(|m| m.flags & display::CURRENT != 0);
+        let current = modes.iter().find(|m| m.flags & display::CURRENT != 0);
         let summary = current.map(|m| {
             card(vec![row_detail(
                 "Showing",
@@ -519,7 +564,7 @@ impl Settings {
             )])
         });
         // Largest first, as the screen's own list is.
-        let rows = self.modes.iter().enumerate().rev().map(|(i, m)| {
+        let rows = modes.iter().enumerate().rev().map(|(i, m)| {
             let mut tags = Vec::new();
             let current = m.flags & display::CURRENT != 0;
             if m.flags & display::PREFERRED != 0 {
@@ -629,7 +674,8 @@ impl Settings {
                 footer(
                     "Tap with one finger to click and two to secondary-click; tap, then drag to move \
                      things. Scroll with two fingers: with natural scrolling the content follows your \
-                     fingers, as on a phone.",
+                     fingers, as on a phone. Swipe three fingers sideways to go back and forward. \
+                     These settings apply to built-in and USB trackpads alike.",
                 ),
             ],
         )
@@ -708,6 +754,56 @@ impl Settings {
              WaveSDK's gamepad module.",
         ));
         page("Game Controllers", sections)
+    }
+
+    fn play(&self) -> View<'_, Msg> {
+        let item = |id: &'static str, label: &str, detail: &str, key: &'static str| {
+            row_detail(label, detail, Toggle::new("", prefs::get_bool(key)).on_change(move |on| Msg::Toggle(key, on)))
+                .id(id)
+        };
+        page(
+            "Wave Play",
+            vec![
+                card(vec![row_detail(
+                    "Wave Play",
+                    "Your games and apps in large rows, full screen, for a controller. Press the \
+                     controller's home button for the quick menu.",
+                    Button::new("Enter Wave Play").action(Msg::Play(true)),
+                )
+                .id("play/enter")]),
+                titled(
+                    "Controllers",
+                    vec![
+                        item(
+                            "play/auto-enter",
+                            "Open when a controller connects",
+                            "Connecting a controller turns the desktop into Wave Play.",
+                            pref::PLAY_AUTO_ENTER,
+                        ),
+                        item(
+                            "play/sounds",
+                            "Sounds and vibration",
+                            "Quiet clicks as you move, and a light vibration on controllers that have it.",
+                            pref::PLAY_SOUNDS,
+                        ),
+                    ],
+                ),
+                titled(
+                    "Motion",
+                    vec![item(
+                        "play/motion",
+                        "Reduce motion",
+                        "Switch between the desktop and Wave Play without the animated transformation.",
+                        pref::REDUCE_MOTION,
+                    )],
+                ),
+                footer(
+                    "Without a controller: the arrow keys move, Enter opens, Escape goes back and \
+                     Super+Escape opens the quick menu. Games and apps can be added to the library by \
+                     placing a .play file in /Settings/Play/Library.",
+                ),
+            ],
+        )
     }
 
     fn network(&self) -> View<'_, Msg> {
@@ -801,24 +897,30 @@ impl Settings {
                 sections.push(titled("Networks", rows));
             }
         }
-        let ifaces: Vec<_> =
-            corekit::net::interfaces().into_iter().filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0).collect();
+        let all_ifaces = corekit::net::interfaces();
+        let ipv6 = corekit::net::interfaces6();
+        let ifaces: Vec<_> = all_ifaces.iter().filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0).collect();
         if ifaces.is_empty() && self.wifi.is_none() {
             sections.push(footer("No network adapter was found."));
         }
-        for i in &ifaces {
+        for i in ifaces {
+            let v6 = all_ifaces.iter().position(|a| a.name == i.name).and_then(|n| ipv6.get(n));
+            let has_v6 = v6.is_some_and(|v| v.router != [0; 16] && v.addr_count > 0);
             let ip = |a: [u8; 4]| if a == [0; 4] { String::from("—") } else { corekit::net::ip_string(a) };
             let wireless = corekit::net::name_of(i).starts_with("wlan");
-            let (status, color) = match (i.flags & corekit::abi::net::IF_LINK != 0, i.ip != [0; 4]) {
-                (true, true) => ("Connected", Color::Green),
+            let (status, color) = match (i.flags & corekit::abi::net::IF_LINK != 0, i.ip != [0; 4] || has_v6) {
+                (true, true) => ("Network configured", Color::Green),
                 (true, false) => ("Getting an address…", Color::Orange),
                 (false, _) if wireless => ("Not connected", Color::Gray),
                 (false, _) => ("Cable unplugged", Color::Red),
             };
             let kind = if wireless { "Wi-Fi" } else { "Ethernet" };
             let mac = i.mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
-            let dns: Vec<String> =
+            let mut dns: Vec<String> =
                 i.dns.iter().filter(|d| **d != [0; 4]).map(|d| corekit::net::ip_string(*d)).collect();
+            if let Some(v) = v6 {
+                dns.extend(v.dns.iter().take(v.dns_count.min(2) as usize).map(corekit::net::ip6_string));
+            }
             let lease = if i.lease_secs == 0 {
                 String::from("—")
             } else {
@@ -851,12 +953,39 @@ impl Settings {
             rows.extend(details.into_iter().map(|(k, v)| {
                 row(k, Text::new(v).foreground(Color::SecondaryLabel)).height(34).foreground(Color::Label)
             }));
+            if let Some(v) = v6 {
+                for a in v.addrs.iter().take(v.addr_count.min(4) as usize) {
+                    rows.push(
+                        row("IPv6 address", Text::new(corekit::net::ip6_string(a)).foreground(Color::SecondaryLabel))
+                            .min_height(34),
+                    );
+                }
+            }
             sections.push(card(rows));
         }
         sections.push(footer(
-            "Addresses come from the network's DHCP server. Test the connection with `ping` or `fetch` \
-             in Terminal, or browse with Voyage.",
+            "An address confirms network configuration, not Internet access. Check DNS and a verified HTTPS request on demand. Nothing is sent until you choose Check connection.",
         ));
+        let busy = self.network_check.is_some();
+        sections.push(
+            Button::new(if busy { "Checking DNS and HTTPS…" } else { "Check connection" })
+                .action(Msg::CheckNetwork)
+                .disabled(busy),
+        );
+        if let Some(report) = &self.network_report {
+            sections.push(Section::titled(
+                if report.ok { "Last check succeeded" } else { "Last check needs attention" },
+                card(
+                    report
+                        .lines
+                        .iter()
+                        .map(|line| {
+                            Text::paragraph(line.clone()).style(TextStyle::Callout).fill_width().padding_xy(0, 4)
+                        })
+                        .collect(),
+                ),
+            ));
+        }
         page("Network", sections)
     }
 
@@ -932,15 +1061,74 @@ impl Settings {
     }
 
     fn sound(&self) -> View<'_, Msg> {
+        use corekit::abi::audio as abi;
         let vol = prefs::get_int(pref::VOLUME, 70).clamp(0, 100);
-        let out = prefs::get("audio_device").unwrap_or_else(|| String::from("No output device found"));
+        let devices = corekit::audio::devices();
+        // One row per device; the one in use has the check.
+        let list = |kind: u32, key: &'static str, none: &str| -> Vec<View<'_, Msg>> {
+            let rows: Vec<View<'_, Msg>> = devices
+                .iter()
+                .filter(|d| d.flags & kind != 0)
+                .map(|d| {
+                    let on = d.flags & abi::DEFAULT != 0;
+                    let detail =
+                        format!("{}{} kHz", if d.flags & abi::USB != 0 { "USB · " } else { "" }, d.rate / 1000);
+                    row_detail(
+                        d.name(),
+                        detail,
+                        if on { Image::symbol(Symbol::Check).foreground(Color::Accent) } else { View::empty() },
+                    )
+                    .on_tap(Msg::Pref(key, String::from(d.name())))
+                })
+                .collect();
+            if rows.is_empty() {
+                vec![row(none, View::empty())]
+            } else {
+                rows
+            }
+        };
         page(
             "Sound",
-            vec![card(vec![
-                pref_slider("sound/volume", "Volume", pref::VOLUME, vol, 0, 100, 5, None),
-                pref_toggle("sound/mute", "Mute", pref::MUTED),
-                row("Output", Text::new(out).foreground(Color::SecondaryLabel)),
-            ])],
+            vec![
+                card(vec![
+                    pref_slider("sound/volume", "Volume", pref::VOLUME, vol, 0, 100, 5, None),
+                    pref_toggle("sound/mute", "Mute", pref::MUTED),
+                ]),
+                Section::titled(
+                    "Output",
+                    card(list(abi::OUTPUT, pref::AUDIO_OUTPUT, "No output device found")).id("sound/output"),
+                ),
+                Section::titled(
+                    "Input",
+                    card(list(abi::INPUT, pref::AUDIO_INPUT, "No input device found")).id("sound/input"),
+                ),
+                footer("The device you choose is used whenever it is connected."),
+            ],
+        )
+    }
+
+    fn battery(&self) -> View<'_, Msg> {
+        let current = prefs::get(pref::ENERGY_MODE).unwrap_or_default();
+        let mode = ENERGY_MODES.iter().position(|m| *m == current).unwrap_or(1);
+        page(
+            "Battery",
+            vec![
+                Section::titled(
+                    "Energy",
+                    card(vec![row(
+                        "Energy mode",
+                        Picker::new(["Battery saver", "Balanced", "Performance"], mode)
+                            .on_change(Msg::Energy)
+                            .picker_style(PickerStyle::Segmented),
+                    )])
+                    .id("battery/energy-mode"),
+                ),
+                footer(
+                    "Balanced lets the processor slow down and sleep deeply when there is little to do. Battery \
+                     saver also keeps it from boosting. Performance keeps it fast and quick to wake. On battery, \
+                     Balanced and Battery saver save a little more.",
+                ),
+            ],
         )
     }
 
@@ -961,7 +1149,7 @@ impl Settings {
         let dock = prefs::get_int(pref::DOCK_SIZE, 48).clamp(32, 64);
         let glass = prefs::get_int(pref::GLASS, 70).clamp(0, 100);
         page(
-            "Desktop & Harbor",
+            "Desktop & Dock",
             vec![
                 titled(
                     "Harbor",
@@ -1001,7 +1189,7 @@ impl Settings {
         let crest = prefs::get_bool(pref::CREST);
         let battery = prefs::get_bool(pref::BATTERY_LEVEL);
         page(
-            "Bar & Crest",
+            "Top Bar & Clock",
             vec![
                 Canvas::new(move |cv, r| bar_preview(cv, r, crest, battery)).height(120).fill_width(),
                 card(vec![
@@ -1012,40 +1200,6 @@ impl Settings {
                     "Crest sits at the top centre and shows the time; point at it for the date, click it for \
                      Drift. Without Crest, the time and date move into the right bubble. The battery level \
                      appears next to the status ring on computers with a battery.",
-                ),
-            ],
-        )
-    }
-
-    fn login(&self) -> View<'_, Msg> {
-        let name = prefs::get("account_name").unwrap_or_else(|| String::from("This computer"));
-        let initials: String =
-            name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect::<String>().to_uppercase();
-        let avatar = Canvas::new(move |cv, r| {
-            cv.fill_round_rect_dgradient(r, r.w / 2, theme::accent(), theme::ACCENT_2);
-            cv.text_centered(r, &initials, theme::ui_bold(18), 0xFFFF_FFFF);
-        })
-        .size(52, 52);
-        page(
-            "Login",
-            vec![
-                card(vec![HStack::new()
-                    .push(avatar)
-                    .push(
-                        VStack::new()
-                            .push(Text::new(name).style(TextStyle::Title2))
-                            .push(Text::new("Owner · password protected").foreground(Color::SecondaryLabel))
-                            .spacing(2)
-                            .alignment(Align::Start),
-                    )
-                    .push(Spacer::new())
-                    .spacing(16)
-                    .padding_xy(0, 14)
-                    .fill_width()]),
-                card(vec![pref_toggle("login/auto", "Log in automatically", pref::AUTO_LOGIN)]),
-                footer(
-                    "With automatic login, WaveOS opens straight to the desktop when it starts. Lock Screen \
-                     (Super L) and waking from sleep still ask for your password.",
                 ),
             ],
         )
@@ -1184,6 +1338,10 @@ impl App for Settings {
         "Settings".into()
     }
 
+    fn min_size(&self) -> (i32, i32) {
+        (560, 420)
+    }
+
     fn size(&self) -> (i32, i32) {
         (1140, 728)
     }
@@ -1249,9 +1407,11 @@ impl App for Settings {
                     self.modes = prefs::display_modes();
                 }
             }
+            Msg::Energy(i) => self.set(cx, pref::ENERGY_MODE, ENERGY_MODES[i.min(2)]),
             Msg::Layout(id) => self.set(cx, pref::KEYBOARD, id),
             Msg::Try(t) => self.try_text = t,
             Msg::Toggle(key, on) => self.set(cx, key, if on { "1" } else { "0" }),
+            Msg::Pref(key, value) => self.set(cx, key, &value),
             Msg::Int(key, v) => {
                 // Repeat delay and rate run the other way round on screen.
                 let v = match key {
@@ -1320,13 +1480,38 @@ impl App for Settings {
                 corekit::net::wifi_disconnect();
                 self.wifi = corekit::net::wifi_status();
             }
+            Msg::CheckNetwork => {
+                if self.network_check.is_none() {
+                    self.network_report = None;
+                    let configuration = corekit::net::configuration_key();
+                    match corekit::thread::spawn(move || {
+                        let mut report = corekit::diagnostics::network("https://example.com/");
+                        if configuration != corekit::net::configuration_key() {
+                            report.ok = false;
+                            report.lines.push(String::from("Network configuration changed. Check again."));
+                        }
+                        report
+                    }) {
+                        Ok(worker) => self.network_check = Some(worker),
+                        Err(e) => self.flash(cx, format!("Couldn't start the connection check: {e}")),
+                    }
+                }
+            }
             Msg::Rumble(id) => {
                 if let Some((pad, _)) = self.pads.iter().find(|(p, _)| p.id == id) {
                     pad.rumble(0.8, 0.5, 400);
                 }
             }
+            Msg::Play(on) => {
+                if let Err(e) = corekit::process::desktop::play(on) {
+                    self.flash(cx, format!("Couldn't open Wave Play: {e}"));
+                }
+            }
             Msg::OpenAbout => cx.open_app("About"),
             Msg::ClearNote => self.note = None,
+            Msg::Users(m) => self.users_update(m, cx),
+            Msg::Displays(m) => self.displays_update(m, cx),
+            Msg::Apps(m) => self.apps_update(m, cx),
         }
     }
 
@@ -1343,6 +1528,9 @@ impl App for Settings {
     }
 
     fn poll_interval(&self) -> Option<u64> {
+        if self.network_check.is_some() {
+            return Some(100);
+        }
         match self.pane {
             Pane::Controllers => Some(50),
             Pane::DateTime | Pane::Network => Some(1000),
@@ -1352,6 +1540,13 @@ impl App for Settings {
     }
 
     fn poll(&mut self, _cx: &mut Context<Msg>) -> bool {
+        if self.network_check.as_ref().is_some_and(|worker| worker.is_finished()) {
+            self.network_report = Some(self.network_check.take().unwrap().join());
+            return true;
+        }
+        if self.network_check.is_some() {
+            return false;
+        }
         match self.pane {
             Pane::Controllers => {
                 let before: Vec<_> = self.pads.iter().map(|(p, s)| (p.id, s.map(|s| s.sequence()))).collect();
@@ -1385,13 +1580,16 @@ impl App for Settings {
                 Pane::Trackpad => self.trackpad(),
                 Pane::Mouse => self.mouse(),
                 Pane::Controllers => self.controllers(),
+                Pane::Play => self.play(),
                 Pane::Network => self.network(),
                 Pane::DateTime => self.date_time(),
                 Pane::Sound => self.sound(),
+                Pane::Battery => self.battery(),
                 Pane::Notifications => self.notifications(),
                 Pane::Desktop => self.desktop(),
                 Pane::Bar => self.bar(),
-                Pane::Login => self.login(),
+                Pane::Login => self.users_pane(),
+                Pane::Apps => self.apps_pane(),
                 Pane::Accessibility => self.accessibility(),
                 Pane::About => self.about(env),
             };
@@ -1451,6 +1649,10 @@ fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
             cv.fill_rect(Rect::new(cx - 4, cy - 2, 1, 5), tile);
             cv.fill_circle(cx + 4, cy, 1, tile);
         }
+        Pane::Play => {
+            cv.polyline(&[(cx - 3, cy - 6), (cx + 6, cy), (cx - 3, cy + 6), (cx - 3, cy - 6)], 2, w);
+            cv.fill_rect(Rect::new(cx - 2, cy - 3, 3, 6), w);
+        }
         Pane::Network => {
             cv.line(cx - 5, cy + 4, cx, cy - 4, 2, w);
             cv.line(cx + 5, cy + 4, cx, cy - 4, 2, w);
@@ -1470,6 +1672,11 @@ fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
             cv.line(cx - 2, cy + 3, cx + 2, cy + 7, 2, w);
             cv.fill_rect(Rect::new(cx + 2, cy - 6, 2, 13), w);
         }
+        Pane::Battery => {
+            cv.fill_round_rect(Rect::new(cx - 8, cy - 4, 14, 9), 2, w);
+            cv.fill_rect(Rect::new(cx + 6, cy - 2, 2, 5), w);
+            cv.fill_rect(Rect::new(cx - 6, cy - 2, 7, 5), tile);
+        }
         Pane::Notifications => {
             cv.fill_round_rect(Rect::new(cx - 6, cy - 6, 12, 12), 3, w);
             cv.fill_circle(cx + 5, cy - 5, 3, 0xFFFFD60A);
@@ -1479,6 +1686,11 @@ fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
             cv.fill_round_rect(Rect::new(cx - 3, cy - 5, 6, 3), 1, tile);
             cv.fill_rect(Rect::new(cx - 7, cy + 2, 14, 1), w);
             cv.fill_rect(Rect::new(cx - 7, cy + 5, 9, 1), w);
+        }
+        Pane::Apps => {
+            for (dx, dy) in [(-6, -6), (1, -6), (-6, 1), (1, 1)] {
+                cv.fill_round_rect(Rect::new(cx + dx, cy + dy, 5, 5), 1, w);
+            }
         }
         Pane::Login => {
             cv.fill_circle(cx, cy - 3, 3, w);
@@ -1574,14 +1786,16 @@ fn human(n: u64) -> String {
 
 fn mode_preview(cv: &mut Surface, r: Rect, dark: bool) {
     let t = if dark { &theme::DARK } else { &theme::LIGHT };
-    let bg = if dark { 0xFF10_1426 } else { 0xFFBF_D6F5 };
+    let bg = if dark { 0xFF26323F } else { 0xFFD6E4EF };
     cv.fill_round_rect(r, 10, bg);
     let win = Rect::new(r.x + 20, r.y + 14, r.w - 40, r.h - 26);
     cv.fill_round_rect(win, 6, t.window_bg);
     cv.fill_rect(Rect::new(win.x + 6, win.y + 16, win.w - 12, 1), t.separator);
-    for (i, c) in [theme::CLOSE, theme::MINIMIZE, theme::ZOOM].iter().enumerate() {
-        cv.fill_circle(win.x + 9 + i as i32 * 9, win.y + 8, 3, *c);
-    }
+    cv.fill_round_rect(Rect::new(win.x + 9, win.y + 7, (win.w - 40).max(8), 2), 1, with_alpha(t.text_secondary, 110));
+    cv.line(win.right() - 25, win.y + 9, win.right() - 21, win.y + 9, 1, t.text_secondary);
+    cv.stroke_round_rect(Rect::new(win.right() - 17, win.y + 6, 5, 5), 1, t.text_secondary);
+    cv.line(win.right() - 9, win.y + 6, win.right() - 5, win.y + 10, 1, t.text_secondary);
+    cv.line(win.right() - 5, win.y + 6, win.right() - 9, win.y + 10, 1, t.text_secondary);
     for i in 0..3 {
         cv.fill_round_rect(
             Rect::new(win.x + 10, win.y + 26 + i * 10, win.w - 30 - i * 14, 5),

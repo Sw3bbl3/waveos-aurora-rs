@@ -43,18 +43,46 @@ pub fn init_clock() {
         return;
     }
     const MS: u64 = 20;
-    let (t0, t1) = if crate::drivers::hpet::present() {
-        let t0 = unsafe { _rdtsc() };
-        crate::drivers::hpet::spin_us(MS * 1000);
-        (t0, unsafe { _rdtsc() })
+    let hz = if crate::drivers::hpet::present() {
+        hpet_tsc_hz()
     } else {
-        pit_wait(|| unsafe { _rdtsc() }, MS)
+        let (t0, t1) = pit_wait(|| unsafe { _rdtsc() }, MS);
+        (t1 - t0) * 1000 / MS
     };
-    let hz = (t1 - t0) * 1000 / MS;
     TSC_BASE.store(unsafe { _rdtsc() }, Ordering::Relaxed);
     TSC_MULT.store(((1_000_000_000u128 << 32) / hz as u128) as u64, Ordering::Relaxed);
     TSC_HZ.store(hz, Ordering::Release);
     log!("time", "TSC at {}.{:02} GHz is the clock", hz / 1_000_000_000, hz / 10_000_000 % 100);
+}
+
+/// The TSC frequency measured against the HPET: the median of several short
+/// windows. Under a hypervisor the host can pause this CPU at any point, which
+/// stretches one window or separates a TSC read from its HPET read; the median
+/// discards such windows, and each sample keeps the TSC read that sat in the
+/// tightest pair of HPET reads.
+fn hpet_tsc_hz() -> u64 {
+    use crate::drivers::hpet;
+    let sample = || {
+        let mut best = (u64::MAX, 0u64, 0u64);
+        for _ in 0..8 {
+            let h0 = hpet::nanos();
+            let t = unsafe { _rdtsc() };
+            let h1 = hpet::nanos();
+            if h1 - h0 < best.0 {
+                best = (h1 - h0, t, h0 + (h1 - h0) / 2);
+            }
+        }
+        (best.1, best.2)
+    };
+    let mut rates = [0u64; 5];
+    for rate in rates.iter_mut() {
+        let (t0, h0) = sample();
+        hpet::spin_us(8000);
+        let (t1, h1) = sample();
+        *rate = ((t1 - t0) as u128 * 1_000_000_000 / (h1 - h0).max(1) as u128) as u64;
+    }
+    rates.sort_unstable();
+    rates[rates.len() / 2]
 }
 
 /// Reads `f` before and after `ms` milliseconds measured by PIT channel 2.
@@ -110,7 +138,7 @@ pub fn resume() {
     let at = SUSPENDED_AT.load(Ordering::Acquire) as i64;
     OFFSET_NS.store(at - raw_ns() as i64, Ordering::Release);
     // The date moved on while asleep.
-    init_wall_clock_at(uptime_ms());
+    resume_wall_clock();
     crate::compat::linux::vdso::publish();
 }
 
@@ -146,27 +174,109 @@ pub fn uptime_ms() -> u64 {
     ticks()
 }
 
-static BOOT_WALL: AtomicU64 = AtomicU64::new(0);
+// ------------------------------------------------------------ wall clock
+//
+// Real time (UTC) is the monotonic clock plus one offset, `REAL_OFFSET_NS`,
+// and nothing else: `realtime_ns` adds it to one reading of `now_ns`, and
+// the vDSO adds the very same value (published with the TSC's parameters)
+// to its own reading, so a program's clocks agree with the kernel's by
+// construction. The offset changes only when the clock is set, when the
+// zone the RTC keeps is learnt, and after sleep; each change is published
+// at once. Local time (what the RTC holds, and file times) is real time
+// plus the zone (`utc_offset`, minutes east of UTC).
 
-/// Records the RTC time at boot so wall-clock time can be derived from uptime.
+use core::sync::atomic::AtomicI64;
+
+/// Seconds from 1970-01-01 (Unix time) to 2000-01-01.
+const UNIX_2000: i64 = 946_684_800;
+const NS: i64 = 1_000_000_000;
+
+/// UTC in nanoseconds since 1970, minus [`now_ns`].
+static REAL_OFFSET_NS: AtomicI64 = AtomicI64::new(0);
+/// The zone of local time (and of the RTC), in minutes east of UTC.
+static ZONE_MIN: AtomicI64 = AtomicI64::new(0);
+/// Changes to the clock, one at a time (so the vDSO's copy is the last one).
+static WALL_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+/// The real-time offset that makes local time `local` (seconds since 2000) now.
+fn offset_for_local(local: u64) -> i64 {
+    (local as i64 + UNIX_2000 - ZONE_MIN.load(Ordering::Relaxed) * 60) * NS - now_ns() as i64
+}
+
+/// Reads the RTC (local time) at boot.
 pub fn init_wall_clock() {
-    init_wall_clock_at(0);
+    let rtc = seconds_since_2000(&crate::drivers::rtc::now());
+    REAL_OFFSET_NS.store(offset_for_local(rtc), Ordering::Release);
 }
 
-fn init_wall_clock_at(uptime_ms: u64) {
-    let now = seconds_since_2000(&crate::drivers::rtc::now());
-    BOOT_WALL.store(now.saturating_sub(uptime_ms / 1000), Ordering::Relaxed);
+/// After sleep: the RTC tells how long it was. It counts whole seconds, so
+/// unless it disagrees by more than that the clock just goes on (a
+/// fraction of a second either way would make real time jump back).
+fn resume_wall_clock() {
+    let _g = WALL_LOCK.lock();
+    let rtc = seconds_since_2000(&crate::drivers::rtc::now());
+    if rtc.abs_diff(wall_seconds()) > 1 {
+        REAL_OFFSET_NS.store(offset_for_local(rtc), Ordering::Release);
+    }
 }
 
-/// Sets the date and time (hardware clock and the kernel's wall clock).
+/// UTC in nanoseconds since 1970 (`CLOCK_REALTIME`).
+pub fn realtime_ns() -> u64 {
+    (now_ns() as i64 + REAL_OFFSET_NS.load(Ordering::Acquire)).max(0) as u64
+}
+
+/// What [`realtime_ns`] adds to [`now_ns`] (for the vDSO).
+pub fn real_offset_ns() -> i64 {
+    REAL_OFFSET_NS.load(Ordering::Acquire)
+}
+
+/// Sets the date and time, as local time (hardware clock and the kernel's
+/// wall clock); Linux programs see the change at once.
 pub fn set_wall_clock(d: &crate::drivers::rtc::DateTime) {
-    crate::drivers::rtc::set(d);
-    BOOT_WALL.store(seconds_since_2000(d).saturating_sub(uptime_ms() / 1000), Ordering::Relaxed);
+    {
+        let _g = WALL_LOCK.lock();
+        crate::drivers::rtc::set(d);
+        REAL_OFFSET_NS.store(offset_for_local(seconds_since_2000(d)), Ordering::Release);
+    }
+    crate::compat::linux::vdso::publish();
+}
+
+/// The zone the user chose (`utc_offset`): the instant stays, local time
+/// moves, and the RTC (which keeps local time) is rewritten.
+pub fn change_zone(minutes: i64) {
+    let _g = WALL_LOCK.lock();
+    ZONE_MIN.store(minutes, Ordering::Relaxed);
+    let d = aurora_abi::calendar::from_seconds_since_2000(wall_seconds());
+    crate::drivers::rtc::set(&crate::drivers::rtc::DateTime {
+        year: d.year,
+        month: d.month,
+        day: d.day,
+        hour: d.hour,
+        minute: d.minute,
+        second: d.second,
+    });
+}
+
+/// The zone the RTC's time was in (read from the settings after boot):
+/// local time stays, the instant it stands for moves.
+pub fn learn_zone(minutes: i64) {
+    {
+        let _g = WALL_LOCK.lock();
+        let old = ZONE_MIN.swap(minutes, Ordering::Relaxed);
+        REAL_OFFSET_NS.fetch_sub((minutes - old) * 60 * NS, Ordering::AcqRel);
+    }
+    crate::compat::linux::vdso::publish();
+}
+
+/// The zone of local time, in minutes east of UTC.
+pub fn zone_minutes() -> i64 {
+    ZONE_MIN.load(Ordering::Relaxed)
 }
 
 /// Local wall-clock time in seconds since 2000-01-01 00:00.
 pub fn wall_seconds() -> u64 {
-    BOOT_WALL.load(Ordering::Relaxed) + uptime_ms() / 1000
+    let local = realtime_ns() as i64 / NS - UNIX_2000 + ZONE_MIN.load(Ordering::Relaxed) * 60;
+    local.max(0) as u64
 }
 
 pub fn seconds_since_2000(d: &crate::drivers::rtc::DateTime) -> u64 {

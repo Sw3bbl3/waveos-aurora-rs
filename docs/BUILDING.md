@@ -14,6 +14,51 @@ For the versioned 0.7 user and developer guides, see the [bilingual handbook](ha
 
 `xtask` finds OVMF in the usual Homebrew and distro locations. To point it at a specific build, set `OVMF_CODE=/path/to/OVMF_CODE.fd`. It expects a matching `*VARS*` file in the same directory.
 
+## The launcher: `make run`
+
+```sh
+make run          # or ./waveos: open the launcher page, choose, Launch
+make quick        # or ./waveos quick: boot the configuration launched last, no page
+make              # list every shortcut (build, test, lint, image, iso, clean)
+```
+
+`make run` runs `cargo xtask launch`. It serves a page on `127.0.0.1` (a random free port) and opens it in your default browser. The page has presets, every run option below with a short explanation, and the exact `cargo xtask run …` command for what you've chosen, with a copy button. The launcher runs precisely that command, so anything you launch from the page you can also type. **Launch** builds and boots, streaming the build output and the serial console into the page; **Stop** and **Restart** do what they say. If the build or QEMU fails, the page says so and keeps the output.
+
+- **Presets.** Default, Low memory laptop (1 GiB, 2 CPUs, battery), Dual display, Real-hardware-like (NVMe, e1000e, xHCI), Headless and Kernel tests. **Save as preset** keeps your own, which you can rename and delete. They and the last configuration live in `.waveos-launcher.json` at the top of the repository, which git ignores and `make clean` keeps.
+- **Options this QEMU can't do are greyed out.** The launcher asks `qemu-system-x86_64 -device help` and `-display help`. Homebrew's macOS QEMU, for example, has no `ivshmem`, so "This computer's battery" is off there.
+- **A fresh disk is never a surprise.** The page asks before erasing `target/waveos-aurora.img`. The launcher refuses an unconfirmed fresh disk and never remembers one for `make quick`.
+- **Lifetime.** Closing the page leaves WaveOS running. The launcher keeps going while WaveOS runs, and exits by itself once WaveOS has stopped and no page has been open for 30 seconds. **Ctrl-C** in the terminal stops everything: the launcher, any build and QEMU share the terminal's process group, so they all get the interrupt, and QEMU shuts down cleanly. **Stop** sends SIGTERM to the run and every process under it, and waits until QEMU has gone (SIGKILL after 10 seconds). **Quit launcher** on the page stops WaveOS and the launcher.
+- **Options.** `cargo xtask launch --no-open` prints the URL without opening a browser; `--port N` picks the port.
+- **Security.** The page is self-contained (no requests anywhere else). The server only listens on 127.0.0.1, checks the `Host` header, and only accepts changes posted as JSON from its own origin, so other web pages can't drive it.
+
+## Several displays
+
+```sh
+cargo xtask run --displays 2                                   # two 1920×1080 displays
+cargo xtask run --displays 3 --resolution 2560x1440           # three, all 2560×1440
+cargo xtask run --resolution 1920x1080,1280x800                # one size per display (two displays)
+cargo xtask run --displays 2 --gpu virtio                      # virtio-gpu with two outputs
+```
+
+`--displays N` (1 to 4) gives the virtual machine N monitors, each with its own EDID:
+- `--gpu std` adds a `secondary-vga` per extra display, each preferring its own size from `--resolution`. Display 1's mode is chosen by WaveOS, as before.
+- `--gpu virtio` uses one virtio-vga with `max_outputs=N`. The ported Linux driver logs `number of scanouts: N`. QEMU gives every output the same preferred size, display 1's.
+
+Each display opens in its own host window. How depends on what your QEMU was built with:
+
+| Host | Display 1 | Displays 2 to N |
+|---|---|---|
+| macOS (Homebrew QEMU: Cocoa, no SDL or GTK) | the QEMU window | one VNC server each on 127.0.0.1 (from port 5901), opened in **Screen Sharing** windows. Screen Sharing needs a VNC password, so each run makes a random one and passes it in the `vnc://` URL; the printed command hides it. |
+| Linux with SDL | an SDL window | an SDL window each (`-display sdl`) |
+| Linux with GTK only | the QEMU window | VNC, opened with `remote-viewer`, `vncviewer` or `gvncviewer` if installed; otherwise the address is printed |
+| `--headless` | none | none; the guest still sees every display |
+
+QEMU's Cocoa window can show only one display at a time (View menu), so VNC is what gives macOS separate windows. When QEMU exits, the Screen Sharing windows stay open with a "connection lost" message: close them yourself.
+
+With `--gpu virtio` the desktop extends over every display: the menu bar and Harbor on display 1, the others to its right (arrange them in Settings → Display). QEMU switches outputs 2 to N on only when a user interface asks for a size, which Screen Sharing and most VNC viewers never do, so xtask asks itself through one more VNC server per output, on a Unix socket in the session directory. With `--gpu std` only display 1 is used (the `secondary-vga` windows keep showing the firmware's last text). One QEMU caveat: the USB tablet is absolute over the rectangle around all displays, so in a VM with several windows the pointer lands where that rectangle says rather than under the host cursor; use a mouse (`AURORA_QEMU_ARGS="-device usb-mouse"`) or move between displays at their shared edges.
+
+`cargo xtask test --gpu virtio --displays 3` runs the multi-monitor kernel test: the harness plugs the extra heads in and out through their VNC servers and compares a QMP screendump of each head with what the compositor drew.
+
 ## Everyday commands
 
 ```sh
@@ -34,8 +79,11 @@ cargo xtask run --headless --audio-wav target/playback.wav # record native guest
 cargo xtask run --no-keyboard-capture # macOS: opt out of full keyboard capture
 cargo xtask run --developer         # separate 8 GiB developer disk, 4 GiB RAM
 cargo xtask run --net none          # disable networking for offline validation
-cargo xtask run --gpu virtio        # virtio-vga display, driven by the ported Linux DRM virtio-gpu driver
+cargo xtask run --gpu virtio        # virtio-vga display, driven by the native virtio-gpu driver
+cargo xtask run --gpu virtio-linux  # the same display, driven by the ported Linux DRM virtio-gpu driver
 cargo xtask run --wifi-sim          # simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
+cargo xtask run --displays 2        # two simulated displays, each in its own window (see "Several displays")
+cargo xtask launch                  # the launcher page (make run); --last boots the last configuration (make quick)
 cargo xtask test [--disk virtio] [--smp 1] [--gpu virtio]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
 cargo xtask lint                    # Clippy on every crate, for its own target; warnings are errors
 cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-wifi -p aurora-hid -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
@@ -53,7 +101,9 @@ The virtual machine has 4 CPUs, Intel HD Audio (played through your Mac's speake
 
 The WaveSDK developer site is [docs/developer/index.html](developer/index.html). See [WaveSDK development](WAVESDK.md) for GINA packaging, native CLI commands, Studio, the compiler-port gap, developer disk sizing, and compatibility details.
 
-`cargo xtask test` also attaches a USB stick, the test battery, and records the sound output to `target/test-audio.wav`. Its sleep test puts the VM to sleep and wakes it over QMP. Some OVMF builds (Ubuntu's, for one) fault while resuming, before WaveOS gets control: the harness notices and runs the suite again with `sleep=off`. Set `AURORA_TEST_SLEEP=off` to skip it from the start.
+`cargo xtask test` also attaches a USB stick, the test battery, and records the sound output to `target/test-audio.wav`. It plugs in virtual USB keyboards, touchpads and game controllers through QEMU's `usb-redir` when the local QEMU has it (it asks `-device help`); Homebrew's macOS QEMU doesn't, so those checks are skipped there with a warning. `AURORA_TEST_NO_USBREDIR=1` skips them anyway, and `=0` insists on them.
+
+The launcher's own tests: `cargo test -p xtask` checks the option tables, the command lines and presets, and that `cargo xtask launch --no-open` serves the page. `cargo xtask build && cargo test -p xtask --test launcher -- --ignored` also launches a headless WaveOS through the launcher's API (on its own disk, `target/launcher-e2e.img`), waits for `Aurora desktop ready` and stops it. Its sleep test puts the VM to sleep and wakes it over QMP. Some OVMF builds (Ubuntu's, for one) fault while resuming, before WaveOS gets control: the harness notices and runs the suite again with `sleep=off`. Set `AURORA_TEST_SLEEP=off` to skip it from the start.
 
 ## Booting on real hardware (experimental)
 

@@ -115,6 +115,15 @@ static void memory(void) {
     CHECK(h[4096] == 42 && h[huge / 2] == 43, "touched pages keep what was written");
     CHECK(madvise(h, 2 * 4096, MADV_DONTNEED) == 0 && h[4096] == 0, "MADV_DONTNEED gives zeros back");
     CHECK(munmap(h, huge) == 0, "unmap 8 GiB");
+    // mincore: mapped pages answer, unmapped ones are ENOMEM (EGL tells a
+    // Wayland display from other pointers this way).
+    unsigned char vec[4];
+    char *mc = mmap(0, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(mc != MAP_FAILED && mincore(mc, 4 * 4096, vec) == 0, "mincore of mapped pages");
+    CHECK(munmap(mc + 2 * 4096, 2 * 4096) == 0, "unmap half");
+    errno = 0;
+    CHECK(mincore(mc, 4 * 4096, vec) == -1 && errno == ENOMEM, "mincore over unmapped pages");
+    munmap(mc, 2 * 4096);
     printf("PASS memory\n");
 }
 
@@ -245,18 +254,32 @@ static void clocks(void) {
     long ms = (b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000;
     CHECK(ms >= 25 && ms < 2000, "slept about 30 ms");
     CHECK(time(0) > 1700000000, "wall clock");
-    // The vDSO answers without a system call, and agrees with the kernel.
+    // The vDSO answers without a system call, and agrees with the kernel:
+    // its time always lies between two of the kernel's taken around it,
+    // for both clocks, again and again until real time has crossed a whole
+    // second (where a clock pieced together from seconds and nanoseconds
+    // read apart would jump).
     CHECK(getauxval(AT_SYSINFO_EHDR) != 0, "a vDSO");
-    struct timespec k1, v, k2;
-    for (int clock = CLOCK_REALTIME; clock <= CLOCK_MONOTONIC; clock++) {
-        syscall(SYS_clock_gettime, clock, &k1);
-        clock_gettime(clock, &v);
-        syscall(SYS_clock_gettime, clock, &k2);
-        long long n1 = k1.tv_sec * 1000000000LL + k1.tv_nsec, nv = v.tv_sec * 1000000000LL + v.tv_nsec,
-                  n2 = k2.tv_sec * 1000000000LL + k2.tv_nsec;
-        CHECK(n1 <= nv && nv <= n2, "the vDSO's time lies between the kernel's");
+    struct timespec k1, v, k2, first;
+    syscall(SYS_clock_gettime, CLOCK_REALTIME, &first);
+    long rounds = 0, real_sec = first.tv_sec;
+    while (real_sec < first.tv_sec + 2 && rounds < 1000000) {
+        for (int clock = CLOCK_REALTIME; clock <= CLOCK_MONOTONIC; clock++) {
+            syscall(SYS_clock_gettime, clock, &k1);
+            clock_gettime(clock, &v);
+            syscall(SYS_clock_gettime, clock, &k2);
+            long long n1 = k1.tv_sec * 1000000000LL + k1.tv_nsec, nv = v.tv_sec * 1000000000LL + v.tv_nsec,
+                      n2 = k2.tv_sec * 1000000000LL + k2.tv_nsec;
+            if (!(n1 <= nv && nv <= n2)) {
+                printf("    clock %d, check %ld: kernel %lld, vDSO %lld, kernel %lld\n", clock, rounds, n1, nv, n2);
+            }
+            CHECK(n1 <= nv && nv <= n2, "the vDSO's time lies between the kernel's");
+            if (clock == CLOCK_REALTIME) real_sec = k2.tv_sec;
+        }
+        rounds++;
     }
-    printf("PASS clocks (slept %ld ms)\n", ms);
+    CHECK(time(0) >= first.tv_sec + 2, "real time moved on through a whole second");
+    printf("PASS clocks (slept %ld ms; vDSO checked against the kernel %ld times over a second)\n", ms, rounds);
 }
 
 // From <linux/futex.h> (musl ships no kernel headers).
@@ -312,6 +335,25 @@ static void machine(void) {
     char exe[256] = {0};
     CHECK(readlink("/proc/self/exe", exe, sizeof exe - 1) > 0 && strstr(exe, "linuxtest"), "/proc/self/exe");
     CHECK(sysconf(_SC_NPROCESSORS_ONLN) >= 1, "processor count");
+    // The processors as /proc and /sys describe them (cpuid's flags).
+    char *info = malloc(1 << 16);
+    fd = open("/proc/cpuinfo", O_RDONLY);
+    ssize_t in = fd >= 0 ? read(fd, info, (1 << 16) - 1) : -1;
+    close(fd);
+    CHECK(in > 0, "/proc/cpuinfo");
+    info[in] = 0;
+    CHECK(strstr(info, "flags\t\t: fpu") && strstr(info, " sse2") && strstr(info, "model name"), "cpuinfo flags");
+    free(info);
+    char online[32] = {0};
+    fd = open("/sys/devices/system/cpu/online", O_RDONLY);
+    CHECK(fd >= 0 && read(fd, online, sizeof online - 1) > 0 && online[0] == '0', "/sys/devices/system/cpu/online");
+    close(fd);
+    CHECK(sysconf(_SC_NPROCESSORS_CONF) == sysconf(_SC_NPROCESSORS_ONLN), "configured processors are online");
+    // close_range closes a run of descriptors (or marks them close-on-exec).
+    int a = dup(1), b = dup(1);
+    CHECK(a > 2 && b > a && syscall(436 /* close_range */, a, b, 4) == 0, "close_range CLOEXEC");
+    CHECK(fcntl(a, F_GETFD) == FD_CLOEXEC && fcntl(b, F_GETFD) == FD_CLOEXEC, "marked close-on-exec");
+    CHECK(syscall(436 /* close_range */, a, b, 0) == 0 && fcntl(a, F_GETFD) == -1 && fcntl(b, F_GETFD) == -1, "close_range");
     // glibc finds the main thread's stack in /proc/self/maps.
     static char maps[65536];
     fd = open("/proc/self/maps", O_RDONLY);

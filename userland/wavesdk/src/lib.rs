@@ -45,14 +45,13 @@ pub fn new_project(path: &str, id: &str, name: &str) -> Result<()> {
         return Err("Choose an absolute project folder without parent traversal.".into());
     }
     let m = gina::Manifest {
+        format: 1,
         id: id.into(),
         name: name.into(),
         developer: "Independent Developer".into(),
         version: "0.1.0".into(),
         entry: "bin/app".into(),
-        icon: String::new(),
-        resources: Vec::new(),
-        extensions: Vec::new(),
+        ..Default::default()
     };
     gina::Manifest::parse(&m.encode()).map_err(ToString::to_string)?;
     mkdirs(&format!("{path}/src"))?;

@@ -48,6 +48,8 @@ pub enum Handle {
     Log,
     /// A sound playback stream.
     Audio(Arc<crate::drivers::audio::Stream>),
+    /// A sound capture stream (read).
+    AudioIn(Arc<crate::drivers::audio::Capture>),
     /// A network socket.
     Socket(crate::net::socket::Socket),
     /// A directory, generated file or device opened by a Linux program.
@@ -60,6 +62,7 @@ impl Drop for Handle {
             Handle::PipeRead { pipe, .. } => pipe.close_reader(),
             Handle::PipeWrite(pipe) => pipe.close_writer(),
             Handle::Audio(stream) => stream.close(),
+            Handle::AudioIn(capture) => capture.close(),
             _ => {}
         }
     }
@@ -90,6 +93,8 @@ pub struct Process {
     pub sid: AtomicU32,
     pub fds: Mutex<Vec<Option<Arc<Handle>>>>,
     pub cwd: Mutex<String>,
+    /// Who the process acts as (inherited from its parent; see `users`).
+    pub cred: IrqMutex<crate::users::Cred>,
     exit: AtomicI64,
     pub killed: AtomicBool,
     /// Set once a parent has collected the exit code with `wait`.
@@ -163,6 +168,12 @@ impl Process {
         MemGuard { guard: self.aspace.lock(), _owner: None }
     }
 
+    /// Threads not reaped yet.
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // memory reports in self-tests
+    pub fn thread_count(&self) -> u32 {
+        self.threads.load(Ordering::Relaxed)
+    }
+
     pub fn exit_code(&self) -> Option<i64> {
         let c = self.exit.load(Ordering::Acquire);
         (c != RUNNING).then_some(c)
@@ -184,6 +195,13 @@ impl Process {
         fds.push(Some(h));
         Ok(fds.len() - 1)
     }
+}
+
+/// Whether memory allows another thread: its kernel stack (and the
+/// scheduler's bookkeeping) comes out of what programs may use, so threads
+/// can't eat into the kernel's reserve.
+fn room_for_thread() -> bool {
+    crate::mm::frame::user_may_take(crate::mm::kstack::SIZE / crate::mm::PAGE_SIZE + 4)
 }
 
 static TABLE: IrqMutex<BTreeMap<Pid, Arc<Process>>> = IrqMutex::new(BTreeMap::new());
@@ -297,12 +315,18 @@ pub fn spawn_env(
     parent: Pid,
 ) -> Result<Pid, isize> {
     use crate::compat::linux;
+    if !room_for_thread() {
+        return Err(ENOMEM);
+    }
     let data = fs::read_all(path)?;
     let image = aurora_elf::parse(&data).ok_or(ENOEXEC)?;
     let mut aspace = AddressSpace::new().ok_or(ENOMEM)?;
     let (entry, user_sp, arg, linux_state) = if linux::is_linux(&image, path) {
+        // Linux programs need the execute bit too (WaveOS programs only
+        // need to be readable, which `read_all` checked).
+        fs::perm::check_exec(path)?;
         let user = linux::fs::account_user();
-        linux::fs::prepare_root(&user);
+        linux::fs::prepare_root(&user, crate::users::for_child(parent).uid);
         let default_env;
         let env = match env {
             Some(e) => e,
@@ -313,7 +337,7 @@ pub fn spawn_env(
         };
         let start = linux::exec::load(&data, &image, &linux::fs::to_guest(path), argv, env, &mut aspace)?;
         let state = linux::Linux::new(start.brk);
-        state.trace.store(linux::tracing(env), Ordering::Relaxed);
+        state.configure(env);
         (start.entry, start.sp, 0, Some(state))
     } else {
         let (sp, block) = load_waveos(&data, &image, argv, &mut aspace)?;
@@ -341,6 +365,7 @@ pub fn spawn_env(
         aspace: Mutex::new(Some(aspace)),
         fds: Mutex::new(fds),
         cwd: Mutex::new(cwd.unwrap_or_else(|| String::from("/"))),
+        cred: IrqMutex::new(crate::users::for_child(parent)),
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
         waited: AtomicBool::new(false),
@@ -385,14 +410,17 @@ fn load_waveos(
     }
 
     // Stack with an argument block at the top: [argc][argv pointers][strings].
+    // Its place is random (`mm::aslr`), and so is the first frame's offset.
+    let stack_top = crate::mm::aslr::stack_top();
     let stack_pages = layout::STACK_SIZE / 4096;
-    aspace.map_anon(layout::STACK_TOP - layout::STACK_SIZE, stack_pages, Prot::ReadWrite)?;
+    aspace.map_anon(stack_top - layout::STACK_SIZE, stack_pages, Prot::ReadWrite)?;
+    aspace.stack_top = stack_top;
     let strings_len: usize = argv.iter().map(|a| a.len() + 1).sum();
     let block_len = (8 + 8 * argv.len() + strings_len + 15) & !15;
     if block_len as u64 > layout::STACK_SIZE / 4 {
         return Err(EINVAL);
     }
-    let block_va = layout::STACK_TOP - block_len as u64;
+    let block_va = stack_top - crate::mm::aslr::stack_offset() - block_len as u64;
     let mut block = Vec::with_capacity(block_len);
     block.extend_from_slice(&(argv.len() as u64).to_le_bytes());
     let mut str_va = block_va + 8 + 8 * argv.len() as u64;
@@ -432,7 +460,7 @@ pub fn spawn_thread(entry: u64, stack: u64, arg: u64) -> Result<u64, isize> {
     if entry >= layout::USER_END || !(4096..layout::USER_END).contains(&stack) {
         return Err(EINVAL);
     }
-    if p.threads.load(Ordering::Acquire) >= 64 {
+    if p.threads.load(Ordering::Acquire) >= 64 || !room_for_thread() {
         return Err(EAGAIN);
     }
     p.threads.fetch_add(1, Ordering::AcqRel);
@@ -451,7 +479,7 @@ pub fn spawn_linux_thread(
     set_tid: [u64; 2],
 ) -> Result<u64, isize> {
     let p = current().ok_or(EPERM)?;
-    if p.threads.load(Ordering::Acquire) >= 512 {
+    if p.threads.load(Ordering::Acquire) >= 512 || !room_for_thread() {
         return Err(EAGAIN);
     }
     p.threads.fetch_add(1, Ordering::AcqRel);
@@ -517,6 +545,9 @@ fn terminate(p: &Process, code: i64) {
     let _ = p.exit.compare_exchange(RUNNING, code, Ordering::AcqRel, Ordering::Acquire);
     p.killed.store(true, Ordering::Release);
     sched::wake_process(p.pid);
+    // A thread busy in user code on another CPU may get no timer interrupt
+    // (there is no periodic tick): interrupt it so it notices.
+    sched::interrupt_process(p.pid);
 }
 
 /// Ends process `p` as signal `sig` does (its exit code is `-sig`).
@@ -693,6 +724,9 @@ pub fn fork(
     share_vm: bool,
     linux: crate::compat::linux::Linux,
 ) -> Result<Arc<Process>, isize> {
+    if !room_for_thread() {
+        return Err(ENOMEM);
+    }
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
     let started = crate::time::uptime_ms();
     let (aspace, cr3, owner, resident) = if share_vm {
@@ -719,6 +753,7 @@ pub fn fork(
         aspace: Mutex::new(aspace),
         fds: Mutex::new(parent.fds.lock().clone()),
         cwd: Mutex::new(parent.cwd.lock().clone()),
+        cred: IrqMutex::new(*parent.cred.lock()),
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
         waited: AtomicBool::new(false),
@@ -818,7 +853,7 @@ pub fn group(pgid: Pid) -> Vec<Arc<Process>> {
 /// Frees resources of exited processes (runs as a kernel task).
 fn reaper() {
     loop {
-        sched::wait_until(1000, || !REAP_QUEUE.lock().is_empty());
+        sched::wait_until(10_000, || !REAP_QUEUE.lock().is_empty());
         // (Pop in its own statement: a `while let` would hold the lock — with
         // interrupts off — for the whole body.)
         loop {
@@ -863,6 +898,16 @@ fn reaper() {
                 .collect();
             for z in zombies {
                 TABLE.lock().remove(&z);
+            }
+        }
+        // Frames of kernel stacks cached beyond what is kept for reuse.
+        crate::mm::kstack::trim();
+        // Memory ran short: the kernel's caches give back what they can.
+        crate::mm::frame::refresh_low();
+        if crate::mm::frame::take_pressure() {
+            let freed = crate::mm::reclaim();
+            if freed >= 256 {
+                log!("mm", "memory is short: the kernel's caches gave back {} KiB", freed * 4);
             }
         }
     }

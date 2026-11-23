@@ -1,15 +1,33 @@
-//! Sound output.
+//! Sound: the device registry, the mixer, playback and capture streams.
+//!
+//! Output devices (Intel HDA's speakers and headphones, USB speakers and
+//! headsets) and input devices (USB microphones) register here as they are
+//! found or plugged in, and leave when unplugged. One output is *active* at
+//! a time: the preferred one (`audio_output` in the preferences, by name)
+//! when it is present, otherwise a built-in device, otherwise any. Inputs
+//! have a default the same way (`audio_input`).
 //!
 //! Programs open playback streams (`AUDIO_OPEN`) and write 48 kHz, 16-bit
-//! stereo samples to them. The `audio` kernel task mixes every stream, applies
-//! the master volume and keeps the output device's DMA ring filled a few tens
-//! of milliseconds ahead of what it is playing. The device (Intel HDA) wakes
-//! the mixer with an interrupt each time it finishes a segment of the ring.
+//! stereo samples to them. The `audio` kernel task mixes every stream,
+//! applies the master volume and keeps the active device's ring filled a few
+//! tens of milliseconds ahead of what it is playing; the device converts to
+//! its own rate and format ([`convert`]) and wakes the mixer as it plays. A
+//! device with its own volume control gets the system volume in decibels
+//! ([`volume`]); the mixer makes up whatever it can't do.
+//!
+//! Capture streams ([`capture`], `AUDIO_CAPTURE`) read what an input device
+//! records, in the same format.
 
+pub mod capture;
+pub mod convert;
 pub mod hda;
+pub mod volume;
+
+pub use capture::{Capture, Input};
+pub use convert::Format;
 
 use crate::sched::{self, TaskId};
-use crate::sync::IrqMutex;
+use crate::sync::{IrqMutex, WaitQueue};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -17,7 +35,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use aurora_abi::err::*;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use spin::Once;
 
 pub const RATE: usize = aurora_abi::audio::RATE as usize;
 /// How far ahead of the device the mixer keeps the ring filled, in frames (64 ms).
@@ -25,7 +42,8 @@ const LEAD: usize = 3072;
 /// Samples a stream may buffer before its writer blocks (250 ms of stereo).
 const STREAM_CAPACITY: usize = RATE / 4 * 2;
 
-/// An output device that plays a ring of interleaved stereo frames in a loop.
+/// An output device that plays a ring of interleaved 48 kHz stereo frames
+/// in a loop.
 pub trait Output: Send + Sync {
     fn describe(&self) -> String;
     /// Length of the ring in frames.
@@ -41,18 +59,234 @@ pub trait Output: Send + Sync {
     fn poll_jack(&self) -> Option<bool> {
         None
     }
+    /// The format on the wire (the device converts from the ring's).
+    fn format(&self) -> Format {
+        Format::MIXER
+    }
+    /// A USB device (rather than a built-in one).
+    fn usb(&self) -> bool {
+        false
+    }
+    /// The device's own volume control, (min, max) in 1/256 dB.
+    fn volume_range(&self) -> Option<(i16, i16)> {
+        None
+    }
+    /// Sets the device's volume control (within `volume_range`) and mute.
+    fn set_volume(&self, _db256: i16, _muted: bool) {}
+    /// The mixer starts playing to it.
+    fn activate(&self) {}
+    /// The mixer moved to another device: fall silent.
+    fn deactivate(&self) {
+        let zeros = vec![0i16; 1024 * 2];
+        let mut f = 0;
+        while f < self.frames() {
+            let n = 1024.min(self.frames() - f);
+            self.write(f, &zeros[..n * 2]);
+            f += n;
+        }
+    }
 }
 
-static OUTPUT: Once<Arc<dyn Output>> = Once::new();
+/// The devices present and the choices among them.
+pub(crate) struct Registry {
+    next_id: u32,
+    outputs: Vec<(u32, Arc<dyn Output>)>,
+    inputs: Vec<(u32, Arc<dyn Input>)>,
+    /// The output the mixer plays to (0: none).
+    active: u32,
+    pub(crate) default_input: u32,
+    /// Chosen in this session (menu bar, tests) until the preference changes.
+    chosen_output: Option<String>,
+    /// The `audio_output` and `audio_input` preferences (device names).
+    preferred: (Option<String>, Option<String>),
+}
+
+pub(crate) static REGISTRY: IrqMutex<Registry> = IrqMutex::new(Registry {
+    next_id: 1,
+    outputs: Vec::new(),
+    inputs: Vec::new(),
+    active: 0,
+    default_input: 0,
+    chosen_output: None,
+    preferred: (None, None),
+});
+/// Changes whenever devices come or go or the choice changes (wakes the mixer).
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+static MIXER_WAKE: WaitQueue = WaitQueue::new();
+
 static STREAMS: IrqMutex<Vec<Arc<Stream>>> = IrqMutex::new(Vec::new());
 static VOLUME: AtomicU32 = AtomicU32::new(60);
 static MUTED: AtomicBool = AtomicBool::new(false);
+/// Bumped by `set_volume`; the mixer applies the new level.
+static VOLUME_GEN: AtomicU64 = AtomicU64::new(0);
+/// The mixer's gain (16.16): all of the volume, or what the device can't do.
+static GAIN: AtomicU32 = AtomicU32::new(0);
 static HEADPHONES: AtomicBool = AtomicBool::new(false);
 static UNDERRUNS: AtomicU64 = AtomicU64::new(0);
-/// Frames the device has played since the mixer started.
+/// Frames the active devices have played since the mixer started.
 static PLAYED: AtomicU64 = AtomicU64::new(0);
 /// Loudest sample of the last mix (for tests and level meters).
 static PEAK: AtomicU32 = AtomicU32::new(0);
+
+// ------------------------------------------------------------------ devices
+
+/// Registers an output device; returns its id.
+pub fn add_output(dev: Arc<dyn Output>) -> u32 {
+    let id = {
+        let mut r = REGISTRY.lock();
+        let id = r.next_id;
+        r.next_id += 1;
+        r.outputs.push((id, dev.clone()));
+        id
+    };
+    log!("audio", "output {}: {}", id, dev.describe());
+    choose();
+    id
+}
+
+/// The output went away (unplugged): the mixer moves to another.
+pub fn remove_output(id: u32) {
+    let gone = {
+        let mut r = REGISTRY.lock();
+        let before = r.outputs.len();
+        r.outputs.retain(|(i, _)| *i != id);
+        before != r.outputs.len()
+    };
+    if gone {
+        log!("audio", "output {} removed", id);
+        choose();
+    }
+}
+
+/// Registers an input device; returns its id (for [`capture::captured`]).
+pub fn add_input(dev: Arc<dyn Input>) -> u32 {
+    let id = {
+        let mut r = REGISTRY.lock();
+        let id = r.next_id;
+        r.next_id += 1;
+        r.inputs.push((id, dev.clone()));
+        id
+    };
+    log!("audio", "input {}: {}", id, dev.describe());
+    choose();
+    id
+}
+
+pub fn remove_input(id: u32) {
+    REGISTRY.lock().inputs.retain(|(i, _)| *i != id);
+    capture::device_gone(id);
+    choose();
+}
+
+pub(crate) fn input(id: u32) -> Option<Arc<dyn Input>> {
+    REGISTRY.lock().inputs.iter().find(|(i, _)| *i == id).map(|(_, d)| d.clone())
+}
+
+fn active() -> Option<(u32, Arc<dyn Output>)> {
+    let r = REGISTRY.lock();
+    r.outputs.iter().find(|(i, _)| *i == r.active).cloned()
+}
+
+/// Picks the active output and the default input again.
+fn choose() {
+    let mut r = REGISTRY.lock();
+    let (want_out, want_in) = r.preferred.clone();
+    let named = |name: Option<&String>, list: &[(u32, String, bool)]| {
+        name.and_then(|n| list.iter().find(|(_, d, _)| d == n)).map(|(i, _, _)| *i)
+    };
+    let outs: Vec<(u32, String, bool)> = r.outputs.iter().map(|(i, d)| (*i, d.describe(), d.usb())).collect();
+    let ins: Vec<(u32, String, bool)> = r.inputs.iter().map(|(i, d)| (*i, d.describe(), d.usb())).collect();
+    let pick = |want: Option<&String>, list: &[(u32, String, bool)]| {
+        named(want, list)
+            .or_else(|| list.iter().find(|(_, _, usb)| !usb).map(|(i, _, _)| *i))
+            .or_else(|| list.first().map(|(i, _, _)| *i))
+            .unwrap_or(0)
+    };
+    let chosen = r.chosen_output.clone();
+    let out = named(chosen.as_ref(), &outs).unwrap_or_else(|| pick(want_out.as_ref(), &outs));
+    let inp = pick(want_in.as_ref(), &ins);
+    if (r.active, r.default_input) != (out, inp) {
+        if r.active != out {
+            if let Some((_, name, _)) = outs.iter().find(|(i, _, _)| *i == out) {
+                log!("audio", "playing to {}", name);
+            }
+        }
+        r.active = out;
+        r.default_input = inp;
+    }
+    drop(r);
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+    MIXER_WAKE.wake_all();
+}
+
+/// Plays to output `id` from now on (this session; the menu bar and
+/// Settings also save the choice as `audio_output`).
+pub fn select_output(id: u32) -> bool {
+    {
+        let mut r = REGISTRY.lock();
+        let Some(name) = r.outputs.iter().find(|(i, _)| *i == id).map(|(_, d)| d.describe()) else { return false };
+        r.chosen_output = Some(name);
+    }
+    choose();
+    true
+}
+
+/// The `audio_output`/`audio_input` preference changed (or was loaded).
+pub fn preference_changed() {
+    // Preferences may read the disk: not under the registry lock.
+    let out = crate::gui::prefs::get(aurora_abi::pref::AUDIO_OUTPUT).filter(|v| !v.is_empty());
+    let inp = crate::gui::prefs::get(aurora_abi::pref::AUDIO_INPUT).filter(|v| !v.is_empty());
+    {
+        let mut r = REGISTRY.lock();
+        r.chosen_output = None;
+        r.preferred = (out, inp);
+    }
+    choose();
+}
+
+/// The active output's id (0: none).
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))] // used by the self-tests
+pub fn active_output() -> u32 {
+    REGISTRY.lock().active
+}
+
+/// Every device, for `AUDIO_DEVICES`, Settings and the menu bar.
+pub fn devices() -> Vec<aurora_abi::audio::AudioDevice> {
+    use aurora_abi::audio as abi;
+    let r = REGISTRY.lock();
+    let entry = |id: u32, name: String, f: Format, mut flags: u32| {
+        let mut d = abi::AudioDevice::default();
+        let n = name.len().min(d.name.len());
+        d.name[..n].copy_from_slice(&name.as_bytes()[..n]);
+        d.name_len = n as u32;
+        d.id = id;
+        d.rate = f.rate;
+        d.channels = f.channels as u16;
+        d.bits = f.bits as u16;
+        if id == r.active || id == r.default_input {
+            flags |= abi::DEFAULT;
+        }
+        d.flags = flags;
+        d
+    };
+    let mut all = Vec::new();
+    for (id, d) in &r.outputs {
+        let mut flags = abi::OUTPUT;
+        if d.usb() {
+            flags |= abi::USB;
+        }
+        if d.volume_range().is_some() {
+            flags |= abi::HW_VOLUME;
+        }
+        all.push(entry(*id, d.describe(), d.format(), flags));
+    }
+    for (id, d) in &r.inputs {
+        all.push(entry(*id, d.describe(), d.format(), abi::INPUT | if d.usb() { abi::USB } else { 0 }));
+    }
+    all
+}
+
+// ------------------------------------------------------------------ streams
 
 /// A playback stream: a queue of samples the mixer drains.
 pub struct Stream {
@@ -160,17 +394,18 @@ impl Stream {
 
 /// Opens a playback stream (`ENODEV` without an output device).
 pub fn open() -> Result<Arc<Stream>, isize> {
-    if OUTPUT.get().is_none() {
+    if !present() {
         return Err(ENODEV);
     }
     let s = Stream::new();
     STREAMS.lock().push(s.clone());
+    MIXER_WAKE.wake_all(); // it may be resting
     Ok(s)
 }
 
 /// Plays samples (48 kHz interleaved stereo) without blocking.
 pub fn play(samples: &[i16]) {
-    if OUTPUT.get().is_none() {
+    if !present() {
         return;
     }
     let s = Stream::new();
@@ -180,13 +415,14 @@ pub fn play(samples: &[i16]) {
         g.closed = true;
     }
     STREAMS.lock().push(s);
+    MIXER_WAKE.wake_all(); // it may be resting
 }
 
 static SOUNDS: IrqMutex<BTreeMap<String, Arc<Vec<i16>>>> = IrqMutex::new(BTreeMap::new());
 
 /// Plays `/System/Sounds/<name>.wav` (cached after the first use).
 pub fn play_sound(name: &str) {
-    if OUTPUT.get().is_none() || MUTED.load(Ordering::Relaxed) {
+    if !present() || MUTED.load(Ordering::Relaxed) {
         return;
     }
     let cached = SOUNDS.lock().get(name).cloned();
@@ -206,6 +442,8 @@ pub fn play_sound(name: &str) {
     play(&samples);
 }
 
+// ------------------------------------------------------------------- volume
+
 /// `audio_volume` state word (see `aurora_abi::audio`).
 pub fn state() -> u64 {
     use aurora_abi::audio as abi;
@@ -213,7 +451,7 @@ pub fn state() -> u64 {
     if MUTED.load(Ordering::Relaxed) {
         s |= abi::MUTED;
     }
-    if OUTPUT.get().is_some() {
+    if present() {
         s |= abi::PRESENT;
     }
     if HEADPHONES.load(Ordering::Relaxed) {
@@ -225,14 +463,32 @@ pub fn state() -> u64 {
 pub fn set_volume(volume: u32, muted: bool) {
     VOLUME.store(volume.min(100), Ordering::Relaxed);
     MUTED.store(muted, Ordering::Relaxed);
+    VOLUME_GEN.fetch_add(1, Ordering::Relaxed);
+    MIXER_WAKE.wake_all();
 }
 
+/// Splits the volume between the device's control and the mixer.
+fn apply_volume(out: &dyn Output) {
+    let (v, muted) = (VOLUME.load(Ordering::Relaxed), MUTED.load(Ordering::Relaxed));
+    let gain = match out.volume_range() {
+        Some((min, max)) => {
+            let (db, gain) = volume::split(v, min, max);
+            out.set_volume(db, muted || v == 0);
+            gain
+        }
+        None => volume::software_gain(v),
+    };
+    GAIN.store(if muted { 0 } else { gain }, Ordering::Relaxed);
+}
+
+/// An output device exists.
 pub fn present() -> bool {
-    OUTPUT.get().is_some()
+    !REGISTRY.lock().outputs.is_empty()
 }
 
+/// The active output's name.
 pub fn describe() -> Option<String> {
-    OUTPUT.get().map(|o| o.describe())
+    active().map(|(_, o)| o.describe())
 }
 
 /// (frames played, underruns, loudest recent sample) — for tests and diagnostics.
@@ -240,6 +496,8 @@ pub fn describe() -> Option<String> {
 pub fn counters() -> (u64, u64, u32) {
     (PLAYED.load(Ordering::Relaxed), UNDERRUNS.load(Ordering::Relaxed), PEAK.load(Ordering::Relaxed))
 }
+
+// -------------------------------------------------------------------- mixer
 
 /// Sums every stream into `mix` (interleaved), dropping finished streams.
 fn mix_streams(mix: &mut [i32]) {
@@ -265,10 +523,9 @@ fn mix_streams(mix: &mut [i32]) {
     });
 }
 
-/// Master volume (a perceptual square curve) and a soft knee instead of hard clipping.
+/// The mixer's gain and a soft knee instead of hard clipping.
 fn finish(mix: &[i32], out: &mut [i16]) -> u32 {
-    let v = VOLUME.load(Ordering::Relaxed) as i64;
-    let gain = if MUTED.load(Ordering::Relaxed) { 0 } else { v * v * 65536 / 10_000 };
+    let gain = GAIN.load(Ordering::Relaxed) as i64;
     let mut peak = 0;
     for (o, &m) in out.iter_mut().zip(mix) {
         let mut x = (m as i64 * gain) >> 16;
@@ -283,22 +540,61 @@ fn finish(mix: &[i32], out: &mut [i16]) -> u32 {
     peak
 }
 
-/// The mixer task.
+/// The mixer task: plays to the active output, following it as it changes.
 fn mixer() {
-    let Some(out) = OUTPUT.get().cloned() else { return };
+    let mut mix = vec![0i32; LEAD * 2];
+    let mut samples = vec![0i16; LEAD * 2];
+    loop {
+        let Some((id, out)) = active() else {
+            // No device: streams play into nothing at the real rate, so
+            // their writers don't wait forever.
+            let gen = GENERATION.load(Ordering::Relaxed);
+            MIXER_WAKE.wait(20, || GENERATION.load(Ordering::Relaxed) != gen);
+            mix_streams(&mut mix[..RATE / 50 * 2]);
+            continue;
+        };
+        out.activate();
+        let rest = play_to(id, &*out, &mut mix, &mut samples);
+        out.deactivate();
+        HEADPHONES.store(false, Ordering::Relaxed);
+        if rest {
+            // Nothing to play for a while: the device is stopped (no DMA, no
+            // interrupts) until a stream opens or the devices change.
+            let gen = GENERATION.load(Ordering::Relaxed);
+            while STREAMS.lock().is_empty() && GENERATION.load(Ordering::Relaxed) == gen {
+                MIXER_WAKE.wait(60_000, || !STREAMS.lock().is_empty() || GENERATION.load(Ordering::Relaxed) != gen);
+            }
+        }
+    }
+}
+
+/// How long the mixer plays silence, with no stream open, before it stops
+/// the device.
+const REST_AFTER_MS: u64 = 3000;
+
+/// Keeps `out`'s ring filled until another output becomes active.
+/// Plays to `out` while it is the active output. True if it stopped
+/// because nothing played for [`REST_AFTER_MS`].
+fn play_to(id: u32, out: &dyn Output, mix: &mut [i32], samples: &mut [i16]) -> bool {
     let ring = out.frames();
     let base = out.position();
     let mut last = base;
     let mut played: u64 = 0;
     let mut written: u64 = 0;
-    let mut mix = vec![0i32; LEAD * 2];
-    let mut samples = vec![0i16; LEAD * 2];
     let mut next_jack = 0;
-    loop {
+    let mut volume_gen = VOLUME_GEN.load(Ordering::Relaxed).wrapping_sub(1);
+    let start = PLAYED.load(Ordering::Relaxed);
+    let mut quiet_since: Option<u64> = None;
+    while REGISTRY.lock().active == id {
+        let gen = VOLUME_GEN.load(Ordering::Relaxed);
+        if gen != volume_gen {
+            volume_gen = gen;
+            apply_volume(out);
+        }
         let pos = out.position();
         played += ((pos + ring - last) % ring) as u64;
         last = pos;
-        PLAYED.store(played, Ordering::Relaxed);
+        PLAYED.store(start + played, Ordering::Relaxed);
         if written < played {
             // We fell behind the device: skip ahead instead of writing the past.
             UNDERRUNS.fetch_add(1, Ordering::Relaxed);
@@ -319,6 +615,15 @@ fn mixer() {
             written += n as u64;
         }
         let now = crate::time::uptime_ms();
+        if STREAMS.lock().is_empty() {
+            let since = *quiet_since.get_or_insert(now);
+            // Rest once what was written has played out.
+            if now >= since + REST_AFTER_MS && played >= written.saturating_sub(LEAD as u64) {
+                return true;
+            }
+        } else {
+            quiet_since = None;
+        }
         if now >= next_jack {
             next_jack = now + 500;
             if let Some(hp) = out.poll_jack() {
@@ -329,25 +634,25 @@ fn mixer() {
         }
         out.wait(25);
     }
+    false
 }
 
-/// After sleep.
+/// After sleep: built-in devices are restarted here; USB ones come back
+/// with their bus.
 pub fn resume() {
-    if present() {
-        hda::resume();
-    }
+    hda::resume();
+    VOLUME_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Finds a sound device and starts the mixer.
+/// Finds built-in sound devices and starts the mixer.
 pub fn init() {
     for d in crate::drivers::pci::devices() {
         if d.class == 0x04 && d.subclass == 0x03 {
             if let Some(out) = hda::probe(&d) {
-                log!("audio", "output: {}", out.describe());
-                OUTPUT.call_once(|| out);
-                sched::spawn("audio", mixer);
-                return;
+                add_output(out);
+                break;
             }
         }
     }
+    sched::spawn("audio", mixer);
 }

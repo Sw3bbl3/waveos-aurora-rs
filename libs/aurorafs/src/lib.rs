@@ -12,6 +12,15 @@
 //! data               file contents and directories
 //! ```
 //!
+//! **Owners** (feature [`FEATURE_OWNERS`]). Each inode can carry an owner, a
+//! group and Unix permission bits (bytes 240–251, flagged by bit 0 of the
+//! inode flags). Inodes without them — every inode on a volume made before
+//! owners existed — belong to the volume's *default owner*, kept with the
+//! feature bits in a checksummed extension of the superblock (bytes
+//! 188–255). The extension is a compatible feature: an older kernel ignores
+//! it, still mounts the volume, and the inodes it rewrites simply fall back
+//! to the default owner.
+//!
 //! All metadata changes (superblock, bitmaps, inodes, directory contents) are
 //! collected in a transaction and reach their home location only after the
 //! transaction has been written to the journal and flushed. File data is
@@ -30,6 +39,8 @@ extern crate std;
 
 mod crc;
 #[cfg(test)]
+mod owner_tests;
+#[cfg(test)]
 mod tests;
 
 use alloc::boxed::Box;
@@ -44,6 +55,15 @@ pub const BLOCK: usize = 4096;
 pub const MAGIC: [u8; 8] = *b"WAVEFS01";
 pub const VERSION: u32 = 1;
 pub const ROOT: u64 = 1;
+/// Superblock feature: inodes may carry an owner, a group and a mode.
+pub const FEATURE_OWNERS: u32 = 1;
+/// Feature bits this version understands.
+const KNOWN_FEATURES: u32 = FEATURE_OWNERS;
+/// The default owner of a volume made by `format` (the first account).
+pub const FIRST_UID: u32 = 1000;
+pub const FIRST_GID: u32 = 1000;
+/// Inode flag: bytes 240–251 hold an owner, a group and a mode.
+const IFLAG_OWNED: u16 = 1;
 pub const NAME_MAX: usize = 255;
 /// The largest file, in bytes.
 pub const MAX_FILE_SIZE: u64 = 1 << 40;
@@ -114,6 +134,26 @@ pub struct Meta {
     pub mtime: u64,
     pub ctime: u64,
     pub links: u32,
+    pub owner: Owner,
+}
+
+/// Who a file belongs to and what others may do with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub uid: u32,
+    pub gid: u32,
+    /// Permission bits (`0o7777`: set-id, sticky, owner, group, others).
+    pub mode: u16,
+}
+
+impl Owner {
+    /// The usual mode of something new: `rwxr-xr-x` folders, `rw-r--r--` files.
+    pub fn default_mode(kind: Kind) -> u16 {
+        match kind {
+            Kind::Dir => 0o755,
+            Kind::File => 0o644,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,7 +207,18 @@ struct Superblock {
     label: [u8; 32],
     mount_count: u64,
     journal_seq: u64,
+    /// `FEATURE_*` bits (in the checksummed extension, bytes 188–255).
+    features: u32,
+    /// Owner of inodes that carry none.
+    default_uid: u32,
+    default_gid: u32,
 }
+
+/// The superblock extension: bytes 188..252 with a CRC32 at 252. A volume
+/// written before it existed (or by a kernel that doesn't know it) has a
+/// zero or mismatching checksum there, and the extension reads as empty.
+const EXT_START: usize = 188;
+const EXT_CRC: usize = 252;
 
 impl Superblock {
     fn encode(&self) -> Box<Block> {
@@ -199,6 +250,13 @@ impl Superblock {
         put_u64(&mut b[..], 176, self.journal_seq);
         let crc = crc32(&b[..184]);
         put_u32(&mut b[..], 184, crc);
+        if self.features != 0 {
+            put_u32(&mut b[..], EXT_START, self.features);
+            put_u32(&mut b[..], EXT_START + 4, self.default_uid);
+            put_u32(&mut b[..], EXT_START + 8, self.default_gid);
+            let crc = crc32(&b[EXT_START..EXT_CRC]);
+            put_u32(&mut b[..], EXT_CRC, crc);
+        }
         b
     }
 
@@ -228,7 +286,19 @@ impl Superblock {
             label: b[136..168].try_into().unwrap(),
             mount_count: get_u64(b, 168),
             journal_seq: get_u64(b, 176),
+            features: 0,
+            default_uid: 0,
+            default_gid: 0,
         };
+        let mut sb = sb;
+        let ext_crc = get_u32(b, EXT_CRC);
+        if ext_crc != 0 && crc32(&b[EXT_START..EXT_CRC]) == ext_crc {
+            // Unknown feature bits are ignored: every feature so far is
+            // compatible (an older reader may mount the volume).
+            sb.features = get_u32(b, EXT_START) & KNOWN_FEATURES;
+            sb.default_uid = get_u32(b, EXT_START + 4);
+            sb.default_gid = get_u32(b, EXT_START + 8);
+        }
         if !sb.geometry_ok() {
             return Err(Error::Corrupt);
         }
@@ -283,9 +353,15 @@ struct Inode {
     extents: Vec<Extent>,
     /// Block holding extents beyond the first 12 (0 = none).
     extent_block: u64,
+    /// Its own owner, group and mode (None: the volume's default owner).
+    owner: Option<Owner>,
 }
 
 impl Inode {
+    fn new(kind: u16, links: u32, t: u64, owner: Option<Owner>) -> Inode {
+        Inode { kind, links, size: 0, ctime: t, mtime: t, extents: Vec::new(), extent_block: 0, owner }
+    }
+
     fn kind(&self) -> Result<Kind> {
         match self.kind {
             1 => Ok(Kind::File),
@@ -376,6 +452,9 @@ fn layout(blocks: u64) -> Result<Superblock> {
         label: [0; 32],
         mount_count: 0,
         journal_seq: 0,
+        features: FEATURE_OWNERS,
+        default_uid: FIRST_UID,
+        default_gid: FIRST_GID,
     })
 }
 
@@ -422,18 +501,7 @@ impl<D: Disk> Volume<D> {
         set_bit(&mut vol.imap, ROOT, true);
         vol.sb.free_inodes = vol.sb.inodes - 2;
         let t = now();
-        vol.write_inode(
-            ROOT,
-            &Inode {
-                kind: Kind::Dir as u16,
-                links: 2,
-                size: 0,
-                ctime: t,
-                mtime: t,
-                extents: Vec::new(),
-                extent_block: 0,
-            },
-        )?;
+        vol.write_inode(ROOT, &Inode::new(Kind::Dir as u16, 2, t, None))?;
         // Bitmaps can be larger than the journal: write them in place.
         for i in 0..vol.sb.bbitmap_blocks as usize {
             let mut img = zero_block();
@@ -848,6 +916,11 @@ impl<D: Disk> Volume<D> {
             mtime: get_u64(r, 24),
             extents,
             extent_block,
+            owner: (get_u16(r, 250) & IFLAG_OWNED != 0).then(|| Owner {
+                uid: get_u32(r, 240),
+                gid: get_u32(r, 244),
+                mode: get_u16(r, 248) & 0o7777,
+            }),
         };
         inode.kind()?;
         // Nor may its size claim more than those blocks hold (callers size
@@ -878,6 +951,12 @@ impl<D: Disk> Volume<D> {
             put_u32(r, 48 + i * 16, e.len);
         }
         put_u64(r, 232, inode.extent_block);
+        if let Some(o) = inode.owner {
+            put_u32(r, 240, o.uid);
+            put_u32(r, 244, o.gid);
+            put_u16(r, 248, o.mode & 0o7777);
+            put_u16(r, 250, IFLAG_OWNED);
+        }
         self.meta_write(blk, &b);
         if inode.extents.len() > DIRECT_EXTENTS {
             let mut eb = zero_block();
@@ -964,7 +1043,59 @@ impl<D: Disk> Volume<D> {
 
     pub fn stat(&mut self, ino: u64) -> Result<Meta> {
         let i = self.read_inode(ino)?;
-        Ok(Meta { kind: i.kind()?, size: i.size, mtime: i.mtime, ctime: i.ctime, links: i.links })
+        let kind = i.kind()?;
+        Ok(Meta { kind, size: i.size, mtime: i.mtime, ctime: i.ctime, links: i.links, owner: self.owner_of(&i, kind) })
+    }
+
+    fn owner_of(&self, i: &Inode, kind: Kind) -> Owner {
+        i.owner.unwrap_or(Owner { uid: self.sb.default_uid, gid: self.sb.default_gid, mode: Owner::default_mode(kind) })
+    }
+
+    /// The feature bits of this volume (`FEATURE_*`).
+    pub fn features(&self) -> u32 {
+        self.sb.features
+    }
+
+    /// The owner of inodes that carry none: `(uid, gid)`.
+    pub fn default_owner(&self) -> (u32, u32) {
+        (self.sb.default_uid, self.sb.default_gid)
+    }
+
+    /// Turns on owners for a volume made before they existed: every file
+    /// without one belongs to `uid`/`gid` from now on. Nothing else changes.
+    pub fn enable_owners(&mut self, uid: u32, gid: u32) -> Result<()> {
+        self.sb.features |= FEATURE_OWNERS;
+        self.sb.default_uid = uid;
+        self.sb.default_gid = gid;
+        self.dirty_super();
+        self.commit()
+    }
+
+    /// The owner, group and mode of a file or folder.
+    pub fn owner(&mut self, ino: u64) -> Result<Owner> {
+        Ok(self.stat(ino)?.owner)
+    }
+
+    /// True if the inode has its own owner (rather than the volume's default).
+    pub fn has_own_owner(&mut self, ino: u64) -> Result<bool> {
+        Ok(self.read_inode(ino)?.owner.is_some())
+    }
+
+    /// The raw flag bits of an inode (fsck checks for unknown ones).
+    fn raw_inode_flags(&mut self, ino: u64) -> Result<u16> {
+        let (blk, off) = self.inode_location(ino)?;
+        let mut b = zero_block();
+        self.meta_read(blk, &mut b)?;
+        Ok(get_u16(&b[..], off + 250))
+    }
+
+    /// Gives a file or folder an owner, a group and a mode.
+    pub fn set_owner(&mut self, ino: u64, owner: Owner) -> Result<()> {
+        let mut inode = self.read_inode(ino)?;
+        inode.owner = Some(Owner { mode: owner.mode & 0o7777, ..owner });
+        inode.ctime = (self.now)();
+        self.write_inode(ino, &inode)?;
+        self.maybe_commit()
     }
 
     pub fn read(&mut self, ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize> {
@@ -1162,6 +1293,11 @@ impl<D: Disk> Volume<D> {
     }
 
     pub fn create(&mut self, dir: u64, name: &str, kind: Kind) -> Result<u64> {
+        self.create_owned(dir, name, kind, None)
+    }
+
+    /// Creates a file or folder with an owner (None: the volume's default).
+    pub fn create_owned(&mut self, dir: u64, name: &str, kind: Kind, owner: Option<Owner>) -> Result<u64> {
         Self::check_name(name)?;
         let mut entries = self.readdir(dir)?;
         if entries.iter().any(|e| e.name == name) {
@@ -1170,10 +1306,8 @@ impl<D: Disk> Volume<D> {
         let ino = self.alloc_inode()?;
         let t = (self.now)();
         let links = if kind == Kind::Dir { 2 } else { 1 };
-        self.write_inode(
-            ino,
-            &Inode { kind: kind as u16, links, size: 0, ctime: t, mtime: t, extents: Vec::new(), extent_block: 0 },
-        )?;
+        let owner = owner.map(|o| Owner { mode: o.mode & 0o7777, ..o });
+        self.write_inode(ino, &Inode::new(kind as u16, links, t, owner))?;
         entries.push(DirEntry { name: String::from(name), ino, kind });
         self.write_dir(dir, &entries)?;
         Ok(ino)
@@ -1182,7 +1316,7 @@ impl<D: Disk> Volume<D> {
     fn release(&mut self, ino: u64) -> Result<()> {
         let mut inode = self.read_inode(ino)?;
         self.shrink(&mut inode, 0);
-        let empty = Inode { kind: 0, links: 0, size: 0, ctime: 0, mtime: 0, extents: Vec::new(), extent_block: 0 };
+        let empty = Inode::new(0, 0, 0, None);
         self.write_inode(ino, &empty)?;
         self.free_inode(ino);
         Ok(())
@@ -1251,6 +1385,15 @@ impl<D: Disk> Volume<D> {
                 return Err(format!("inode {ino} reachable twice"));
             }
             let inode = self.read_inode(ino).map_err(|e| format!("inode {ino}: {e:?}"))?;
+            let flags = self.raw_inode_flags(ino).map_err(|e| format!("inode {ino}: {e:?}"))?;
+            if flags & !IFLAG_OWNED != 0 {
+                return Err(format!("inode {ino}: unknown flags {flags:#x}"));
+            }
+            if let Some(o) = inode.owner {
+                if o.uid == u32::MAX || o.gid == u32::MAX {
+                    return Err(format!("inode {ino}: invalid owner {}:{}", o.uid, o.gid));
+                }
+            }
             if inode.allocated_blocks() < inode.size.div_ceil(BLOCK as u64) {
                 return Err(format!("inode {ino}: size {} exceeds its blocks", inode.size));
             }

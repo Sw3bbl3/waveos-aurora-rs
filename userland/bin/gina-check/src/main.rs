@@ -36,7 +36,7 @@ fn run() -> Result<(), String> {
         return Err("wrong identity".into());
     }
     println!("PASS initial install");
-    let probe = format!("/AppData/{id}/probe.txt");
+    let probe = format!("{}/probe.txt", apps::data_dir(&id));
     fs::write(&probe, b"keep my data").map_err(io)?;
     let again = apps::install(&first, |_, _| {})?;
     if again.directory != a.directory {
@@ -83,7 +83,7 @@ fn run() -> Result<(), String> {
     }
     println!("PASS reinstall retains data");
     apps::uninstall(&id, true)?;
-    if fs::exists(&format!("/AppData/{id}")) || fs::exists(&format!("/Applications/{id}")) {
+    if fs::exists(&apps::data_dir(&id)) || fs::exists(&format!("/Applications/{id}")) {
         return Err("explicit removal incomplete".into());
     }
     println!("PASS explicit test-data deletion");

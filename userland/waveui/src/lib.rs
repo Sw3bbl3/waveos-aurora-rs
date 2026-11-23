@@ -62,12 +62,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub use aurorakit::{load_fonts, text, KeyCode, KeyEvent, Modifiers, Request};
+pub use corekit::abi::cursor;
 pub use lumen;
 pub use style::{Align, Color, Insets, TextStyle};
 pub use view::*;
 
 /// Everything an app usually needs: `use waveui::prelude::*;`.
 pub mod prelude {
+    pub use crate::cursor;
     pub use crate::style::{radius, size, space, Align, Color, Insets, TextStyle};
     pub use crate::view::*;
     pub use crate::{App, Context, Env, KeyCode, KeyEvent};
@@ -86,8 +88,12 @@ pub struct Env {
     pub active: bool,
     /// The window's content size.
     pub size: (i32, i32),
-    /// The screen's size.
+    /// The screen's size (the main display's).
     pub screen: (i32, i32),
+    /// The display the window is on (see `corekit::display`; 0 until it
+    /// appears) and its size.
+    pub display: u32,
+    pub display_size: (i32, i32),
     /// Dark appearance.
     pub dark: bool,
     /// The person asked for less motion.
@@ -103,6 +109,8 @@ impl Env {
             active: env.focused,
             size: (area.w, area.h),
             screen: env.screen,
+            display: env.display,
+            display_size: env.display_size,
             dark: lumen::theme::current().dark,
             reduce_motion: lumen::theme::reduce_motion(),
             mods: env.mods,
@@ -126,6 +134,10 @@ pub trait App: Sized {
     /// Can the window be resized?
     fn resizable(&self) -> bool {
         true
+    }
+    /// Minimum useful content size. The compositor adds its own control strip.
+    fn min_size(&self) -> (i32, i32) {
+        (240, 160)
     }
 
     /// Changes the state for a message. The interface is redrawn after.

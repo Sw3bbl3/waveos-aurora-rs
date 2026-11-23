@@ -75,6 +75,12 @@ macro_rules! stubs {
             "push r14",
             "push r15",
             "cld",
+            // Close user access (SMAP) if the trap interrupted the user-copy
+            // routine: the handler may switch tasks, and `iretq` reopens it.
+            "cmp byte ptr [rip + {smap}], 0",
+            "je 2f",
+            "clac",
+            "2:",
             "mov rdi, rsp",
             "call {trap}",
             "pop r15",
@@ -95,6 +101,7 @@ macro_rules! stubs {
             "add rsp, 16",
             "iretq",
             trap = sym super::idt::trap,
+            smap = sym super::protect::AURORA_SMAP,
         );
     };
 }

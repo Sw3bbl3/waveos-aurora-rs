@@ -84,6 +84,7 @@ extern "sysv64" fn resume_entry(_arg: u64) -> ! {
     idt::init();
     syscall::init();
     fpu::init();
+    crate::arch::protect::init();
     crate::arch::pat::init();
     percpu::init(0);
     unsafe { aurora_s3_restore(&raw const CONTEXT) }
@@ -159,6 +160,8 @@ pub fn suspend() -> Result<(), &'static str> {
         // vectors overlap CPU exceptions) is masked again.
         crate::time::resume();
         apic::resume(&ioapic);
+        // Frequency settings (HWP, CPPC) were reset with the processor.
+        crate::power::cpu_started(0);
         (true, pci)
     });
     let (slept, pci) = resumed;

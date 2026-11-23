@@ -71,6 +71,8 @@ struct Entry {
     path: String,
     icon: Icon,
     package: Option<String>,
+    /// An installed app in the "game" category (also listed under Play).
+    game: bool,
 }
 
 pub struct Launcher {
@@ -86,7 +88,9 @@ impl Launcher {
         let q = self.query.to_ascii_lowercase();
         self.apps
             .iter()
-            .filter(|a| self.group == Group::All || group_of(a.kind) == self.group)
+            .filter(|a| {
+                self.group == Group::All || group_of(a.kind) == self.group || (self.group == Group::Play && a.game)
+            })
             .filter(|a| a.name.to_ascii_lowercase().contains(q.as_str()))
             .collect()
     }
@@ -142,6 +146,7 @@ impl Desktop {
     }
 
     pub fn toggle_launcher(&mut self) {
+        self.begin_reveal(self.screen());
         if self.launcher.take().is_none() {
             let mut apps: Vec<Entry> = CATALOG
                 .iter()
@@ -153,15 +158,17 @@ impl Desktop {
                     path: String::from(a.path),
                     icon: a.icon,
                     package: None,
+                    game: false,
                 })
                 .collect();
             apps.sort_by(|a, b| a.name.cmp(&b.name));
             apps.extend(crate::gui::installed::list().into_iter().map(|a| Entry {
                 kind: None,
                 package: Some(a.manifest.id.clone()),
+                game: a.manifest.is_game(),
                 name: a.manifest.name,
                 path: a.path,
-                icon: Icon::Aurora,
+                icon: a.icon,
             }));
             self.launcher = Some(Launcher { apps, query: String::new(), group: Group::All, hover: None, page: 0 });
             self.shoal_backdrop = None;

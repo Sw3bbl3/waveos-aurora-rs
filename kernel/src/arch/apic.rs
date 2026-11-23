@@ -1,14 +1,14 @@
 //! Local APIC (timer, EOI) and I/O APIC (external IRQ routing).
 //! The legacy 8259 PICs are remapped out of the way and fully masked.
 
-use super::idt::{PIC_BASE_VECTOR, SPURIOUS_VECTOR, TIMER_VECTOR};
+use super::idt::{PIC_BASE_VECTOR, SPURIOUS_VECTOR};
 use crate::acpi::AcpiInfo;
 use crate::mm::phys_to_virt;
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::instructions::port::Port;
 
 static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
-/// LAPIC timer count for one tick (divide-by-16), measured once on the BSP.
+/// LAPIC timer count for one millisecond (divide-by-16), measured once on the BSP.
 static TIMER_COUNT: AtomicU64 = AtomicU64::new(0);
 static IOAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 static IOAPIC_GSI_BASE: AtomicU64 = AtomicU64::new(0);
@@ -19,21 +19,20 @@ const LAPIC_ICR_HIGH: u32 = 0x310;
 const LAPIC_TPR: u32 = 0x80;
 const LAPIC_EOI: u32 = 0xB0;
 const LAPIC_SVR: u32 = 0xF0;
-const LAPIC_LVT_TIMER: u32 = 0x320;
+pub(super) const LAPIC_LVT_TIMER: u32 = 0x320;
 const LAPIC_LVT_LINT0: u32 = 0x350;
 const LAPIC_LVT_LINT1: u32 = 0x360;
 const LAPIC_LVT_ERROR: u32 = 0x370;
-const LAPIC_TIMER_INIT: u32 = 0x380;
+pub(super) const LAPIC_TIMER_INIT: u32 = 0x380;
 const LAPIC_TIMER_CURRENT: u32 = 0x390;
-const LAPIC_TIMER_DIVIDE: u32 = 0x3E0;
+pub(super) const LAPIC_TIMER_DIVIDE: u32 = 0x3E0;
 const LVT_MASKED: u32 = 1 << 16;
-const TIMER_PERIODIC: u32 = 1 << 17;
 
 fn lapic_read(reg: u32) -> u32 {
     unsafe { ((LAPIC_BASE.load(Ordering::Relaxed) + reg as u64) as *const u32).read_volatile() }
 }
 
-fn lapic_write(reg: u32, value: u32) {
+pub(super) fn lapic_write(reg: u32, value: u32) {
     unsafe { ((LAPIC_BASE.load(Ordering::Relaxed) + reg as u64) as *mut u32).write_volatile(value) }
 }
 
@@ -111,11 +110,16 @@ fn enable_local() {
     lapic_write(LAPIC_SVR, 0x100 | SPURIOUS_VECTOR as u32); // software enable
 }
 
-/// Starts this CPU's periodic scheduler tick.
+/// LAPIC timer counts (divide-by-16) per millisecond.
+pub(super) fn timer_count_per_ms() -> u32 {
+    TIMER_COUNT.load(Ordering::Relaxed) as u32
+}
+
+/// Starts this CPU's timer (one-shot or TSC-deadline, or the periodic tick;
+/// see `arch::timer`) and arms it for this CPU's next deadline.
 fn start_timer() {
-    lapic_write(LAPIC_TIMER_DIVIDE, 0x3);
-    lapic_write(LAPIC_LVT_TIMER, TIMER_VECTOR as u32 | TIMER_PERIODIC);
-    lapic_write(LAPIC_TIMER_INIT, TIMER_COUNT.load(Ordering::Relaxed) as u32);
+    super::timer::start_local();
+    crate::timer::reprogram();
 }
 
 /// Local APIC setup for an application processor (the BSP measured the timer).
@@ -133,6 +137,8 @@ pub fn init(acpi: &AcpiInfo) {
     let source = if crate::drivers::hpet::present() { "HPET" } else { "PIT" };
     log!("apic", "LAPIC id {} at {:#x}, timer {} ticks/ms ({})", lapic_id(), acpi.lapic_phys, per_ms, source);
     TIMER_COUNT.store((per_ms as u64 * 1000 / crate::time::HZ).max(1), Ordering::Relaxed);
+    super::timer::choose(None);
+    log!("apic", "timer: {}", super::timer::describe());
     start_timer();
 
     IOAPIC_BASE.store(phys_to_virt(acpi.ioapic_phys), Ordering::Relaxed);
@@ -253,16 +259,23 @@ pub fn broadcast_ipi(vector: u8) {
 }
 
 /// INIT, then two STARTUP IPIs pointing at `page` (a 4 KiB page below 1 MiB).
+///
+/// Each ICR write pair runs with interrupts off: a handler that sends an IPI
+/// in between (a woken task's reschedule) would leave its own destination in
+/// ICR_HIGH, and the INIT would reset a running CPU.
 pub fn start_ap(apic: u32, page: u64, delay_us: impl Fn(u64)) {
-    wait_icr();
-    lapic_write(LAPIC_ICR_HIGH, apic << 24);
-    lapic_write(LAPIC_ICR_LOW, 0x0000_4500); // INIT, level assert
-    wait_icr();
+    let send = |low: u32| {
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            wait_icr();
+            lapic_write(LAPIC_ICR_HIGH, apic << 24);
+            lapic_write(LAPIC_ICR_LOW, low);
+            wait_icr();
+        })
+    };
+    send(0x0000_4500); // INIT, level assert
     delay_us(10_000);
     for _ in 0..2 {
-        lapic_write(LAPIC_ICR_HIGH, apic << 24);
-        lapic_write(LAPIC_ICR_LOW, 0x0000_4600 | (page >> 12) as u32); // STARTUP
-        wait_icr();
+        send(0x0000_4600 | (page >> 12) as u32); // STARTUP
         delay_us(200);
     }
 }

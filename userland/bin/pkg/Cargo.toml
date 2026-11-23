@@ -1,0 +1,10 @@
+[package]
+name = "pkg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+corekit.workspace = true
+gina.workspace = true
+nebula-web.workspace = true

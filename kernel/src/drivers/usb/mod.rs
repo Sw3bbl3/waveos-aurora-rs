@@ -1,8 +1,8 @@
 //! USB: host controller drivers — [`xhci`] (USB 3, and every device speed
 //! on PCs since about 2012), [`ehci`] (USB 2), [`ohci`] and [`uhci`] (USB 1.1,
 //! often as EHCI's companions) — and class drivers for hubs ([`hub`]),
-//! keyboards, pointing devices, touchpads and game controllers ([`hid`]) and
-//! storage ([`msc`]).
+//! keyboards, pointing devices, touchpads and game controllers ([`hid`]),
+//! storage ([`msc`]) and sound ([`uac`], over isochronous streams: [`iso`]).
 //!
 //! A controller driver implements [`Hcd`]: root ports, addressing a device
 //! and moving data. Everything above that is shared and lives in [`Bus`]:
@@ -16,8 +16,10 @@ pub mod ehci;
 mod hcutil;
 pub mod hid;
 pub mod hub;
+pub mod iso;
 pub mod msc;
 pub mod ohci;
+pub mod uac;
 pub mod uhci;
 pub mod xhci;
 
@@ -50,6 +52,7 @@ pub const DESC_ENDPOINT: u8 = 5;
 pub const DESC_HID: u8 = 0x21;
 pub const DESC_REPORT: u8 = 0x22;
 
+pub const CLASS_AUDIO: u8 = 1;
 pub const CLASS_HID: u8 = 3;
 pub const CLASS_MSC: u8 = 8;
 pub const CLASS_HUB: u8 = 9;
@@ -145,6 +148,9 @@ pub struct DeviceDescriptor {
     pub product: u16,
     pub manufacturer_index: u8,
     pub product_index: u8,
+    pub serial_index: u8,
+    /// `bcdDevice`: the device's release.
+    pub release: u16,
 }
 
 impl DeviceDescriptor {
@@ -158,6 +164,8 @@ impl DeviceDescriptor {
             product: u16::from_le_bytes([b[10], b[11]]),
             manufacturer_index: b[14],
             product_index: b[15],
+            serial_index: b[16],
+            release: u16::from_le_bytes([b[12], b[13]]),
         })
     }
 }
@@ -170,7 +178,9 @@ pub struct Endpoint {
     pub kind: u8,
     pub max_packet: u16,
     pub interval: u8,
-    /// SuperSpeed companion: max burst.
+    /// Extra packets per service interval, as xHCI's Max Burst Size: the
+    /// SuperSpeed companion's max burst, or a high-speed periodic endpoint's
+    /// additional transactions per microframe.
     pub burst: u8,
 }
 
@@ -231,12 +241,14 @@ impl Configuration {
                 }),
                 DESC_ENDPOINT if len >= 7 => {
                     if let Some(iface) = c.interfaces.last_mut() {
+                        let size = u16::from_le_bytes([d[4], d[5]]);
+                        let periodic = d[3] & 1 != 0; // isochronous or interrupt
                         iface.endpoints.push(Endpoint {
                             address: d[2],
                             kind: d[3] & 3,
-                            max_packet: u16::from_le_bytes([d[4], d[5]]) & 0x7FF,
+                            max_packet: size & 0x7FF,
                             interval: d[6],
-                            burst: 0,
+                            burst: if periodic { ((size >> 11) & 3) as u8 } else { 0 },
                         });
                     }
                 }
@@ -332,6 +344,10 @@ pub trait Hcd: Send + Sync {
     /// Root ports whose status changed since the last call. Controllers that
     /// interrupt on port changes queue them; the others are polled here.
     fn changed_ports(&self) -> Vec<u8>;
+    /// Whether port changes are only found by polling [`Hcd::changed_ports`].
+    fn polls_ports(&self) -> bool {
+        true
+    }
     /// Acknowledges a root port's changes; true when a device is connected.
     fn port_connected(&self, port: u8) -> bool;
     /// Resets a root port with a device on it. Returns the device's speed once
@@ -352,6 +368,25 @@ pub trait Hcd: Send + Sync {
     fn open_pipe(&self, dev: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool;
     /// The device cleared an endpoint's halt: its data toggle starts over.
     fn reset_toggle(&self, _dev: u8, _ep_address: u8) {}
+    /// Takes endpoints (of an alternate setting being left) off the schedule.
+    fn drop_endpoints(&self, _dev: u8, _eps: &[Endpoint]) -> bool {
+        true
+    }
+    /// Starts an isochronous stream on a configured endpoint (see [`iso`]).
+    fn open_iso(
+        &self,
+        _dev: u8,
+        _ep: &Endpoint,
+        _depth: usize,
+        _handler: Arc<dyn iso::IsoHandler>,
+    ) -> Result<(), iso::IsoError> {
+        Err(iso::IsoError::Unsupported)
+    }
+    /// Stops an isochronous stream; its handler's `stopped` runs.
+    fn close_iso(&self, _dev: u8, _ep_address: u8) {}
+    fn iso_stats(&self, _dev: u8, _ep_address: u8) -> Option<Arc<iso::IsoStats>> {
+        None
+    }
     /// The device is gone: stop its pipes and free its handle.
     fn release(&self, dev: u8);
     /// After sleep: reset and start again (every device is gone).
@@ -382,6 +417,8 @@ type DetachHook = Box<dyn Fn() + Send + Sync>;
 /// One USB bus: a host controller and the devices on it.
 pub struct Bus {
     pub index: usize,
+    /// The controller's PCI address ("0000:00:04.0"), as Linux names it.
+    pub pci: String,
     pub hcd: &'static dyn Hcd,
     devices: IrqMutex<Vec<DeviceRecord>>,
     detach: IrqMutex<Vec<(u8, DetachHook)>>,
@@ -406,6 +443,7 @@ pub fn register(hcd: &'static dyn Hcd) -> &'static Bus {
     let mut all = BUSES.lock();
     let bus: &'static Bus = Box::leak(Box::new(Bus {
         index: all.len(),
+        pci: PROBING.lock().clone(),
         hcd,
         devices: IrqMutex::new(Vec::new()),
         detach: IrqMutex::new(Vec::new()),
@@ -435,9 +473,35 @@ pub struct UsbDevice {
     pub desc: DeviceDescriptor,
     pub config: Configuration,
     pub name: String,
+    /// The manufacturer, product and serial number strings (may be empty).
+    pub maker: String,
+    pub model: String,
+    pub serial: String,
 }
 
 impl UsbDevice {
+    /// Where interface `interface` is, as Linux's sysfs and stable device
+    /// names say it.
+    pub fn place(&self, interface: u8) -> crate::drivers::evdev::UsbPlace {
+        let mut ports = format!("{}", self.pos.root_port);
+        for tier in 0..self.pos.depth {
+            ports.push_str(&format!(".{}", (self.pos.route >> (4 * tier)) & 0xF));
+        }
+        crate::drivers::evdev::UsbPlace {
+            bus: self.bus.index as u8 + 1,
+            ports,
+            interface,
+            vendor: self.desc.vendor,
+            product: self.desc.product,
+            version: self.desc.release,
+            maker: self.maker.clone(),
+            model: self.model.clone(),
+            serial: self.serial.clone(),
+            pci: self.bus.pci.clone(),
+            hid: 0,
+        }
+    }
+
     pub fn control(&self, setup: Setup, data: Option<&mut [u8]>) -> Result<usize, u8> {
         self.bus.control(self.dev, setup, data)
     }
@@ -481,7 +545,10 @@ impl Bus {
                 hub::changed(self, hub, bitmap);
             }
             self.settled.store(true, Ordering::Release);
-            self.wake.wait(250, || !self.port_events.lock().is_empty() || !self.hub_events.lock().is_empty());
+            // Controllers that report port changes as events wake this task;
+            // the others are polled four times a second.
+            let poll = if self.hcd.polls_ports() { 250 } else { 5000 };
+            self.wake.wait(poll, || !self.port_events.lock().is_empty() || !self.hub_events.lock().is_empty());
         }
     }
 
@@ -608,8 +675,8 @@ impl Bus {
         let maker = self.string(dev, desc.manufacturer_index);
         let name = match (maker.is_empty(), product.is_empty()) {
             (_, true) => format!("USB device {:04x}:{:04x}", desc.vendor, desc.product),
-            (true, false) => product,
-            (false, false) if product.starts_with(maker.as_str()) => product,
+            (true, false) => product.clone(),
+            (false, false) if product.starts_with(maker.as_str()) => product.clone(),
             (false, false) => format!("{maker} {product}"),
         };
         let mut head = [0u8; 9];
@@ -625,7 +692,18 @@ impl Bus {
         if self.hcd.control(dev, Setup::set_configuration(config.value), None).is_err() {
             return fail("SET_CONFIGURATION failed");
         }
-        let device = UsbDevice { bus: self, dev, pos, desc: desc.clone(), config, name: name.clone() };
+        let serial = self.string(dev, desc.serial_index);
+        let device = UsbDevice {
+            bus: self,
+            dev,
+            pos,
+            desc: desc.clone(),
+            config,
+            name: name.clone(),
+            maker: maker.clone(),
+            model: product.clone(),
+            serial,
+        };
         // Recorded first, so an unplug during the driver's setup still finds it.
         self.devices.lock().push(DeviceRecord { dev, pos, desc, name: name.clone(), driver: String::new() });
         let driver = attach(&device);
@@ -717,7 +795,9 @@ fn start_ticks() {
 fn tick_task() {
     loop {
         let now = crate::time::uptime_ms();
-        let mut next = 1000u64;
+        // Handlers that start needing ticks (a key held, a touchpad glide)
+        // kick this task; otherwise it rests.
+        let mut next = 10_000u64;
         let handlers: Vec<Arc<dyn PipeHandler>> =
             buses().iter().flat_map(|b| b.pipes.lock().iter().map(|(_, h)| h.clone()).collect::<Vec<_>>()).collect();
         for h in handlers {
@@ -751,6 +831,8 @@ pub fn attach(dev: &UsbDevice) -> String {
     for iface in dev.config.interfaces.iter().filter(|i| i.alternate == 0) {
         let taken = match (iface.class, iface.subclass, iface.protocol) {
             (CLASS_HID, ..) => hid::attach(dev, iface),
+            // Audio Control: the audio function (its streaming interfaces follow).
+            (CLASS_AUDIO, 0x01, _) => uac::attach(dev, iface),
             // SCSI commands over bulk-only transport.
             (CLASS_MSC, 0x06, 0x50) => msc::attach(dev, iface),
             // Xbox controllers have their own (vendor) protocols.
@@ -812,16 +894,23 @@ pub fn init() {
     let devices = crate::drivers::pci::devices();
     let usb =
         |prog_if: u8| devices.iter().filter(move |d| d.class == 0x0C && d.subclass == 0x03 && d.prog_if == prog_if);
+    let probe = |d: &crate::drivers::pci::Device, f: fn(&crate::drivers::pci::Device)| {
+        *PROBING.lock() = format!("0000:{:02x}:{:02x}.{:x}", d.bus, d.dev, d.func);
+        f(d);
+    };
     for d in usb(0x30) {
-        xhci::probe(d);
+        probe(d, xhci::probe);
     }
     for d in usb(0x20) {
-        ehci::probe(d);
+        probe(d, ehci::probe);
     }
     for d in usb(0x10) {
-        ohci::probe(d);
+        probe(d, ohci::probe);
     }
     for d in usb(0x00) {
-        uhci::probe(d);
+        probe(d, uhci::probe);
     }
 }
+
+/// The PCI address of the controller being probed (a bus records it).
+static PROBING: IrqMutex<String> = IrqMutex::new(String::new());

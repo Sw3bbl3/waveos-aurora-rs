@@ -3,7 +3,7 @@ Les meilleures applications WaveOS sont calmes, claires et rapides. Ces directiv
 
 ## Principes
 - **Clarté.** Le contenu passe en premier. Utilisez beaucoup d’espace, une hiérarchie typographique nette et peu de couleurs, pour que l’important ressorte.
-- **Profondeur.** Les barres latérales et les barres d’outils utilisent des matériaux translucides, comme de l’eau vive sur le bureau. Les cartes et les feuilles soulèvent le contenu qu’elles portent. Servez-vous de la profondeur pour montrer la structure, pas pour décorer.
+- **Profondeur.** Gardez les surfaces de lecture et d’édition opaques. Réservez une transparence discrète à la navigation et aux commandes flottantes du système. Les cartes et les feuilles soulèvent le contenu qu’elles portent. Servez-vous de la profondeur pour montrer la structure, pas pour décorer.
 - **Discrétion.** L’interface soutient le travail sans le gêner. Préférez les commandes familières aux commandes personnalisées et gardez le cadre sobre.
 - **Respect.** Suivez les réglages de la personne : apparence, couleur d’accent, taille du texte, Réduire les animations et Réduire la transparence. Ne perdez jamais son travail.
 
@@ -73,3 +73,15 @@ WaveOS utilise Manrope. Utilisez les styles de texte plutôt que des tailles fix
 - Traduisez votre application dans le plus de langues possible. WaveOS est offert en anglais et en français canadien.
 
 Consultez [WaveUI](developer-waveui.md) pour les vues qui mettent ces directives en œuvre.
+
+## Cadre des fenêtres et pointeurs
+
+Le compositeur réserve une bande supérieure de 34 points dans chaque fenêtre. La surface de l’application commence en dessous : cette bande ne fait pas partie des coordonnées de son contenu. Le survol révèle les commandes pour réduire, agrandir ou fermer, sans déplacer le contenu. Alt+Espace donne accès aux commandes au clavier; Tab, Retour et Échap permettent de les utiliser. Les quatre bords et les quatre coins permettent le redimensionnement avec des pointeurs directionnels.
+
+WaveUI choisit les pointeurs selon les vraies cibles. Utilisez `.cursor(waveui::cursor::CROSSHAIR)` pour le dessin, `GRAB` et `GRABBING` pour déplacer une image, et `PROGRESS` pendant une tâche en arrière-plan. Réservez `WAIT` aux interactions temporairement bloquées. Les durées communes sont de 120 ms pour les réactions, 180 ms pour les apparitions et 240 ms pour les transitions plus grandes. Respectez Réduire les animations.
+
+## Photos et prise en main
+
+Six photographies avec crédits remplacent la collection générée. Chaque photo conserve ses couleurs dans les deux apparences. Les choix personnalisés et les identifiants existants sont conservés. Les sources et licences se trouvent dans `assets/WALLPAPER-CREDITS.md`.
+
+Bienvenue propose une visite interactive facultative, accessible aussi par **Take a Tour** dans le menu WayV. Les conseils suivent les commandes à l’écran et utilisent une fenêtre de pratique temporaire sans ouvrir ni modifier vos documents. F1 active les conseils au clavier, Échap quitte la visite, et la fin de la visite est enregistrée.

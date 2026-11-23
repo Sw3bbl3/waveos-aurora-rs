@@ -141,6 +141,9 @@ impl Socket {
                 }
             }
             Kind::Udp => {
+                // UDP connect selects a route/source even without sending.
+                // glibc uses it when sorting mixed IPv4/IPv6 DNS answers.
+                with(|s| s.source_for(remote.0)).ok_or(ENETUNREACH)?;
                 let mut i = self.inner.lock();
                 if i.port.is_none() {
                     i.port = Some(with(|s| s.udp.bind(0))?);
@@ -153,6 +156,14 @@ impl Socket {
                 Ok(())
             }
         }
+    }
+
+    pub fn disconnect_datagram(&self) -> Result<(), isize> {
+        if self.kind != Kind::Udp {
+            return Err(EAFNOSUPPORT);
+        }
+        self.inner.lock().peer = None;
+        Ok(())
     }
 
     pub fn listen(&self, backlog: usize) -> Result<(), isize> {
@@ -375,6 +386,11 @@ impl Socket {
         with(|s| tcp::state(s, id).and_then(|t| t.3))
     }
 
+    pub fn take_error(&self) -> Option<isize> {
+        let id = self.inner.lock().tcp?;
+        with(|s| tcp::take_error(s, id))
+    }
+
     /// True while a TCP connection is being set up.
     pub fn connecting(&self) -> bool {
         let Some(id) = self.inner.lock().tcp else { return false };
@@ -403,7 +419,12 @@ impl Socket {
                     None => ((ANY_ADDR, 0), (ANY_ADDR, 0), STATE_CLOSED),
                 })
             }
-            _ => ((ANY_ADDR, i.port.unwrap_or(0)), i.peer.unwrap_or((ANY_ADDR, 0)), STATE_CLOSED),
+            _ => {
+                let (port, peer) = (i.port.unwrap_or(0), i.peer);
+                drop(i);
+                let local = peer.and_then(|p| with(|s| s.source_for(p.0))).unwrap_or(ANY_ADDR);
+                ((local, port), peer.unwrap_or((ANY_ADDR, 0)), STATE_CLOSED)
+            }
         }
     }
 }

@@ -47,6 +47,9 @@ struct Queue {
 
 /// Bytes a queue holds before writers wait.
 const CAPACITY: usize = 256 * 1024;
+/// Messages a queue holds before writers wait (empty datagrams take no
+/// bytes, but each is kernel memory).
+const MAX_SEGMENTS: usize = 1024;
 
 type QueueRef = Arc<Mutex<Queue>>;
 
@@ -190,7 +193,7 @@ impl Socket {
     /// The next connection on a listening socket.
     pub fn accept(&self, nonblock: bool, pid: u32) -> Result<Arc<Socket>, isize> {
         loop {
-            let gen = readiness::generation();
+            let watch = (!nonblock).then(|| readiness::Watch::new(&[readiness::key(self)]));
             {
                 let mut s = self.st.lock();
                 if !s.listening {
@@ -202,7 +205,7 @@ impl Socket {
                     return Ok(c);
                 }
             }
-            wait(gen, &[readiness::key(self)], nonblock)?;
+            wait(watch)?;
         }
     }
 
@@ -236,13 +239,13 @@ impl Socket {
         let mut fds = Some(fds);
         let mut done = 0;
         loop {
-            let gen = readiness::generation();
+            let watch = (!nonblock).then(|| readiness::Watch::new(&[readiness::key(Arc::as_ptr(&queue))]));
             {
                 let mut q = queue.lock();
                 if q.reader_gone {
                     return if done > 0 { Ok(done) } else { Err(EPIPE) };
                 }
-                let room = CAPACITY.saturating_sub(q.bytes);
+                let room = if q.segs.len() >= MAX_SEGMENTS { 0 } else { CAPACITY.saturating_sub(q.bytes) };
                 let whole = self.ty != Type::Stream;
                 if whole && data.len() > CAPACITY {
                     return Err(EMSGSIZE);
@@ -270,7 +273,7 @@ impl Socket {
             if done > 0 && nonblock {
                 return Ok(done);
             }
-            wait(gen, &[readiness::key(Arc::as_ptr(&queue))], nonblock)?;
+            wait(watch)?;
         }
     }
 
@@ -278,7 +281,8 @@ impl Socket {
     /// whether a datagram was cut short. `Ok((0, ..))` at end of file.
     pub fn recv(&self, out: &mut [u8], peek: bool, nonblock: bool) -> Result<Received, isize> {
         loop {
-            let gen = readiness::generation();
+            let watch = (!nonblock)
+                .then(|| readiness::Watch::new(&[readiness::key(Arc::as_ptr(&self.rx)), readiness::key(self)]));
             {
                 let mut q = self.rx.lock();
                 if !q.segs.is_empty() {
@@ -294,7 +298,7 @@ impl Socket {
                     return Ok(Received::default());
                 }
             }
-            wait(gen, &[readiness::key(Arc::as_ptr(&self.rx)), readiness::key(self)], nonblock)?;
+            wait(watch)?;
         }
     }
 
@@ -383,7 +387,7 @@ impl Socket {
         let (writable, gone) = match tx {
             Some(t) => {
                 let q = t.lock();
-                (q.reader_gone || q.bytes < CAPACITY, q.reader_gone)
+                (q.reader_gone || (q.bytes < CAPACITY && q.segs.len() < MAX_SEGMENTS), q.reader_gone)
             }
             None => (self.ty == Type::Dgram, !connected && self.ty != Type::Dgram),
         };
@@ -444,13 +448,11 @@ pub struct Received {
 }
 
 /// Waits for the next change to `keys` (or fails at once without blocking).
-fn wait(gen: u64, keys: &[usize], nonblock: bool) -> Result<(), isize> {
-    if nonblock {
-        return Err(EAGAIN);
-    }
+fn wait(watch: Option<readiness::Watch>) -> Result<(), isize> {
+    let watch = watch.ok_or(EAGAIN)?;
     if crate::proc::interrupted() {
         return Err(EINTR);
     }
-    readiness::wait(gen, keys, 1000);
+    watch.wait(1000);
     Ok(())
 }

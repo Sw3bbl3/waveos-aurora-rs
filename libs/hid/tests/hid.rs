@@ -1,9 +1,9 @@
 //! Host tests: real devices' report descriptors and reports.
 
 use aurora_hid::gamepad::{self, button, Layout};
-use aurora_hid::gestures::{Gestures, Output, Settings};
+use aurora_hid::gestures::{Gestures, Output, Settings, Swipe};
 use aurora_hid::touchpad::{self, Contact, Frame};
-use aurora_hid::{keyboard, pointer, usage, Descriptor, Kind};
+use aurora_hid::{keyboard, pointer, touchscreen, usage, Descriptor, Kind};
 
 /// The boot keyboard descriptor (HID 1.11 Appendix B.1), as most keyboards send.
 const BOOT_KEYBOARD: &[u8] = &[
@@ -365,6 +365,46 @@ fn palms_are_ignored() {
     g.frame(0, &palm(5000), &s);
     let o = g.frame(50, &palm(7000), &s);
     assert_eq!((o.dx, o.buttons), (0, 0));
+}
+
+#[test]
+fn three_finger_swipes() {
+    let s = Settings::default();
+    let mut g = pad();
+    let three = |x: i32| frame(&[(1, x, 2000), (2, x + 1000, 3000), (3, x + 2000, 4000)], false);
+    g.frame(0, &three(3000), &s);
+    // 10 mm: not yet; 20 mm: a swipe right, reported once; no click on lifting.
+    assert_eq!(g.frame(20, &three(4000), &s).swipe, None);
+    let o = g.frame(40, &three(5000), &s);
+    assert_eq!(o.swipe, Some(Swipe::Right));
+    assert_eq!((o.dx, o.dy, o.scroll_y), (0, 0, 0), "a swipe moves nothing else");
+    assert_eq!(g.frame(60, &three(6000), &s).swipe, None, "once per touch");
+    assert_eq!(g.frame(80, &lift(), &s).buttons, 0, "not a three-finger tap");
+    // Upward, on a new touch.
+    let up = |y: i32| frame(&[(4, 3000, y), (5, 4000, y), (6, 5000, y)], false);
+    g.frame(1000, &up(5000), &s);
+    assert_eq!(g.frame(1020, &up(3000), &s).swipe, Some(Swipe::Up));
+}
+
+#[test]
+fn touch_screen_follows_the_first_finger() {
+    let mut desc = precision_touchpad();
+    desc[3] = 0x04; // the application collection: Touch Screen instead of Touch Pad
+    let d = parse(&desc);
+    assert!(touchscreen::is_touchscreen(&d) && !touchpad::is_touchpad(&d));
+    assert_eq!(touchscreen::info(&d).map(|i| (i.x_max, i.y_max)), Some((10000, 6000)));
+    assert_eq!(touchpad::input_mode_report_with(&d, 2), Some(vec![3, 2]));
+    let mut t = touchscreen::Touches::new();
+    let read = |c: &[(u8, bool, u16, u16)], n| touchscreen::read(&d, &touch_report(&d, c, n, false)).unwrap();
+    let down = t.feed(read(&[(1, true, 100, 200)], 1)).unwrap();
+    assert_eq!(down, touchscreen::Touch { x: 100, y: 200, down: true });
+    // A second finger doesn't take over; the first one moves.
+    let moved = t.feed(read(&[(2, true, 9000, 5000), (1, true, 150, 250)], 2)).unwrap();
+    assert_eq!((moved.x, moved.y, moved.down), (150, 250, true));
+    // Lifting lets go where it was.
+    let up = t.feed(read(&[(1, false, 150, 250)], 1)).unwrap();
+    assert_eq!(up, touchscreen::Touch { x: 150, y: 250, down: false });
+    assert_eq!(t.feed(read(&[], 0)), None);
 }
 
 // ------------------------------------------------------------ gamepads

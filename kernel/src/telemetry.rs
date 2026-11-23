@@ -254,6 +254,30 @@ fn snapshot() -> String {
     for (i, (busy, idle)) in crate::sched::cpu_times().iter().enumerate() {
         let _ = write!(o, "{}[{},{}]", if i > 0 { "," } else { "" }, busy, idle);
     }
+    // Per CPU: what woke it (timer interrupts, of which slice ends and empty
+    // ones; expired timers; IPIs and IPIs avoided) and time idle (µs).
+    let _ = write!(o, "],\"pcpu\":[");
+    for (i, cpu) in crate::arch::percpu::online().enumerate() {
+        let st = &crate::timer::STATS[cpu];
+        let (ipi, avoided) = crate::power::idle::ipi_counts(cpu);
+        let _ = write!(
+            o,
+            "{}{{\"cpu\":{},\"timer\":{},\"slice\":{},\"empty\":{},\"expired\":{},\"ipi\":{},\"ipiAvoided\":{},\"idleUs\":{}}}",
+            if i > 0 { "," } else { "" },
+            cpu,
+            st.interrupts.load(Ordering::Relaxed),
+            st.slices.load(Ordering::Relaxed),
+            st.empty.load(Ordering::Relaxed),
+            st.expired.load(Ordering::Relaxed),
+            ipi,
+            avoided,
+            crate::power::idle::idle_ns(cpu) / 1000
+        );
+    }
+    let _ = write!(o, "],\"wakers\":[");
+    for (i, (name, n)) in crate::sched::timer_wakeups().iter().enumerate() {
+        let _ = write!(o, "{}[{},{}]", if i > 0 { "," } else { "" }, json_str(name), n);
+    }
     let _ = write!(o, "]");
 
     // Processes.
@@ -276,9 +300,11 @@ fn snapshot() -> String {
     let m = crate::mm::stats();
     let _ = write!(
         o,
-        "],\"mem\":{{\"total\":{},\"used\":{},\"heap\":{},\"heapUsed\":{}}}",
+        "],\"mem\":{{\"total\":{},\"used\":{},\"heap\":{},\"heapUsed\":{}",
         m.total_bytes, m.used_bytes, m.heap_size, m.heap_used
     );
+    crate::mm::write_telemetry(&mut o);
+    let _ = write!(o, "}}");
 
     // Syscalls and interrupts.
     let _ = write!(o, ",\"sys\":[");

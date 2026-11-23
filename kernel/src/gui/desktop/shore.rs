@@ -1,6 +1,11 @@
 //! Shore: where you arrive. The first-boot setup (create the account, then
-//! choose an appearance and a wallpaper), the login screen at start-up and
-//! the lock screen (Super L, Current's Lock, waking from sleep).
+//! choose an appearance and a wallpaper), the login screen at start-up
+//! (with a row of accounts to choose from when there are several) and the
+//! lock screen (Super L, Current's Lock, waking from sleep when the account
+//! has a password).
+//!
+//! Passwords are checked by `users::db` (rate limited: after three wrong
+//! ones each try has to wait longer).
 //!
 //! While Shore is up nothing else receives input, windows aren't drawn and
 //! Crest shows a padlock.
@@ -35,6 +40,8 @@ pub(super) enum Mode {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Hit {
     Field(usize),
+    /// An account in the login row.
+    User(usize),
     AutoLogin,
     Continue,
     Back,
@@ -73,6 +80,11 @@ pub(super) struct Shore {
     hover: Option<Hit>,
     /// Wallpaper thumbnails for setup's second step (decoded once).
     thumbs: Vec<Option<aurora_image::Image>>,
+    /// Login: the accounts to choose from, and the chosen one.
+    accounts: Vec<Account>,
+    selected: usize,
+    /// Too many wrong passwords: no tries before this time (ms).
+    wait_until: u64,
 }
 
 impl Shore {
@@ -81,7 +93,7 @@ impl Shore {
             Mode::Setup => alloc::vec![
                 Field::new("Full name", "Your name", false),
                 Field::new("Account name", "", false),
-                Field::new("Password", "", true),
+                Field::new("Password", "Optional", true),
                 Field::new("Confirm", "", true),
                 Field::new("Hint", "Shown after three wrong tries", false),
             ],
@@ -99,7 +111,22 @@ impl Shore {
             shake_at: None,
             hover: None,
             thumbs: Vec::new(),
+            accounts: Vec::new(),
+            selected: 0,
+            wait_until: 0,
         }
+    }
+
+    /// The login screen, with `accounts` to choose from (`uid` first chosen).
+    pub(super) fn login(mode: Mode, accounts: Vec<Account>, uid: u32) -> Shore {
+        let mut s = Shore::new(mode);
+        s.selected = accounts.iter().position(|a| a.uid == uid).unwrap_or(0);
+        s.accounts = accounts;
+        s
+    }
+
+    fn chosen(&self) -> Option<&Account> {
+        self.accounts.get(self.selected)
     }
 }
 
@@ -128,13 +155,28 @@ impl Desktop {
         self.shore.is_some()
     }
 
-    /// The login screen to show at start-up, if any.
+    /// The login screen to show at start-up, if any: setup before the
+    /// first account exists; nothing when one logs in by itself (the only
+    /// account has no password, or "log in automatically" is on).
     pub(super) fn startup_shore(account: Option<&Account>) -> Option<Shore> {
-        match account {
-            None => Some(Shore::new(Mode::Setup)),
-            Some(_) if prefs::get_bool(pref::AUTO_LOGIN) => None,
-            Some(_) => Some(Shore::new(Mode::Login)),
+        let accounts = Account::all();
+        if accounts.is_empty() {
+            return Some(Shore::new(Mode::Setup));
         }
+        if let Some(uid) = crate::users::db::auto_login_uid() {
+            crate::users::set_session(uid);
+            return None;
+        }
+        Some(Shore::login(Mode::Login, accounts, account.map_or(0, |a| a.uid)))
+    }
+
+    /// The login screen after logging out (or to switch accounts).
+    pub(super) fn show_login(&mut self) {
+        let uid = self.account.as_ref().map_or(0, |a| a.uid);
+        self.shore = Some(Shore::login(Mode::Login, Account::all(), uid));
+        self.bar_hover = None;
+        self.crest_retarget();
+        self.damage_all();
     }
 
     /// Locks the screen (nothing happens before an account exists).
@@ -152,7 +194,8 @@ impl Desktop {
         if self.spotlight_open() {
             self.toggle_spotlight();
         }
-        self.shore = Some(Shore::new(Mode::Locked));
+        let me = self.account.clone().into_iter().collect();
+        self.shore = Some(Shore::login(Mode::Locked, me, 0));
         self.bar_hover = None;
         self.crest_retarget();
         self.damage_all();
@@ -181,7 +224,7 @@ impl Desktop {
                 let card = self.setup_card();
                 let col = (card.w - 80 - 14) / 2;
                 let (x0, x1) = (card.x + 40, card.x + 40 + col + 14);
-                let y = card.y + 290;
+                let y = card.y + 290 - (624 - card.h).clamp(0, 64);
                 v.push((Hit::Field(0), Rect::new(x0, y, col, 36)));
                 v.push((Hit::Field(1), Rect::new(x1, y, col, 36)));
                 v.push((Hit::Field(2), Rect::new(x0, y + 70, col, 36)));
@@ -199,7 +242,12 @@ impl Desktop {
                 for i in 0..wallpaper::NAMES.len() as u8 {
                     v.push((
                         Hit::Wallpaper(i),
-                        Rect::new(card.x + 40 + i as i32 * (tw + 12), card.y + 296, tw, tw * 5 / 8),
+                        Rect::new(
+                            card.x + 40 + (i as i32 % 3) * (tw + 12),
+                            card.y + 270 + (i as i32 / 3) * (tw * 5 / 8 + 30),
+                            tw,
+                            tw * 5 / 8,
+                        ),
                     ));
                 }
                 v.push((Hit::Continue, Rect::new(card.right() - 40 - 112, card.bottom() - 30 - 34, 112, 34)));
@@ -207,8 +255,23 @@ impl Desktop {
             }
             _ => {
                 let field = Rect::new(w / 2 - 140, h - 196, 280, 42);
-                v.push((Hit::Field(0), field));
-                v.push((Hit::Submit, Rect::new(field.right() - 37, field.y + 5, 32, 32)));
+                if s.chosen().is_none_or(|a| a.has_password) {
+                    v.push((Hit::Field(0), field));
+                    v.push((Hit::Submit, Rect::new(field.right() - 37, field.y + 5, 32, 32)));
+                } else {
+                    // No password: one button logs in.
+                    v.push((Hit::Submit, Rect::new(w / 2 - 70, field.y, 140, 42)));
+                }
+                // Several accounts: a row of pictures to choose from.
+                let n = s.accounts.len() as i32;
+                if s.mode == Mode::Login && n > 1 {
+                    let (size, gap) = (52, 22);
+                    let total = n * size + (n - 1) * gap;
+                    for i in 0..n {
+                        let x = w / 2 - total / 2 + i * (size + gap);
+                        v.push((Hit::User(i as usize), Rect::new(x, h - 456, size, size + 22)));
+                    }
+                }
                 for (i, hit) in [Hit::Sleep, Hit::Restart, Hit::ShutDown].into_iter().enumerate() {
                     v.push((hit, Rect::new(34 + i as i32 * 66, h - 98, 44, 44)));
                 }
@@ -219,7 +282,7 @@ impl Desktop {
 
     fn setup_card(&self) -> Rect {
         let step = self.shore.as_ref().map_or(0, |s| s.step);
-        let h = if step == 0 { 624 } else { 520 };
+        let h = if step == 0 { 624 } else { 600 };
         let h = h.min(self.h - 40);
         Rect::new((self.w - CARD_W) / 2, (self.h - h) / 2, CARD_W, h)
     }
@@ -245,6 +308,17 @@ impl Desktop {
             Some(Hit::Field(i)) => {
                 if let Some(s) = self.shore.as_mut() {
                     s.focus = i;
+                }
+            }
+            Some(Hit::User(i)) => {
+                if let Some(s) = self.shore.as_mut() {
+                    if s.selected != i {
+                        s.selected = i;
+                        s.fields[0].text.clear();
+                        s.error = None;
+                        s.tries = 0;
+                        s.wait_until = 0;
+                    }
                 }
             }
             Some(Hit::AutoLogin) => {
@@ -340,9 +414,12 @@ impl Desktop {
             s.error = if full.is_empty() {
                 s.focus = 0;
                 Some("Enter your name.")
-            } else if pass.chars().count() < 4 {
+            } else if !crate::users::db::valid_name(&s.fields[1].text) {
+                s.focus = 1;
+                Some("Account names are lowercase letters and digits.")
+            } else if !pass.is_empty() && pass.chars().count() < 4 {
                 s.focus = 2;
-                Some("Use at least 4 characters for the password.")
+                Some("Use at least 4 characters, or leave the password empty.")
             } else if *pass != s.fields[3].text {
                 s.focus = 3;
                 Some("The passwords don't match.")
@@ -368,6 +445,7 @@ impl Desktop {
         match Account::create(&full, &name, &pass, &hint) {
             Ok(a) => {
                 log!("gui", "created the account {}", a.name);
+                crate::users::set_session(a.uid);
                 self.account = Some(a);
                 if let Err(e) = prefs::set(pref::AUTO_LOGIN, if auto { "1" } else { "0" }) {
                     log!("gui", "could not save auto login: {}", aurora_abi::err::name(e));
@@ -385,23 +463,41 @@ impl Desktop {
     }
 
     fn shore_submit(&mut self) {
+        let now = self.now_ms;
         let Some(s) = self.shore.as_mut() else { return };
-        let ok = self.account.as_ref().is_some_and(|a| a.verify(&s.fields[0].text));
-        if ok {
-            s.fields[0].text.clear();
-            self.unlock();
+        let Some(account) = s.chosen().cloned() else { return };
+        if now < s.wait_until {
+            s.shake_at = Some(now);
             return;
         }
-        s.tries += 1;
-        s.fields[0].text.clear();
-        s.error = Some("Wrong password. Try again.");
-        s.shake_at = Some(self.now_ms);
-        crate::drivers::audio::play_sound("error");
+        let typed = core::mem::take(&mut s.fields[0].text);
+        match account.verify(&typed) {
+            Ok(()) => {
+                if s.mode == Mode::Login {
+                    crate::users::set_session(account.uid);
+                    self.account = Some(account);
+                }
+                self.unlock();
+            }
+            Err(e) => {
+                s.tries += 1;
+                let wait = crate::users::db::wait_ms(account.uid);
+                s.wait_until = now + wait;
+                s.error = Some(if e == aurora_abi::err::EAGAIN || wait > 0 {
+                    "Too many tries."
+                } else {
+                    "Wrong password. Try again."
+                });
+                s.shake_at = Some(now);
+                crate::drivers::audio::play_sound("error");
+            }
+        }
     }
 
     /// True while the password field shakes.
     pub(super) fn shore_moving(&self) -> bool {
-        self.shore.as_ref().is_some_and(|s| s.shake_at.is_some_and(|t| self.now_ms < t + SHAKE_MS))
+        !theme::reduce_motion()
+            && self.shore.as_ref().is_some_and(|s| s.shake_at.is_some_and(|t| self.now_ms < t + SHAKE_MS))
     }
 
     // --------------------------------------------------------- painting
@@ -416,6 +512,9 @@ impl Desktop {
     }
 
     fn shake(&self) -> i32 {
+        if theme::reduce_motion() {
+            return 0;
+        }
         let Some(t) = self.shore.as_ref().and_then(|s| s.shake_at) else { return 0 };
         let dt = self.now_ms.saturating_sub(t);
         if dt >= SHAKE_MS {
@@ -464,19 +563,50 @@ impl Desktop {
         cv.text(w / 2 - tf.width(&time) / 2, 260, &time, tf, ink);
 
         let s = self.shore.as_ref().unwrap();
-        let (initials, name, hint) = match &self.account {
-            Some(a) => (a.initials(), a.full.clone(), a.hint.clone()),
-            None => (String::from("?"), String::new(), String::new()),
+        let chosen = s.chosen().cloned();
+        let (initials, name, hint, tone) = match &chosen {
+            Some(a) => (a.initials(), a.full.clone(), a.hint.clone(), a.tone()),
+            None => (String::from("?"), String::new(), String::new(), 0),
         };
+        let layout = self.shore_layout();
+        let rect = |hit: Hit| layout.iter().find(|(h, _)| *h == hit).map(|(_, r)| *r).unwrap_or_default();
+        // The row of accounts (several only).
+        for (i, a) in s.accounts.iter().enumerate() {
+            let r = rect(Hit::User(i));
+            if r.w == 0 {
+                continue;
+            }
+            let pic = Rect::new(r.x, r.y, r.w, r.w);
+            let (c0, c1) = account::TONES[a.tone()];
+            if i == s.selected || s.hover == Some(Hit::User(i)) {
+                cv.fill_circle(pic.x + pic.w / 2, pic.y + pic.w / 2, pic.w / 2 + 3, with_alpha(0xFFFF_FFFF, 0x90));
+            }
+            cv.fill_round_rect_dgradient(pic, pic.w / 2, c0, c1);
+            cv.text_centered(pic, &a.initials(), theme::ui_bold(17), 0xFFFF_FFFF);
+            let f = theme::ui_bold(11);
+            let label: String = a.name.chars().take(12).collect();
+            cv.text(pic.x + pic.w / 2 - f.width(&label) / 2, r.bottom() - 2, &label, f, ink);
+        }
         let av = Rect::new(w / 2 - 38, h - 336, 76, 76);
+        let (c0, c1) = account::TONES[tone];
         cv.fill_circle(w / 2, av.y + 38, 41, with_alpha(0xFFFF_FFFF, 0x90));
-        cv.fill_round_rect_dgradient(av, 38, 0xFF4A_63FF, 0xFF8D_2CF0);
+        cv.fill_round_rect_dgradient(av, 38, c0, c1);
         cv.text_centered(av, &initials, theme::display(27), 0xFFFF_FFFF);
         let nf = theme::ui_bold(17);
         cv.text(w / 2 - nf.width(&name) / 2, av.bottom() + 30, &name, nf, ink);
 
-        let layout = self.shore_layout();
-        let rect = |hit: Hit| layout.iter().find(|(h, _)| *h == hit).map(|(_, r)| *r).unwrap_or_default();
+        if chosen.as_ref().is_some_and(|a| !a.has_password) {
+            // No password: a single button.
+            let go = rect(Hit::Submit);
+            cv.shadow(go, 21, 14, 4, t.shadow / 4);
+            cv.fill_round_rect(go, 21, theme::accent());
+            if s.hover == Some(Hit::Submit) {
+                cv.fill_round_rect(go, 21, with_alpha(0xFFFF_FFFF, 0x24));
+            }
+            cv.text_centered(go, "Log In", theme::ui_bold(14), 0xFFFF_FFFF);
+            self.paint_shore_footer(cv, ink);
+            return;
+        }
         let field = rect(Hit::Field(0)).offset(self.shake(), 0);
         cv.shadow(field, 21, 14, 4, t.shadow / 4);
         cv.frosted(field, 21, t.glass_tint);
@@ -503,7 +633,9 @@ impl Desktop {
         cv.line(gx - 5, gy, gx + 5, gy, 2, 0xFFFF_FFFF);
         cv.line(gx + 1, gy - 4, gx + 5, gy, 2, 0xFFFF_FFFF);
         cv.line(gx + 1, gy + 4, gx + 5, gy, 2, 0xFFFF_FFFF);
+        let wait = s.wait_until.saturating_sub(self.now_ms);
         let caption = match s.error {
+            _ if wait > 0 => format!("Too many tries · try again in {} s", wait.div_ceil(1000)),
             Some(e) if s.tries >= 3 && !hint.is_empty() => format!("{e} Hint: {hint}"),
             Some(e) => String::from(e),
             None if s.mode == Mode::Locked => String::from("Locked · enter your password to continue"),
@@ -512,7 +644,15 @@ impl Desktop {
         let cf = theme::ui_bold(12);
         let cc = if s.error.is_some() { 0xFFFF_8A8A } else { sub };
         cv.text(w / 2 - cf.width(&caption) / 2, field.bottom() + 26, &caption, cf, cc);
+        self.paint_shore_footer(cv, ink);
+    }
 
+    /// Sleep, Restart and Shut Down, and the network chip.
+    fn paint_shore_footer(&mut self, cv: &mut Canvas, ink: u32) {
+        let t = theme::current();
+        let layout = self.shore_layout();
+        let rect = |hit: Hit| layout.iter().find(|(h, _)| *h == hit).map(|(_, r)| *r).unwrap_or_default();
+        let s = self.shore.as_ref().unwrap();
         // Sleep, Restart and Shut Down.
         for (hit, label) in [(Hit::Sleep, "Sleep"), (Hit::Restart, "Restart"), (Hit::ShutDown, "Shut Down")] {
             let r = rect(hit);
@@ -561,7 +701,9 @@ impl Desktop {
         let mut v: Vec<Rect> = self
             .shore_layout()
             .into_iter()
-            .filter(|(h, _)| matches!(h, Hit::Field(0) | Hit::Sleep | Hit::Restart | Hit::ShutDown))
+            .filter(|(h, _)| {
+                matches!(h, Hit::Field(0) | Hit::Submit | Hit::User(_) | Hit::Sleep | Hit::Restart | Hit::ShutDown)
+            })
             .map(|(_, r)| r)
             .collect();
         v.push(self.network_chip().0);
@@ -610,7 +752,9 @@ impl Desktop {
 
         if s.step == 0 {
             // Picture circle with the initials typed so far.
-            let av = Rect::new(card.x + card.w / 2 - 42, card.y + 66, 84, 84);
+            let lift = (624 - card.h).clamp(0, 64);
+            let diameter = if lift > 0 { 64 } else { 84 };
+            let av = Rect::new(card.x + card.w / 2 - diameter / 2, card.y + 66, diameter, diameter);
             cv.fill_round_rect_dgradient(av, 42, 0xFF4A_63FF, 0xFF8D_2CF0);
             let initials = account::initials(&s.fields[0].text);
             cv.text_centered(
@@ -619,13 +763,13 @@ impl Desktop {
                 theme::display(30),
                 0xFFFF_FFFF,
             );
-            center(cv, card.y + 190, "Make this computer yours", theme::display(22), t.text);
+            center(cv, card.y + 190 - lift / 2, "Make this computer yours", theme::display(22), t.text);
             let lines = [
-                "One account keeps your files, settings and wallpaper. You'll use",
-                "the password to log in and to approve changes.",
+                "One account keeps your files, settings and wallpaper. A password",
+                "protects them and approves changes; you can leave it empty.",
             ];
             for (i, l) in lines.iter().enumerate() {
-                center(cv, card.y + 216 + i as i32 * 19, l, theme::ui(13), t.text_secondary);
+                center(cv, card.y + 216 - lift / 2 + i as i32 * 19, l, theme::ui(13), t.text_secondary);
             }
             for i in 0..5 {
                 let r = rect(Hit::Field(i));
@@ -686,7 +830,7 @@ impl Desktop {
                 cv.text(
                     r.x + 18,
                     r.y + 72,
-                    if dark { "Navy glass, night pictures" } else { "Paper glass, day pictures" },
+                    if dark { "Quiet surfaces, deep contrast" } else { "Clear surfaces, bright appearance" },
                     theme::ui(11),
                     mix(ink, if dark { 0xFF11_1527 } else { 0xFFFB_FCFF }, 90),
                 );
@@ -698,7 +842,8 @@ impl Desktop {
                 s.thumbs = (0..wallpaper::NAMES.len() as u8)
                     .map(|i| {
                         wallpaper::file(i, dark)
-                            .and_then(|f| crate::fs::read_all(f).ok())
+                            .map(|f| f.replace("/System/Wallpapers/", "/System/Wallpapers/Thumbnails/"))
+                            .and_then(|f| crate::fs::read_all(&f).ok())
                             .and_then(|d| aurora_image::decode(&d).ok())
                             .map(|img| img.thumbnail(260, 160))
                     })
@@ -747,7 +892,7 @@ impl Desktop {
         // Security note or the error, bottom left.
         let (text, c) = match s.error {
             Some(e) => (e, 0xFFFF_6B6B),
-            None if s.step == 0 => ("Stored only as a salted hash, never as text.", t.text_secondary),
+            None if s.step == 0 => ("Passwords are kept only as a salted hash.", t.text_secondary),
             None => ("WaveOS Aurora · by WayV", t.text_secondary),
         };
         let note_x = card.x + 40 + self.shake();

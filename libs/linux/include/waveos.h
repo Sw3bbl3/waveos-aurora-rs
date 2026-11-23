@@ -30,9 +30,14 @@
 #define WAVE_PREF_GET 46
 #define WAVE_DISPLAY_MODES 49
 #define WAVE_AUDIO_OPEN 52
+#define WAVE_GAMEPADS 76
+#define WAVE_GAMEPAD_STATE 77
+#define WAVE_GAMEPAD_RUMBLE 78
 #define WAVE_AUDIO_CONTROL 71
 #define WAVE_WIN_SET_CURSOR 81
 #define WAVE_EVENT_FD 82
+#define WAVE_UNIX_MS 83
+#define WAVE_WIN_SET_PROGRAM 93
 
 /* Window flags for wave_win_create. */
 #define WAVE_WIN_RESIZABLE 1
@@ -50,6 +55,8 @@
 #define WAVE_EV_SCREEN 14
 /* The compositor has shown the window's last present: draw the next frame. */
 #define WAVE_EV_FRAME 15
+/* A controller changed: a = id, b = buttons, c = 1 connected, 2 disconnected. */
+#define WAVE_EV_GAMEPAD 16
 
 /* Pointer shapes for wave_win_set_cursor. */
 #define WAVE_CURSOR_ARROW 0
@@ -62,6 +69,12 @@
 #define WAVE_CURSOR_RESIZE_NS 7
 #define WAVE_CURSOR_MOVE 8
 #define WAVE_CURSOR_HIDDEN 9
+#define WAVE_CURSOR_RESIZE_NWSE 10
+#define WAVE_CURSOR_RESIZE_NESW 11
+#define WAVE_CURSOR_GRAB 12
+#define WAVE_CURSOR_GRABBING 13
+#define WAVE_CURSOR_COPY 14
+#define WAVE_CURSOR_PROGRESS 15
 
 /* Key codes (wave_event.a for WAVE_EV_KEY). */
 enum wave_key {
@@ -98,6 +111,46 @@ struct wave_event {
 struct wave_surface {
     uint64_t addr;
     uint32_t width, height, stride, scale;
+};
+
+/*
+ * Game controllers, in one standard layout whatever the device: face
+ * buttons by position (Xbox A B X Y = south east west north), sticks
+ * -32768..32767 with right and down positive, triggers 0..65535. While the
+ * program isn't the one in front (or WaveOS's own menus are open), a
+ * controller reads as nothing pressed.
+ */
+#define WAVE_PAD_SOUTH (1u << 0)
+#define WAVE_PAD_EAST (1u << 1)
+#define WAVE_PAD_WEST (1u << 2)
+#define WAVE_PAD_NORTH (1u << 3)
+#define WAVE_PAD_LEFT_SHOULDER (1u << 4)
+#define WAVE_PAD_RIGHT_SHOULDER (1u << 5)
+#define WAVE_PAD_LEFT_TRIGGER (1u << 6)
+#define WAVE_PAD_RIGHT_TRIGGER (1u << 7)
+#define WAVE_PAD_BACK (1u << 8)
+#define WAVE_PAD_START (1u << 9)
+#define WAVE_PAD_LEFT_STICK (1u << 10)
+#define WAVE_PAD_RIGHT_STICK (1u << 11)
+#define WAVE_PAD_UP (1u << 12)
+#define WAVE_PAD_DOWN (1u << 13)
+#define WAVE_PAD_LEFT (1u << 14)
+#define WAVE_PAD_RIGHT (1u << 15)
+#define WAVE_PAD_GUIDE (1u << 16)
+
+struct wave_gamepad_info {
+    uint32_t id;
+    uint16_t vendor, product;
+    uint32_t family; /* 0 generic, 1 Xbox, 2 PlayStation, 3 Nintendo */
+    uint32_t rumble, name_len;
+    char name[64];
+};
+
+struct wave_gamepad_state {
+    uint32_t buttons;
+    int16_t axes[4]; /* left x, left y, right x, right y */
+    uint16_t triggers[2];
+    uint32_t sequence; /* counts reports */
 };
 
 /* Sound streams take interleaved stereo 16-bit samples at this rate. */
@@ -140,6 +193,15 @@ static inline long wave_win_set_cursor(long window, int shape) {
     return wave_call(WAVE_WIN_SET_CURSOR, window, shape, 0, 0, 0);
 }
 /*
+ * For a bridge drawing another program's window (wl-bridge): says the
+ * window shows what process pid draws, which then gets the window's
+ * input focus (/dev/input, controllers). pid must be the caller's
+ * account's; 0 clears it.
+ */
+static inline long wave_win_set_program(long window, long pid) {
+    return wave_call(WAVE_WIN_SET_PROGRAM, window, pid, 0, 0, 0);
+}
+/*
  * A file descriptor that poll() and epoll report readable while the
  * program has events waiting (read() gives their number, 8 bytes, without
  * taking them): wait on it with the rest of a main loop, then take the
@@ -154,6 +216,18 @@ static inline long wave_audio_open(void) {
 }
 static inline long wave_notify(const char *title, int title_len, const char *body, int body_len) {
     return wave_call(WAVE_NOTIFY, (long)title, title_len, (long)body, body_len, 0);
+}
+/* Lists up to `max` controllers; returns how many are connected. */
+static inline long wave_gamepads(struct wave_gamepad_info *out, long max) {
+    return wave_call(WAVE_GAMEPADS, (long)out, max, 0, 0, 0);
+}
+/* A controller's state now (negative once it is unplugged). */
+static inline long wave_gamepad_state(uint32_t id, struct wave_gamepad_state *s) {
+    return wave_call(WAVE_GAMEPAD_STATE, id, (long)s, 0, 0, 0);
+}
+/* Shakes it: strong and weak motor 0-255, for `ms` milliseconds. */
+static inline long wave_gamepad_rumble(uint32_t id, int strong, int weak, long ms) {
+    return wave_call(WAVE_GAMEPAD_RUMBLE, id, strong, weak, ms, 0);
 }
 
 #endif

@@ -59,11 +59,16 @@ fn ink(role: u32) -> u32 {
     }
 }
 
-/// The short name of the account ("alex" for Alex Rivera).
+/// The short name of the account the Terminal runs as ("alex").
 fn user_name() -> String {
-    let full = corekit::prefs::get("account_name").unwrap_or_default();
-    let first = full.split_whitespace().next().unwrap_or("user").to_lowercase();
-    first.chars().filter(|c| c.is_alphanumeric()).collect::<String>()
+    corekit::users::whoami().unwrap_or_else(|| String::from("user"))
+}
+
+/// True if a program's prompt asks for a password: what is typed then is
+/// shown as dots and not echoed.
+fn secret_prompt(prompt: &str) -> bool {
+    let p = prompt.trim_end().to_lowercase();
+    p.ends_with("password:") || p.ends_with("passphrase:")
 }
 const BIN: &str = "/System/Bin";
 /// Where commands are looked for: WaveOS's own, then Linux programs.
@@ -303,7 +308,8 @@ impl Session {
             "help" => self.out(
                 "Built-in:\n  cd DIR · clear · history · theme light|dark · exit\n\nPrograms in /System/Bin (each runs as \
                  its own process):\n  files: ls cat echo mkdir rm mv cp touch grep wc df sync\n  system: ps kill uname \
-                 uptime date mem cpuinfo lspci lsusb dmesg battery neofetch\n  sound: play volume\n  network: ping \
+                 uptime date mem cpuinfo lspci lsusb dmesg battery neofetch\n  accounts: whoami id users passwd \
+                 chmod chown\n  sound: play record volume\n  network: ping \
                  ifconfig nslookup fetch (http and https)\n\nLinux programs in /System/Linux/bin run too: \
                  busybox ls, busybox vi, busybox awk…\n\nAlso: open APP|FILE · shutdown · reboot\nPipelines and \
                  redirection: ls | grep txt, echo hi > note.txt, cmd >> log\nLists: a && b (b if a worked), a || b (b \
@@ -549,7 +555,12 @@ impl Session {
         // Wrap scrollback + prompt line into screen rows.
         let mut screen: Vec<(String, u32)> = Vec::new();
         let prompt = self.prompt();
-        let input_line = format!("{}{}", prompt, self.input);
+        let typed = if self.job.is_some() && secret_prompt(&prompt) {
+            self.input.chars().map(|_| '•').collect()
+        } else {
+            self.input.clone()
+        };
+        let input_line = format!("{}{}", prompt, typed);
         let live = if self.job.is_some() { FG } else { ECHO };
         let all = self.lines.iter().map(|(s, c)| (s.as_str(), *c)).chain(core::iter::once((input_line.as_str(), live)));
         for (s, c) in all {
@@ -732,6 +743,10 @@ impl App for Terminal {
     fn title(&self) -> String {
         format!("Terminal — {}", self.tabs[self.active].cwd)
     }
+    fn min_size(&self) -> (i32, i32) {
+        (400, 240)
+    }
+
     fn size(&self) -> (i32, i32) {
         (1000, 680)
     }
@@ -847,7 +862,9 @@ impl Session {
         match ev.code {
             KeyCode::Enter => {
                 let line = core::mem::take(&mut self.input);
-                let echo = format!("{}{}", core::mem::take(&mut job.partial), line);
+                let secret = secret_prompt(&job.partial);
+                let shown = if secret { String::new() } else { line.clone() };
+                let echo = format!("{}{}", core::mem::take(&mut job.partial), shown);
                 // The program took the interrupt and carries on (a shell).
                 job.interrupts = 0;
                 if let Some(w) = job.stdin {
@@ -896,6 +913,6 @@ impl Session {
 corekit::entry!(main);
 
 fn main(_: corekit::Args) -> i32 {
-    let _ = fs::chdir("/Documents");
+    let _ = fs::chdir(&corekit::users::home_folder("Documents"));
     waveui::run(Terminal::new())
 }

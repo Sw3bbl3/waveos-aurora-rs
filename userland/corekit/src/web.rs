@@ -74,9 +74,7 @@ impl Io for Conn {
 
 /// Seconds since 1970 by the system clock.
 pub fn unix_time() -> i64 {
-    let d = crate::time::now();
-    let days = nebula_secure::der::days_from_civil(d.year as i64, d.month as i64, d.day as i64);
-    days * 86400 + d.hour as i64 * 3600 + d.minute as i64 * 60 + d.second as i64
+    (crate::time::unix_ms() / 1000.0) as i64
 }
 
 fn key(url: &Url) -> String {
@@ -118,13 +116,25 @@ pub fn open(url: &Url) -> Result<Conn, Error> {
 
 /// Until when (uptime ms) IPv6 is skipped after it failed outright.
 static V6_BROKEN_UNTIL: Mutex<u64> = Mutex::new(0);
+static NETWORK_CONFIGURATION: Mutex<u64> = Mutex::new(0);
+
+fn refresh_network() {
+    let current = net::configuration_key();
+    let mut previous = NETWORK_CONFIGURATION.lock();
+    if *previous != current {
+        POOL.lock().clear();
+        *V6_BROKEN_UNTIL.lock() = 0;
+        *previous = current;
+    }
+}
 
 /// Connects to the first address that answers, Happy Eyeballs style
 /// (RFC 8305, sequential): IPv6 first when this machine has a routed IPv6
 /// address, given 300 ms before IPv4 is tried; a hard IPv6 failure (no
-/// route, refused, unreachable) skips IPv6 for ten minutes.
+/// route) skips IPv6 for ten minutes. A refused host does not disable IPv6.
 fn connect_any(addrs: &[net::IpAddr], port: u16) -> Result<TcpStream, crate::Error> {
     use net::IpAddr;
+    refresh_network();
     let now = crate::time::uptime_ms();
     let v6_ok = *V6_BROKEN_UNTIL.lock() <= now && net::ipv6_routed();
     let v6: Vec<IpAddr> = addrs.iter().copied().filter(|a| matches!(a, IpAddr::V6(_))).collect();
@@ -132,11 +142,11 @@ fn connect_any(addrs: &[net::IpAddr], port: u16) -> Result<TcpStream, crate::Err
     let mut last = crate::Error(crate::abi::err::ENOENT);
     if v6_ok {
         if let Some(&a) = v6.first() {
-            let wait = if v4.is_empty() { 0 } else { 300 };
+            let wait = if v4.is_empty() { 3000 } else { 300 };
             match TcpStream::connect_addr(a, port, wait) {
                 Ok(s) => return Ok(s),
                 Err(e) => {
-                    if !e.is(crate::abi::err::ETIMEDOUT) {
+                    if e.is(crate::abi::err::ENETUNREACH) {
                         *V6_BROKEN_UNTIL.lock() = now + 600_000;
                     }
                     last = e;
@@ -144,10 +154,14 @@ fn connect_any(addrs: &[net::IpAddr], port: u16) -> Result<TcpStream, crate::Err
             }
         }
     }
-    let rest = if v4.is_empty() && !v6_ok { &v6[..] } else { &v4[..] };
-    for (k, &a) in rest.iter().enumerate() {
-        // Every address but the last gets 10 s; the last the system default.
-        let wait = if k + 1 < rest.len() { 10_000 } else { 0 };
+    // Try every family, including alternate IPv6 answers on IPv6-only hosts.
+    let start = usize::from(v6_ok && !v6.is_empty());
+    for &a in v4.iter().chain(v6.iter().skip(start)).take(8) {
+        let elapsed = crate::time::uptime_ms().saturating_sub(now);
+        if elapsed >= 12_000 {
+            break;
+        }
+        let wait = (12_000 - elapsed).min(3000);
         match TcpStream::connect_addr(a, port, wait) {
             Ok(s) => return Ok(s),
             Err(e) => last = e,
@@ -168,6 +182,7 @@ impl Connect for Pooled {
     type Conn = Conn;
 
     fn connect(&mut self, url: &Url, fresh: bool) -> Result<(Conn, bool), Error> {
+        refresh_network();
         if !fresh {
             let k = key(url);
             let now = crate::time::uptime_ms();

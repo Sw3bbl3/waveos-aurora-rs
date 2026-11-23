@@ -47,8 +47,16 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::SLEEP => {
             let ms = a[0].min(24 * 3600 * 1000);
             let until = time::uptime_ms() + ms;
-            while time::uptime_ms() < until && !proc::interrupted() {
-                sched::wait_until(until - time::uptime_ms(), proc::interrupted);
+            loop {
+                // One reading of the clock for the test and the wait: with
+                // two, a thread preempted in between computed `until - now`
+                // with `now` past `until` and slept for 2^64 ms — a 25 ms
+                // sleep that never ended (found by `fuzz`).
+                let now = time::uptime_ms();
+                if now >= until || proc::interrupted() {
+                    break;
+                }
+                sched::wait_until(until - now, proc::interrupted);
             }
             Ok(0)
         }
@@ -56,7 +64,11 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::GETPID => Ok(sched::current_pid() as u64),
         nr::SPAWN => spawn(a),
         nr::WAIT => proc::wait(a[0] as u32, a[1]).map(|c| c as i32 as u32 as u64),
-        nr::KILL => proc::kill(a[0] as u32).map(|_| 0),
+        nr::KILL => {
+            let target = proc::get(a[0] as u32).ok_or(ESRCH)?;
+            crate::users::ensure(crate::users::may_signal(&target))?;
+            proc::kill(a[0] as u32).map(|_| 0)
+        }
         nr::SIGNAL => {
             let me = proc::current().ok_or(EPERM)?;
             let target = a[0] as i64;
@@ -65,6 +77,8 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             if targets.is_empty() {
                 return Err(ESRCH);
             }
+            let targets: Vec<_> = targets.into_iter().filter(|t| crate::users::may_signal(t)).collect();
+            crate::users::ensure(!targets.is_empty())?;
             let info = crate::compat::linux::signal::Info { pid: me.pid, ..Default::default() };
             for t in targets {
                 crate::compat::linux::signal::send(&t, a[1] as u32, info, None);
@@ -150,6 +164,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             };
             user::put(a[0], &dt).map(|_| 0)
         }
+        nr::UNIX_MS => Ok(crate::compat::linux::realtime_ns() / 1_000_000),
         nr::SYNC => fs::try_sync_all().map(|_| 0),
         nr::SYNC_PATH => {
             let path = user::path(a[0], a[1])?;
@@ -214,6 +229,9 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::PREF_SET => {
             let key = user::str(a[0], a[1].min(64))?;
             let value = user::str(a[2], a[3].min(1024))?;
+            if crate::users::system_pref(&key) {
+                crate::users::require_admin("change how this computer starts up")?;
+            }
             crate::gui::prefs::set(&key, &value).map(|_| 0)
         }
         nr::SET_DATETIME => {
@@ -227,6 +245,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             if !ok {
                 return Err(EINVAL);
             }
+            crate::users::require_admin("set the date and time")?;
             let rd = crate::drivers::rtc::DateTime {
                 year: d.year,
                 month: d.month,
@@ -235,12 +254,15 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
                 minute: d.minute,
                 second: d.second,
             };
+            // (The vDSO's time page follows at once.)
             time::set_wall_clock(&rd);
             Ok(0)
         }
         nr::DISPLAY_MODES => {
             let (w, h) = crate::gui::screen_pixels();
-            let modes = crate::drivers::display::modes((w as u32, h as u32), crate::gui::prefs::boot_resolution());
+            let main = crate::gui::screens::published().first().map(|d| d.id);
+            let modes =
+                crate::drivers::display::modes(main, (w as u32, h as u32), crate::gui::prefs::boot_resolution());
             let max = (a[1] as usize).min(64);
             let size = core::mem::size_of::<aurora_abi::DisplayMode>();
             let mut out = user::slice_mut(a[0], (max * size) as u64)?;
@@ -397,7 +419,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             Ok(list.len() as u64)
         }
         nr::GAMEPAD_STATE => {
-            let st = crate::drivers::gamepad::state(a[0] as u32).ok_or(ENODEV)?;
+            let st = crate::drivers::gamepad::state_for(crate::sched::current_pid(), a[0] as u32).ok_or(ENODEV)?;
             let size = core::mem::size_of::<aurora_abi::GamepadState>();
             let mut out = user::slice_mut(a[1], size as u64)?;
             out.copy_from_slice(unsafe { core::slice::from_raw_parts(&st as *const _ as *const u8, size) });
@@ -446,6 +468,19 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             }
             Ok(crate::drivers::audio::state())
         }
+        nr::AUDIO_DEVICES => {
+            let all = crate::drivers::audio::devices();
+            let max = a[1].min(64) as usize;
+            for (i, d) in all.iter().take(max).enumerate() {
+                user::put(a[0] + (i * core::mem::size_of::<aurora_abi::audio::AudioDevice>()) as u64, d)?;
+            }
+            Ok(all.len() as u64)
+        }
+        nr::AUDIO_CAPTURE => {
+            let capture = crate::drivers::audio::capture::open(a[0] as u32)?;
+            let p = proc::current().ok_or(EPERM)?;
+            p.install_fd(Arc::new(Handle::AudioIn(capture))).map(|fd| fd as u64)
+        }
         nr::AUDIO_CONTROL => match &*proc::current().ok_or(EPERM)?.fd(a[0] as usize)? {
             Handle::Audio(stream) => stream.control(a[1]),
             _ => Err(EINVAL),
@@ -457,9 +492,13 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         | nr::WIN_PRESENT
         | nr::WIN_SET_TITLE
         | nr::WIN_SET_CURSOR
+        | nr::WIN_SET_PROGRAM
         | nr::WIN_CLOSE
         | nr::WIN_RESIZE
         | nr::NEXT_EVENT => crate::gui::server::syscall(nr, a),
+        nr::CRED_GET | nr::CRED_SET | nr::CHMOD | nr::CHOWN | nr::STAT_OWNER | nr::USERS | nr::ELEVATE => {
+            crate::users::syscall::handle(nr, a)
+        }
         _ => Err(ENOSYS),
     }
 }
@@ -543,6 +582,7 @@ pub(crate) fn read(fd: usize, ptr: u64, len: u64) -> SysResult {
         Handle::PipeRead { pipe, nonblocking } => pipe.read(&mut buf, *nonblocking)?,
         Handle::Socket(s) => s.read(&mut buf)?,
         Handle::Special(s) => s.lock().read(&mut buf)?,
+        Handle::AudioIn(capture) => capture.read(&mut buf)?,
         Handle::PipeWrite(_) | Handle::Log | Handle::Audio(_) => return Err(EBADF),
     };
     buf.commit(n)?;
@@ -562,7 +602,7 @@ pub(crate) fn write(fd: usize, ptr: u64, len: u64) -> SysResult {
         Handle::Audio(stream) => stream.write(&buf)?,
         Handle::Socket(s) => s.write(&buf)?,
         Handle::Special(s) => s.lock().write(&buf)?,
-        Handle::PipeRead { .. } => return Err(EBADF),
+        Handle::PipeRead { .. } | Handle::AudioIn(_) => return Err(EBADF),
     };
     Ok(n as u64)
 }

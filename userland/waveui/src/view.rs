@@ -467,6 +467,7 @@ pub(crate) struct Mods<'a, M> {
     pub on_hover: Option<Handler<bool, M>>,
     pub context_menu: Vec<MenuItem<M>>,
     pub help: Option<String>,
+    pub cursor: Option<u32>,
     pub id: Option<u64>,
     pub shortcut: Option<Shortcut>,
     pub on_drop: Option<Handler<DropInfo, Option<M>>>,
@@ -500,6 +501,7 @@ impl<M> Default for Mods<'_, M> {
             on_hover: None,
             context_menu: Vec::new(),
             help: None,
+            cursor: None,
             id: None,
             shortcut: None,
             on_drop: None,
@@ -681,6 +683,12 @@ impl<'a, M> View<'a, M> {
         self
     }
     /// A tooltip.
+    /// Explicit pointer feedback, using `waveui::cursor` shapes.
+    pub fn cursor(mut self, shape: u32) -> Self {
+        self.mods.cursor = Some(shape);
+        self
+    }
+
     pub fn help(mut self, text: impl Into<String>) -> Self {
         self.mods.help = Some(text.into());
         self
@@ -1345,7 +1353,12 @@ pub fn row_detail<'a, M>(title: impl Into<String>, detail: impl Into<String>, ac
         .push(
             VStack::new()
                 .push(Text::new(title))
-                .push(Text::paragraph(detail).style(TextStyle::Subheadline).foreground(Color::SecondaryLabel))
+                .push(
+                    Text::paragraph(detail)
+                        .style(TextStyle::Subheadline)
+                        .foreground(Color::SecondaryLabel)
+                        .fill_width(),
+                )
                 .spacing(2)
                 .alignment(Align::Start)
                 .grow(1),
@@ -1353,6 +1366,7 @@ pub fn row_detail<'a, M>(title: impl Into<String>, detail: impl Into<String>, ac
         .push(accessory)
         .spacing(12)
         .min_height(crate::style::size::ROW + 8)
+        .padding_xy(0, 8)
         .fill_width()
 }
 

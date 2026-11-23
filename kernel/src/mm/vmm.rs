@@ -54,7 +54,7 @@ static SHM_REFS: IrqMutex<alloc::collections::BTreeMap<u64, u32>> = IrqMutex::ne
 
 /// A zeroed frame for a shared memory object, held once (by the object).
 pub fn shm_alloc() -> Option<u64> {
-    let f = zeroed_frame()?;
+    let f = zeroed_user_frame()?;
     SHM_REFS.lock().insert(f, 1);
     Some(f)
 }
@@ -73,7 +73,7 @@ fn shm_retain(frame: u64) -> bool {
 /// A counted frame holding `data` (a page at most; the rest zeroed), held
 /// once (by its caller).
 pub fn shm_alloc_with(data: &[u8]) -> Option<u64> {
-    let f = frame::alloc()?;
+    let f = frame::alloc_user()?;
     let page = unsafe { core::slice::from_raw_parts_mut(phys_to_virt(f) as *mut u8, PAGE_SIZE as usize) };
     page[..data.len()].copy_from_slice(data);
     page[data.len()..].fill(0);
@@ -84,6 +84,12 @@ pub fn shm_alloc_with(data: &[u8]) -> Option<u64> {
 /// Another holder for a counted frame (`shm_alloc`).
 pub fn shm_hold(frame: u64) {
     shm_retain(frame);
+}
+
+/// Starts counting frames another owner allocated (a GPU buffer a program
+/// maps), held once by that owner, which lets go with [`shm_release`].
+pub fn shm_count(frames: &[u64]) {
+    shm_adopt(frames, 1);
 }
 
 /// Counts private frames as shared by `holders` (a `fork`: parent and child).
@@ -97,6 +103,29 @@ fn shm_adopt(frames: &[u64], holders: u32) {
 /// How many hold a counted frame (0: it isn't one).
 fn shm_holders(frame: u64) -> u32 {
     SHM_REFS.lock().get(&frame).copied().unwrap_or(0)
+}
+
+/// Holders let go of counted frames, under one lock (a GPU buffer or a
+/// shared mapping is often a thousand pages); the frames no one holds any
+/// more are freed.
+fn shm_release_many(frames: &[u64]) {
+    let mut last = Vec::new();
+    {
+        let mut refs = SHM_REFS.lock();
+        for f in frames {
+            match refs.get_mut(f) {
+                Some(n) if *n > 1 => *n -= 1,
+                Some(_) => {
+                    refs.remove(f);
+                    last.push(*f);
+                }
+                None => {}
+            }
+        }
+    }
+    for f in last {
+        frame::free(f);
+    }
 }
 
 /// A holder lets go of a counted frame; the last one frees it.
@@ -134,6 +163,14 @@ fn zeroed_frame() -> Option<u64> {
     Some(f)
 }
 
+/// A zeroed frame for a program's own memory: refused once only the
+/// kernel's reserve is left (`frame::alloc_user`).
+fn zeroed_user_frame() -> Option<u64> {
+    let f = frame::alloc_user()?;
+    unsafe { core::ptr::write_bytes(phys_to_virt(f) as *mut u8, 0, PAGE_SIZE as usize) };
+    Some(f)
+}
+
 fn idx(va: u64, level: u32) -> usize {
     ((va >> (12 + 9 * level)) & 0x1FF) as usize
 }
@@ -157,6 +194,9 @@ pub fn init() {
 }
 
 /// Walks to the leaf entry for `va`, optionally creating intermediate tables.
+/// Tables for user mappings (`user`) are the program's memory, refused once
+/// only the kernel's reserve is left like its pages (a program mapping and
+/// unmapping all over its address space used to fill memory with them).
 fn walk(pml4: u64, va: u64, create: bool, user: bool) -> Option<&'static mut u64> {
     let mut t = pml4;
     for level in (1..=3).rev() {
@@ -165,7 +205,8 @@ fn walk(pml4: u64, va: u64, create: bool, user: bool) -> Option<&'static mut u64
             if !create {
                 return None;
             }
-            *e = zeroed_frame()? | PRESENT | WRITABLE | if user { USER } else { 0 };
+            let f = if user { zeroed_user_frame()? } else { zeroed_frame()? };
+            *e = f | PRESENT | WRITABLE | if user { USER } else { 0 };
         } else if *e & HUGE != 0 {
             return None; // 2 MiB/1 GiB pages are only used by the physical window
         }
@@ -191,15 +232,26 @@ static KVA: IrqMutex<Kva> = IrqMutex::new(Kva { next: KVA_BASE, free: Vec::new()
 pub fn kmap(frames: &[u64]) -> Option<u64> {
     let pages = frames.len() as u64;
     let mut k = KVA.lock();
-    let base = if let Some(i) = k.free.iter().position(|&(_, p)| p == pages) {
-        k.free.swap_remove(i).0
+    // First fit among freed ranges, split (a free range of `p` pages is
+    // followed by its guard page, as every allocation is). Reusing only
+    // ranges of exactly the same size let the area — and its page tables —
+    // grow without bound with surfaces of ever new sizes (found by `fuzz`).
+    let base = if let Some(i) = k.free.iter().position(|&(_, p)| p >= pages) {
+        let (b, p) = k.free[i];
+        if p >= pages + 2 {
+            k.free[i] = (b + (pages + 1) * PAGE_SIZE, p - pages - 1);
+        } else {
+            k.free.swap_remove(i);
+        }
+        b
     } else {
         let b = k.next;
         // One unmapped guard page between allocations.
-        k.next += (pages + 1) * PAGE_SIZE;
-        if k.next > KVA_BASE + KVA_SIZE {
+        let next = b + (pages + 1) * PAGE_SIZE;
+        if next > KVA_BASE + KVA_SIZE {
             return None;
         }
+        k.next = next;
         b
     };
     let pml4 = kernel_pml4();
@@ -210,6 +262,29 @@ pub fn kmap(frames: &[u64]) -> Option<u64> {
         x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
     }
     Some(base)
+}
+
+/// Maps frame `f` at kernel address `va` (writable, no-execute), outside
+/// the kernel virtual area: for `mm::kstack`, which serializes its own
+/// calls. False if a page table could not be allocated.
+pub fn kmap_fixed(va: u64, f: u64) -> bool {
+    match walk(kernel_pml4(), va, true, false) {
+        Some(e) => {
+            *e = f | PRESENT | WRITABLE | NO_EXECUTE;
+            x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Unmaps the page at kernel address `va` (from [`kmap_fixed`]) on this
+/// CPU only; returns its frame. The caller shoots down other CPUs' TLBs.
+pub fn kunmap_fixed(va: u64) -> Option<u64> {
+    let e = walk(kernel_pml4(), va, false, false)?;
+    let old = core::mem::replace(e, 0);
+    x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+    (old & PRESENT != 0).then_some(old & ADDR)
 }
 
 /// Maps `size` bytes of device memory at `phys` (a framebuffer) into the
@@ -307,6 +382,31 @@ pub fn kernel_entry(va: u64) -> Option<u64> {
     walk(kernel_pml4(), va, false, false).map(|e| *e)
 }
 
+/// Pages mapped in the kernel virtual area, and pages of it ever used
+/// (tests: where frames are held).
+#[cfg(feature = "ktest")]
+pub fn held_pages() -> (u64, u64) {
+    let end = KVA.lock().next;
+    let mut mapped = 0;
+    let mut va = KVA_BASE;
+    while va < end {
+        if walk(kernel_pml4(), va, false, false).is_some_and(|e| *e & PRESENT != 0) {
+            mapped += 1;
+        }
+        va += PAGE_SIZE;
+    }
+    (mapped, (end - KVA_BASE) / PAGE_SIZE)
+}
+
+/// (pages of the kernel virtual area in use, counted shared frames), for
+/// memory reports; zeros where a lock is busy.
+pub fn usage() -> (u64, u64) {
+    let kva =
+        KVA.try_lock().map_or(0, |k| (k.next - KVA_BASE) / PAGE_SIZE - k.free.iter().map(|&(_, p)| p + 1).sum::<u64>());
+    let shm = SHM_REFS.try_lock().map_or(0, |r| r.len() as u64);
+    (kva, shm)
+}
+
 /// Unmaps a `kmap` range on every CPU. Must not be called while holding an
 /// `IrqMutex` (other CPUs have to take the shootdown IPI).
 pub fn kunmap(base: u64, pages: u64) {
@@ -323,7 +423,28 @@ pub fn kunmap(base: u64, pages: u64) {
     }
     // Outside the lock: the other CPUs must be free to take the IPI.
     shootdown(base, pages, None);
-    KVA.lock().free.push((base, pages));
+    let mut k = KVA.lock();
+    k.free.push((base, pages));
+    // Merge neighbours (each range with the guard page after it), and give
+    // a range at the end back to the never-used part.
+    // (In place: the heap frees large blocks through here.)
+    k.free.sort_unstable_by_key(|&(b, _)| b);
+    let mut i = 0;
+    while i + 1 < k.free.len() {
+        let ((b, p), (nb, np)) = (k.free[i], k.free[i + 1]);
+        if b + (p + 1) * PAGE_SIZE == nb {
+            k.free[i].1 = p + 1 + np;
+            k.free.remove(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(&(b, p)) = k.free.last() {
+        if b + (p + 1) * PAGE_SIZE == k.next {
+            k.next = b;
+            k.free.pop();
+        }
+    }
 }
 
 // ----------------------------------------------------------- TLB shootdown
@@ -402,8 +523,10 @@ pub enum Prot {
 
 pub struct AddressSpace {
     pml4: u64,
-    /// Next free address for `mmap`-style allocations.
+    /// Next free address for `mmap`-style allocations (randomized; `mm::aslr`).
     mmap_next: u64,
+    /// The top of the main thread's stack (randomized by the program loaders).
+    pub stack_top: u64,
     /// Bytes of private memory mapped (for accounting).
     pub resident: u64,
     /// Memory mapped but not made yet: start -> (end, protection), not
@@ -415,11 +538,17 @@ pub struct AddressSpace {
 
 impl AddressSpace {
     pub fn new() -> Option<AddressSpace> {
-        let pml4 = zeroed_frame()?;
+        let pml4 = zeroed_user_frame()?;
         let k = table(kernel_pml4());
         let t = table(pml4);
         t[256..].copy_from_slice(&k[256..]);
-        Some(AddressSpace { pml4, mmap_next: layout::MMAP_BASE, resident: 0, lazy: Default::default() })
+        Some(AddressSpace {
+            pml4,
+            mmap_next: super::aslr::mmap_base(),
+            stack_top: layout::STACK_TOP,
+            resident: 0,
+            lazy: Default::default(),
+        })
     }
 
     pub fn cr3(&self) -> u64 {
@@ -495,6 +624,11 @@ impl AddressSpace {
     pub fn map_lazy(&mut self, va: u64, pages: u64, prot: Prot) -> Result<(), isize> {
         let end = va.checked_add(pages * PAGE_SIZE).filter(|&e| e <= layout::USER_END);
         let Some(end) = end.filter(|_| va.is_multiple_of(PAGE_SIZE)) else { return Err(aurora_abi::err::EINVAL) };
+        // Each range is kernel memory the program asks for (Linux allows
+        // as many mappings, `vm.max_map_count`).
+        if self.lazy.len() >= 65_530 {
+            return Err(aurora_abi::err::ENOMEM);
+        }
         self.lazy_remove(va, end);
         self.lazy.insert(va, (end, prot));
         Ok(())
@@ -524,7 +658,7 @@ impl AddressSpace {
             return false;
         }
         let Some(e) = walk(self.pml4, page, true, true) else { return false };
-        let Some(f) = zeroed_frame() else { return false };
+        let Some(f) = zeroed_user_frame() else { return false };
         *e = f | Self::flags(prot);
         self.resident += PAGE_SIZE;
         self.invalidate(page);
@@ -574,7 +708,7 @@ impl AddressSpace {
                 }
                 *e = f;
             } else {
-                *e = zeroed_frame().ok_or(ENOMEM)? | Self::flags(prot);
+                *e = zeroed_user_frame().ok_or(ENOMEM)? | Self::flags(prot);
                 self.resident += PAGE_SIZE;
             }
             self.invalidate(page);
@@ -603,7 +737,7 @@ impl AddressSpace {
         let flags = Self::flags(prot);
         self.each_present(va, end, &mut |_, e| {
             if *e & COPY_ON_WRITE != 0 && writable {
-                let Some(f) = frame::alloc() else {
+                let Some(f) = frame::alloc_user() else {
                     failed = true;
                     return;
                 };
@@ -694,27 +828,51 @@ impl AddressSpace {
     }
 
     fn map_counted(&mut self, va: u64, frames: &[u64], flags: u64) -> Result<(), isize> {
-        for (i, &f) in frames.iter().enumerate() {
+        // The holds on the frames first, under one lock (`walk` may need
+        // the frame allocator, which mustn't wait inside it).
+        let counted: Vec<bool> = {
+            let mut refs = SHM_REFS.lock();
+            frames
+                .iter()
+                .map(|f| match refs.get_mut(f) {
+                    Some(n) => {
+                        *n += 1;
+                        true
+                    }
+                    None => false,
+                })
+                .collect()
+        };
+        let mut replaced = Vec::new();
+        let mut result = Ok(());
+        let mut mapped = 0;
+        for (i, (&f, &c)) in frames.iter().zip(&counted).enumerate() {
             let page = va + i as u64 * PAGE_SIZE;
-            let e = walk(self.pml4, page, true, true).ok_or(aurora_abi::err::ENOMEM)?;
-            if *e & PRESENT != 0 {
-                Self::drop_entry(*e, &mut self.resident);
+            let Some(e) = walk(self.pml4, page, true, true) else {
+                result = Err(aurora_abi::err::ENOMEM);
+                break;
+            };
+            let old = core::mem::replace(e, f | flags | if c { COUNTED } else { 0 });
+            // A page that wasn't mapped can't be in any TLB.
+            if old & PRESENT != 0 {
+                replaced.push(old);
+                self.invalidate(page);
             }
-            let counted = if shm_retain(f) { COUNTED } else { 0 };
-            *e = f | flags | counted;
-            self.invalidate(page);
+            mapped = i + 1;
         }
-        Ok(())
-    }
-
-    /// Lets go of what a present entry maps (a private frame, or a hold on a shared one).
-    fn drop_entry(e: u64, resident: &mut u64) {
-        if e & SHARED == 0 {
-            frame::free(e & ADDR);
-            *resident = resident.saturating_sub(PAGE_SIZE);
-        } else {
-            Self::release_shared(e);
+        // What the new entries replaced, and the holds not used (out of memory).
+        let mut release: Vec<u64> =
+            frames[mapped..].iter().zip(&counted[mapped..]).filter(|p| *p.1).map(|p| *p.0).collect();
+        for e in replaced {
+            if e & SHARED == 0 {
+                frame::free(e & ADDR);
+                self.resident = self.resident.saturating_sub(PAGE_SIZE);
+            } else if e & COUNTED != 0 {
+                release.push(e & ADDR);
+            }
         }
+        shm_release_many(&release);
+        result
     }
 
     /// Gives back a shared entry's count on its frame, if it holds one.
@@ -727,18 +885,28 @@ impl AddressSpace {
     /// Moves `pages` mapped at `from` to `to` (Linux `mremap`), without
     /// copying: the page table entries move. `to` must be free.
     pub fn move_pages(&mut self, from: u64, to: u64, pages: u64) -> Result<(), isize> {
+        let mut result = Ok(());
         for i in 0..pages {
             let (src, dst) = (from + i * PAGE_SIZE, to + i * PAGE_SIZE);
-            let entry = match walk(self.pml4, src, false, true) {
-                Some(e) if *e & PRESENT != 0 => core::mem::replace(e, 0),
-                _ => continue,
+            if walk(self.pml4, src, false, true).is_none_or(|e| *e & PRESENT == 0) {
+                continue;
+            }
+            // The destination's tables first: a page is never left in neither place.
+            let Some(d) = walk(self.pml4, dst, true, true) else {
+                result = Err(aurora_abi::err::ENOMEM);
+                break;
             };
-            let d = walk(self.pml4, dst, true, true).ok_or(aurora_abi::err::ENOMEM)?;
-            *d = entry;
+            let Some(e) = walk(self.pml4, src, false, true) else { continue };
+            *d = core::mem::replace(e, 0);
             self.invalidate(src);
             self.invalidate(dst);
         }
-        shootdown(from, pages, Some(self.pml4));
+        let tables = self.prune(from, from + pages * PAGE_SIZE);
+        shootdown(from, pages.max(1), Some(self.pml4));
+        for t in tables {
+            frame::free(t);
+        }
+        result?;
         // Lazy memory there moves too.
         let (end, shift) = (from + pages * PAGE_SIZE, to.wrapping_sub(from));
         let parts: Vec<(u64, u64, Prot)> = self
@@ -754,9 +922,9 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// Unmaps pages, freeing private frames.
+    /// Unmaps pages, freeing private frames, and the page tables left empty.
     pub fn unmap(&mut self, va: u64, pages: u64) {
-        let end = va.saturating_add(pages * PAGE_SIZE);
+        let end = va.saturating_add(pages.saturating_mul(PAGE_SIZE));
         self.lazy_remove(va, end);
         let mut freed = Vec::new();
         let mut private = 0;
@@ -768,19 +936,64 @@ impl AddressSpace {
             *e = 0;
         });
         self.resident = self.resident.saturating_sub(private);
-        if !freed.is_empty() && Cr3::read().0.start_address().as_u64() == self.pml4 {
+        let tables = self.prune(va, end);
+        if (!freed.is_empty() || !tables.is_empty()) && Cr3::read().0.start_address().as_u64() == self.pml4 {
             x86_64::instructions::tlb::flush_all();
         }
         // Other threads of this process may run on other CPUs: they must
-        // forget the pages before the frames can be reused.
-        shootdown(va, pages, Some(self.pml4));
+        // forget the pages (and tables) before the frames can be reused.
+        // (One `invlpg` also drops every cached upper-level entry, so a
+        // freed table is never walked again.)
+        shootdown(va, pages.max(!tables.is_empty() as u64), Some(self.pml4));
+        let mut shared = Vec::new();
         for e in freed {
             if e & SHARED == 0 {
                 frame::free(e & ADDR);
-            } else {
-                Self::release_shared(e);
+            } else if e & COUNTED != 0 {
+                shared.push(e & ADDR);
             }
         }
+        shm_release_many(&shared);
+        for t in tables {
+            frame::free(t);
+        }
+    }
+
+    /// Unlinks the page tables under `[start, end)` that map nothing any
+    /// more (after an unmap) and returns their frames, to be freed once no
+    /// CPU can walk them. Without this, a program that maps and unmaps at
+    /// ever new addresses (every `mmap` gets fresh address space) kept a
+    /// page table for every 2 MiB it ever used, until it exited.
+    fn prune(&mut self, start: u64, end: u64) -> Vec<u64> {
+        fn visit(t: u64, level: u32, base: u64, start: u64, end: u64, out: &mut Vec<u64>) {
+            let span = 1u64 << (12 + 9 * level);
+            let limit = if level == 3 { 256 } else { 512 };
+            let first = ((start.max(base) - base) / span) as usize;
+            for i in first..limit {
+                let lo = base + i as u64 * span;
+                if lo >= end {
+                    break;
+                }
+                let e = table(t)[i];
+                if e & PRESENT == 0 || e & HUGE != 0 {
+                    continue;
+                }
+                let child = e & ADDR;
+                if level > 1 {
+                    visit(child, level - 1, lo, start, end, out);
+                }
+                if table(child).iter().all(|&x| x == 0) {
+                    table(t)[i] = 0;
+                    out.push(child);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        let end = end.min(layout::USER_END);
+        if start < end {
+            visit(self.pml4, 3, 0, start, end, &mut out);
+        }
+        out
     }
 
     /// A copy of this address space (Linux `fork`), made without copying
@@ -794,6 +1007,7 @@ impl AddressSpace {
     pub fn fork_copy(&mut self) -> Option<AddressSpace> {
         let mut child = AddressSpace::new()?;
         child.mmap_next = self.mmap_next;
+        child.stack_top = self.stack_top;
         child.lazy = self.lazy.clone();
         let mut shared = 0;
         let ok = Self::copy_level(self.pml4, child.pml4, 3, &mut shared);
@@ -841,7 +1055,7 @@ impl AddressSpace {
             if e & PRESENT == 0 {
                 continue;
             }
-            let Some(t) = zeroed_frame() else { return false };
+            let Some(t) = zeroed_user_frame() else { return false };
             table(dst)[i] = t | (e & !ADDR);
             if !Self::copy_level(e & ADDR, t, level - 1, shared) {
                 return false;
@@ -877,7 +1091,7 @@ impl AddressSpace {
             self.invalidate(page);
             return true;
         }
-        let Some(copy) = frame::alloc() else { return false };
+        let Some(copy) = frame::alloc_user() else { return false };
         unsafe {
             core::ptr::copy_nonoverlapping(
                 phys_to_virt(frame) as *const u8,
@@ -948,6 +1162,25 @@ impl AddressSpace {
         }
         self.mmap_next = end;
         Some(va)
+    }
+
+    /// Frames of this address space's own page tables (the top level included).
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // memory reports in self-tests
+    pub fn table_frames(&self) -> u64 {
+        fn count(t: u64, level: u32) -> u64 {
+            let limit = if level == 3 { 256 } else { 512 };
+            let mut n = 1;
+            if level > 0 {
+                for &e in table(t).iter().take(limit) {
+                    if e & PRESENT != 0 && e & HUGE == 0 {
+                        n += count(e & ADDR, level - 1);
+                    }
+                }
+            }
+            n
+        }
+        // Level-0 tables count themselves; their entries are pages, not tables.
+        count(self.pml4, 3)
     }
 
     /// The user mappings, lowest first, as (start, end, writable, executable),

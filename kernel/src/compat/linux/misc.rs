@@ -5,7 +5,7 @@ use crate::proc::{self, Process};
 use crate::syscall::user;
 use crate::{sched, time};
 use aurora_abi::err::*;
-use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 /// The thread id Linux programs see: the process id for the main thread.
 pub fn tid(p: &Process) -> u64 {
@@ -224,19 +224,10 @@ pub fn getrandom(ptr: u64, len: u64) -> Result<u64, isize> {
     Ok(n as u64)
 }
 
-/// UTC nanoseconds since 1970, anchored to the clock at first use and
-/// advanced by the monotonic clock (smooth, never jumps back).
+/// UTC real time. Unlike MONOTONIC, this follows clock corrections at once
+/// (and the vDSO computes it the same way; see `time::realtime_ns`).
 pub fn realtime_ns() -> u64 {
-    static BASE: AtomicI64 = AtomicI64::new(i64::MIN);
-    static ANCHOR: AtomicU64 = AtomicU64::new(0);
-    if BASE.load(Ordering::Acquire) == i64::MIN {
-        let now = time::now_ns();
-        let secs = super::fs::unix_time(time::wall_seconds());
-        ANCHOR.store(now, Ordering::Relaxed);
-        BASE.store(secs * 1_000_000_000, Ordering::Release);
-    }
-    let base = BASE.load(Ordering::Acquire) as u64;
-    base + (time::now_ns() - ANCHOR.load(Ordering::Relaxed))
+    time::realtime_ns()
 }
 
 fn clock_ns(clock: u64) -> Result<u64, isize> {

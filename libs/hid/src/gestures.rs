@@ -9,6 +9,9 @@
 //!   secondary click.
 //! - Two fingers scroll, in either direction, and the content keeps
 //!   gliding briefly after a quick flick.
+//! - Three fingers sweeping 15 mm one way report a [`Swipe`] (once per
+//!   touch) for the system to act on.
+//! - Palms: contacts the pad marks as not confident are ignored.
 //!
 //! Integer arithmetic throughout (the kernel has no floating point):
 //! distances in micrometres, motion in 1/65536 pixels.
@@ -41,6 +44,17 @@ pub struct Output {
     pub buttons: u8,
     pub scroll_x: i32,
     pub scroll_y: i32,
+    /// Three fingers swept across the pad (once per touch).
+    pub swipe: Option<Swipe>,
+}
+
+/// Which way three fingers moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Swipe {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 /// The longest touch that still counts as a tap, and how far it may move.
@@ -58,6 +72,8 @@ const ONE: i64 = 65536;
 const GLIDE_DECAY: i64 = 240;
 const GLIDE_MIN: i64 = 40 * ONE; // 40 px/s
 const TICK_MS: u64 = 16;
+/// How far three fingers travel, mostly in one direction, to swipe.
+const SWIPE_UM: i64 = 15_000;
 
 #[derive(Clone, Copy, Debug)]
 struct Track {
@@ -96,6 +112,9 @@ pub struct Gestures {
     /// Scroll velocity (fixed-point px per second) for gliding after a flick.
     velocity: (i64, i64),
     gliding: bool,
+    /// Three-finger travel this touch (µm), and whether it already swiped.
+    swipe_travel: (i64, i64),
+    swiped: bool,
 }
 
 impl Gestures {
@@ -124,6 +143,8 @@ impl Gestures {
             dragging: false,
             velocity: (0, 0),
             gliding: false,
+            swipe_travel: (0, 0),
+            swiped: false,
         }
     }
 
@@ -160,6 +181,8 @@ impl Gestures {
             self.touch_scrolled = false;
             self.gliding = false;
             self.velocity = (0, 0);
+            self.swipe_travel = (0, 0);
+            self.swiped = false;
             if self.drag_until.take().is_some_and(|t| now <= t) {
                 self.tap_release = None;
                 self.dragging = true;
@@ -221,6 +244,23 @@ impl Gestures {
                 // Velocity, smoothed, for gliding after the fingers lift.
                 self.velocity.0 = (self.velocity.0 + sx * 1000 / dt) / 2;
                 self.velocity.1 = (self.velocity.1 + sy * 1000 / dt) / 2;
+            }
+            (3, 3) if self.pressed == 0 && !self.swiped => {
+                // Three fingers moving together, far enough and mostly one way.
+                self.swipe_travel.0 += moves.iter().map(|m| m.0).sum::<i64>() / 3;
+                self.swipe_travel.1 += moves.iter().map(|m| m.1).sum::<i64>() / 3;
+                let (tx, ty) = self.swipe_travel;
+                let dir = if tx.abs() >= SWIPE_UM && tx.abs() > 2 * ty.abs() {
+                    Some(if tx > 0 { Swipe::Right } else { Swipe::Left })
+                } else if ty.abs() >= SWIPE_UM && ty.abs() > 2 * tx.abs() {
+                    Some(if ty > 0 { Swipe::Down } else { Swipe::Up })
+                } else {
+                    None
+                };
+                if dir.is_some() {
+                    self.swiped = true;
+                    out.swipe = dir;
+                }
             }
             _ => {}
         }

@@ -118,7 +118,8 @@ impl Desktop {
 
     /// True while Drift slides.
     pub(super) fn notifications_moving(&self) -> bool {
-        self.center.as_ref().is_some_and(|c| self.now_ms < c.opened_at + SLIDE_MS || c.closing_at.is_some())
+        !theme::reduce_motion()
+            && self.center.as_ref().is_some_and(|c| self.now_ms < c.opened_at + SLIDE_MS || c.closing_at.is_some())
     }
 
     pub(super) fn notification_deadline(&self) -> u64 {
@@ -129,14 +130,15 @@ impl Desktop {
         let now = self.now_ms;
         let mut moving = false;
         if let Some(c) = &self.center {
-            let done_closing = c.closing_at.is_some_and(|t| now >= t + SLIDE_MS);
-            let animating = now < c.opened_at + SLIDE_MS || c.closing_at.is_some();
+            let done_closing = c.closing_at.is_some_and(|t| theme::reduce_motion() || now >= t + SLIDE_MS);
+            let animating = !theme::reduce_motion() && (now < c.opened_at + SLIDE_MS || c.closing_at.is_some());
             if animating {
                 let r = self.center_area();
                 self.damage(r);
                 moving = true;
             }
             if done_closing {
+                self.damage(self.center_area());
                 self.center = None;
             }
         }
@@ -190,7 +192,7 @@ impl Desktop {
             None => (0, 0),
         };
         // Grows out of Crest: narrower and higher while it opens.
-        let p = (open - close).clamp(0, 1000) as i32;
+        let p = if theme::reduce_motion() { 1000 } else { (open - close).clamp(0, 1000) as i32 };
         let w = CENTER_W - (1000 - p) * 120 / 1000;
         let h = CENTER_H - (1000 - p) * 60 / 1000;
         let y = MENUBAR_H + 4 - (1000 - p) * 14 / 1000;
@@ -203,6 +205,11 @@ impl Desktop {
 
     pub(super) fn toggle_center(&mut self) {
         let now = self.now_ms;
+        if theme::reduce_motion() && self.center.is_some() {
+            self.center = None;
+            self.damage_all();
+            return;
+        }
         match &mut self.center {
             Some(c) if c.closing_at.is_none() => c.closing_at = Some(now),
             Some(_) => {}
@@ -255,7 +262,7 @@ impl Desktop {
         if !p.contains(x, y) {
             self.toggle_center();
             // Let a click on the clock only close (not reopen) the panel.
-            return y < MENUBAR_H;
+            return y < MENUBAR_H && self.on_main(x, y);
         }
         let hit = self.center_hits().into_iter().find(|(_, r)| r.contains(x, y)).map(|(h, _)| h);
         match hit {
@@ -342,7 +349,7 @@ impl Desktop {
                     let bg = cv.pixel(cx, cy);
                     cv.fill_circle(cx, cy, 8, ink);
                     cv.fill_circle(cx + 4, cy - 3, 7, bg);
-                    cv.text(r.x + 52, r.y + 22, "Calm", theme::ui_bold(13), t.text);
+                    cv.text(r.x + 52, r.y + 22, "Do Not Disturb", theme::ui_bold(13), t.text);
                     cv.text(
                         r.x + 52,
                         r.y + 40,

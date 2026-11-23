@@ -66,7 +66,7 @@ fn track() -> u32 {
 /// A raised surface: the selected segment.
 fn raised() -> u32 {
     if theme::current().dark {
-        rgb(30, 36, 60)
+        theme::current().control_bg
     } else {
         WHITE
     }
@@ -127,7 +127,7 @@ pub(crate) fn render<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &mut Canvas, p: Pa
     }
     if m.material {
         rt.materials.push(r);
-        cv.fill_rect(r, if t.dark { with_alpha(rgb(28, 34, 60), 148) } else { with_alpha(WHITE, 143) });
+        cv.fill_rect(r, with_alpha(t.titlebar, 205));
     }
     if let Some((c, rr)) = m.background {
         cv.fill_round_rect(r, m.corner.unwrap_or(rr), fade(c.argb(), p.alpha));
@@ -135,13 +135,16 @@ pub(crate) fn render<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &mut Canvas, p: Pa
     let tappable = !p.disabled && (m.on_tap.is_some() || m.on_double_tap.is_some());
     let hovered = rt.hover == Some(l.key);
     let pressed = rt.pressed == Some(l.key);
-    if m.selected {
-        cv.fill_round_rect(r, rad, fade(selection(rt.active), p.alpha));
-        if rt.active {
+    let hover_amount = if tappable { rt.feedback(l.key ^ 0xA11CE001, if hovered { 1.0 } else { 0.0 }) } else { 0.0 };
+    let press_amount = if tappable { rt.feedback(l.key ^ 0xA11CE002, if pressed { 1.0 } else { 0.0 }) } else { 0.0 };
+    let selected = rt.feedback(l.key ^ 0xA11CE003, if m.selected { 1.0 } else { 0.0 });
+    if selected > 0.0 {
+        cv.fill_round_rect(r, rad, fade(selection(rt.active), mul(p.alpha, (255.0 * selected) as u8)));
+        if rt.active && m.selected {
             p.fg = Some(Color::AccentText);
         }
-    } else if tappable && (hovered || pressed) {
-        cv.fill_round_rect(r, rad, if pressed { with_alpha(t.text, 0x22) } else { t.hover });
+    } else if tappable && (hover_amount > 0.0 || press_amount > 0.0) {
+        cv.fill_round_rect(r, rad, with_alpha(t.text, (18.0 * hover_amount + 16.0 * press_amount) as u8));
     }
     if let Some((c, rr)) = m.border {
         cv.stroke_round_rect(r, m.corner.unwrap_or(rr), fade(c.argb(), p.alpha));
@@ -157,7 +160,8 @@ pub(crate) fn render<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &mut Canvas, p: Pa
         || !m.context_menu.is_empty()
         || m.help.is_some()
         || m.on_drop.is_some()
-        || m.drag.is_some();
+        || m.drag.is_some()
+        || m.cursor.is_some();
     if wants_hit && !p.disabled {
         rt.hit(Hit {
             rect: r.intersect(&cv.clip),
@@ -173,6 +177,7 @@ pub(crate) fn render<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &mut Canvas, p: Pa
             menu: !m.context_menu.is_empty(),
             hover: m.on_hover.is_some(),
             help: m.help.clone(),
+            cursor: m.cursor,
             drop: m.on_drop.is_some(),
             drag: m.drag.is_some(),
             appear: false,
@@ -203,6 +208,7 @@ fn control_hit<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &Canvas, p: Paint, path:
         menu: false,
         hover: false,
         help: None,
+        cursor: v.mods.cursor,
         drop: false,
         drag: false,
         appear: v.mods.focus_on_appear,
@@ -275,16 +281,9 @@ fn node<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &mut Canvas, p: Paint, rt: &mut
             let tint = v.mods.tint.map(|c| c.argb());
             let mut lp = p;
             lp.style = button_text(*size);
-            // Hover lifts a fill towards the text colour; pressing more.
-            let state = |c: u32| {
-                if pressed {
-                    mix(c, t.text, 40)
-                } else if hovered {
-                    mix(c, t.text, 18)
-                } else {
-                    c
-                }
-            };
+            let hover = rt.feedback(key ^ 0xA11CE001, if hovered { 1.0 } else { 0.0 });
+            let down = rt.feedback(key ^ 0xA11CE002, if pressed { 1.0 } else { 0.0 });
+            let state = |c: u32| mix(c, t.text, (18.0 * hover + 22.0 * down) as i32);
             match style {
                 ButtonStyle::Bordered => {
                     let bg = tint.unwrap_or(Color::SecondaryFill.argb());
@@ -295,15 +294,9 @@ fn node<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &mut Canvas, p: Paint, rt: &mut
                     let bg = tint.unwrap_or_else(theme::accent);
                     // A soft glow of the accent below it.
                     if p.alpha == 255 && !p.disabled {
-                        cv.glow(n.offset(0, 3), rad, 8, bg, 60);
+                        cv.glow(n.offset(0, 2), rad, 5, bg, 24);
                     }
-                    let bg = if pressed {
-                        mix(bg, rgb(0, 0, 0), 48)
-                    } else if hovered {
-                        mix(bg, WHITE, 28)
-                    } else {
-                        bg
-                    };
+                    let bg = mix(mix(bg, WHITE, (18.0 * hover) as i32), rgb(0, 0, 0), (36.0 * down) as i32);
                     cv.fill_round_rect(n, rad, fade(bg, p.alpha));
                     lp.on_accent = true;
                 }
@@ -313,16 +306,7 @@ fn node<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &mut Canvas, p: Paint, rt: &mut
                         (ButtonStyle::Destructive, None) => (Color::Red.argb(), Color::Red.argb()),
                         _ => (theme::accent_ink(), theme::accent()),
                     };
-                    let bg = with_alpha(
-                        tone,
-                        if pressed {
-                            80
-                        } else if hovered {
-                            60
-                        } else {
-                            41
-                        },
-                    );
+                    let bg = with_alpha(tone, (41.0 + 19.0 * hover + 20.0 * down) as u8);
                     cv.fill_round_rect(n, rad, fade(bg, p.alpha));
                     if lp.fg.is_none() {
                         lp.fg = Some(Color::Custom(ink));
@@ -332,20 +316,17 @@ fn node<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &mut Canvas, p: Paint, rt: &mut
                     if lp.fg.is_none() {
                         lp.fg = Some(v.mods.tint.unwrap_or(Color::AccentText));
                     }
-                    if pressed {
-                        lp.alpha = mul(lp.alpha, 150);
-                    } else if hovered {
-                        lp.alpha = mul(lp.alpha, 210);
-                    }
+                    lp.alpha = mul(lp.alpha, (255.0 - 45.0 * hover - 60.0 * down) as u8);
                 }
                 ButtonStyle::Toolbar | ButtonStyle::Row => {
                     lp.style = p.style;
                     let rad = if *style == ButtonStyle::Row { v.mods.corner.unwrap_or(radius::ITEM) } else { rad };
-                    if pressed {
-                        cv.fill_round_rect(n, rad, Color::TertiaryFill.argb());
-                    } else if hovered || !menu.is_empty() && rt.menu_owner() == Some(key) {
-                        cv.fill_round_rect(n, rad, Color::SecondaryFill.argb());
-                    }
+                    let menu_open = !menu.is_empty() && rt.menu_owner() == Some(key);
+                    cv.fill_round_rect(
+                        n,
+                        rad,
+                        with_alpha(t.text, (20.0 * if menu_open { 1.0 } else { hover } + 15.0 * down) as u8),
+                    );
                 }
             }
             if ring {
@@ -677,7 +658,7 @@ fn node<M>(v: &View<'_, M>, l: &Laid<'_, M>, cv: &mut Canvas, p: Paint, rt: &mut
             if let [sl, dl] = &l.kids[..] {
                 // Glass over the desktop, a hairline to the content.
                 rt.materials.push(sl.rect);
-                cv.fill_rect(sl.rect, if t.dark { with_alpha(rgb(28, 34, 60), 148) } else { with_alpha(WHITE, 143) });
+                cv.fill_rect(sl.rect, with_alpha(t.titlebar, 205));
                 cv.fill_rect(Rect::new(sl.rect.right(), n.y, 1, n.h), Color::Separator.argb());
                 path.push(0);
                 render(sidebar, sl, cv, p, rt, path);

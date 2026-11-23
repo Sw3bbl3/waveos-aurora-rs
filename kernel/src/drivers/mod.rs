@@ -3,8 +3,11 @@ pub mod serial;
 pub mod audio;
 pub mod block;
 pub mod display;
+pub mod evdev;
 pub mod gamepad;
+pub mod gpu;
 pub mod hpet;
+pub mod i2c;
 pub mod input;
 pub mod keyboard;
 pub mod keymap;
@@ -22,10 +25,12 @@ pub fn resume() {
     block::ahci::resume();
     block::nvme::resume();
     block::virtio::resume();
+    block::sdhci::resume();
     let (w, h) = crate::gui::screen_pixels();
     display::resume(w as u32, h as u32);
     ps2::init();
     audio::resume();
     net::resume();
     usb::resume();
+    i2c::resume();
 }

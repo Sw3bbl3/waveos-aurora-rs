@@ -1,6 +1,4 @@
-//! Wallpapers. The living water set (Tide, Aurora, Dunes) ships as a day and
-//! a night picture each in `/System/Wallpapers`; the appearance picks one
-//! ([`file`]). The procedural renderings below — a sky with aurora ribbons
+//! Six licensed photographs, displayed faithfully in both appearances. The procedural renderings below — a sky with aurora ribbons
 //! over layered waves, pure integer math and resolution independent — stand
 //! in when the pictures can't be read and draw quick thumbnails.
 
@@ -9,16 +7,20 @@ use crate::math::{sin, Rng};
 use alloc::vec;
 use alloc::vec::Vec;
 
-pub const NAMES: [&str; 3] = ["Tide", "Aurora", "Dunes"];
+/// Existing slots 0, 1, and 2 retain water, mountains, and dunes respectively.
+pub const NAMES: [&str; 6] = ["Tide", "Mist", "Dunes", "Ripple", "Coast", "Alpine"];
+pub const FILES: [&str; 6] = [
+    "/System/Wallpapers/tide.jpg",
+    "/System/Wallpapers/mist.jpg",
+    "/System/Wallpapers/dunes.jpg",
+    "/System/Wallpapers/ripple.jpg",
+    "/System/Wallpapers/coast.jpg",
+    "/System/Wallpapers/alpine.jpg",
+];
 
-/// The picture for wallpaper `index` in the given appearance.
-pub fn file(index: u8, dark: bool) -> Option<&'static str> {
-    const FILES: [[&str; 2]; 3] = [
-        ["/System/Wallpapers/tide-day.jpg", "/System/Wallpapers/tide-night.jpg"],
-        ["/System/Wallpapers/aurora-day.jpg", "/System/Wallpapers/aurora-night.jpg"],
-        ["/System/Wallpapers/dunes-day.jpg", "/System/Wallpapers/dunes-night.jpg"],
-    ];
-    FILES.get(index as usize).map(|f| f[dark as usize])
+/// Photographs stay faithful in both appearances.
+pub fn file(index: u8, _dark: bool) -> Option<&'static str> {
+    FILES.get(index as usize).copied()
 }
 
 /// Wallpaper index meaning "the user's own picture" (see `desktop::SET_WALLPAPER_IMAGE`).

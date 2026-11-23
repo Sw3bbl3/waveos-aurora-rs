@@ -484,7 +484,7 @@ impl Notes {
             .push(
                 HStack::new()
                     .push(
-                        TextField::search("Seek in Notes", self.query.clone())
+                        TextField::search("Search", self.query.clone())
                             .on_change(Msg::Seek)
                             .shortcut(Shortcut::ctrl_shift('f'))
                             .id("seek")
@@ -508,7 +508,7 @@ impl Notes {
             .fill()
     }
 
-    fn toolbar<'a>(&'a self) -> View<'a, Msg> {
+    fn toolbar<'a>(&'a self, compact: bool) -> View<'a, Msg> {
         let line = self.caret_line();
         let in_list = line.starts_with(BULLET);
         let in_tasks = line.starts_with(TASK) || line.starts_with("- [x] ") || line.starts_with("- [X] ");
@@ -556,7 +556,7 @@ impl Notes {
                 self.find.is_some(),
             ),
             Spacer::new(),
-            Text::new(status).style(TextStyle::Caption).foreground(Color::TertiaryLabel),
+            Text::new(status).style(TextStyle::Caption).foreground(Color::TertiaryLabel).hidden(compact),
             tool(Button::symbol(Symbol::Share).action(Msg::Share).help("Copy Note"), false),
         ])
     }
@@ -650,6 +650,10 @@ impl App for Notes {
         } else {
             format!("{} — Notes", self.title)
         }
+    }
+
+    fn min_size(&self) -> (i32, i32) {
+        (480, 300)
     }
 
     fn size(&self) -> (i32, i32) {
@@ -789,9 +793,20 @@ impl App for Notes {
         }
     }
 
-    fn view(&self, _env: &Env) -> View<'_, Msg> {
-        let detail = VStack::new().push(self.toolbar()).push_if(self.find_bar()).push(self.page()).spacing(0).fill();
-        SplitView::new(self.sidebar(), detail).sidebar_width(290)
+    fn view(&self, env: &Env) -> View<'_, Msg> {
+        let detail = VStack::new()
+            .push(self.toolbar(env.size.0 < 900))
+            .push_if(self.find_bar())
+            .push(self.page())
+            .spacing(0)
+            .fill();
+        SplitView::new(self.sidebar(), detail).sidebar_width(if env.size.0 < 640 {
+            170
+        } else if env.size.0 < 760 {
+            210
+        } else {
+            260
+        })
     }
 }
 

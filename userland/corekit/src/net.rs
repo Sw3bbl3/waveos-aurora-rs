@@ -445,7 +445,8 @@ impl Ping6 {
 
 /// Answers by host name: (host, addresses or error, expiry in uptime ms).
 type Answer = core::result::Result<Vec<IpAddr>, isize>;
-static DNS_CACHE: crate::sync::Mutex<Vec<(String, Answer, u64)>> = crate::sync::Mutex::new(Vec::new());
+type CachedAnswer = (String, Answer, u64);
+static DNS_CACHE: crate::sync::Mutex<(u64, Vec<CachedAnswer>)> = crate::sync::Mutex::new((0, Vec::new()));
 const DNS_CACHE_SIZE: usize = 256;
 
 /// Resolves a host name to an IPv4 address (dotted addresses pass through).
@@ -470,21 +471,32 @@ pub fn resolve_all(host: &str) -> Result<Vec<IpAddr>> {
     }
     let key = host.trim_end_matches('.').to_ascii_lowercase();
     let now = crate::time::uptime_ms();
+    let configuration = configuration_key();
     {
-        let mut cache = DNS_CACHE.lock();
+        let mut state = DNS_CACHE.lock();
+        if state.0 != configuration {
+            state.0 = configuration;
+            state.1.clear();
+        }
+        let cache = &mut state.1;
         cache.retain(|(_, _, until)| *until > now);
         if let Some((_, answer, _)) = cache.iter().find(|(h, _, _)| *h == key) {
             return answer.clone().map_err(Error);
         }
     }
     let answer = lookup(&key);
-    // Keep answers for their TTL (30 s to an hour); "no such host" for 10 s.
+    // Respect short/zero TTLs; cap long answers at one hour. NXDOMAIN: 10 s.
     let (value, ttl): (Answer, u64) = match answer {
-        Ok((addrs, ttl)) => (Ok(addrs), (ttl as u64).clamp(30, 3600) * 1000),
+        Ok((addrs, ttl)) => (Ok(addrs), (ttl as u64).min(3600) * 1000),
         Err(e) if e.0.abs() == err::ENOENT => (Err(e.0), 10_000),
         Err(e) => return Err(e),
     };
-    let mut cache = DNS_CACHE.lock();
+    let mut state = DNS_CACHE.lock();
+    // An older in-flight lookup must not repopulate a newer configuration.
+    if state.0 != configuration {
+        return value.map_err(Error);
+    }
+    let cache = &mut state.1;
     if cache.len() >= DNS_CACHE_SIZE {
         let _ = cache.remove(0);
     }
@@ -496,10 +508,26 @@ pub fn resolve_all(host: &str) -> Result<Vec<IpAddr>> {
 /// Asks the configured DNS servers (IPv4 ones, else IPv6 ones from router
 /// advertisements): (addresses, smallest TTL).
 fn lookup(host: &str) -> Result<(Vec<IpAddr>, u32)> {
-    let mut servers: Vec<IpAddr> =
-        interfaces().iter().flat_map(|i| i.dns).filter(|d| *d != [0; 4]).map(IpAddr::V4).collect();
-    for i in interfaces6() {
-        servers.extend(i.dns[..i.dns_count as usize].iter().map(|d| IpAddr::V6(*d)));
+    let ifaces = interfaces();
+    let v6 = interfaces6();
+    let mut servers = Vec::new();
+    for (n, i) in
+        ifaces.iter().enumerate().filter(|(_, i)| i.flags & net::IF_LINK != 0 && i.flags & net::IF_LOOPBACK == 0)
+    {
+        for d in i.dns.iter().filter(|d| **d != [0; 4]) {
+            let a = IpAddr::V4(*d);
+            if !servers.contains(&a) {
+                servers.push(a);
+            }
+        }
+        if let Some(i) = v6.get(n) {
+            for d in i.dns.iter().take(i.dns_count.min(2) as usize).filter(|d| **d != [0; 16]) {
+                let a = IpAddr::V6(*d);
+                if !servers.contains(&a) {
+                    servers.push(a);
+                }
+            }
+        }
     }
     if servers.is_empty() {
         return Err(Error(err::ENETUNREACH));
@@ -518,6 +546,9 @@ fn question(id: u16, host: &str, kind: u16) -> Result<Vec<u8>> {
     let mut q = Vec::new();
     q.extend_from_slice(&id.to_be_bytes());
     q.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]); // recursion desired, one question
+    if host.len() > 253 {
+        return Err(Error(err::EINVAL));
+    }
     for label in host.trim_end_matches('.').split('.') {
         if label.is_empty() || label.len() > 63 {
             return Err(Error(err::EINVAL));
@@ -552,11 +583,15 @@ fn query(server: IpAddr, host: &str) -> Result<(Vec<IpAddr>, u32)> {
     };
     let mut idb = [0u8; 4];
     random(&mut idb);
-    let ids = [u16::from_be_bytes([idb[0], idb[1]]), u16::from_be_bytes([idb[2], idb[3]])];
+    let mut ids = [u16::from_be_bytes([idb[0], idb[1]]), u16::from_be_bytes([idb[2], idb[3]])];
+    if ids[0] == ids[1] {
+        ids[1] = ids[1].wrapping_add(1);
+    }
     let questions = [question(ids[0], host, 1)?, question(ids[1], host, 28)?];
     let mut answers: [Option<Records>; 2] = [None, None];
     let mut buf = [0u8; 1500];
-    for attempt in 0..3u64 {
+    let mut grace = None;
+    for attempt in 0..2u64 {
         for (k, q) in questions.iter().enumerate() {
             if answers[k].is_none() {
                 send(q)?;
@@ -565,30 +600,76 @@ fn query(server: IpAddr, host: &str) -> Result<(Vec<IpAddr>, u32)> {
         let deadline = crate::time::uptime_ms() + (1000 << attempt);
         loop {
             let now = crate::time::uptime_ms();
-            // A is in: give AAAA a little longer only.
-            let deadline = if answers[0].is_some() { deadline.min(now + 300) } else { deadline };
+            // Start the grace period once, so unrelated packets cannot extend it.
+            if grace.is_none() && answers.iter().any(|a| matches!(a, Some(Ok((v, _))) if !v.is_empty())) {
+                grace = Some(now + 250);
+            }
+            let deadline = grace.map_or(deadline, |g| deadline.min(g));
             if now >= deadline || answers.iter().all(|a| a.is_some()) {
                 break;
             }
             sock.set_timeout(deadline - now);
-            let mut from = abi::SockAddr6::default();
-            let n = match call(
-                nr::RECVFROM,
-                &[sock.fd, buf.as_mut_ptr() as u64, buf.len() as u64, &mut from as *mut _ as u64],
-            ) {
+            let mut from4 = SockAddr::default();
+            let mut from6 = abi::SockAddr6::default();
+            let source = match server {
+                IpAddr::V4(_) => &mut from4 as *mut _ as u64,
+                IpAddr::V6(_) => &mut from6 as *mut _ as u64,
+            };
+            let n = match call(nr::RECVFROM, &[sock.fd, buf.as_mut_ptr() as u64, buf.len() as u64, source]) {
                 Ok(n) => n as usize,
                 Err(e) if e.is(err::ETIMEDOUT) => break,
                 Err(e) => return Err(e),
             };
-            if n < 12 {
+            let expected_source = match server {
+                IpAddr::V4(ip) => from4.ip == ip && from4.port == 53,
+                IpAddr::V6(ip) => from6.ip == ip && from6.port == 53,
+            };
+            if n < 12 || n > buf.len() || !expected_source {
                 continue;
             }
             let id = u16::from_be_bytes([buf[0], buf[1]]);
             if let Some(k) = ids.iter().position(|i| *i == id) {
-                answers[k] = Some(parse_answer(&buf[..n]));
+                let kind = if k == 0 { 1 } else { 28 };
+                let decoded = nebula_web::dns::answer(&buf[..n], ids[k], kind);
+                let decoded = if decoded == Err(nebula_web::dns::Error::Truncated) {
+                    match dns_tcp(server, &questions[k]) {
+                        Ok(reply) => nebula_web::dns::answer(&reply, ids[k], kind),
+                        Err(e) => {
+                            // A failure in one family must not discard an
+                            // already usable answer in the other family.
+                            answers[k] = Some(Err(e));
+                            continue;
+                        }
+                    }
+                } else {
+                    decoded
+                };
+                if decoded != Err(nebula_web::dns::Error::Malformed) {
+                    answers[k] = Some(
+                        decoded
+                            .map(|(v, ttl)| {
+                                (
+                                    v.into_iter()
+                                        .map(|a| match a {
+                                            nebula_web::dns::Address::V4(ip) => IpAddr::V4(ip),
+                                            nebula_web::dns::Address::V6(ip) => IpAddr::V6(ip),
+                                        })
+                                        .collect(),
+                                    ttl,
+                                )
+                            })
+                            .map_err(|e| {
+                                Error(match e {
+                                    nebula_web::dns::Error::NotFound => err::ENOENT,
+                                    _ => err::EIO,
+                                })
+                            }),
+                    );
+                }
             }
         }
-        if answers[0].is_some() {
+        if answers.iter().all(|a| a.is_some()) || answers.iter().any(|a| matches!(a, Some(Ok((v, _))) if !v.is_empty()))
+        {
             break;
         }
     }
@@ -613,57 +694,56 @@ fn query(server: IpAddr, host: &str) -> Result<(Vec<IpAddr>, u32)> {
     Ok((addrs, ttl))
 }
 
-/// Skips a (possibly compressed) name; returns the offset after it.
-fn skip_name(m: &[u8], mut i: usize) -> Option<usize> {
-    loop {
-        let len = *m.get(i)? as usize;
-        if len == 0 {
-            return Some(i + 1);
-        }
-        if len & 0xC0 == 0xC0 {
-            return Some(i + 2);
-        }
-        i += 1 + len;
-    }
-}
-
 /// A response's addresses and their smallest TTL (seconds).
 type Records = Result<(Vec<IpAddr>, u32)>;
 
-/// The A and AAAA records of a response.
-fn parse_answer(m: &[u8]) -> Records {
-    let rcode = m[3] & 0xF;
-    if rcode == 3 {
-        return Err(Error(err::ENOENT)); // no such name
+fn dns_tcp(server: IpAddr, question: &[u8]) -> Result<Vec<u8>> {
+    let mut stream = TcpStream::connect_addr(server, 53, 2000)?;
+    stream.socket().set_timeout(2000);
+    stream.write_all(&(question.len() as u16).to_be_bytes())?;
+    stream.write_all(question)?;
+    let mut len = [0u8; 2];
+    if stream.read_full(&mut len)? != 2 {
+        return Err(Error(err::EIO));
     }
-    let qd = u16::from_be_bytes([m[4], m[5]]);
-    let an = u16::from_be_bytes([m[6], m[7]]);
-    let mut i = 12;
-    for _ in 0..qd {
-        i = skip_name(m, i).ok_or(Error(err::EIO))? + 4;
+    let n = u16::from_be_bytes(len) as usize;
+    if n < 12 {
+        return Err(Error(err::EIO));
     }
-    let mut out = Vec::new();
-    let mut ttl = u32::MAX;
-    for _ in 0..an {
-        i = skip_name(m, i).ok_or(Error(err::EIO))?;
-        let rec = m.get(i..i + 10).ok_or(Error(err::EIO))?;
-        let (kind, class) = (u16::from_be_bytes([rec[0], rec[1]]), u16::from_be_bytes([rec[2], rec[3]]));
-        let len = u16::from_be_bytes([rec[8], rec[9]]) as usize;
-        i += 10;
-        let data = m.get(i..i + len).ok_or(Error(err::EIO))?;
-        // CNAMEs come before the addresses they lead to: keep looking.
-        let addr = match (kind, class, len) {
-            (1, 1, 4) => Some(IpAddr::V4([data[0], data[1], data[2], data[3]])),
-            (28, 1, 16) => Some(IpAddr::V6(data.try_into().unwrap())),
-            _ => None,
-        };
-        if let Some(a) = addr {
-            out.push(a);
-            ttl = ttl.min(u32::from_be_bytes([rec[4], rec[5], rec[6], rec[7]]));
+    let mut reply = vec![0; n];
+    if stream.read_full(&mut reply)? != n {
+        return Err(Error(err::EIO));
+    }
+    Ok(reply)
+}
+
+/// A fingerprint of routing/resolver configuration, excluding traffic counters
+/// and lease countdowns. Native caches invalidate when this changes.
+pub fn configuration_key() -> u64 {
+    let mut key = 0xcbf29ce484222325u64;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            key = (key ^ *b as u64).wrapping_mul(0x100000001b3);
         }
-        i += len;
+    };
+    for i in interfaces() {
+        feed(&i.flags.to_le_bytes());
+        feed(&i.ip);
+        feed(&i.gateway);
+        for d in i.dns {
+            feed(&d);
+        }
     }
-    Ok((out, if ttl == u32::MAX { 300 } else { ttl }))
+    for i in interfaces6() {
+        feed(&i.router);
+        for a in i.addrs {
+            feed(&a);
+        }
+        for d in i.dns {
+            feed(&d);
+        }
+    }
+    key
 }
 
 /// Human-readable error for network failures.

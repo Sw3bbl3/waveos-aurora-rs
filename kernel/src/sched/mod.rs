@@ -3,8 +3,11 @@
 //! Every thread of execution is a task: kernel threads (pid 0) and the threads
 //! of user processes. Each CPU has its own run queue and an idle task (the
 //! context that brought the CPU up). A CPU whose queue runs dry steals from
-//! the busiest one; a task woken for an idle CPU gets there by IPI. Timer
-//! ticks drive preemption every `QUANTUM_MS`.
+//! the busiest one; a task woken for an idle CPU gets there by IPI (unless
+//! that CPU is polling for work, see `power::idle`). There is no periodic
+//! tick: a CPU's timer is armed for its next timer (`crate::timer`; every
+//! sleep and timeout is one) and, only while other tasks wait for it, for
+//! the end of the running task's `QUANTUM_MS` slice.
 //!
 //! One lock guards the task table and all queues. Switching is split in two:
 //! under the lock a CPU decides and records the switch, then — lock released,
@@ -26,7 +29,6 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use x86_64::instructions::interrupts;
 
-const STACK_SIZE: usize = 128 * 1024;
 const QUANTUM_MS: u64 = 10;
 
 pub type TaskId = u64;
@@ -44,7 +46,7 @@ struct Task {
     name: String,
     rsp: u64,
     state: State,
-    _stack: Option<Box<[u8]>>,
+    _stack: Option<crate::mm::kstack::KStack>,
     cpu_ns: u64,
     /// Owning process (0 = kernel).
     pid: u32,
@@ -65,6 +67,12 @@ struct Task {
     idle: bool,
     /// Runs only on CPU 0 (suspend: firmware resumes on the boot CPU).
     bsp_only: bool,
+    /// The timer that ends its sleep, while it sleeps with a timeout.
+    timer: Option<crate::timer::Handle>,
+    /// Counts its sleeps, so a timer that fires late can't end a later one.
+    sleep_seq: u64,
+    /// Sleeps that ended by timeout (the timer wakeups it causes).
+    timer_wakeups: u64,
 }
 
 struct Cpu {
@@ -91,10 +99,9 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 /// nothing but their idle task, which halts.
 static PARKING: AtomicBool = AtomicBool::new(false);
 static PARKED: AtomicU64 = AtomicU64::new(0);
-/// The earliest tick a sleeping task wants to wake at (`u64::MAX`: none),
-/// so the timer looks through the tasks only when one is due. Changed
-/// under `SCHED`'s lock.
-static NEXT_WAKE: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Per CPU: when the running task's slice ends (ns), if other tasks wait
+/// for that CPU; 0 if none do (no preemption interrupt is needed then).
+static TICK_AT: [AtomicU64; percpu::MAX_CPUS] = [const { AtomicU64::new(0) }; percpu::MAX_CPUS];
 /// Per CPU: the `on_cpu` flag of the task it just switched away from, for
 /// [`finish_switch`] to clear without taking the lock (0: that task exited,
 /// and is freed under the lock).
@@ -103,7 +110,7 @@ static PREV_ON_CPU: [AtomicU64; percpu::MAX_CPUS] = [const { AtomicU64::new(0) }
 fn new_task(
     name: &str,
     rsp: u64,
-    stack: Option<Box<[u8]>>,
+    stack: Option<crate::mm::kstack::KStack>,
     pid: u32,
     cr3: u64,
     kstack_top: u64,
@@ -125,6 +132,9 @@ fn new_task(
         on_cpu: AtomicBool::new(false),
         idle: false,
         bsp_only: false,
+        timer: None,
+        sleep_seq: 0,
+        timer_wakeups: 0,
     })
 }
 
@@ -157,6 +167,7 @@ fn adopt_idle(s: &mut Scheduler, cpu: usize, id: TaskId) {
     if old != id && old != 0 && s.tasks.get(&old).is_some_and(|t| t.idle) {
         s.tasks.remove(&old);
     }
+    TICK_AT[cpu].store(0, Ordering::Relaxed);
     let pc = &percpu::CPUS[cpu];
     pc.idle.store(true, Ordering::Relaxed);
     pc.task.store(id, Ordering::Relaxed);
@@ -193,39 +204,107 @@ pub fn spawn(name: &str, f: fn()) -> TaskId {
     id
 }
 
-/// The CPU with the least work (queued tasks, plus one if busy).
+/// The CPU with the least work (queued tasks, plus one if busy); among
+/// equals this one, which is awake and runs it when it next yields.
 fn least_loaded(s: &Scheduler) -> usize {
+    let me = percpu::cpu_id();
     percpu::online()
         .filter(|&c| c < s.cpus.len())
-        .min_by_key(|&c| s.cpus[c].queue.len() + (s.cpus[c].current != s.cpus[c].idle) as usize)
+        .min_by_key(|&c| (s.cpus[c].queue.len() + (s.cpus[c].current != s.cpus[c].idle) as usize, c != me))
         .unwrap_or(0)
 }
 
-/// Queues a ready task on `cpu`; returns the CPU to kick with an IPI, if any.
+/// `cpu` is running its idle task with nothing queued.
+fn is_idle(s: &Scheduler, cpu: usize) -> bool {
+    cpu < s.cpus.len()
+        && s.cpus[cpu].current == s.cpus[cpu].idle
+        && s.cpus[cpu].queue.is_empty()
+        && percpu::CPUS[cpu].online.load(Ordering::Acquire)
+        && !(cpu != 0 && PARKING.load(Ordering::Acquire))
+}
+
+/// An idle CPU other than `except` to run more work, preferring one that is
+/// awake (polling for work, so it needs no interrupt) over one asleep.
+fn find_idle(s: &Scheduler, except: usize) -> Option<usize> {
+    let mut asleep = None;
+    for c in percpu::online().filter(|&c| c != except && is_idle(s, c)) {
+        if crate::power::idle::polling(c) {
+            return Some(c);
+        }
+        asleep = asleep.or(Some(c));
+    }
+    asleep
+}
+
+/// Queues a ready task, preferably on `cpu` (where it last ran); returns the
+/// CPU to kick, if any.
+///
+/// Placement avoids waking sleeping CPUs: a task goes to its own CPU if
+/// that is idle; else to this CPU if it is idle (it is awake already: this
+/// is an interrupt handler or the idle loop, and runs the task next); else
+/// to another idle CPU, awake ones first; else it waits on its own CPU.
 fn enqueue(s: &mut Scheduler, id: TaskId, mut cpu: usize) -> Option<usize> {
     let bsp_only = s.tasks.get(&id).is_some_and(|t| t.bsp_only);
     if bsp_only || cpu >= s.cpus.len() || !percpu::CPUS[cpu].online.load(Ordering::Acquire) {
         cpu = 0;
     }
-    // Prefer an idle CPU over waiting behind a busy one.
-    if !bsp_only && (s.cpus[cpu].current != s.cpus[cpu].idle || !s.cpus[cpu].queue.is_empty()) {
-        if let Some(idle) = percpu::online()
-            .find(|&c| c < s.cpus.len() && s.cpus[c].current == s.cpus[c].idle && s.cpus[c].queue.is_empty())
-        {
+    let me = percpu::cpu_id();
+    if !bsp_only && !is_idle(s, cpu) {
+        if is_idle(s, me) {
+            cpu = me;
+        } else if let Some(idle) = find_idle(s, cpu) {
             cpu = idle;
         }
     }
     s.cpus[cpu].queue.push_back(id);
-    (s.cpus[cpu].current == s.cpus[cpu].idle && cpu != percpu::cpu_id()).then_some(cpu)
+    crate::power::idle::set_need_resched(cpu);
+    let c = &s.cpus[cpu];
+    if c.current != c.idle {
+        // A busy CPU must now end its task's slice on time.
+        if TICK_AT[cpu].load(Ordering::Relaxed) == 0 {
+            TICK_AT[cpu].store(c.slice_start + QUANTUM_MS * 1_000_000, Ordering::Relaxed);
+            if cpu == me {
+                crate::timer::reprogram();
+                return None;
+            }
+            return Some(cpu); // to arm its timer
+        }
+        return None;
+    }
+    (cpu != me).then_some(cpu)
 }
 
+/// Gets `cpu` to look at its queue: an IPI, unless it is idle and polling
+/// for work (then the flag [`enqueue`] set is enough).
 fn kick(cpu: Option<usize>) {
     if let Some(c) = cpu {
+        crate::power::idle::set_need_resched(c);
+        if crate::power::idle::polling(c) {
+            crate::power::idle::ipi_avoided(c);
+            return;
+        }
         crate::arch::apic::send_ipi(
             percpu::CPUS[c].lapic_id.load(Ordering::Relaxed),
             crate::arch::idt::RESCHEDULE_VECTOR,
         );
     }
+}
+
+/// When `cpu`'s timer must end the running task's slice (`u64::MAX`: no
+/// other task waits, so never).
+pub fn tick_deadline(cpu: usize) -> u64 {
+    match TICK_AT.get(cpu).map_or(0, |t| t.load(Ordering::Relaxed)) {
+        0 => u64::MAX,
+        t => t,
+    }
+}
+
+/// Records whether `cpu` needs a preemption interrupt: only while it runs a
+/// task and others are queued behind it.
+fn set_tick(s: &Scheduler, cpu: usize) {
+    let c = &s.cpus[cpu];
+    let at = if c.current != c.idle && !c.queue.is_empty() { c.slice_start + QUANTUM_MS * 1_000_000 } else { 0 };
+    TICK_AT[cpu].store(at, Ordering::Relaxed);
 }
 
 /// Spawns a kernel thread that only ever runs on CPU 0.
@@ -349,8 +428,9 @@ fn spawn_inner_fpu(
     fpu: Option<Box<FpuState>>,
     fs_base: u64,
 ) -> TaskId {
-    let stack = alloc::vec![0u8; STACK_SIZE].into_boxed_slice();
-    let top = (stack.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
+    // 128 KiB with an unmapped guard area below (see `mm::kstack`).
+    let stack = crate::mm::kstack::KStack::new();
+    let top = stack.top() & !0xF;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let rsp = switch::init_stack(top, f as usize as u64, arg);
     let target = interrupts::without_interrupts(|| {
@@ -451,7 +531,12 @@ fn pick_next(s: &mut Scheduler, cpu: usize) -> Option<TaskId> {
             return Some(id);
         }
     }
-    let victim = (0..s.cpus.len()).filter(|&c| c != cpu).max_by_key(|&c| s.cpus[c].queue.len())?;
+    // Only from CPUs busy with another task: one that is idle has been
+    // kicked and runs its queue as soon as it wakes (stealing from it only
+    // races its wakeup, and leaves it with nothing).
+    let victim = (0..s.cpus.len())
+        .filter(|&c| c != cpu && s.cpus[c].current != s.cpus[c].idle)
+        .max_by_key(|&c| s.cpus[c].queue.len())?;
     let q = &mut s.cpus[victim].queue;
     let pos = q.iter().position(|id| {
         s.tasks.get(id).is_some_and(|t| t.state == State::Ready && t.running_on.is_none() && (cpu == 0 || !t.bsp_only))
@@ -470,12 +555,13 @@ fn schedule() {
     }
     let cpu = percpu::cpu_id();
     let now = time::now_ns();
-    let (save, load, next_flag, switch_to) = {
+    let (save, load, next_flag, switch_to, kick_idle) = {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
         if cpu >= s.cpus.len() {
             return;
         }
+        crate::power::idle::clear_need_resched(cpu);
         let cur_id = s.cpus[cpu].current;
         let delta = now.saturating_sub(s.cpus[cpu].slice_start);
         let cur_is_idle = cur_id == s.cpus[cpu].idle;
@@ -505,11 +591,24 @@ fn schedule() {
         };
         if next_id == cur_id {
             s.tasks.get_mut(&cur_id).unwrap().state = State::Running;
+            set_tick(s, cpu);
+            crate::timer::reprogram();
             return;
         }
+        let mut kick_idle = None;
         if requeue {
-            // While the APs park, their tasks move to the boot CPU.
-            let home = if cpu != 0 && PARKING.load(Ordering::Acquire) { 0 } else { cpu };
+            // While the APs park, their tasks move to the boot CPU. A task
+            // that had to give way moves to an idle CPU if there is one
+            // (with no periodic tick, idle CPUs don't come looking).
+            let bsp_only = s.tasks.get(&cur_id).is_some_and(|t| t.bsp_only);
+            let home = if parking {
+                0
+            } else if let Some(idle) = find_idle(s, cpu).filter(|_| !bsp_only) {
+                kick_idle = Some(idle);
+                idle
+            } else {
+                cpu
+            };
             s.cpus[home].queue.push_back(cur_id);
         }
         // Record the switch. The tasks' boxes stay put while their stacks
@@ -547,9 +646,12 @@ fn schedule() {
         let flag = &next.on_cpu as *const AtomicBool;
         s.cpus[cpu].current = next_id;
         crate::telemetry::switched(next_id, cpu);
-        (save, load, flag, switch_to)
+        set_tick(s, cpu);
+        crate::timer::reprogram();
+        (save, load, flag, switch_to, kick_idle)
         // The lock guard drops here; interrupts stay off because the caller disabled them.
     };
+    kick(kick_idle);
     // The task we leave is ours until `finish_switch` on the other side.
     if let Some(f) = switch_to.save_fpu {
         unsafe { (*f).save() };
@@ -620,16 +722,14 @@ fn finish_switch() {
     }
 }
 
-/// Called from each CPU's timer interrupt (interrupts already disabled).
+/// After this CPU's timer interrupt (interrupts already disabled): ends the
+/// running task's slice if it is over and others wait, and re-arms the timer.
 pub fn on_timer_tick() {
     if !STARTED.load(Ordering::Acquire) {
+        crate::timer::reprogram();
         return;
     }
     let cpu = percpu::cpu_id();
-    if cpu == 0 {
-        time::tick();
-        wake_sleepers();
-    }
     let now = time::now_ns();
     let need = {
         let guard = SCHED.lock();
@@ -638,64 +738,81 @@ pub fn on_timer_tick() {
         let others = !c.queue.is_empty();
         let expired = now.saturating_sub(c.slice_start) >= QUANTUM_MS * 1_000_000;
         let parking = cpu != 0 && c.current != c.idle && PARKING.load(Ordering::Acquire);
-        (c.current == c.idle && others) || (expired && others) || parking
+        let need = (c.current == c.idle && others) || (expired && others) || parking;
+        if !need {
+            set_tick(s, cpu);
+        }
+        need
     };
     if need {
         schedule();
+    } else {
+        crate::timer::reprogram();
     }
 }
 
-/// Reschedule IPI: another CPU queued work for this one.
+/// Reschedule IPI: another CPU queued work for this one (or needs this CPU
+/// to arm its slice timer, or to leave user mode for a signal).
 pub fn on_reschedule_ipi() {
-    schedule();
+    crate::power::idle::ipi_received(percpu::cpu_id());
+    on_timer_tick();
 }
 
-/// Wakes tasks whose sleep has run out (CPU 0, every tick).
-fn wake_sleepers() {
-    let now = time::ticks();
-    if now < NEXT_WAKE.load(Ordering::Relaxed) {
-        return;
-    }
-    let due: Vec<TaskId> = match SCHED.lock().as_ref() {
-        Some(s) => {
-            let mut next = u64::MAX;
-            let mut due = Vec::new();
-            for (&id, t) in &s.tasks {
-                match t.state {
-                    State::Sleeping(u) if now >= u => due.push(id),
-                    State::Sleeping(u) => next = next.min(u),
-                    _ => {}
-                }
-            }
-            NEXT_WAKE.store(next, Ordering::Relaxed);
-            due
+/// A sleep's timer fired (in the timer interrupt of the CPU it slept on).
+pub fn timer_expired(id: TaskId, seq: u64) {
+    let target = {
+        let mut guard = SCHED.lock();
+        let Some(s) = guard.as_mut() else { return };
+        let Some(t) = s.tasks.get_mut(&id) else { return };
+        if !matches!(t.state, State::Sleeping(_)) || t.sleep_seq != seq {
+            return;
         }
-        None => return,
+        t.timer = None;
+        t.timer_wakeups += 1;
+        t.state = State::Ready;
+        if t.running_on.is_some() {
+            return;
+        }
+        let cpu = t.last_cpu;
+        enqueue(s, id, cpu)
     };
-    for id in due {
-        wake(id);
-    }
+    kick(target);
 }
 
 pub fn yield_now() {
     interrupts::without_interrupts(schedule);
 }
 
+/// Marks the running task asleep until millisecond tick `until` (or until
+/// woken), with a timer on this CPU to wake it then.
 fn mark_sleeping(until: u64) {
+    let deadline = until.saturating_mul(1_000_000);
     if let Some(s) = SCHED.lock().as_mut() {
         let cur = s.cpus[percpu::cpu_id()].current;
         if let Some(t) = s.tasks.get_mut(&cur) {
             if !t.idle {
                 t.state = State::Sleeping(until);
-                NEXT_WAKE.fetch_min(until, Ordering::Relaxed);
+                t.sleep_seq += 1;
+                if let Some(old) = t.timer.take() {
+                    crate::timer::cancel(old);
+                }
+                if deadline != u64::MAX {
+                    t.timer = Some(crate::timer::add(deadline, crate::timer::Action::Wake(cur, t.sleep_seq)));
+                }
             }
         }
     }
 }
 
+/// The millisecond tick `ms` from now (sleeps end on millisecond
+/// boundaries, so timers due close together share one interrupt).
+fn tick_after(ms: u64) -> u64 {
+    time::ticks().saturating_add(ms.saturating_mul(time::HZ) / 1000)
+}
+
 pub fn sleep_ms(ms: u64) {
     interrupts::without_interrupts(|| {
-        mark_sleeping(time::ticks().saturating_add(ms.saturating_mul(time::HZ) / 1000));
+        mark_sleeping(tick_after(ms));
         schedule();
     });
 }
@@ -705,13 +822,16 @@ pub fn sleep_ms(ms: u64) {
 /// checked, so a wakeup from another CPU in between is never lost.
 pub fn wait_until(ms: u64, ready: impl Fn() -> bool) {
     interrupts::without_interrupts(|| {
-        mark_sleeping(time::ticks().saturating_add(ms.saturating_mul(time::HZ) / 1000));
+        mark_sleeping(tick_after(ms));
         if ready() {
             if let Some(s) = SCHED.lock().as_mut() {
                 let cur = s.cpus[percpu::cpu_id()].current;
                 if let Some(t) = s.tasks.get_mut(&cur) {
                     if matches!(t.state, State::Sleeping(_) | State::Ready) {
                         t.state = State::Running;
+                    }
+                    if let Some(h) = t.timer.take() {
+                        crate::timer::cancel(h);
                     }
                 }
             }
@@ -731,6 +851,9 @@ pub fn wake(id: TaskId) {
             return;
         }
         t.state = State::Ready;
+        if let Some(h) = t.timer.take() {
+            crate::timer::cancel(h);
+        }
         // A task still on its CPU (it hasn't switched away yet) is requeued by that CPU.
         if t.running_on.is_some() {
             return;
@@ -744,7 +867,9 @@ pub fn wake(id: TaskId) {
 /// The idle loop run by each CPU's boot context once everything is up.
 pub fn idle() -> ! {
     loop {
-        interrupts::enable_and_hlt();
+        // Sleeps in an idle state until an interrupt, or returns at once if
+        // work was queued here (interrupts are on afterwards).
+        crate::power::idle::enter();
         yield_now();
         let cpu = percpu::cpu_id();
         if cpu != 0 && PARKING.load(Ordering::Acquire) {
@@ -790,6 +915,11 @@ pub fn park_aps() -> bool {
         }
         yield_now();
     }
+    // Their pending timers (sleeps that started there) move here.
+    for &c in &aps {
+        crate::timer::migrate(c, percpu::cpu_id());
+        TICK_AT[c].store(0, Ordering::Relaxed);
+    }
     percpu::set_count(1);
     true
 }
@@ -804,34 +934,47 @@ pub fn unpark() {
 /// the return addresses on its stack (resolve them with `addr2line -e` on the
 /// kernel ELF). For the self-tests' panic report; it never waits for a lock.
 pub fn dump_stacks() {
+    dump_stacks_of(|_| true)
+}
+
+/// [`dump_stacks`] for the tasks of the processes `which` picks (0: the kernel).
+pub fn dump_stacks_of(which: impl Fn(u32) -> bool) {
     let Some(guard) = SCHED.try_lock() else {
         crate::kprintln!("(scheduler busy: no task stacks)");
         return;
     };
     let Some(s) = guard.as_ref() else { return };
+    // (Allocates nothing: the panic may be the heap running out.)
     for (&id, t) in &s.tasks {
-        if t.idle || t.running_on.is_some() {
+        if t.idle || !which(t.pid) {
+            continue;
+        }
+        if let Some(cpu) = t.running_on {
+            crate::kprintln!("task {} '{}' (pid {}) running on CPU {}", id, t.name, t.pid, cpu);
             continue;
         }
         let Some(stack) = t._stack.as_ref() else { continue };
-        let (lo, hi) = (stack.as_ptr() as u64, stack.as_ptr() as u64 + stack.len() as u64);
+        let (lo, hi) = (stack.bottom(), stack.top());
         let read = |a: u64| -> Option<u64> { (a >= lo && a + 8 <= hi).then(|| unsafe { (a as *const u64).read() }) };
         // aurora_context_switch pushed rbp, rbx, r12–r15 below its return address.
-        let mut frames = alloc::vec::Vec::new();
+        let mut frames = [0u64; 20];
+        let mut n = 0;
         if let Some(ret) = read(t.rsp + 48) {
-            frames.push(ret);
+            frames[0] = ret;
+            n = 1;
         }
         let mut rbp = read(t.rsp + 40).unwrap_or(0);
-        while frames.len() < 20 {
+        while n < frames.len() {
             let (Some(next), Some(ret)) = (read(rbp), read(rbp + 8)) else { break };
-            frames.push(ret);
+            frames[n] = ret;
+            n += 1;
             if next <= rbp {
                 break;
             }
             rbp = next;
         }
-        crate::kprint!("task {} '{}' {:?}:", id, t.name, t.state);
-        for f in frames {
+        crate::kprint!("task {} '{}' (pid {}) {:?}:", id, t.name, t.pid, t.state);
+        for f in &frames[..n] {
             crate::kprint!(" {:#x}", f);
         }
         crate::kprintln!();
@@ -873,6 +1016,33 @@ pub fn list() -> Vec<TaskInfo> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// (tasks, of them user threads, of them sleeping), without waiting for
+/// the lock (zeros if it is busy).
+pub fn task_counts() -> (u64, u64, u64) {
+    interrupts::without_interrupts(|| {
+        let Some(g) = SCHED.try_lock() else { return (0, 0, 0) };
+        let Some(s) = g.as_ref() else { return (0, 0, 0) };
+        let user = s.tasks.values().filter(|t| t.pid != 0).count() as u64;
+        let sleeping = s.tasks.values().filter(|t| t.pid != 0 && matches!(t.state, State::Sleeping(_))).count() as u64;
+        (s.tasks.len() as u64, user, sleeping)
+    })
+}
+
+/// Tasks by the timer wakeups their sleeps caused (timeouts that ran out),
+/// most first: what keeps an idle system from being quiet.
+pub fn timer_wakeups() -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = SCHED
+        .lock()
+        .as_ref()
+        .map(|s| s.tasks.values().filter(|t| t.timer_wakeups > 0).map(|t| (t.name.clone(), t.timer_wakeups)).collect())
+        .unwrap_or_default();
+    for (name, n) in crate::timer::call_counts() {
+        v.push((alloc::format!("timer:{name}"), n));
+    }
+    v.sort_by_key(|a| core::cmp::Reverse(a.1));
+    v
 }
 
 /// (busy, idle) milliseconds of every CPU that has joined.

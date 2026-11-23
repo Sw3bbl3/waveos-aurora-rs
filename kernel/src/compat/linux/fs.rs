@@ -19,6 +19,7 @@ pub const AT_REMOVEDIR: u64 = 0x200;
 const AT_EMPTY_PATH: u64 = 0x1000;
 pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 const O_NOFOLLOW: u64 = 0o400000;
+const O_PATH: u64 = 0o10000000;
 pub const O_CLOEXEC: u64 = 0o2000000;
 
 pub const O_WRONLY: u64 = 1;
@@ -82,18 +83,31 @@ pub fn to_guest(host: &str) -> String {
     String::from(host)
 }
 
-/// Makes the writable Linux folders (once per boot is enough; cheap after).
-pub fn prepare_root(user: &str) {
-    for dir in ["", "/home", "/tmp", "/var", "/var/tmp", "/run", "/root"] {
-        let path = format!("{WRITABLE_ROOT}{dir}");
-        if !fs::is_dir(&path) {
-            let _ = fs::mkdir(&path);
+/// Makes the writable Linux folders (once per boot is enough; cheap after):
+/// the system's, with `/tmp` and `/var/tmp` open to everyone (sticky), and
+/// `/home/<user>` for account `uid`.
+pub fn prepare_root(user: &str, uid: u32) {
+    use crate::fs::{perm, Owner};
+    perm::system(|| {
+        for dir in ["", "/home", "/tmp", "/var", "/var/tmp", "/run", "/root"] {
+            let path = format!("{WRITABLE_ROOT}{dir}");
+            if !fs::is_dir(&path) && fs::mkdir(&path).is_ok() {
+                let mode = match dir {
+                    "/tmp" | "/var/tmp" => Some(0o1777),
+                    "/run" => Some(0o777),
+                    "/root" => Some(0o700),
+                    _ => None,
+                };
+                if let Some(mode) = mode {
+                    let _ = perm::set_owner_path(&path, Owner::system(mode));
+                }
+            }
         }
-    }
-    let home = format!("{WRITABLE_ROOT}/home/{user}");
-    if !fs::is_dir(&home) {
-        let _ = fs::mkdir(&home);
-    }
+        let home = format!("{WRITABLE_ROOT}/home/{user}");
+        if !fs::is_dir(&home) && fs::mkdir(&home).is_ok() {
+            let _ = perm::set_owner_path(&home, Owner { uid, gid: uid, mode: 0o755 });
+        }
+    });
 }
 
 /// An open object only Linux programs have: a directory, a generated file,
@@ -126,15 +140,42 @@ pub enum Special {
         file: Arc<super::shm::ShmFile>,
         pos: u64,
     },
+    /// A device node with its own reads, writes and `ioctl`s
+    /// (`/dev/input/*`, `/dev/hidraw*`, `/dev/uinput`).
+    Device(Arc<dyn super::chardev::CharDev>),
+    /// An inotify descriptor.
+    Inotify(Arc<super::inotify::Inotify>),
+    /// A `NETLINK_KOBJECT_UEVENT` socket.
+    Netlink(Arc<super::uevent::Socket>),
+    /// A symbolic link itself (`O_PATH | O_NOFOLLOW`), by Linux path.
+    Link(String),
+    /// An open DRM card (`/dev/dri/card0`, see [`super::drm`]).
+    Drm(Arc<super::drm::File>),
+    /// A dma-buf: a GPU buffer exported from a card (`PRIME`).
+    DmaBuf(Arc<crate::drivers::gpu::BufferObject>),
 }
 
 impl Special {
+    /// The character device behind it, if it is one.
+    pub fn chardev(&self) -> Option<Arc<dyn super::chardev::CharDev>> {
+        match self {
+            Special::Device(d) => Some(d.clone()),
+            Special::Inotify(i) => Some(i.clone()),
+            _ => None,
+        }
+    }
+
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize, isize> {
         match self {
+            Special::Device(d) => d.read(out, true),
+            Special::Inotify(i) => super::chardev::CharDev::read(&**i, out, true),
+            Special::Netlink(_) => Err(EINVAL),
+            Special::Link(_) => Err(EBADF),
             Special::Event(e) => e.read(out),
             Special::Timer(t) => t.read(out),
             Special::WaveEvents(pid) => super::events::wave_events_read(*pid, out),
-            Special::Epoll(_) => Err(EINVAL),
+            Special::Epoll(_) | Special::DmaBuf(_) => Err(EINVAL),
+            Special::Drm(f) => super::drm::vblank::read(f, out, true),
             Special::Unix(u) => u.recv(out, false, false).map(|r| r.len),
             Special::Shm { file, pos } => {
                 let n = file.read_at(*pos, out);
@@ -165,7 +206,14 @@ impl Special {
             Special::Dir { .. } => Err(EISDIR),
             Special::Mem { .. } => Err(EACCES),
             Special::Event(e) => e.write(data),
-            Special::Timer(_) | Special::Epoll(_) | Special::WaveEvents(_) => Err(EINVAL),
+            Special::Device(d) => d.write(data, true),
+            Special::Timer(_)
+            | Special::Epoll(_)
+            | Special::WaveEvents(_)
+            | Special::Inotify(_)
+            | Special::Netlink(_) => Err(EINVAL),
+            Special::Link(_) => Err(EBADF),
+            Special::Drm(_) | Special::DmaBuf(_) => Err(EINVAL),
             Special::Unix(u) => u.send(data, Vec::new(), None, false),
             Special::Shm { file, pos } => {
                 let n = file.write_at(*pos, data)?;
@@ -186,8 +234,16 @@ impl Special {
             Special::Random => (S_IFCHR | 0o666, makedev(1, 9)),
             // Anonymous inodes on Linux.
             Special::Event(_) | Special::Timer(_) | Special::Epoll(_) | Special::WaveEvents(_) => (0o600, 0),
-            Special::Unix(_) => (S_IFSOCK | 0o777, 0),
+            Special::Unix(_) | Special::Netlink(_) => (S_IFSOCK | 0o777, 0),
             Special::Shm { .. } => (S_IFREG | 0o600, 0),
+            Special::Device(d) => {
+                let (mode, rdev, _) = d.stat();
+                (mode, rdev)
+            }
+            Special::Inotify(_) => (0o600, 0),
+            Special::Link(_) => (S_IFLNK | 0o777, 0),
+            Special::Drm(f) => (S_IFCHR | 0o666, makedev(super::drm::MAJOR, f.minor as u64)),
+            Special::DmaBuf(_) => (0o600, 0),
         }
     }
 }
@@ -199,7 +255,7 @@ const S_IFREG: u32 = 0o100000;
 const S_IFLNK: u32 = 0o120000;
 const S_IFSOCK: u32 = 0o140000;
 
-fn makedev(major: u64, minor: u64) -> u64 {
+pub fn makedev(major: u64, minor: u64) -> u64 {
     (major << 8) | minor
 }
 
@@ -266,16 +322,27 @@ pub fn path_arg(p: &Process, dirfd: u64, ptr: u64) -> Result<String, isize> {
 
 /// Files that exist only for Linux programs.
 fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
+    // sysfs (the input devices' and, through them, the DRM cards'), udev's
+    // records and the input device folders.
+    match super::input::lookup(guest) {
+        Some(super::input::Found::Dir) => {
+            return Some(Ok(Special::Dir { host: String::from(guest), entries: None, pos: 0 }))
+        }
+        Some(super::input::Found::File(data)) => return Some(Ok(Special::Mem { data, pos: 0 })),
+        Some(super::input::Found::Missing) => return Some(Err(ENOENT)),
+        // Links are followed before; device nodes are opened elsewhere.
+        Some(_) | None => {}
+    }
     let user = account_user();
     Some(Ok(match guest {
-        "/dev" | "/proc" | "/proc/self" | "/dev/shm" => {
+        "/dev" | "/proc" | "/proc/self" | "/dev/shm" | "/dev/dri" => {
             Special::Dir { host: String::from(guest), entries: None, pos: 0 }
         }
         "/dev/null" => Special::Null,
         "/dev/zero" => Special::Zero,
         "/dev/random" | "/dev/urandom" => Special::Random,
         "/dev/tty" | "/dev/console" => return Some(Err(ENXIO)),
-        "/proc/cpuinfo" => mem(cpuinfo()),
+        "/proc/cpuinfo" => mem(super::cpu::cpuinfo()),
         "/proc/meminfo" => mem(meminfo()),
         "/proc/self/maps" => mem(super::mm::maps(p)),
         "/proc/self/cmdline" => mem(format!("{}\0", p.name())),
@@ -291,11 +358,8 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/proc/mounts" | "/proc/self/mounts" | "/etc/mtab" => mem(mounts()),
         "/proc/version" => mem(String::from("Linux version 6.12.0-waveos (WaveOS Aurora)\n")),
         "/proc/sys/kernel/osrelease" => mem(String::from("6.12.0-waveos\n")),
-        "/etc/passwd" => mem(format!(
-            "root:x:0:0:root:/root:/bin/sh\n{user}:x:{uid}:{uid}:{user}:/home/{user}:/bin/sh\n",
-            uid = super::UID
-        )),
-        "/etc/group" => mem(format!("root:x:0:\n{user}:x:{uid}:\n", uid = super::UID)),
+        "/etc/passwd" => mem(passwd(&user)),
+        "/etc/group" => mem(group(&user)),
         "/etc/hostname" => mem(String::from("aurora\n")),
         "/etc/hosts" => mem(String::from("127.0.0.1 localhost aurora\n::1 localhost aurora\n")),
         "/etc/resolv.conf" => mem(resolv_conf()),
@@ -303,26 +367,49 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
     }))
 }
 
-/// The user name Linux programs see ("alex" for Alex Rivera).
+/// The user name Linux programs see: the calling process's account
+/// ("alex"), or the logged-in one's for the system.
 pub fn account_user() -> String {
-    let full = crate::gui::prefs::get("account_name").unwrap_or_default();
-    let first: String = full.split_whitespace().next().unwrap_or("user").to_lowercase();
-    let name: String = first.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    if name.is_empty() {
-        String::from("user")
-    } else {
-        name
-    }
+    let uid = crate::users::current().unwrap_or_else(crate::users::session).uid;
+    crate::users::db::get(uid).map(|u| u.name).unwrap_or_else(|| String::from("user"))
 }
 
-fn cpuinfo() -> String {
-    let n = crate::arch::percpu::count();
-    let mut s = String::new();
-    for i in 0..n {
-        s.push_str(&format!(
-            "processor\t: {i}\nvendor_id\t: GenuineIntel\nmodel name\t: x86-64 processor\nflags\t\t: fpu sse sse2\n\n"
-        ));
+/// `/etc/passwd`: the system and every account (no password material: the
+/// `x` says it is kept elsewhere, as on Linux).
+fn passwd(user: &str) -> String {
+    let mut s = String::from("root:x:0:0:system:/root:/bin/sh\n");
+    let accounts = crate::users::db::all();
+    for u in &accounts {
+        let full = u.full.replace([':', '\n'], " ");
+        s.push_str(&format!("{}:x:{}:{}:{}:/home/{}:/bin/sh\n", u.name, u.uid, u.uid, full, u.name));
     }
+    if accounts.is_empty() {
+        s.push_str(&format!("{user}:x:{uid}:{uid}:{user}:/home/{user}:/bin/sh\n", uid = crate::users::FIRST_UID));
+    }
+    s.push_str("nobody:x:65534:65534:nobody:/:/bin/false\n");
+    s
+}
+
+/// `/etc/group`: the system's groups and one per account.
+fn group(user: &str) -> String {
+    let accounts = crate::users::db::all();
+    let names = |admins: bool| {
+        accounts.iter().filter(|u| !admins || u.admin).map(|u| u.name.as_str()).collect::<Vec<_>>().join(",")
+    };
+    let mut s = format!(
+        "root:x:0:\nadmin:x:{}:{}\nusers:x:{}:{}\n",
+        crate::users::ADMIN_GID,
+        names(true),
+        crate::users::USERS_GID,
+        names(false)
+    );
+    for u in &accounts {
+        s.push_str(&format!("{}:x:{}:\n", u.name, u.uid));
+    }
+    if accounts.is_empty() {
+        s.push_str(&format!("{user}:x:{}:\n", crate::users::FIRST_UID));
+    }
+    s.push_str("nogroup:x:65534:\n");
     s
 }
 
@@ -348,14 +435,35 @@ fn mounts() -> String {
 
 fn resolv_conf() -> String {
     let mut s = String::new();
-    for i in crate::net::interfaces() {
+    let interfaces = crate::net::interfaces();
+    let ipv6 = crate::net::interfaces6();
+    let mut servers = Vec::new();
+    for (index, i) in interfaces.iter().enumerate() {
+        if i.flags & aurora_abi::net::IF_LINK == 0 || i.flags & aurora_abi::net::IF_LOOPBACK != 0 {
+            continue;
+        }
         for d in i.dns.iter().filter(|d| **d != [0; 4]) {
-            s.push_str(&format!("nameserver {}.{}.{}.{}\n", d[0], d[1], d[2], d[3]));
+            let address = format!("{}.{}.{}.{}", d[0], d[1], d[2], d[3]);
+            if !servers.contains(&address) {
+                servers.push(address);
+            }
+        }
+        if let Some(v6) = ipv6.get(index) {
+            for d in v6.dns.iter().take(v6.dns_count.min(2) as usize).filter(|d| **d != [0; 16]) {
+                let address = crate::net::wire::ip6_str(d);
+                if !servers.contains(&address) {
+                    servers.push(address);
+                }
+            }
         }
     }
-    if s.is_empty() {
-        s.push_str("nameserver 10.0.2.3\n");
+    for address in servers {
+        s.push_str(&format!("nameserver {address}\n"));
     }
+    if s.is_empty() {
+        s.push_str("# No DNS server has been supplied by an active interface.\n");
+    }
+    s.push_str("options timeout:1 attempts:2\n");
     s
 }
 
@@ -365,6 +473,13 @@ fn resolv_conf() -> String {
 pub fn read(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
     // Event and timer reads may block: not while holding the descriptor's lock.
     if let Handle::Special(s) = &*p.fd(fd as usize)? {
+        let dev = s.lock().chardev();
+        if let Some(d) = dev {
+            let mut out = user::slice_mut(ptr, len.min(user::MAX_BUF))?;
+            let n = d.read(&mut out, nonblocking(p, fd))?;
+            out.commit(n)?;
+            return Ok(n as u64);
+        }
         let unix = match &*s.lock() {
             Special::Unix(u) => Some(u.clone()),
             _ => None,
@@ -375,6 +490,16 @@ pub fn read(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
             let r = u.recv(&mut out, false, nb)?;
             out.commit(r.len)?;
             return Ok(r.len as u64);
+        }
+        let drm = match &*s.lock() {
+            Special::Drm(f) => Some(f.clone()),
+            _ => None,
+        };
+        if let Some(f) = drm {
+            let mut out = user::slice_mut(ptr, len)?;
+            let n = super::drm::vblank::read(&f, &mut out, nonblocking(p, fd))?;
+            out.commit(n)?;
+            return Ok(n as u64);
         }
         let blocking = match &*s.lock() {
             Special::Event(e) => Some((Some(e.clone()), None)),
@@ -408,6 +533,11 @@ pub fn read(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
 
 pub fn write(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize> {
     if let Handle::Special(s) = &*p.fd(fd as usize)? {
+        let dev = s.lock().chardev();
+        if let Some(d) = dev {
+            let data = user::slice(ptr, len.min(user::MAX_BUF))?;
+            return d.write(&data, nonblocking(p, fd)).map(|n| n as u64);
+        }
         let (event, unix) = match &*s.lock() {
             Special::Event(e) => (Some(e.clone()), None),
             Special::Unix(u) => (None, Some(u.clone())),
@@ -462,24 +592,36 @@ pub fn readiness_of(p: &Process, fd: usize, depth: u32) -> Option<(bool, bool, b
                 Ready(bool, bool),
                 Epoll(Arc<super::events::Epoll>),
                 Unix(Arc<super::unix::Socket>),
+                Device(Arc<dyn super::chardev::CharDev>),
             }
             let inner = match &*s.lock() {
                 Special::Event(e) => Inner::Ready(e.readable(), e.writable()),
                 Special::Timer(t) => Inner::Ready(t.readable(), false),
                 Special::WaveEvents(pid) => Inner::Ready(crate::gui::server::has_events(*pid), false),
+                Special::Drm(f) => Inner::Ready(f.readable(), false),
                 Special::Epoll(e) => Inner::Epoll(e.clone()),
                 Special::Unix(u) => Inner::Unix(u.clone()),
-                _ => Inner::Ready(true, true),
+                Special::Netlink(n) => Inner::Ready(n.readable(), true),
+                other => match other.chardev() {
+                    Some(d) => Inner::Device(d),
+                    None => Inner::Ready(true, true),
+                },
             };
             match inner {
                 Inner::Ready(rd, wr) => (rd, wr, false),
                 Inner::Epoll(ep) => (ep.readable(p, depth), false, false),
                 Inner::Unix(u) => u.readiness(),
+                Inner::Device(d) => d.readiness(),
             }
         }
         Handle::Socket(sock) => sock.readiness(),
         _ => (true, true, false),
     })
+}
+
+/// Pending errors are reported even when the caller did not request read/write.
+pub fn descriptor_error(p: &Process, fd: usize) -> bool {
+    p.fd(fd).is_ok_and(|h| matches!(&*h, Handle::Socket(s) if s.error().is_some()))
 }
 
 /// Adds to `keys` what to wait on for a change in descriptor `fd`'s
@@ -493,10 +635,16 @@ pub fn wait_keys(p: &Process, fd: usize, keys: &mut Vec<usize>) {
             Special::Event(e) => keys.push(key(Arc::as_ptr(e))),
             Special::Timer(t) => keys.push(key(Arc::as_ptr(t))),
             Special::WaveEvents(pid) => keys.push(crate::gui::server::event_key(*pid)),
+            Special::Drm(f) => keys.push(key(Arc::as_ptr(f))),
             // A set inside the set: any change.
             Special::Epoll(_) => keys.push(ANY),
             Special::Unix(u) => u.wait_keys(keys),
-            _ => {}
+            Special::Netlink(n) => keys.push(n.key()),
+            other => {
+                if let Some(d) = other.chardev() {
+                    keys.push(d.wait_key());
+                }
+            }
         },
         Handle::Socket(_) => keys.push(NET),
         // The rest is always ready.
@@ -516,13 +664,40 @@ fn next_timer(p: &Process, fds: impl Iterator<Item = usize>) -> Option<u64> {
     .min()
 }
 
-pub fn openat(p: &Process, dirfd: u64, ptr: u64, flags: u64, _mode: u64) -> Result<u64, isize> {
+pub fn openat(p: &Process, dirfd: u64, ptr: u64, flags: u64, mode: u64) -> Result<u64, isize> {
     let guest = path_arg(p, dirfd, ptr)?;
     if super::links::target(&guest).is_some() && flags & O_NOFOLLOW != 0 {
-        return Err(ELOOP);
+        // O_PATH opens the link itself (systemd's path walking, in
+        // libudev, reads links this way: readlinkat(fd, "")).
+        if flags & O_PATH == 0 {
+            return Err(ELOOP);
+        }
+        return install(p, special(Special::Link(guest)), flags & O_CLOEXEC != 0);
     }
-    let handle = open_guest(p, &follow(&guest)?, flags)?;
-    install(p, handle, flags & O_CLOEXEC != 0)
+    let handle = open_guest_mode(p, &follow(&guest)?, flags, mode)?;
+    let fd = install(p, handle, flags & O_CLOEXEC != 0)?;
+    if flags & O_NONBLOCK != 0 {
+        if let Some(l) = &p.linux {
+            l.set_nonblock(fd as usize, true);
+        }
+    }
+    Ok(fd)
+}
+
+/// The inotify descriptor `fd`, if it is one.
+pub fn inotify_of(p: &Process, fd: u64) -> Option<Arc<super::inotify::Inotify>> {
+    match &*p.fd(fd as usize).ok()? {
+        Handle::Special(s) => match &*s.lock() {
+            Special::Inotify(i) => Some(i.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether the Linux path `guest` is a folder (`ENOENT` if nothing is there).
+pub fn is_directory(p: &Process, guest: &str) -> Result<bool, isize> {
+    Ok(info_for_path(p, guest, false)?.mode & 0o170000 == S_IFDIR)
 }
 
 /// Installs a new made-up descriptor (event, timer, epoll).
@@ -545,8 +720,8 @@ pub fn install_handle(p: &Process, h: Arc<Handle>, cloexec: bool) -> Result<u64,
     install(p, h, cloexec)
 }
 
-/// Opens a Linux path as a handle.
-pub fn open_guest(p: &Process, guest: &str, flags: u64) -> Result<Arc<Handle>, isize> {
+/// Opens a Linux path as a handle; a file it creates gets `mode` (before the umask).
+fn open_guest_mode(p: &Process, guest: &str, flags: u64, mode: u64) -> Result<Arc<Handle>, isize> {
     let fd_alias = guest.strip_prefix("/dev/fd/").or_else(|| guest.strip_prefix("/proc/self/fd/"));
     let std_alias = match guest {
         "/dev/stdin" => Some(0),
@@ -567,9 +742,17 @@ pub fn open_guest(p: &Process, guest: &str, flags: u64) -> Result<Arc<Handle>, i
     if guest == "/dev/dsp" {
         return crate::drivers::audio::open().map(|s| Arc::new(Handle::Audio(s)));
     }
+    // The display devices' DRM nodes.
+    if let Some(f) = super::drm::open(guest) {
+        return Ok(special(Special::Drm(f?)));
+    }
     if let Some(name) = guest.strip_prefix("/dev/shm/") {
         let file = super::shm::open(name, flags & O_CREAT != 0, flags & O_EXCL != 0, flags & O_TRUNC != 0)?;
         return Ok(special(Special::Shm { file, pos: 0 }));
+    }
+    // Input devices: /dev/input, /dev/hidraw*, /dev/uinput.
+    if let Some(node) = super::input::open(p, guest, flags) {
+        return node.map(special);
     }
     if let Some(v) = virtual_file(p, guest) {
         return v.map(special);
@@ -603,7 +786,7 @@ pub fn open_guest(p: &Process, guest: &str, flags: u64) -> Result<Arc<Handle>, i
     if flags & O_APPEND != 0 {
         f |= APPEND;
     }
-    let file = fs::open(&host, f)?;
+    let file = fs::open_mode(&host, f, Some((mode & 0o7777) as u16))?;
     Ok(Arc::new(Handle::File(Mutex::new(file))))
 }
 
@@ -621,6 +804,33 @@ pub fn close(p: &Process, fd: u64) -> Result<u64, isize> {
     }
     // The handle goes after the lock (a pipe end wakes its peer).
     drop(old);
+    Ok(0)
+}
+
+/// `close_range`: closes (or with `CLOSE_RANGE_CLOEXEC` marks
+/// close-on-exec) every open descriptor from `first` to `last`.
+/// (`CLOSE_RANGE_UNSHARE` changes nothing here: a process's descriptor
+/// table is its own.)
+pub fn close_range(p: &Process, first: u64, last: u64, flags: u64) -> Result<u64, isize> {
+    const UNSHARE: u64 = 1 << 1;
+    const CLOEXEC: u64 = 1 << 2;
+    if flags & !(UNSHARE | CLOEXEC) != 0 || first > last {
+        return Err(EINVAL);
+    }
+    let open: Vec<usize> = {
+        let fds = p.fds.lock();
+        let end = (last as usize).min(fds.len().saturating_sub(1));
+        (first as usize..=end).filter(|&i| fds.get(i).is_some_and(|s| s.is_some())).collect()
+    };
+    for fd in open {
+        if flags & CLOEXEC != 0 {
+            if let Some(l) = &p.linux {
+                l.set_cloexec(fd, true);
+            }
+        } else {
+            let _ = close(p, fd as u64);
+        }
+    }
     Ok(0)
 }
 
@@ -655,6 +865,12 @@ pub fn lseek(p: &Process, fd: u64, offset: i64, whence: u64) -> Result<u64, isiz
                 Ok(new as u64)
             }
             Special::Dir { .. } => Err(EINVAL),
+            // A dma-buf tells its size this way (and nothing else).
+            Special::DmaBuf(bo) => match (whence, offset) {
+                (0, 0) => Ok(0),
+                (2, 0) => Ok(bo.size as u64),
+                _ => Err(EINVAL),
+            },
             _ => Ok(0),
         },
         _ => Err(ESPIPE),
@@ -804,6 +1020,19 @@ fn dir_entries(host: &str) -> Vec<(String, u8)> {
 }
 
 fn plain_entries(host: &str) -> Vec<(String, u8)> {
+    let mut v = folder_entries(host);
+    // What the input devices add (/sys, /dev/input, /run/udev, …).
+    if let Some(extra) = super::input::entries(&to_guest(host)) {
+        for e in extra {
+            if !v.iter().any(|(n, _)| *n == e.0) {
+                v.push(e);
+            }
+        }
+    }
+    v
+}
+
+fn folder_entries(host: &str) -> Vec<(String, u8)> {
     let kind = |dir: bool| if dir { DT_DIR } else { DT_REG };
     // A layered system folder: what the disk has, then the system image.
     let guest = to_guest(host);
@@ -819,7 +1048,11 @@ fn plain_entries(host: &str) -> Vec<(String, u8)> {
         return v;
     }
     let names: &[(&str, bool)] = match host {
-        "/dev" => &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true)],
+        "/dev" => {
+            &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true), ("dri", true)]
+        }
+        // Character devices (DT_CHR).
+        "/dev/dri" => return super::drm::node_names().into_iter().map(|n| (n, 2)).collect(),
         "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false)],
         "/proc/self" => &[("exe", false), ("maps", false), ("cmdline", false), ("comm", false), ("stat", false)],
         "/dev/shm" => return super::shm::names().into_iter().map(|n| (n, DT_REG)).collect(),
@@ -832,7 +1065,7 @@ fn plain_entries(host: &str) -> Vec<(String, u8)> {
                 .collect();
             // The Linux tree shows its top folders at the root.
             if host == "/" {
-                for d in SYSTEM_DIRS.iter().chain(WRITABLE_DIRS.iter()).chain(["dev", "proc"].iter()) {
+                for d in SYSTEM_DIRS.iter().chain(WRITABLE_DIRS.iter()).chain(["dev", "proc", "sys"].iter()) {
                     if !v.iter().any(|(n, _)| n == d) {
                         v.push((String::from(*d), DT_DIR));
                     }
@@ -853,6 +1086,8 @@ fn fnv(s: &str) -> u64 {
 /// What `stat` reports, gathered from either a path or a handle.
 struct Info {
     mode: u32,
+    /// Owner and group (None: the process's own, for made-up files).
+    owner: Option<(u32, u32)>,
     size: u64,
     ino: u64,
     rdev: u64,
@@ -863,8 +1098,7 @@ struct Info {
 
 /// WaveOS keeps local time since 2000; Linux wants UTC since 1970.
 pub fn unix_time(since_2000: u64) -> i64 {
-    let offset = crate::gui::prefs::get("utc_offset").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
-    since_2000 as i64 + 946_684_800 - offset * 60
+    since_2000 as i64 + 946_684_800 - crate::time::zone_minutes() * 60
 }
 
 /// Program and library folders hold executables; everything else is data.
@@ -879,46 +1113,111 @@ fn info_for_path(p: &Process, guest: &str, follow_link: bool) -> Result<Info, is
     if let Some(to) = super::links::target(guest) {
         if !follow_link {
             let mode = S_IFLNK | 0o777;
-            return Ok(Info { mode, size: to.len() as u64, ino: fnv(guest), rdev: 0, mtime: 0, ctime: 0 });
+            return Ok(Info { owner: None, mode, size: to.len() as u64, ino: fnv(guest), rdev: 0, mtime: 0, ctime: 0 });
         }
         return info_for_path(p, &follow(guest)?, false);
     }
     if let Some(shm) = guest.strip_prefix("/dev/shm/").filter(|n| !n.is_empty()) {
         let f = super::shm::lookup(shm).ok_or(ENOENT)?;
-        return Ok(Info { mode: S_IFREG | 0o600, size: f.size(), ino: fnv(guest), rdev: 0, mtime: 0, ctime: 0 });
+        return Ok(Info {
+            owner: None,
+            mode: S_IFREG | 0o600,
+            size: f.size(),
+            ino: fnv(guest),
+            rdev: 0,
+            mtime: 0,
+            ctime: 0,
+        });
+    }
+    if let Some(super::input::Found::Char { dev, .. }) = super::input::lookup(guest) {
+        let (mode, rdev, owner) = super::input::node_stat(dev);
+        return Ok(Info { owner, mode, size: 0, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
+    }
+    if let Some(rdev) = super::drm::node_rdev(guest) {
+        return Ok(Info { owner: None, mode: S_IFCHR | 0o666, size: 0, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
     }
     if let Some(v) = virtual_file(p, guest) {
         let s = v?;
         let (mode, rdev) = s.mode();
         let size = if let Special::Mem { data, .. } = &s { data.len() as u64 } else { 0 };
-        return Ok(Info { mode, size, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
+        // Device folders change when devices come and go (SDL rescans
+        // /dev/input when its time changes).
+        let mtime = super::input::lookup(guest).map_or(0, |_| super::input::tree::mtime());
+        return Ok(Info { owner: None, mode, size, ino: fnv(guest), rdev, mtime, ctime: mtime });
     }
     let host = to_host(guest);
     // The Linux tree's top folders exist even before anything is in them.
     let (md, _) = match fs::stat(&host) {
         Err(ENOENT) if guest.trim_end_matches('/').matches('/').count() == 1 && host != guest => {
-            return Ok(Info { mode: S_IFDIR | 0o755, size: 0, ino: fnv(guest), rdev: 0, mtime: 0, ctime: 0 });
+            return Ok(Info {
+                owner: None,
+                mode: S_IFDIR | 0o755,
+                size: 0,
+                ino: fnv(guest),
+                rdev: 0,
+                mtime: 0,
+                ctime: 0,
+            });
         }
         r => r?,
     };
     let ino = fs::lookup(&host).map(|(_, i)| i).unwrap_or_else(|_| fnv(&host));
-    let mode = if md.kind == Kind::Dir { S_IFDIR | 0o755 } else { file_mode(&host) };
-    Ok(Info { mode, size: md.size, ino, rdev: 0, mtime: unix_time(md.mtime), ctime: unix_time(md.ctime) })
+    let (mode, owner) = match fs::perm::stat_owner(&host) {
+        // Files that carry their own mode report it; others keep the
+        // old guess by folder (programs and libraries are executable).
+        Ok((o, explicit)) => {
+            let bits = if md.kind == Kind::Dir {
+                S_IFDIR | o.mode as u32
+            } else if explicit {
+                S_IFREG | o.mode as u32
+            } else {
+                file_mode(&host) | (o.mode as u32 & 0o7000)
+            };
+            (bits, Some((o.uid, o.gid)))
+        }
+        Err(_) => (if md.kind == Kind::Dir { S_IFDIR | 0o755 } else { file_mode(&host) }, None),
+    };
+    Ok(Info { mode, owner, size: md.size, ino, rdev: 0, mtime: unix_time(md.mtime), ctime: unix_time(md.ctime) })
 }
 
 fn info_for_handle(h: &Handle) -> Result<Info, isize> {
-    let fifo = |ino| Info { mode: S_IFIFO | 0o600, size: 0, ino, rdev: 0, mtime: 0, ctime: 0 };
+    let fifo = |ino| Info { owner: None, mode: S_IFIFO | 0o600, size: 0, ino, rdev: 0, mtime: 0, ctime: 0 };
     Ok(match h {
         Handle::File(f) => {
             let f = f.lock();
             let md = f.fs.metadata(f.ino)?;
-            let mode = if md.kind == Kind::Dir { S_IFDIR | 0o755 } else { S_IFREG | 0o755 };
-            Info { mode, size: md.size, ino: f.ino, rdev: 0, mtime: unix_time(md.mtime), ctime: unix_time(md.ctime) }
+            let (mut mode, owner) = match f.fs.owner(f.ino) {
+                // Without its own mode a file keeps reporting executable, as before.
+                Some((o, explicit)) => (o.mode as u32 | if explicit { 0 } else { 0o111 }, Some((o.uid, o.gid))),
+                None => (0o755, None),
+            };
+            if md.kind == Kind::Dir {
+                mode = S_IFDIR | (mode & 0o7777);
+            } else {
+                mode = S_IFREG | (mode & 0o7777);
+            }
+            Info {
+                mode,
+                owner,
+                size: md.size,
+                ino: f.ino,
+                rdev: 0,
+                mtime: unix_time(md.mtime),
+                ctime: unix_time(md.ctime),
+            }
         }
         Handle::Special(s) => {
             let s = s.lock();
             if let Special::Dir { host, .. } = &*s {
-                return Ok(Info { mode: S_IFDIR | 0o755, size: 0, ino: fnv(host), rdev: 0, mtime: 0, ctime: 0 });
+                return Ok(Info {
+                    owner: None,
+                    mode: S_IFDIR | 0o755,
+                    size: 0,
+                    ino: fnv(host),
+                    rdev: 0,
+                    mtime: 0,
+                    ctime: 0,
+                });
             }
             let (mode, rdev) = s.mode();
             let size = match &*s {
@@ -926,26 +1225,39 @@ fn info_for_handle(h: &Handle) -> Result<Info, isize> {
                 Special::Shm { file, .. } => file.size(),
                 _ => 0,
             };
-            Info { mode, size, ino: h as *const Handle as u64 >> 4, rdev, mtime: 0, ctime: 0 }
+            let owner = match &*s {
+                Special::Device(d) => d.stat().2,
+                _ => None,
+            };
+            Info { owner, mode, size, ino: h as *const Handle as u64 >> 4, rdev, mtime: 0, ctime: 0 }
         }
         Handle::PipeRead { pipe, .. } => fifo(Arc::as_ptr(pipe) as u64 >> 4),
         Handle::PipeWrite(pipe) => fifo(Arc::as_ptr(pipe) as u64 >> 4),
-        Handle::Socket(_) => Info { mode: S_IFSOCK | 0o777, size: 0, ino: 1, rdev: 0, mtime: 0, ctime: 0 },
-        Handle::Log | Handle::Audio(_) => {
-            Info { mode: S_IFCHR | 0o620, size: 0, ino: 2, rdev: makedev(5, 1), mtime: 0, ctime: 0 }
+        Handle::Socket(_) => Info { owner: None, mode: S_IFSOCK | 0o777, size: 0, ino: 1, rdev: 0, mtime: 0, ctime: 0 },
+        Handle::Log | Handle::Audio(_) | Handle::AudioIn(_) => {
+            Info { owner: None, mode: S_IFCHR | 0o620, size: 0, ino: 2, rdev: makedev(5, 1), mtime: 0, ctime: 0 }
         }
+    })
+}
+
+/// Owner and group to report: the file's, or the caller's for made-up files.
+fn ids(i: &Info) -> (u32, u32) {
+    i.owner.unwrap_or_else(|| {
+        let c = crate::users::current().unwrap_or_else(crate::users::session);
+        (c.uid, c.gid)
     })
 }
 
 /// Linux's `struct stat` (144 bytes on x86-64).
 fn put_stat(ptr: u64, i: &Info) -> Result<u64, isize> {
+    let (uid, gid) = ids(i);
     let mut b = [0u8; 144];
     let mut w = |off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
     w(0, 0x803); // st_dev
     w(8, i.ino);
     w(16, if i.mode & S_IFDIR != 0 { 2 } else { 1 }); // st_nlink
-    w(24, i.mode as u64 | (super::UID << 32)); // st_mode, st_uid
-    w(32, super::UID); // st_gid
+    w(24, i.mode as u64 | ((uid as u64) << 32)); // st_mode, st_uid
+    w(32, gid as u64); // st_gid
     w(40, i.rdev);
     w(48, i.size);
     w(56, 4096); // st_blksize
@@ -984,8 +1296,9 @@ pub fn statx(p: &Process, dirfd: u64, ptr: u64, flags: u64, buf: u64) -> Result<
     put32(&mut b, 0, 0x7FF); // stx_mask: the basic fields
     put32(&mut b, 4, 4096);
     put32(&mut b, 16, if info.mode & S_IFDIR != 0 { 2 } else { 1 });
-    put32(&mut b, 20, super::UID as u32);
-    put32(&mut b, 24, super::UID as u32);
+    let (uid, gid) = ids(&info);
+    put32(&mut b, 20, uid);
+    put32(&mut b, 24, gid);
     b[28..30].copy_from_slice(&(info.mode as u16).to_le_bytes());
     put64(&mut b, 32, info.ino);
     put64(&mut b, 40, info.size);
@@ -1010,10 +1323,89 @@ pub fn access(p: &Process, dirfd: u64, ptr: u64, mode: u64) -> Result<u64, isize
             return Err(EROFS);
         }
     }
-    if mode & 1 != 0 && info.mode & 0o111 == 0 {
+    // The permission bits as stat reported them, for the caller's identity.
+    if let Some(c) = crate::users::current().filter(|c| !c.is_root()) {
+        let (uid, gid) = ids(&info);
+        let o = fs::Owner { uid, gid, mode: (info.mode & 0o7777) as u16 };
+        if !fs::perm::allowed(&c, &o, (mode & 7) as u16) {
+            return Err(EACCES);
+        }
+    } else if mode & 1 != 0 && info.mode & 0o111 == 0 {
         return Err(EACCES);
     }
     Ok(0)
+}
+
+/// `chmod`, `fchmodat`: the owner sets the permission bits. On volumes
+/// without owners (FAT, the system image) nothing changes, as before.
+pub fn chmod(p: &Process, dirfd: u64, ptr: u64, mode: u64) -> Result<u64, isize> {
+    let guest = follow(&path_arg(p, dirfd, ptr)?)?;
+    if virtual_file(p, &guest).is_some() {
+        return Err(EPERM);
+    }
+    match fs::perm::chmod(&to_host(&guest), mode as u16) {
+        Err(EPERM) if no_owners(&to_host(&guest)) => Ok(0),
+        r => r.map(|_| 0),
+    }
+}
+
+/// `chown`, `fchownat`, `lchown` (`-1` leaves an id as it is).
+pub fn chown(p: &Process, dirfd: u64, ptr: u64, uid: u64, gid: u64) -> Result<u64, isize> {
+    let guest = follow(&path_arg(p, dirfd, ptr)?)?;
+    if virtual_file(p, &guest).is_some() {
+        return Err(EPERM);
+    }
+    let id = |v: u64| if v as u32 == u32::MAX { u32::MAX } else { v as u32 };
+    match fs::perm::chown(&to_host(&guest), id(uid), id(gid)) {
+        Err(EPERM) if no_owners(&to_host(&guest)) => Ok(0),
+        r => r.map(|_| 0),
+    }
+}
+
+/// `fchmod`/`fchown` on an open file: by its path when it has one.
+pub fn fchmod(p: &Process, fd: u64, mode: Option<u64>, ids: (u64, u64)) -> Result<u64, isize> {
+    let h = p.fd(fd as usize)?;
+    let host = match &*h {
+        Handle::Special(s) => match &*s.lock() {
+            Special::Dir { host, .. } => Some(host.clone()),
+            _ => None,
+        },
+        Handle::File(f) => {
+            // Files opened by path: find the owner through the filesystem.
+            let f = f.lock();
+            let Some((o, _)) = f.fs.owner(f.ino) else { return Ok(0) };
+            if let Some(c) = crate::users::current() {
+                let owner_ok = c.uid == o.uid || c.is_admin();
+                if !owner_ok || (mode.is_none() && ids.0 as u32 != u32::MAX && ids.0 as u32 != o.uid && !c.is_admin()) {
+                    return Err(EPERM);
+                }
+            }
+            let new = match mode {
+                Some(m) => fs::Owner { mode: (m & 0o7777) as u16, ..o },
+                None => fs::Owner {
+                    uid: if ids.0 as u32 == u32::MAX { o.uid } else { ids.0 as u32 },
+                    gid: if ids.1 as u32 == u32::MAX { o.gid } else { ids.1 as u32 },
+                    mode: o.mode,
+                },
+            };
+            return f.fs.set_owner(f.ino, new).map(|_| 0);
+        }
+        _ => None,
+    };
+    let Some(host) = host else { return Ok(0) };
+    let r = match mode {
+        Some(m) => fs::perm::chmod(&host, m as u16),
+        None => fs::perm::chown(&host, ids.0 as u32, ids.1 as u32),
+    };
+    match r {
+        Err(EPERM) if no_owners(&host) => Ok(0),
+        r => r.map(|_| 0),
+    }
+}
+
+/// True if `host` is on a volume without owners.
+fn no_owners(host: &str) -> bool {
+    fs::lookup(host).is_ok_and(|(f, i)| f.owner(i).is_none())
 }
 
 // ------------------------------------------------------------------ fds
@@ -1021,14 +1413,49 @@ pub fn access(p: &Process, dirfd: u64, ptr: u64, mode: u64) -> Result<u64, isize
 pub fn ioctl(p: &Process, fd: u64, request: u64, arg: u64) -> Result<u64, isize> {
     // The request is 32 bits, as on Linux (musl passes it sign-extended).
     let request = request as u32 as u64;
-    if let Handle::Audio(stream) = &*p.fd(fd as usize)? {
+    let h = p.fd(fd as usize)?;
+    if let Handle::Audio(stream) = &*h {
         return oss(stream, request, arg);
+    }
+    // Device nodes answer their own (outside the descriptor's lock: an
+    // effect upload to a uinput device waits for its maker).
+    let dev = match &*h {
+        Handle::Special(s) => s.lock().chardev(),
+        _ => None,
+    };
+    if let Some(d) = &dev {
+        if !matches!(request, 0x541B | 0x5421 | 0x5451 | 0x5450) {
+            return d.ioctl(request as u32, arg);
+        }
+    }
+    // DRM ('d') requests on a card, dma-buf ('b') ones on a dma-buf.
+    if let Handle::Special(s) = &*h {
+        let kind = request >> 8 & 0xFF;
+        let (card, dmabuf) = match &*s.lock() {
+            Special::Drm(f) => (Some(f.clone()), false),
+            Special::DmaBuf(_) => (None, true),
+            _ => (None, false),
+        };
+        if let (Some(f), 0x64) = (&card, kind) {
+            return super::drm::ioctl(p, f, request, arg);
+        }
+        if dmabuf && kind == 0x62 {
+            return super::drm::dmabuf_ioctl(request, arg);
+        }
     }
     match request {
         // Terminal queries: no file is a terminal yet.
         0x5401 | 0x5413 | 0x540F | 0x5410 | 0x5402..=0x5404 => Err(ENOTTY),
-        // FIONBIO, FIOCLEX, FIONCLEX.
-        0x5421 | 0x5451 | 0x5450 => Ok(0),
+        // FIONBIO: non-blocking or not.
+        0x5421 => {
+            let on: i32 = user::get(arg)?;
+            if let Some(l) = &p.linux {
+                l.set_nonblock(fd as usize, on != 0);
+            }
+            Ok(0)
+        }
+        // FIOCLEX, FIONCLEX.
+        0x5451 | 0x5450 => Ok(0),
         // FIONREAD: bytes waiting to be read (the next datagram's, for those).
         0x541B => {
             let n = match &*p.fd(fd as usize)? {
@@ -1037,7 +1464,8 @@ pub fn ioctl(p: &Process, fd: u64, request: u64, arg: u64) -> Result<u64, isize>
                 Handle::Special(s) => match &*s.lock() {
                     Special::Unix(u) => u.available() as u64,
                     Special::Mem { data, pos } => data.len().saturating_sub(*pos) as u64,
-                    _ => 0,
+                    Special::Netlink(n) => n.available() as u64,
+                    other => other.chardev().map_or(0, |d| d.available() as u64),
                 },
                 Handle::File(f) => {
                     let f = f.lock();
@@ -1250,25 +1678,28 @@ fn wait_ready(
 ) -> Result<u64, isize> {
     use crate::proc::readiness;
     loop {
-        let gen = readiness::generation();
         let timed_out = deadline.is_some_and(|d| crate::time::uptime_ms() >= d);
-        let n = check(timed_out)?;
-        if n > 0 || timed_out {
+        if timed_out {
+            return check(true);
+        }
+        let fds = fds();
+        let mut keys = Vec::new();
+        for &fd in &fds {
+            wait_keys(p, fd, &mut keys);
+        }
+        let watch = readiness::Watch::new(&keys);
+        let n = check(false)?;
+        if n > 0 {
             return Ok(n);
         }
         if crate::proc::interrupted() {
             return Err(EINTR);
         }
-        let fds = fds();
         let mut wait = deadline.map_or(1000, |d| d.saturating_sub(crate::time::uptime_ms()));
         if let Some(t) = next_timer(p, fds.iter().copied()) {
             wait = wait.min(t);
         }
-        let mut keys = Vec::new();
-        for &fd in &fds {
-            wait_keys(p, fd, &mut keys);
-        }
-        readiness::wait(gen, &keys, wait.max(1));
+        watch.wait(wait.max(1));
     }
 }
 
@@ -1306,9 +1737,14 @@ fn poll_until(p: &Process, fds_ptr: u64, count: u64, deadline: Option<u64>) -> R
                 let revents: u16 = if fd < 0 {
                     0
                 } else {
-                    match readiness(p, fd as usize) {
+                    match readiness_of(p, fd as usize, 0) {
                         None => 0x20, // POLLNVAL
-                        Some((rd, wr)) => (if rd { events & 0x1 } else { 0 }) | (if wr { events & 0x4 } else { 0 }),
+                        Some((rd, wr, hup)) => {
+                            (if rd { events & 0x1 } else { 0 })
+                                | (if wr { events & 0x4 } else { 0 })
+                                | (if hup { 0x10 } else { 0 })
+                                | (if descriptor_error(p, fd as usize) { 0x8 } else { 0 })
+                        }
                     }
                 };
                 if revents != 0 {
@@ -1426,9 +1862,18 @@ pub fn fchdir(p: &Process, fd: u64) -> Result<u64, isize> {
     set_cwd(p, &guest)
 }
 
-pub fn mkdirat(p: &Process, dirfd: u64, ptr: u64) -> Result<u64, isize> {
+pub fn mkdirat(p: &Process, dirfd: u64, ptr: u64, mode: u64) -> Result<u64, isize> {
     let guest = path_arg(p, dirfd, ptr)?;
-    fs::mkdir(&to_host(&guest)).map(|_| 0)
+    let host = to_host(&guest);
+    fs::mkdir(&host)?;
+    // The mode asked for, less the umask (the default is rwxr-xr-x).
+    if let Some(c) = crate::users::current() {
+        let mode = (mode & 0o7777) as u16 & !c.umask;
+        if mode != 0o755 && !no_owners(&host) {
+            let _ = fs::perm::chmod(&host, mode);
+        }
+    }
+    Ok(0)
 }
 
 pub fn unlinkat(p: &Process, dirfd: u64, ptr: u64, flags: u64) -> Result<u64, isize> {
@@ -1437,7 +1882,10 @@ pub fn unlinkat(p: &Process, dirfd: u64, ptr: u64, flags: u64) -> Result<u64, is
         return super::shm::unlink(name).map(|_| 0);
     }
     if super::links::target(&guest).is_some() {
-        return super::links::remove(&guest).map(|_| 0);
+        if crate::users::current().is_some_and(|c| !c.is_root()) {
+            fs::perm::access(&fs::parent_path(&to_host(&guest)), fs::perm::W | fs::perm::X)?;
+        }
+        return fs::perm::system(|| super::links::remove(&guest)).map(|_| 0);
     }
     let host = to_host(&guest);
     let dir = fs::is_dir(&host);
@@ -1464,6 +1912,20 @@ pub fn renameat(p: &Process, olddir: u64, old: u64, newdir: u64, new: u64) -> Re
 }
 
 pub fn readlinkat(p: &Process, dirfd: u64, ptr: u64, buf: u64, size: u64) -> Result<u64, isize> {
+    // An empty path: the link `dirfd` was opened on (`O_PATH`).
+    if user::cstr(ptr)?.is_empty() {
+        let link = match &*p.fd(dirfd as usize)? {
+            Handle::Special(s) => match &*s.lock() {
+                Special::Link(guest) => super::links::target(guest),
+                _ => None,
+            },
+            _ => None,
+        };
+        let target = link.ok_or(ENOENT)?;
+        let n = target.len().min(size as usize);
+        user::put_bytes(buf, &target.as_bytes()[..n])?;
+        return Ok(n as u64);
+    }
     let guest = path_arg(p, dirfd, ptr)?;
     let target = match guest.as_str() {
         "/proc/self/exe" => to_guest(&p.path()),
@@ -1495,7 +1957,12 @@ pub fn symlinkat(p: &Process, target: u64, dirfd: u64, ptr: u64) -> Result<u64, 
     if fs::stat(&host).is_ok() || virtual_file(p, &guest).is_some() {
         return Err(EEXIST);
     }
-    super::links::create(&guest, &to).map(|_| 0)
+    // Links are kept in one table of the system's, but may only be made
+    // where the caller could make a file.
+    if crate::users::current().is_some_and(|c| !c.is_root()) {
+        fs::perm::access(&fs::parent_path(&host), fs::perm::W | fs::perm::X)?;
+    }
+    fs::perm::system(|| super::links::create(&guest, &to)).map(|_| 0)
 }
 
 pub fn truncate(p: &Process, ptr: u64, len: u64) -> Result<u64, isize> {
@@ -1540,12 +2007,49 @@ pub fn fallocate(p: &Process, fd: u64, mode: u64, off: u64, len: u64) -> Result<
     }
 }
 
-/// `statfs`/`fstatfs`: one big volume.
-pub fn statfs(buf: u64) -> Result<u64, isize> {
+/// The file system type `statfs` reports for Linux path `guest`: sysfs,
+/// devtmpfs, /proc and /run as Linux's (libudev checks it is in sysfs),
+/// one ext4-like volume elsewhere.
+fn fs_magic(guest: &str) -> u64 {
+    let under = |root: &str| guest.strip_prefix(root).is_some_and(|r| r.is_empty() || r.starts_with('/'));
+    if under("/sys") {
+        0x6265_6572 // SYSFS_MAGIC
+    } else if under("/proc") {
+        0x9fa0 // PROC_SUPER_MAGIC
+    } else if under("/dev") || under("/run") {
+        0x0102_1994 // TMPFS_MAGIC (devtmpfs too)
+    } else {
+        0xEF53
+    }
+}
+
+/// `statfs`: by path.
+pub fn statfs_path(p: &Process, ptr: u64, buf: u64) -> Result<u64, isize> {
+    let guest = follow(&path_arg(p, AT_FDCWD, ptr)?)?;
+    info_for_path(p, &guest, true)?;
+    statfs(buf, fs_magic(&guest))
+}
+
+/// `fstatfs`: by descriptor (made-up folders say where they are).
+pub fn fstatfs(p: &Process, fd: u64, buf: u64) -> Result<u64, isize> {
+    let magic = match &*p.fd(fd as usize)? {
+        Handle::Special(s) => match &*s.lock() {
+            Special::Dir { host, .. } => fs_magic(&to_guest(host)),
+            Special::Link(guest) => fs_magic(guest),
+            Special::Device(_) => fs_magic("/dev"),
+            _ => 0xEF53,
+        },
+        _ => 0xEF53,
+    };
+    statfs(buf, magic)
+}
+
+/// `statfs`/`fstatfs`: one big volume (of type `magic`).
+fn statfs(buf: u64, magic: u64) -> Result<u64, isize> {
     let (total, free) = fs::space_of("/").unwrap_or((1 << 34, 1 << 33));
     let mut b = [0u8; 120];
     let mut w = |off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
-    w(0, 0xEF53);
+    w(0, magic);
     w(8, 4096);
     w(16, total / 4096);
     w(24, free / 4096);

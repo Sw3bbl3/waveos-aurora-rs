@@ -43,6 +43,27 @@ pub enum Icon {
     Firefox,
     /// Voyage, the web browser (on WebKit): a compass on the sea.
     Voyage,
+    /// An installed app's own picture ([`custom`]).
+    Custom(u16),
+}
+
+/// Paths of the pictures behind [`Icon::Custom`].
+static CUSTOM: spin::Mutex<Vec<alloc::string::String>> = spin::Mutex::new(Vec::new());
+/// Custom pictures kept at most (an app updated many times keeps its old ones).
+const MAX_CUSTOM: usize = 512;
+
+/// The icon for an installed app's picture at `path` (a PNG). Falls back
+/// to the generic app icon when the picture can't be loaded.
+pub fn custom(path: &str) -> Icon {
+    let mut c = CUSTOM.lock();
+    if let Some(i) = c.iter().position(|p| p == path) {
+        return Icon::Custom(i as u16);
+    }
+    if c.len() >= MAX_CUSTOM {
+        return Icon::Aurora;
+    }
+    c.push(path.into());
+    Icon::Custom((c.len() - 1) as u16)
 }
 
 impl Icon {
@@ -63,11 +84,12 @@ impl Icon {
             Icon::Clock => "clock",
             Icon::Activity => "pulse",
             Icon::Nebula => "nebula",
+            Icon::Voyage => "voyage",
             Icon::Trash | Icon::TrashFull => "trash",
             Icon::Studio => "studio",
             Icon::Installer => "installer",
             Icon::Doom => "doom",
-            Icon::Folder | Icon::Document | Icon::Picture | Icon::Firefox | Icon::Voyage => return None,
+            Icon::Folder | Icon::Document | Icon::Picture | Icon::Firefox | Icon::Custom(_) => return None,
         })
     }
 }
@@ -76,7 +98,8 @@ impl Icon {
 pub type Loader = fn(&str) -> Option<(Vec<u32>, u32, u32)>;
 
 struct Picture {
-    name: &'static str,
+    /// The picture's path.
+    path: alloc::string::String,
     /// The decoded master (None: not available, don't try again).
     master: Option<(Vec<u32>, u32, u32)>,
     /// Box-filtered copies, one per size drawn (dock, launcher, About …).
@@ -123,19 +146,27 @@ fn box_scale(src: &[u32], sw: u32, sh: u32, size: i32) -> Vec<u32> {
 
 /// Draws the picture for `icon` into `r`; false when it has none (or it couldn't be loaded).
 fn draw_picture(cv: &mut Canvas, icon: Icon, r: Rect) -> bool {
-    let Some(name) = icon.picture() else { return false };
+    let path = match icon {
+        Icon::Custom(i) => match CUSTOM.lock().get(i as usize) {
+            Some(p) => p.clone(),
+            None => return false,
+        },
+        _ => match icon.picture() {
+            Some(name) => alloc::format!("/System/Icons/{name}.png"),
+            None => return false,
+        },
+    };
     let Some(loader) = *LOADER.lock() else { return false };
     let size = r.w.min(r.h);
     if size <= 0 {
         return true;
     }
     let mut pictures = PICTURES.lock();
-    let index = match pictures.iter().position(|p| p.name == name) {
+    let index = match pictures.iter().position(|p| p.path == path) {
         Some(i) => i,
         None => {
-            let master = loader(&alloc::format!("/System/Icons/{name}.png"))
-                .filter(|(px, w, h)| *w > 0 && *h > 0 && px.len() == (*w * *h) as usize);
-            pictures.push(Picture { name, master, sized: Vec::new() });
+            let master = loader(&path).filter(|(px, w, h)| *w > 0 && *h > 0 && px.len() == (*w * *h) as usize);
+            pictures.push(Picture { path, master, sized: Vec::new() });
             pictures.len() - 1
         }
     };
@@ -176,7 +207,7 @@ pub fn draw(cv: &mut Canvas, icon: Icon, r: Rect) {
     let rad = radius(s);
     let u = |v: i32| v * s / 48; // design grid is 48 px
     match icon {
-        Icon::Aurora => {
+        Icon::Aurora | Icon::Custom(_) => {
             cv.fill_round_rect_dgradient(r, rad, rgb(0x7C, 0x5C, 0xFF), rgb(0x2D, 0xD4, 0xBF));
             let inner = Rect::new(r.x + u(9), r.y + u(14), s - u(18), s - u(28));
             wave(cv, inner, 2, u(4).max(2), 0xFFFF_FFFF);

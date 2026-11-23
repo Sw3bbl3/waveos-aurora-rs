@@ -52,6 +52,7 @@ pub enum Msg {
     Back,
     Forward,
     Home,
+    Tour,
     Language(usize),
     Smaller,
     Larger,
@@ -573,6 +574,26 @@ impl Learn {
         ScrollView::new(
             VStack::new()
                 .push(header)
+                .push(
+                    HStack::new()
+                        .push(
+                            Text::paragraph(self.tr(
+                                "A hands-on introduction to Apps, Search, and windows.",
+                                "Découvrez les apps, la recherche et les fenêtres en pratiquant.",
+                            ))
+                            .foreground(Color::SecondaryLabel)
+                            .grow(1),
+                        )
+                        .push(
+                            Button::new(self.tr("Take a tour", "Faire la visite"))
+                                .action(Msg::Tour)
+                                .button_style(ButtonStyle::Tinted),
+                        )
+                        .spacing(16)
+                        .padding(16)
+                        .background_rounded(Color::Fill, 12)
+                        .fill_width(),
+                )
                 .push(grid)
                 .spacing(18)
                 .alignment(Align::Stretch)
@@ -683,15 +704,20 @@ impl App for Learn {
         self.tr("Learn — WaveOS Guide", "Learn — Guide WaveOS").into()
     }
 
+    fn min_size(&self) -> (i32, i32) {
+        (560, 360)
+    }
+
     fn size(&self) -> (i32, i32) {
         (1140, 728)
     }
 
-    fn update(&mut self, msg: Msg, _cx: &mut Context<Msg>) {
+    fn update(&mut self, msg: Msg, cx: &mut Context<Msg>) {
         match msg {
             Msg::Back => self.go(true),
             Msg::Forward => self.go(false),
             Msg::Home => self.home(),
+            Msg::Tour => cx.request(waveui::Request::StartTour),
             Msg::Language(i) => {
                 let locale = if i == 0 { "en" } else { "fr-CA" };
                 if locale == self.locale {
@@ -815,7 +841,7 @@ impl App for Learn {
         corekit::println!("learn-perf startup {} ms", corekit::time::uptime_ms() - self.started);
     }
 
-    fn view(&self, _env: &Env) -> View<'_, Msg> {
+    fn view(&self, env: &Env) -> View<'_, Msg> {
         let headings: Vec<MenuItem<Msg>> = self
             .current
             .map(|i| {
@@ -837,22 +863,28 @@ impl App for Learn {
                 .disabled(self.history_pos + 1 >= self.history.len())
                 .help(self.tr("Forward", "Suivant")),
             Button::symbol(Symbol::Home).action(Msg::Home).help(self.tr("Home", "Accueil")),
-            Button::with(label(Symbol::List, self.tr("Contents", "Sommaire")))
-                .button_style(ButtonStyle::Toolbar)
-                .menu(headings),
+            Button::with(if env.size.0 < 900 {
+                waveui::Image::symbol(Symbol::List).symbol_size(16)
+            } else {
+                label(Symbol::List, self.tr("Contents", "Sommaire"))
+            })
+            .button_style(ButtonStyle::Toolbar)
+            .menu(headings),
             Spacer::new(),
             Button::with(Text::new("A").style(TextStyle::Sized(11, waveui::style::Weight::Bold)))
                 .action(Msg::Smaller)
                 .button_style(ButtonStyle::Toolbar)
-                .help(self.tr("Smaller text", "Texte plus petit")),
+                .help(self.tr("Smaller text", "Texte plus petit"))
+                .hidden(env.size.0 < 900),
             Button::with(Text::new("A").style(TextStyle::Sized(17, waveui::style::Weight::Bold)))
                 .action(Msg::Larger)
                 .button_style(ButtonStyle::Toolbar)
-                .help(self.tr("Larger text", "Texte plus grand")),
+                .help(self.tr("Larger text", "Texte plus grand"))
+                .hidden(env.size.0 < 900),
             Picker::new(["English", "Français (Canada)"], (self.locale != "en") as usize)
                 .on_change(Msg::Language)
                 .picker_style(PickerStyle::Menu)
-                .width(180),
+                .width(if env.size.0 < 900 { 120 } else { 180 }),
         ]);
         let reading: View<'_, Msg> = match &self.error {
             Some(e) => Text::paragraph(e.clone()).padding(24).fill(),
@@ -874,6 +906,7 @@ impl App for Learn {
         .foreground(Color::SecondaryLabel)
         .padding_xy(20, 6);
         let top = toolbar(vec![
+            Button::symbol(Symbol::Mouse).action(Msg::Tour).help(self.tr("Take a tour", "Faire la visite")),
             Picker::new([self.tr("Lessons", "Leçons"), self.tr("Guides", "Guides")], self.tab)
                 .on_change(Msg::Tab)
                 .width(220),
@@ -883,13 +916,13 @@ impl App for Learn {
                 .on_submit(Msg::OpenFirst)
                 .shortcut(Shortcut::ctrl('f'))
                 .id("search")
-                .width(220),
+                .width(if env.size.0 < 900 { 160 } else { 220 }),
         ]);
         let content = if self.tab == 0 {
             self.lessons()
         } else {
             let detail = VStack::new().push(bar).push(reading).push(footer).spacing(0).fill();
-            SplitView::new(self.sidebar(), detail).sidebar_width(250)
+            SplitView::new(self.sidebar(), detail).sidebar_width(if env.size.0 < 900 { 200 } else { 250 })
         };
         VStack::new().push(top).push(content).spacing(0).fill()
     }

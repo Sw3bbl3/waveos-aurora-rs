@@ -13,6 +13,7 @@ pub mod cache;
 pub mod fat;
 pub mod index;
 pub mod mapcache;
+pub mod perm;
 pub mod ramfs;
 pub mod tarfs;
 pub mod trash;
@@ -40,6 +41,21 @@ pub struct Metadata {
     pub ctime: u64,
 }
 
+/// Who a file belongs to: owner, group and Unix permission bits (`0o7777`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u16,
+}
+
+impl Owner {
+    /// The system's, with `mode`.
+    pub const fn system(mode: u16) -> Owner {
+        Owner { uid: 0, gid: 0, mode }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DirEntry {
     pub name: String,
@@ -64,12 +80,33 @@ pub trait Filesystem: Send + Sync {
     fn sync(&self) -> FsResult<()> {
         Ok(())
     }
+    /// Memory is short: give back what a cache holds (without waiting
+    /// for a lock someone holds).
+    fn shrink(&self) {}
     fn read_only(&self) -> bool {
         false
     }
     /// (total bytes, free bytes), if meaningful.
     fn space(&self) -> Option<(u64, u64)> {
         None
+    }
+    /// The owner, group and mode of `ino`, and whether the inode carries
+    /// them itself (false: the volume's default). None: this filesystem
+    /// has no owners (the VFS decides by where it is mounted).
+    fn owner(&self, _ino: Ino) -> Option<(Owner, bool)> {
+        None
+    }
+    fn set_owner(&self, _ino: Ino, _owner: Owner) -> FsResult<()> {
+        Err(EPERM)
+    }
+    /// Creates an entry with an owner (None: the volume's default).
+    fn create_owned(&self, dir: Ino, name: &str, kind: Kind, _owner: Option<Owner>) -> FsResult<Ino> {
+        self.create(dir, name, kind)
+    }
+    /// Turns on owners for a volume from before them (the inodes without
+    /// one belong to `uid`/`gid`). True if it did.
+    fn enable_owners(&self, _uid: u32, _gid: u32) -> FsResult<bool> {
+        Ok(false)
     }
     /// Verifies on-disk consistency (filesystems that support it).
     #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
@@ -91,15 +128,35 @@ pub fn root_persistent() -> bool {
     PERSISTENT_ROOT.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// Block devices a mounted filesystem lives on (so removable-media code
+/// never mounts one twice).
+static IN_USE: IrqMutex<Vec<String>> = IrqMutex::new(Vec::new());
+
+pub fn note_device(name: &str) {
+    IN_USE.lock().push(String::from(name));
+}
+
+pub fn device_in_use(name: &str) -> bool {
+    IN_USE.lock().iter().any(|n| n == name)
+}
+
+/// A device and its partitions went away.
+pub fn forget_device(name: &str) {
+    let part_prefix = alloc::format!("{name}p");
+    IN_USE.lock().retain(|n| n != name && !n.starts_with(part_prefix.as_str()));
+}
+
 /// Mounts an EFI System Partition found later (on a USB disk) at `/Boot`
 /// when boot found none. Returns whether it did.
 pub fn adopt_boot(dev: Arc<dyn crate::drivers::block::BlockDevice>) -> bool {
     if MOUNTS.lock().iter().any(|m| m.path == "/Boot") {
         return false;
     }
+    let name = dev.name();
     match fat::FatFs::mount(dev) {
         Ok(fs) => {
             mount("/Boot", Arc::new(fs));
+            note_device(&name);
             true
         }
         Err(_) => false,
@@ -115,6 +172,7 @@ pub fn adopt_home(dev: Arc<dyn crate::drivers::block::BlockDevice>) -> bool {
     match aurorafs::AuroraFs::mount(dev.clone()) {
         Ok(fs) => {
             mount("/", Arc::new(fs));
+            note_device(&dev.name());
             PERSISTENT_ROOT.store(true, core::sync::atomic::Ordering::Release);
             log!("vfs", "home volume on {} ({})", dev.name(), dev.describe());
             true
@@ -183,6 +241,11 @@ fn components(path: &str) -> impl Iterator<Item = &str> {
 
 /// Picks the mount for `path` (already normalised) and returns the path remainder.
 fn mount_for(path: &str) -> FsResult<(Arc<dyn Filesystem>, String)> {
+    mount_full(path).map(|(fs, rest, _)| (fs, rest))
+}
+
+/// [`mount_for`], with the mount point.
+fn mount_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, String, String)> {
     let mounts = MOUNTS.lock();
     let mut best: Option<&Mount> = None;
     for m in mounts.iter() {
@@ -195,15 +258,17 @@ fn mount_for(path: &str) -> FsResult<(Arc<dyn Filesystem>, String)> {
     }
     let m = best.ok_or(ENOENT)?;
     let rest = if m.path == "/" { path.to_string() } else { path[m.path.len()..].to_string() };
-    Ok((m.fs.clone(), rest))
+    Ok((m.fs.clone(), rest, m.path.clone()))
 }
 
-fn walk(fs: &Arc<dyn Filesystem>, rest: &str) -> FsResult<Ino> {
+/// Walks `rest` on `fs`, checking search permission on each folder for `cred`.
+fn walk(fs: &Arc<dyn Filesystem>, rest: &str, mount: &str, cred: Option<&crate::users::Cred>) -> FsResult<Ino> {
     let mut ino = fs.root();
     for c in components(rest) {
         if c.len() > aurora_abi::NAME_MAX {
             return Err(ENAMETOOLONG);
         }
+        perm::search(cred, fs, mount, ino)?;
         ino = fs.lookup(ino, c)?;
     }
     Ok(ino)
@@ -211,14 +276,19 @@ fn walk(fs: &Arc<dyn Filesystem>, rest: &str) -> FsResult<Ino> {
 
 /// Resolves an absolute path to (filesystem, inode).
 pub fn lookup(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino)> {
-    let path = resolve("/", path);
-    let (fs, rest) = mount_for(&path)?;
-    let ino = walk(&fs, &rest)?;
-    Ok((fs, ino))
+    lookup_full(&resolve("/", path)).map(|(fs, ino, _)| (fs, ino))
 }
 
-/// Resolves the parent directory of `path` and returns (fs, dir inode, final name).
-fn parent_of(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String)> {
+/// [`lookup`] of a normalised path, with the mount point.
+fn lookup_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String)> {
+    let (fs, rest, mount) = mount_full(path)?;
+    let ino = walk(&fs, &rest, &mount, perm::caller().as_ref())?;
+    Ok((fs, ino, mount))
+}
+
+/// Resolves the parent directory of `path` and returns (fs, dir inode,
+/// final name, mount point).
+fn parent_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String, String)> {
     let path = resolve("/", path);
     let (dir, name) = match path.rfind('/') {
         Some(0) => ("/", &path[1..]),
@@ -235,11 +305,11 @@ fn parent_of(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String)> {
     if MOUNTS.lock().iter().any(|m| m.path == path) {
         return Err(EPERM);
     }
-    let (fs, dino) = lookup(dir)?;
+    let (fs, dino, mount) = lookup_full(&resolve("/", dir))?;
     if fs.metadata(dino)?.kind != Kind::Dir {
         return Err(ENOTDIR);
     }
-    Ok((fs, dino, String::from(name)))
+    Ok((fs, dino, String::from(name), mount))
 }
 
 pub fn stat(path: &str) -> FsResult<(Metadata, bool)> {
@@ -257,10 +327,11 @@ pub struct Entry {
 /// Lists a directory, including mount points that live directly inside it.
 pub fn readdir(path: &str) -> FsResult<Vec<Entry>> {
     let path = resolve("/", path);
-    let (fs, ino) = lookup(&path)?;
+    let (fs, ino, mount) = lookup_full(&path)?;
     if fs.metadata(ino)?.kind != Kind::Dir {
         return Err(ENOTDIR);
     }
+    perm::check_list(&fs, &mount, ino)?;
     let mut out = Vec::new();
     for e in fs.readdir(ino)? {
         let md = fs.metadata(e.ino)?;
@@ -294,23 +365,26 @@ pub fn mkdir(path: &str) -> FsResult<()> {
     if stat(path).is_ok() {
         return Err(EEXIST);
     }
-    let (fs, dir, name) = parent_of(path)?;
+    let (fs, dir, name, mount) = parent_full(path)?;
     if fs.read_only() {
         return Err(EROFS);
     }
     if fs.lookup(dir, &name).is_ok() {
         return Err(EEXIST);
     }
-    fs.create(dir, &name, Kind::Dir)?;
+    perm::check_create(&fs, &mount, dir, &name)?;
+    let owner = perm::new_owner(perm::caller().as_ref(), &fs, &mount, dir, Kind::Dir, None);
+    fs.create_owned(dir, &name, Kind::Dir, owner)?;
     index::added(&resolve("/", path), true);
     Ok(())
 }
 
 pub fn unlink(path: &str) -> FsResult<()> {
-    let (fs, dir, name) = parent_of(path)?;
+    let (fs, dir, name, mount) = parent_full(path)?;
     if fs.read_only() {
         return Err(EROFS);
     }
+    perm::check_remove(&fs, &mount, dir, &name)?;
     if let Ok(ino) = fs.lookup(dir, &name) {
         mapcache::forget(&fs, ino);
     }
@@ -338,13 +412,18 @@ pub fn join(dir: &str, name: &str) -> String {
 }
 
 pub fn rename(from: &str, to: &str) -> FsResult<()> {
-    let (fs_a, dir_a, name_a) = parent_of(from)?;
-    let (fs_b, dir_b, name_b) = parent_of(to)?;
+    let (fs_a, dir_a, name_a, mount) = parent_full(from)?;
+    let (fs_b, dir_b, name_b, _) = parent_full(to)?;
     if !Arc::ptr_eq(&fs_a, &fs_b) {
         return Err(EINVAL); // cross-volume moves are copy + delete in user space
     }
     if fs_a.read_only() {
         return Err(EROFS);
+    }
+    perm::check_remove(&fs_a, &mount, dir_a, &name_a)?;
+    perm::check_create(&fs_b, &mount, dir_b, &name_b)?;
+    if fs_b.lookup(dir_b, &name_b).is_ok() {
+        perm::check_remove(&fs_b, &mount, dir_b, &name_b)?;
     }
     // Refuse to move a directory into itself.
     let from_n = resolve("/", from);
@@ -363,6 +442,14 @@ pub fn rename(from: &str, to: &str) -> FsResult<()> {
 
 pub fn sync_all() {
     let _ = try_sync_all();
+}
+
+/// Memory is short: every mounted filesystem shrinks its cache.
+pub fn shrink_caches() {
+    let all: Vec<Arc<dyn Filesystem>> = MOUNTS.lock().iter().map(|m| m.fs.clone()).collect();
+    for fs in all {
+        fs.shrink();
+    }
 }
 
 pub fn try_sync_all() -> FsResult<()> {
@@ -388,23 +475,33 @@ pub struct OpenFile {
 }
 
 pub fn open(path: &str, flags: usize) -> FsResult<OpenFile> {
+    open_mode(path, flags, None)
+}
+
+/// [`open`], giving a file it creates permission bits `mode` (before the
+/// creator's umask; None: `rw-r--r--`).
+pub fn open_mode(path: &str, flags: usize, mode: Option<u16>) -> FsResult<OpenFile> {
     use aurora_abi::open::*;
     let writable = flags & (WRITE | APPEND | TRUNCATE) != 0;
-    let (fs, ino) = match lookup(path) {
-        Ok((fs, ino)) => {
+    let mut created = false;
+    let (fs, ino, mount) = match lookup_full(&resolve("/", path)) {
+        Ok(found) => {
             if flags & CREATE != 0 && flags & EXCLUSIVE != 0 {
                 return Err(EEXIST);
             }
-            (fs, ino)
+            found
         }
         Err(ENOENT) if flags & CREATE != 0 => {
-            let (fs, dir, name) = parent_of(path)?;
+            let (fs, dir, name, mount) = parent_full(path)?;
             if fs.read_only() {
                 return Err(EROFS);
             }
-            let ino = fs.create(dir, &name, Kind::File)?;
+            perm::check_create(&fs, &mount, dir, &name)?;
+            let owner = perm::new_owner(perm::caller().as_ref(), &fs, &mount, dir, Kind::File, mode);
+            let ino = fs.create_owned(dir, &name, Kind::File, owner)?;
             index::added(&resolve("/", path), false);
-            (fs, ino)
+            created = true;
+            (fs, ino, mount)
         }
         Err(e) => return Err(e),
     };
@@ -414,6 +511,10 @@ pub fn open(path: &str, flags: usize) -> FsResult<OpenFile> {
     }
     if writable && md.kind == Kind::Dir {
         return Err(EISDIR);
+    }
+    // The creator may write what it just made, whatever its mode says.
+    if !created {
+        perm::check_open(&fs, &mount, ino, flags & READ != 0 || !writable, writable)?;
     }
     if flags & TRUNCATE != 0 {
         mapcache::forget(&fs, ino);
@@ -580,6 +681,7 @@ pub fn mount_disks() {
             match fat::FatFs::mount(dev.clone()) {
                 Ok(fs) => {
                     mount("/Boot", Arc::new(fs));
+                    note_device(&dev.name());
                     boot_found = true;
                 }
                 Err(e) => log!("vfs", "{}: FAT32 mount failed: {}", dev.name(), aurora_abi::err::name(e)),
@@ -590,6 +692,7 @@ pub fn mount_disks() {
             match aurorafs::AuroraFs::mount(dev.clone()) {
                 Ok(fs) => {
                     mount("/", Arc::new(fs));
+                    note_device(&dev.name());
                     root_found = true;
                     PERSISTENT_ROOT.store(true, core::sync::atomic::Ordering::Release);
                 }

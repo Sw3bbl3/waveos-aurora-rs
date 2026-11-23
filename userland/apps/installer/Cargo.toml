@@ -7,3 +7,4 @@ license.workspace = true
 corekit.workspace = true
 waveui.workspace = true
 gina.workspace = true
+aurora-image.workspace = true

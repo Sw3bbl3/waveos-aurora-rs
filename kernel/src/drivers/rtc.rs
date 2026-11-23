@@ -13,6 +13,12 @@ pub struct DateTime {
     pub second: u8,
 }
 
+/// The CMOS index and data ports are one register pair for the whole
+/// machine: a read on one CPU must not select a register under another's
+/// (two programs reading the date at once got the day as the month, and
+/// `weekday` indexed past its table — found by `fuzz`).
+static CMOS: crate::sync::IrqMutex<()> = crate::sync::IrqMutex::new(());
+
 fn cmos(reg: u8) -> u8 {
     unsafe {
         Port::<u8>::new(0x70).write(reg | 0x80); // keep NMI disabled bit set
@@ -27,6 +33,7 @@ fn raw() -> [u8; 7] {
 
 pub fn now() -> DateTime {
     without_interrupts(|| {
+        let _cmos = CMOS.lock();
         let mut r = raw();
         loop {
             let again = raw();
@@ -63,11 +70,12 @@ impl DateTime {
     /// 0 = Sunday.
     pub fn weekday(&self) -> u8 {
         const T: [u16; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+        let month = self.month.clamp(1, 12);
         let mut y = self.year;
-        if self.month < 3 {
-            y -= 1;
+        if month < 3 {
+            y = y.saturating_sub(1);
         }
-        ((y + y / 4 - y / 100 + y / 400 + T[(self.month - 1) as usize] + self.day as u16) % 7) as u8
+        ((y + y / 4 - y / 100 + y / 400 + T[(month - 1) as usize] + self.day as u16) % 7) as u8
     }
 
     pub fn weekday_name(&self) -> &'static str {
@@ -90,6 +98,7 @@ fn cmos_write(reg: u8, value: u8) {
 /// Sets the hardware clock (local time).
 pub fn set(d: &DateTime) {
     without_interrupts(|| {
+        let _cmos = CMOS.lock();
         let status_b = cmos(0x0B);
         let binary = status_b & 0x04 != 0;
         let enc = |v: u8| if binary { v } else { (v / 10) << 4 | (v % 10) };

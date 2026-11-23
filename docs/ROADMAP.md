@@ -55,11 +55,11 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - **ACPI:** the `acpi` crate's AML interpreter on its own task (a failure there only turns ACPI off): the power button, batteries, the power adapter, the lid, and sleep states.
 - **Sleep:** S3 suspend to RAM and resume, with every driver brought back and the other CPUs restarted.
 - **Tools:** `lspci`, `lsusb`, `cpuinfo`, `dmesg`, `battery`, `play` and `volume`; a boot log on the EFI partition; [HARDWARE.md](HARDWARE.md) for testing on real machines.
-- **Deferred:** tickless idle with TSC-deadline timers; I²C touchpads; Modern Standby (S0ix); a native GPU driver; per-CPU NVMe queues. (USB keyboard LEDs and the older USB controllers arrived in 0.9.)
+- **Deferred:** tickless idle with TSC-deadline timers; I²C touchpads; Modern Standby (S0ix); native GPU drivers for real hardware (Intel, AMD, Nvidia modesetting, on the display core that virtio-gpu and Bochs VGA already use); per-CPU NVMe queues. (USB keyboard LEDs and the older USB controllers arrived in 0.9.)
 
 ## ✅ M6: Networking and the web
 
-- **Adapters:** virtio-net (modern virtio-pci, MSI-X) and Intel e1000/e1000e (82540EM, 82574L and relatives; MSI or polled). Both come back after sleep.
+- **Adapters:** virtio-net (modern virtio-pci, MSI-X) and Intel e1000/e1000e (82540EM, 82574L and relatives; MSI or polled). Both come back after sleep. Later: Intel igb (82576, tested in QEMU; also I210/I211/I350) and igc (I225/I226), Realtek RTL8139 (tested in QEMU) and RTL8168/8111/8125; none of them yet tried on real hardware.
 - **Our own IPv4 stack** in the kernel (`net/`): ARP with a pending queue, ICMP echo and unreachable, UDP, and TCP with RFC 6298 retransmission timers, slow start and congestion avoidance, fast retransmit, delayed ACKs, window scaling, zero-window probes and TIME_WAIT. A DHCP client renews its lease, and loopback works.
 - **Sockets** for programs (`SOCKET`, `CONNECT`, `BIND`, `LISTEN`, `ACCEPT`, `SENDTO`, `RECVFROM`, …) with timeouts and non-blocking mode; `GETRANDOM` from a ChaCha20 generator seeded by RDSEED/RDRAND.
 - **The web** (host-tested `no_std` libraries):
@@ -78,13 +78,20 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 - Conservative localized composition with reproducible release measurements.
 - See [0.7.0 update notes](releases/0.7.0/en.md) and the [handbook](handbook/README.md).
 
+## In progress: graphics for games
+
+The direction for graphics, replacing the earlier plan to port more Linux GPU drivers: WaveOS's own Rust display drivers expose Linux's DRM/KMS interface, and unmodified Mesa runs on top through the Linux layer, with Steam games as the eventual target.
+
+- **Done:** the display core; native virtio-gpu, Intel (Skylake to Raptor Lake) and AMD (Polaris to Navi 3x, Ryzen APUs) display drivers that take over the firmware's mode (Intel and AMD untested on real hardware); Nvidia detection; several displays; `/dev/dri/card0` with dumb buffers, atomic commits, page-flip events and PRIME (libdrm's `modetest` runs unmodified); `evdev`, `hidraw`, `uinput` and udev-style discovery (SDL2 recognises controllers unmodified); Wave Play.
+- **Next:** Mesa's software path (llvmpipe, lavapipe) over the DRM device; virtio-gpu 3D (virgl and Venus); render nodes, GEM and command submission for Intel, then AMD; an Nvidia driver through the GSP firmware ([design](developer/nvidia-display.md)); 32-bit Linux programs for Steam's client.
+
 ## Future work
 
 Candidates, in no fixed order:
 
 - Tickless idle with TSC-deadline timers; per-CPU NVMe queues.
 - I²C-HID touchpads (laptops' built-in ones); Bluetooth input.
-- More Linux graphics drivers on the compatibility layer in `kernel/linux` (virtio-gpu runs since 0.9): TTM, the DRM GPU scheduler and firmware loading for amdgpu and i915/xe, then a Linux-compatible interface for Mesa (3D). The Linux driver should also restore the display after sleep.
+- More Linux graphics drivers on the compatibility layer in `kernel/linux` (virtio-gpu runs since 0.9): TTM, the DRM GPU scheduler and firmware loading for amdgpu and i915/xe, then a Linux-compatible interface for Mesa (3D). The Linux driver should also restore the display after sleep. (The native virtio-gpu driver, the default since the display core, does; the ported one stays selectable with `gpu=linux`.)
 - Wi-Fi on real hardware: firmware loading and Intel's command protocol for the iwlwifi adapters WaveOS already recognizes (the station, WPA2 and CCMP are done); WPA3 (SAE).
 - More of the web platform (WebP, SVG, CORS); a user-space window server.
 

@@ -68,7 +68,33 @@ pub fn build() {
     log!("index", "indexed {} files and folders in {} ms", n, crate::time::uptime_ms() - t0);
 }
 
+/// Bumped whenever a file or folder is created, removed or renamed anywhere.
+static GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WATCHERS: crate::sync::WaitQueue = crate::sync::WaitQueue::new();
+
+fn changed() {
+    GENERATION.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    WATCHERS.wake_all();
+}
+
+pub fn generation() -> u64 {
+    GENERATION.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Waits up to `ms` for a file to be created, removed or renamed after
+/// [`generation`] was `since`, or for `also()` (re-checked on [`poke`]).
+pub fn wait_change(since: u64, ms: u64, also: impl Fn() -> bool) {
+    WATCHERS.wait(ms, || generation() != since || also());
+}
+
+/// Wakes [`wait_change`] waiters to look at their own condition.
+pub fn poke() {
+    WATCHERS.wake_all();
+}
+
 pub fn added(path: &str, dir: bool) {
+    changed();
+    crate::compat::linux::inotify::host_changed(path, crate::compat::linux::inotify::IN_CREATE, dir);
     if !indexed(path) {
         return;
     }
@@ -79,11 +105,15 @@ pub fn added(path: &str, dir: bool) {
 }
 
 pub fn removed(path: &str) {
+    changed();
+    crate::compat::linux::inotify::host_changed(path, crate::compat::linux::inotify::IN_DELETE, false);
     let prefix = alloc::format!("{path}/");
     INDEX.lock().items.retain(|i| i.path != path && !i.path.starts_with(&prefix));
 }
 
 pub fn renamed(from: &str, to: &str) {
+    changed();
+    crate::compat::linux::inotify::host_renamed(from, to);
     let prefix = alloc::format!("{from}/");
     let mut idx = INDEX.lock();
     let mut moved_dir = None;

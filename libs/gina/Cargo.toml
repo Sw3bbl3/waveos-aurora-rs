@@ -4,9 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["crypto"]
+# Ed25519 signing and verification. The kernel reads manifests only and
+# builds without it (it is soft-float and needs no curve arithmetic).
+crypto = ["dep:ed25519-dalek"]
+
 [dependencies]
 aurora-elf = { path = "../elf" }
 sha2 = { version = "0.10", default-features = false }
+ed25519-dalek = { version = "2.2", default-features = false, optional = true }
 
 [dev-dependencies]
 aurora-mutate = { path = "../mutate" }

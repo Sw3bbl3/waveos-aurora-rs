@@ -12,6 +12,8 @@
 pub mod input;
 
 /// System call numbers.
+pub mod calendar;
+
 pub mod nr {
     pub const EXIT: usize = 0;
     pub const YIELD: usize = 1;
@@ -51,7 +53,9 @@ pub mod nr {
     pub const SYS_INFO: usize = 23;
     /// `desktop(request, arg_ptr, arg_len) -> value` (see [`desktop`])
     pub const DESKTOP: usize = 24;
-    /// `win_create(width, height, title, title_len, flags) -> window id`
+    /// `win_create(width, height, title, title_len, flags, minimum) -> window id`.
+    /// With `win::MINIMUM_SIZE`, `minimum` packs content width in the high
+    /// 32 bits and height in the low 32 bits. Otherwise it is ignored.
     pub const WIN_CREATE: usize = 25;
     /// `win_surface(window, *mut SurfaceInfo)` — current pixel buffer of a window
     pub const WIN_SURFACE: usize = 26;
@@ -181,7 +185,168 @@ pub mod nr {
     /// report readable while the program has window events waiting (read
     /// gives their number); `next_event` takes them.
     pub const EVENT_FD: usize = 82;
-    pub const COUNT: usize = 83;
+    /// UTC milliseconds since 1970; changes immediately when the clock is corrected.
+    pub const UNIX_MS: usize = 83;
+    /// `audio_devices(buf, max) -> count` — fills up to `max`
+    /// [`super::audio::AudioDevice`]s at `buf`; returns how many devices exist.
+    pub const AUDIO_DEVICES: usize = 84;
+    /// `audio_capture(device) -> fd` — a capture stream from input `device`
+    /// (0: the default input): read interleaved stereo `i16` samples at
+    /// [`super::audio::RATE`]; reads block until samples arrive and return 0
+    /// once the device is gone (`-ENODEV` without an input device).
+    pub const AUDIO_CAPTURE: usize = 85;
+    /// `cred_get(*mut Cred)` — who the calling process acts as.
+    pub const CRED_GET: usize = 86;
+    /// `cred_set(*const Cred)` — changes it. Only the system may become
+    /// another account; anyone may drop the administrator capability or
+    /// groups, or change the umask.
+    pub const CRED_SET: usize = 87;
+    /// `chmod(path, len, mode)` — the owner (or an administrator) sets the
+    /// permission bits.
+    pub const CHMOD: usize = 88;
+    /// `chown(path, len, uid, gid)` — `u32::MAX` leaves one unchanged.
+    /// Changing the owner takes the administrator capability; the owner
+    /// may give the file to a group they are in.
+    pub const CHOWN: usize = 89;
+    /// `stat_owner(path, len, *mut FileOwner)`
+    pub const STAT_OWNER: usize = 90;
+    /// `users(op, uid, buf, buf_len, out, out_len) -> value` — the
+    /// accounts; see [`super::users`].
+    pub const USERS: usize = 91;
+    /// `elevate(reason, reason_len)` — asks for the administrator
+    /// capability: the system prompt asks for an administrator's name and
+    /// password (the caller never sees them). 0 once granted (for a few
+    /// minutes), `-EPERM` if refused. Returns 0 at once for administrators.
+    pub const ELEVATE: usize = 92;
+    /// `win_set_program(window, pid)` — says the window shows what process
+    /// `pid` draws (a bridge such as `wl-bridge` showing a Wayland
+    /// program): that program then gets the window's input focus for
+    /// `/dev/input` and the controllers. `pid` must belong to the caller's
+    /// account; 0 clears it.
+    pub const WIN_SET_PROGRAM: usize = 93;
+    pub const COUNT: usize = 94;
+}
+
+/// A process's identity (`cred_get`, `cred_set`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cred {
+    pub uid: u32,
+    /// Primary group.
+    pub gid: u32,
+    /// [`cred`] flags.
+    pub flags: u32,
+    pub ngroups: u32,
+    /// Supplementary groups (the first `ngroups`).
+    pub groups: [u32; 16],
+    /// Permission bits taken away from new files.
+    pub umask: u32,
+    pub _pad: u32,
+}
+
+pub mod cred {
+    /// Holds the administrator capability now.
+    pub const ADMIN: u32 = 1;
+    /// ...because an administrator approved it (it runs out).
+    pub const ELEVATED: u32 = 2;
+    /// The system's well-known ids.
+    pub const ROOT_UID: u32 = 0;
+    pub const ADMIN_GID: u32 = 80;
+    pub const USERS_GID: u32 = 100;
+}
+
+/// Who a file belongs to (`stat_owner`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileOwner {
+    pub uid: u32,
+    pub gid: u32,
+    /// Permission bits, `0o7777`.
+    pub mode: u32,
+    /// [`owner`] flags.
+    pub flags: u32,
+}
+
+pub mod owner {
+    /// The file carries its owner itself (otherwise it is its volume's
+    /// default, or where the volume is mounted decides).
+    pub const OWN: u32 = 1;
+}
+
+/// An account as anyone may see it (`users(LIST)`): no password material.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UserInfo {
+    pub uid: u32,
+    /// [`users`] flags.
+    pub flags: u32,
+    pub name_len: u32,
+    pub full_len: u32,
+    pub home_len: u32,
+    pub avatar_len: u32,
+    pub name: [u8; 32],
+    pub full: [u8; 64],
+    pub home: [u8; 64],
+    pub avatar: [u8; 128],
+}
+
+impl UserInfo {
+    pub const fn zeroed() -> Self {
+        Self {
+            uid: 0,
+            flags: 0,
+            name_len: 0,
+            full_len: 0,
+            home_len: 0,
+            avatar_len: 0,
+            name: [0; 32],
+            full: [0; 64],
+            home: [0; 64],
+            avatar: [0; 128],
+        }
+    }
+    fn text(b: &[u8], n: u32) -> &str {
+        core::str::from_utf8(&b[..(n as usize).min(b.len())]).unwrap_or("?")
+    }
+    pub fn name(&self) -> &str {
+        Self::text(&self.name, self.name_len)
+    }
+    pub fn full(&self) -> &str {
+        Self::text(&self.full, self.full_len)
+    }
+    pub fn home(&self) -> &str {
+        Self::text(&self.home, self.home_len)
+    }
+    pub fn avatar(&self) -> &str {
+        Self::text(&self.avatar, self.avatar_len)
+    }
+}
+
+/// `users` operations. Strings go in `buf` as NUL-separated fields.
+pub mod users {
+    /// `out` = `*mut UserInfo`, `out_len` = how many fit → number of accounts.
+    pub const LIST: usize = 1;
+    /// `buf` = "name\0full name\0password\0", `uid` = 1 for an
+    /// administrator → the new uid. Administrators only.
+    pub const ADD: usize = 2;
+    /// Removes account `uid` (its home folder stays). Administrators only;
+    /// the last administrator and the logged-in account can't go.
+    pub const REMOVE: usize = 3;
+    /// `buf` = "old\0new\0": sets account `uid`'s password (an empty new
+    /// one removes it). Your own needs the old one; someone else's needs
+    /// the administrator capability.
+    pub const SET_PASSWORD: usize = 4;
+    /// Makes `uid` an administrator (`buf_len` = 1) or not (0).
+    pub const SET_ADMIN: usize = 5;
+    /// `buf` = "full name\0hint\0picture\0"; an empty field stays as it
+    /// is, a single `-` clears the hint. Your own, or with the capability.
+    pub const SET_DETAILS: usize = 6;
+
+    /// [`super::UserInfo`] flags.
+    pub const ADMIN: u32 = 1;
+    pub const HAS_PASSWORD: u32 = 2;
+    /// The account logged in now.
+    pub const CURRENT: u32 = 4;
 }
 
 #[repr(C)]
@@ -488,6 +653,44 @@ pub mod audio {
     pub const PRESENT: u64 = 1 << 9;
     /// Headphones are plugged in (speakers muted).
     pub const HEADPHONES: u64 = 1 << 10;
+
+    /// [`AudioDevice`] flags: plays sound.
+    pub const OUTPUT: u32 = 1 << 0;
+    /// Records sound.
+    pub const INPUT: u32 = 1 << 1;
+    /// The output in use, or the default input.
+    pub const DEFAULT: u32 = 1 << 2;
+    /// Connected over USB.
+    pub const USB: u32 = 1 << 3;
+    /// The device has its own volume control (the system volume drives it).
+    pub const HW_VOLUME: u32 = 1 << 4;
+
+    /// A sound device, as `audio_devices` lists it. Select one by saving its
+    /// name as the `audio_output` or `audio_input` preference.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    pub struct AudioDevice {
+        pub id: u32,
+        pub flags: u32,
+        /// The device's own format (the system converts to 48 kHz stereo).
+        pub rate: u32,
+        pub channels: u16,
+        pub bits: u16,
+        pub name_len: u32,
+        pub name: [u8; 60],
+    }
+
+    impl Default for AudioDevice {
+        fn default() -> Self {
+            AudioDevice { id: 0, flags: 0, rate: 0, channels: 0, bits: 0, name_len: 0, name: [0; 60] }
+        }
+    }
+
+    impl AudioDevice {
+        pub fn name(&self) -> &str {
+            core::str::from_utf8(&self.name[..(self.name_len as usize).min(60)]).unwrap_or("")
+        }
+    }
 }
 
 /// Error numbers (returned negated).
@@ -506,6 +709,7 @@ pub mod err {
     pub const ENOMEM: isize = 12;
     pub const EACCES: isize = 13;
     pub const EFAULT: isize = 14;
+    pub const EBUSY: isize = 16;
     pub const EEXIST: isize = 17;
     pub const ENODEV: isize = 19;
     pub const ENOTDIR: isize = 20;
@@ -557,6 +761,7 @@ pub mod err {
             EAGAIN => "try again",
             ENOMEM => "out of memory",
             EACCES => "permission denied",
+            EBUSY => "busy",
             EFAULT => "bad address",
             EEXIST => "already exists",
             ENODEV => "no such device",
@@ -813,8 +1018,18 @@ pub mod pref {
     pub const CREST: &str = "crest";
     /// "1": the status ring is 28 points with the battery percentage beside it.
     pub const BATTERY_LEVEL: &str = "battery_level";
+    /// Processor energy policy: "saver", "balanced" (default) or "performance".
+    pub const ENERGY_MODE: &str = "energy_mode";
     /// "1": skip Shore at start-up (locking still asks for the password).
     pub const AUTO_LOGIN: &str = "auto_login";
+    /// The preferred sound output and input, by device name (used whenever
+    /// that device is present).
+    pub const AUDIO_OUTPUT: &str = "audio_output";
+    pub const AUDIO_INPUT: &str = "audio_input";
+    /// "1" (default): connecting a game controller enters Wave Play.
+    pub const PLAY_AUTO_ENTER: &str = "play_auto_enter";
+    /// "1" (default): Wave Play's navigation sounds and controller vibration.
+    pub const PLAY_SOUNDS: &str = "play_sounds";
 }
 
 /// A screen resolution.
@@ -841,6 +1056,97 @@ pub mod display {
     pub const FOLLOWS_WINDOW: u32 = 16;
 }
 
+/// One display of the desktop (`desktop::DISPLAYS`). Places and sizes are
+/// in points, in one space for all displays: the main display (the one
+/// with the menu bar) is at (0, 0) and the others touch it or each other.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayInfo {
+    /// Stays the same while the display is connected (`desktop::WINDOW_DISPLAY`,
+    /// `event::DISPLAY`); a display plugged in again may get another.
+    pub id: u32,
+    /// [`display_info`] flags.
+    pub flags: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    /// The resolution, in device pixels (`scale` per point).
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub scale: u32,
+    /// Refresh rate in millihertz (0 when unknown).
+    pub refresh_mhz: u32,
+    /// Physical size in millimetres (0 when unknown).
+    pub mm_width: u32,
+    pub mm_height: u32,
+    /// The display's identity (from its EDID and connector): the same
+    /// whenever it is plugged in. Settings keeps its arrangement under the
+    /// preference `display_` followed by these 8 hex digits.
+    pub key: u32,
+    /// Its wallpaper (as `desktop::SET_WALLPAPER` numbers them), or -1 for
+    /// the main display's.
+    pub wallpaper: i32,
+    /// A name for people ("DEL U2720Q", "Virtual-2"), NUL-padded UTF-8.
+    pub name: [u8; 32],
+    /// The connector ("HDMI-A-1", "Virtual-2"), NUL-padded.
+    pub connector: [u8; 16],
+}
+
+impl Default for DisplayInfo {
+    fn default() -> Self {
+        DisplayInfo {
+            id: 0,
+            flags: 0,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            pixel_width: 0,
+            pixel_height: 0,
+            scale: 1,
+            refresh_mhz: 0,
+            mm_width: 0,
+            mm_height: 0,
+            key: 0,
+            wallpaper: -1,
+            name: [0; 32],
+            connector: [0; 16],
+        }
+    }
+}
+
+impl DisplayInfo {
+    fn text(b: &[u8]) -> &str {
+        let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        core::str::from_utf8(&b[..n]).unwrap_or("")
+    }
+
+    pub fn name(&self) -> &str {
+        Self::text(&self.name)
+    }
+
+    pub fn connector(&self) -> &str {
+        Self::text(&self.connector)
+    }
+
+    pub fn is_primary(&self) -> bool {
+        self.flags & display_info::PRIMARY != 0
+    }
+}
+
+/// [`DisplayInfo::flags`].
+pub mod display_info {
+    /// The main display: the menu bar, Harbor and new full-screen things go here.
+    pub const PRIMARY: u32 = 1;
+    /// Shows the main display's picture (mirroring) rather than a part of the desktop of its own.
+    pub const MIRROR: u32 = 2;
+    /// The resolution can change while running (`desktop::DISPLAY_MODES`).
+    pub const LIVE: u32 = 4;
+    /// A virtual machine's display, which follows the size of its window.
+    pub const FOLLOWS_WINDOW: u32 = 8;
+}
+
 /// Drag images for `drag_start`.
 pub mod drag {
     pub const DOCUMENT: usize = 0;
@@ -852,6 +1158,7 @@ pub mod drag {
 /// Window creation flags.
 pub mod win {
     pub const RESIZABLE: usize = 1;
+    pub const MINIMUM_SIZE: usize = 2;
 }
 
 /// Event kinds delivered by `next_event`.
@@ -873,6 +1180,14 @@ pub mod cursor {
     pub const MOVE: u32 = 8;
     /// No pointer over the window (a video playing full screen).
     pub const HIDDEN: u32 = 9;
+    pub const RESIZE_NWSE: u32 = 10;
+    pub const RESIZE_NESW: u32 = 11;
+    pub const GRAB: u32 = 12;
+    pub const GRABBING: u32 = 13;
+    pub const COPY: u32 = 14;
+    /// Work continues in the background; the arrow stays available.
+    pub const PROGRESS: u32 = 15;
+    pub const MAX: u32 = PROGRESS;
 }
 
 pub mod event {
@@ -896,12 +1211,24 @@ pub mod event {
     pub const DROP: u32 = 12;
     /// Sent to the window a drag started from: `a` = 1 if it was dropped somewhere.
     pub const DRAG_END: u32 = 13;
-    /// The screen changed size: `x` = width, `y` = height.
+    /// The screen changed size: `x` = width, `y` = height (the main display;
+    /// see [`DISPLAY`] for the others).
     pub const SCREEN: u32 = 14;
     /// The compositor has shown what the window presented last (a window
     /// presents again after this to draw at the screen's pace). At most
     /// one is queued per window.
     pub const FRAME: u32 = 15;
+    /// A game controller changed: `a` = its id, `b` = its buttons (the
+    /// [`super::gamepad`] bits), `c` = 1 connected, 2 disconnected, 0 a
+    /// button or stick direction changed. Changes go to the window in front
+    /// (while it may read the controllers), connections to every window;
+    /// `gamepad_state` has the rest (sticks, triggers).
+    pub const GAMEPAD: u32 = 16;
+    /// The window is on another display, or the displays changed: `a` = the
+    /// id of the display it is on (see `desktop::DISPLAYS`), `x`, `y` = that
+    /// display's size in points, `b` = its scale, `c` = how many displays
+    /// there are. Every window gets one when it first appears.
+    pub const DISPLAY: u32 = 17;
 }
 
 /// A single input/window event. Field meaning depends on `kind`:
@@ -952,6 +1279,19 @@ pub mod desktop {
     pub const PLAY_SOUND: usize = 12;
     /// Writes out and unmounts a removable volume (a path under /Volumes).
     pub const EJECT: usize = 13;
+    /// Starts the optional shell-owned interactive introduction. No arguments.
+    pub const START_TOUR: usize = 15;
+    /// Wave Play, the controller layout: arg_len = 1 enters it, 0 goes back
+    /// to the desktop (no argument pointer).
+    pub const PLAY: usize = 16;
+    /// The displays: arg = `*mut DisplayInfo`, arg_len = how many fit →
+    /// how many there are (the main display first).
+    pub const DISPLAYS: usize = 17;
+    /// arg_len = one of the caller's windows → the id of the display it is on.
+    pub const WINDOW_DISPLAY: usize = 18;
+    /// A display's resolutions: arg = `*mut DisplayMode`, arg_len = the
+    /// display's id << 32 | how many fit → how many there are.
+    pub const DISPLAY_MODES: usize = 19;
 }
 
 /// Where user programs are linked and where the kernel places things.

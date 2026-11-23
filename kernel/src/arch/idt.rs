@@ -191,6 +191,14 @@ extern "x86-interrupt" fn nmi(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, code: u64) -> ! {
+    let cr2 = Cr2::read_raw();
+    if crate::mm::kstack::is_guard(cr2) || crate::mm::kstack::is_guard(frame.stack_pointer.as_u64()) {
+        fatal(
+            "Double Fault (#DF)",
+            (&frame).into(),
+            format_args!("kernel stack overflow: guard page hit at {:#x}", cr2),
+        );
+    }
     fatal("Double Fault (#DF)", (&frame).into(), format_args!("error code {:#x}", code));
 }
 
@@ -218,7 +226,7 @@ pub extern "sysv64" fn trap(f: &mut TrapFrame) {
         TIMER_VECTOR => {
             crate::telemetry::irq(crate::telemetry::Irq::Timer);
             apic::eoi();
-            crate::sched::on_timer_tick();
+            crate::timer::interrupt();
         }
         RESCHEDULE_VECTOR => {
             apic::eoi();
@@ -247,8 +255,14 @@ pub extern "sysv64" fn trap(f: &mut TrapFrame) {
         }
     }
     if f.user_mode() {
+        // As on the way out of a system call, with interrupts on: writing a
+        // signal frame may have to make a stack page (or un-share one since
+        // `fork`), which waits for locks; with interrupts off the copy
+        // failed and the program was killed instead (`iretq` restores IF).
+        x86_64::instructions::interrupts::enable();
         crate::proc::check_killed();
         crate::compat::linux::signal::on_trap_return(f);
+        x86_64::instructions::interrupts::disable();
     }
 }
 
@@ -261,7 +275,12 @@ fn user_fault(f: &mut TrapFrame, sig: u32, code: i32, addr: u64) -> bool {
     }
     let Some(p) = crate::proc::current().filter(|p| p.linux.is_some()) else { return false };
     let info = crate::compat::linux::signal::Info { code, addr, ..Default::default() };
-    crate::compat::linux::signal::force(&p, sig, info, f)
+    // Interrupts on (they were, in ring 3): the signal frame may land on a
+    // stack page that must be made or un-shared first (see `trap`).
+    x86_64::instructions::interrupts::enable();
+    let entered = crate::compat::linux::signal::force(&p, sig, info, f);
+    x86_64::instructions::interrupts::disable();
+    entered
 }
 
 fn page_fault(f: &mut TrapFrame) {

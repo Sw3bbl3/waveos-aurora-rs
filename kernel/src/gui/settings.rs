@@ -70,7 +70,8 @@ pub fn try_set(key: &str, value: &str) -> Result<(), isize> {
         return Ok(());
     }
     snapshot.insert(String::from(key), String::from(value));
-    save(&snapshot)?;
+    // The system's file, whichever process's call this serves.
+    crate::fs::perm::system(|| save(&snapshot))?;
     VALUES.lock().insert(String::from(key), String::from(value));
     Ok(())
 }

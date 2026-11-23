@@ -83,6 +83,8 @@ enum CurrentHit {
     LockButton,
     Power,
     Settings,
+    /// A sound output to switch to (by position in the list).
+    Output(u8),
 }
 
 pub(super) fn crest_on() -> bool {
@@ -108,6 +110,25 @@ fn volume() -> (u32, bool) {
     let s = audio::state();
     ((s & 0xFF) as u32, s & aurora_abi::audio::MUTED != 0)
 }
+
+/// The sound outputs to choose between (id, name, in use): listed only
+/// when there is a choice.
+fn sound_outputs() -> Vec<(u32, String, bool)> {
+    use aurora_abi::audio::{DEFAULT, OUTPUT};
+    let outs: Vec<_> = audio::devices()
+        .into_iter()
+        .filter(|d| d.flags & OUTPUT != 0)
+        .map(|d| (d.id, String::from(d.name()), d.flags & DEFAULT != 0))
+        .collect();
+    if outs.len() >= 2 {
+        outs
+    } else {
+        Vec::new()
+    }
+}
+
+/// Extra height of the sound card for its output list.
+const OUTPUT_ROW: i32 = 28;
 
 fn duration(minutes: u32) -> String {
     match (minutes / 60, minutes % 60) {
@@ -144,6 +165,16 @@ pub(super) fn time_text() -> String {
         };
         format!("{}:{:02}{}", h, d.minute, secs)
     }
+}
+
+/// Milliseconds until [`time_text`] can change: a second when it shows
+/// seconds, else until the next minute (the RTC counts whole seconds, so
+/// the new minute shows within a second of starting).
+pub(super) fn until_clock_changes() -> u64 {
+    if prefs::get_bool(pref::CLOCK_SECONDS) {
+        return 1000;
+    }
+    (60 - rtc::now().second.min(59) as u64) * 1000
 }
 
 /// "Mon 26 Oct" (with AM/PM first on a 12-hour clock: "PM · Mon 26 Oct").
@@ -539,6 +570,7 @@ impl Desktop {
                 if self.center_open() {
                     self.toggle_center();
                 }
+                self.begin_reveal(self.current_rect());
                 self.current = Some(Current::default());
                 let r = self.current_rect();
                 self.damage(r.inset(-40));
@@ -776,7 +808,13 @@ impl Desktop {
         // Sound card: the speaker mutes, the bar sets the level.
         hits.push((CurrentHit::Mute, Rect::new(x + pad + 12, y + 34, 26, 26)));
         hits.push((CurrentHit::Volume, Rect::new(x + pad + 12, y + 34, inner_w - 24, 26)));
-        y += 74 + 10;
+        y += 74;
+        // With more than one output, the card lists them to switch between.
+        for i in 0..sound_outputs().len() {
+            hits.push((CurrentHit::Output(i as u8), Rect::new(x + pad + 12, y, inner_w - 24, OUTPUT_ROW)));
+            y += OUTPUT_ROW;
+        }
+        y += 10;
         if battery().is_some() {
             y += 42;
             hits.push((CurrentHit::BatteryLevel, Rect::new(x + pad, y, inner_w, 42)));
@@ -803,6 +841,9 @@ impl Desktop {
     }
 
     pub(super) fn close_current(&mut self) {
+        if self.current.is_some() {
+            self.begin_reveal(self.current_rect());
+        }
         if self.current.take().is_some() {
             let r = self.current_rect();
             self.damage(r);
@@ -861,6 +902,13 @@ impl Desktop {
             Some(CurrentHit::Settings) => {
                 self.close_current();
                 self.open(apps::AppKind::Settings);
+            }
+            Some(CurrentHit::Output(i)) => {
+                if let Some((id, name, _)) = sound_outputs().into_iter().nth(i as usize) {
+                    audio::select_output(id);
+                    // Remembered: used whenever this device is connected.
+                    let _ = prefs::set(pref::AUDIO_OUTPUT, &name);
+                }
             }
             None => {}
         }
@@ -940,7 +988,7 @@ impl Desktop {
             rect(CurrentHit::Calm),
             calm,
             hov(CurrentHit::Calm),
-            "Calm",
+            "Do Not Disturb",
             if calm { "On" } else { "Off" },
             &|cv, x, y, col| {
                 // A crescent moon.
@@ -965,8 +1013,30 @@ impl Desktop {
         });
 
         // Sound.
-        let sound = Rect::new(panel.x + 14, rect(CurrentHit::Volume).y - 34, panel.w - 28, 74);
+        let outputs = sound_outputs();
+        let list_h = outputs.len() as i32 * OUTPUT_ROW + if outputs.is_empty() { 0 } else { 6 };
+        let sound = Rect::new(panel.x + 14, rect(CurrentHit::Volume).y - 34, panel.w - 28, 74 + list_h);
         cv.fill_round_rect(sound, 18, card);
+        for (i, (_, name, on)) in outputs.iter().enumerate() {
+            let r = rect(CurrentHit::Output(i as u8));
+            if hov(CurrentHit::Output(i as u8)) {
+                cv.fill_round_rect(r, 10, mix(card, t.text, 18));
+            }
+            cv.text_clipped(
+                r.x + 8,
+                r.y + 19,
+                name,
+                if *on { theme::ui_bold(12) } else { theme::ui(12) },
+                t.text,
+                r.w - 40,
+            );
+            if *on {
+                // A check mark.
+                let (cx, cy) = (r.right() - 16, r.y + r.h / 2);
+                cv.line(cx - 5, cy, cx - 1, cy + 4, 2, theme::accent());
+                cv.line(cx - 1, cy + 4, cx + 6, cy - 4, 2, theme::accent());
+            }
+        }
         cv.text(sound.x + 14, sound.y + 22, "Sound", theme::ui_bold(12), t.text_secondary);
         let bar = rect(CurrentHit::Volume);
         let (v, muted) = volume();

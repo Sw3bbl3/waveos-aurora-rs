@@ -51,10 +51,10 @@ impl Memory {
 /// thread's stack here).
 pub fn maps(p: &Process) -> String {
     let heap = p.linux.as_ref().map_or((0, 0), |l| l.mm.lock().heap());
-    let regions = p.mem().as_ref().map(|a| a.regions()).unwrap_or_default();
+    let (regions, stack_top) = p.mem().as_ref().map(|a| (a.regions(), a.stack_top)).unwrap_or_default();
     let mut out = String::new();
     for (start, end, w, x) in regions {
-        let name = if end == layout::STACK_TOP {
+        let name = if end == stack_top {
             "[stack]"
         } else if start < heap.1 && end > heap.0 {
             "[heap]"
@@ -112,6 +112,14 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
         return Err(EINVAL);
     }
     let n = pages(len);
+    // A GPU buffer (a card's `MAP_DUMB` offset, or a dma-buf): its own
+    // frames, shared with the device and every other mapping.
+    if flags & MAP_ANONYMOUS == 0 {
+        if let Some(frames) = super::drm::mmap_frames(p, fd as u64, offset, n) {
+            let frames = frames?;
+            return map_frames(p, addr, n, flags, prot_bits, &frames);
+        }
+    }
     // Shared memory: the same frames in every process that maps it.
     let shared = if flags & MAP_SHARED != 0 {
         if flags & MAP_ANONYMOUS != 0 {
@@ -123,33 +131,16 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
         None
     };
     if let Some(shm) = shared {
-        let frames = shm.frames(offset / PAGE_SIZE, n);
-        let mut guard = p.mem();
-        let aspace = guard.as_mut().ok_or(ESRCH)?;
-        let va = if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 {
-            if !addr.is_multiple_of(PAGE_SIZE) || !user_range(addr, n * PAGE_SIZE) {
-                return Err(EINVAL);
-            }
-            if flags & MAP_FIXED_NOREPLACE != 0 && !aspace.is_free(addr, n) {
-                return Err(EEXIST);
-            }
-            aspace.unmap(addr, n);
-            addr
-        } else {
-            place(aspace, addr & !(PAGE_SIZE - 1), n)?
-        };
         // Pages past the object's end stay unmapped (Linux: SIGBUS there).
-        aspace.map_shared(va, &frames, prot(prot_bits).unwrap_or(Prot::ReadOnly))?;
-        if prot(prot_bits).is_none() {
-            aspace.protect(va, frames.len() as u64, None)?;
-        }
-        update_resident(p, aspace);
-        return Ok(va);
+        let frames = shm.frames(offset / PAGE_SIZE, n);
+        return map_frames(p, addr, n, flags, prot_bits, &frames);
     }
     // A file's contents are read now, before taking the address-space lock.
     let file_data = if let (true, Some(shm)) = (flags & MAP_ANONYMOUS == 0, super::fs::shm_of(p, fd as u64)) {
         // A private copy of shared memory.
-        let mut data = alloc::vec![0u8; len as usize];
+        // (Only what the object holds: `len` is the program's, up to 64 GiB.)
+        let held = shm.size().saturating_sub(offset).min(len);
+        let mut data = crate::syscall::user::buffer(held as usize)?;
         let got = shm.read_at(offset, &mut data);
         data.truncate(got);
         Some(data)
@@ -211,6 +202,31 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
         if target != Some(Prot::ReadWrite) {
             aspace.protect(va, n, target)?;
         }
+    }
+    update_resident(p, aspace);
+    Ok(va)
+}
+
+/// Maps `frames` shared over the first pages of an `n`-page range, at
+/// `addr` (`MAP_FIXED`) or wherever there is room.
+fn map_frames(p: &Process, addr: u64, n: u64, flags: u64, prot_bits: u64, frames: &[u64]) -> Result<u64, isize> {
+    let mut guard = p.mem();
+    let aspace = guard.as_mut().ok_or(ESRCH)?;
+    let va = if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 {
+        if !addr.is_multiple_of(PAGE_SIZE) || !user_range(addr, n * PAGE_SIZE) {
+            return Err(EINVAL);
+        }
+        if flags & MAP_FIXED_NOREPLACE != 0 && !aspace.is_free(addr, n) {
+            return Err(EEXIST);
+        }
+        aspace.unmap(addr, n);
+        addr
+    } else {
+        place(aspace, addr & !(PAGE_SIZE - 1), n)?
+    };
+    aspace.map_shared(va, frames, prot(prot_bits).unwrap_or(Prot::ReadOnly))?;
+    if prot(prot_bits).is_none() {
+        aspace.protect(va, frames.len() as u64, None)?;
     }
     update_resident(p, aspace);
     Ok(va)
@@ -293,6 +309,34 @@ pub fn mremap(p: &Process, addr: u64, old_len: u64, new_len: u64, flags: u64) ->
     aspace.map_lazy(to + old_n * PAGE_SIZE, new_n - old_n, Prot::ReadWrite)?;
     update_resident(p, aspace);
     Ok(to)
+}
+
+/// `mincore`: one byte per page of `[addr, addr + len)`, `ENOMEM` if any
+/// page isn't mapped. (Programs ask it whether a pointer may be read: EGL
+/// tells a Wayland display from other native displays this way.) Every
+/// mapped page counts as resident: untouched memory comes on first touch
+/// at no cost a program could notice.
+pub fn mincore(p: &Process, addr: u64, len: u64, vec: u64) -> Result<u64, isize> {
+    if !addr.is_multiple_of(PAGE_SIZE) {
+        return Err(EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    if !user_range(addr, len) {
+        return Err(ENOMEM);
+    }
+    let n = pages(len);
+    {
+        let mut guard = p.mem();
+        let aspace = guard.as_mut().ok_or(ESRCH)?;
+        if (0..n).any(|i| aspace.is_free(addr + i * PAGE_SIZE, 1)) {
+            return Err(ENOMEM);
+        }
+    }
+    let ones = alloc::vec![1u8; n as usize];
+    crate::syscall::user::put_bytes(vec, &ones)?;
+    Ok(0)
 }
 
 pub fn madvise(p: &Process, addr: u64, len: u64, advice: u64) -> Result<u64, isize> {

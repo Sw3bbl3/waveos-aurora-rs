@@ -127,11 +127,84 @@ fn screenshot() -> Vec<i16> {
     })
 }
 
+/// Scales a rendered sound (they are all rendered at the same peak).
+fn quieter(mut samples: Vec<i16>, percent: i32) -> Vec<i16> {
+    for s in &mut samples {
+        *s = (*s as i32 * percent / 100) as i16;
+    }
+    samples
+}
+
+/// Wave Play: moving the focus — a soft, short wooden tick.
+fn play_move() -> Vec<i16> {
+    quieter(render(0.07, &[note(1568.0, 0.0, 1.0, 70.0, 0.0), note(784.0, 0.0, 0.4, 60.0, 0.0)], |_| 0.0), 38)
+}
+
+/// Wave Play: opening something — two notes up a fifth.
+fn play_select() -> Vec<i16> {
+    quieter(render(0.32, &[note(880.0, 0.0, 0.8, 16.0, -0.1), note(1318.5, 0.055, 0.9, 12.0, 0.1)], |_| 0.0), 62)
+}
+
+/// Wave Play: closing an overlay — the same, down.
+fn play_back() -> Vec<i16> {
+    quieter(render(0.26, &[note(1174.7, 0.0, 0.8, 16.0, 0.1), note(880.0, 0.05, 0.7, 14.0, -0.1)], |_| 0.0), 50)
+}
+
+/// Wave Play: the end of a row — a muted knock.
+fn play_bump() -> Vec<i16> {
+    quieter(render(0.09, &[note(196.0, 0.0, 1.0, 45.0, 0.0), note(392.0, 0.0, 0.3, 60.0, 0.0)], |_| 0.0), 55)
+}
+
+/// Wave Play: the desktop turning into Wave Play — a rising open chord with air under it.
+fn play_enter() -> Vec<i16> {
+    let notes = [
+        note(293.66, 0.00, 0.6, 3.2, -0.4),
+        note(440.00, 0.06, 0.6, 3.4, -0.1),
+        note(587.33, 0.12, 0.6, 3.6, 0.1),
+        note(880.00, 0.18, 0.5, 3.8, 0.4),
+        note(1174.66, 0.26, 0.35, 4.5, 0.0),
+    ];
+    let mut noise = Noise(0x9a1e);
+    let mut low = 0.0f32;
+    quieter(
+        render(1.1, &notes, move |t| {
+            // A breath of filtered noise swelling then fading: the whoosh.
+            low += (noise.next() - low) * 0.08;
+            let env = (t / 0.22).min(1.0) * (-(t - 0.22).max(0.0) * 6.0).exp();
+            low * env * 0.5
+        }),
+        70,
+    )
+}
+
+/// Wave Play: back to the desktop — the chord falling.
+fn play_exit() -> Vec<i16> {
+    let notes = [
+        note(1174.66, 0.00, 0.35, 4.5, 0.3),
+        note(880.00, 0.05, 0.5, 4.0, 0.1),
+        note(587.33, 0.10, 0.6, 3.6, -0.1),
+        note(293.66, 0.16, 0.6, 3.2, -0.3),
+    ];
+    quieter(render(0.9, &notes, |_| 0.0), 65)
+}
+
+/// A controller was connected — a quick bright pair.
+fn play_connect() -> Vec<i16> {
+    quieter(render(0.5, &[note(987.77, 0.0, 0.7, 10.0, -0.2), note(1479.98, 0.08, 0.8, 8.0, 0.2)], |_| 0.0), 70)
+}
+
 /// (file name, WAV bytes) for every system sound.
 pub fn all() -> Vec<(&'static str, Vec<u8>)> {
     type Synth = fn() -> Vec<i16>;
-    let sounds: [(&str, Synth); 7] = [
+    let sounds: [(&str, Synth); 14] = [
         ("startup.wav", startup),
+        ("play-move.wav", play_move),
+        ("play-select.wav", play_select),
+        ("play-back.wav", play_back),
+        ("play-bump.wav", play_bump),
+        ("play-enter.wav", play_enter),
+        ("play-exit.wav", play_exit),
+        ("play-connect.wav", play_connect),
         ("notify.wav", notify),
         ("volume.wav", volume),
         ("timer.wav", timer),

@@ -6,7 +6,7 @@
 
 The bootloader, kernel, drivers, filesystem, window server, network stack, web browser, and every app — designed together, built together, from the first instruction to the last pixel.
 
-![WaveOS Aurora in dark mode: Lens and Notes moored side by side, with Harbor risen to peek at Notes](docs/screenshots/0.8/desktop-dark.png)
+![WaveOS in dark mode: Notes and Files arranged side by side above a calm water photograph](docs/screenshots/ui-refresh/desktop-dark.png)
 
 [Get started](#get-started) · [Explore the system](docs/explorer/index.html) · [Read the handbook](docs/handbook/0.7/en/start-welcome.md) · [Every feature](docs/FEATURES.md)
 
@@ -16,12 +16,14 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 
 ## Beautiful by default.
 
-**Living water**, the WaveOS look: glass bubbles along the top, **Crest** in the middle with the time and whatever is happening now, and **Harbor** floating at the bottom with your apps in three bays. Windows have no title bars: bring the pointer to the top edge and a handle rises to move, shrink, expand or close them. Light and dark everywhere, an accent colour that can follow your wallpaper, and every word set in Manrope by **Lyra**, our own TrueType engine.
+**Living water**, the WaveOS look: calm light and dark surfaces, floating controls above, and **Harbor** below. A slim strip inside each window quietly reveals its controls when you point at it; every corner and edge resizes with a matching pointer. Six high-resolution photographs bring the desktop to life, with an accent that follows your wallpaper. Shared spacing, typography, rounded cursors, and short transitions carry across the native apps. Welcome’s optional interactive tour gives you a practice window to find your feet. Every word is set in Manrope by **Lyra**, our own TrueType engine.
+
+[See the UI refresh, before/after captures, and native validation](docs/validation/ui-refresh.md).
 
 | | |
 |---|---|
 | ![The boot screen: the WayV logo, a progress bar and the version](docs/screenshots/0.8/boot.png) | ![Shore, the login screen, with the date, a large clock and the password field](docs/screenshots/0.8/shore-login.png) |
-| **Start-up.** The WayV logo and real progress, in your appearance. | **Shore.** One account, a salted and hashed password, and Lock Screen with Super L. |
+| **Start-up.** The WayV logo and real progress, in your appearance. | **Shore.** Your accounts, salted and hashed passwords, and Lock Screen with Super L. |
 | ![Shoal, every app full screen, with search and groups](docs/screenshots/0.8/shoal.png) | ![Seek finding a picture](docs/screenshots/0.8/seek.png) |
 | **Shoal.** Every app, full screen. Type to narrow it down. | **Seek.** Apps, files, settings and quick maths, one keystroke away. |
 | ![Drift, dropped from Crest: the calendar, Calm and notifications](docs/screenshots/0.8/drift.png) | ![Current, opened from the status ring: network, Calm, appearance, lock and sound](docs/screenshots/0.8/current.png) |
@@ -33,7 +35,7 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 
 ## The whole web.
 
-**Voyage** is the browser: our own, around WebKit, the engine of Safari, with JavaScriptCore and all of WebKit's CSS, running on WaveOS's Linux layer and showing its window through our Wayland bridge. It has tabs, find in page, zoom and downloads to your Downloads folder, follows WaveOS's light or dark look, and opens pages in half the time Firefox takes. Mozilla's **Firefox ESR**, unchanged, is a launcher away, and **NetSurf**, a small browser that starts in seconds, comes in the system image too.
+**Voyage** is the browser: our own, around WebKit, the engine of Safari, with JavaScriptCore and WebKit's CSS, running on WaveOS's Linux layer and showing its window through our Wayland bridge. It has tabs, find in page, zoom, persistent site data, useful error/retry controls, and downloads with progress and cancellation. It follows WaveOS's light or dark look. Settings' on-demand connection check separates network configuration from verified DNS and HTTPS access. Mozilla's **Firefox ESR**, unchanged, is a launcher away, and **NetSurf**, a small browser, comes in the system image too. See the [network/browser validation report](docs/validation/network-web.md) for measured results and limits.
 
 | | |
 |---|---|
@@ -57,12 +59,20 @@ Each app runs as a separate, protected process. If one crashes, you see a polite
 
 ## Made for real machines.
 
-Multicore scheduling. USB 3. NVMe and SATA. Sound with headphone detection. Battery, lid and sleep. Wired networking that's ready the moment you boot.
+Multicore scheduling with tickless idle. USB 3, with USB audio. NVMe, SATA, SD cards and eMMC. Sound with headphone detection. Battery, lid and sleep. Wired networking on Intel and Realtek adapters, ready the moment you boot. Several monitors, each at its own resolution and scale, arranged in Settings. Accounts with file permissions, signed installable apps, and a kernel hardened with ASLR, guarded stacks and W^X.
+
+Display drivers for Intel and AMD graphics, laptop touchpads over I²C, and other drivers written from specifications have so far run only against simulated hardware; [HARDWARE.md](docs/HARDWARE.md) says exactly what has been tested where, and what to send back if you try a real PC.
 
 | | |
 |---|---|
 | ![About This Computer: the WVOS mark, the version and Made by WayV](docs/screenshots/0.8/about-light.png) | ![Terminal running ping, nslookup and fetch over HTTPS](docs/screenshots/network-tools.png) |
 | **About This Computer.** The WVOS mark, the version and the machine. | **Terminal.** A real shell, with pipes, redirection and 35 programs. |
+
+## Ready to play.
+
+Connect a controller and the desktop becomes **Wave Play**: a console-style home for your games and apps, with a quick overlay on the home button, and the desktop back the moment you want it.
+
+Underneath, Linux games find what they expect. WaveOS's own display drivers speak Linux's DRM/KMS interface at `/dev/dri/card0`, and keyboards, mice and controllers appear as standard `evdev` devices, so unmodified libdrm and SDL2 programs run as they are. Hardware-accelerated 3D is the work in progress: see the [roadmap](docs/ROADMAP.md).
 
 ## See inside, while it runs.
 
@@ -79,8 +89,10 @@ You need a Mac (Apple silicon or Intel) or a Linux PC, [rustup](https://rustup.r
 ```sh
 git clone https://github.com/Sw3bbl3/waveos-aurora-rs.git
 cd waveos-aurora-rs
-cargo xtask run
+make run
 ```
+
+`make run` (or `./waveos` without make) opens the launcher in your browser: pick a preset or choose the displays, memory, devices and so on, then press Launch. The build output and the serial console stream into the page. `make quick` boots whatever you launched last, and `make` on its own lists the other shortcuts. Prefer the terminal? `cargo xtask run` does the same with the defaults.
 
 A minute later, you're at the desktop. Add `--monitor` to open the System Explorer alongside it. To try a real PC, see [HARDWARE.md](docs/HARDWARE.md); for every build command, see [FEATURES.md](docs/FEATURES.md#build-commands).
 

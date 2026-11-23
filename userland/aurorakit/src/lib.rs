@@ -23,6 +23,8 @@ fn refresh_effects() {
 }
 
 pub use corekit::abi::input::{KeyCode, KeyEvent, Modifiers};
+/// The displays (`displays()`, `window_display`, `modes`): see `corekit::display`.
+pub use corekit::display;
 pub use lumen::{canvas, font, geom, icons, math, theme, wallpaper, widgets};
 
 use alloc::string::String;
@@ -46,18 +48,28 @@ pub enum Request {
     SetWallpaper(u8),
     /// Use a picture file as the wallpaper.
     SetWallpaperImage(String),
+    StartTour,
 }
 
 pub struct Env {
     pub now_ms: u64,
     pub focused: bool,
+    /// The main display's size in points.
     pub screen: (i32, i32),
+    /// The display the window is on (an id for `display::display`; 0 until
+    /// the window first appears) and its size in points.
+    pub display: u32,
+    pub display_size: (i32, i32),
     pub requests: Vec<Request>,
     /// Modifier keys currently held (as last reported by the keyboard).
     pub mods: Modifiers,
 }
 
 pub trait App {
+    /// Cursor at the last pointer position; changes are sent only when needed.
+    fn cursor(&self) -> u32 {
+        corekit::abi::cursor::ARROW
+    }
     /// Opt-in transparent regions, in window-local coordinates. Opaque is the default.
     fn materials(&self, _area: Rect) -> Vec<corekit::abi::MaterialRegion> {
         Vec::new()
@@ -65,6 +77,10 @@ pub trait App {
     fn title(&self) -> String;
     /// Initial content size.
     fn size(&self) -> (i32, i32);
+    /// Minimum useful content size, excluding compositor chrome.
+    fn min_size(&self) -> (i32, i32) {
+        (240, 160)
+    }
     fn resizable(&self) -> bool {
         true
     }
@@ -85,6 +101,11 @@ pub trait App {
         false
     }
     fn release(&mut self, _x: i32, _y: i32, _area: Rect, _env: &mut Env) -> bool {
+        false
+    }
+    /// The window moved to another display (`env.display`), or displays
+    /// were plugged in, removed or rearranged. Return true to redraw.
+    fn display_changed(&mut self, _env: &mut Env) -> bool {
         false
     }
     /// Pointer moved inside the window (`x < 0` when it left).
@@ -228,6 +249,9 @@ fn apply(requests: Vec<Request>) {
             Request::Reboot => desktop::reboot(),
             Request::SetDark(d) => desktop::set_dark(d),
             Request::SetWallpaper(i) => desktop::set_wallpaper(i),
+            Request::StartTour => {
+                let _ = desktop::start_tour();
+            }
             Request::SetWallpaperImage(p) => {
                 let _ = desktop::set_wallpaper_image(&p);
             }
@@ -276,8 +300,10 @@ pub fn run<A: App>(mut app: A) -> i32 {
     let (w, h) = (w.min(screen.0 - 48), h.min(screen.1 - 150));
     let mut title = app.title();
     let [tp, tl] = str_args(&title);
-    let flags = if app.resizable() { win::RESIZABLE } else { 0 };
-    let id = match call(nr::WIN_CREATE, &[w as u64, h as u64, tp, tl, flags as u64]) {
+    let flags = (if app.resizable() { win::RESIZABLE } else { 0 }) | win::MINIMUM_SIZE;
+    let (mw, mh) = app.min_size();
+    let minimum = ((mw.clamp(120, 8192) as u64) << 32) | mh.clamp(80, 8192) as u64;
+    let id = match call(nr::WIN_CREATE, &[w as u64, h as u64, tp, tl, flags as u64, minimum]) {
         Ok(id) => id,
         Err(e) => {
             corekit::eprintln!("could not create window: {}", e);
@@ -290,11 +316,14 @@ pub fn run<A: App>(mut app: A) -> i32 {
         now_ms: corekit::time::uptime_ms(),
         focused: true,
         screen,
+        display: 0,
+        display_size: screen,
         requests: Vec::new(),
         mods: Modifiers::default(),
     };
     let mut dirty = true;
     let mut next_tick = 0;
+    let mut pointer_shape = u32::MAX;
     // Opt-in validation counters; ordinary sessions do not collect these.
     let metrics = corekit::fs::exists("/Settings/runtime-metrics");
     let mut sample_at = env.now_ms;
@@ -363,6 +392,11 @@ pub fn run<A: App>(mut app: A) -> i32 {
             title = new_title;
         }
         apply(core::mem::take(&mut env.requests));
+        let shape = app.cursor().min(corekit::abi::cursor::MAX);
+        if shape != pointer_shape {
+            let _ = call(nr::WIN_SET_CURSOR, &[id, shape as u64]);
+            pointer_shape = shape;
+        }
 
         // Layout can reveal an offscreen focus target and request another
         // frame; honor that deadline before sleeping as well as after input.
@@ -422,6 +456,11 @@ pub fn run<A: App>(mut app: A) -> i32 {
             event::SCREEN => {
                 env.screen = (ev.x, ev.y);
                 true
+            }
+            event::DISPLAY => {
+                env.display = ev.a;
+                env.display_size = (ev.x, ev.y);
+                app.display_changed(&mut env)
             }
             event::CLOSE_REQUESTED => {
                 if if ev.a == 1 { app.close_tab_requested(&mut env) } else { app.close_requested(&mut env) } {

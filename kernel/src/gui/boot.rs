@@ -14,6 +14,8 @@ const STAGES: [&str; 9] = ["scheduler", "smp", "storage", "network", "usb", "sou
 
 struct Screen {
     fb: Framebuffer,
+    /// The framebuffer's kernel mapping (write-combining when possible).
+    front: u64,
     back: Vec<u32>,
     bar: Rect,
     dark: bool,
@@ -25,9 +27,9 @@ static SCREEN: spin::Mutex<Option<Screen>> = spin::Mutex::new(None);
 fn colors(dark: bool) -> (u32, u32, u32) {
     // (background, track, version text)
     if dark {
-        (rgb(0x04, 0x06, 0x1A), rgb(0x23, 0x25, 0x37), rgb(0x84, 0x88, 0x9A))
+        (rgb(0x18, 0x1D, 0x25), rgb(0x2A, 0x32, 0x3D), rgb(0xA9, 0xB2, 0xBF))
     } else {
-        (rgb(0xF7, 0xF9, 0xFF), rgb(0xDE, 0xE0, 0xE8), rgb(0x6A, 0x70, 0x84))
+        (rgb(0xF7, 0xF9, 0xFC), rgb(0xE0, 0xE5, 0xEB), rgb(0x5E, 0x68, 0x76))
     }
 }
 
@@ -49,7 +51,7 @@ pub fn show(fb: Framebuffer, dark: bool) {
         cv.fill_rect(cv.clip, bg);
         // A soft violet-blue glow behind the logo, strongest at the centre.
         let glow = rgb(0x4A, 0x63, 0xFF);
-        let strength = if dark { 56 } else { 24 };
+        let strength = if dark { 24 } else { 12 };
         let (cx, cy, rx, ry) = (w / 2, h / 2 - h / 40, w * 5 / 16, h * 5 / 16);
         for y in (cy - ry).max(0)..(cy + ry).min(h) {
             let dy = (y - cy) * 1024 / ry;
@@ -86,9 +88,12 @@ pub fn show(fb: Framebuffer, dark: bool) {
     }
     let bar_w = (w / 6).clamp(180, 280);
     let bar = Rect::new((w - bar_w) / 2, h / 2 + h / 16 + 18, bar_w, 4);
-    let mut screen = Screen { fb, back, bar, dark, done: 0 };
+    // Drawn straight to the firmware's framebuffer: no display driver runs yet.
+    let len = fb.stride as u64 * fb.height as u64 * 4;
+    let front = crate::mm::vmm::kmap_wc(fb.phys_addr, len).unwrap_or_else(|| crate::mm::phys_to_virt(fb.phys_addr));
+    let mut screen = Screen { fb, front, back, bar, dark, done: 0 };
     paint_bar(&mut screen);
-    super::flush(super::front_buffer(&fb), &screen.back, &fb, Rect::new(0, 0, w, h));
+    copy(&screen, Rect::new(0, 0, w, h));
     *SCREEN.lock() = Some(screen);
 }
 
@@ -122,7 +127,28 @@ pub fn stage(id: &str) {
     s.done = n + 1;
     paint_bar(s);
     let r = s.bar;
-    super::flush(super::front_buffer(&s.fb), &s.back, &s.fb, r);
+    copy(s, r);
+}
+
+/// Copies `r` of the boot screen to the framebuffer.
+fn copy(s: &Screen, r: Rect) {
+    let fb = &s.fb;
+    let (w, stride) = (fb.width as usize, fb.stride as usize);
+    let front = unsafe { core::slice::from_raw_parts_mut(s.front as *mut u32, stride * fb.height as usize) };
+    let r = r.intersect(&Rect::new(0, 0, fb.width as i32, fb.height as i32));
+    for y in r.y as usize..r.bottom() as usize {
+        let src = &s.back[y * w + r.x as usize..y * w + r.right() as usize];
+        let dst = &mut front[y * stride + r.x as usize..y * stride + r.right() as usize];
+        match fb.format {
+            bootinfo::PixelFormat::Bgr => dst.copy_from_slice(src),
+            bootinfo::PixelFormat::Rgb => {
+                for (d, s) in dst.iter_mut().zip(src) {
+                    *d = (s & 0x00FF00) | (s >> 16 & 0xFF) | (s & 0xFF) << 16;
+                }
+            }
+        }
+    }
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }
 
 /// The desktop took over the screen: free the boot screen's buffer.

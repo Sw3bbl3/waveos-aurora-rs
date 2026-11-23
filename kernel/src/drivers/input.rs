@@ -81,6 +81,14 @@ pub fn pointer_moved(dx: i32, dy: i32, buttons: u8) {
     push(InputEvent::Pointer { x: (x + dx).clamp(0, w - 1), y: (y + dy).clamp(0, h - 1), buttons });
 }
 
+/// Puts the pointer at (`x`, `y`) without an event: the desktop stopped
+/// it at the edge of a display, so relative devices move it from there.
+pub fn warp(x: i32, y: i32) {
+    let (w, h) = screen_size();
+    let (x, y) = (x.clamp(0, (w - 1).max(0)), y.clamp(0, (h - 1).max(0)));
+    POINTER.store((x as u32 as u64) << 32 | y as u32 as u64 | 1 << 63, Ordering::Relaxed);
+}
+
 pub fn push(ev: InputEvent) {
     if let InputEvent::Pointer { x, y, .. } = ev {
         POINTER.store((x as u32 as u64) << 32 | y as u32 as u64 | 1 << 63, Ordering::Relaxed);
@@ -175,6 +183,38 @@ pub fn touchpad_settings() -> aurora_hid::gestures::Settings {
     }
 }
 
+/// What a touchpad's gesture engine decided, into the queue (USB and I²C
+/// touchpads alike); `held` tracks the buttons this pad holds down.
+pub fn touchpad_output(o: aurora_hid::gestures::Output, held: &mut u8) {
+    let buttons = o.buttons & 0x07;
+    if o.dx != 0 || o.dy != 0 || buttons != *held {
+        pointer_moved(o.dx, o.dy, buttons);
+        *held = buttons;
+    }
+    if o.scroll_x != 0 || o.scroll_y != 0 {
+        // Pixels to 1/120 notch, at 40 px a notch.
+        push(InputEvent::Scroll { dx: o.scroll_x * 3, dy: o.scroll_y * 3 });
+    }
+    if let Some(s) = o.swipe {
+        touchpad_swipe(s);
+    }
+}
+
+/// Three fingers swept across a touchpad. Sideways means back and forward
+/// (fingers to the right go back, as pages slide); up and down are free
+/// for the desktop to use.
+pub fn touchpad_swipe(s: aurora_hid::gestures::Swipe) {
+    use aurora_hid::gestures::Swipe;
+    let code = match s {
+        Swipe::Right => KeyCode::Back,
+        Swipe::Left => KeyCode::Forward,
+        Swipe::Up | Swipe::Down => return,
+    };
+    for pressed in [true, false] {
+        push(InputEvent::Key(KeyEvent { code, ch: None, pressed, mods: modifiers() }));
+    }
+}
+
 /// Mouse motion scaled by the speed setting (5: one pixel per count),
 /// keeping the fractions in `rem` (1/64 px).
 pub fn scale_motion(dx: i32, dy: i32, rem: &mut (i32, i32)) -> (i32, i32) {
@@ -199,8 +239,22 @@ pub fn caps() -> bool {
 /// updates every keyboard's light. Returns the new state.
 pub fn toggle_caps() -> bool {
     let on = !CAPS.fetch_xor(true, Ordering::AcqRel);
+    LIGHT.store(on, Ordering::Release);
     request_lights();
+    super::evdev::sources::caps_changed(on);
     on
+}
+
+/// The Caps Lock light as last set (it follows the lock, unless a program
+/// set it through a keyboard's `/dev/input` node).
+static LIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Lights (or puts out) every keyboard's Caps Lock light without changing
+/// the lock (Linux programs write `LED_CAPSL`).
+pub fn set_caps_light(on: bool) {
+    if LIGHT.swap(on, Ordering::AcqRel) != on {
+        request_lights();
+    }
 }
 
 /// Something that shows the lock state (a keyboard driver).
@@ -243,7 +297,7 @@ fn lights_task() {
         }
         let sinks = *SINKS.lock();
         for sink in sinks.into_iter().flatten() {
-            sink(caps());
+            sink(LIGHT.load(Ordering::Acquire));
         }
     }
 }
