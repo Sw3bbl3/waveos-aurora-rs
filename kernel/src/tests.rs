@@ -2246,12 +2246,16 @@ fn sleep_and_wake() {
     // The network card was reset too: talk to the host again.
     if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
         use crate::net::socket::{Kind, Socket};
-        // An IPv4 address: the host is reached over IPv4, and an IPv6
-        // address alone (which can come first) makes `online` true.
+        // An IPv4 address on every wired card: the host is reached over
+        // IPv4, an IPv6 address alone (which can come first) makes `online`
+        // true, and with two USB adapters on look-alike networks (the same
+        // address on each) the route must not change under the connection.
         let v4 = || {
-            crate::net::interfaces()
-                .iter()
-                .any(|i| i.flags & aurora_abi::net::IF_LOOPBACK == 0 && !i.name.starts_with(b"wlan") && i.ip != [0; 4])
+            let wired: Vec<_> = crate::net::interfaces()
+                .into_iter()
+                .filter(|i| i.flags & aurora_abi::net::IF_LOOPBACK == 0 && !i.name.starts_with(b"wlan"))
+                .collect();
+            !wired.is_empty() && wired.iter().all(|i| i.ip != [0; 4])
         };
         assert!(wait_for(|| crate::net::online() && v4(), 10_000), "no network address after sleep");
         let c = Socket::new(Kind::Tcp, false);

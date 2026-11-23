@@ -320,7 +320,7 @@ Not supported:
 - **SMSC/Microchip LAN9500/9512/9514 and LAN7800/7850** (0424:ec00, 9500, 9512, 9514, 7800, 7850; the Raspberry Pi's built-in Ethernet): vendor protocols not implemented.
 - **Realtek chips without a CDC configuration**, mobile broadband modems (MBIM, QMI) and Wi-Fi dongles.
 
-Performance (QEMU 11 under TCG on a Mac; QEMU's usb-net moves one frame per transfer, and its numbers vary from run to run): a megabyte from the host takes about 45–100 ms over usb-net on xHCI (10–23 MB/s), close to virtio-net and e1000 in the same setup, and about 2 s on EHCI (via its UHCI companion, at full speed: 0.5 MB/s each way). See [the developer notes](developer/usb-networking.md) for the measurements and where the time goes.
+Performance (QEMU 11 under TCG on a Mac; QEMU's usb-net moves one frame per transfer, and its numbers vary from run to run): a megabyte to or from the host takes about 20–70 ms over usb-net on xHCI (15–50 MB/s), like virtio-net and faster than the emulated e1000 in the same setup, and about 2 s on EHCI (via its UHCI companion, at full speed: 0.5 MB/s each way). See [the developer notes](developer/usb-networking.md) for the measurements and where the time goes.
 
 ## Compatibility
 

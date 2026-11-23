@@ -534,6 +534,30 @@ impl Stack {
         best(&|f| f.ip != ANY && f.gateway != ANY).map(|i| (i, self.ifaces[i].gateway))
     }
 
+    /// The route for a packet whose source address is already chosen (a
+    /// connection's): through the interface with that address if it still
+    /// reaches `dst`, so a better interface coming up (a USB adapter plugged
+    /// in) doesn't send the connection's packets out with an address that
+    /// isn't theirs. Otherwise, as [`Stack::route`].
+    fn route_from(&self, src: Ip, dst: Ip) -> Option<(usize, Ip)> {
+        if src != ANY && dst[0] != 127 {
+            let own = self
+                .ifaces
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| !f.loopback() && !f.gone && f.link && f.ip == src)
+                .filter_map(|(i, f)| {
+                    let hop = if f.in_subnet(dst) { dst } else { f.gateway };
+                    (hop != ANY).then_some((f.metric, i, hop))
+                })
+                .min_by_key(|&(metric, i, _)| (metric, i));
+            if let Some((_, i, hop)) = own {
+                return Some((i, hop));
+            }
+        }
+        self.route(dst)
+    }
+
     /// Our address on the interface that reaches `dst` (None: no route, or
     /// no address there yet).
     pub fn source_for(&self, dst: Addr) -> Option<Addr> {
@@ -548,6 +572,15 @@ impl Stack {
         match as_v4(&dst) {
             Some(d) => self.send_ip4(d, proto, payload),
             None => self.send_ip6(dst, proto, payload),
+        }
+    }
+
+    /// [`Stack::send_ip`] for a connection bound to `src`: an IPv4 packet
+    /// keeps to the interface with that address (see [`Stack::route_from`]).
+    pub fn send_ip_from(&mut self, src: Addr, dst: Addr, proto: u8, payload: &[u8]) -> Result<(), isize> {
+        match (as_v4(&src), as_v4(&dst)) {
+            (Some(s), Some(d)) => self.send_ip4_from(s, d, proto, payload),
+            _ => self.send_ip(dst, proto, payload),
         }
     }
 
@@ -570,10 +603,16 @@ impl Stack {
 
     /// Sends an IPv4 datagram to `dst` (routing, ARP, loopback).
     pub fn send_ip4(&mut self, dst: Ip, proto: u8, payload: &[u8]) -> Result<(), isize> {
+        self.send_ip4_from(ANY, dst, proto, payload)
+    }
+
+    /// [`Stack::send_ip4`], from `src` when it is one of ours (ANY: the
+    /// address of the interface the route takes).
+    fn send_ip4_from(&mut self, from: Ip, dst: Ip, proto: u8, payload: &[u8]) -> Result<(), isize> {
         if 20 + payload.len() > MTU {
             return Err(EMSGSIZE);
         }
-        let (i, hop) = self.route(dst).ok_or(ENETUNREACH)?;
+        let (i, hop) = self.route_from(from, dst).ok_or(ENETUNREACH)?;
         let src = if dst[0] == 127 { LOOPBACK } else { self.ifaces[i].ip };
         let packet = self.ip_packet(src, dst, proto, payload);
         if self.ifaces[i].loopback() || self.ifaces.iter().any(|f| f.ip == dst) {
