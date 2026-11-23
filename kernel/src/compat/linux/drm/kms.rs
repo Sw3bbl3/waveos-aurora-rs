@@ -22,8 +22,8 @@ use aurora_abi::err::*;
 /// Every framebuffer programs made: (id, file, the framebuffer).
 static FBS: Mutex<Vec<(ObjId, u64, Weak<Framebuffer>)>> = Mutex::new(Vec::new());
 
-/// A framebuffer by id: one a program made, or one on screen now (the
-/// desktop's).
+/// A framebuffer by id: one a program made, or one on screen now or kept
+/// aside while a program holds the display (the desktop's).
 pub fn fb_by_id(f: &File, id: u32) -> Option<Arc<Framebuffer>> {
     if id == 0 {
         return None;
@@ -31,7 +31,8 @@ pub fn fb_by_id(f: &File, id: u32) -> Option<Arc<Framebuffer>> {
     if let Some(fb) = FBS.lock().iter().find(|e| e.0 == id).and_then(|e| e.2.upgrade()) {
         return Some(fb);
     }
-    f.dev.state().1.into_iter().filter_map(|p| p.fb).find(|fb| fb.id == id)
+    let shown = f.dev.state().1.into_iter().filter_map(|p| p.fb);
+    shown.chain(gpu::owner::kept_framebuffers(&*f.dev)).find(|fb| fb.id == id)
 }
 
 /// A file's framebuffers go with it.
@@ -108,9 +109,11 @@ pub fn add_fb(f: &File, a: &mut Args) -> Result<(), isize> {
 pub fn add_fb2(f: &File, a: &mut Args) -> Result<(), isize> {
     const INTERLACED: u32 = 1;
     const MODIFIERS: u32 = 2;
+    // The only modifier is DRM_FORMAT_MOD_LINEAR (0), which is also what
+    // a framebuffer without modifiers is; others (and MOD_INVALID) are
+    // refused, as Linux refuses what a plane's IN_FORMATS doesn't list.
     let flags = a.u32(16);
-    // No format modifiers (DRM_CAP_ADDFB2_MODIFIERS is 0): linear only.
-    if flags & !(INTERLACED | MODIFIERS) != 0 || flags & MODIFIERS != 0 {
+    if flags & !(INTERLACED | MODIFIERS) != 0 || (flags & MODIFIERS != 0 && a.u64(72) != 0) {
         return Err(EINVAL);
     }
     // One plane per format: the other slots must be empty.
@@ -177,10 +180,12 @@ pub fn get_fb2(f: &File, a: &mut Args) -> Result<(), isize> {
     a.set32(4, fb.width);
     a.set32(8, fb.height);
     a.set32(12, fb.format);
-    a.set32(16, 0);
+    // DRM_MODE_FB_MODIFIERS, with the linear modifier (0) in `modifier[0]`.
+    a.set32(16, 2);
     a.set32(20, if f.is_master() { f.handle_for(&fb.bo) } else { 0 });
     a.set32(36, fb.pitch);
     a.set32(52, fb.offset);
+    a.set64(72, 0);
     Ok(())
 }
 
@@ -458,6 +463,7 @@ pub fn errno(e: gpu::Error) -> isize {
 /// the CRTCs it touched to the next frame (with a flip-complete event for
 /// `event`'s user data).
 pub fn commit(f: &File, c: Commit, touched: &[ObjId], event: Option<u64>) -> Result<(), isize> {
+    let start = super::stats::now();
     let test = c.flags & commit::TEST_ONLY != 0;
     if !test {
         for &crtc in touched {
@@ -471,9 +477,11 @@ pub fn commit(f: &File, c: Commit, touched: &[ObjId], event: Option<u64>) -> Res
     }
     gpu::owner::client_commit(&*f.dev, f.id, &c).map_err(errno)?;
     if !test {
+        let mut due = 0;
         for &crtc in touched {
-            vblank::flipped(f, crtc, event)?;
+            due = due.max(vblank::flipped(f, crtc, event)?);
         }
+        f.flips.lock().record(start, super::stats::now(), due);
         // A blocking commit returns once its frame is on screen, as on Linux.
         if c.flags & commit::NONBLOCK == 0 {
             for &crtc in touched {

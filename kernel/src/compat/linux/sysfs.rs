@@ -8,7 +8,8 @@
 //! - the PCI device: `vendor`, `device`, `subsystem_vendor`,
 //!   `subsystem_device`, `revision`, `class`, `config`, `boot_vga`, a
 //!   `uevent` with `PCI_SLOT_NAME`, `PCI_ID` and `DRIVER`, and a `subsystem`
-//!   link to `/sys/bus/pci`.
+//!   link to `/sys/bus/pci`;
+//! - the processors, `/sys/devices/system/cpu` (`super::cpu`).
 //!
 //! That is what libdrm reads to enumerate devices (`drmGetDevices2`,
 //! `drmGetDevice2`, `drmGetDeviceNameFromFd2`) without udev. The tree is
@@ -79,6 +80,12 @@ fn tree() -> BTreeMap<String, Entry> {
         t.insert(p, Entry::Link(to));
     };
     file(&mut t, String::from("/sys/class/drm/version"), b"drm 1.1.0 20060810\n");
+    for (path, data) in super::cpu::sys_files() {
+        match data {
+            Some(d) => file(&mut t, path, d.as_bytes()),
+            None => dir(&mut t, &path),
+        }
+    }
     for (i, dev) in drm::cards().iter().enumerate() {
         let driver = drm::driver_for(&**dev).name();
         let slot = pci_slot(&**dev);

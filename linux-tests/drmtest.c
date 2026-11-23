@@ -259,6 +259,7 @@ _Static_assert(sizeof(union drm_wait_vblank) == 24, "wait_vblank");
 #define DRM_IOCTL_MODE_GETPLANE IOWR(0xB6, struct drm_mode_get_plane)
 #define DRM_IOCTL_MODE_SETPLANE IOWR(0xB7, struct drm_mode_set_plane)
 #define DRM_IOCTL_MODE_ADDFB2 IOWR(0xB8, struct drm_mode_fb_cmd2)
+#define DRM_IOCTL_MODE_GETFB2 IOWR(0xCE, struct drm_mode_fb_cmd2)
 #define DRM_IOCTL_MODE_OBJ_GETPROPERTIES IOWR(0xB9, struct drm_mode_obj_get_properties)
 #define DRM_IOCTL_MODE_CURSOR2 IOWR(0xBB, struct drm_mode_cursor2)
 #define DRM_IOCTL_MODE_ATOMIC IOWR(0xBC, struct drm_mode_atomic)
@@ -935,6 +936,54 @@ static void prime(void) {
     printf("drm-test: PRIME export, mmap, SCM_RIGHTS, import\n");
 }
 
+/// Formats and modifiers: the planes list theirs in IN_FORMATS, each with
+/// the linear modifier, which ADDFB2 takes and GETFB2 reports.
+static void modifiers(void) {
+    CHECK(cap(card, 0x10) == 1, "DRM_CAP_ADDFB2_MODIFIERS");
+    uint64_t blob = 0;
+    CHECK(prop(card, primary_id, 0xeeeeeeee, "IN_FORMATS", &blob) && blob, "IN_FORMATS on the primary plane");
+    static uint8_t data[1024];
+    struct drm_mode_get_blob b = {.blob_id = (uint32_t)blob};
+    CHECK(ioctl(card, DRM_IOCTL_MODE_GETPROPBLOB, &b) == 0 && b.length >= 48 && b.length <= sizeof data,
+          "IN_FORMATS length");
+    b.data = ptr(data);
+    CHECK(ioctl(card, DRM_IOCTL_MODE_GETPROPBLOB, &b) == 0, "IN_FORMATS");
+    // struct drm_format_modifier_blob, then the formats, then struct drm_format_modifier.
+    uint32_t h[6];
+    memcpy(h, data, sizeof h);
+    CHECK(h[0] == 1 && h[2] >= 1 && h[4] >= 1 && h[5] % 8 == 0, "IN_FORMATS header");
+    int xrgb = -1;
+    for (uint32_t i = 0; i < h[2]; i++) {
+        uint32_t f;
+        memcpy(&f, data + h[3] + 4 * i, 4);
+        if (f == DRM_FORMAT_XRGB8888) xrgb = (int)i;
+    }
+    CHECK(xrgb >= 0, "IN_FORMATS lists XRGB8888");
+    uint64_t mask, modifier;
+    uint32_t offset;
+    memcpy(&mask, data + h[5], 8);
+    memcpy(&offset, data + h[5] + 8, 4);
+    memcpy(&modifier, data + h[5] + 16, 8);
+    CHECK(modifier == 0 && xrgb >= (int)offset && ((mask >> (xrgb - offset)) & 1), "XRGB8888 is linear");
+    struct buffer m = dumb(card, 64, 64, DRM_FORMAT_XRGB8888);
+    struct drm_mode_fb_cmd2 f = {.width = 64, .height = 64, .pixel_format = DRM_FORMAT_XRGB8888, .flags = 2};
+    f.handles[0] = m.handle, f.pitches[0] = m.pitch;
+    CHECK(ioctl(card, DRM_IOCTL_MODE_ADDFB2, &f) == 0 && f.fb_id, "ADDFB2 with the linear modifier");
+    struct drm_mode_fb_cmd2 g = {.fb_id = f.fb_id};
+    CHECK(ioctl(card, DRM_IOCTL_MODE_GETFB2, &g) == 0 && (g.flags & 2) && g.modifier[0] == 0 && g.width == 64 &&
+              g.pitches[0] == m.pitch,
+          "GETFB2");
+    struct drm_mode_fb_cmd2 bad = f;
+    bad.modifier[0] = 0x00ffffffffffffffull; // DRM_FORMAT_MOD_INVALID
+    FAILS(card, DRM_IOCTL_MODE_ADDFB2, &bad, EINVAL, "ADDFB2 with MOD_INVALID");
+    unsigned int ids[2] = {f.fb_id, m.fb};
+    for (int i = 0; i < 2; i++) CHECK(ioctl(card, DRM_IOCTL_MODE_RMFB, &ids[i]) == 0, "RMFB");
+    munmap(m.map, m.size);
+    struct drm_gem_close gc = {.handle = m.handle};
+    CHECK(ioctl(card, DRM_IOCTL_GEM_CLOSE, &gc) == 0, "GEM_CLOSE");
+    printf("drm-test: IN_FORMATS lists %u formats, linear\n", h[2]);
+}
+
 static void errors(void) {
     struct drm_gem_close gc = {.handle = 0x7777};
     FAILS(card, DRM_IOCTL_GEM_CLOSE, &gc, EINVAL, "GEM_CLOSE of no handle");
@@ -1042,6 +1091,7 @@ int main(void) {
     screendump("drm-client");
     cursor();
     prime();
+    modifiers();
     errors();
     close_gives_back();
     killed_gives_back();

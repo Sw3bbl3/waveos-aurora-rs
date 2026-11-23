@@ -395,6 +395,10 @@ fn build() -> Tree {
         b.dir(dir);
     }
     b.file("/run/udev/control", "");
+    // The DRM cards' records, beside the input devices' (`super::super::drm`).
+    for (name, data) in super::super::drm::udev_records() {
+        b.file(&format!("/run/udev/data/{name}"), data);
+    }
     // /dev/uinput (a misc device).
     let uinput = "/sys/devices/virtual/misc/uinput";
     b.file(&format!("{uinput}/uevent"), node_uevent(Dev::Uinput));

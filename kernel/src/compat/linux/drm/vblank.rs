@@ -74,7 +74,8 @@ fn queue(f: &File, due: u64, bytes: Vec<u8>) -> Result<(), isize> {
     if due <= now {
         wake(key);
     } else {
-        crate::timer::call_after_ms((due - now).div_ceil(1_000_000), wake, key, "drm-event");
+        // At the frame's start to the nanosecond, not the millisecond after.
+        crate::timer::add(due, crate::timer::Action::Call { f: wake, arg: key, name: "drm-event" });
     }
     Ok(())
 }
@@ -189,8 +190,9 @@ pub fn wait_flip(crtc: ObjId) -> Result<(), isize> {
 }
 
 /// A commit changed what `crtc` shows: the flip completes at the next
-/// frame, with a `DRM_EVENT_FLIP_COMPLETE` for `user_data` if `event`.
-pub fn flipped(f: &File, crtc: ObjId, event: Option<u64>) -> Result<(), isize> {
+/// frame (returned), with a `DRM_EVENT_FLIP_COMPLETE` for `user_data` if
+/// `event`.
+pub fn flipped(f: &File, crtc: ObjId, event: Option<u64>) -> Result<u64, isize> {
     let dev = &*f.dev;
     let (seq, _) = now(dev, crtc);
     let due = if dev.caps().vblank_irq { time::now_ns() } else { frame_time(dev, crtc, seq + 1) };
@@ -198,7 +200,7 @@ pub fn flipped(f: &File, crtc: ObjId, event: Option<u64>) -> Result<(), isize> {
     if let Some(user_data) = event {
         queue(f, due, vblank_event(EVENT_FLIP_COMPLETE, user_data, due, seq + 1, crtc))?;
     }
-    Ok(())
+    Ok(due)
 }
 
 /// `struct drm_event_vblank` (32 bytes).

@@ -311,6 +311,34 @@ pub fn mremap(p: &Process, addr: u64, old_len: u64, new_len: u64, flags: u64) ->
     Ok(to)
 }
 
+/// `mincore`: one byte per page of `[addr, addr + len)`, `ENOMEM` if any
+/// page isn't mapped. (Programs ask it whether a pointer may be read: EGL
+/// tells a Wayland display from other native displays this way.) Every
+/// mapped page counts as resident: untouched memory comes on first touch
+/// at no cost a program could notice.
+pub fn mincore(p: &Process, addr: u64, len: u64, vec: u64) -> Result<u64, isize> {
+    if !addr.is_multiple_of(PAGE_SIZE) {
+        return Err(EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    if !user_range(addr, len) {
+        return Err(ENOMEM);
+    }
+    let n = pages(len);
+    {
+        let mut guard = p.mem();
+        let aspace = guard.as_mut().ok_or(ESRCH)?;
+        if (0..n).any(|i| aspace.is_free(addr + i * PAGE_SIZE, 1)) {
+            return Err(ENOMEM);
+        }
+    }
+    let ones = alloc::vec![1u8; n as usize];
+    crate::syscall::user::put_bytes(vec, &ones)?;
+    Ok(0)
+}
+
 pub fn madvise(p: &Process, addr: u64, len: u64, advice: u64) -> Result<u64, isize> {
     if !addr.is_multiple_of(PAGE_SIZE) {
         return Err(EINVAL);

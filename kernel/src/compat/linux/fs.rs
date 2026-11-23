@@ -352,7 +352,7 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/dev/zero" => Special::Zero,
         "/dev/random" | "/dev/urandom" => Special::Random,
         "/dev/tty" | "/dev/console" => return Some(Err(ENXIO)),
-        "/proc/cpuinfo" => mem(cpuinfo()),
+        "/proc/cpuinfo" => mem(super::cpu::cpuinfo()),
         "/proc/meminfo" => mem(meminfo()),
         "/proc/self/maps" => mem(super::mm::maps(p)),
         "/proc/self/cmdline" => mem(format!("{}\0", p.name())),
@@ -420,17 +420,6 @@ fn group(user: &str) -> String {
         s.push_str(&format!("{user}:x:{}:\n", crate::users::FIRST_UID));
     }
     s.push_str("nogroup:x:65534:\n");
-    s
-}
-
-fn cpuinfo() -> String {
-    let n = crate::arch::percpu::count();
-    let mut s = String::new();
-    for i in 0..n {
-        s.push_str(&format!(
-            "processor\t: {i}\nvendor_id\t: GenuineIntel\nmodel name\t: x86-64 processor\nflags\t\t: fpu sse sse2\n\n"
-        ));
-    }
     s
 }
 
@@ -830,6 +819,33 @@ pub fn close(p: &Process, fd: u64) -> Result<u64, isize> {
     }
     // The handle goes after the lock (a pipe end wakes its peer).
     drop(old);
+    Ok(0)
+}
+
+/// `close_range`: closes (or with `CLOSE_RANGE_CLOEXEC` marks
+/// close-on-exec) every open descriptor from `first` to `last`.
+/// (`CLOSE_RANGE_UNSHARE` changes nothing here: a process's descriptor
+/// table is its own.)
+pub fn close_range(p: &Process, first: u64, last: u64, flags: u64) -> Result<u64, isize> {
+    const UNSHARE: u64 = 1 << 1;
+    const CLOEXEC: u64 = 1 << 2;
+    if flags & !(UNSHARE | CLOEXEC) != 0 || first > last {
+        return Err(EINVAL);
+    }
+    let open: Vec<usize> = {
+        let fds = p.fds.lock();
+        let end = (last as usize).min(fds.len().saturating_sub(1));
+        (first as usize..=end).filter(|&i| fds.get(i).is_some_and(|s| s.is_some())).collect()
+    };
+    for fd in open {
+        if flags & CLOEXEC != 0 {
+            if let Some(l) = &p.linux {
+                l.set_cloexec(fd, true);
+            }
+        } else {
+            let _ = close(p, fd as u64);
+        }
+    }
     Ok(0)
 }
 
