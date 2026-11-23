@@ -92,6 +92,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     sched::init();
     proc::init();
     sandbox::init();
+    mm::kswapd::init();
     x86_64::instructions::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
     log!("boot", "protections: {}", arch::protect::report());

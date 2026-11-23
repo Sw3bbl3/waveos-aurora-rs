@@ -46,6 +46,7 @@ const TESTS: &[Test] = &[
     ("clipboard and Trash", clipboard_and_trash),
     ("SMP: work on every CPU, lock stress", smp_work),
     ("SMP: TLB shootdown", smp_shootdown),
+    ("locks: waiters for a lock held long sleep, so even an idle-task holder runs", mutex_long_hold),
     ("clock: TSC/HPET monotonic", clock),
     ("timers: queue order, accuracy, cancel, on every CPU", timer_queue),
     ("tickless: timeouts fire on CPUs with the tick stopped", tickless_timeouts),
@@ -78,6 +79,11 @@ const TESTS: &[Test] = &[
     ("system update: download, install alongside, start on trial, fall back (pkgtest)", crate::gui::installed::system_test),
     ("syscall fuzzer (native calls, racing threads, kills)", syscall_fuzz),
     ("memory exhaustion: programs take all they can, the kernel keeps its reserve and recovers", memory_exhaustion),
+    ("mm: what memory costs a program under no pressure (bench)", memory_bench),
+    ("swap: private, fork-shared, shared and locked pages out and back", mm::swaptest::semantics),
+    ("swap: a program fills several times its memory, every page checked", mm::swaptest::overcommit),
+    ("swap: pages through the swap file, then it fills; the kernel is unharmed", mm::swaptest::file_full),
+    ("swap: out of memory ends the right program", mm::swaptest::oom),
     ("Learn: both offline libraries", learn_library),
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
@@ -400,6 +406,7 @@ const FUZZ_SLACK: u64 = 32;
 fn syscall_fuzz() {
     let opt = |k: &str, d: &str| crate::gui::prefs::boot_option(k).unwrap_or_else(|| alloc::string::String::from(d));
     let (seed, iters, rounds) = (opt("fuzz_seed", "1"), opt("fuzz_iters", "1500"), opt("fuzz_rounds", "4"));
+    let _squeezed = fuzz_pressure();
     let heap_before = mm::heap::usage().1;
     let before = free_frames();
     let pid = crate::proc::spawn(
@@ -442,6 +449,38 @@ fn syscall_fuzz() {
     );
     let heap_after = mm::heap::usage().1;
     crate::kprint!("[seed {seed}, heap {} KiB → {} KiB] ", heap_before / 1024, heap_after / 1024);
+}
+
+/// What memory costs a program with no pressure on it: `fuzz swap` maps
+/// 64 MiB, writes every page and reads it back (`bench:` lines, to compare
+/// kernels; it asserts nothing but that the pattern held).
+fn memory_bench() {
+    let (r, w) = crate::proc::new_pipe(true);
+    let argv = ["fuzz", "swap", "64", "9", "1", "1"];
+    let pid = crate::proc::spawn("/System/Bin/fuzz", &argv, [None, Some(w.clone()), Some(w)], 0).expect("spawn fuzz");
+    let pipe = match &*r {
+        crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
+        _ => unreachable!(),
+    };
+    let p = crate::proc::get(pid).unwrap();
+    let mut out = String::new();
+    let mut buf = [0u8; 256];
+    loop {
+        while let Ok(n @ 1..) = pipe.read(&mut buf, true) {
+            out.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        if p.exit_code().is_some() {
+            while let Ok(n @ 1..) = pipe.read(&mut buf, true) {
+                out.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+            break;
+        }
+        sched::sleep_ms(20);
+    }
+    for line in out.lines() {
+        crate::kprintln!("bench: {line}");
+    }
+    assert_eq!(p.exit_code(), Some(0), "{out}");
 }
 
 fn learn_library() {
@@ -1216,10 +1255,20 @@ impl MemReport {
 /// The Linux system-call fuzzer (`linux-tests/linuxfuzz.c`): random Linux
 /// calls from racing threads in disposable child processes. Longer runs:
 /// `AURORA_FUZZ_SEED`, `AURORA_LINUXFUZZ_CHILDREN`, `AURORA_LINUXFUZZ_CALLS`.
+/// Fuzzing under memory pressure: `fuzz_ram` (boot option;
+/// `AURORA_FUZZ_RAM`) MiB of memory left to programs while a fuzzer runs,
+/// the rest held here, so the fuzzers' processes swap and may meet the
+/// out-of-memory killer.
+fn fuzz_pressure() -> mm::swaptest::Balloon {
+    let mib = crate::gui::prefs::boot_option("fuzz_ram").and_then(|v| v.parse().ok());
+    mm::swaptest::Balloon::leaving(mib)
+}
+
 fn linux_fuzz() {
     let opt = |k: &str, d: &str| crate::gui::prefs::boot_option(k).unwrap_or_else(|| String::from(d));
     let (seed, children, calls) =
         (opt("fuzz_seed", "1"), opt("linuxfuzz_children", "6"), opt("linuxfuzz_calls", "300"));
+    let _squeezed = fuzz_pressure();
     let before = free_frames();
     run_linux_test_with("linuxfuzz", &["linuxfuzz", &seed, &children, &calls], "linuxfuzz passed", 30 * 60_000);
     // What its own clean-up could not remove (a child may have taken the
@@ -1944,6 +1993,48 @@ fn smp_work() {
     let seen = SEEN.load(Ordering::SeqCst).count_ones();
     crate::kprint!("[{} CPUs, work ran on {}] ", online, seen);
     assert_eq!(seen, online, "every CPU ran some of the work");
+}
+
+/// A `sync::Mutex` held across a long wait (I/O, say): its contenders must
+/// stop being ready (they sleep), or a holder that only runs when nothing
+/// else is ready — the boot code, in a CPU's idle task — never runs again.
+/// (That starved the second boot on one CPU with a virtio disk: the boot
+/// code held the disk's queue lock while three tasks yield-spun on it and
+/// on the locks behind it.) Here three tasks on the boot CPU contend for a
+/// lock this task holds while it sleeps; then they all get it.
+fn mutex_long_hold() {
+    static M: crate::sync::Mutex<u32> = crate::sync::Mutex::new(0);
+    static GOT: AtomicU32 = AtomicU32::new(0);
+    let before = crate::sync::LONG_WAITS.load(Ordering::Relaxed);
+    let guard = M.lock();
+    let ids: Vec<u64> = (0..3)
+        .map(|_| {
+            sched::spawn_on_bsp("t-lock", || {
+                *M.lock() += 1;
+                GOT.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+    // Held for a while: the contenders give up yielding and sleep; some
+    // moment finds none of them ready.
+    let start = time::uptime_ms();
+    let mut all_asleep = false;
+    while time::uptime_ms() < start + 200 {
+        sched::sleep_ms(2);
+        if time::uptime_ms() < start + 20 {
+            continue;
+        }
+        let tasks = sched::list();
+        let mine: Vec<_> = tasks.iter().filter(|t| ids.contains(&t.id)).collect();
+        all_asleep |= mine.len() == 3 && mine.iter().all(|t| matches!(t.state, sched::State::Sleeping(_)));
+    }
+    let slept = crate::sync::LONG_WAITS.load(Ordering::Relaxed) - before;
+    drop(guard);
+    assert!(slept > 0, "contenders of a lock held 200 ms never slept: they would starve an idle-task holder");
+    assert!(all_asleep, "the contenders were never all asleep at once while the lock was held");
+    assert!(eventually(5000, || GOT.load(Ordering::SeqCst) == 3), "the contenders did not get the lock once it was free");
+    assert_eq!(*M.lock(), 3);
+    crate::kprint!("[{slept} sleeps] ");
 }
 
 fn smp_shootdown() {

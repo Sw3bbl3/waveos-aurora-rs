@@ -73,6 +73,15 @@ fn interrupt(arg: usize) {
 
 impl Queue {
     fn submit(&mut self, kind: u32, sector: u64, data_len: usize, device_writes_data: bool) -> BlockResult<()> {
+        // A request that timed out is still the device's: its completion
+        // must be seen (and its buffer left alone) before the next one, or
+        // every later request would be taken as done one completion early,
+        // with the data of the one before.
+        if self.last_used != self.avail_idx {
+            let (ring, target) = (&self.ring, self.avail_idx);
+            wait_irq(self.irq, 30_000, || ring.read::<u16>(USED_OFF + 2) == target)?;
+            self.last_used = target;
+        }
         let io = self.io.phys;
         // Request header.
         self.io.write::<u32>(HDR_OFF, kind);
@@ -107,7 +116,21 @@ impl Queue {
         // Wait for the used ring to advance.
         let ring = &self.ring;
         let target = self.last_used.wrapping_add(1);
-        wait_irq(self.irq, 5000, || ring.read::<u16>(USED_OFF + 2) == target)?;
+        let t0 = crate::time::uptime_ms();
+        if let Err(e) = wait_irq(self.irq, 5000, || ring.read::<u16>(USED_OFF + 2) == target) {
+            // (`last_used` stays behind `avail_idx`: the next request waits for this one.)
+            log!(
+                "virtio",
+                "request {} at sector {} ({} bytes) not done after {} ms (used {}, waiting for {})",
+                kind,
+                sector,
+                data_len,
+                crate::time::uptime_ms() - t0,
+                ring.read::<u16>(USED_OFF + 2),
+                target,
+            );
+            return Err(e);
+        }
         self.last_used = target;
         fence(Ordering::SeqCst);
         match self.io.read::<u8>(STATUS_OFF) {

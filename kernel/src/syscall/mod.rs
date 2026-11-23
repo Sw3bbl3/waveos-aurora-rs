@@ -674,16 +674,46 @@ fn mmap(len: u64) -> SysResult {
     if len == 0 || len > 1 << 30 {
         return Err(EINVAL);
     }
+    use mm::vmm::Fault;
     let pages = len.div_ceil(mm::PAGE_SIZE);
     let p = proc::current().ok_or(EPERM)?;
-    let mut guard = p.mem();
-    let aspace = guard.as_mut().ok_or(ESRCH)?;
-    let va = aspace.reserve(pages).ok_or(ENOMEM)?;
-    if let Err(e) = aspace.map_anon(va, pages, mm::vmm::Prot::ReadWrite) {
-        aspace.unmap(va, pages);
-        return Err(e);
+    let va = {
+        let mut guard = p.mem();
+        let aspace = guard.as_mut().ok_or(ESRCH)?;
+        let va = aspace.reserve(pages).ok_or(ENOMEM)?;
+        aspace.map_lazy(va, pages, mm::vmm::Prot::ReadWrite)?;
+        va
+    };
+    // The memory is made now (a WaveOS program's `mmap` either gets it or
+    // fails), a chunk at a time with the address space let go in between,
+    // so `kswapd` can swap out what this process filled before.
+    let undo = |e| {
+        if let Some(a) = p.mem().as_mut() {
+            a.unmap(va, pages);
+        }
+        Err(e)
+    };
+    let mut done = 0;
+    while done < pages {
+        let n = (pages - done).min(64);
+        let r = match p.mem().as_mut() {
+            Some(a) => a.prefault(va + done * mm::PAGE_SIZE, n * mm::PAGE_SIZE, true),
+            None => Fault::Invalid,
+        };
+        match r {
+            Fault::Resolved => done += n,
+            // (No out-of-memory killing for this: the call fails instead.)
+            Fault::NoMemory if mm::kswapd::wait_for_memory() && !proc::interrupted() => {}
+            Fault::NoMemory => return undo(ENOMEM),
+            // Unmapped meanwhile by another thread.
+            Fault::Invalid => return undo(ENOMEM),
+        }
     }
-    p.resident_kib.store(aspace.resident / 1024, Ordering::Relaxed);
+    if let Some(a) = p.mem().as_mut() {
+        // Every page is made: nothing lazy is left to remember there.
+        a.made(va, pages);
+        p.resident_kib.store(a.resident / 1024, Ordering::Relaxed);
+    }
     Ok(va)
 }
 
@@ -807,6 +837,16 @@ fn sys_stats() -> aurora_abi::SysStats {
     s.frames = crate::telemetry::FRAMES.load(Ordering::Relaxed);
     s.windows = crate::gui::server::windows().len() as u32;
     s.processes = proc::all().iter().filter(|p| p.exit_code().is_none()).count() as u32;
+    let mi = mm::kswapd::meminfo();
+    let sw = mm::swap::stats();
+    s.mem_available = mi.available;
+    (s.mem_compressed, s.mem_compressed_pages) = (mi.compressed_bytes, mi.compressed_pages * mm::PAGE_SIZE);
+    (s.swap_total, s.swap_used, s.swap_file_total, s.swap_file_used) =
+        (mi.swap_total, mi.swap_used, mi.disk_swap_total, mi.disk_swap_used);
+    (s.swap_ins, s.swap_outs) = (sw.swapins, sw.swapouts);
+    s.mem_pressure = mm::kswapd::level();
+    s.mem_stall_10s = mm::kswapd::pressure().1[0] as u32;
+    s.oom_kills = mm::kswapd::oom_kills();
     s
 }
 

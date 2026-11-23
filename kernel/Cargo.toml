@@ -32,6 +32,7 @@ aurora-i2c = { path = "../libs/i2c" }
 aurora-sdmmc = { path = "../libs/sdmmc" }
 aurora-acpi-res = { path = "../libs/acpires" }
 aurora-edid = { path = "../libs/edid" }
+aurora-lz4 = { path = "../libs/lz4" }
 aurora-igfx = { path = "../libs/igfx" }
 aurora-amdgfx = { path = "../libs/amdgfx" }
 aurora-nvgfx = { path = "../libs/nvgfx" }

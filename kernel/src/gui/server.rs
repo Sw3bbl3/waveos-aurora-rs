@@ -341,6 +341,37 @@ pub fn push_event(id: u32, mut ev: Event) {
     wake_pid(pid);
 }
 
+/// The process whose window has the focus (0: none): the program in use.
+static FOREGROUND: AtomicU32 = AtomicU32::new(0);
+
+pub fn foreground() -> u32 {
+    FOREGROUND.load(Ordering::Relaxed)
+}
+
+/// Makes `pid` the program in front (tests: no compositor runs).
+#[cfg(feature = "ktest")]
+pub fn set_foreground(pid: u32) {
+    FOREGROUND.store(pid, Ordering::Relaxed);
+}
+
+/// Window `id` gained or lost the focus.
+pub fn note_focus(id: u32, focused: bool) {
+    let Some(pid) = pid_of(id) else { return };
+    if focused {
+        FOREGROUND.store(pid, Ordering::Relaxed);
+    } else {
+        let _ = FOREGROUND.compare_exchange(pid, 0, Ordering::Relaxed, Ordering::Relaxed);
+    }
+}
+
+/// The processes with windows.
+pub fn window_pids() -> Vec<u32> {
+    let mut pids: Vec<u32> = CLIENTS.lock().values().map(|c| c.pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
 /// Sends an event to every client window (e.g. theme changes).
 pub fn broadcast(ev: Event) {
     let ids: Vec<u32> = CLIENTS.lock().keys().copied().collect();

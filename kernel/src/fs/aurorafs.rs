@@ -55,6 +55,8 @@ fn kind(k: ::aurorafs::Kind) -> Kind {
 pub struct AuroraFs {
     vol: Mutex<Volume<CachedDisk>>,
     device: String,
+    /// The swap file's inode (0: none), which nothing else may touch.
+    swap: core::sync::atomic::AtomicU64,
 }
 
 impl AuroraFs {
@@ -62,7 +64,7 @@ impl AuroraFs {
         let device = super::short_device(dev.as_ref());
         let cache = BlockCache::new(dev, 4096)?;
         let vol = Volume::mount(CachedDisk(cache), crate::time::wall_seconds).map_err(errno)?;
-        Ok(AuroraFs { vol: Mutex::new(vol), device })
+        Ok(AuroraFs { vol: Mutex::new(vol), device, swap: core::sync::atomic::AtomicU64::new(0) })
     }
 
     /// Formats `dev` (used by tests).
@@ -72,11 +74,27 @@ impl AuroraFs {
         let cache = BlockCache::new(dev, 1024)?;
         let uuid = (crate::time::wall_seconds() as u128 * 0x9E37_79B9_7F4A_7C15).to_le_bytes();
         let vol = Volume::format(CachedDisk(cache), label, uuid, crate::time::wall_seconds).map_err(errno)?;
-        Ok(AuroraFs { vol: Mutex::new(vol), device })
+        Ok(AuroraFs { vol: Mutex::new(vol), device, swap: core::sync::atomic::AtomicU64::new(0) })
     }
 
     pub fn label(&self) -> String {
         self.vol.lock().label()
+    }
+
+    /// Refuses access to the swap file (`EBUSY`).
+    fn guard(&self, ino: Ino) -> FsResult<()> {
+        if ino != 0 && self.swap.load(core::sync::atomic::Ordering::Acquire) == ino {
+            return Err(EBUSY);
+        }
+        Ok(())
+    }
+
+    /// [`AuroraFs::guard`] for the entry `name` in `dir`.
+    fn guard_entry(&self, v: &mut Volume<CachedDisk>, dir: Ino, name: &str) -> FsResult<()> {
+        match v.lookup(dir, name) {
+            Ok(ino) => self.guard(ino),
+            Err(_) => Ok(()),
+        }
     }
 }
 
@@ -101,9 +119,11 @@ impl Filesystem for AuroraFs {
         Ok(Metadata { kind: kind(m.kind), size: m.size, mtime: m.mtime, ctime: m.ctime })
     }
     fn read(&self, ino: Ino, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
+        self.guard(ino)?;
         self.vol.lock().read(ino, offset, buf).map_err(errno)
     }
     fn write(&self, ino: Ino, offset: u64, data: &[u8]) -> FsResult<usize> {
+        self.guard(ino)?;
         let mut v = self.vol.lock();
         if v.stat(ino).map_err(errno)?.kind == ::aurorafs::Kind::Dir {
             return Err(EISDIR);
@@ -111,6 +131,7 @@ impl Filesystem for AuroraFs {
         v.write(ino, offset, data).map_err(errno)
     }
     fn truncate(&self, ino: Ino, size: u64) -> FsResult<()> {
+        self.guard(ino)?;
         self.vol.lock().truncate(ino, size).map_err(errno)
     }
     fn readdir(&self, dir: Ino) -> FsResult<Vec<DirEntry>> {
@@ -150,10 +171,40 @@ impl Filesystem for AuroraFs {
         Ok(true)
     }
     fn unlink(&self, dir: Ino, name: &str) -> FsResult<()> {
-        self.vol.lock().unlink(dir, name).map_err(errno)
+        let mut v = self.vol.lock();
+        self.guard_entry(&mut v, dir, name)?;
+        v.unlink(dir, name).map_err(errno)
     }
     fn rename(&self, from_dir: Ino, from: &str, to_dir: Ino, to: &str) -> FsResult<()> {
-        self.vol.lock().rename(from_dir, from, to_dir, to).map_err(errno)
+        let mut v = self.vol.lock();
+        self.guard_entry(&mut v, from_dir, from)?;
+        self.guard_entry(&mut v, to_dir, to)?;
+        v.rename(from_dir, from, to_dir, to).map_err(errno)
+    }
+    fn swap_file(&self, ino: Ino, size: u64) -> FsResult<SwapExtents> {
+        use core::sync::atomic::Ordering;
+        let mut v = self.vol.lock();
+        let current = self.swap.load(Ordering::Acquire);
+        if current != 0 && current != ino {
+            return Err(EBUSY);
+        }
+        v.allocate(ino, size).map_err(errno)?;
+        let extents = v.extents(ino).map_err(errno)?;
+        // Nothing of the file may be left in the cache to be written later.
+        let cache = &mut v.disk().0;
+        cache.flush()?;
+        for &(start, len) in &extents {
+            cache.disown(start, len);
+        }
+        let (dev, per_block) = cache.device();
+        let mut runs = Vec::new();
+        let mut page = 0;
+        for (start, len) in extents {
+            runs.push((page, start * per_block, len));
+            page += len;
+        }
+        self.swap.store(ino, Ordering::Release);
+        Ok(SwapExtents { dev, runs })
     }
     fn sync(&self) -> FsResult<()> {
         self.vol.lock().commit().map_err(errno)

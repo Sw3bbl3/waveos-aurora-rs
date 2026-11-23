@@ -29,6 +29,13 @@ fn bucket(k: Key) -> &'static Bucket {
 /// and gives its key: by physical address if `shared` and the word lives in
 /// shared memory.
 fn key(addr: u64, shared: bool) -> Result<Key, isize> {
+    key_pinned(addr, shared, false).map(|(k, _)| k)
+}
+
+/// [`key`]; with `pin`, a shared key's frame stays where it is (it is not
+/// swapped out and back to another frame, which would change the key)
+/// until the returned [`Pinned`] goes.
+fn key_pinned(addr: u64, shared: bool, pin: bool) -> Result<(Key, Pinned), isize> {
     if !addr.is_multiple_of(4) {
         return Err(EINVAL);
     }
@@ -37,11 +44,30 @@ fn key(addr: u64, shared: bool) -> Result<Key, isize> {
         return Err(EFAULT);
     }
     if shared {
-        if let Some(phys) = p.mem().as_ref().and_then(|a| a.shared_frame(addr)) {
-            return Ok((0, phys));
+        let mem = p.mem();
+        let found = mem.as_ref().and_then(|a| {
+            if pin {
+                a.shared_frame_pinned(addr)
+            } else {
+                a.shared_frame(addr).map(|phys| (phys, false))
+            }
+        });
+        if let Some((phys, pinned)) = found {
+            return Ok(((0, phys), Pinned(pinned.then_some(phys))));
         }
     }
-    Ok((p.cr3(), addr))
+    Ok(((p.cr3(), addr), Pinned(None)))
+}
+
+/// A shared futex's frame kept in place (see [`key_pinned`]).
+struct Pinned(Option<u64>);
+
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        if let Some(phys) = self.0 {
+            crate::mm::vmm::unpin_frame(phys);
+        }
+    }
 }
 
 fn queued(k: Key, task: TaskId) -> bool {
@@ -76,18 +102,34 @@ pub fn wait(addr: u64, expected: u32, timeout_ms: u64) -> Result<u64, isize> {
 
 /// [`wait`], for a futex that may be shared between processes.
 pub fn wait_shared(addr: u64, expected: u32, timeout_ms: u64, shared: bool) -> Result<u64, isize> {
-    let k = key(addr, shared)?;
+    let (k, _pinned) = key_pinned(addr, shared, true)?;
     let me = sched::current_id();
     MOVED.lock().remove(&me);
-    {
+    let mut tries = 0;
+    loop {
         // The value is read under the lock that `wake` takes, so a wakeup
         // between the check and the sleep cannot be lost.
         let mut w = bucket(k).lock();
-        let value = crate::syscall::user::read_u32(addr)?;
-        if value != expected {
-            return Err(EAGAIN);
+        match crate::syscall::user::read_u32(addr) {
+            Ok(value) => {
+                if value != expected {
+                    return Err(EAGAIN);
+                }
+                w.entry(k).or_default().push(me);
+                break;
+            }
+            // Swapped out since `key` brought it in: reading it with
+            // interrupts off (under the lock) can't bring it back, so it
+            // comes back here, and the read goes again.
+            Err(e) => {
+                drop(w);
+                tries += 1;
+                if tries > 3 {
+                    return Err(e);
+                }
+                crate::syscall::user::check(addr, 4, false)?;
+            }
         }
-        w.entry(k).or_default().push(me);
     }
     let deadline = crate::time::uptime_ms().saturating_add(timeout_ms);
     // A requeue moves this waiter to another key: follow it.

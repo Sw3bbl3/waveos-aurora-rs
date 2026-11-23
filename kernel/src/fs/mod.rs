@@ -108,11 +108,26 @@ pub trait Filesystem: Send + Sync {
     fn enable_owners(&self, _uid: u32, _gid: u32) -> FsResult<bool> {
         Ok(false)
     }
+    /// Makes file `ino` the swap file, of at least `size` bytes (blocks
+    /// allocated, not written), and says where its blocks are. From then
+    /// on, until the next boot, the filesystem refuses to read, write,
+    /// truncate, rename or remove it: the swap file writes its blocks
+    /// directly (`mm::swapfile`).
+    fn swap_file(&self, _ino: Ino, _size: u64) -> FsResult<SwapExtents> {
+        Err(EOPNOTSUPP)
+    }
     /// Verifies on-disk consistency (filesystems that support it).
     #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     fn check(&self) -> Result<(), String> {
         Ok(())
     }
+}
+
+/// Where a swap file's blocks are: the device, then runs of (first page
+/// of the file, first sector, pages).
+pub struct SwapExtents {
+    pub dev: Arc<dyn crate::drivers::block::BlockDevice>,
+    pub runs: Vec<(u64, u64, u64)>,
 }
 
 struct Mount {

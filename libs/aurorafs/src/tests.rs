@@ -133,6 +133,49 @@ fn large_and_fragmented_files() {
     v.fsck().unwrap();
 }
 
+/// A swap file: blocks given without being written, where `extents` says,
+/// surviving a remount (and `fsck`); a file too big for the disk is refused
+/// before anything is allocated.
+#[test]
+fn allocated_blocks_and_their_extents() {
+    let mut v = fresh(4096);
+    // Some fragmentation first, so the file takes more than one run.
+    for i in 0..40 {
+        v.write_file(&std::format!("/f{i}"), &[i as u8; 20_000]).unwrap();
+    }
+    for i in (0..40).step_by(3) {
+        v.unlink(ROOT, &std::format!("f{i}")).unwrap();
+    }
+    v.commit().unwrap();
+    let (_, free_before) = v.space();
+    let f = v.create(ROOT, "swapfile", Kind::File).unwrap();
+    let blocks = 600u64;
+    v.allocate(f, blocks * BLOCK as u64).unwrap();
+    assert_eq!(v.stat(f).unwrap().size, blocks * BLOCK as u64);
+    let runs = v.extents(f).unwrap();
+    assert_eq!(runs.iter().map(|r| r.1).sum::<u64>(), blocks);
+    // Every run lies in the data area, and no two overlap.
+    let mut seen = std::collections::BTreeSet::new();
+    for &(start, len) in &runs {
+        for b in start..start + len {
+            assert!(seen.insert(b), "block {b} twice");
+        }
+    }
+    assert!(v.space().1 <= free_before - blocks * BLOCK as u64);
+    v.fsck().unwrap();
+    // Allocating again to the same size changes nothing.
+    v.allocate(f, blocks * BLOCK as u64).unwrap();
+    assert_eq!(v.extents(f).unwrap(), runs);
+    let mut v = Volume::mount(v.into_disk(), now).unwrap();
+    assert_eq!(v.extents(f).unwrap(), runs);
+    v.fsck().unwrap();
+    let g = v.create(ROOT, "toobig", Kind::File).unwrap();
+    let (_, free) = v.space();
+    assert_eq!(v.allocate(g, free + 1024 * BLOCK as u64), Err(Error::NoSpace));
+    assert_eq!(v.space().1, free, "nothing allocated");
+    v.fsck().unwrap();
+}
+
 #[test]
 fn full_disk_reports_no_space() {
     let mut v = fresh(256);

@@ -262,6 +262,11 @@ mod nr {
     pub const SCHED_GET_PRIORITY_MAX: u64 = 146;
     pub const SCHED_GET_PRIORITY_MIN: u64 = 147;
     pub const SCHED_GETSCHEDULER: u64 = 145;
+    pub const MLOCK: u64 = 149;
+    pub const MUNLOCK: u64 = 150;
+    pub const MLOCKALL: u64 = 151;
+    pub const MUNLOCKALL: u64 = 152;
+    pub const MLOCK2: u64 = 325;
     pub const SCHED_SETSCHEDULER: u64 = 144;
     pub const PRCTL: u64 = 157;
     pub const ARCH_PRCTL: u64 = 158;
@@ -562,6 +567,10 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::MREMAP => mm::mremap(&p, a[0], a[1], a[2], a[3]),
         nr::MADVISE => mm::madvise(&p, a[0], a[1], a[2]),
         nr::MSYNC => Ok(0),
+        nr::MLOCK | nr::MLOCK2 => mm::mlock(&p, a[0], a[1], true),
+        nr::MUNLOCK => mm::mlock(&p, a[0], a[1], false),
+        nr::MLOCKALL => mm::mlockall(&p, a[0], true),
+        nr::MUNLOCKALL => mm::mlockall(&p, 0, false),
         nr::MINCORE => mm::mincore(&p, a[0], a[1], a[2]),
 
         nr::EXIT => misc::exit_thread(&p, a[0] as i64),

@@ -132,6 +132,11 @@ pub fn u64() -> u64 {
     u64::from_le_bytes(b)
 }
 
+/// One ChaCha20 block for `key` at `counter` (the swap file's cipher).
+pub fn chacha_block(key: &[u32; 8], counter: u64) -> [u32; 16] {
+    block(key, counter)
+}
+
 /// Whether the CPU provides hardware randomness (otherwise only timer jitter).
 pub fn hardware() -> bool {
     rdrand().is_some()

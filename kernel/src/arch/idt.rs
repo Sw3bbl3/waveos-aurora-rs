@@ -303,8 +303,11 @@ fn page_fault(f: &mut TrapFrame) {
     {
         x86_64::instructions::interrupts::enable();
         let resolved = crate::proc::resolve_fault(addr, write);
+        let killed = !resolved && f.user_mode() && crate::proc::current_killed();
         x86_64::instructions::interrupts::disable();
-        if resolved {
+        // (Ended meanwhile — by the out-of-memory killer, say: the thread
+        // leaves on the way back to user mode, with no crash to report.)
+        if resolved || killed {
             return;
         }
     }

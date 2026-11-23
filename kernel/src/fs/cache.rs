@@ -68,6 +68,23 @@ impl BlockCache {
         self.dev.sectors() / self.per_block
     }
 
+    /// The device, and sectors per block (for the swap file's own I/O).
+    pub fn device(&self) -> (Arc<dyn BlockDevice>, u64) {
+        (self.dev.clone(), self.per_block)
+    }
+
+    /// Drops blocks `start..start + count` (clean or not) from the cache:
+    /// someone else writes them from now on (the swap file).
+    pub fn disown(&mut self, start: u64, count: u64) {
+        let gone: alloc::vec::Vec<u64> = self.entries.range(start..start + count).map(|(&b, _)| b).collect();
+        for b in gone {
+            if let Some(e) = self.entries.remove(&b) {
+                self.by_use.remove(&e.used);
+                HELD.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
     /// Memory is short: drops clean blocks, the ones used longest ago
     /// first, until at most `keep` are left (dirty ones wait for `flush`).
     pub fn shrink(&mut self, keep: usize) {

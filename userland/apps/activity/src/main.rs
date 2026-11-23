@@ -342,7 +342,23 @@ impl Activity {
         let net_max = net.iter().copied().max().unwrap_or(0).max(64 * 1024);
         let adapters =
             corekit::net::interfaces().iter().filter(|i| i.flags & corekit::abi::net::IF_LOOPBACK == 0).count();
-        let pressure = if s.mem_used * 10 > s.mem_total * 9 { "under pressure" } else { "no pressure" };
+        // The kernel's pressure level (`event::MEMORY_PRESSURE`), and what
+        // is swapped out (compressed in memory, or in the swap file).
+        let pressure = match s.mem_pressure {
+            0 => "no pressure",
+            1 => "under pressure",
+            _ => "critical pressure",
+        };
+        let mut memory = format!("of {}", human_bytes(s.mem_total));
+        if s.swap_used > 0 {
+            memory.push_str(&format!(" · {} swapped", human_bytes(s.swap_used)));
+            if s.mem_compressed > 0 {
+                memory.push_str(&format!(" ({} compressed in {})", human_bytes(s.mem_compressed_pages), human_bytes(s.mem_compressed)));
+            }
+            if s.swap_file_used > 0 {
+                memory.push_str(&format!(", {} on disk", human_bytes(s.swap_file_used)));
+            }
+        }
         HStack::new()
             .push(gauge(
                 "Processor",
@@ -352,7 +368,7 @@ impl Activity {
             ))
             .push(gauge(
                 "Memory",
-                format!("of {} · {pressure}", human_bytes(s.mem_total)),
+                format!("{memory} · {pressure}"),
                 human_bytes(s.mem_used),
                 sparkline(deque(&self.mem_hist), 1000, PURPLE),
             ))

@@ -93,9 +93,12 @@ Writing to the file, or deleting it, drops it from the cache.
   `/dev/kmsg` (the system log: `2>/dev/kmsg` keeps a program's messages);
   the input devices and what describes them (`/dev/input`, `/dev/hidraw*`,
   `/dev/uinput`, `/sys`, `/run/udev`; see below);
-  `/proc/self/exe`, `/proc/meminfo`, `/proc/mounts`; `/proc/cpuinfo` and
-  `/sys/devices/system/cpu`, as Linux writes them from `cpuid` (the
-  `flags` line lists what the processor has and the kernel enables);
+  `/proc/self/exe`, `/proc/meminfo` (with swap and the compressed store
+  as `Zswap`), `/proc/pressure/memory`, `/proc/self/status` and
+  `/proc/<pid>/status` (`VmRSS`, `VmSwap`, `VmLck`), `/proc/mounts`;
+  `/proc/cpuinfo` and `/sys/devices/system/cpu`, as Linux writes them
+  from `cpuid` (the `flags` line lists what the processor has and the
+  kernel enables);
   `/dev/dri/card0` (see [The display](#the-display-drm)), the parts of
   `/sys` that describe it (`/sys/class/drm`, `/sys/dev/char`, the PCI
   device) and its udev record (`/run/udev/data/c226:0`); and
@@ -105,9 +108,16 @@ Writing to the file, or deleting it, drops it from the cache.
   `MAP_FIXED`), `mprotect`, `mremap`, `munmap` and `madvise`. Anonymous
   memory gets its pages when they are first touched, so a program can
   reserve gigabytes (WebKit's JavaScript engine maps 8 GiB) and pay only
-  for what it uses; `MADV_DONTNEED` gives pages back. `PROT_NONE`
-  reservations take no memory at all. `mincore` tells whether pages are
-  mapped.
+  for what it uses; `MADV_DONTNEED` and `MADV_FREE` give pages back,
+  `MADV_PAGEOUT` swaps them out now, `MADV_COLD` makes them the first to
+  go, `MADV_WILLNEED` brings swapped-out ones back. `PROT_NONE`
+  reservations take no memory at all. `mlock`, `mlock2`, `munlock`,
+  `mlockall` and `munlockall` keep pages in memory (`MCL_FUTURE` is
+  accepted, but memory mapped later isn't locked); `sysinfo` reports swap.
+  When memory runs short, pages are swapped out (see
+  [developer/memory.md](developer/memory.md)).
+  `mincore` tells whether pages are mapped and in memory (a swapped-out
+  page is not).
 - **The processor:** x87, SSE and AVX, with the kernel saving each thread's
   registers (XSAVE) across switches and in signal frames, as on Linux.
 - **Shared memory:** `memfd_create`, `shm_open` (`/dev/shm`) and

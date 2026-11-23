@@ -85,6 +85,7 @@ cargo xtask run --wifi-sim          # simulated Wi-Fi networks ("Harbor Cafe", p
 cargo xtask run --displays 2        # two simulated displays, each in its own window (see "Several displays")
 cargo xtask launch                  # the launcher page (make run); --last boots the last configuration (make quick)
 cargo xtask test [--disk virtio] [--smp 1] [--gpu virtio]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
+cargo xtask test --memory-mib 256        # the same on a small machine (default 512 MiB); AURORA_TEST_FILTER=swap for the swap tests only
 cargo xtask lint                    # Clippy on every crate, for its own target; warnings are errors
 cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-wifi -p aurora-hid -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
 AURORA_MUTATIONS=100 cargo test -p aurorafs --release   # robustness tests, 100x longer than CI runs them

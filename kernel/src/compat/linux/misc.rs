@@ -180,13 +180,18 @@ pub fn uname(ptr: u64) -> Result<u64, isize> {
     user::put(ptr, &b).map(|_| 0)
 }
 
+/// `sysinfo`: uptime, memory (free, and the caches as "buffers"), swap,
+/// and the number of processes, in bytes (`mem_unit` 1).
 pub fn sysinfo(ptr: u64) -> Result<u64, isize> {
-    let m = crate::mm::stats();
+    let m = crate::mm::kswapd::meminfo();
     let mut b = [0u8; 112];
     let mut w = |off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
     w(0, time::uptime_ms() / 1000);
-    w(32, m.total_bytes);
-    w(40, m.total_bytes - m.used_bytes);
+    w(32, m.total);
+    w(40, m.free);
+    w(56, crate::fs::cache::held_blocks() * 4096);
+    w(64, m.swap_total);
+    w(72, m.swap_total.saturating_sub(m.swap_used));
     b[80..82].copy_from_slice(&(proc::all().len() as u16).to_le_bytes());
     b[104..108].copy_from_slice(&1u32.to_le_bytes()); // mem_unit
     user::put(ptr, &b).map(|_| 0)

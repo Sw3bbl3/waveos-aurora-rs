@@ -38,16 +38,20 @@
 //!   cargo xtask image [--no-linux-root] build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
+//!                                         (--memory-mib N: guest RAM, default 512, 2048 with --mesa;
+//!                                         the swap tests overcommit whatever it is several times over)
 //!                                         (AURORA_TEST_FILTER=NAME runs matching tests; AURORA_FUZZ_SEED,
 //!                                         AURORA_FUZZ_ROUNDS, AURORA_FUZZ_ITERS, AURORA_LINUXFUZZ_CHILDREN and
 //!                                         AURORA_LINUXFUZZ_CALLS make the fuzzers run longer, with
-//!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 240;
+//!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 240 (360 under
+//!                                         384 MiB, 1200 over 512);
 //!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run;
 //!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data)
 //!       --displays N                      with --gpu virtio: N scanouts, plugged in and out by the
 //!                                         multi-monitor test, each checked by QMP screendump (testdisplays.rs)
 //!       --mesa                            only the Mesa tests, on a disk with Debian's Mesa, kmscube, glmark2
-//!                                         and Vulkan tools (target/mesa-root, fetched once) and 2 GiB of memory
+//!                                         and Vulkan tools (target/mesa-root, fetched once) and 2 GiB of
+//!                                         memory unless --memory-mib says otherwise
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
@@ -128,6 +132,13 @@ fn main() {
 
     match args.first().map(String::as_str) {
         Some("web-check") => webcheck::run(&args[1..]),
+        Some("fsck") => match image::check_home(Path::new(args.get(1).map(String::as_str).unwrap_or("target/test-disk.img"))) {
+            Ok(report) => print!("{report}"),
+            Err(e) => {
+                eprintln!("fsck: {e}");
+                exit(1);
+            }
+        },
         Some("docs") => {
             println!("{}", help::build(&root()).unwrap_or_else(|e| panic!("{e}")).display());
         }
@@ -433,7 +444,10 @@ fn main() {
                 eprintln!("the multi-monitor test needs --gpu virtio (the kernel drives one Bochs VGA)");
                 exit(2);
             }
-            test(profile, disk, smp, net, gpu, usb, n, flag("--mesa"))
+            let mesa = flag("--mesa");
+            // (Mesa's tests need the memory LLVM's code generator does.)
+            let memory_mib = number("--memory-mib", if mesa { 2048 } else { 512 }, 256, 32768);
+            test(profile, disk, (smp, memory_mib), net, gpu, usb, n, mesa)
         }
         Some("test262") => test262(&args[1..]),
         _ => {
@@ -601,6 +615,24 @@ fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64, linux: Option<&P
     image::create_with(esp, &home, linux, img, size).expect("image creation failed");
 }
 
+/// Strips the debug information from a kernel going on a boot image.
+fn strip_debug(kernel: &Path) {
+    let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().expect("rustc sysroot");
+    let version = Command::new("rustc").arg("-vV").output().expect("rustc host");
+    let version = String::from_utf8_lossy(&version.stdout);
+    let host = version.lines().find_map(|line| line.strip_prefix("host: ")).expect("rustc host triple");
+    let objcopy = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
+        .join("lib/rustlib")
+        .join(host)
+        .join("bin/llvm-objcopy");
+    let status = Command::new(objcopy)
+        .arg("--strip-debug")
+        .arg(kernel)
+        .status()
+        .expect("llvm-objcopy (install llvm-tools-preview)");
+    assert!(status.success(), "could not strip packaged kernel debug information");
+}
+
 fn esp_dir(test: bool) -> PathBuf {
     root().join(if test { "target/esp-test" } else { "target/esp" })
 }
@@ -674,20 +706,7 @@ fn build(profile: Profile, test: bool) -> PathBuf {
     if profile == Profile::Release {
         // Keep the full ELF for host GDB. DWARF is never loaded by UEFI and
         // would otherwise crowd the bounded El Torito EFI boot image.
-        let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().expect("rustc sysroot");
-        let version = Command::new("rustc").arg("-vV").output().expect("rustc host");
-        let version = String::from_utf8_lossy(&version.stdout);
-        let host = version.lines().find_map(|line| line.strip_prefix("host: ")).expect("rustc host triple");
-        let objcopy = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
-            .join("lib/rustlib")
-            .join(host)
-            .join("bin/llvm-objcopy");
-        let status = Command::new(objcopy)
-            .arg("--strip-debug")
-            .arg(esp.join("aurora/kernel.elf"))
-            .status()
-            .expect("llvm-objcopy (install llvm-tools-preview)");
-        assert!(status.success(), "could not strip packaged kernel debug information");
+        strip_debug(&esp.join("aurora/kernel.elf"));
     }
     let mut programs = build_userland(profile);
     programs.extend(linux::programs());
@@ -1588,21 +1607,29 @@ fn inbound_check(port: u16) {
 }
 
 #[allow(clippy::too_many_arguments)] // the test matrix
-fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str, heads: usize, mesa: bool) {
+fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str, usb: &str, heads: usize, mesa: bool) {
+    let (smp, memory_mib) = machine;
     let esp = build(profile, true);
+    // AURORA_TEST_KERNEL=path runs another kernel (a self-test build of an
+    // earlier commit, say) with this build's programs: for A/B comparisons
+    // of the `bench:` and `mm-bench:` lines.
+    if let Some(kernel) = env::var_os("AURORA_TEST_KERNEL") {
+        fs::copy(&kernel, esp.join("aurora/kernel.elf")).expect("copy AURORA_TEST_KERNEL");
+        strip_debug(&esp.join("aurora/kernel.elf"));
+        println!("testing the kernel {}", Path::new(&kernel).display());
+    }
     let img = root().join("target/test-disk.img");
     let shown = if heads > 1 { format!("display {gpu} with {heads} heads") } else { format!("display {gpu}") };
-    println!("running kernel tests with the disk on {disk}, network {net}, {shown}, USB on {usb}");
-    // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux and
-    // the memory LLVM's code generator needs.
+    println!("running kernel tests with the disk on {disk}, network {net}, {shown}, USB on {usb}, {memory_mib} MiB of memory");
+    // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux.
     let mesa_root = mesa.then(mesa::root_dir);
-    let (disk_size, memory_mib) = match &mesa_root {
-        Some(r) => (dir_size(r) + 256 * 1024 * 1024, 2048),
+    let disk_size = match &mesa_root {
+        Some(r) => dir_size(r) + 256 * 1024 * 1024,
         // Cards keep their 128 MiB (a size a card can have); a disk gets
         // room for two system updates beside the home folder (see the
         // system update test, which cards skip).
-        None if disk == "sd" || disk == "emmc" => (128 * 1024 * 1024, 512),
-        None => (384 * 1024 * 1024, 512),
+        None if disk == "sd" || disk == "emmc" => 128 * 1024 * 1024,
+        None => 384 * 1024 * 1024,
     };
     let http_port = start_test_http_server();
     let fwd_port = free_port();
@@ -1631,6 +1658,12 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
             ("AURORA_LINUXFUZZ_CALLS", "linuxfuzz_calls"),
             // Seconds between memory reports while the fuzzers run (`mm::report`).
             ("AURORA_MEM_REPORT", "mem_report"),
+            // The swap tests: MiB left to programs ("all": all of memory),
+            // and how many times that they fill (`mm::swaptest`).
+            ("AURORA_SWAP_TEST_RAM", "swap_test_ram"),
+            ("AURORA_SWAP_FACTOR", "swap_factor"),
+            // MiB left to programs while the fuzzers run (memory pressure).
+            ("AURORA_FUZZ_RAM", "fuzz_ram"),
         ] {
             if let Ok(v) = env::var(var) {
                 image::set_boot_option(&img, key, &v).expect("write boot.conf");
@@ -2087,8 +2120,13 @@ fn run_tests_once(
     });
     let start = Instant::now();
     // Longer fuzzing runs need more: AURORA_TEST_TIMEOUT (seconds per boot).
-    // (The Mesa tests, with more memory, compile shaders under emulation.)
-    let default = if memory_mib > 512 { 1200 } else { 240 };
+    // (The Mesa tests, with more memory, compile shaders under emulation;
+    // on a small machine the swap tests go through the swap file on disk.)
+    let default = match memory_mib {
+        0..=383 => 360,
+        384..=512 => 240,
+        _ => 1200,
+    };
     let timeout =
         Duration::from_secs(env::var("AURORA_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(default));
     let status = loop {
