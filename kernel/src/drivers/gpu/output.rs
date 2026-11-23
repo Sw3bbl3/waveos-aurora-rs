@@ -3,7 +3,8 @@
 //! back buffer the CPU draws into, and the few operations a compositor
 //! needs — present damage, change size, follow the host window, move the
 //! cursor. Everything goes through atomic commits on the device, so the
-//! compositor is just another KMS client.
+//! compositor is just another KMS client — one that steps aside while a
+//! program drives the display itself (see [`super::owner`]).
 //!
 //! The back buffer is the framebuffer the primary plane scans out. On
 //! virtio-gpu that means no copy at all in the guest (the host reads the
@@ -92,7 +93,7 @@ impl Output {
             flags: commit::ALLOW_MODESET,
             user_data: 0,
         };
-        dev.atomic_commit(&c)?;
+        owner::desktop_commit(dev, &c)?;
         Ok(fb)
     }
 
@@ -102,6 +103,11 @@ impl Output {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// The back buffer's framebuffer (what the primary plane shows).
+    pub fn framebuffer(&self) -> &Arc<Framebuffer> {
+        &self.fb
     }
 
     /// The back buffer: `width` pixels per row.
@@ -115,7 +121,7 @@ impl Output {
 
     /// Shows the damaged rectangles of the back buffer.
     pub fn present(&self, rects: &[Damage]) -> Result<()> {
-        self.dev.dirty(&self.fb, rects)
+        owner::desktop_dirty(&*self.dev, &self.fb, rects)
     }
 
     /// Switches to `w`×`h`. The old back buffer is gone afterwards.
@@ -174,7 +180,7 @@ impl Output {
 
     fn commit_cursor(&self) -> Result<()> {
         let c = Commit { planes: alloc::vec![self.cursor_state()], ..Commit::default() };
-        self.dev.atomic_commit(&c)
+        owner::desktop_commit(&*self.dev, &c)
     }
 
     /// Shows a `w`×`h` cursor image (0xAARRGGBB, straight alpha) with its

@@ -16,7 +16,7 @@ use super::{new_id, Error, ObjId, Result};
 use crate::mm::{frame, vmm, PAGE_SIZE};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// DRM fourcc pixel formats (little-endian words).
 pub mod fourcc {
@@ -44,6 +44,9 @@ pub struct BufferObject {
     /// The binding a driver made (e.g. a virtio-gpu resource id), 0 if none.
     handle: AtomicU32,
     owner: spin::Mutex<Option<Arc<dyn Unbind>>>,
+    /// The frames are counted shared memory (see [`BufferObject::user_frames`]):
+    /// a program may still map them after the buffer is gone.
+    counted: AtomicBool,
 }
 
 impl BufferObject {
@@ -93,7 +96,25 @@ impl BufferObject {
             pages,
             handle: AtomicU32::new(0),
             owner: spin::Mutex::new(None),
+            counted: AtomicBool::new(false),
         }))
+    }
+
+    /// The frames, page by page, for mapping into a program (DRM's
+    /// `MAP_DUMB`, a dma-buf's `mmap`). From the first call on they are
+    /// counted like shared memory (`vmm::shm_count`): each mapping holds
+    /// them, so they outlive the buffer while a program still maps them.
+    pub fn user_frames(&self) -> Vec<u64> {
+        let frames: Vec<u64> = self
+            .chunks
+            .iter()
+            .flat_map(|&(phys, bytes)| (0..bytes as u64 / PAGE_SIZE).map(move |p| phys + p * PAGE_SIZE))
+            .collect();
+        let _guard = self.owner.lock();
+        if !self.counted.swap(true, Ordering::AcqRel) {
+            vmm::shm_count(&frames);
+        }
+        frames
     }
 
     /// The kernel address of the first byte.
@@ -129,9 +150,15 @@ impl Drop for BufferObject {
             }
         }
         vmm::kunmap(self.vaddr, self.pages);
+        let counted = *self.counted.get_mut();
         for &(phys, bytes) in &self.chunks {
             for p in 0..bytes as u64 / PAGE_SIZE {
-                frame::free(phys + p * PAGE_SIZE);
+                // Mapped by a program: the last mapping frees it.
+                if counted {
+                    vmm::shm_release(phys + p * PAGE_SIZE);
+                } else {
+                    frame::free(phys + p * PAGE_SIZE);
+                }
             }
         }
     }

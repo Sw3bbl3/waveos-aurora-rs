@@ -70,6 +70,7 @@ const TESTS: &[Test] = &[
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
     ("Linux programs: local and network sockets (nettest)", linux_sockets),
+    ("Linux programs: the DRM device, mode setting, events, PRIME (drmtest)", linux_drm),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
@@ -436,6 +437,27 @@ fn linux_processes() {
 /// A third checks sockets: local ones with descriptor passing, TCP and UDP.
 fn linux_sockets() {
     run_linux_test("nettest", "net-test passed");
+}
+
+/// A fourth drives the display through `/dev/dri/card0` while a stand-in
+/// desktop (an `Output` showing one colour) is on it: the program takes
+/// the display with its first mode set, and when it closes the card — and
+/// again when it is killed holding it — the desktop's picture is back.
+/// The harness checks screendumps of both (see `xtask`).
+fn linux_drm() {
+    use crate::drivers::gpu::{self, output::Output, Damage};
+    let desktop = Output::open(None).expect("no display");
+    let (w, h) = desktop.size();
+    unsafe { desktop.back_buffer() }.fill(0xFF33_6699);
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present");
+    run_linux_test_with("drmtest", &["drmtest"], "drm-test passed", 240_000);
+    let dev = gpu::primary().unwrap();
+    assert_eq!(gpu::owner::holder(&*dev), None, "a program still holds the display");
+    let (_, planes) = dev.state();
+    let shown = planes.iter().any(|p| p.fb.as_ref().is_some_and(|fb| Arc::ptr_eq(fb, desktop.framebuffer())));
+    assert!(shown, "the desktop's picture is not on the display");
+    // The desktop presents again (it was skipped while the program held the display).
+    desktop.present(&[Damage { x: 0, y: 0, w, h }]).expect("present after");
 }
 
 /// The vDSO's clocks (computed from its time page, as `kernel/vdso/vdso.c`
