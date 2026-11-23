@@ -2540,7 +2540,12 @@ fn usb_network() {
     assert!(wait_for(|| weak.upgrade().is_none(), 5000), "the unplugged adapter was not freed");
     assert_eq!(route_name(), "usb1", "the route did not move to the second adapter");
     crate::kprint!("[unplugged: gone in {gone_ms} ms, connection failed in {failed_ms} ms] ");
-    let body = download(port, 20_000).expect("download over usb1");
+    let body = download(port, 20_000).unwrap_or_else(|e| {
+        for line in net::describe() {
+            log!("net-test", "{line}");
+        }
+        panic!("download over usb1: {}", aurora_abi::err::name(e))
+    });
     assert_eq!(body.len(), 1 << 20, "short download over usb1");
 
     // Plugged back in: usb0 again, with an address, and the route back.
