@@ -26,9 +26,9 @@
 //! or the waiter gives up: a failed `mmap` or system call (`ENOMEM`), or
 //! for a page fault, the out-of-memory killer.
 //!
-//! **Out of memory.** When reclaim can't keep up — a page fault still
-//! finds no memory after waiting, or `kswapd` went round everything
-//! without freeing a page — [`out_of_memory`] ends one program, chosen by
+//! **Out of memory.** When reclaim can't keep up — a page fault finds no
+//! memory after ten seconds of waiting, or `kswapd` finds swap full or
+//! nothing left to swap out — [`out_of_memory`] ends one program, chosen by
 //! [`badness`]: the memory killing it frees (pages in memory and swapped
 //! out), a fraction of it for the program the user is using (1/8) and for
 //! programs with windows (1/2), and nothing for system services (processes
