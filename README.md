@@ -23,7 +23,7 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 | | |
 |---|---|
 | ![The boot screen: the WayV logo, a progress bar and the version](docs/screenshots/0.8/boot.png) | ![Shore, the login screen, with the date, a large clock and the password field](docs/screenshots/0.8/shore-login.png) |
-| **Start-up.** The WayV logo and real progress, in your appearance. | **Shore.** One account, a salted and hashed password, and Lock Screen with Super L. |
+| **Start-up.** The WayV logo and real progress, in your appearance. | **Shore.** Your accounts, salted and hashed passwords, and Lock Screen with Super L. |
 | ![Shoal, every app full screen, with search and groups](docs/screenshots/0.8/shoal.png) | ![Seek finding a picture](docs/screenshots/0.8/seek.png) |
 | **Shoal.** Every app, full screen. Type to narrow it down. | **Seek.** Apps, files, settings and quick maths, one keystroke away. |
 | ![Drift, dropped from Crest: the calendar, Calm and notifications](docs/screenshots/0.8/drift.png) | ![Current, opened from the status ring: network, Calm, appearance, lock and sound](docs/screenshots/0.8/current.png) |
@@ -59,12 +59,20 @@ Each app runs as a separate, protected process. If one crashes, you see a polite
 
 ## Made for real machines.
 
-Multicore scheduling. USB 3. NVMe and SATA. Sound with headphone detection. Battery, lid and sleep. Wired networking that's ready the moment you boot.
+Multicore scheduling with tickless idle. USB 3, with USB audio. NVMe, SATA, SD cards and eMMC. Sound with headphone detection. Battery, lid and sleep. Wired networking on Intel and Realtek adapters, ready the moment you boot. Several monitors, each at its own resolution and scale, arranged in Settings. Accounts with file permissions, signed installable apps, and a kernel hardened with ASLR, guarded stacks and W^X.
+
+Display drivers for Intel and AMD graphics, laptop touchpads over I²C, and other drivers written from specifications have so far run only against simulated hardware; [HARDWARE.md](docs/HARDWARE.md) says exactly what has been tested where, and what to send back if you try a real PC.
 
 | | |
 |---|---|
 | ![About This Computer: the WVOS mark, the version and Made by WayV](docs/screenshots/0.8/about-light.png) | ![Terminal running ping, nslookup and fetch over HTTPS](docs/screenshots/network-tools.png) |
 | **About This Computer.** The WVOS mark, the version and the machine. | **Terminal.** A real shell, with pipes, redirection and 35 programs. |
+
+## Ready to play.
+
+Connect a controller and the desktop becomes **Wave Play**: a console-style home for your games and apps, with a quick overlay on the home button, and the desktop back the moment you want it.
+
+Underneath, Linux games find what they expect. WaveOS's own display drivers speak Linux's DRM/KMS interface at `/dev/dri/card0`, and keyboards, mice and controllers appear as standard `evdev` devices, so unmodified libdrm and SDL2 programs run as they are. Hardware-accelerated 3D is the work in progress: see the [roadmap](docs/ROADMAP.md).
 
 ## See inside, while it runs.
 
