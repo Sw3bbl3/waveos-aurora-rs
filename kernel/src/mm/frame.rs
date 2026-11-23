@@ -554,6 +554,31 @@ fn relieve_pressure() {
     drain_caches();
 }
 
+/// Whether free memory is down to the part kept for the kernel (refreshed
+/// every few user allocations: reading the exact count takes the allocator's
+/// lock).
+static LOW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static USER_ALLOCS: AtomicU64 = AtomicU64::new(0);
+
+/// Frames user programs can't take: 1/32 of memory, between 8 and 64 MiB.
+/// The kernel's heap, page tables and drivers allocate on demand, so a
+/// program that maps all of memory must fail before they do.
+fn kernel_reserve() -> u64 {
+    (TOTAL.load(Ordering::Relaxed) / 32).clamp(2048, 16384)
+}
+
+/// One frame for a user program's memory (or a window surface): like
+/// [`alloc`], but fails once only the kernel's reserve is left.
+pub fn alloc_user() -> Option<u64> {
+    if USER_ALLOCS.fetch_add(1, Ordering::Relaxed).is_multiple_of(32) || LOW.load(Ordering::Relaxed) {
+        LOW.store(counts().1 <= kernel_reserve(), Ordering::Relaxed);
+    }
+    if LOW.load(Ordering::Relaxed) {
+        return None;
+    }
+    alloc()
+}
+
 /// (total usable frames, free frames)
 pub fn counts() -> (u64, u64) {
     let s = stats();

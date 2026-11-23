@@ -72,10 +72,11 @@ serial → GDT/TSS → IDT → syscall MSRs → FPU → mm (frames, heap, drop i
 | Virtual range | Contents |
 |---|---|
 | `0x0000_0000_0040_0000 …` | user program (per process) |
-| `0x0000_0100_0000_0000 …` | user `mmap` region: heap arenas, window surfaces |
-| `…0x0000_7fff_f000_0000` | user stack (1 MiB, guard page below) |
+| `0x0000_0100_0000_0000 …` | user `mmap` region: heap arenas, window surfaces (base randomized, up to +1 TiB) |
+| `…0x0000_7fff_f000_0000` | user stack (1 MiB, guard page below; top randomized, up to −4 GiB) |
 | `0xffff_8000_0000_0000 + phys` | physical memory window (`mm::phys_to_virt`) |
-| `0xffff_c000_0000_0000 …` | kernel mappings of window surfaces (`vmm::kmap`) |
+| `0xffff_c000_0000_0000 …` | kernel mappings of window surfaces and large heap blocks (`vmm::kmap`) |
+| `0xffff_d000_0000_0000 …` | kernel task stacks, 128 KiB each in a 256 KiB slot whose lower half is an unmapped guard (`mm::kstack`) |
 | `0xffff_ffff_8000_0000 …` | kernel image (`kernel/linker.ld`) |
 
 - **Frames** (`mm/frame.rs`): a buddy allocator over the usable regions above 1 MiB (including RAM above 4 GiB), with free blocks of 4 KiB to 4 MiB on lists linked through the free frames, in two zones: below 4 GiB (`alloc_contiguous_below`, for 32-bit devices) and above. Normal allocations take low memory first. Single frames go through a 64-frame cache per CPU, refilled and drained 32 at a time; runs come from the lists without scanning (runs over 4 MiB fall back to a scan). Two bitmaps (in use; free block starts here) catch double frees. When memory runs out, the caches are drained and the heap gives back its idle slabs before an allocation fails.
@@ -362,10 +363,23 @@ Lines are written while holding the port lock and without allocating, so events 
   - sleep: S3 (the harness wakes the VM over QMP), then CPUs, work on every CPU, disk I/O, sound, USB (the USB speaker plays again) and the network after waking
   - networking (on the card `--net` chose, which the test checks is the one in use): DHCP, ping to loopback and our own address, UDP and TCP over loopback (a megabyte each way), a megabyte over HTTP from a server xtask runs on the host, and an inbound connection through a QEMU port forward
 
-  `usertest` also covers threads, futexes and SIMD state surviving preemption.
+  `usertest` also covers threads, futexes and SIMD state surviving preemption, randomized layouts and UMIP.
+- **Fuzzers.** `cargo xtask test` runs two system-call fuzzers briefly (see "Hardening" below); longer or reproducible runs take `AURORA_FUZZ_SEED`, `AURORA_FUZZ_ROUNDS`, `AURORA_FUZZ_ITERS` (native) and `AURORA_LINUXFUZZ_CHILDREN`, `AURORA_LINUXFUZZ_CALLS` (Linux), e.g. `AURORA_FUZZ_ROUNDS=200 AURORA_FUZZ_ITERS=5000 AURORA_TEST_FILTER=fuzzer cargo xtask test`.
 
   The kernel reports through QEMU's `isa-debug-exit` device. `xtask test` boots the same fresh disk **twice**: the first boot leaves a file, and the second must find it intact.
 - **Headless boots.** `cargo xtask run --headless` exposes QEMU's HMP monitor at `target/qemu-monitor.sock` and QMP at `target/qemu-qmp.sock`. That makes it possible to script screenshots and input (`screendump`, `input-send-event`).
 - **Host tests.** `cargo test -p aurora-hid -p aurora-acpi-res -p aurora-i2c` covers HID descriptors and gestures, ACPI resource decoding (hand-laid descriptors, malformed buffers), the HID over I²C protocol against the software device, and the DesignWare driver against a simulated controller (small FIFOs, NACKs, a stuck bus). `cargo test -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p nebula-web -p nebula-secure -p nebula-engine -p xtask` covers the filesystem libraries (crash recovery, `fatfs` cross-checks), the TrueType engine (metrics and placement against fontdue, coverage against 4× supersampling), the image codecs (against the `png`, `jpeg-encoder`, `jpeg-decoder` and `gif` crates), WAV decoding, URLs and HTTP (redirects, keep-alive, gzip), TLS (every cipher suite and version against a rustls server, RFC 8448 key schedule, bad certificates), the browser engine (parsing, selectors, the cascade and layout) and the AML assembler for the test SSDT.
 - **Scripted UI.** `tools/qmp.py` clicks, types and takes screenshots in a running VM.
 - **CI.** On every push, CI runs the host tests, the kernel suite on AHCI, virtio-blk and NVMe with 4 CPUs (and AHCI with 1 CPU), with virtio-net (and e1000e and RTL8139 on one job each), and a headless boot to the desktop.
+
+## 11. Hardening
+
+Each CPU feature is enabled only where CPUID reports it, on the boot CPU, on every other CPU as it starts, and again after waking from S3 (`arch::protect::init`). The boot log's `protections:` line says what is on.
+
+- **SMEP** — the kernel never executes a user page. **SMAP** — the kernel never reads or writes one, except in the user-copy routine (`syscall/user.rs`), which brackets its `rep movsb` with `stac`/`clac`; every trap entry (`arch::trap`) clears RFLAGS.AC again, and `syscall` masks it. All user memory goes through that routine: `put`/`get`/`slice`/`read_u32` and the Linux layer, which uses them for signal frames, `ioctl`s and the rest; the loaders and the vDSO write through the physical window. **UMIP** — `sgdt`, `sidt`, `sldt`, `smsw`, `str` fault in ring 3. **CR0.WP** and **EFER.NXE** are always on.
+- **W^X kernel.** `kernel/linker.ld` page-aligns `.text`, `.rodata` + `.got`, and `.data`/`.bss`; `protect_kernel` maps them RX, R+NX and RW+NX, and marks every other kernel PML4 slot no-execute (the physical window is an alias of the code). The bootloader still maps the image RWX until then (it runs before the kernel enables NXE). The AP/S3 trampoline's own page table maps low memory RWX while CPUs start.
+- **Kernel stacks** of tasks (`mm::kstack`) have an unmapped 128 KiB guard below each; an overflow ends in a double fault that names it. (CPU boot stacks and IST stacks are heap memory without guards.)
+- **Stack protector.** `-Z stack-protector=strong` (`.cargo/config.toml`) with a canary from RDSEED/RDRAND and the TSC, written first thing in `_start` (`stackguard.rs`). About 1,600 functions carry it; `.text` grows by ~104 KiB (3.8 %). The C half (LinuxKPI) is built without it.
+- **ASLR** (`mm::aslr`, ChaCha20 from `random.rs`): the `mmap` base (28 bits of pages), the stack top (20 bits, plus 8 bits of 16-byte offset), and for Linux programs the position-independent executable (24 bits) and `ld.so` (27 bits); the vDSO moves with the stack. `aslr=off` in boot.conf turns it off. WaveOS programs are still linked at `0x40_0000`. Plan for them: build userland with `relocation-model=pic` and `static-position-independent-executables` in `userland/x86_64-aurora-user.json`, link `corekit/user.ld` at 0, and have `proc::load_waveos` load at a random base and apply the `R_X86_64_RELATIVE` entries of `PT_DYNAMIC` (no other relocation types appear in a static PIE).
+- **Speculation.** Nothing is enabled: no IBRS/IBPB/STIBP, no KPTI, no `verw` on return to user mode. The log line reports which of IBRS, STIBP, SSBD and MD_CLEAR the CPU offers.
+- **Fuzzers.** `userland/bin/fuzz` (`fuzz run`) calls every native system call with structured random arguments (null, kernel, non-canonical and straddling pointers, read-only code, boundary lengths, recycled descriptors) on four threads while a fifth unmaps their buffers, closes their descriptors and starts threads; each round is a child process the parent kills if it lingers, and processes blocked in pipes, futexes, sleeps, sockets and `wait` must die when killed. `linux-tests/linuxfuzz.c` does the same with Linux numbers (and `WAVE_BASE` calls) in forked children. Both keep to their sandboxes (`/fuzz`, `/tmp/lfz`) and never make calls that change the machine (power, clock, display, preferences) or reach other processes. The self-test checks that no frames leak.

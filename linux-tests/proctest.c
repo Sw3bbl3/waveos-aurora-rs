@@ -79,6 +79,15 @@ static void forking(void) {
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 42, "child's exit code");
     CHECK(shared == 1, "memory is copied, not shared");
     CHECK(waitpid(-1, &status, WNOHANG) == -1 && errno == ECHILD, "no children left");
+    // The child keeps the vDSO: clock_gettime answers there (it used to
+    // fetch from an unmapped page and crash the child).
+    pid = fork();
+    if (pid == 0) {
+        struct timespec ts;
+        _exit(clock_gettime(CLOCK_MONOTONIC, &ts) == 0 && ts.tv_sec + ts.tv_nsec > 0 ? 42 : 1);
+    }
+    CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 42,
+          "a forked child reads the clock through the vDSO");
     printf("PASS fork and wait\n");
 }
 
@@ -253,6 +262,14 @@ static void on_fault_skip(int sig, siginfo_t *si, void *ucv) {
     if (sig == SIGILL) uc->uc_mcontext.gregs[REG_RIP] += 2;
 }
 
+// Ends the process with a code saying the handler ran.
+static void on_fault_exit(int sig, siginfo_t *si, void *uc) {
+    (void)sig;
+    (void)si;
+    (void)uc;
+    _exit(42);
+}
+
 static void catch_with(int sig, void (*handler)(int, siginfo_t *, void *)) {
     struct sigaction sa = {0};
     sa.sa_sigaction = handler;
@@ -318,6 +335,27 @@ static void faults(void) {
         _exit(0);
     }
     CHECK(waitpid(pid, &status, 0) == pid && WIFSIGNALED(status), "without a handler, the fault ends the process");
+
+    // The handler's frame lands on a stack page still shared with the
+    // parent since fork (copy-on-write): the kernel must un-share it, not
+    // give up and kill the child (it wrote frames with interrupts off).
+    size_t alt_size = 16384;
+    char *alt = mmap(NULL, alt_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(alt != MAP_FAILED, "mmap an alternate signal stack");
+    memset(alt, 0x5a, alt_size);
+    pid = fork();
+    if (pid == 0) {
+        stack_t ss = {.ss_sp = alt, .ss_size = alt_size, .ss_flags = 0};
+        struct sigaction sa = {0};
+        sa.sa_sigaction = on_fault_exit;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        if (sigaltstack(&ss, NULL) != 0 || sigaction(SIGSEGV, &sa, NULL) != 0) _exit(1);
+        *(volatile int *)16 = 1;
+        _exit(2);
+    }
+    CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 42,
+          "a fault handler runs on a stack page shared since fork");
+    munmap(alt, alt_size);
     printf("PASS faults\n");
 }
 

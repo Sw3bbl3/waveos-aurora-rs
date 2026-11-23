@@ -23,6 +23,7 @@ mod proc;
 mod random;
 mod report;
 mod sched;
+mod stackguard;
 mod sync;
 mod syscall;
 mod telemetry;
@@ -40,6 +41,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
+    // First of all: nothing protected has been entered yet that will return.
+    stackguard::init();
     drivers::serial::init();
     telemetry::init();
     telemetry::stage("kernel", "Aster kernel entry");
@@ -52,6 +55,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     arch::idt::init();
     arch::syscall::init();
     arch::fpu::init();
+    arch::protect::init();
     arch::pat::init();
     log!("boot", "GDT, TSS and IDT loaded");
 
@@ -86,6 +90,7 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     proc::init();
     x86_64::instructions::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
+    log!("boot", "protections: {}", arch::protect::report());
 
     telemetry::stage("smp", "Starting the other CPUs");
     arch::smp::start_aps(&cpu_ids, boot_info.trampoline_phys);

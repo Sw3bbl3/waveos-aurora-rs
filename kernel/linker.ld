@@ -14,10 +14,24 @@ SECTIONS
         *(.text .text.*)
     }
 
+    /* Page-aligned boundaries: the kernel maps .text read-only and
+       executable, .rodata and .got read-only, the rest no-execute
+       (arch::protect). The .got is filled in at link time. */
+    . = ALIGN(4K);
+    __text_end = .;
+
     .rodata : ALIGN(4K)
     {
         *(.rodata .rodata.*)
     }
+
+    .got :
+    {
+        *(.got .got.*)
+    }
+
+    . = ALIGN(4K);
+    __rodata_end = .;
 
     .data : ALIGN(4K)
     {

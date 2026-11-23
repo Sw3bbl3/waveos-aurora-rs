@@ -40,6 +40,8 @@ const TESTS: &[Test] = &[
     ("SMP: TLB shootdown", smp_shootdown),
     ("clock: TSC/HPET monotonic", clock),
     ("user copies recover from faults", user_copy_fault),
+    ("hardening: SMEP/SMAP/UMIP, kernel W^X, stack guards, ASLR", hardening),
+    ("RTC: reads from every CPU at once", rtc_concurrent),
     ("sound: HDA playback", sound),
     ("sound: format and rate conversion", crate::drivers::audio::convert::self_test),
     ("sound: device registry and capture streams", sound_devices),
@@ -55,10 +57,12 @@ const TESTS: &[Test] = &[
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
+    ("syscall fuzzer (native calls, racing threads, kills)", syscall_fuzz),
     ("Learn: both offline libraries", learn_library),
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
     ("Linux programs: local and network sockets (nettest)", linux_sockets),
+    ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
     ("AuroraFS on RAM disk (kernel adapter)", wavefs_ramdisk),
@@ -315,6 +319,12 @@ fn address_spaces() {
     assert_eq!(before, after, "address space teardown leaked frames");
 }
 
+/// Free frames for leak checks: those the heap holds and those of cached
+/// kernel stacks (`mm::kstack`) count as free, since neither is leaked.
+fn free_frames() -> u64 {
+    mm::leak_check_counts().1
+}
+
 fn user_processes() {
     let (_, before) = mm::leak_check_counts();
     let pid = crate::proc::spawn("/System/Bin/usertest", &["usertest"], [None, None, None], 0).expect("spawn usertest");
@@ -334,6 +344,59 @@ fn user_processes() {
     }
     let (_, after) = mm::leak_check_counts();
     assert!(after + 8 >= before, "user processes leaked {} frames", before - after);
+}
+
+/// The system-call fuzzer (`userland/bin/fuzz`): every native call with
+/// random arguments, racing threads, killed blocked processes. The kernel
+/// must not panic or hang, and must give back every frame. Short by
+/// default; `AURORA_FUZZ_ITERS`, `AURORA_FUZZ_ROUNDS` and `AURORA_FUZZ_SEED`
+/// (boot options `fuzz_iters`, `fuzz_rounds`, `fuzz_seed`) make it longer
+/// or reproduce a run.
+const FUZZ_SLACK: u64 = 32;
+
+fn syscall_fuzz() {
+    let opt = |k: &str, d: &str| crate::gui::prefs::boot_option(k).unwrap_or_else(|| alloc::string::String::from(d));
+    let (seed, iters, rounds) = (opt("fuzz_seed", "1"), opt("fuzz_iters", "1500"), opt("fuzz_rounds", "4"));
+    let heap_before = mm::heap::usage().1;
+    let before = free_frames();
+    let pid = crate::proc::spawn(
+        "/System/Bin/fuzz",
+        &["fuzz", "run", "--seed", &seed, "--iters", &iters, "--rounds", &rounds],
+        [None, None, None],
+        0,
+    )
+    .expect("spawn fuzz");
+    let p = crate::proc::get(pid).unwrap();
+    let deadline = time::uptime_ms() + 30 * 60_000;
+    while p.exit_code().is_none() && time::uptime_ms() < deadline {
+        // Nobody runs the window server here: answer what the fuzzer's
+        // windows ask of it, as the Linux tests do.
+        for cmd in crate::gui::server::take_commands() {
+            if let crate::gui::server::Command::Present(id, _) = cmd {
+                crate::gui::server::frame_done(id);
+            }
+        }
+        sched::sleep_ms(10);
+    }
+    assert_eq!(p.exit_code(), Some(0), "the fuzzer reported failures (see the log above)");
+    drop(p);
+    // Slack: kernel page tables (never freed) grow with the most kernel
+    // virtual memory and stacks ever in use at once; a leaked process or
+    // window costs hundreds of frames.
+    let cleanup_deadline = time::uptime_ms() + 10_000;
+    while free_frames() + FUZZ_SLACK < before && time::uptime_ms() < cleanup_deadline {
+        let _ = crate::gui::server::take_commands();
+        sched::sleep_ms(20);
+    }
+    let after = free_frames();
+    assert!(
+        after + FUZZ_SLACK >= before,
+        "fuzzing leaked {} frames (kernel virtual area: (mapped, used) pages {:?})",
+        before - after,
+        mm::vmm::held_pages()
+    );
+    let heap_after = mm::heap::usage().1;
+    crate::kprint!("[seed {seed}, heap {} KiB → {} KiB] ", heap_before / 1024, heap_after / 1024);
 }
 
 fn learn_library() {
@@ -364,17 +427,38 @@ fn linux_sockets() {
     run_linux_test("nettest", "net-test passed");
 }
 
+/// The Linux system-call fuzzer (`linux-tests/linuxfuzz.c`): random Linux
+/// calls from racing threads in disposable child processes. Longer runs:
+/// `AURORA_FUZZ_SEED`, `AURORA_LINUXFUZZ_CHILDREN`, `AURORA_LINUXFUZZ_CALLS`.
+fn linux_fuzz() {
+    let opt = |k: &str, d: &str| crate::gui::prefs::boot_option(k).unwrap_or_else(|| String::from(d));
+    let (seed, children, calls) = (opt("fuzz_seed", "1"), opt("linuxfuzz_children", "6"), opt("linuxfuzz_calls", "300"));
+    let before = free_frames();
+    run_linux_test_with("linuxfuzz", &["linuxfuzz", &seed, &children, &calls], "linuxfuzz passed", 30 * 60_000);
+    let deadline = time::uptime_ms() + 10_000;
+    while free_frames() + FUZZ_SLACK < before && time::uptime_ms() < deadline {
+        let _ = crate::gui::server::take_commands();
+        sched::sleep_ms(20);
+    }
+    let after = free_frames();
+    assert!(after + FUZZ_SLACK >= before, "Linux fuzzing leaked {} frames", before - after);
+}
+
 fn run_linux_test(name: &str, passed: &str) {
+    run_linux_test_with(name, &[name], passed, 120_000);
+}
+
+fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64) {
     let path = alloc::format!("/System/Linux/bin/{name}");
     if crate::fs::stat(&path).is_err() {
         crate::kprint!("(skipped: built without musl-gcc) ");
         return;
     }
     let (r, w) = crate::proc::new_pipe(false);
-    let pid = crate::proc::spawn(&path, &[name], [None, Some(w.clone()), Some(w)], 0).expect("spawn Linux test");
+    let pid = crate::proc::spawn(&path, argv, [None, Some(w.clone()), Some(w)], 0).expect("spawn Linux test");
     let p = crate::proc::get(pid).unwrap();
     let mut out = alloc::vec::Vec::new();
-    let deadline = time::uptime_ms() + 120_000;
+    let deadline = time::uptime_ms() + timeout_ms;
     let mut buf = [0u8; 512];
     let reader = match &*r {
         crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
@@ -796,6 +880,126 @@ fn user_copy_fault() {
     assert_eq!(user::read_u32(0xffff_8000_0000_0000), Err(aurora_abi::err::EFAULT));
 }
 
+/// SMEP, SMAP, UMIP, CR0.WP and NX as CPUID allows; the kernel image W^X
+/// and the physical window no-execute; guard pages under kernel stacks;
+/// the stack protector's canary; randomized user layouts.
+fn hardening() {
+    use crate::arch::protect;
+    use crate::mm::vmm::{self, AddressSpace, Prot};
+    use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
+    let f = protect::features();
+    let cr4 = Cr4::read();
+    assert_eq!(cr4.contains(Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION), f.smep, "SMEP as CPUID says");
+    assert_eq!(cr4.contains(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION), f.smap, "SMAP as CPUID says");
+    assert_eq!(cr4.bits() & (1 << 11) != 0, f.umip, "UMIP as CPUID says");
+    assert!(Cr0::read().contains(Cr0Flags::WRITE_PROTECT), "CR0.WP");
+    assert!(protect::every_cpu().0, "SMEP/SMAP/UMIP on every CPU");
+    assert!(x86_64::registers::model_specific::Efer::read()
+        .contains(x86_64::registers::model_specific::EferFlags::NO_EXECUTE_ENABLE));
+
+    // W^X: code is not writable, read-only data not executable or writable,
+    // data not executable; the physical window (an alias of the code) is
+    // not executable.
+    const W: u64 = 1 << 1;
+    const NX: u64 = 1 << 63;
+    let text = hardening as *const () as u64;
+    let rodata = "a string in .rodata".as_ptr() as u64;
+    static DATA: AtomicU32 = AtomicU32::new(1);
+    let data = &DATA as *const AtomicU32 as u64;
+    let e = |va: u64| vmm::kernel_entry(va).expect("kernel image mapped");
+    assert_eq!(e(text) & (W | NX), 0, "kernel .text must be read-only and executable");
+    assert_eq!(e(rodata) & (W | NX), NX, "kernel .rodata must be read-only and no-execute");
+    assert_eq!(e(data) & (W | NX), W | NX, "kernel .data must be writable and no-execute");
+    let pml4 = unsafe { &*(mm::phys_to_virt(vmm::kernel_pml4()) as *const [u64; 512]) };
+    assert!(pml4[256] & NX != 0, "the physical window must be no-execute");
+    let (mut wx, mut checked) = (0, 0);
+    for va in (0xffff_ffff_8000_0000u64..0xffff_ffff_8000_0000 + (64 << 20)).step_by(4096) {
+        if let Some(e) = vmm::kernel_entry(va).filter(|e| e & 1 != 0) {
+            checked += 1;
+            if e & W != 0 && e & NX == 0 {
+                wx += 1;
+            }
+        }
+    }
+    assert_eq!(wx, 0, "{wx} of {checked} kernel image pages are writable and executable");
+
+    // SMAP and SMEP, from the kernel on a user address space: a plain read
+    // of a user page faults (with SMAP), a user copy does not; calling into
+    // a user page faults (with SMEP).
+    let mut a = AddressSpace::new().unwrap();
+    let va = 0x40_0000;
+    a.map_anon(va, 1, Prot::ReadExec).unwrap();
+    a.write_bytes(va, &[0xC3]).unwrap(); // ret
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        unsafe { vmm::load(a.cr3()) };
+        let plain_read_faults = crate::syscall::user::probe::read_faults(va);
+        let copied: Result<u8, isize> = crate::syscall::user::get(va);
+        let call_faults = crate::syscall::user::probe::exec_faults(va);
+        unsafe { vmm::load(vmm::kernel_pml4()) };
+        assert_eq!(plain_read_faults, f.smap, "a kernel read of user memory outside user_copy");
+        assert_eq!(copied, Ok(0xC3), "user_copy reads user memory");
+        assert_eq!(call_faults, f.smep, "the kernel calling into a user page");
+    });
+    drop(a);
+
+    // Kernel stacks: an unmapped guard area right below each.
+    let s = crate::mm::kstack::KStack::new();
+    if let crate::mm::kstack::KStack::Guarded(_) = s {
+        assert!(vmm::translate(s.bottom()).is_some() && vmm::translate(s.top() - 8).is_some());
+        assert!(vmm::translate(s.bottom() - 8).is_none(), "guard page below a kernel stack");
+        assert!(crate::mm::kstack::is_guard(s.bottom() - 8) && !crate::mm::kstack::is_guard(s.bottom()));
+    } else {
+        panic!("kernel stack without a guard page");
+    }
+    drop(s);
+
+    // The stack protector's canary is per boot (random) with a zero low byte.
+    let guard = crate::stackguard::guard();
+    assert!(guard != 0x2f8e_57a1_c3d0_9b46 && guard & 0xFF == 0, "stack protector canary not set at boot");
+
+    // Randomized layouts: mmap bases of new address spaces differ.
+    if crate::mm::aslr::enabled() {
+        let bases: Vec<u64> = (0..4).map(|_| crate::mm::aslr::mmap_base()).collect();
+        assert!(bases.iter().any(|&b| b != bases[0]), "mmap base not randomized");
+        let tops: Vec<u64> = (0..4).map(|_| crate::mm::aslr::stack_top()).collect();
+        assert!(tops.iter().any(|&t| t != tops[0]), "stack top not randomized");
+        assert!(tops.iter().all(|&t| t <= aurora_abi::layout::STACK_TOP && t.is_multiple_of(4096)));
+    }
+    crate::kprint!(
+        "[SMEP {}, SMAP {}, UMIP {}, stack protector {}] ",
+        f.smep,
+        f.smap,
+        f.umip,
+        crate::stackguard::active()
+    );
+}
+
+/// The CMOS clock read from several CPUs at once must give sane dates
+/// (its index/data ports are shared; `fuzz` once panicked the kernel here).
+fn rtc_concurrent() {
+    use core::sync::atomic::AtomicU32;
+    static BAD: AtomicU32 = AtomicU32::new(0);
+    static DONE: AtomicU32 = AtomicU32::new(0);
+    BAD.store(0, Ordering::SeqCst);
+    DONE.store(0, Ordering::SeqCst);
+    fn reader() {
+        for _ in 0..300 {
+            let d = crate::drivers::rtc::now();
+            let _ = d.weekday();
+            if !(1..=12).contains(&d.month) || !(1..=31).contains(&d.day) || d.hour > 23 || d.minute > 59 {
+                BAD.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        DONE.fetch_add(1, Ordering::SeqCst);
+    }
+    let n = 8;
+    for _ in 0..n {
+        sched::spawn("t-rtc", reader);
+    }
+    assert!(wait_for(|| DONE.load(Ordering::SeqCst) == n, 60_000), "RTC readers finished");
+    assert_eq!(BAD.load(Ordering::SeqCst), 0, "torn RTC reads");
+}
+
 fn sound() {
     use crate::drivers::audio;
     if !audio::present() {
@@ -1203,6 +1407,12 @@ fn sleep_and_wake() {
     assert_eq!(RESULT.load(Ordering::Acquire), 1, "the machine did not sleep");
     assert!(time::now_ns() >= t0, "time went backwards across sleep");
     assert!(wait_for(|| crate::arch::percpu::count() == cpus, 2000), "not every CPU came back");
+    let (protected, inits) = crate::arch::protect::every_cpu();
+    assert!(protected && inits >= 2, "SMEP/SMAP/UMIP not back on every CPU after sleep");
+    assert!(
+        x86_64::registers::control::Cr4::read_raw() & crate::arch::protect::wanted_cr4() == crate::arch::protect::wanted_cr4(),
+        "CR4 protections lost across sleep"
+    );
     // Drivers were reset and restarted: the disk, sound and USB work again.
     block_round_trip();
     let (played, _, _) = crate::drivers::audio::counters();

@@ -394,14 +394,17 @@ fn load_waveos(
     }
 
     // Stack with an argument block at the top: [argc][argv pointers][strings].
+    // Its place is random (`mm::aslr`), and so is the first frame's offset.
+    let stack_top = crate::mm::aslr::stack_top();
     let stack_pages = layout::STACK_SIZE / 4096;
-    aspace.map_anon(layout::STACK_TOP - layout::STACK_SIZE, stack_pages, Prot::ReadWrite)?;
+    aspace.map_anon(stack_top - layout::STACK_SIZE, stack_pages, Prot::ReadWrite)?;
+    aspace.stack_top = stack_top;
     let strings_len: usize = argv.iter().map(|a| a.len() + 1).sum();
     let block_len = (8 + 8 * argv.len() + strings_len + 15) & !15;
     if block_len as u64 > layout::STACK_SIZE / 4 {
         return Err(EINVAL);
     }
-    let block_va = layout::STACK_TOP - block_len as u64;
+    let block_va = stack_top - crate::mm::aslr::stack_offset() - block_len as u64;
     let mut block = Vec::with_capacity(block_len);
     block.extend_from_slice(&(argv.len() as u64).to_le_bytes());
     let mut str_va = block_va + 8 + 8 * argv.len() as u64;
@@ -875,5 +878,7 @@ fn reaper() {
                 TABLE.lock().remove(&z);
             }
         }
+        // Frames of kernel stacks cached beyond what is kept for reuse.
+        crate::mm::kstack::trim();
     }
 }

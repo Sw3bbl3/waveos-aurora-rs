@@ -9,14 +9,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use aurora_abi::err::*;
-use aurora_abi::layout;
 use aurora_elf::{Image, PF_W, PF_X};
 
-/// Where a position-independent program is loaded.
-const PIE_BASE: u64 = 0x1000_0000;
-/// Where the dynamic linker (the program's interpreter) is loaded: above
-/// the `mmap` region, below the stack.
-const INTERP_BASE: u64 = 0x7e00_0000_0000;
 /// The stack: 8 MiB below the top of user space, like Linux's default.
 const STACK_SIZE: u64 = 8 << 20;
 
@@ -36,13 +30,14 @@ fn seg_prot(flags: u32) -> Prot {
     }
 }
 
-/// Maps the program's segments at `bias`; returns the end of the highest one.
-fn map_segments(data: &[u8], image: &Image, bias: u64, aspace: &mut AddressSpace) -> Result<u64, isize> {
+/// Maps the program's segments at `bias`, below `limit`; returns the end of
+/// the highest one.
+fn map_segments(data: &[u8], image: &Image, bias: u64, limit: u64, aspace: &mut AddressSpace) -> Result<u64, isize> {
     let mut end = 0;
     for seg in &image.segments {
         let start = (seg.vaddr + bias) & !0xFFF;
         let stop = seg.vaddr + bias + seg.memsz;
-        if stop > layout::STACK_TOP - STACK_SIZE || start < PAGE_SIZE {
+        if stop > limit || start < PAGE_SIZE {
             return Err(EINVAL);
         }
         aspace.map_anon(start, (stop - start).div_ceil(PAGE_SIZE), seg_prot(seg.flags))?;
@@ -90,8 +85,14 @@ pub fn load(
     env: &[String],
     aspace: &mut AddressSpace,
 ) -> Result<Start, isize> {
-    let bias = if image.dynamic { PIE_BASE } else { 0 };
-    let end = map_segments(data, image, bias, aspace)?;
+    // Random places (`mm::aslr`): the stack, a position-independent
+    // program, and the dynamic linker.
+    let top = crate::mm::aslr::stack_top();
+    let stack_bottom = top - STACK_SIZE;
+    // (Room for the vDSO below the stack.)
+    let limit = stack_bottom - 128 * 1024;
+    let bias = if image.dynamic { crate::mm::aslr::pie_base() } else { 0 };
+    let end = map_segments(data, image, bias, limit, aspace)?;
     let brk = end.next_multiple_of(PAGE_SIZE);
     // A dynamically linked program starts in its interpreter (`ld.so`),
     // which loads the libraries and then jumps to the program's entry.
@@ -105,19 +106,20 @@ pub fn load(
             if ld_image.interp.is_some() || !ld_image.dynamic {
                 return Err(ELIBBAD);
             }
-            map_segments(&ld, &ld_image, INTERP_BASE, aspace)?;
-            (ld_image.entry + INTERP_BASE, INTERP_BASE)
+            let base = crate::mm::aslr::interp_base();
+            map_segments(&ld, &ld_image, base, limit, aspace)?;
+            (ld_image.entry + base, base)
         }
         None => (image.entry + bias, 0),
     };
 
-    let stack_bottom = layout::STACK_TOP - STACK_SIZE;
     aspace.map_anon(stack_bottom, STACK_SIZE / PAGE_SIZE, Prot::ReadWrite)?;
+    aspace.stack_top = top;
     let vdso = super::vdso::map(aspace, stack_bottom - 64 * 1024);
 
     // Strings at the top: 16 random bytes, the platform, the program path,
     // then the arguments and the environment.
-    let top = layout::STACK_TOP;
+    let top = top - crate::mm::aslr::stack_offset();
     let mut strings: Vec<u8> = Vec::new();
     let mut random = [0u8; 16];
     crate::random::fill(&mut random);

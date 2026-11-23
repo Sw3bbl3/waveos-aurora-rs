@@ -31,6 +31,9 @@
 //!   cargo xtask image [--no-linux-root] build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
+//!                                         (AURORA_TEST_FILTER=NAME runs matching tests; AURORA_FUZZ_SEED,
+//!                                         AURORA_FUZZ_ROUNDS, AURORA_FUZZ_ITERS, AURORA_LINUXFUZZ_CHILDREN and
+//!                                         AURORA_LINUXFUZZ_CALLS make the fuzzers run longer)
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
@@ -1201,6 +1204,18 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str)
         }
         if let Ok(filter) = env::var("AURORA_TEST_FILTER") {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
+        }
+        // A longer or reproducible fuzzing run (see `syscall_fuzz` in kernel/src/tests.rs).
+        for (var, key) in [
+            ("AURORA_FUZZ_SEED", "fuzz_seed"),
+            ("AURORA_FUZZ_ITERS", "fuzz_iters"),
+            ("AURORA_FUZZ_ROUNDS", "fuzz_rounds"),
+            ("AURORA_LINUXFUZZ_CHILDREN", "linuxfuzz_children"),
+            ("AURORA_LINUXFUZZ_CALLS", "linuxfuzz_calls"),
+        ] {
+            if let Ok(v) = env::var(var) {
+                image::set_boot_option(&img, key, &v).expect("write boot.conf");
+            }
         }
         if !usbredir::available() {
             println!("warning: skipping virtual USB HID checks (usb-redir unavailable)");

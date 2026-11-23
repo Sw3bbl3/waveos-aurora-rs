@@ -26,7 +26,6 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use x86_64::instructions::interrupts;
 
-const STACK_SIZE: usize = 128 * 1024;
 const QUANTUM_MS: u64 = 10;
 
 pub type TaskId = u64;
@@ -44,7 +43,7 @@ struct Task {
     name: String,
     rsp: u64,
     state: State,
-    _stack: Option<Box<[u8]>>,
+    _stack: Option<crate::mm::kstack::KStack>,
     cpu_ns: u64,
     /// Owning process (0 = kernel).
     pid: u32,
@@ -103,7 +102,7 @@ static PREV_ON_CPU: [AtomicU64; percpu::MAX_CPUS] = [const { AtomicU64::new(0) }
 fn new_task(
     name: &str,
     rsp: u64,
-    stack: Option<Box<[u8]>>,
+    stack: Option<crate::mm::kstack::KStack>,
     pid: u32,
     cr3: u64,
     kstack_top: u64,
@@ -349,8 +348,9 @@ fn spawn_inner_fpu(
     fpu: Option<Box<FpuState>>,
     fs_base: u64,
 ) -> TaskId {
-    let stack = alloc::vec![0u8; STACK_SIZE].into_boxed_slice();
-    let top = (stack.as_ptr() as u64 + STACK_SIZE as u64) & !0xF;
+    // 128 KiB with an unmapped guard area below (see `mm::kstack`).
+    let stack = crate::mm::kstack::KStack::new();
+    let top = stack.top() & !0xF;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let rsp = switch::init_stack(top, f as usize as u64, arg);
     let target = interrupts::without_interrupts(|| {
@@ -814,7 +814,7 @@ pub fn dump_stacks() {
             continue;
         }
         let Some(stack) = t._stack.as_ref() else { continue };
-        let (lo, hi) = (stack.as_ptr() as u64, stack.as_ptr() as u64 + stack.len() as u64);
+        let (lo, hi) = (stack.bottom(), stack.top());
         let read = |a: u64| -> Option<u64> { (a >= lo && a + 8 <= hi).then(|| unsafe { (a as *const u64).read() }) };
         // aurora_context_switch pushed rbp, rbx, r12–r15 below its return address.
         let mut frames = alloc::vec::Vec::new();
@@ -830,7 +830,7 @@ pub fn dump_stacks() {
             }
             rbp = next;
         }
-        crate::kprint!("task {} '{}' {:?}:", id, t.name, t.state);
+        crate::kprint!("task {} '{}' (pid {}) {:?}:", id, t.name, t.pid, t.state);
         for f in frames {
             crate::kprint!(" {:#x}", f);
         }

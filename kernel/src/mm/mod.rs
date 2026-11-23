@@ -1,7 +1,9 @@
 //! Memory management: physical frames, kernel heap, page tables.
 
+pub mod aslr;
 pub mod frame;
 pub mod heap;
+pub mod kstack;
 pub mod paging;
 #[cfg(feature = "ktest")]
 pub mod selftest;
@@ -23,6 +25,7 @@ pub fn init(boot_info: &'static BootInfo) {
     heap::init();
     paging::init(boot_info);
     vmm::init();
+    crate::arch::protect::protect_kernel(vmm::kernel_pml4());
     heap::enable_large();
 }
 
@@ -42,11 +45,12 @@ pub fn stats() -> MemStats {
 /// (total, free) frames for leak checks. Frames the heap holds for small
 /// and mid-sized allocations count as free, as they did when the heap was
 /// one region carved out at boot, so the heap growing on demand (or keeping
-/// an empty slab) is not mistaken for a leak.
+/// an empty slab) is not mistaken for a leak. The stacks of exited tasks
+/// that `kstack` keeps for the next task count as free too.
 #[cfg(feature = "ktest")]
 pub fn leak_check_counts() -> (u64, u64) {
     let (total, free) = frame::counts();
-    (total, free + heap::held_frames())
+    (total, free + heap::held_frames() + kstack::cached_frames())
 }
 
 /// The allocators' details for a telemetry snapshot, as JSON members to

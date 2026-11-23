@@ -532,6 +532,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuzz"
+version = "0.8.0"
+dependencies = [
+ "corekit",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
