@@ -219,6 +219,7 @@ impl Desktop {
             self.main_resized(w, h);
         }
         self.fit_windows(&refit);
+        self.refit_fullscreen();
         let rects = self.display_rects();
         self.cursor = displays::constrain(&rects, self.cursor.0, self.cursor.1);
         let b = self.bounds();

@@ -41,6 +41,10 @@
 /* sandbox(op, ...): see aurora_abi::sandbox (INFO 1, RESTRICT 2, PANEL 3,
  * BOOKMARK 4, RESOLVE 5). */
 #define WAVE_SANDBOX 94
+#define WAVE_WIN_BUFFER 95
+#define WAVE_WIN_BUFFER_DESTROY 96
+#define WAVE_WIN_ATTACH 97
+#define WAVE_WIN_SET_FULLSCREEN 98
 
 /* Window flags for wave_win_create. */
 #define WAVE_WIN_RESIZABLE 1
@@ -60,6 +64,18 @@
 #define WAVE_EV_FRAME 15
 /* A controller changed: a = id, b = buttons, c = 1 connected, 2 disconnected. */
 #define WAVE_EV_GAMEPAD 16
+/* The compositor no longer reads buffer a (wave_win_attach): draw into it again. */
+#define WAVE_EV_BUFFER_RELEASE 19
+/* The window became full screen (a = 1) or left it (a = 0). */
+#define WAVE_EV_FULLSCREEN 20
+/*
+ * WAVE_EV_FRAME's timing: a = the display's frame counter, b = its refresh
+ * period (ns), c | d << 32 = when the frame started showing (CLOCK_MONOTONIC
+ * ns), x = these flags.
+ */
+#define WAVE_FRAME_VSYNC 1
+#define WAVE_FRAME_HW_CLOCK 2
+#define WAVE_FRAME_ZERO_COPY 8
 
 /* Pointer shapes for wave_win_set_cursor. */
 #define WAVE_CURSOR_ARROW 0
@@ -217,6 +233,49 @@ static inline long wave_win_set_cursor(long window, int shape) {
  */
 static inline long wave_win_set_program(long window, long pid) {
     return wave_call(WAVE_WIN_SET_PROGRAM, window, pid, 0, 0, 0);
+}
+/*
+ * Pixels a window can show instead of its own surface, without a copy:
+ * a dma-buf (a DRM buffer exported with PRIME) or shared memory (memfd,
+ * /dev/shm) at byte `offset`, `stride` bytes a row, in DRM fourcc `format`
+ * (XRGB8888, or premultiplied ARGB8888). Returns the buffer's id. The
+ * memory is held until wave_win_buffer_destroy and the compositor has let
+ * go of it.
+ */
+static inline long wave_win_buffer(int fd, long offset, int width, int height, int stride, uint32_t format) {
+    return wave_call(WAVE_WIN_BUFFER, fd, offset, (long)(uint32_t)width | (long)height << 32, stride, format);
+}
+static inline long wave_win_buffer_destroy(long buffer) {
+    return wave_call(WAVE_WIN_BUFFER_DESTROY, buffer, 0, 0, 0, 0);
+}
+/*
+ * The window shows `buffer` (drawn at `scale`) from now on; x, y, w, h is
+ * what changed, in buffer pixels. Buffer 0 goes back to the window's own
+ * surface. Don't draw into the buffer again before WAVE_EV_BUFFER_RELEASE
+ * for it: the compositor reads it where it is (or the display scans it out).
+ */
+static inline long wave_win_attach(long window, long buffer, int scale, int x, int y, int w, int h) {
+    return wave_call(WAVE_WIN_ATTACH, window, buffer | (long)scale << 32, (long)(uint32_t)x | (long)y << 32,
+                     (long)(uint32_t)w | (long)h << 32, 0);
+}
+/*
+ * Several buffers stacked (bottom first): src (buffer pixels) of each shown at
+ * dst (window pixels at `scale`, scaled when the sizes differ); x, y, w, h is
+ * what changed, in window pixels. Buffers left out are released.
+ */
+struct wave_layer {
+    uint32_t buffer, flags;
+    int32_t src[4], dst[4];
+};
+#define WAVE_ATTACH_LAYERS (1L << 31)
+static inline long wave_win_attach_layers(long window, const struct wave_layer *layers, int count, int scale, int x,
+                                          int y, int w, int h) {
+    return wave_call(WAVE_WIN_ATTACH, window, WAVE_ATTACH_LAYERS | count | (long)scale << 32, (long)layers,
+                     (long)(uint32_t)x | (long)y << 32, (long)(uint32_t)w | (long)h << 32);
+}
+/* Shows the window's content over the whole display it is on (on = 1), or not. */
+static inline long wave_win_set_fullscreen(long window, int on) {
+    return wave_call(WAVE_WIN_SET_FULLSCREEN, window, on, 0, 0, 0);
 }
 /*
  * A file descriptor that poll() and epoll report readable while the

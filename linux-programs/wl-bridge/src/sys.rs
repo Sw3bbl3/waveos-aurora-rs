@@ -69,6 +69,8 @@ mod nr {
     pub const READ: i64 = 0;
     pub const PIPE2: i64 = 293;
     pub const FCNTL: i64 = 72;
+    pub const OPENAT: i64 = 257;
+    pub const CLOCK_GETTIME: i64 = 228;
 }
 
 /// arm64's numbers (Linux's generic table); `fork`, `poll` and `unlink`
@@ -96,6 +98,8 @@ mod nr {
     pub const READ: i64 = 63;
     pub const PIPE2: i64 = 59;
     pub const FCNTL: i64 = 25;
+    pub const OPENAT: i64 = 56;
+    pub const CLOCK_GETTIME: i64 = 113;
 }
 
 use nr::*;
@@ -353,6 +357,13 @@ pub mod event {
     pub const RESIZE: u32 = 6;
     pub const CLOSE_REQUESTED: u32 = 7;
     pub const FOCUS: u32 = 8;
+    /// The window's last present is on screen: `a` frame counter, `b`
+    /// refresh (ns), `c` | `d` << 32 when (monotonic ns), `x` flags.
+    pub const FRAME: u32 = 15;
+    /// WaveOS no longer reads window buffer `a`.
+    pub const BUFFER_RELEASE: u32 = 19;
+    /// The window is full screen (`a` = 1) or not.
+    pub const FULLSCREEN: u32 = 20;
 }
 
 pub fn win_create(w: u32, h: u32, title: &str) -> Option<u32> {
@@ -494,3 +505,100 @@ pub fn write(fd: Fd, data: &[u8]) -> i64 {
 pub const POLLOUT: i16 = 4;
 pub const POLLERR: i16 = 8;
 pub const POLLHUP: i16 = 16;
+
+const WIN_BUFFER: i64 = 95;
+const WIN_BUFFER_DESTROY: i64 = 96;
+const WIN_ATTACH: i64 = 97;
+const WIN_SET_FULLSCREEN: i64 = 98;
+
+/// A WaveOS window buffer over `fd` (a dma-buf or shared memory) from byte
+/// `offset`: a window can show it as it is (`win_attach`).
+pub fn win_buffer(fd: Fd, offset: usize, w: i32, h: i32, stride: i32, format: u32) -> Option<u32> {
+    let size = (w as u32 as i64) | (h as i64) << 32;
+    let id = call(WAVE + WIN_BUFFER, [fd as i64, offset as i64, size, stride as i64, format as i64, 0]);
+    (id > 0).then_some(id as u32)
+}
+
+pub fn win_buffer_destroy(id: u32) {
+    call(WAVE + WIN_BUFFER_DESTROY, [id as i64, 0, 0, 0, 0, 0]);
+}
+
+/// Window `win` shows buffer `buffer` (0: its own surface again), drawn at
+/// `scale`; `r` (buffer pixels) changed.
+pub fn win_attach(win: u32, buffer: u32, scale: i32, r: crate::damage::Rect) -> bool {
+    let pos = (r.x as u32 as i64) | (r.y as i64) << 32;
+    let size = (r.w as u32 as i64) | (r.h as i64) << 32;
+    call(WAVE + WIN_ATTACH, [win as i64, buffer as i64 | (scale as i64) << 32, pos, size, 0, 0]) == 0
+}
+
+const WIN_SET_CURSOR: i64 = 81;
+/// `aurora_abi::cursor`: the arrow, and none.
+pub const CURSOR_ARROW: u32 = 0;
+pub const CURSOR_HIDDEN: u32 = 9;
+
+pub fn win_set_cursor(win: u32, shape: u32) {
+    call(WAVE + WIN_SET_CURSOR, [win as i64, shape as i64, 0, 0, 0, 0]);
+}
+
+/// One layer of a window (`aurora_abi::WinLayer`): `src` of `buffer`
+/// (buffer pixels) at `dst` (window pixels).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct WinLayer {
+    pub buffer: u32,
+    pub flags: u32,
+    pub src: [i32; 4],
+    pub dst: [i32; 4],
+}
+
+/// `aurora_abi::attach`.
+const ATTACH_LAYERS: i64 = 1 << 31;
+pub const MAX_LAYERS: usize = 16;
+
+/// Window `win` shows `layers` (bottom first) drawn at `scale`; `r` (window
+/// pixels) changed.
+pub fn win_attach_layers(win: u32, layers: &[WinLayer], scale: i32, r: crate::damage::Rect) -> bool {
+    let pos = (r.x as u32 as i64) | (r.y as i64) << 32;
+    let size = (r.w as u32 as i64) | (r.h as i64) << 32;
+    let what = ATTACH_LAYERS | layers.len() as i64 | (scale as i64) << 32;
+    call(WAVE + WIN_ATTACH, [win as i64, what, layers.as_ptr() as i64, pos, size, 0]) == 0
+}
+
+pub fn win_set_fullscreen(win: u32, on: bool) {
+    call(WAVE + WIN_SET_FULLSCREEN, [win as i64, on as i64, 0, 0, 0, 0]);
+}
+
+
+/// A line in the system log (`/dev/kmsg`, which names the bridge), and
+/// on standard error.
+pub fn log(line: &str) {
+    let path = b"/dev/kmsg\0";
+    let fd = call(OPENAT, [-100, path.as_ptr() as i64, 1 | O_CLOEXEC, 0, 0, 0]);
+    if fd >= 0 {
+        write(fd as Fd, line.as_bytes());
+        close(fd as Fd);
+    }
+    say(&format!("wl-bridge: {line}"));
+}
+
+/// A line on standard error. Unlike `eprintln!` this never fails: the
+/// bridge outlives the program that started it, and whatever its standard
+/// error was may be gone (a write to a closed pipe must not end it).
+pub fn say(line: &str) {
+    say_to(2, line);
+}
+
+/// A line on descriptor `fd` (1 or 2), errors ignored.
+pub fn say_to(fd: Fd, line: &str) {
+    let mut text = line.as_bytes().to_vec();
+    text.push(b'\n');
+    write(fd, &text);
+}
+
+
+/// `CLOCK_MONOTONIC` in nanoseconds (presentation times).
+pub fn monotonic_ns() -> u64 {
+    let mut ts = [0i64; 2];
+    call(CLOCK_GETTIME, [1, ts.as_mut_ptr() as i64, 0, 0, 0, 0]);
+    ts[0] as u64 * 1_000_000_000 + ts[1] as u64
+}

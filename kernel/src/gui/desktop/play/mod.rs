@@ -931,6 +931,20 @@ impl Desktop {
 
     /// Records a client's present; true when it shouldn't repaint (frozen
     /// under the overlay).
+    /// The program in front, full screen with nothing of Wave Play over it
+    /// (its buffer may be scanned out: see `Desktop::scanout_window`).
+    pub(super) fn play_scanout(&self) -> Option<u32> {
+        let p = &self.play;
+        let still = p.on && p.morph.settled() && p.morph.value() >= 1000;
+        if !still || p.overlay.is_some() || p.toast.is_some() || p.launch.is_some() || p.shrink.is_some() {
+            return None;
+        }
+        let Front::Game(id) = p.front else { return None };
+        let i = self.index_of(id)?;
+        let w = &self.windows[i];
+        (w.content() == self.screen()).then(|| w.app.client_id()).flatten()
+    }
+
     pub(super) fn play_presented(&mut self, client: u32) -> bool {
         if let Front::Game(id) = self.play.front {
             if self.index_of(id).and_then(|i| self.windows[i].app.client_id()) == Some(client) {

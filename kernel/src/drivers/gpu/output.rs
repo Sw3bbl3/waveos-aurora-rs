@@ -175,6 +175,39 @@ impl Output {
         owner::desktop_dirty(&*self.dev, &self.fb, rects)
     }
 
+    /// Shows `fb` — a program's buffer of the display's size — on the
+    /// primary plane instead of the back buffer: a page flip, and the
+    /// compositor composes nothing for the display meanwhile. Fails (and
+    /// nothing changes) if the device can't scan it out.
+    pub fn scan_out(&self, fb: &Arc<Framebuffer>) -> Result<()> {
+        let c = Commit { planes: alloc::vec![PlaneState::show(self.primary, self.crtc, fb, 0, 0)], ..Commit::default() };
+        owner::desktop_commit(&*self.dev, &c)
+    }
+
+    /// The back buffer on the primary plane again, all of it shown.
+    pub fn scan_back(&self) -> Result<()> {
+        self.scan_out(&self.fb)
+    }
+
+    /// Shows the damaged rectangles of `fb` while it is scanned out.
+    pub fn present_fb(&self, fb: &Arc<Framebuffer>, rects: &[Damage]) -> Result<()> {
+        owner::desktop_dirty(&*self.dev, fb, rects)
+    }
+
+    /// The frame the display is in and its period: (count, start, period),
+    /// in nanoseconds. Devices without vblank interrupts get a steady clock
+    /// at the mode's refresh rate (frame `n` starts `n` periods after boot),
+    /// as the DRM device gives programs.
+    pub fn frame_clock(&self) -> (u64, u64, u64) {
+        let period = 1_000_000_000 / self.mode.vrefresh.clamp(10, 1000) as u64;
+        if self.dev.caps().vblank_irq {
+            let v = self.dev.vblank(self.crtc);
+            return (v.seq, v.time_ns, period);
+        }
+        let t = crate::time::now_ns();
+        (t / period, t / period * period, period)
+    }
+
     /// Switches to `w`×`h`. The old back buffer is gone afterwards.
     pub fn set_size(&mut self, w: u32, h: u32) -> Result<()> {
         let conns = self.dev.connectors();

@@ -53,7 +53,9 @@
 //!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 480 (600 under
 //!                                         384 MiB, 1200 over 512);
 //!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run;
-//!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data)
+//!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data;
+//!                                         AURORA_MESA_BENCH=1 with --mesa measures copies against zero-copy;
+//!                                         AURORA_TEST_ROOT=browsers with --mesa measures Voyage and Firefox)
 //!       --displays N                      with --gpu virtio: N scanouts, plugged in and out by the
 //!                                         multi-monitor test, each checked by QMP screendump (testdisplays.rs)
 //!       --mesa                            only the Mesa tests, on a disk with Debian's Mesa, kmscube, glmark2
@@ -1883,8 +1885,11 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
     let img = arch::current().disk(&root(), "test-disk");
     let shown = if heads > 1 { format!("display {gpu} with {heads} heads") } else { format!("display {gpu}") };
     println!("running kernel tests with the disk on {disk}, network {net}, {shown}, USB on {usb}, {memory_mib} MiB of memory");
-    // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux.
-    let mesa_root = mesa.then(mesa::root_dir);
+    // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux; with
+    // AURORA_TEST_ROOT=browsers, the browser measurements on a disk with the
+    // default Linux packages (Voyage, Firefox) instead.
+    let browsers = mesa && env::var("AURORA_TEST_ROOT").as_deref() == Ok("browsers");
+    let mesa_root = if browsers { Some(linux_root()) } else { mesa.then(mesa::root_dir) };
     let disk_size = match &mesa_root {
         Some(r) => dir_size(r) + 256 * 1024 * 1024,
         // Cards keep their 128 MiB (a size a card can have); a disk gets
@@ -1913,7 +1918,8 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
         if net.starts_with("usb-") {
             image::set_boot_option(&img, "test_usb_net", net).expect("write boot.conf");
         }
-        if let Some(filter) = env::var("AURORA_TEST_FILTER").ok().or(mesa.then(|| String::from("Mesa"))) {
+        let default_filter = if browsers { "browsers in windows" } else { "Mesa" };
+        if let Some(filter) = env::var("AURORA_TEST_FILTER").ok().or(mesa.then(|| String::from(default_filter))) {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
         }
         // A longer or reproducible fuzzing run (see `syscall_fuzz` in kernel/src/tests.rs).
@@ -1931,6 +1937,8 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
             ("AURORA_SWAP_FACTOR", "swap_factor"),
             // MiB left to programs while the fuzzers run (memory pressure).
             ("AURORA_FUZZ_RAM", "fuzz_ram"),
+            // The Mesa tests measure copies against zero-copy (`linux_mesa_bench`).
+            ("AURORA_MESA_BENCH", "mesa_bench"),
         ] {
             if let Ok(v) = env::var(var) {
                 image::set_boot_option(&img, key, &v).expect("write boot.conf");

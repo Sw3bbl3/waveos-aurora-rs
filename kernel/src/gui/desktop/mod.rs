@@ -12,6 +12,7 @@ mod items;
 mod switcher;
 use lumen::windowing::{self, Placement, Switcher};
 mod dragdrop;
+mod fullscreen;
 mod handle;
 mod harbor;
 mod notifications;
@@ -92,6 +93,8 @@ pub struct Window {
     away: lumen::displays::Away,
     /// The display last reported to the window's client (0: none yet).
     on_display: u32,
+    /// Full screen (`win_set_fullscreen`): where it was before.
+    fullscreen: Option<Rect>,
 }
 
 impl Window {
@@ -515,6 +518,7 @@ impl Desktop {
             chrome_focus: None,
             away: None,
             on_display: 0,
+            fullscreen: None,
         });
         if let Some(p) = prev {
             self.damage_window(p);
@@ -886,6 +890,7 @@ impl Desktop {
                         }
                     }
                 }
+                Command::Fullscreen(id) => self.fullscreen_command(id),
                 Command::StartTour => self.start_tour(),
                 Command::Play(on) => self.play_command(on),
                 Command::Cursor if !cursor::hardware() => {
@@ -1196,10 +1201,13 @@ impl Desktop {
             || self.current_open()
             || self.center_open()
             || self.switcher.is_some()
-            || (y < MENUBAR_H && self.on_main(x, y))
-            || self.dock_rect().contains(x, y)
+            || (self.fullscreen_at(x, y).is_none()
+                && ((y < MENUBAR_H && self.on_main(x, y)) || self.dock_rect().contains(x, y)))
         {
             return c::ARROW;
+        }
+        if let Some(w) = self.fullscreen_at(x, y).map(|i| &self.windows[i]) {
+            return w.app.client_id().map_or(c::ARROW, server::cursor_of);
         }
         if let Some(w) = self.window_at(x, y).map(|i| &self.windows[i]) {
             let e = if w.app.resizable() { windowing::resize_edges(w.rect, x, y) } else { 0 };
@@ -1226,7 +1234,13 @@ impl Desktop {
     }
 
     fn window_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.windows.iter().rposition(|w| !w.minimized && w.awaiting_frame.is_none() && w.rect.contains(x, y))
+        // Full-screen windows are above the rest, and only their content is shown.
+        if let Some(i) = self.fullscreen_at(x, y) {
+            return Some(i);
+        }
+        self.windows.iter().rposition(|w| {
+            !w.minimized && w.awaiting_frame.is_none() && w.fullscreen.is_none() && w.rect.contains(x, y)
+        })
     }
 
     fn pointer_moved(&mut self, x: i32, y: i32) {
@@ -1355,6 +1369,23 @@ impl Desktop {
         if self.spotlight_press(x, y) || self.center_press(x, y) {
             return;
         }
+        // A full-screen window takes clicks anywhere on its display (the
+        // bar and Harbor are under it), unless a menu or Shoal is open.
+        if self.menu.is_none() && self.launcher.is_none() {
+            if let Some(i) = self.fullscreen_at(x, y) {
+                let id = self.windows[i].id;
+                if self.focused_id() != Some(id) {
+                    self.raise(id);
+                }
+                self.grab = Some(id);
+                if double {
+                    self.with_app(id, |app, area, env| app.double_click(x, y, area, env));
+                } else {
+                    self.with_app(id, |app, area, env| app.click(x, y, area, env));
+                }
+                return;
+            }
+        }
         if self.menu.is_none() && self.bar_press(x, y) {
             return;
         }
@@ -1401,8 +1432,9 @@ impl Desktop {
         if self.switcher.is_some() {
             return;
         }
-        let in_bar = y < MENUBAR_H && self.on_main(x, y);
-        if self.menu.is_some() || self.launcher.is_some() || in_bar || self.dock_rect().contains(x, y) {
+        let in_bar = y < MENUBAR_H && self.on_main(x, y) && self.fullscreen_at(x, y).is_none();
+        let in_dock = self.dock_rect().contains(x, y) && self.fullscreen_at(x, y).is_none();
+        if self.menu.is_some() || self.launcher.is_some() || in_bar || in_dock {
             return;
         }
         let Some(i) = self.window_at(x, y) else {
@@ -1839,6 +1871,14 @@ impl Desktop {
         self.paint_shoal(cv);
         self.paint_harbor(cv);
         self.paint_bar(cv);
+        if self.windows.iter().any(|w| w.fullscreen.is_some()) {
+            self.paint_fullscreen(cv);
+            // What still shows over a full-screen window.
+            if self.launcher.is_some() {
+                self.paint_shoal(cv);
+            }
+            self.paint_crest_notice(cv);
+        }
         self.paint_menu(cv);
         self.paint_center(cv);
         self.paint_spotlight(cv);
@@ -1891,7 +1931,7 @@ impl Desktop {
         let clip = cv.clip;
         for i in range {
             let w = &self.windows[i];
-            if w.minimized || w.animating || !w.bounds().intersects(&clip) {
+            if w.minimized || w.animating || w.fullscreen.is_some() || !w.bounds().intersects(&clip) {
                 continue;
             }
             let is_focused = Some(self.windows[i].id) == focused;

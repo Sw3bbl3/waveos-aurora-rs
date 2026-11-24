@@ -9,14 +9,25 @@
 //! (programs are told decorations are the server's), and its clipboard is
 //! the programs' selection.
 //!
-//! Buffers are shared memory (`wl_shm`); the bridge copies each committed
-//! buffer and releases it straight away.
+//! Buffers are shared memory (`wl_shm`) or dma-bufs (`zwp_linux_dmabuf_v1`,
+//! and Mesa's `wl_drm`, through which Mesa's EGL renders on the DRM device).
+//! A window that shows one surface takes its buffers as they are: WaveOS
+//! reads them where they are (or scans them out), and they are released
+//! when it says it no longer reads them. Windows with sub-surfaces or
+//! pop-ups are composed by the bridge, from copies (see `buffers`). Frame
+//! callbacks and presentation feedback follow WaveOS's frames: they are
+//! answered when the window's picture is on screen (`FRAME` events).
+//!
+//! `WL_BRIDGE_COPY=1` in its environment makes it copy everything and offer
+//! no dma-bufs, as before (for comparisons).
 //!
 //! `wl-bridge --background` returns once the bridge is listening (and at
 //! once if one already is), leaving it running: launchers start it that way
 //! before a program.
 
+mod buffers;
 mod damage;
+use buffers::{Buffer, Pool};
 use damage::Rect;
 mod keys;
 mod protocol;
@@ -37,6 +48,12 @@ type Id = u32;
 const SERVER_IDS: u32 = 0xff00_0000;
 /// Milliseconds between frames.
 const FRAME_MS: u32 = 16;
+/// A frame callback waits this long for its window's picture to be shown
+/// (a hidden window's never is) before it is answered anyway.
+const SHOWN_WAIT_MS: u32 = 100;
+/// The DRM device programs render on (`wl_drm`, dma-buf feedback): card0.
+const DRM_DEVICE: &str = "/dev/dri/card0";
+const DRM_DEV_T: u64 = 226 << 8;
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -52,39 +69,17 @@ const GLOBALS: &[(&str, u32)] = &[
     (zxdg_decoration_manager_v1::NAME, 1),
     (wl_data_device_manager::NAME, 3),
     (wp_viewporter::NAME, 1),
+    (zwp_linux_dmabuf_v1::NAME, 4),
+    (wl_drm::NAME, 2),
+    (wp_presentation::NAME, 1),
 ];
 
+/// Globals not offered with `WL_BRIDGE_COPY=1`.
+fn dmabuf_global(name: &str) -> bool {
+    name == zwp_linux_dmabuf_v1::NAME || name == wl_drm::NAME
+}
+
 // ------------------------------------------------------------------ objects
-
-struct Pool {
-    fd: Fd,
-    ptr: *mut u8,
-    size: usize,
-}
-
-impl Pool {
-    fn map(fd: Fd, size: usize) -> Option<Pool> {
-        let ptr = sys::mmap_shared(fd, size.max(1))?;
-        Some(Pool { fd, ptr, size })
-    }
-}
-
-impl Drop for Pool {
-    fn drop(&mut self) {
-        sys::munmap(self.ptr, self.size.max(1));
-        sys::close(self.fd);
-    }
-}
-
-struct Buffer {
-    pool: Rc<RefCell<Pool>>,
-    offset: usize,
-    width: i32,
-    height: i32,
-    stride: i32,
-    /// `wl_shm` format: 0 ARGB8888 (premultiplied), 1 XRGB8888.
-    format: u32,
-}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Role {
@@ -118,6 +113,8 @@ struct Pending {
     damage: Option<Rect>,
     buffer_damage: Option<Rect>,
     frames: Vec<Id>,
+    /// `wp_presentation_feedback`s.
+    feedbacks: Vec<Id>,
     /// `Some(None)`: input everywhere again.
     input: Option<Option<Region>>,
 }
@@ -145,6 +142,15 @@ struct Surface {
     pending_pos: Option<(i32, i32)>,
     /// Where the surface takes pointer input (`None`: everywhere).
     input: Option<Region>,
+    /// The attached buffer was not copied (`pixels` are stale): its window
+    /// shows it as it is, or copies it when it composes.
+    direct: bool,
+    /// What changed in it since the window last took it (buffer pixels).
+    direct_damage: Option<Rect>,
+    /// The buffer WaveOS shows of it now (held until WaveOS releases it).
+    on_screen: Option<Id>,
+    /// `pixels` hold its last committed picture (not just an older one).
+    pixels_current: bool,
 }
 
 impl Surface {
@@ -166,6 +172,10 @@ impl Surface {
             pos: (0, 0),
             pending_pos: None,
             input: None,
+            direct: false,
+            direct_damage: None,
+            on_screen: None,
+            pixels_current: false,
         }
     }
 
@@ -217,6 +227,8 @@ struct Toplevel {
     asked: Option<(i32, i32)>,
     /// The size it last drew.
     drawn: (i32, i32),
+    /// It asked to be full screen.
+    fullscreen: bool,
 }
 
 struct Popup {
@@ -318,6 +330,8 @@ struct Client {
     viewports: HashMap<Id, Id>,
     data_sources: HashMap<Id, Vec<String>>,
     regions: HashMap<Id, Region>,
+    /// `zwp_linux_buffer_params_v1`: the plane added (fd, offset, stride, modifier).
+    params: HashMap<Id, Option<(Fd, u32, u32, u64)>>,
     next_server_id: u32,
     dead: bool,
 }
@@ -345,6 +359,7 @@ impl Client {
             viewports: HashMap::new(),
             data_sources: HashMap::new(),
             regions: HashMap::new(),
+            params: HashMap::new(),
             next_server_id: SERVER_IDS,
             dead: false,
         }
@@ -456,6 +471,46 @@ struct Window {
     focused: bool,
     dirty: bool,
     damage: Option<Rect>,
+    /// The WaveOS buffers the window shows as they are (`win_attach`).
+    attached: Vec<u32>,
+    /// How many layers it showed last (1: a buffer alone).
+    layers: usize,
+    /// How it reaches the screen (logged when it changes).
+    mode: String,
+    /// A picture was presented and is not on screen yet.
+    showing: bool,
+    /// For the statistics line: frames shown as they are, and composed.
+    direct_frames: u64,
+    composed_frames: u64,
+}
+
+/// A frame callback or presentation feedback, answered when its window's
+/// picture is on screen.
+struct Frame {
+    client: ClientId,
+    id: Id,
+    feedback: bool,
+    /// The window it waits for; `None`: the next tick of the bridge's timer.
+    window: Option<u32>,
+    since: u32,
+}
+
+/// Where a client's frames go, measured (milliseconds and frames since the
+/// last line, which goes to the system log every 10 seconds).
+#[derive(Default)]
+struct Stats {
+    frames: u64,
+    direct: u64,
+    /// Client time: from a frame callback answered to the next commit
+    /// (programs that draw on frame callbacks), and how many such frames.
+    client_ns: u64,
+    client: u64,
+    /// The bridge's own time from a commit to the window's present.
+    handoff_ns: u64,
+    /// From the present until WaveOS said it was on screen.
+    shown_ns: u64,
+    shown: u64,
+    since: u32,
 }
 
 struct Server {
@@ -473,7 +528,7 @@ struct Server {
     pointer_at: (f64, f64),
     button_down: bool,
     mods: u32,
-    frames: Vec<(ClientId, Id)>,
+    frames: Vec<Frame>,
     last_frame: u32,
     /// The program owning the selection, and its data source.
     selection: Option<(ClientId, Id)>,
@@ -481,6 +536,18 @@ struct Server {
     clip_in: Vec<(Fd, Vec<u8>)>,
     /// Clipboard text being written to a program.
     clip_out: Vec<(Fd, Vec<u8>)>,
+    /// WaveOS window buffers by id: the client and `wl_buffer` they are.
+    kernel_buffers: HashMap<u32, (ClientId, Id)>,
+    /// `WL_BRIDGE_COPY=1`: no dma-bufs, every frame copied.
+    copy_only: bool,
+    stats: Stats,
+    /// When the last frame callbacks were answered (client time starts) and
+    /// presents were made (until shown), in monotonic ns.
+    answered_at: u64,
+    presented_at: HashMap<u32, u64>,
+    /// When a window's first commit since its last present began (the
+    /// hand-off is measured from there: copies happen at the commit).
+    committed_at: HashMap<u32, u64>,
 }
 
 fn main() {
@@ -538,8 +605,14 @@ fn main() {
         selection: None,
         clip_in: Vec::new(),
         clip_out: Vec::new(),
+        kernel_buffers: HashMap::new(),
+        copy_only: std::env::var("WL_BRIDGE_COPY").is_ok_and(|v| v == "1"),
+        stats: Stats::default(),
+        answered_at: 0,
+        presented_at: HashMap::new(),
+        committed_at: HashMap::new(),
     };
-    println!("wl-bridge: listening on {path}");
+    sys::say_to(1, &format!("wl-bridge: listening on {path}"));
     loop {
         s.run_once(wake_r, &rx);
     }
@@ -612,15 +685,19 @@ impl Server {
         let now = sys::now_ms();
         if !self.frames.is_empty() && now.wrapping_sub(self.last_frame) >= FRAME_MS {
             self.last_frame = now;
-            for (cid, cb) in std::mem::take(&mut self.frames) {
-                if let Some(c) = self.clients.get_mut(&cid) {
-                    if c.objects.remove(&cb).is_some() {
-                        c.send(cb, wl_callback::ev::DONE, &[Out::U(now)]);
-                        c.send(1, wl_display::ev::DELETE_ID, &[Out::U(cb)]);
-                    }
-                }
-            }
+            // Frames for no window, or a window with nothing on its way to
+            // the screen, go on the timer; the others wait for their window
+            // (a while at most: a hidden window's picture is never shown).
+            let windows = &self.windows;
+            let due = |f: &Frame| match f.window.and_then(|w| windows.get(&w)) {
+                Some(w) if w.showing => now.wrapping_sub(f.since) >= SHOWN_WAIT_MS,
+                _ => true,
+            };
+            let (go, keep): (Vec<Frame>, Vec<Frame>) = std::mem::take(&mut self.frames).into_iter().partition(due);
+            self.frames = keep;
+            self.answer(go, None);
         }
+        self.log_stats(false);
         let ids: Vec<ClientId> = self.clients.keys().copied().collect();
         for id in ids {
             let c = self.clients.get_mut(&id).unwrap();
@@ -670,7 +747,7 @@ impl Server {
                 Ok(None) => break,
                 Err(e) => {
                     let obj = u32::from_le_bytes(c.inbuf[0..4].try_into().unwrap());
-                    eprintln!("wl-bridge: client {cid}: {e}");
+                    sys::say(&format!("wl-bridge: client {cid}: {e}"));
                     c.send(1, wl_display::ev::ERROR, &[Out::O(obj), Out::U(1), Out::S(&e)]);
                     c.flush();
                     c.dead = true;
@@ -682,9 +759,13 @@ impl Server {
 
     fn disconnect(&mut self, cid: ClientId) {
         let Some(c) = self.clients.remove(&cid) else { return };
+        // What its frames cost, up to now.
+        self.log_stats(true);
         let windows: Vec<u32> = self.windows.iter().filter(|(_, w)| w.client == cid).map(|(id, _)| *id).collect();
         for id in windows {
             self.windows.remove(&id);
+            self.presented_at.remove(&id);
+            self.committed_at.remove(&id);
             sys::win_close(id);
         }
         if self.pointer.is_some_and(|p| p.0 == cid) {
@@ -693,7 +774,8 @@ impl Server {
         if self.selection.is_some_and(|s| s.0 == cid) {
             self.selection = None;
         }
-        self.frames.retain(|f| f.0 != cid);
+        self.frames.retain(|f| f.client != cid);
+        self.kernel_buffers.retain(|_, b| b.0 != cid);
         for fd in c.infds.iter().chain(c.outfds.iter()).chain(c.close_after.iter()) {
             sys::close(*fd);
         }
@@ -732,8 +814,12 @@ impl Server {
             (wl_display::NAME, wl_display::req::GET_REGISTRY) => {
                 let reg = a[0].uint();
                 self.new_object(cid, reg, wl_registry::NAME, 1);
+                let copy_only = self.copy_only;
                 let c = self.clients.get_mut(&cid).unwrap();
                 for (i, (name, v)) in GLOBALS.iter().enumerate() {
+                    if copy_only && dmabuf_global(name) {
+                        continue;
+                    }
                     c.send(reg, wl_registry::ev::GLOBAL, &[Out::U(i as u32 + 1), Out::S(name), Out::U(*v)]);
                 }
             }
@@ -776,14 +862,7 @@ impl Server {
             (wl_shm_pool::NAME, wl_shm_pool::req::CREATE_BUFFER) => {
                 let c = self.clients.get_mut(&cid).unwrap();
                 let Some(pool) = c.pools.get(&obj).cloned() else { return };
-                let b = Buffer {
-                    pool,
-                    offset: a[1].int().max(0) as usize,
-                    width: a[2].int(),
-                    height: a[3].int(),
-                    stride: a[4].int(),
-                    format: a[5].uint(),
-                };
+                let b = Buffer::shm(pool, a[1].int().max(0) as usize, a[2].int(), a[3].int(), a[4].int(), a[5].uint());
                 let id = a[0].uint();
                 c.buffers.insert(id, b);
                 self.new_object(cid, id, wl_buffer::NAME, 1);
@@ -807,8 +886,26 @@ impl Server {
                 }
             }
             (wl_buffer::NAME, wl_buffer::req::DESTROY) => {
-                self.clients.get_mut(&cid).unwrap().buffers.remove(&obj);
+                if let Some(b) = self.clients.get_mut(&cid).unwrap().buffers.remove(&obj) {
+                    if let Some(k) = b.kernel.get() {
+                        self.kernel_buffers.remove(&k);
+                    }
+                }
                 self.destroyed(cid, obj);
+            }
+
+            (zwp_linux_dmabuf_v1::NAME, op) => self.dmabuf_request(cid, obj, op, a),
+            (zwp_linux_buffer_params_v1::NAME, op) => self.params_request(cid, obj, op, a),
+            (zwp_linux_dmabuf_feedback_v1::NAME, _) => self.destroyed(cid, obj),
+            (wl_drm::NAME, op) => self.drm_request(cid, obj, op, a),
+            (wp_presentation::NAME, wp_presentation::req::DESTROY) => self.destroyed(cid, obj),
+            (wp_presentation::NAME, wp_presentation::req::FEEDBACK) => {
+                let (sid, id) = (a[0].uint(), a[1].uint());
+                let c = self.clients.get_mut(&cid).unwrap();
+                c.objects.insert(id, (wp_presentation_feedback::NAME, 1));
+                if let Some(s) = c.surfaces.get_mut(&sid) {
+                    s.pending.feedbacks.push(id);
+                }
             }
 
             (wl_surface::NAME, op) => self.surface_request(cid, obj, op, a),
@@ -893,10 +990,16 @@ impl Server {
             | (wl_touch::NAME, wl_touch::req::RELEASE)
             | (wl_output::NAME, wl_output::req::RELEASE) => self.destroyed(cid, obj),
             (wl_pointer::NAME, wl_pointer::req::SET_CURSOR) => {
-                // WaveOS draws its own pointer.
+                // WaveOS draws its own pointer: the arrow, or none when the
+                // program hides it (a game; the display may then scan the
+                // game out even without a cursor plane).
                 let c = self.clients.get_mut(&cid).unwrap();
-                if let Some(s) = c.surfaces.get_mut(&a[1].uint()) {
+                let surface = a[1].uint();
+                if let Some(s) = c.surfaces.get_mut(&surface) {
                     s.role = Role::Cursor;
+                }
+                if let Some((_, _, wid)) = self.pointer.filter(|p| p.0 == cid) {
+                    sys::win_set_cursor(wid, if surface == 0 { sys::CURSOR_HIDDEN } else { sys::CURSOR_ARROW });
                 }
             }
 
@@ -1030,6 +1133,136 @@ impl Server {
         }
     }
 
+    // ------------------------------------------------------------ dma-bufs
+
+    fn dmabuf_request(&mut self, cid: ClientId, obj: Id, op: u16, a: &[Arg]) {
+        let version = self.clients.get(&cid).map_or(1, |c| c.version(obj));
+        match op {
+            zwp_linux_dmabuf_v1::req::DESTROY => self.destroyed(cid, obj),
+            zwp_linux_dmabuf_v1::req::CREATE_PARAMS => {
+                self.new_object(cid, a[0].uint(), zwp_linux_buffer_params_v1::NAME, version);
+                self.clients.get_mut(&cid).unwrap().params.insert(a[0].uint(), None);
+            }
+            zwp_linux_dmabuf_v1::req::GET_DEFAULT_FEEDBACK | zwp_linux_dmabuf_v1::req::GET_SURFACE_FEEDBACK => {
+                let id = a[0].uint();
+                self.new_object(cid, id, zwp_linux_dmabuf_feedback_v1::NAME, version);
+                self.send_feedback(cid, id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Where to render and in what: card0, one tranche of the formats
+    /// WaveOS shows (XRGB8888, ARGB8888), linear (or the driver's implicit
+    /// layout, linear too).
+    fn send_feedback(&mut self, cid: ClientId, id: Id) {
+        let mut table = Vec::new();
+        for f in [buffers::XRGB8888, buffers::ARGB8888] {
+            for m in [buffers::MOD_LINEAR, buffers::MOD_INVALID] {
+                table.extend_from_slice(&f.to_le_bytes());
+                table.extend_from_slice(&0u32.to_le_bytes());
+                table.extend_from_slice(&m.to_le_bytes());
+            }
+        }
+        let entries = table.len() / 16;
+        let fd = sys::memfd_with(&table);
+        let dev = DRM_DEV_T.to_le_bytes();
+        let indices: Vec<u8> = (0..entries as u16).flat_map(u16::to_le_bytes).collect();
+        let c = self.clients.get_mut(&cid).unwrap();
+        c.send(id, zwp_linux_dmabuf_feedback_v1::ev::FORMAT_TABLE, &[Out::H(fd), Out::U(table.len() as u32)]);
+        c.close_after.push(fd);
+        c.send(id, zwp_linux_dmabuf_feedback_v1::ev::MAIN_DEVICE, &[Out::A(&dev)]);
+        c.send(id, zwp_linux_dmabuf_feedback_v1::ev::TRANCHE_TARGET_DEVICE, &[Out::A(&dev)]);
+        c.send(id, zwp_linux_dmabuf_feedback_v1::ev::TRANCHE_FORMATS, &[Out::A(&indices)]);
+        c.send(id, zwp_linux_dmabuf_feedback_v1::ev::TRANCHE_FLAGS, &[Out::U(0)]);
+        c.send(id, zwp_linux_dmabuf_feedback_v1::ev::TRANCHE_DONE, &[]);
+        c.send(id, zwp_linux_dmabuf_feedback_v1::ev::DONE, &[]);
+    }
+
+    fn params_request(&mut self, cid: ClientId, obj: Id, op: u16, a: &[Arg]) {
+        use zwp_linux_buffer_params_v1::{ev, req};
+        // Errors: 0 already used, 1 plane index, 2 plane set, 3 incomplete,
+        // 4 invalid format, 5 invalid dimensions, 7 invalid wl_buffer.
+        let c = self.clients.get_mut(&cid).unwrap();
+        match op {
+            req::DESTROY => {
+                if let Some(Some((fd, ..))) = c.params.remove(&obj) {
+                    sys::close(fd);
+                }
+                self.destroyed(cid, obj);
+            }
+            req::ADD => {
+                let fd = a[0].fd();
+                let modifier = (a[4].uint() as u64) << 32 | a[5].uint() as u64;
+                let problem = match c.params.get(&obj) {
+                    None => Some((0, "already used")),
+                    _ if a[1].uint() != 0 => Some((1, "one plane only")),
+                    Some(Some(_)) => Some((2, "plane 0 is set")),
+                    _ if modifier != buffers::MOD_LINEAR && modifier != buffers::MOD_INVALID => {
+                        Some((4, "linear buffers only"))
+                    }
+                    _ => None,
+                };
+                if let Some((code, text)) = problem {
+                    sys::close(fd);
+                    return self.error(cid, obj, code, text);
+                }
+                c.params.insert(obj, Some((fd, a[2].uint(), a[3].uint(), modifier)));
+            }
+            req::CREATE | req::CREATE_IMMED => {
+                let immed = op == req::CREATE_IMMED;
+                let args = if immed { &a[1..] } else { a };
+                let (w, h, format) = (args[0].int(), args[1].int(), args[2].uint());
+                let Some(plane) = c.params.insert(obj, None) else { return self.error(cid, obj, 0, "already used") };
+                c.params.remove(&obj);
+                let Some((fd, offset, stride, _)) = plane else { return self.error(cid, obj, 3, "no plane") };
+                if !Buffer::supported(format) || w <= 0 || h <= 0 || (stride as i64) < w as i64 * 4 {
+                    sys::close(fd);
+                    if !immed {
+                        c.send(obj, ev::FAILED, &[]);
+                        return;
+                    }
+                    return self.error(cid, obj, 7, "a buffer WaveOS can't show");
+                }
+                let id = if immed {
+                    a[0].uint()
+                } else {
+                    c.next_server_id += 1;
+                    c.next_server_id - 1
+                };
+                c.buffers.insert(id, Buffer::dma(fd, offset as usize, w, h, stride as i32, format));
+                if !immed {
+                    c.send(obj, ev::CREATED, &[Out::N(id)]);
+                }
+                self.new_object(cid, id, wl_buffer::NAME, 1);
+            }
+            _ => {}
+        }
+    }
+
+    /// Mesa's `wl_drm`: how its EGL learns which device to render on (no
+    /// render node is needed to use it) and hands over PRIME buffers.
+    fn drm_request(&mut self, cid: ClientId, obj: Id, op: u16, a: &[Arg]) {
+        let c = self.clients.get_mut(&cid).unwrap();
+        match op {
+            // WaveOS's DRM device asks no authentication of programs.
+            wl_drm::req::AUTHENTICATE => c.send(obj, wl_drm::ev::AUTHENTICATED, &[]),
+            wl_drm::req::CREATE_PRIME_BUFFER => {
+                let (id, fd, w, h, format) = (a[0].uint(), a[1].fd(), a[2].int(), a[3].int(), a[4].uint());
+                let (offset, stride) = (a[5].int(), a[6].int());
+                if !Buffer::supported(format) || w <= 0 || h <= 0 || stride < w.saturating_mul(4) || offset < 0 {
+                    sys::close(fd);
+                    // Errors: 1 invalid format, 2 invalid name.
+                    return self.error(cid, obj, 1, "a buffer WaveOS can't show");
+                }
+                c.buffers.insert(id, Buffer::dma(fd, offset as usize, w, h, stride, format));
+                self.new_object(cid, id, wl_buffer::NAME, 1);
+            }
+            // GEM names (flink) are not shared between programs.
+            _ => self.error(cid, obj, 2, "only PRIME buffers"),
+        }
+    }
+
     fn error(&mut self, cid: ClientId, obj: Id, code: u32, text: &str) {
         if let Some(c) = self.clients.get_mut(&cid) {
             c.send(1, wl_display::ev::ERROR, &[Out::O(obj), Out::U(code), Out::S(text)]);
@@ -1061,6 +1294,30 @@ impl Server {
                 }
             }
             wl_output::NAME => Self::output_info(c, id, v, screen, scale),
+            zwp_linux_dmabuf_v1::NAME if v < 4 => {
+                for f in [buffers::XRGB8888, buffers::ARGB8888] {
+                    if v < 3 {
+                        c.send(id, zwp_linux_dmabuf_v1::ev::FORMAT, &[Out::U(f)]);
+                        continue;
+                    }
+                    for m in [buffers::MOD_LINEAR, buffers::MOD_INVALID] {
+                        let (hi, lo) = ((m >> 32) as u32, m as u32);
+                        c.send(id, zwp_linux_dmabuf_v1::ev::MODIFIER, &[Out::U(f), Out::U(hi), Out::U(lo)]);
+                    }
+                }
+            }
+            wl_drm::NAME => {
+                c.send(id, wl_drm::ev::DEVICE, &[Out::S(DRM_DEVICE)]);
+                for f in [buffers::XRGB8888, buffers::ARGB8888] {
+                    c.send(id, wl_drm::ev::FORMAT, &[Out::U(f)]);
+                }
+                if v >= 2 {
+                    // PRIME: buffers come as dma-buf descriptors.
+                    c.send(id, wl_drm::ev::CAPABILITIES, &[Out::U(1)]);
+                }
+            }
+            // CLOCK_MONOTONIC: what WaveOS's frame times are in.
+            wp_presentation::NAME => c.send(id, wp_presentation::ev::CLOCK_ID, &[Out::U(1)]),
             _ => {}
         }
     }
@@ -1165,6 +1422,14 @@ impl Server {
     }
 
     fn commit(&mut self, cid: ClientId, sid: Id) {
+        let started = sys::monotonic_ns();
+        // A surface of a window (its main surface, a sub-surface, a pop-up),
+        // shown or not yet, may be shown as it is: the window decides when it
+        // composes (see `compose`). Its buffer is held meanwhile.
+        let shown = {
+            let c = &self.clients[&cid];
+            c.xdg_of(sid).and_then(|x| c.toplevel_of(x)).is_some()
+        };
         let c = self.clients.get_mut(&cid).unwrap();
         let Some(s) = c.surfaces.get_mut(&sid) else { return };
         let p = std::mem::take(&mut s.pending);
@@ -1202,23 +1467,54 @@ impl Server {
                             damage::add(&mut region, r.scaled(s.scale));
                         }
                     }
-                    copied = copy_buffer(b, s, if geometry_changed { None } else { region });
-                    if !geometry_changed && copied.is_some_and(Rect::empty) {
-                        changed = false;
+                    if shown && !self.copy_only && Buffer::supported(b.format) && b.width > 0 && b.height > 0 {
+                        s.direct = true;
+                        let full = Rect::new(0, 0, b.width, b.height);
+                        let resized = (s.bw, s.bh) != (b.width, b.height) || s.opaque != b.opaque();
+                        s.direct_damage = match (s.direct_damage, if geometry_changed || resized { None } else { region }) {
+                            (Some(a), Some(r)) => Some(a.union(r)),
+                            (None, Some(r)) => Some(r),
+                            _ => Some(full),
+                        };
+                        s.bw = b.width;
+                        s.bh = b.height;
+                        s.opaque = b.opaque();
+                        copied = if geometry_changed || resized { None } else { s.direct_damage };
+                    } else {
+                        copied = copy_buffer(b, s, if geometry_changed { None } else { region });
+                        if !geometry_changed && copied.is_some_and(Rect::empty) {
+                            changed = false;
+                        }
+                        s.direct = false;
+                        s.pixels_current = copied.is_some();
+                        released = Some(bid);
                     }
                     s.has_content = true;
-                    released = Some(bid);
                 }
             }
             Some(None) => {
                 s.has_content = false;
+                s.direct = false;
                 s.pixels = Vec::new();
             }
             None => {}
         }
         let role = s.role;
+        let window = c.xdg_of(sid).and_then(|x| c.toplevel_of(x)).and_then(|t| c.toplevels.get(&t)).and_then(|t| t.window);
+        if let Some(w) = window {
+            self.committed_at.entry(w).or_insert(started);
+        }
+        let now = sys::now_ms();
+        if !p.frames.is_empty() && self.answered_at > 0 {
+            self.stats.client_ns += sys::monotonic_ns().saturating_sub(self.answered_at);
+            self.stats.client += 1;
+            self.answered_at = 0;
+        }
         for cb in p.frames {
-            self.frames.push((cid, cb));
+            self.frames.push(Frame { client: cid, id: cb, feedback: false, window, since: now });
+        }
+        for f in p.feedbacks {
+            self.frames.push(Frame { client: cid, id: f, feedback: true, window, since: now });
         }
         if let Some(bid) = released {
             c.send(bid, wl_buffer::ev::RELEASE, &[]);
@@ -1326,8 +1622,10 @@ impl Server {
                 if let Some(x) = c.xdg.get_mut(&xid) {
                     x.role = XdgRole::Toplevel(id);
                 }
-                c.toplevels
-                    .insert(id, Toplevel { xdg: xid, title: String::new(), window: None, asked: None, drawn: (0, 0) });
+                c.toplevels.insert(
+                    id,
+                    Toplevel { xdg: xid, title: String::new(), window: None, asked: None, drawn: (0, 0), fullscreen: false },
+                );
                 self.new_object(cid, id, xdg_toplevel::NAME, version);
             }
             xdg_surface::req::GET_POPUP => {
@@ -1376,8 +1674,29 @@ impl Server {
                     sys::win_set_title(w, &t.title);
                 }
             }
+            xdg_toplevel::req::SET_FULLSCREEN | xdg_toplevel::req::UNSET_FULLSCREEN => {
+                let on = op == xdg_toplevel::req::SET_FULLSCREEN;
+                let Some(t) = c.toplevels.get_mut(&top) else { return };
+                t.fullscreen = on;
+                match t.window {
+                    // WaveOS says when it is (`FULLSCREEN`, then a `RESIZE`).
+                    Some(w) => sys::win_set_fullscreen(w, on),
+                    // Not shown yet: it opens full screen, at the display's size.
+                    None if t.asked.is_some() => {
+                        let size = if on { self.fullscreen_size() } else { (0, 0) };
+                        self.configure_toplevel(cid, top, size);
+                    }
+                    None => {}
+                }
+            }
             _ => {}
         }
+    }
+
+    /// The main display's size in points (a full-screen window's size).
+    fn fullscreen_size(&self) -> (i32, i32) {
+        let k = self.scale.max(1);
+        (self.screen.0 / k, self.screen.1 / k)
     }
 
     fn popup_request(&mut self, cid: ClientId, pid: Id, op: u16, a: &[Arg]) {
@@ -1439,8 +1758,13 @@ impl Server {
         let c = self.clients.get_mut(&cid).unwrap();
         let Some(x) = c.xdg.get_mut(&xid) else { return };
         x.configured = true;
-        match x.role {
-            XdgRole::Toplevel(top) => self.configure_toplevel(cid, top, (0, 0)),
+        let role = x.role;
+        let full = matches!(role, XdgRole::Toplevel(top) if c.toplevels.get(&top).is_some_and(|t| t.fullscreen));
+        match role {
+            XdgRole::Toplevel(top) => {
+                let size = if full { self.fullscreen_size() } else { (0, 0) };
+                self.configure_toplevel(cid, top, size)
+            }
             XdgRole::Popup(pid) => {
                 self.place_popup(cid, pid);
                 self.configure_popup(cid, pid);
@@ -1458,15 +1782,21 @@ impl Server {
         let v = c.version(top);
         let Some(t) = c.toplevels.get_mut(&top) else { return };
         t.asked = Some(size);
-        let xdg = t.xdg;
+        let (xdg, fullscreen) = (t.xdg, t.fullscreen);
         if v >= 4 {
             c.send(top, xdg_toplevel::ev::CONFIGURE_BOUNDS, &[Out::I(screen.0 / scale), Out::I(screen.1 / scale)]);
         }
         if v >= 5 {
             c.send(top, xdg_toplevel::ev::WM_CAPABILITIES, &[Out::A(&[])]);
         }
-        // States: 4 activated.
-        let states: Vec<u8> = if focused { 4u32.to_le_bytes().to_vec() } else { Vec::new() };
+        // States: 2 fullscreen, 4 activated.
+        let mut states: Vec<u8> = Vec::new();
+        if fullscreen {
+            states.extend_from_slice(&2u32.to_le_bytes());
+        }
+        if focused {
+            states.extend_from_slice(&4u32.to_le_bytes());
+        }
         c.send(top, xdg_toplevel::ev::CONFIGURE, &[Out::I(size.0), Out::I(size.1), Out::A(&states)]);
         c.send(xdg, xdg_surface::ev::CONFIGURE, &[Out::U(serial)]);
     }
@@ -1485,7 +1815,7 @@ impl Server {
         let Some(t) = c.toplevels.get_mut(&top) else { return };
         let title = if t.title.is_empty() { "Linux program" } else { &t.title };
         let Some(id) = sys::win_create(w.max(1) as u32, h.max(1) as u32, title) else {
-            eprintln!("wl-bridge: no more windows");
+            sys::say("wl-bridge: no more windows");
             return;
         };
         t.window = Some(id);
@@ -1496,10 +1826,28 @@ impl Server {
         let surface = sys::win_surface(id);
         let size =
             (surface.width as i32 / surface.scale.max(1) as i32, surface.height as i32 / surface.scale.max(1) as i32);
+        let fullscreen = t.fullscreen;
         self.windows.insert(
             id,
-            Window { client: cid, toplevel: top, size, surface, focused: false, dirty: true, damage: None },
+            Window {
+                client: cid,
+                toplevel: top,
+                size,
+                surface,
+                focused: false,
+                dirty: true,
+                damage: None,
+                attached: Vec::new(),
+                layers: 0,
+                mode: String::new(),
+                showing: false,
+                direct_frames: 0,
+                composed_frames: 0,
+            },
         );
+        if fullscreen {
+            sys::win_set_fullscreen(id, true);
+        }
         if size != (w, h) {
             self.configure_toplevel(cid, top, size);
         }
@@ -1508,8 +1856,19 @@ impl Server {
     fn close_window(&mut self, cid: ClientId, top: Id) {
         let Some(c) = self.clients.get_mut(&cid) else { return };
         let Some(id) = c.toplevels.get_mut(&top).and_then(|t| t.window.take()) else { return };
-        self.windows.remove(&id);
+        let w = self.windows.remove(&id);
+        self.presented_at.remove(&id);
+        self.committed_at.remove(&id);
         sys::win_close(id);
+        // What it showed as it is goes back to the program (WaveOS tells
+        // a closed window nothing).
+        for k in w.map(|w| w.attached).unwrap_or_default() {
+            if let Some(&(owner, bid)) = self.kernel_buffers.get(&k) {
+                if let Some(c) = self.clients.get_mut(&owner).filter(|c| c.buffers.contains_key(&bid)) {
+                    c.send(bid, wl_buffer::ev::RELEASE, &[]);
+                }
+            }
+        }
         if self.pointer.is_some_and(|p| p.2 == id) {
             self.pointer = None;
         }
@@ -1530,10 +1889,154 @@ impl Server {
 
     // ------------------------------------------------------------ drawing
 
+    /// What a window shows, as layers WaveOS can show as they are — every
+    /// surface with content (its main surface, sub-surfaces, pop-ups),
+    /// bottom first, each buffer not copied and in a format WaveOS takes —
+    /// or `None` when one isn't so (the bridge composes the window then).
+    fn layers(&self, wid: u32) -> Result<Vec<Layer>, &'static str> {
+        let gone = "the window is gone";
+        let w = self.windows.get(&wid).ok_or(gone)?;
+        let c = self.clients.get(&w.client).ok_or(gone)?;
+        let t = c.toplevels.get(&w.toplevel).ok_or(gone)?;
+        let root = c.xdg.get(&t.xdg).ok_or(gone)?.surface;
+        let k = w.surface.scale.max(1) as i32;
+        let g = c.geometry(t.xdg);
+        let mut out = Vec::new();
+        collect_layers(c, root, (-g.0, -g.1), k, &mut out)?;
+        for (_, p) in &c.popups {
+            if c.toplevel_of(p.xdg) != Some(w.toplevel) {
+                continue;
+            }
+            let (ox, oy) = c.origin(p.xdg);
+            if let Some(px) = c.xdg.get(&p.xdg) {
+                collect_layers(c, px.surface, (ox - g.0, oy - g.1), k, &mut out)?;
+            }
+        }
+        match out.len() {
+            0 => Err("nothing to show"),
+            n if n > sys::MAX_LAYERS => Err("too many surfaces"),
+            _ => Ok(out),
+        }
+    }
+
+    /// Shows a window's surfaces as they are: their buffers attached to
+    /// the WaveOS window — one alone when it is all the window shows (a
+    /// display may then scan it out), else as layers. False if it can't be.
+    fn attach(&mut self, wid: u32) -> bool {
+        let layers = match self.layers(wid) {
+            Ok(l) => l,
+            Err(why) => {
+                self.note_mode(wid, why);
+                return false;
+            }
+        };
+        let w = self.windows.get_mut(&wid).unwrap();
+        let cid = w.client;
+        let c = self.clients.get_mut(&cid).unwrap();
+        let first = &layers[0];
+        let s = c.surfaces.get(&first.surface).unwrap();
+        let whole = Rect::new(0, 0, s.bw, s.bh);
+        let alone = layers.len() == 1 && first.src == whole && (first.dst.x, first.dst.y) == (0, 0) && s.identity_viewport();
+        // What changed of each layer: its damage, made tight by comparing
+        // with the buffer WaveOS still shows of it (browsers say "all of it"
+        // for a caret, or a scrolled strip): only that is composed again.
+        let changed: Vec<Option<Rect>> = layers.iter().map(|l| tight_damage(c, l)).collect();
+        let done = if alone {
+            // Damage against what the window showed last, whichever buffer
+            // that was; all of it when the window showed its own surface.
+            let damage = if w.attached.is_empty() { whole } else { changed[0].unwrap_or_default() };
+            sys::win_attach(wid, first.kernel, s.scale, damage.intersect(whole))
+        } else {
+            let window = Rect::new(0, 0, w.surface.width as i32, w.surface.height as i32);
+            // Damage in window pixels: every layer's change where it is shown
+            // (all of it after a change of layout).
+            let mut damage = None;
+            for (l, r) in layers.iter().zip(&changed) {
+                if let Some(r) = r {
+                    let sx = |v: i32| l.dst.x + ((v - l.src.x) as i64 * l.dst.w as i64 / l.src.w.max(1) as i64) as i32;
+                    let sy = |v: i32| l.dst.y + ((v - l.src.y) as i64 * l.dst.h as i64 / l.src.h.max(1) as i64) as i32;
+                    let (x0, y0) = (sx(r.x), sy(r.y));
+                    damage::add(&mut damage, Rect::new(x0, y0, sx(r.right()) - x0 + 1, sy(r.bottom()) - y0 + 1));
+                }
+            }
+            let damage = if w.attached.is_empty() || w.damage.is_none() { window } else { damage.unwrap_or_default() };
+            let list: Vec<sys::WinLayer> = layers
+                .iter()
+                .map(|l| sys::WinLayer {
+                    buffer: l.kernel,
+                    flags: 0,
+                    src: [l.src.x, l.src.y, l.src.w, l.src.h],
+                    dst: [l.dst.x, l.dst.y, l.dst.w, l.dst.h],
+                })
+                .collect();
+            sys::win_attach_layers(wid, &list, w.surface.scale as i32, damage.intersect(window))
+        };
+        if !done {
+            self.note_mode(wid, "WaveOS refused the buffers");
+            return false;
+        }
+        let kinds: Vec<String> = {
+            let c = &self.clients[&cid];
+            layers
+                .iter()
+                .map(|l| {
+                    let b = c.buffers.get(&l.buffer);
+                    let dma = b.is_some_and(|b| matches!(b.memory, buffers::Memory::Dma { .. }));
+                    let format = b.map_or("", |b| if b.opaque() { "XRGB" } else { "ARGB" });
+                    let scaled = if (l.src.w, l.src.h) != (l.dst.w, l.dst.h) { " scaled" } else { "" };
+                    format!("{} {}x{} {format}{scaled}", if dma { "dma-buf" } else { "shm" }, l.src.w, l.src.h)
+                })
+                .collect()
+        };
+        let mode = if alone {
+            format!("shown as it is ({})", kinds[0])
+        } else {
+            format!("{} layers: {}", kinds.len(), kinds.join(", "))
+        };
+        self.note_mode(wid, &mode);
+        let w = self.windows.get_mut(&wid).unwrap();
+        let c = self.clients.get_mut(&cid).unwrap();
+        // The buffers it showed before come back from WaveOS (`BUFFER_RELEASE`).
+        w.attached = layers.iter().map(|l| l.kernel).collect();
+        w.damage = None;
+        w.showing = true;
+        w.direct_frames += 1;
+        w.layers = layers.len();
+        for l in &layers {
+            if let Some(s) = c.surfaces.get_mut(&l.surface) {
+                s.direct_damage = None;
+                s.on_screen = Some(l.buffer);
+                s.pixels_current = false;
+            }
+            self.kernel_buffers.insert(l.kernel, (cid, l.buffer));
+        }
+        true
+    }
+
+    /// Logs how a window reaches the screen when that changes (as it is, as
+    /// layers, or composed by the bridge and why).
+    fn note_mode(&mut self, wid: u32, mode: &str) {
+        let Some(w) = self.windows.get_mut(&wid) else { return };
+        if w.mode == mode {
+            return;
+        }
+        w.mode = String::from(mode);
+        let title = self.clients.get(&w.client).and_then(|c| c.toplevels.get(&w.toplevel)).map(|t| t.title.clone());
+        let composed = if mode.starts_with("shown") || mode.contains("layers:") { "" } else { "composed by the bridge: " };
+        sys::log(&format!("window {wid} ({}): {composed}{mode}", title.unwrap_or_default()));
+    }
+
     /// Draws a window's surfaces into its WaveOS window.
     fn compose(&mut self, wid: u32) {
         let Some(w) = self.windows.get_mut(&wid) else { return };
         w.dirty = false;
+        let started = sys::monotonic_ns();
+        if self.attach(wid) {
+            self.presented(wid, started, true);
+            return;
+        }
+        self.take_back(wid);
+        let Some(w) = self.windows.get_mut(&wid) else { return };
         let Some(c) = self.clients.get(&w.client) else { return };
         let Some(t) = c.toplevels.get(&w.toplevel) else { return };
         let Some(x) = c.xdg.get(&t.xdg) else { return };
@@ -1573,6 +2076,144 @@ impl Server {
             }
         }
         sys::win_present(wid, clip);
+        if let Some(w) = self.windows.get_mut(&wid) {
+            w.showing = true;
+            w.composed_frames += 1;
+        }
+        self.presented(wid, started, false);
+    }
+
+    /// A window that showed a buffer as it is composes again: the surface
+    /// that wasn't copied is copied now, and the WaveOS window shows its
+    /// own surface (the buffer comes back with `BUFFER_RELEASE`).
+    fn take_back(&mut self, wid: u32) {
+        let Some(w) = self.windows.get(&wid) else { return };
+        let (cid, top, attached) = (w.client, w.toplevel, w.attached.clone());
+        let Some(c) = self.clients.get_mut(&cid) else { return };
+        // Every surface of the window: its tree and its pop-ups'.
+        let mut tree = Vec::new();
+        if let Some(sid) = c.toplevels.get(&top).and_then(|t| c.xdg.get(&t.xdg)).map(|x| x.surface) {
+            tree_of(c, sid, &mut tree);
+        }
+        for (_, p) in &c.popups {
+            if c.toplevel_of(p.xdg) == Some(top) {
+                if let Some(px) = c.xdg.get(&p.xdg) {
+                    tree_of(c, px.surface, &mut tree);
+                }
+            }
+        }
+        let mut release = Vec::new();
+        for sid in tree {
+            let Some(s) = c.surfaces.get_mut(&sid).filter(|s| s.direct) else { continue };
+            s.direct = false;
+            let region = if s.pixels_current { s.direct_damage } else { None };
+            s.direct_damage = None;
+            s.on_screen = None;
+            if let Some(b) = s.attached.and_then(|bid| c.buffers.get(&bid)) {
+                copy_buffer(b, s, region);
+                s.pixels_current = true;
+                // Never given to WaveOS: it goes back now.
+                if b.kernel.get().is_none_or(|k| !attached.contains(&k)) {
+                    release.extend(s.attached);
+                }
+            }
+        }
+        for bid in release {
+            c.send(bid, wl_buffer::ev::RELEASE, &[]);
+        }
+        if !attached.is_empty() {
+            sys::win_attach(wid, 0, 1, Rect::new(0, 0, 0, 0));
+            let w = self.windows.get_mut(&wid).unwrap();
+            w.attached.clear();
+            w.layers = 0;
+            w.damage = None;
+        }
+    }
+
+    /// A window's picture went to WaveOS (`started`: when the bridge began).
+    fn presented(&mut self, wid: u32, started: u64, direct: bool) {
+        let now = sys::monotonic_ns();
+        let started = self.committed_at.remove(&wid).unwrap_or(started).min(started);
+        self.stats.frames += 1;
+        self.stats.direct += direct as u64;
+        self.stats.handoff_ns += now - started;
+        self.presented_at.insert(wid, now);
+    }
+
+    /// Answers frame callbacks and presentation feedback; `shown` is the
+    /// `FRAME` event that says when the picture was on screen.
+    fn answer(&mut self, frames: Vec<Frame>, shown: Option<&sys::Event>) {
+        if frames.is_empty() {
+            return;
+        }
+        let ms = sys::now_ms();
+        let (time, refresh, seq, flags) = match shown {
+            Some(e) => (e.c as u64 | (e.d as u64) << 32, e.b, e.a, e.x as u32),
+            None => (sys::monotonic_ns(), 16_666_667, 0, 0),
+        };
+        for f in frames {
+            let Some(c) = self.clients.get_mut(&f.client) else { continue };
+            if c.objects.remove(&f.id).is_none() {
+                continue;
+            }
+            if !f.feedback {
+                c.send(f.id, wl_callback::ev::DONE, &[Out::U(ms)]);
+            } else if shown.is_some() {
+                for o in c.all(wl_output::NAME) {
+                    c.send(f.id, wp_presentation_feedback::ev::SYNC_OUTPUT, &[Out::O(o)]);
+                }
+                let (sec, nsec) = (time / 1_000_000_000, (time % 1_000_000_000) as u32);
+                c.send(
+                    f.id,
+                    wp_presentation_feedback::ev::PRESENTED,
+                    &[
+                        Out::U((sec >> 32) as u32),
+                        Out::U(sec as u32),
+                        Out::U(nsec),
+                        Out::U(refresh),
+                        Out::U(0),
+                        Out::U(seq),
+                        // vsync, hw clock, hw completion, zero copy: as WaveOS says.
+                        Out::U(flags & 0xF),
+                    ],
+                );
+            } else {
+                c.send(f.id, wp_presentation_feedback::ev::DISCARDED, &[]);
+            }
+            c.send(1, wl_display::ev::DELETE_ID, &[Out::U(f.id)]);
+        }
+        self.answered_at = sys::monotonic_ns();
+    }
+
+    /// Every 10 seconds of frames (and when a program leaves): where they
+    /// went, in the system log.
+    fn log_stats(&mut self, now_too: bool) {
+        let now = sys::now_ms();
+        if self.stats.since == 0 {
+            self.stats.since = now;
+        }
+        if now.wrapping_sub(self.stats.since) < 10_000 && !now_too {
+            return;
+        }
+        let s = std::mem::take(&mut self.stats);
+        self.stats.since = now;
+        if s.frames == 0 {
+            return;
+        }
+        let per = |ns: u64, n: u64| ns as f64 / n.max(1) as f64 / 1e6;
+        let ms = now.wrapping_sub(s.since).max(1);
+        sys::log(&format!(
+            "{} frames in {} ms ({:.1} per second), {} shown as they are; per frame: hand-off {:.3} ms, \
+             until shown {:.2} ms, client {:.2} ms after its frame callback ({} frames)",
+            s.frames,
+            ms,
+            s.frames as f64 * 1000.0 / ms as f64,
+            s.direct,
+            per(s.handoff_ns, s.frames),
+            per(s.shown_ns, s.shown),
+            per(s.client_ns, s.client),
+            s.client,
+        ));
     }
 
     // ------------------------------------------------------ WaveOS events
@@ -1580,9 +2221,39 @@ impl Server {
     fn wave_event(&mut self, e: sys::Event) {
         use sys::event::*;
         let wid = e.window;
+        if e.kind == BUFFER_RELEASE {
+            // WaveOS no longer reads it: the program may draw into it again.
+            if let Some((cid, bid)) = self.kernel_buffers.get(&e.a).copied() {
+                if let Some(c) = self.clients.get_mut(&cid).filter(|c| c.buffers.contains_key(&bid)) {
+                    c.send(bid, wl_buffer::ev::RELEASE, &[]);
+                }
+            }
+            return;
+        }
         let Some(w) = self.windows.get(&wid) else { return };
         let (cid, top) = (w.client, w.toplevel);
         match e.kind {
+            FRAME => {
+                if let Some(w) = self.windows.get_mut(&wid) {
+                    w.showing = false;
+                }
+                if let Some(at) = self.presented_at.remove(&wid) {
+                    self.stats.shown_ns += sys::monotonic_ns().saturating_sub(at);
+                    self.stats.shown += 1;
+                }
+                let (go, keep): (Vec<Frame>, Vec<Frame>) =
+                    std::mem::take(&mut self.frames).into_iter().partition(|f| f.window == Some(wid));
+                self.frames = keep;
+                self.answer(go, Some(&e));
+            }
+            FULLSCREEN => {
+                let on = e.a != 0;
+                if let Some(t) = self.clients.get_mut(&cid).and_then(|c| c.toplevels.get_mut(&top)) {
+                    t.fullscreen = on;
+                }
+                let size = self.windows.get(&wid).map_or((0, 0), |w| w.size);
+                self.configure_toplevel(cid, top, size);
+            }
             KEY => self.key(cid, &e),
             POINTER_MOVE => {
                 if e.x < 0 && e.y < 0 && e.a == 0 {
@@ -2011,20 +2682,23 @@ struct Target<'a> {
 
 /// Copies a committed buffer into the surface.
 fn copy_buffer(b: &Buffer, s: &mut Surface, requested: Option<Rect>) -> Option<Rect> {
-    let pool = b.pool.borrow();
     let (w, h, stride) = (b.width.max(0) as usize, b.height.max(0) as usize, b.stride.max(0) as usize);
-    let need = b.offset.checked_add(stride.checked_mul(h.saturating_sub(1))?)?.checked_add(w.checked_mul(4)?)?;
-    if w == 0 || h == 0 || stride < w * 4 || need > pool.size {
+    if w == 0 || h == 0 || stride < w * 4 {
+        return None;
+    }
+    let need = stride.checked_mul(h - 1)?.checked_add(w.checked_mul(4)?)?;
+    let (base, size) = b.bytes()?;
+    if need > size {
         return None;
     }
     let bounds = Rect::new(0, 0, w as i32, h as i32);
-    let same = s.bw == w as i32 && s.bh == h as i32 && s.opaque == (b.format == 1) && s.has_content;
+    let same = s.bw == w as i32 && s.bh == h as i32 && s.opaque == b.opaque() && s.has_content;
     let clip = if same { requested.unwrap_or(bounds).intersect(bounds) } else { bounds };
     s.pixels.resize(w * h, 0);
     let mut actual = if same { Rect::default() } else { bounds };
-    let mask = if b.format == 1 { 0x00ff_ffff } else { u32::MAX };
+    let mask = if b.opaque() { 0x00ff_ffff } else { u32::MAX };
     for y in clip.y as usize..clip.bottom() as usize {
-        let row = unsafe { std::slice::from_raw_parts(pool.ptr.add(b.offset + y * stride) as *const u32, w) };
+        let row = unsafe { std::slice::from_raw_parts(base.add(y * stride) as *const u32, w) };
         let start = y * w + clip.x as usize;
         let source = &row[clip.x as usize..clip.right() as usize];
         let destination = &mut s.pixels[start..start + clip.w as usize];
@@ -2047,8 +2721,120 @@ fn copy_buffer(b: &Buffer, s: &mut Surface, requested: Option<Rect>) -> Option<R
     }
     s.bw = w as i32;
     s.bh = h as i32;
-    s.opaque = b.format == 1;
+    s.opaque = b.opaque();
     Some(actual)
+}
+
+/// A surface shown as it is: `src` of its buffer (buffer pixels) at `dst`
+/// (window pixels).
+struct Layer {
+    surface: Id,
+    buffer: Id,
+    kernel: u32,
+    src: Rect,
+    dst: Rect,
+}
+
+/// Adds the layers of surface `sid` and its sub-surfaces, at `at` points
+/// in the window, to `out`; `None` if one can't be shown as it is.
+fn collect_layers(c: &Client, sid: Id, at: (i32, i32), k: i32, out: &mut Vec<Layer>) -> Result<(), &'static str> {
+    let Some(s) = c.surfaces.get(&sid) else { return Ok(()) };
+    if s.has_content {
+        if !s.direct {
+            return Err("a surface was copied (committed before its window showed, or an unusual format)");
+        }
+        let bid = s.attached.ok_or("a surface lost its buffer")?;
+        let b = c.buffers.get(&bid).ok_or("a buffer was destroyed")?;
+        let kernel = b.kernel_id().ok_or("WaveOS can't show a buffer")?;
+        let (lw, lh) = s.size();
+        let src = match s.src {
+            // The viewport's source rectangle, in buffer pixels.
+            Some((x, y, w, h)) => {
+                let sc = s.scale as f64;
+                let r = Rect::new((x * sc) as i32, (y * sc) as i32, ((w * sc) as i32).max(1), ((h * sc) as i32).max(1));
+                r.intersect(Rect::new(0, 0, s.bw, s.bh))
+            }
+            None => Rect::new(0, 0, s.bw, s.bh),
+        };
+        if src.empty() || lw <= 0 || lh <= 0 {
+            return Err("an empty viewport");
+        }
+        out.push(Layer { surface: sid, buffer: bid, kernel, src, dst: Rect::new(at.0 * k, at.1 * k, lw * k, lh * k) });
+    }
+    for child in &s.children {
+        if let Some(cs) = c.surfaces.get(child) {
+            collect_layers(c, *child, (at.0 + cs.pos.0, at.1 + cs.pos.1), k, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// What changed of layer `l` (buffer pixels; `None`: nothing): the
+/// surface's damage, made tight by comparing its new buffer with the one
+/// WaveOS still shows of it, row by row (it is held until WaveOS releases
+/// it, so it can't change meanwhile). Without such a buffer, the damage as
+/// the program gave it.
+fn tight_damage(c: &Client, l: &Layer) -> Option<Rect> {
+    let s = c.surfaces.get(&l.surface)?;
+    let whole = Rect::new(0, 0, s.bw, s.bh);
+    let damage = s.direct_damage?.intersect(whole);
+    let (Some(old), Some(new)) = (s.on_screen.filter(|&b| b != l.buffer), Some(l.buffer)) else { return Some(damage) };
+    let (Some(old), Some(new)) = (c.buffers.get(&old), c.buffers.get(&new)) else { return Some(damage) };
+    if (old.width, old.height, old.stride, old.format) != (new.width, new.height, new.stride, new.format) {
+        return Some(damage);
+    }
+    let (Some((a, asize)), Some((b, bsize))) = (old.bytes(), new.bytes()) else { return Some(damage) };
+    let stride = new.stride as usize;
+    if damage.empty() || (damage.bottom() as usize).saturating_sub(1) * stride + damage.right() as usize * 4 > asize.min(bsize) {
+        return Some(damage);
+    }
+    let mask = if new.opaque() { 0x00ff_ffff } else { u32::MAX };
+    let row = |y: i32| {
+        let at = y as usize * stride + damage.x as usize * 4;
+        unsafe {
+            (
+                std::slice::from_raw_parts(a.add(at) as *const u32, damage.w as usize),
+                std::slice::from_raw_parts(b.add(at) as *const u32, damage.w as usize),
+            )
+        }
+    };
+    // Comparing costs as much as a copy: first a few rows spread over the
+    // damage. When most of them changed (a scroll, a new page) the damage
+    // stands as given; only small changes are worth narrowing down.
+    if damage.h >= 64 {
+        let samples = 24;
+        let changed = (0..samples)
+            .filter(|i| {
+                let (ra, rb) = row(damage.y + i * (damage.h - 1) / (samples - 1));
+                ra != rb
+            })
+            .count();
+        if changed * 2 >= samples as usize {
+            return Some(damage);
+        }
+    }
+    let mut tight: Option<Rect> = None;
+    for y in damage.y..damage.bottom() {
+        let (ra, rb) = row(y);
+        if ra == rb {
+            continue;
+        }
+        let differs = |(p, q): (&u32, &u32)| (p ^ q) & mask != 0;
+        let Some(left) = ra.iter().zip(rb).position(differs) else { continue };
+        let right = ra.iter().zip(rb).rposition(differs).unwrap() + 1;
+        damage::add(&mut tight, Rect::new(damage.x + left as i32, y, (right - left) as i32, 1));
+    }
+    tight
+}
+
+/// Surface `sid` and all its sub-surfaces.
+fn tree_of(c: &Client, sid: Id, out: &mut Vec<Id>) {
+    out.push(sid);
+    if let Some(s) = c.surfaces.get(&sid) {
+        for child in &s.children {
+            tree_of(c, *child, out);
+        }
+    }
 }
 
 /// Draws a surface and its sub-surfaces at (`x`, `y`) points.
@@ -2186,7 +2972,7 @@ mod render_tests {
     fn full_damage_is_reduced_to_visible_pixel_changes() {
         let mut source = vec![0xff112233u32; 16];
         let pool = Rc::new(RefCell::new(Pool { fd: -1, ptr: source.as_mut_ptr() as *mut u8, size: 64 }));
-        let mut buffer = Buffer { pool: pool.clone(), offset: 0, width: 4, height: 4, stride: 16, format: 1 };
+        let mut buffer = Buffer::shm(pool.clone(), 0, 4, 4, 16, 1);
         let mut surface = Surface::new();
         assert_eq!(copy_buffer(&buffer, &mut surface, None), Some(Rect::new(0, 0, 4, 4)));
         surface.has_content = true;
@@ -2197,7 +2983,7 @@ mod render_tests {
         // XRGB's unused byte is not a visible change. ARGB's alpha is.
         source[0] ^= 0xff000000;
         assert!(copy_buffer(&buffer, &mut surface, None).unwrap().empty());
-        buffer.format = 0;
+        buffer.format = buffers::ARGB8888;
         assert_eq!(copy_buffer(&buffer, &mut surface, None), Some(Rect::new(0, 0, 4, 4)));
         source[0] ^= 0xff000000;
         assert_eq!(copy_buffer(&buffer, &mut surface, None), Some(Rect::new(0, 0, 1, 1)));
@@ -2209,7 +2995,7 @@ mod render_tests {
     fn damage_copy_preserves_unchanged_pixels_and_resizes_in_full() {
         let mut source = vec![0xff224466u32; 16];
         let pool = Rc::new(RefCell::new(Pool { fd: -1, ptr: source.as_mut_ptr() as *mut u8, size: 64 }));
-        let mut buffer = Buffer { pool: pool.clone(), offset: 0, width: 4, height: 4, stride: 16, format: 1 };
+        let mut buffer = Buffer::shm(pool.clone(), 0, 4, 4, 16, 1);
         let mut surface = Surface::new();
         assert_eq!(copy_buffer(&buffer, &mut surface, Some(Rect::new(1, 1, 1, 1))), Some(Rect::new(0, 0, 4, 4)));
         surface.has_content = true;

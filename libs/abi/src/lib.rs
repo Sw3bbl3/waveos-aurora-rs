@@ -243,7 +243,29 @@ pub mod nr {
     /// system open and save panel, file bookmarks and (for Settings) the
     /// privacy decisions; see [`super::sandbox`].
     pub const SANDBOX: usize = 94;
-    pub const COUNT: usize = 95;
+    /// `win_buffer(fd, offset, width | height << 32, stride, format) -> id`
+    /// — Linux programs only: pixels a window can show instead of its own
+    /// surface, without a copy (see `win_attach`). `fd` is a dma-buf (a
+    /// DRM buffer from PRIME) or shared memory (`memfd`, `/dev/shm`);
+    /// `offset` and `stride` are in bytes; `format` is a DRM fourcc
+    /// (`XR24`, `AR24` premultiplied). The memory is held from now on, until
+    /// `win_buffer_destroy` and the compositor no longer reads it.
+    pub const WIN_BUFFER: usize = 95;
+    /// `win_buffer_destroy(id)` — the program has no more use for buffer `id`.
+    pub const WIN_BUFFER_DESTROY: usize = 96;
+    /// `win_attach(window, buffer | scale << 32, x | y << 32, w | h << 32)`
+    /// — the window shows `buffer` (drawn at `scale`, 1 if 0) from now on,
+    /// and `x`, `y`, `w`, `h` of it (pixels) changed; buffer 0 goes back to the window's own
+    /// surface. The buffer is read where it is: the program must not draw
+    /// into it again before an [`super::event::BUFFER_RELEASE`] for it.
+    /// With [`super::attach::LAYERS`] | n in place of the buffer, the window
+    /// shows `n` buffers stacked ([`super::WinLayer`]s at the third argument;
+    /// the damage, in window pixels, follows as `x | y << 32, w | h << 32`).
+    pub const WIN_ATTACH: usize = 97;
+    /// `win_set_fullscreen(window, on)` — shows the window's content over
+    /// the whole display it is on (no frame, bar or Harbor), or not.
+    pub const WIN_SET_FULLSCREEN: usize = 98;
+    pub const COUNT: usize = 99;
 }
 
 /// Per-app sandboxing (`sandbox`, see docs/developer/sandboxing.md).
@@ -1519,7 +1541,7 @@ pub mod event {
     pub const SCREEN: u32 = 14;
     /// The compositor has shown what the window presented last (a window
     /// presents again after this to draw at the screen's pace). At most
-    /// one is queued per window.
+    /// one is queued per window; [`super::frame`] says when it was shown.
     pub const FRAME: u32 = 15;
     /// A game controller changed: `a` = its id, `b` = its buttons (the
     /// [`super::gamepad`] bits), `c` = 1 connected, 2 disconnected, 0 a
@@ -1537,6 +1559,46 @@ pub mod event {
     /// can rebuild), 2 critical (programs wait for memory, and one may be
     /// ended soon: free all you can).
     pub const MEMORY_PRESSURE: u32 = 18;
+    /// The compositor no longer reads buffer `a` (`win_attach`): the
+    /// program may draw into it again.
+    pub const BUFFER_RELEASE: u32 = 19;
+    /// The window became full screen (`a` = 1) or left it (`a` = 0); a
+    /// [`RESIZE`] gives its new size.
+    pub const FULLSCREEN: u32 = 20;
+}
+
+/// `win_attach` with several buffers: a window made of a program's surfaces
+/// (its main one, sub-surfaces such as a video, pop-up menus), each shown
+/// where it is, without composing them into one picture first.
+pub mod attach {
+    /// The buffer argument of `win_attach` is this | the number of layers.
+    pub const LAYERS: u64 = 1 << 31;
+    pub const MAX_LAYERS: usize = 16;
+}
+
+/// One layer of a window (`win_attach` with [`attach::LAYERS`]), bottom
+/// first: the part `src` of `buffer` (its pixels) shown at `dst` (window
+/// pixels, at the attach's scale; scaled when the sizes differ).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WinLayer {
+    pub buffer: u32,
+    pub flags: u32,
+    pub src: [i32; 4],
+    pub dst: [i32; 4],
+}
+
+/// What a [`event::FRAME`] says about when the frame was shown: `a` = the
+/// display's frame counter, `b` = its refresh period in nanoseconds, `c`
+/// and `d` = the time the frame started showing (monotonic nanoseconds, low
+/// and high halves), `x` = these flags.
+pub mod frame {
+    /// Shown at a frame start of the display (vertical blank).
+    pub const VSYNC: i32 = 1;
+    /// The time is the display's own (not estimated).
+    pub const HW_CLOCK: i32 = 2;
+    /// The display scanned the program's buffer out itself: no copy.
+    pub const ZERO_COPY: i32 = 8;
 }
 
 /// A single input/window event. Field meaning depends on `kind`:
