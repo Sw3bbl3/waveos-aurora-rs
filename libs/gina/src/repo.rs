@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! catalog.txt, catalog.sig      the catalogue (format 2), what the Store reads
+//! catalog-aarch64.txt, .sig      the same for aarch64 systems (see below)
 //! index.txt, index.sig          the same packages in format 1, for older systems
 //! root/<n>.txt, root/<n>.sig    trust roots: which keys may sign the catalogue
 //! packages/<id>-<version>.gina  the packages
@@ -47,6 +48,16 @@
 //! key proves it is held). Clients walk `root/<n+1>.txt` until there is no
 //! next one, so a repository can retire a key without asking every device
 //! to trust a new one by hand.
+//!
+//! # Architectures
+//!
+//! A repository can serve x86_64 and aarch64 systems: each reads its own
+//! catalogue ([`catalog_files`]), whose packages and system updates are all
+//! for its processor. An aarch64 catalogue says so in its signed text
+//! (`arch<TAB>aarch64`, after `expires`); an x86_64 one says nothing, as
+//! before the port, so older systems still read it. A client refuses a
+//! catalogue for another processor ([`Index::arch`]), so a mirror can't
+//! hand one architecture the other's (validly signed) catalogue.
 //!
 //! Format 1 (`index.txt`, `gina-repository 1`) has only `name`, `generated`
 //! and the first ten `package` fields; a client that has once seen a
@@ -139,6 +150,17 @@ pub struct Index {
     /// (id, version) pairs nobody may install.
     pub revoked: Vec<(String, String)>,
     pub system: Vec<SystemRelease>,
+    /// The processor everything listed is for; empty means x86_64 (see [`Index::arch`]).
+    pub architecture: String,
+}
+
+/// The catalogue and its signature for systems of architecture `arch`.
+pub fn catalog_files(arch: &str) -> (&'static str, &'static str) {
+    if arch == "aarch64" {
+        ("catalog-aarch64.txt", "catalog-aarch64.sig")
+    } else {
+        ("catalog.txt", "catalog.sig")
+    }
 }
 
 fn text(s: &str, max: usize, empty_ok: bool) -> Result<String> {
@@ -305,6 +327,13 @@ impl Index {
                     index.expires = number(v)?;
                     expiring = true;
                 }
+                (2, ["arch", a]) if index.architecture.is_empty() => {
+                    if !crate::ARCHITECTURES.contains(a) {
+                        return Err("The repository catalogue is for an unknown processor");
+                    }
+                    // x86_64 is the default: kept as "", as an x86 catalogue writes it.
+                    index.architecture = if *a == "x86_64" { String::new() } else { a.to_string() };
+                }
                 (2, ["mirror", url]) => {
                     if !valid_url(url) || index.mirrors.len() >= 8 || index.mirrors.iter().any(|m| m == url) {
                         return Err("Invalid mirror in the index");
@@ -381,6 +410,15 @@ impl Index {
         Ok(index)
     }
 
+    /// The processor this catalogue's packages and updates are for.
+    pub fn arch(&self) -> &str {
+        if self.architecture.is_empty() {
+            "x86_64"
+        } else {
+            &self.architecture
+        }
+    }
+
     /// The index in its own format.
     pub fn encode(&self) -> String {
         if self.format == 2 {
@@ -421,6 +459,9 @@ impl Index {
             "gina-repository 2\nname\t{}\nversion\t{}\ngenerated\t{}\nexpires\t{}\n",
             self.name, self.version, self.generated, self.expires
         );
+        if self.arch() != "x86_64" {
+            out += &format!("arch\t{}\n", self.arch());
+        }
         for m in &self.mirrors {
             out += &format!("mirror\t{m}\n");
         }

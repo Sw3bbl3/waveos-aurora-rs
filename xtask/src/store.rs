@@ -22,6 +22,16 @@
 //! (`target/keys/waveos-system.key`, trusted through
 //! `/System/Keys/Updates/waveos-system.pub`), as content-addressed objects
 //! under `system/objects/` that later updates share.
+//!
+//! One folder serves both architectures: `--arch` (or the build's) says
+//! which half is written. x86_64 has the names from before the port
+//! (`catalog.txt`, `index.txt`, `packages/`, `assets/`, `system/<version>/`),
+//! aarch64 its own (`catalog-aarch64.txt`, `packages-aarch64/`,
+//! `assets-aarch64/`, `system-aarch64/<version>/`); the content-addressed
+//! objects of system updates (`system/objects/`) are shared, and so are the
+//! trust roots. Each architecture's catalogue lists only its own packages
+//! and updates, and names its architecture (see `gina::repo`).
+use super::arch::Arch;
 use super::package::{self, Key};
 use super::{root, Program};
 use gina::repo::{Asset, Entry, Index, Role, Root, SystemRelease};
@@ -104,6 +114,13 @@ pub struct Spec<'a> {
     /// Seconds since 1970 the catalogue was made (default: now).
     pub generated: Option<u64>,
     pub revoked: Vec<(String, String)>,
+    /// Whose half of the repository this is (default: the build's).
+    pub arch: Arch,
+}
+
+/// Where an architecture's files go in a repository folder.
+fn sub(arch: Arch, name: &str) -> String {
+    format!("{name}{}", arch.suffix())
 }
 
 impl<'a> Spec<'a> {
@@ -117,13 +134,14 @@ impl<'a> Spec<'a> {
             version: None,
             generated: None,
             revoked: Vec::new(),
+            arch: crate::arch::current(),
         }
     }
 }
 
-fn write_asset(dir: &Path, bytes: &[u8]) -> Result<Asset, String> {
+fn write_asset(dir: &Path, arch: Arch, bytes: &[u8]) -> Result<Asset, String> {
     let sha: [u8; 32] = Sha256::digest(bytes).into();
-    let path = format!("assets/{}.png", gina::hex(&sha));
+    let path = format!("{}/{}.png", sub(arch, "assets"), gina::hex(&sha));
     fs::write(dir.join(&path), bytes).map_err(|e| e.to_string())?;
     Ok(Asset { path, sha256: sha, size: bytes.len() as u64 })
 }
@@ -133,19 +151,20 @@ fn sign_file(path: &Path, message: &[u8], keys: &[&Key]) -> Result<(), String> {
     fs::write(path, text).map_err(|e| e.to_string())
 }
 
-/// The catalogue a repository folder holds now, if any.
-pub fn current_catalog(dir: &Path) -> Option<Index> {
-    Index::parse(&fs::read(dir.join("catalog.txt")).ok()?).ok()
+/// The catalogue a repository folder holds now for `arch`, if any.
+pub fn current_catalog_for(dir: &Path, arch: Arch) -> Option<Index> {
+    Index::parse(&fs::read(dir.join(gina::repo::catalog_files(arch.name()).0)).ok()?).ok()
 }
 
 /// Writes (or rewrites) the repository in `dir`: packages, pictures, the
 /// signed catalogue and format 1 index. Keeps `root/` and `system/`, and
 /// lists every system update found in `system/*/update.txt`.
 pub fn write(dir: &Path, spec: &Spec, apps: &[(Vec<u8>, Listing)]) -> Result<Index, String> {
-    let previous = current_catalog(dir).map(|c| c.version).unwrap_or(0);
-    for sub in ["packages", "assets"] {
-        let _ = fs::remove_dir_all(dir.join(sub));
-        fs::create_dir_all(dir.join(sub)).map_err(|e| e.to_string())?;
+    let arch = spec.arch;
+    let previous = current_catalog_for(dir, arch).map(|c| c.version).unwrap_or(0);
+    for name in ["packages", "assets"] {
+        let _ = fs::remove_dir_all(dir.join(sub(arch, name)));
+        fs::create_dir_all(dir.join(sub(arch, name))).map_err(|e| e.to_string())?;
     }
     let generated = spec.generated.unwrap_or_else(now);
     let mut index = Index {
@@ -156,27 +175,32 @@ pub fn write(dir: &Path, spec: &Spec, apps: &[(Vec<u8>, Listing)]) -> Result<Ind
         expires: generated + spec.expires_days * 86400,
         mirrors: spec.mirrors.clone(),
         revoked: spec.revoked.clone(),
-        system: system_releases(dir)?,
+        system: system_releases(dir, arch)?,
+        architecture: if arch == Arch::X86_64 { String::new() } else { arch.name().into() },
         ..Index::default()
     };
     for (bytes, listing) in apps {
         let p = gina::Package::parse(bytes).map_err(str::to_string)?;
         let m = &p.manifest;
+        if m.arch() != arch.name() {
+            return Err(format!("{} {} is for {}, and this catalogue for {}", m.id, m.version, m.arch(), arch.name()));
+        }
         let file = format!("{}-{}.gina", m.id, m.version);
-        fs::write(dir.join("packages").join(&file), bytes).map_err(|e| e.to_string())?;
+        fs::write(dir.join(sub(arch, "packages")).join(&file), bytes).map_err(|e| e.to_string())?;
         let icon = p
             .files
             .iter()
             .find(|f| !m.icon.is_empty() && f.path == m.icon)
-            .map(|f| write_asset(dir, f.bytes))
+            .map(|f| write_asset(dir, arch, f.bytes))
             .transpose()?;
-        let screenshots = listing.screenshots.iter().map(|s| write_asset(dir, s)).collect::<Result<Vec<_>, _>>()?;
+        let screenshots =
+            listing.screenshots.iter().map(|s| write_asset(dir, arch, s)).collect::<Result<Vec<_>, _>>()?;
         index.packages.push(Entry {
             id: m.id.clone(),
             version: m.version.clone(),
             sha256: Sha256::digest(bytes).into(),
             size: bytes.len() as u64,
-            path: format!("packages/{file}"),
+            path: format!("{}/{file}", sub(arch, "packages")),
             categories: m.categories.clone(),
             name: m.name.clone(),
             author: m.developer.clone(),
@@ -198,8 +222,13 @@ pub fn write(dir: &Path, spec: &Spec, apps: &[(Vec<u8>, Listing)]) -> Result<Ind
     Index::parse(catalog.as_bytes()).map_err(str::to_string)?;
     let mut signers = vec![spec.key];
     signers.extend(spec.cosigners.iter().copied());
-    fs::write(dir.join("catalog.txt"), &catalog).map_err(|e| e.to_string())?;
-    sign_file(&dir.join("catalog.sig"), &gina::repo::catalog_message(catalog.as_bytes()), &signers)?;
+    let (catalog_txt, catalog_sig) = gina::repo::catalog_files(arch.name());
+    fs::write(dir.join(catalog_txt), &catalog).map_err(|e| e.to_string())?;
+    sign_file(&dir.join(catalog_sig), &gina::repo::catalog_message(catalog.as_bytes()), &signers)?;
+    // Format 1 is for systems from before format 2, all of them x86.
+    if arch != Arch::X86_64 {
+        return Ok(index);
+    }
     let v1 = index.encode_v1();
     fs::write(dir.join("index.txt"), &v1).map_err(|e| e.to_string())?;
     sign_file(&dir.join("index.sig"), &gina::repo::signed_message(v1.as_bytes()), &[spec.key])?;
@@ -225,10 +254,10 @@ pub fn write_root(
     sign_file(&dir.join(format!("root/{version}.sig")), &gina::repo::root_message(text.as_bytes()), signers)
 }
 
-/// The system updates in `dir/system/*/update.txt`.
-fn system_releases(dir: &Path) -> Result<Vec<SystemRelease>, String> {
+/// The system updates in `dir/system/*/update.txt` (`system-aarch64/` for aarch64).
+fn system_releases(dir: &Path, arch: Arch) -> Result<Vec<SystemRelease>, String> {
     let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(dir.join("system")) else { return Ok(out) };
+    let Ok(entries) = fs::read_dir(dir.join(sub(arch, "system"))) else { return Ok(out) };
     let mut versions: Vec<String> = entries
         .flatten()
         .filter(|e| e.path().join("update.txt").exists())
@@ -236,9 +265,12 @@ fn system_releases(dir: &Path) -> Result<Vec<SystemRelease>, String> {
         .collect();
     versions.sort_by(|a, b| gina::compare_versions(a, b));
     for v in versions {
-        let path = format!("system/{v}/update.txt");
+        let path = format!("{}/{v}/update.txt", sub(arch, "system"));
         let bytes = fs::read(dir.join(&path)).map_err(|e| e.to_string())?;
         let u = Update::parse(&bytes).map_err(|e| format!("{path}: {e}"))?;
+        if u.arch() != arch.name() {
+            return Err(format!("{path} is an update for {}", u.arch()));
+        }
         out.push(SystemRelease {
             version: u.version,
             path,
@@ -331,7 +363,8 @@ pub fn describe_esp(esp: &Path, version: &str) -> Result<Update, String> {
     let kernel = fs::read(esp.join("aurora/kernel.elf")).map_err(|e| e.to_string())?;
     let boot = fs::read(esp.join("EFI/BOOT").join(crate::arch::current().boot_file())).map_err(|e| e.to_string())?;
     let tar = fs::read(esp.join("aurora/system.tar")).map_err(|e| e.to_string())?;
-    system::describe(version, "", "", part(&kernel), part(&boot), &tar).map_err(str::to_string)
+    system::describe(crate::arch::current().name(), version, "", "", part(&kernel), part(&boot), &tar)
+        .map_err(str::to_string)
 }
 
 /// How to make a system update.
@@ -355,8 +388,9 @@ pub fn add_system_update(repo: &Path, b: &Build, key: &Key) -> Result<SystemRele
     }
     let boot = read(&format!("EFI/BOOT/{}", crate::arch::current().boot_file()))?;
     let tar = retag_image(&read("aurora/system.tar")?, b.version)?;
-    let mut u =
-        system::describe(b.version, b.min_from, b.notes, part(&kernel), part(&boot), &tar).map_err(str::to_string)?;
+    let arch = crate::arch::current();
+    let mut u = system::describe(arch.name(), b.version, b.min_from, b.notes, part(&kernel), part(&boot), &tar)
+        .map_err(str::to_string)?;
     u.published = now();
     let objects = repo.join(system::OBJECTS);
     fs::create_dir_all(&objects).map_err(|e| e.to_string())?;
@@ -376,14 +410,14 @@ pub fn add_system_update(repo: &Path, b: &Build, key: &Key) -> Result<SystemRele
             }
         }
     }
-    let dir = repo.join(format!("system/{}", b.version));
+    let dir = repo.join(format!("{}/{}", sub(arch, "system"), b.version));
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let text = u.encode();
     fs::write(dir.join("update.txt"), &text).map_err(|e| e.to_string())?;
     sign_file(&dir.join("update.sig"), &system::signed_message(text.as_bytes()), &[key])?;
     Ok(SystemRelease {
         version: u.version.clone(),
-        path: format!("system/{}/update.txt", b.version),
+        path: format!("{}/{}/update.txt", sub(arch, "system"), b.version),
         sha256: Sha256::digest(text.as_bytes()).into(),
         size: text.len() as u64,
         min_from: u.min_from,
@@ -422,7 +456,14 @@ fn samples(programs: &[Program], key: &Key, gallery_versions: &[&str]) -> Vec<(V
 /// Store and Software Update (`cargo xtask serve-repo`).
 pub fn demo_repository(programs: &[Program], esp: &Path, dir: &Path) {
     let key = package::sample_key();
-    let _ = fs::remove_dir_all(dir.join("system"));
+    // This architecture's updates go; the shared objects stay (the other
+    // architecture's updates use them too).
+    let arch = crate::arch::current();
+    for e in fs::read_dir(dir.join(sub(arch, "system"))).into_iter().flatten().flatten() {
+        if e.file_name() != "objects" {
+            let _ = fs::remove_dir_all(e.path());
+        }
+    }
     let next = next_version();
     let notes = "A sample system update made by this build, to try Software Update.";
     let build = Build { esp, version: &next, min_from: "0.8", notes, broken: false };
@@ -532,5 +573,67 @@ mod tests {
         assert_eq!(layout.len(), 3);
         fs::remove_dir_all(dir).unwrap();
         assert_eq!(next_version().split('.').count(), 3);
+    }
+
+    /// A package of `arch` whose executable is a minimal ELF for it.
+    fn package_for(arch: Arch) -> Vec<u8> {
+        let mut elf = vec![0u8; 121];
+        elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        elf[16..18].copy_from_slice(&2u16.to_le_bytes());
+        let machine: u16 = if arch == Arch::Aarch64 { 183 } else { 62 };
+        elf[18..20].copy_from_slice(&machine.to_le_bytes());
+        elf[24..32].copy_from_slice(&0x400000u64.to_le_bytes());
+        elf[32..40].copy_from_slice(&64u64.to_le_bytes());
+        elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1u16.to_le_bytes());
+        elf[64..68].copy_from_slice(&1u32.to_le_bytes());
+        elf[68..72].copy_from_slice(&5u32.to_le_bytes());
+        elf[72..80].copy_from_slice(&120u64.to_le_bytes());
+        elf[80..88].copy_from_slice(&0x400000u64.to_le_bytes());
+        elf[96..104].copy_from_slice(&1u64.to_le_bytes());
+        elf[104..112].copy_from_slice(&1u64.to_le_bytes());
+        let m = gina::Manifest {
+            format: 2,
+            architecture: arch.name().into(),
+            id: "dev.example.both".into(),
+            name: "Both".into(),
+            developer: "Ex".into(),
+            version: "1.0.0".into(),
+            entry: "bin/app".into(),
+            ..Default::default()
+        };
+        gina::pack(&m, &[("bin/app", &elf)]).unwrap()
+    }
+
+    /// One folder serves both architectures: each catalogue lists its own
+    /// package, says its architecture (x86's in the old words), and
+    /// writing one leaves the other as it was.
+    #[test]
+    fn a_repository_holds_both_architectures() {
+        let dir = std::env::temp_dir().join(format!("store-arch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let key = ([9u8; 32], String::from("Test"));
+        let spec = |arch| Spec { arch, ..Spec::new("Both", &key) };
+        let x86 = package_for(Arch::X86_64);
+        let arm = package_for(Arch::Aarch64);
+        write(&dir, &spec(Arch::X86_64), &[(x86.clone(), Listing::default())]).unwrap();
+        let before = fs::read(dir.join("catalog.txt")).unwrap();
+        write(&dir, &spec(Arch::Aarch64), &[(arm.clone(), Listing::default())]).unwrap();
+        assert_eq!(fs::read(dir.join("catalog.txt")).unwrap(), before, "the x86 catalogue changed");
+        let c = current_catalog_for(&dir, Arch::X86_64).unwrap();
+        assert_eq!((c.arch(), c.packages[0].path.as_str()), ("x86_64", "packages/dev.example.both-1.0.0.gina"));
+        assert!(!String::from_utf8(before).unwrap().contains("\narch\t"));
+        assert_eq!(fs::read(dir.join(&c.packages[0].path)).unwrap(), x86);
+        let a = current_catalog_for(&dir, Arch::Aarch64).unwrap();
+        assert_eq!(
+            (a.arch(), a.packages[0].path.as_str()),
+            ("aarch64", "packages-aarch64/dev.example.both-1.0.0.gina")
+        );
+        assert_eq!(fs::read(dir.join(&a.packages[0].path)).unwrap(), arm);
+        assert!(dir.join("catalog-aarch64.sig").exists() && dir.join("index.txt").exists());
+        // A package for the other architecture is refused.
+        assert!(write(&dir, &spec(Arch::Aarch64), &[(x86, Listing::default())]).is_err());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -206,6 +206,14 @@ pub fn load(slot: &str, check: bool) -> Option<System> {
         let dir = alloc::format!("/.system/{slot}");
         let Some(update) = read_file(&mut vol, &alloc::format!("{dir}/update.txt")) else { continue };
         let update = String::from_utf8(update).ok()?;
+        // A slot for another processor never starts (its `arch` line; none
+        // is x86_64, as every update before the aarch64 port was).
+        let arch = update.lines().find_map(|l| l.strip_prefix("arch\t")).unwrap_or("x86_64");
+        let native = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+        if arch != native {
+            warn!("slot {slot}: its system is for {arch}, not {native}");
+            return None;
+        }
         let kernel = read_file(&mut vol, &alloc::format!("{dir}/kernel.elf"))?;
         let image = read_file(&mut vol, &alloc::format!("{dir}/system.tar"))?;
         if check {

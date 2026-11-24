@@ -259,7 +259,12 @@ static void on_fault_skip(int sig, siginfo_t *si, void *ucv) {
     (void)si;
     ucontext_t *uc = ucv;
     fault_sig = sig;
+#if defined(__aarch64__)
+    // `udf` and `brk` leave the PC on themselves (4 bytes each).
+    uc->uc_mcontext.pc += 4;
+#else
     if (sig == SIGILL) uc->uc_mcontext.gregs[REG_RIP] += 2;
+#endif
 }
 
 // Ends the process with a code saying the handler ran.
@@ -302,6 +307,14 @@ static void faults(void) {
     catch_with(SIGILL, on_fault_skip);
     fault_sig = 0;
     uint64_t rcx, r11;
+#if defined(__aarch64__)
+    // x9 and x10, scratch registers a fast return path could lose.
+    __asm__ volatile("mov x9, #0x1234\n\tmov x10, #0x5678\n\tudf #0\n\tmov %0, x9\n\tmov %1, x10"
+                     : "=r"(rcx), "=r"(r11)
+                     :
+                     : "x9", "x10", "memory");
+    CHECK(fault_sig == SIGILL, "SIGILL from udf");
+#else
     // rcx and r11 come back too (they are lost by `sysret`, so this needs
     // the kernel's full return after rt_sigreturn).
     __asm__ volatile("mov $0x1234, %%rcx\n\tmov $0x5678, %%r11\n\tud2\n\tmov %%rcx, %0\n\tmov %%r11, %1"
@@ -309,8 +322,11 @@ static void faults(void) {
                      :
                      : "rcx", "r11", "memory");
     CHECK(fault_sig == SIGILL, "SIGILL from ud2");
+#endif
     CHECK(rcx == 0x1234 && r11 == 0x5678, "every register survives the handler");
 
+#if !defined(__aarch64__)
+    // (Arm's integer division by zero gives 0; it never traps.)
     catch_with(SIGFPE, on_fault_jump);
     fault_sig = 0;
     volatile int zero = 0, x = 1;
@@ -318,11 +334,17 @@ static void faults(void) {
         x = x / zero;
     }
     CHECK(fault_sig == SIGFPE && fault_code == FPE_INTDIV, "SIGFPE from division by zero");
+#endif
 
     catch_with(SIGTRAP, on_fault_skip);
     fault_sig = 0;
+#if defined(__aarch64__)
+    __asm__ volatile("brk #0");
+    CHECK(fault_sig == SIGTRAP, "SIGTRAP from brk");
+#else
     __asm__ volatile("int3");
     CHECK(fault_sig == SIGTRAP, "SIGTRAP from int3");
+#endif
 
     signal(SIGSEGV, SIG_DFL);
     signal(SIGILL, SIG_DFL);

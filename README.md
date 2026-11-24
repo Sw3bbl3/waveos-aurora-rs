@@ -94,7 +94,9 @@ make run
 
 `make run` (or `./waveos` without make) opens the launcher in your browser: pick a preset or choose the displays, memory, devices and so on, then press Launch. The build output and the serial console stream into the page. `make quick` boots whatever you launched last, and `make` on its own lists the other shortcuts. Prefer the terminal? `cargo xtask run` does the same with the defaults.
 
-A minute later, you're at the desktop. Add `--monitor` to open the System Explorer alongside it. To try a real PC, see [HARDWARE.md](docs/HARDWARE.md); for every build command, see [FEATURES.md](docs/FEATURES.md#build-commands).
+A minute later, you're at the desktop. Add `--monitor` to open the System Explorer alongside it.
+
+**On an Apple-silicon Mac,** WaveOS also builds for Arm: `make run ARCH=aarch64` (or choose **Arm** under Processor in the launcher) runs it under Hypervisor.framework at the processor's own speed, where the x86-64 build is emulated instruction by instruction. The Arm port is new: today it boots to the kernel's scheduler, and user programs, the GIC and devices are on their way ([porting.md](docs/developer/porting.md)). Your files can come along: `cargo xtask migrate-disk --arch aarch64` makes an Arm disk with everything on your x86 one, which it only reads ([BUILDING.md](docs/BUILDING.md#two-architectures-x86_64-and-aarch64-port-in-progress)). To try a real PC, see [HARDWARE.md](docs/HARDWARE.md); for every build command, see [FEATURES.md](docs/FEATURES.md#build-commands).
 
 ## Under the hood
 
