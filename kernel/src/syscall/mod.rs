@@ -17,22 +17,22 @@ use core::sync::atomic::Ordering;
 type SysResult = Result<u64, isize>;
 
 /// Entry from the assembly stub (`arch::syscall`), with interrupts enabled.
-pub extern "sysv64" fn dispatch(f: &mut SyscallFrame) {
-    let a = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
-    crate::telemetry::syscall(f.rax as usize);
+pub extern "C" fn dispatch(f: &mut SyscallFrame) {
+    let a = f.args();
+    let nr = f.number();
+    crate::telemetry::syscall(nr as usize);
     // Linux programs use Linux's numbers and meanings. (The process is
     // looked up once, here, for all the steps of the call.)
     let p = proc::current();
     let linux = p.as_ref().filter(|p| p.linux.is_some());
-    let nr = f.rax;
     let result = match linux {
         Some(p) => crate::compat::linux::dispatch(f, p),
-        None => handle(f.rax as usize, a),
+        None => handle(nr as usize, a),
     };
-    f.rax = match result {
+    f.set_return(match result {
         Ok(v) => v,
         Err(e) => (-e.abs()) as u64,
-    };
+    });
     if let Some(p) = linux {
         crate::compat::linux::signal::on_return(f, nr, p);
     }

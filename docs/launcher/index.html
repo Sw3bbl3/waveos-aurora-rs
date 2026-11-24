@@ -312,6 +312,11 @@ dialog .buttons { justify-content: flex-end; }
     <section class="card glass" aria-labelledby="h-what">
       <h2 id="h-what">What to boot</h2>
       <div class="row">
+        <div class="label">Processor</div>
+        <div class="control"><div class="seg" id="arch"></div></div>
+        <div class="help" id="arch-help"></div>
+      </div>
+      <div class="row">
         <div class="label">Boot</div>
         <div class="control"><div class="seg" id="action"></div></div>
         <div class="help" id="action-help"></div>
@@ -534,7 +539,7 @@ function seg(el, items, current, pick) {
     b.type = "button";
     b.textContent = it.label;
     b.setAttribute("aria-pressed", String(String(it.value) === String(current)));
-    if (it.available === false) { b.disabled = true; b.title = "Not in this QEMU"; }
+    if (it.available === false) { b.disabled = true; b.title = it.help && it.help.startsWith("Not on") ? it.help : "Not in this QEMU"; }
     else if (it.help) b.title = it.help;
     b.onclick = () => pick(it.value);
     el.appendChild(b);
@@ -546,24 +551,46 @@ function fillSelect(el, items, current) {
   for (const it of items) {
     const o = document.createElement("option");
     o.value = it.value;
-    o.textContent = it.label + (it.available === false ? " (not in this QEMU)" : "");
+    o.textContent = it.label + (it.available === false ? (it.help && it.help.startsWith("Not on") ? " (not on this machine)" : " (not in this QEMU)") : "");
     o.disabled = it.available === false;
     el.appendChild(o);
   }
   el.value = current;
 }
 
-const help = (table, value) => (S.options[table].find((c) => c.value === value) || {}).help || "";
+// The option tables of the processor chosen (its machine has its own devices).
+const machine = () => Object.assign({}, S.options, S.options.by_arch[config.arch] || {});
+const help = (table, value) => (machine()[table].find((c) => c.value === value) || {}).help || "";
+const suffix = () => config.arch === "aarch64" ? "-aarch64" : "";
+const diskPath = () => config.disk_image || ("target/" + (config.developer_disk ? "waveos-developer" : "waveos-aurora") + suffix() + ".img");
+
+// Another processor: keep what its machine also has, take its defaults for the rest.
+function switchArch(arch) {
+  if (arch === config.arch) return;
+  const next = S.options.by_arch[arch];
+  const patch = { arch };
+  for (const k of ["disk", "net", "gpu", "usb", "battery"]) {
+    const c = next[k].find((x) => x.value === config[k]);
+    if (!c || c.available === false) patch[k] = next.default[k];
+  }
+  if (config.disk === S.options.by_arch[config.arch].default.disk) patch.disk = next.default.disk;
+  if (!next.tests) patch.action = "run";
+  if (!next.linux_root) patch.linux = next.default.linux;
+  set(patch);
+}
 const mib = (n) => n >= 1024 ? (n / 1024) + " GiB" : n + " MiB";
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const isTest = () => config.action === "test";
 
 function render() {
-  const O = S.options;
-  seg($("action"), [{ value: "run", label: "Desktop" }, { value: "test", label: "Kernel tests" }], config.action, (v) => set({ action: v }));
+  const O = machine();
+  seg($("arch"), S.options.arch, config.arch, switchArch);
+  const chosen = S.options.arch.find((a) => a.value === config.arch) || {};
+  $("arch-help").textContent = chosen.help || "";
+  seg($("action"), [{ value: "run", label: "Desktop" }, { value: "test", label: "Kernel tests", available: O.tests }], config.action, (v) => set({ action: v }));
   $("action-help").textContent = isTest()
     ? "cargo xtask test: the kernel self-tests on a fresh test disk (512 MiB, no window), booted twice. Your own disk isn't touched."
-    : "cargo xtask run: WaveOS on your persistent disk, target/waveos-aurora.img. Files saved inside WaveOS are kept.";
+    : "cargo xtask run: WaveOS on your persistent disk, " + diskPath() + ". Files saved inside WaveOS are kept.";
 
   // Displays
   const n = config.displays.length;
@@ -626,6 +653,7 @@ function render() {
     $(k).checked = !!config[k];
   }
   $("nobuild").checked = !config.build;
+  $("linux").disabled = !O.linux_root;
   $("sound").disabled = config.headless;
   $("keyboard_capture").disabled = config.headless;
 
@@ -638,7 +666,7 @@ function render() {
   // Presets
   const box = $("presets");
   box.textContent = "";
-  for (const p of S.presets) {
+  for (const p of S.presets.filter((p) => (p.config.arch || "x86_64") === config.arch)) {
     const b = document.createElement("div");
     b.className = "preset";
     b.tabIndex = 0;
@@ -760,7 +788,7 @@ function ask(dialog, okButton, cancelButton) {
 async function launch() {
   let confirmErase = false;
   if (config.fresh_disk && !isTest()) {
-    $("erase-path").textContent = config.disk_image || (config.developer_disk ? "target/waveos-developer.img" : "target/waveos-aurora.img");
+    $("erase-path").textContent = diskPath();
     if (!await ask($("erase-dialog"), $("erase-ok"), $("erase-cancel"))) return;
     confirmErase = true;
   }
@@ -868,7 +896,8 @@ function connect() {
 async function start() {
   try { const t = localStorage.getItem("waveos-launcher-theme"); if (t) document.documentElement.dataset.theme = t; } catch (_) {}
   S = await api("/api/state");
-  config = Object.assign({}, S.last || S.options.default);
+  config = Object.assign({}, S.options.default, S.last || {});
+  if (!S.options.by_arch[config.arch]) config.arch = S.options.default.arch;
   $("store-path").textContent = "Yours are kept in " + S.store.replace(/^.*\//, "") + " (not in git).";
   $("qemu-chip").textContent = S.qemu.found ? S.qemu.version.replace(/^QEMU emulator version /, "QEMU ") : "QEMU not found";
   if (!S.qemu.found) showError("qemu-system-x86_64 isn't on the PATH. Install QEMU (brew install qemu, or apt install qemu-system-x86 ovmf), then run make run again.");

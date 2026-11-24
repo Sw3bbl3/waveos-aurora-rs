@@ -5,7 +5,6 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::arch::x86_64::__cpuid;
 use core::fmt::Write;
 
 fn class_name(class: u8, sub: u8, prog_if: u8) -> &'static str {
@@ -97,36 +96,9 @@ pub fn i2c() -> String {
 
 pub fn cpu() -> String {
     let mut s = String::new();
-    let leaf1 = __cpuid(1);
-    let leaf7 = __cpuid(7);
-    let ext = __cpuid(0x8000_0007);
-    let flags: Vec<&str> = [
-        (leaf1.ecx & (1 << 20) != 0, "sse4.2"),
-        (leaf1.ecx & (1 << 28) != 0, "avx"),
-        (leaf7.ebx & (1 << 5) != 0, "avx2"),
-        (leaf1.ecx & (1 << 25) != 0, "aes"),
-        (leaf1.ecx & (1 << 30) != 0, "rdrand"),
-        (leaf1.ecx & (1 << 21) != 0, "x2apic"),
-        (leaf1.ecx & (1 << 24) != 0, "tsc-deadline"),
-        (ext.edx & (1 << 8) != 0, "invariant-tsc"),
-        (leaf7.ebx & (1 << 7) != 0, "smep"),
-        (leaf7.ebx & (1 << 20) != 0, "smap"),
-    ]
-    .iter()
-    .filter(|f| f.0)
-    .map(|f| f.1)
-    .collect();
-    let family = (leaf1.eax >> 8) & 0xF;
-    let model = (leaf1.eax >> 4) & 0xF | ((leaf1.eax >> 16) & 0xF) << 4;
+    let flags: Vec<&str> = crate::arch::cpu::feature_names();
     let _ = writeln!(s, "Processor:  {}", crate::arch::cpu::brand());
-    let _ = writeln!(
-        s,
-        "Vendor:     {} (family {:#x}, model {:#x}, stepping {})",
-        crate::arch::cpu::vendor(),
-        family,
-        model,
-        leaf1.eax & 0xF
-    );
+    let _ = writeln!(s, "Vendor:     {} ({})", crate::arch::cpu::vendor(), crate::arch::cpu::model());
     let online = crate::arch::percpu::count();
     let ids: Vec<String> = crate::arch::percpu::online()
         .map(|c| format!("{}", crate::arch::percpu::CPUS[c].lapic_id.load(core::sync::atomic::Ordering::Relaxed)))

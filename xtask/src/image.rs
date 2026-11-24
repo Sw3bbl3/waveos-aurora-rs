@@ -295,7 +295,7 @@ pub fn grow(img: &Path, size: u64) -> io::Result<()> {
                 let (uid, gid) = from.default_owner();
                 to.enable_owners(uid, gid).map_err(err)?;
             }
-            copy_tree(&mut from, &mut to, aurorafs::ROOT, "").map_err(err)?;
+            copy_tree(&mut from, &mut to, aurorafs::ROOT, "", &|_| false).map_err(err)?;
             let root = from.stat(aurorafs::ROOT).map_err(err)?;
             if from.has_own_owner(aurorafs::ROOT).map_err(err)? {
                 to.set_owner(aurorafs::ROOT, root.owner).map_err(err)?;
@@ -333,21 +333,120 @@ fn home_volume(file: &mut File, (start, end): (u64, u64)) -> aurorafs::Result<au
     aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now)
 }
 
-/// Copies the folder `dir` of `from` to `path` on `to`, times included.
+/// The home volume of a disk image, as `migrate.rs` works on it.
+pub(crate) type Home<'a> = aurorafs::Volume<WaveDisk<'a>>;
+
+/// Makes `out`, a disk of `size` bytes with the EFI partition folder `esp`
+/// and a home volume holding a copy of the one on `src` (label, owners,
+/// times), leaving out the paths `skip` names (`/a/b`, as on the volume);
+/// `finish` then sees the source and the new volume to add what replaces
+/// them. `src` is mounted, which replays its journal: pass a copy.
+pub(crate) fn new_disk_around(
+    src: &Path,
+    esp: &Path,
+    out: &Path,
+    size: u64,
+    skip: &dyn Fn(&str) -> bool,
+    finish: &mut dyn FnMut(&mut Home, &mut Home) -> io::Result<()>,
+) -> io::Result<()> {
+    let err = |e: aurorafs::Error| io::Error::other(format!("AuroraFS: {e:?}"));
+    let mut old = OpenOptions::new().read(true).write(true).open(src)?;
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    old.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE))?;
+    old.read_exact(&mut entry)?;
+    if entry[0..16] != aurorafs::PARTITION_TYPE {
+        return Err(io::Error::other("the disk has no AuroraFS volume"));
+    }
+    let home = partition(&mut old, 1)?;
+    let mut from = home_volume(&mut old, home).map_err(err)?;
+    let l = layout(size);
+    let mut new = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(out)?;
+    new.set_len(size)?;
+    write_gpt(&mut new, &l)?;
+    format_esp(&mut new, ESP_START, ESP_SECTORS, esp)?;
+    let bytes = (l.home_end - l.home_start + 1) * SECTOR;
+    let disk =
+        WaveDisk { region: Region { file: &mut new, start: l.home_start * SECTOR, len: bytes, pos: 0 }, blocks: bytes / 4096 };
+    let mut to = aurorafs::Volume::format(disk, &from.label(), pseudo_guid(3), now).map_err(err)?;
+    if from.features() & aurorafs::FEATURE_OWNERS != 0 {
+        let (uid, gid) = from.default_owner();
+        to.enable_owners(uid, gid).map_err(err)?;
+    }
+    copy_tree(&mut from, &mut to, aurorafs::ROOT, "", skip).map_err(err)?;
+    finish(&mut from, &mut to)?;
+    let root = from.stat(aurorafs::ROOT).map_err(err)?;
+    if from.has_own_owner(aurorafs::ROOT).map_err(err)? {
+        to.set_owner(aurorafs::ROOT, root.owner).map_err(err)?;
+    }
+    to.set_times(aurorafs::ROOT, root.ctime, root.mtime).map_err(err)?;
+    to.commit().map_err(err)?;
+    to.fsck().map_err(io::Error::other)?;
+    drop(to);
+    new.sync_all()
+}
+
+/// Mounts the home volume of the disk image open as `file` (replaying its
+/// journal, which writes).
+pub(crate) fn open_home(file: &mut File) -> io::Result<Home<'_>> {
+    let home = partition(file, 1)?;
+    home_volume(file, home).map_err(|e| io::Error::other(format!("AuroraFS: {e:?}")))
+}
+
+/// A file's contents on a home volume, and its own owner if it has one
+/// (`None` when there is no such file).
+pub(crate) fn read_with_owner(vol: &mut Home, path: &str) -> Option<(Vec<u8>, Option<aurorafs::Owner>)> {
+    let ino = vol.resolve(path).ok()?;
+    let owner = own_owner(vol, ino).ok()?;
+    Some((read_file(vol, path), owner))
+}
+
+/// Writes `data` to `path` (its folder must exist), with `owner` if given.
+pub(crate) fn write_with_owner(
+    vol: &mut Home,
+    path: &str,
+    data: &[u8],
+    owner: Option<aurorafs::Owner>,
+) -> aurorafs::Result<()> {
+    let ino = vol.write_file(path, data)?;
+    if let Some(o) = owner {
+        vol.set_owner(ino, o)?;
+    }
+    Ok(())
+}
+
+/// The names in folder `path` (empty if there is none).
+pub(crate) fn list(vol: &mut Home, path: &str) -> Vec<String> {
+    let Ok(ino) = vol.resolve(path) else { return Vec::new() };
+    let mut names: Vec<String> = vol.readdir(ino).unwrap_or_default().into_iter().map(|e| e.name).collect();
+    names.sort();
+    names
+}
+
+/// A file's contents on a home volume (empty if it isn't there).
+pub(crate) fn home_file(vol: &mut Home, path: &str) -> Vec<u8> {
+    read_file(vol, path)
+}
+
+/// Copies the folder `dir` of `from` to `path` on `to`, times included,
+/// except what `skip` names.
 fn copy_tree<A: aurorafs::Disk, B: aurorafs::Disk>(
     from: &mut aurorafs::Volume<A>,
     to: &mut aurorafs::Volume<B>,
     dir: u64,
     path: &str,
+    skip: &dyn Fn(&str) -> bool,
 ) -> aurorafs::Result<()> {
     let parent = to.resolve(path)?;
     let mut buf = vec![0u8; 1 << 20];
     for e in from.readdir(dir)? {
+        if skip(&format!("{path}/{}", e.name)) {
+            continue;
+        }
         let meta = from.stat(e.ino)?;
         let owner = from.has_own_owner(e.ino)?.then_some(meta.owner);
         let ino = to.create_owned(parent, &e.name, e.kind, owner)?;
         if e.kind == aurorafs::Kind::Dir {
-            copy_tree(from, to, e.ino, &format!("{path}/{}", e.name))?;
+            copy_tree(from, to, e.ino, &format!("{path}/{}", e.name), skip)?;
         } else {
             let mut at = 0;
             while at < meta.size {
@@ -503,8 +602,65 @@ pub fn create_efi_boot_image(esp: &Path, out: &Path) -> io::Result<()> {
     file.sync_all()
 }
 
+/// The file on an EFI partition that names the processor it boots
+/// (`x86_64` or `aarch64`, see `arch.rs`).
+pub const ARCH_FILE: &str = "aurora/arch";
+
+/// A disk for one architecture offered an EFI partition for another.
+pub struct ArchMismatch {
+    pub disk: String,
+    pub new: String,
+}
+
+impl std::fmt::Display for ArchMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let (disk, new) = (&self.disk, &self.new);
+        write!(
+            f,
+            "it is a disk for {disk} and this build is for {new}, so its EFI partition was left as it was \
+             (an {new} system on it would not start). Run with `--arch {disk}` to use it, or give {new} a disk \
+             of its own with `--disk-image`"
+        )
+    }
+}
+
+/// The architecture an EFI partition folder is for: its [`ARCH_FILE`], or
+/// else the removable-media boot file it holds.
+pub fn esp_dir_arch(esp: &Path) -> Option<String> {
+    if let Ok(text) = fs::read_to_string(esp.join(ARCH_FILE)) {
+        return Some(text.trim().to_string());
+    }
+    crate::arch::ALL.iter().find(|a| esp.join("EFI/BOOT").join(a.boot_file()).exists()).map(|a| a.name().to_string())
+}
+
+/// The architecture of the EFI partition at sector `start`, by the same
+/// signs as [`esp_dir_arch`] (`None`: an empty or foreign partition).
+fn fat_arch(file: &mut File, start: u64, sectors: u64) -> Option<String> {
+    let part = Region { file, start: start * SECTOR, len: sectors * SECTOR, pos: 0 };
+    let fs = fatfs::FileSystem::new(part, fatfs::FsOptions::new()).ok()?;
+    let root = fs.root_dir();
+    if let Ok(mut f) = root.open_file(ARCH_FILE) {
+        let mut text = String::new();
+        if f.read_to_string(&mut text).is_ok() && !text.trim().is_empty() {
+            return Some(text.trim().to_string());
+        }
+    }
+    crate::arch::ALL
+        .iter()
+        .find(|a| root.open_file(&format!("EFI/BOOT/{}", a.boot_file())).is_ok())
+        .map(|a| a.name().to_string())
+}
+
+/// The architecture of the disk `img` (see [`fat_arch`]).
+pub fn disk_arch(img: &Path) -> io::Result<Option<String>> {
+    let mut file = File::open(img)?;
+    let (start, end) = partition(&mut file, 0)?;
+    Ok(fat_arch(&mut file, start, end - start + 1))
+}
+
 /// Replaces the ESP contents of an existing image, keeping the home volume.
-/// Returns false if `img` doesn't have the expected layout.
+/// Returns false if `img` doesn't have the expected layout, and refuses
+/// (`InvalidInput`, see [`ArchMismatch`]) an ESP for another architecture.
 pub fn refresh_esp(esp: &Path, img: &Path) -> io::Result<bool> {
     let mut file = OpenOptions::new().read(true).write(true).open(img)?;
     let mut hdr = [0u8; 512];
@@ -520,6 +676,13 @@ pub fn refresh_esp(esp: &Path, img: &Path) -> io::Result<bool> {
     let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
     if entry[0..16] != ESP_TYPE || start != ESP_START {
         return Ok(false);
+    }
+    // Never an x86 disk refreshed with ARM binaries, or the reverse: its
+    // files would stay, but it would no longer start.
+    if let (Some(disk), Some(new)) = (fat_arch(&mut file, start, end - start + 1), esp_dir_arch(esp)) {
+        if disk != new {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, ArchMismatch { disk, new }.to_string()));
+        }
     }
     // Options written inside WaveOS (Settings → Display) survive the refresh;
     // a system update it was running is set aside (only the four slot
@@ -767,7 +930,7 @@ impl<D: aurorafs::Disk> aurorafs::Disk for Overlay<D> {
 }
 
 /// A partition of the image file seen as 4 KiB AuroraFS blocks.
-struct WaveDisk<'a> {
+pub(crate) struct WaveDisk<'a> {
     region: Region<'a>,
     blocks: u64,
 }
@@ -935,7 +1098,7 @@ fn crc32(data: &[u8]) -> u32 {
 }
 
 /// A window onto a byte range of the image file.
-struct Region<'a> {
+pub(crate) struct Region<'a> {
     file: &'a mut File,
     start: u64,
     len: u64,
@@ -1053,6 +1216,47 @@ mod tests {
         assert_eq!(read_file(&mut vol, "/.system/a/update.txt"), b"gina-system-update 1");
         assert!(vol.fsck().is_ok());
         drop(vol);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An x86 disk is never refreshed with an aarch64 build, nor the
+    /// reverse; a disk from before `aurora/arch` is known by its boot file.
+    #[test]
+    fn refresh_refuses_the_other_architecture() {
+        let dir = std::env::temp_dir().join(format!("wv-arch-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let esp = |name: &str, boot: &str, arch: Option<&str>| {
+            let esp = dir.join(name);
+            fs::create_dir_all(esp.join("aurora")).unwrap();
+            fs::create_dir_all(esp.join("EFI/BOOT")).unwrap();
+            fs::write(esp.join("aurora/kernel.elf"), name).unwrap();
+            fs::write(esp.join("EFI/BOOT").join(boot), b"MZ loader").unwrap();
+            if let Some(a) = arch {
+                fs::write(esp.join(ARCH_FILE), format!("{a}\n")).unwrap();
+            }
+            esp
+        };
+        // An x86 disk made before the architecture was recorded.
+        let old_x86 = esp("old-x86", "BOOTX64.EFI", None);
+        let x86 = esp("x86", "BOOTX64.EFI", Some("x86_64"));
+        let arm = esp("arm", "BOOTAA64.EFI", Some("aarch64"));
+        let home = dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let img = dir.join("disk.img");
+        create_with(&old_x86, &home, None, &img, 160 * 1024 * 1024).unwrap();
+        assert_eq!(disk_arch(&img).unwrap().as_deref(), Some("x86_64"));
+        let before = fs::read(&img).unwrap();
+        let e = refresh_esp(&arm, &img).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+        assert!(e.to_string().contains("--arch x86_64"), "{e}");
+        assert!(fs::read(&img).unwrap() == before, "the refused disk changed");
+        assert!(refresh_esp(&x86, &img).unwrap());
+        assert_eq!(disk_arch(&img).unwrap().as_deref(), Some("x86_64"));
+        // And an aarch64 disk refuses x86.
+        create_with(&arm, &home, None, &img, 160 * 1024 * 1024).unwrap();
+        assert_eq!(disk_arch(&img).unwrap().as_deref(), Some("aarch64"));
+        assert!(refresh_esp(&x86, &img).is_err());
+        assert!(refresh_esp(&arm, &img).unwrap());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -389,7 +389,7 @@ pub fn ids_of(pid: u32) -> (u32, u32) {
 /// Entry for a Linux process's system call (from `syscall::dispatch`).
 pub fn dispatch(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
     if let Some(l) = p.linux.as_ref().filter(|l| l.counts.on()) {
-        let (nr, start) = (f.rax, crate::time::now_ns());
+        let (nr, start) = (f.number(), crate::time::now_ns());
         let r = traced(f, p);
         l.counts.record(|| p.name(), nr, crate::time::now_ns() - start);
         return r;
@@ -401,7 +401,7 @@ fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u
     if !p.linux.as_ref().is_some_and(|l| l.trace.load(core::sync::atomic::Ordering::Relaxed)) {
         return call(f, p);
     }
-    let (nr, a) = (f.rax, [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
+    let (nr, a) = (f.number(), f.args());
     let r = call(f, p);
     let tid = misc::tid(p);
     // The path a call names, if it names one (which argument holds it).
@@ -437,9 +437,9 @@ fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u
 
 fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
     const SIGCHLD: u64 = signal::SIGCHLD as u64;
-    let a = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
+    let a = f.args();
     let p = p.clone();
-    match f.rax {
+    match f.number() {
         nr::READ => fs::read(&p, a[0], a[1], a[2]),
         nr::WRITE => fs::write(&p, a[0], a[1], a[2]),
         nr::OPEN => fs::openat(&p, fs::AT_FDCWD, a[0], a[1], a[2]),
@@ -589,7 +589,7 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::GETGID | nr::GETEGID => Ok(p.cred.lock().gid as u64),
         nr::GETRESUID | nr::GETRESGID => {
             let c = *p.cred.lock();
-            let id = if f.rax == nr::GETRESUID { c.uid } else { c.gid };
+            let id = if f.number() == nr::GETRESUID { c.uid } else { c.gid };
             for ptr in [a[0], a[1], a[2]] {
                 crate::syscall::user::put(ptr, &id)?;
             }
@@ -600,11 +600,11 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::SETUID | nr::SETGID => {
             let mut c = p.cred.lock();
             let id = a[0] as u32;
-            let same = if f.rax == nr::SETUID { c.uid == id } else { c.gid == id };
+            let same = if f.number() == nr::SETUID { c.uid == id } else { c.gid == id };
             if same {
                 Ok(0)
             } else if c.is_root() {
-                if f.rax == nr::SETUID {
+                if f.number() == nr::SETUID {
                     c.uid = id;
                 } else {
                     c.gid = id;

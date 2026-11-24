@@ -4,7 +4,7 @@
 use super::simple::{Backend, Simple, Vram};
 use super::*;
 use bootinfo::PixelFormat;
-use x86_64::instructions::port::Port;
+use crate::arch::io::Port;
 
 const DISPI_INDEX: u16 = 0x01CE;
 const DISPI_DATA: u16 = 0x01CF;

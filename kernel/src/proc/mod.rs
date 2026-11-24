@@ -268,7 +268,7 @@ fn with_memory(p: &Process, mut op: impl FnMut(&mut AddressSpace) -> crate::mm::
             Fault::Invalid => return false,
             Fault::NoMemory => {}
         }
-        if p.killed.load(Ordering::Acquire) || !x86_64::instructions::interrupts::are_enabled() {
+        if p.killed.load(Ordering::Acquire) || !crate::arch::interrupts::are_enabled() {
             return false;
         }
         let round = kswapd::rounds();
@@ -317,7 +317,7 @@ static CURRENT: [IrqMutex<(Pid, Option<Arc<Process>>)>; crate::arch::percpu::MAX
 /// call, so each CPU remembers its last answer rather than looking in the
 /// table, whose lock every CPU would otherwise queue for.
 pub fn current() -> Option<Arc<Process>> {
-    let (found, old) = x86_64::instructions::interrupts::without_interrupts(|| {
+    let (found, old) = crate::arch::interrupts::without_interrupts(|| {
         let pid = sched::current_pid();
         if pid == 0 {
             return (None, None);

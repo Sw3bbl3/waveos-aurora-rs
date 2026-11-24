@@ -29,7 +29,7 @@ use crate::arch::percpu::{cpu_id, MAX_CPUS};
 use crate::sync::IrqMutex;
 use bootinfo::{MemoryKind, MemoryRegion};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use x86_64::instructions::interrupts;
+use crate::arch::interrupts;
 
 /// The largest buddy block: 2^10 frames (4 MiB).
 pub const MAX_ORDER: u32 = 10;

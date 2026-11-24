@@ -279,6 +279,15 @@ fn verify(source: &str, text: &[u8], sig: &[u8], v2: bool, root: Option<&Root>) 
     if v2 != (index.format == 2) {
         return Err(format!("{source} served the wrong kind of index"));
     }
+    // The signed text names its processor: another architecture's
+    // catalogue, even validly signed, lists nothing this system can run.
+    if index.arch() != gina::NATIVE_ARCH {
+        return Err(format!(
+            "{source} served a catalogue for {} systems; this one is {}",
+            index.arch(),
+            gina::NATIVE_ARCH
+        ));
+    }
     Ok(index)
 }
 
@@ -295,10 +304,13 @@ pub fn catalog(source: &str) -> Result<Catalog> {
     let (mut seen, root_version) = seen(source);
     let root = update_root(source, &bases)?;
     let root_version = root.as_ref().map_or(root_version, |r| r.version as u32);
-    let text = get(&bases, "catalog.txt", gina::repo::MAX_INDEX as u64)?;
+    // This processor's catalogue (`catalog.txt` for x86_64, as before).
+    let (catalog_txt, catalog_sig) = gina::repo::catalog_files(gina::NATIVE_ARCH);
+    let text = get(&bases, catalog_txt, gina::repo::MAX_INDEX as u64)?;
     let index = match text {
         Some(text) => {
-            let sig = get(&bases, "catalog.sig", 4096)?.ok_or_else(|| format!("{source}: its catalogue is not signed"))?;
+            let sig =
+                get(&bases, catalog_sig, 4096)?.ok_or_else(|| format!("{source}: its catalogue is not signed"))?;
             let index = verify(source, &text, &sig, true, root.as_ref())?;
             let digest: [u8; 32] = Sha256::digest(&text).into();
             gina::repo::check_fresh(&index, &digest, now_secs(), &seen).map_err(|e| format!("{source}: {e}"))?;
@@ -312,6 +324,10 @@ pub fn catalog(source: &str) -> Result<Catalog> {
         }
         None if seen.version > 0 || root.is_some() => {
             return Err(format!("{source} no longer serves its catalogue; refusing to fall back to an older format"))
+        }
+        // Format 1 predates other architectures: everything in it is x86.
+        None if gina::NATIVE_ARCH != "x86_64" => {
+            return Err(format!("{source} has no catalogue for {} systems", gina::NATIVE_ARCH))
         }
         None => {
             // A format 1 repository: signed by a trusted key, dates only grow.

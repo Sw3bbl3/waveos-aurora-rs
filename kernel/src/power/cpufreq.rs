@@ -32,9 +32,9 @@
 use crate::arch::percpu::{self, MAX_CPUS};
 use crate::sync::IrqMutex;
 use alloc::vec::Vec;
-use core::arch::x86_64::__cpuid;
+#[cfg(target_arch = "x86_64")]
+use crate::arch::cpu::cpuid as __cpuid;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use x86_64::registers::model_specific::Msr;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -144,7 +144,7 @@ fn set_driver(d: Driver) {
 }
 
 fn hypervisor() -> bool {
-    __cpuid(1).ecx & (1 << 31) != 0
+    crate::arch::cpu::hypervisor()
 }
 
 /// Detects HWP or CPPC (call on the boot CPU).
@@ -217,12 +217,37 @@ fn policy_changed() {
     super::request_local_update();
 }
 
+#[cfg(target_arch = "x86_64")]
 fn rdmsr(m: u32) -> u64 {
-    unsafe { Msr::new(m).read() }
+    crate::arch::x86_64::msr::read(m)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn wrmsr(m: u32, v: u64) {
-    unsafe { Msr::new(m).write(v) }
+    crate::arch::x86_64::msr::write(m, v)
+}
+
+// Elsewhere no CPUID leaf reports a driver, so the registers are never used.
+#[cfg(not(target_arch = "x86_64"))]
+fn rdmsr(_m: u32) -> u64 {
+    0
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn wrmsr(_m: u32, _v: u64) {}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[derive(Default)]
+struct NoCpuid {
+    eax: u32,
+    ebx: u32,
+    ecx: u32,
+    edx: u32,
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn __cpuid(_leaf: u32) -> NoCpuid {
+    NoCpuid::default()
 }
 
 /// Applies the policy to this CPU's registers (on that CPU, interrupts off).

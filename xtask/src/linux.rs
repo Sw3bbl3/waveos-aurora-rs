@@ -8,9 +8,13 @@
 //!   program) with its WaveOS backend, built static with musl into
 //!   `/System/Games/Doom`;
 //! - the Rust programs in `linux-programs/` (the Wayland bridge), built for
-//!   `x86_64-unknown-linux-musl`.
+//!   `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`.
 //!
-//! Downloads are pinned by SHA-256 and cached in `target/downloads`.
+//! Downloads are pinned by SHA-256 and cached in `target/downloads`. For
+//! aarch64 the Debian packages (BusyBox, musl's headers and library) come
+//! through the pinned `Release` and the arm64 index instead (see
+//! `debian.rs`), and the C programs are built in `target/linux-aarch64`;
+//! libdrm's `modetest` and NetSurf are x86-only so far.
 
 use super::{root, Program};
 use sha2::{Digest, Sha256};
@@ -169,8 +173,12 @@ const BUSYBOX_APPLETS: &str = include_str!("busybox-applets.txt");
 
 /// BusyBox for `/System/Linux/bin`, and its copyright for `/System/Licenses`.
 fn busybox() -> Vec<Program> {
-    let Some(deb) = fetch(&format!("{DEBIAN}/{}", BUSYBOX.0), BUSYBOX.1) else { return Vec::new() };
-    let Some(dir) = unpack_deb(&deb) else { return Vec::new() };
+    let dir = if crate::arch::current() == crate::arch::Arch::X86_64 {
+        fetch(&format!("{DEBIAN}/{}", BUSYBOX.0), BUSYBOX.1).and_then(|deb| unpack_deb(&deb))
+    } else {
+        super::debian::package_files("busybox-static")
+    };
+    let Some(dir) = dir else { return Vec::new() };
     vec![
         (String::from("Linux/bin/busybox"), dir.join("bin/busybox")),
         (String::from("Licenses/busybox.txt"), dir.join("usr/share/doc/busybox-static/copyright")),
@@ -193,6 +201,7 @@ pub fn links(programs: &[Program]) -> String {
 /// Without a C compiler for Linux (see [`Cc`]) they are left out (with a
 /// warning), and the kernel's Linux self-tests are skipped.
 pub fn programs() -> Vec<Program> {
+    let x86 = crate::arch::current() == crate::arch::Arch::X86_64;
     let mut all = busybox();
     all.extend(rust_programs());
     all.push((String::from("Linux/bin/firefox"), root().join("linux-programs/firefox/firefox.sh")));
@@ -205,13 +214,23 @@ pub fn programs() -> Vec<Program> {
         return all;
     };
     all.extend(test_programs(&cc));
-    all.extend(super::libdrm::build(&cc));
     all.extend(doom(&cc));
+    if !x86 {
+        println!("note: libdrm's modetest and NetSurf are x86_64-only so far: not in the aarch64 image");
+        return all;
+    }
+    all.extend(super::libdrm::build(&cc));
     match super::netsurf::build(&cc) {
         Some(files) => all.extend(files),
         None => eprintln!("warning: NetSurf's sources could not be downloaded: the browser is left out of the image"),
     }
     all
+}
+
+/// Where the C programs for the build's architecture go (`target/linux`
+/// for x86_64, as before).
+fn out_dir() -> PathBuf {
+    root().join(format!("target/linux{}", crate::arch::current().suffix()))
 }
 
 /// How C programs are built for Linux, static with musl: with Debian's
@@ -221,28 +240,41 @@ pub fn programs() -> Vec<Program> {
 /// second even where `musl-gcc` is installed.
 pub enum Cc {
     MuslGcc,
-    Clang { musl: PathBuf, builtins: PathBuf, lld: PathBuf },
+    /// `triplet`: musl's for the build's architecture (`x86_64-linux-musl`).
+    Clang {
+        musl: PathBuf,
+        builtins: PathBuf,
+        lld: PathBuf,
+        triplet: &'static str,
+    },
 }
 
 impl Cc {
     fn find() -> Option<Cc> {
+        let arch = crate::arch::current();
         let forced = std::env::var("WAVEOS_LINUX_CC").is_ok_and(|v| v == "clang");
-        if !forced && Command::new("musl-gcc").arg("--version").output().is_ok() {
+        // `musl-gcc` builds for the computer it runs on.
+        let native = crate::arch::Arch::host() == Some(arch);
+        if !forced && native && Command::new("musl-gcc").arg("--version").output().is_ok() {
             return Some(Cc::MuslGcc);
         }
         Command::new("clang").arg("--version").output().ok()?;
-        let musl = unpack_deb(&fetch(&format!("{DEBIAN}/{}", MUSL_DEV.0), MUSL_DEV.1)?)?.join("usr");
+        let musl = if arch == crate::arch::Arch::X86_64 {
+            unpack_deb(&fetch(&format!("{DEBIAN}/{}", MUSL_DEV.0), MUSL_DEV.1)?)?.join("usr")
+        } else {
+            super::debian::package_files("musl-dev")?.join("usr")
+        };
         // The compiler's own headers (stdatomic.h, intrinsics), after musl's.
         let resource = Command::new("clang").arg("-print-resource-dir").output().ok()?;
         let builtins = PathBuf::from(String::from_utf8_lossy(&resource.stdout).trim()).join("include");
-        Some(Cc::Clang { musl, builtins, lld: rust_lld()? })
+        Some(Cc::Clang { musl, builtins, lld: rust_lld()?, triplet: arch.musl() })
     }
 
     /// Builds `sources` into the static program `exe` with compiler
     /// options `flags` (defines, include folders, warnings).
     fn build(&self, exe: &Path, sources: &[PathBuf], flags: &[&OsStr]) {
         let name = exe.file_name().unwrap().to_string_lossy().into_owned();
-        let objs_dir = root().join("target/linux/obj").join(&name);
+        let objs_dir = out_dir().join("obj").join(&name);
         let _ = fs::remove_dir_all(&objs_dir);
         fs::create_dir_all(&objs_dir).unwrap();
         let mut objs = Vec::new();
@@ -262,10 +294,11 @@ impl Cc {
                 c.args(["-O2", "-pthread"]);
                 c
             }
-            Cc::Clang { musl, builtins, .. } => {
+            Cc::Clang { musl, builtins, triplet, .. } => {
                 let mut c = Command::new("clang");
-                c.args(["--target=x86_64-linux-musl", "-nostdinc", "-fno-pic", "-O2", "-isystem"])
-                    .arg(musl.join("include/x86_64-linux-musl"))
+                c.arg(format!("--target={triplet}"))
+                    .args(["-nostdinc", "-fno-pic", "-O2", "-isystem"])
+                    .arg(musl.join("include").join(triplet))
                     .arg("-isystem")
                     .arg(builtins);
                 c
@@ -288,8 +321,13 @@ impl Cc {
                 .args(objs)
                 .arg("-lm")
                 .status(),
-            Cc::Clang { musl, lld, .. } => {
-                let lib = musl.join("lib/x86_64-linux-musl");
+            Cc::Clang { musl, lld, triplet, .. } => {
+                let lib = musl.join("lib").join(triplet);
+                // aarch64's `long double` is a 128-bit float, which musl's
+                // printf and strtod do in software: the routines come from
+                // a compiler runtime, here the Rust toolchain's own (macOS's
+                // clang has none for Linux).
+                let runtime = (*triplet != "x86_64-linux-musl").then(compiler_builtins).flatten();
                 Command::new(lld)
                     .args(["-flavor", "gnu", "-static", "--gc-sections", "-s", "-o"])
                     .arg(exe)
@@ -297,12 +335,32 @@ impl Cc {
                     .arg(lib.join("crti.o"))
                     .args(objs)
                     .arg(lib.join("libc.a"))
+                    .args(runtime)
                     .arg(lib.join("crtn.o"))
                     .status()
             }
         };
         status.is_ok_and(|s| s.success())
     }
+}
+
+/// The Rust toolchain's compiler runtime for the build's Linux target (an
+/// archive lld reads like any other).
+fn compiler_builtins() -> Option<PathBuf> {
+    let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().ok()?;
+    let dir = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
+        .join("lib/rustlib")
+        .join(crate::arch::current().linux_musl_target())
+        .join("lib");
+    let mut found: Vec<PathBuf> = fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("libcompiler_builtins-")))
+        .filter(|p| p.extension().is_some_and(|e| e == "rlib"))
+        .collect();
+    found.sort();
+    found.pop()
 }
 
 /// The Rust toolchain's lld.
@@ -318,15 +376,13 @@ pub fn rust_lld() -> Option<PathBuf> {
     lld.exists().then_some(lld)
 }
 
-/// Target of the Rust programs in `linux-programs/`.
-const RUST_TARGET: &str = "x86_64-unknown-linux-musl";
-/// Those programs, and where they go in `/System`.
+/// Those programs (built for `Arch::linux_musl_target`), and where they go in `/System`.
 const RUST_PROGRAMS: &[(&str, &str)] = &[("wl-bridge", "Linux/bin/wl-bridge")];
 
 /// Sets up `cmd` to run cargo `subcommand` over Rust Linux program `name`.
 pub fn rust_cargo(cmd: &mut Command, subcommand: &str, name: &str) {
     cmd.current_dir(root().join("linux-programs").join(name))
-        .args([subcommand, "--release", "--target", RUST_TARGET, "--target-dir"])
+        .args([subcommand, "--release", "--target", crate::arch::current().linux_musl_target(), "--target-dir"])
         .arg(root().join("target/linux-programs"))
         .env_remove("RUSTFLAGS");
 }
@@ -341,8 +397,9 @@ fn rust_programs() -> Vec<Program> {
         let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
         rust_cargo(&mut cmd, "build", name);
         let status = cmd.status().expect("run cargo");
-        assert!(status.success(), "could not build {name} (rustup target add {RUST_TARGET})");
-        let exe = root().join("target/linux-programs").join(RUST_TARGET).join("release").join(name);
+        let target = crate::arch::current().linux_musl_target();
+        assert!(status.success(), "could not build {name} (rustup target add {target})");
+        let exe = root().join("target/linux-programs").join(target).join("release").join(name);
         out.push((String::from(*dest), exe));
     }
     out
@@ -376,7 +433,7 @@ fn files_in(dir: &PathBuf, ext: &[&str]) -> Vec<PathBuf> {
 fn doom(cc: &Cc) -> Vec<Program> {
     let top = root().join("third_party/doomgeneric");
     let (src, port, header) = (top.join("src"), top.join("waveos"), root().join("libs/linux/include"));
-    let exe = root().join("target/linux/doom");
+    let exe = out_dir().join("doom");
     let sources: Vec<PathBuf> = files_in(&src, &["c"]).into_iter().chain(files_in(&port, &["c"])).collect();
     let inputs: Vec<PathBuf> = sources
         .iter()
@@ -399,7 +456,7 @@ fn doom(cc: &Cc) -> Vec<Program> {
 
 fn test_programs(cc: &Cc) -> Vec<Program> {
     let src = root().join("linux-tests");
-    let out = root().join("target/linux");
+    let out = out_dir();
     fs::create_dir_all(&out).unwrap();
     let header = root().join("libs/linux/include");
     let include = OsString::from(format!("-I{}", header.display()));

@@ -167,7 +167,7 @@ fn on_gsi(arg: usize) {
     let d = unsafe { &*(arg as *const Dev) };
     if let IrqSource::Gsi { gsi, level: true, .. } = d.cfg.irq {
         // The line stays asserted until the reports are read (by the task).
-        crate::arch::apic::mask_gsi(gsi);
+        crate::arch::irq::mask_gsi(gsi);
     }
     d.fired.store(true, Ordering::Release);
     d.wq.wake_all();
@@ -178,7 +178,7 @@ fn unmask(d: &Dev) {
     if let IrqSource::Gsi { gsi, level, active_low } = d.cfg.irq {
         let v = d.vector.load(Ordering::Acquire);
         if v != 0 {
-            crate::arch::apic::route_gsi(gsi, v, level, active_low);
+            crate::arch::irq::route_gsi(gsi, v, level, active_low);
         }
     }
 }
@@ -187,7 +187,7 @@ fn run(arg: u64) {
     let dev: Arc<Dev> = unsafe { Arc::from_raw(arg as *const Dev) };
     if let IrqSource::Gsi { gsi, level, active_low } = dev.cfg.irq {
         match crate::arch::irq::alloc("i2c-hid", on_gsi, Arc::as_ptr(&dev) as usize) {
-            Some(v) if crate::arch::apic::route_gsi(gsi, v, level, active_low) => {
+            Some(v) if crate::arch::irq::route_gsi(gsi, v, level, active_low) => {
                 dev.vector.store(v, Ordering::Release)
             }
             _ => log!("i2c", "{}: could not route GSI {}; polling", dev.cfg.path, gsi),
@@ -533,7 +533,7 @@ impl Session {
                         empty_fires = if fired && self.last_report == before { empty_fires + 1 } else { 0 };
                         if empty_fires == 200 {
                             log!("i2c", "{}: GSI {} fires with nothing to read; polling instead", dev.cfg.path, gsi);
-                            crate::arch::apic::mask_gsi(*gsi);
+                            crate::arch::irq::mask_gsi(*gsi);
                         }
                         ok
                     } else {

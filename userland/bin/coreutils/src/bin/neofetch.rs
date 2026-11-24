@@ -20,7 +20,7 @@ fn main(_: corekit::Args) -> i32 {
         alloc::string::String::from("aurora@waveos"),
         alloc::string::String::from("-------------"),
         alloc::format!("OS: WaveOS Aurora {}", fixed_str(&i.version, i.version_len)),
-        alloc::string::String::from("Kernel: Aster (hybrid, x86_64)"),
+        alloc::format!("Kernel: Aster (hybrid, {})", corekit::abi::ARCH),
         alloc::format!("Uptime: {}", corekit::time::format_uptime(i.uptime_ms)),
         alloc::format!("Processes: {}", i.processes),
         alloc::format!("Resolution: {}x{}", i.screen_w, i.screen_h),

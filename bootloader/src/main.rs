@@ -7,8 +7,9 @@
 //!    one when an update fails), load its kernel and place its PT_LOAD
 //!    segments in freshly allocated physical memory.
 //! 3. Build a new 4-level page table: all physical memory at `PHYS_OFFSET`,
-//!    an identity map (so this code survives the CR3 switch), and the kernel
-//!    at its higher-half link address.
+//!    an identity map (so this code survives the switch), and the kernel
+//!    at its higher-half link address (`paging` on x86-64, `paging_aarch64`
+//!    on Arm, which also holds the Arm hand-off).
 //! 4. Exit boot services, translate the UEFI memory map into `BootInfo`,
 //!    switch to the new address space and jump to the kernel.
 
@@ -17,7 +18,10 @@
 
 extern crate alloc;
 
+#[cfg(target_arch = "x86_64")]
 mod paging;
+#[cfg(target_arch = "aarch64")]
+mod paging_aarch64;
 mod slots;
 
 use alloc::vec::Vec;
@@ -25,7 +29,6 @@ use bootinfo::{
     BootInfo, Framebuffer, MemoryKind, MemoryRegion, PixelFormat, VideoMode, BOOTINFO_MAGIC, BOOTINFO_VERSION,
     BOOT_DARK, BOOT_VERBOSE, KERNEL_BASE, MAX_MODES, PHYS_OFFSET,
 };
-use core::arch::asm;
 use log::info;
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::mem::memory_map::MemoryMap;
@@ -56,7 +59,7 @@ fn main() -> Status {
     // --- Choose and load the system ------------------------------------------------
     let (slot, system) = choose_system();
     let kernel_file = system.kernel;
-    let image = aurora_elf::parse(&kernel_file).expect("kernel.elf is not a valid x86_64 ELF");
+    let image = aurora_elf::parse(&kernel_file).expect("kernel.elf is not an ELF for this processor");
     let span = image.virt_end - image.virt_start;
     let kernel_pages = (span.div_ceil(PAGE)) as usize;
     let kernel_phys = alloc_pages(kernel_pages);
@@ -113,6 +116,8 @@ fn main() -> Status {
     // Map everything that is RAM (plus the framebuffer and the low 4 GiB, which
     // holds the LAPIC/IOAPIC MMIO) through the physical-memory window.
     let mut phys_end: u64 = 4 << 30;
+    #[cfg(target_arch = "aarch64")]
+    let mut ram: Vec<(u64, u64)> = Vec::new();
     for d in snapshot.entries() {
         let end = d.phys_start + d.page_count * PAGE;
         let is_ram = matches!(
@@ -129,6 +134,8 @@ fn main() -> Status {
         );
         if is_ram {
             phys_end = phys_end.max(end);
+            #[cfg(target_arch = "aarch64")]
+            ram.push((d.phys_start, end));
         }
     }
     phys_end = phys_end.max(framebuffer.phys_addr + framebuffer.size);
@@ -136,15 +143,45 @@ fn main() -> Status {
     drop(snapshot);
 
     // --- Page tables ------------------------------------------------------------
-    let mut pt = paging::PageTables::new(alloc_page);
-    pt.map_huge_range(PHYS_OFFSET, 0, phys_end);
-    pt.map_huge_range(0, 0, phys_end); // identity, dropped by the kernel later
-    let mut off = 0;
-    while off < span {
-        pt.map_4k(image.virt_start + off, kernel_phys + off);
-        off += PAGE;
-    }
-    let pml4_phys = pt.pml4();
+    #[cfg(target_arch = "x86_64")]
+    let pml4_phys = {
+        let mut pt = paging::PageTables::new(alloc_page);
+        pt.map_huge_range(PHYS_OFFSET, 0, phys_end);
+        pt.map_huge_range(0, 0, phys_end); // identity, dropped by the kernel later
+        let mut off = 0;
+        while off < span {
+            pt.map_4k(image.virt_start + off, kernel_phys + off);
+            off += PAGE;
+        }
+        pt.pml4()
+    };
+    // Arm: memory types matter. RAM is normal memory, the framebuffer
+    // non-cacheable, anything else (MMIO) device memory, per 2 MiB block.
+    #[cfg(target_arch = "aarch64")]
+    let pml4_phys = {
+        use paging_aarch64::Memory;
+        let fb = (framebuffer.phys_addr, framebuffer.phys_addr + framebuffer.size);
+        let kind = |p: u64| {
+            let end = p + (2 << 20);
+            if fb.0 < end && p < fb.1 {
+                Memory::WriteCombining
+            } else if ram.iter().any(|&(s, e)| s < end && p < e) {
+                Memory::Normal
+            } else {
+                Memory::Device
+            }
+        };
+        let mut pt = paging_aarch64::PageTables::new(alloc_page);
+        pt.map_blocks(PHYS_OFFSET, 0, phys_end, false, kind);
+        pt.map_blocks(0, 0, phys_end, true, kind); // identity, dropped by the kernel later
+        let mut off = 0;
+        while off < span {
+            pt.map_4k(image.virt_start + off, kernel_phys + off);
+            off += PAGE;
+        }
+        paging_aarch64::sync_icache(kernel_phys, span);
+        pt.root()
+    };
     info!("page tables ready, physical window covers {} GiB", phys_end >> 30);
 
     info!("exiting boot services, jumping to Aster kernel...");
@@ -201,8 +238,13 @@ fn main() -> Status {
 
     let stack_top = PHYS_OFFSET + stack_phys + KERNEL_STACK_PAGES as u64 * PAGE;
     let boot_info_virt = PHYS_OFFSET + info_phys;
+    #[cfg(target_arch = "aarch64")]
     unsafe {
-        asm!(
+        paging_aarch64::enter_kernel(pml4_phys, image.entry, stack_top, boot_info_virt)
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
             "cli",
             "mov cr3, {pml4}",
             "mov rsp, {stack}",
@@ -280,7 +322,11 @@ impl BootConf {
 /// Aurora design size) if offered, else the largest mode no wider than 1920.
 /// Returns the framebuffer and the list of usable modes.
 fn init_graphics(wanted: Option<(usize, usize)>) -> (Framebuffer, [VideoMode; MAX_MODES], u32) {
-    let handle = boot::get_handle_for_protocol::<GraphicsOutput>().expect("no GOP device");
+    let none = || (Framebuffer { phys_addr: 0, size: 0, width: 0, height: 0, stride: 0, format: PixelFormat::Bgr }, [VideoMode::default(); MAX_MODES], 0);
+    let Ok(handle) = boot::get_handle_for_protocol::<GraphicsOutput>() else {
+        log::warn!("no graphics output (GOP): booting without a framebuffer");
+        return none();
+    };
     let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(handle).expect("open GOP");
 
     let usable = |m: &gop::Mode| matches!(m.info().pixel_format(), gop::PixelFormat::Rgb | gop::PixelFormat::Bgr);
@@ -323,6 +369,10 @@ fn init_graphics(wanted: Option<(usize, usize)>) -> (Framebuffer, [VideoMode; MA
     }
     if let Some(mode) = exact.or(design).or(best) {
         gop.set_mode(&mode).expect("set GOP mode");
+    } else if count == 0 {
+        // Only Blt-only modes (EDK2's virtio-gpu on Arm): no framebuffer.
+        log::warn!("the graphics output has no framebuffer: booting without one");
+        return none();
     }
     list[..count].sort_by_key(|m| (m.width, m.height));
 

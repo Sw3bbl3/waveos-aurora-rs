@@ -457,6 +457,7 @@ pub fn install_with(bytes: &[u8], opts: &Options, mut progress: impl FnMut(usize
         collect_garbage(&root);
         let _ = mkdirs(&data_dir(&id));
         let _ = write_registry(scope);
+        let _ = reinstalled(scope, &id);
         refresh();
     }
     result
@@ -604,6 +605,67 @@ pub fn registry_text(scope: Scope) -> String {
         );
     }
     out
+}
+
+/// An app a disk migration left behind (`cargo xtask migrate-disk`): it
+/// was installed, for another processor, and needs installing again. Its
+/// data is still in `~/Library/Containers/<id>`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToReinstall {
+    pub id: String,
+    pub version: String,
+    pub name: String,
+    /// The architecture the old package was for.
+    pub architecture: String,
+    /// Where it was installed from (a repository or file), if known.
+    pub source: String,
+}
+
+/// `<root>/.reinstall`: `gina-reinstall 1`, then per app, tab-separated:
+/// `app`, id, version, name, architecture, source.
+fn reinstall_path(scope: Scope) -> String {
+    format!("{}/.reinstall", scope.root())
+}
+
+fn parse_reinstall(text: &str) -> Vec<ToReinstall> {
+    if text.lines().next() != Some("gina-reinstall 1") {
+        return Vec::new();
+    }
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            match f.as_slice() {
+                ["app", id, version, name, architecture, source] if gina::valid_id(id) => Some(ToReinstall {
+                    id: (*id).into(),
+                    version: (*version).into(),
+                    name: (*name).into(),
+                    architecture: (*architecture).into(),
+                    source: (*source).into(),
+                }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Apps in `scope` that a disk migration left to reinstall.
+pub fn needing_reinstall(scope: Scope) -> Vec<ToReinstall> {
+    parse_reinstall(&fs::read_to_string(&reinstall_path(scope)).unwrap_or_default())
+}
+
+/// `id` is installed in `scope` again: off the list (the file goes with
+/// its last line).
+fn reinstalled(scope: Scope, id: &str) -> Result<()> {
+    let path = reinstall_path(scope);
+    let Ok(text) = fs::read_to_string(&path) else { return Ok(()) };
+    let rest: Vec<&str> = text.lines().filter(|l| l.split('\t').nth(1) != Some(id) || !l.starts_with("app\t")).collect();
+    if rest.len() == text.lines().count() {
+        return Ok(());
+    }
+    if rest.len() <= 1 {
+        return fs::remove(&path).map_err(io);
+    }
+    fs::write(&path, (rest.join("\n") + "\n").as_bytes()).map_err(io)
 }
 
 /// Rewrites the registry atomically (new file, flush, rename).

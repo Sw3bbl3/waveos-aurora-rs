@@ -60,6 +60,10 @@ The root workspace's `default-members` is only `xtask`, so a plain `cargo build`
 
 Everything the loader allocates is `LOADER_DATA`. That memory is reported as `MemoryKind::Bootloader`, so the kernel never hands it out.
 
+### Processor architectures
+
+The kernel's processor-specific code lives in `kernel/src/arch/x86_64/` and `kernel/src/arch/aarch64/` behind one interface (`arch::cpu`, `interrupts`, `irq`, `timer`, `mmu`, `switch`, `fpu`, `syscall`, `trap`, `uaccess`, `smp`, `protect`, `rng`, `cache`, `io`, `power`); nothing outside `arch/` uses assembly or processor registers. The aarch64 port (QEMU `virt` under HVF or TCG; `cargo xtask run --arch aarch64`) boots through `firstlight` built for `aarch64-unknown-uefi` with the same `BootInfo`, and the kernel runs at EL1 with the same higher-half layout (TTBR1 for the kernel half, TTBR0 for the process's). See [developer/porting.md](developer/porting.md) for the interface, the aarch64 boot hand-off, the system call convention and the port's status. The rest of this document describes x86-64.
+
 ## 2. Kernel bring-up (`kernel/src/main.rs`)
 
 ```
@@ -110,10 +114,10 @@ serial → GDT/TSS → IDT → syscall MSRs → FPU → mm (frames, heap, drop i
 - **Exceptions.** All exceptions have handlers. Double faults, page faults and NMIs run on their own IST stacks, so a kernel stack overflow still produces a readable crash screen. A kernel page fault inside the user-copy routine is not a crash: it resumes at the routine's error exit (`syscall/user.rs`).
 - **Legacy PIC.** It is remapped to vectors `0xE0`–`0xEF` and fully masked.
 - **I/O APIC.** It routes ISA IRQ1 (keyboard, vector 33) and IRQ12 (mouse, vector 44) and the ACPI SCI, honouring the MADT interrupt source overrides (polarity, trigger mode).
-- **MSI and MSI-X** (`arch/irq.rs`, `pci::Device::enable_msi`). 64 vectors from `0x50` are handed out to devices, each with a handler and argument. Disk, USB and sound controllers use them; a driver whose device has neither falls back to polling.
+- **MSI and MSI-X** (`arch/x86_64/irq.rs`, `pci::Device::enable_msi`). 64 vectors from `0x50` are handed out to devices, each with a handler and argument. Disk, USB and sound controllers use them; a driver whose device has neither falls back to polling.
 - **IPIs.** Reschedule (`0xF0`), TLB shootdown (`0xF1`) and halt-on-panic (`0xF2`).
 
-### Multiprocessing (`arch/smp.rs`, `arch/percpu.rs`)
+### Multiprocessing (`arch/x86_64/smp.rs`, `arch/x86_64/percpu.rs`)
 
 - **Start-up.** The bootloader reserves a page below 1 MiB. `smp::start_aps` copies a 16→32→64-bit trampoline there, with a small page table (low memory identity-mapped plus the kernel half), and wakes each CPU from the MADT with INIT-SIPI-SIPI. Each gets its own TSS and IST stacks, loads the shared IDT, `syscall` MSRs and FPU setup, starts its APIC timer and joins the scheduler with its own idle task.
 - **Which CPU am I?** Every CPU loads its own TSS selector, so `str` answers anywhere, even in an exception handler. GS is only swapped for a few instructions in the `syscall` entry stub, to find this CPU's kernel stack.
@@ -129,7 +133,7 @@ serial → GDT/TSS → IDT → syscall MSRs → FPU → mm (frames, heap, drop i
 - **Idle time** is accounted from switch times (`cpu_times`), so it stays right with the tick stopped.
 - **Locking rule.** A spinlock held across a preemption deadlocks, so shared state uses `sync::IrqMutex`, which keeps interrupts off while held. Beware `while let Some(x) = q.lock().pop()`: the guard lives for the whole loop body. Longer critical sections that may block use `sync::Mutex`, whose waiters yield at first and, once it has been held for 2 ms, sleep until the holder lets go (it wakes one of them; any others look again every millisecond): waiters that only ever yield are always ready, and starved a holder that runs only when nothing else is (the boot code, in a CPU's idle task, holding a disk's queue lock — the second boot on one CPU with a virtio disk hung that way). In self-test builds, 60 s without any output while tasks keep switching prints every task's stack.
 
-### Timers and tickless idle (`timer.rs`, `arch/timer.rs`)
+### Timers and tickless idle (`timer.rs`, `arch/x86_64/timer.rs`)
 
 - **Timer queues.** Every CPU keeps its pending timers ordered by deadline (ns of `time::now_ns`). A timer is armed on the CPU that asks for it, so arming never touches another CPU's hardware; it can be cancelled from any CPU. A timer either wakes a sleeping task or calls a short function in interrupt context (`timer::call_after_ms`). Every `sleep_ms` and `wait_until` timeout is one: sleeps end on millisecond boundaries as before (`time::ticks()` is unchanged), so timers due in the same millisecond share one interrupt.
 - **The hardware.** Each CPU's LAPIC timer is armed for the earliest of its timers and, while other tasks wait for it, the end of the running slice (`sched::tick_deadline`). With TSC-deadline mode (CPUID.01H:ECX[24], and the TSC is the clock) the deadline is written to `IA32_TSC_DEADLINE`; otherwise the distance is counted down once (one-shot, divide-by-16; distances beyond 32 bits fire early and re-arm). QEMU's TCG has no TSC-deadline timer, so VMs use one-shot.
@@ -169,7 +173,7 @@ There is no `fork`. The model is spawn-style, like Windows' CreateProcess.
 
 **Threads.** A process can run several threads (`thread_spawn`/`thread_exit`): tasks that share its address space and handles. `futex_wait`/`futex_wake` put contended threads to sleep, keyed by (address space, address); corekit builds `sync::Mutex`, `Condvar` and `thread::spawn`/`join` on them. `thread_exit` can store 1 into a word and wake it, which is how `join` knows the thread has left its stack.
 
-**SIMD state.** User code uses SSE2; the kernel is soft-float and never touches those registers. So only user tasks carry an FXSAVE area, saved and restored eagerly on every switch between them (`arch/fpu.rs`).
+**SIMD state.** User code uses SSE2; the kernel is soft-float and never touches those registers. So only user tasks carry an FXSAVE area, saved and restored eagerly on every switch between them (`arch/x86_64/fpu.rs`).
 
 Each process has an fd table of `Handle`s:
 - open files
@@ -180,7 +184,7 @@ Each process has an fd table of `Handle`s:
 - loads the new CR3 when the process changes
 - points `TSS.rsp0` and the syscall stack at the next task's kernel stack
 
-**Syscall entry** (`arch/syscall.rs`, `syscall`/`sysret`):
+**Syscall entry** (`arch/x86_64/syscall.rs`, `syscall`/`sysret`):
 1. The stub switches to the task's kernel stack.
 2. It saves a `SyscallFrame`, enables interrupts, and calls `syscall::dispatch`.
 
@@ -199,7 +203,7 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
 - **The administrator capability** is held by administrators' processes, and given to others for five minutes when an administrator approves the system prompt (`elevate`, `apps/elevate.rs`; the window server reads the password, the app never does). Privileged: managing accounts, changing other accounts, `chown`, the clock, who logs in automatically, writing to `/Applications`. Signals and `kill` reach only the caller's own account's processes without it.
 - **Shore** shows the first-run setup (password optional), the login screen with a row of accounts when needed, and the lock screen; the WayV menu logs out or switches accounts.
 - **Per-app sandboxing** (`sandbox/`, see [developer/sandboxing.md](developer/sandboxing.md)): every program the desktop starts runs in its app's sandbox (`Process::sandbox`): its manifest's declared capabilities (the system apps' `userland/apps/*/manifest.toml` are built into the kernel; installed apps' come from their package; programs without one get the default profile), what the person allowed (asked once by the window server's privacy prompt, kept in `/Security/Privacy/<uid>.conf`, changed in Settings → Privacy & Security, live for running apps) and the files they handed it (the window server's open and save panel, a drop, a paste, opening a document with it; bookmarks keep them across runs). The VFS asks `sandbox::check_path` at every entry point, so native and Linux calls are covered alike; system calls ask `sandbox::require`; a sandboxed app's Linux local sockets and shared memory live in a namespace of its own, and its Linux `/tmp` and home folder in its container (`~/Library/Containers/<id>`). Children inherit a copy; rights can only be dropped. The menu bar shows a dot while the microphone records.
-- **System updates.** `/.system` on the home volume (the system's, writable by the admin group, protected like `/Applications`) holds the A/B slots of installed WaveOS updates. The kernel learns the slot it started from in `BootInfo.flags` (programs read it as the `system_slot` preference), removes `system_tries` from boot.conf once the desktop draws its first frame (the start was good) and then installs the update's bootloader, and arms a ready update for Update and Restart (`gui/sysupdate.rs`).
+- **System updates.** `/.system` on the home volume (the system's, writable by the admin group, protected like `/Applications`) holds the A/B slots of installed WaveOS updates. The kernel learns the slot it started from in `BootInfo.flags` (programs read it as the `system_slot` preference), removes `system_tries` from boot.conf once the desktop draws its first frame (the start was good) and then installs the update's bootloader (`BOOTX64.EFI`, or `BOOTAA64.EFI` on aarch64), and arms a ready update for Update and Restart (`gui/sysupdate.rs`). Packages, catalogues, update descriptions and slots name their architecture, and each system takes only its own ([developer/store-and-updates.md](developer/store-and-updates.md#architectures)).
 
 ### corekit and AuroraKit
 - **corekit:** the runtime. It provides `_start`, a heap that grows by `mmap`-ing new arenas, and `print!`, which formats into one buffer and writes it once. It also has file, process and time APIs.
@@ -434,7 +438,7 @@ Lines are written while holding the port lock and without allocating, so events 
 
 Each CPU feature is enabled only where CPUID reports it, on the boot CPU, on every other CPU as it starts, and again after waking from S3 (`arch::protect::init`). The boot log's `protections:` line says what is on.
 
-- **SMEP** — the kernel never executes a user page. **SMAP** — the kernel never reads or writes one, except in the user-copy routine (`syscall/user.rs`), which brackets its `rep movsb` with `stac`/`clac`; every trap entry (`arch::trap`) clears RFLAGS.AC again, and `syscall` masks it. All user memory goes through that routine: `put`/`get`/`slice`/`read_u32` and the Linux layer, which uses them for signal frames, `ioctl`s and the rest; the loaders and the vDSO write through the physical window. **UMIP** — `sgdt`, `sidt`, `sldt`, `smsw`, `str` fault in ring 3. **CR0.WP** and **EFER.NXE** are always on.
+- **SMEP** — the kernel never executes a user page. **SMAP** — the kernel never reads or writes one, except in the user-copy routine (`arch/x86_64/uaccess.rs`, used by `syscall/user.rs`), which brackets its `rep movsb` with `stac`/`clac`; every trap entry (`arch::trap`) clears RFLAGS.AC again, and `syscall` masks it. All user memory goes through that routine: `put`/`get`/`slice`/`read_u32` and the Linux layer, which uses them for signal frames, `ioctl`s and the rest; the loaders and the vDSO write through the physical window. **UMIP** — `sgdt`, `sidt`, `sldt`, `smsw`, `str` fault in ring 3. **CR0.WP** and **EFER.NXE** are always on.
 - **W^X kernel.** `kernel/linker.ld` page-aligns `.text`, `.rodata` + `.got`, and `.data`/`.bss`; `protect_kernel` maps them RX, R+NX and RW+NX, and marks every other kernel PML4 slot no-execute (the physical window is an alias of the code). The bootloader still maps the image RWX until then (it runs before the kernel enables NXE). The AP/S3 trampoline's own page table maps low memory RWX while CPUs start.
 - **Kernel stacks** of tasks (`mm::kstack`) have an unmapped 128 KiB guard below each; an overflow ends in a double fault that names it. (CPU boot stacks and IST stacks are heap memory without guards.)
 - **Stack protector.** `-Z stack-protector=strong` (`.cargo/config.toml`) with a canary from RDSEED/RDRAND and the TSC, written first thing in `_start` (`stackguard.rs`). About 1,600 functions carry it; `.text` grows by ~104 KiB (3.8 %). The C half (LinuxKPI) is built without it.

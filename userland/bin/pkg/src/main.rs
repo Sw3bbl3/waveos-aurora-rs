@@ -426,6 +426,22 @@ fn run(args: &[String]) -> Result<()> {
                     a.manifest.name
                 );
             }
+            // Left behind by a move to this processor (`migrate-disk`).
+            for scope in [apps::Scope::User, apps::Scope::System] {
+                for r in apps::needing_reinstall(scope) {
+                    if category.is_none() && !apps::list().iter().any(|a| a.manifest.id == r.id) {
+                        println!(
+                            "{:<32} {:<10} {:<9} {:<12} {} (for {}: reinstall it)",
+                            r.id,
+                            r.version,
+                            scope.name(),
+                            "-",
+                            r.name,
+                            r.architecture
+                        );
+                    }
+                }
+            }
             Ok(())
         }
         "info" => info(args),

@@ -1,15 +1,30 @@
 //! The WaveOS Aurora system-call ABI, shared by the Aster kernel and user space.
 //!
-//! Calling convention (`syscall` instruction): number in `rax`, arguments in
-//! `rdi, rsi, rdx, r10, r8, r9`, result in `rax`. Results `>= 0` are success;
-//! negative results are `-errno` (see [`err`]).
+//! Calling convention, the same numbers and arguments on both architectures:
+//!
+//! | | instruction | number | arguments | result | clobbered |
+//! |---|---|---|---|---|---|
+//! | x86-64 | `syscall` | `rax` | `rdi, rsi, rdx, r10, r8, r9` | `rax` | `rcx`, `r11` |
+//! | aarch64 | `svc #0` | `x8` | `x0`–`x5` | `x0` | none |
+//!
+//! Results `>= 0` are success; negative results are `-errno` (see [`err`]).
+//! Every other register keeps its value (on aarch64 the vector registers
+//! too). A program starts at its ELF entry with the argument block's
+//! address in its first argument register (`rdi`, `x0`); a thread starts
+//! at its function with the spawn argument there. There is no thread pointer: `TPIDR_EL0` and `fs` are left to
+//! Linux programs.
 //!
 //! Every struct that crosses the boundary is `#[repr(C)]` and contains only
 //! integers, so the kernel never has to trust user-written enum discriminants.
+//! The layouts are the same on both architectures (64-bit little-endian).
 
 #![no_std]
 
 pub mod input;
+
+/// The processor architecture this code is built for, as GINA packages
+/// and `uname` name it: `x86_64` or `aarch64`.
+pub const ARCH: &str = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
 
 /// System call numbers.
 pub mod calendar;
@@ -836,6 +851,30 @@ pub mod report {
     pub const CPU: u64 = 2;
     /// The kernel log (`dmesg`).
     pub const LOG: u64 = 3;
+
+    /// Whether the [`CPU`] report's `Features:` line (names separated by
+    /// spaces) lists every name in `names`. How programs learn what the
+    /// processor can do: on aarch64, `aes`, `pmull`, `sha256`, `crc32`,
+    /// `atomics`, … (the kernel reads the ID registers, which EL0 can't).
+    pub fn has_features(report: &str, names: &[&str]) -> bool {
+        let Some(line) = report.lines().find_map(|l| l.trim_start().strip_prefix("Features:")) else {
+            return false;
+        };
+        names.iter().all(|n| line.split_ascii_whitespace().any(|f| f == *n))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn features_line() {
+            let r = "Processor:  Apple M2\nFeatures:   aes pmull sha1 sha256 crc32 atomics\nCPUs: 4\n";
+            assert!(super::has_features(r, &["aes", "pmull"]));
+            assert!(super::has_features(r, &["sha256"]));
+            assert!(!super::has_features(r, &["aes", "sve"]));
+            assert!(!super::has_features(r, &["sha"]));
+            assert!(!super::has_features("Processor: x\n", &["aes"]));
+        }
+    }
 }
 
 /// Power sources, from ACPI (`power_info`).

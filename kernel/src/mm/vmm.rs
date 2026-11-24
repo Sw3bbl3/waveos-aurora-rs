@@ -15,47 +15,46 @@ use crate::sync::IrqMutex;
 use alloc::vec::Vec;
 use aurora_abi::layout;
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::registers::control::Cr3;
-use x86_64::registers::model_specific::{Efer, EferFlags};
+use crate::arch::mmu::{self, pte};
 
-const PRESENT: u64 = 1 << 0;
-const WRITABLE: u64 = 1 << 1;
-const USER: u64 = 1 << 2;
+const PRESENT: u64 = pte::PRESENT;
+const WRITABLE: u64 = pte::WRITABLE;
+const USER: u64 = pte::USER;
 /// Set by the CPU when the page is used, and when it is written.
-const ACCESSED: u64 = 1 << 5;
-const DIRTY: u64 = 1 << 6;
-const HUGE: u64 = 1 << 7;
-/// In a 4 KiB page entry the same bit selects the PAT slot (see `arch::pat`).
-const PAT_4K: u64 = 1 << 7;
+const ACCESSED: u64 = pte::ACCESSED;
+const DIRTY: u64 = pte::DIRTY;
+const HUGE: u64 = pte::HUGE;
+/// Write-combining memory (on x86 the PAT slot bit of a 4 KiB entry; see `arch::pat`).
+const PAT_4K: u64 = pte::WRITE_COMBINING;
 /// Software bit: the frame is owned elsewhere (e.g. a shared surface); don't free it.
-const SHARED: u64 = 1 << 9;
+const SHARED: u64 = pte::SOFT_0;
 /// Software bit, with `SHARED`: a page of a cached file, shared read-only
 /// by every mapping of it (see `fs::mapcache`). Making it
 /// writable gives the address space a copy of its own.
-const COPY_ON_WRITE: u64 = 1 << 10;
+const COPY_ON_WRITE: u64 = pte::SOFT_1;
 /// Software bit, with `SHARED`: the entry holds a count on the frame (see
 /// `swap::PAGES`), which it gives back when it goes. Shared frames without it
 /// (window surfaces) are their owners' to free: a stale entry for one must
 /// never touch the count of whatever the frame has become since.
-const COUNTED: u64 = 1 << 11;
+const COUNTED: u64 = pte::SOFT_2;
 /// Software bit, with `COPY_ON_WRITE`: the page is writable, and was made
 /// read-only only to be shared after `fork`. A write fault gives the
 /// writer the page to itself (see [`AddressSpace::resolve_write`]).
-const FORK_WRITE: u64 = 1 << 52;
+const FORK_WRITE: u64 = pte::SOFT_3;
 /// Software bit: the page is locked in memory (Linux `mlock`): never swapped out.
-const LOCKED: u64 = 1 << 53;
+const LOCKED: u64 = pte::SOFT_4;
 /// Software bit: swapping the page out failed for want of room (it didn't
 /// compress, and the swap file was full or missing); not tried again until
 /// it is written ([`DIRTY`] is cleared when this is set) or the swap file
 /// has room.
-const INCOMPRESSIBLE: u64 = 1 << 54;
+const INCOMPRESSIBLE: u64 = pte::SOFT_5;
 /// In an entry that is not present: the page is swapped out, to the slot
 /// in the address bits. `WRITABLE`, `USER` and `NO_EXECUTE` keep its
 /// protection (writable, for a page shared copy-on-write, meaning it
 /// becomes writable once it is the address space's own).
-const SWAPPED: u64 = 1 << 62;
-const NO_EXECUTE: u64 = 1 << 63;
-const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
+const SWAPPED: u64 = pte::SOFT_NOT_PRESENT;
+const NO_EXECUTE: u64 = pte::NO_EXECUTE;
+const ADDR: u64 = pte::ADDR;
 
 fn is_swap(e: u64) -> bool {
     e & (PRESENT | SWAPPED) == SWAPPED
@@ -185,20 +184,19 @@ fn idx(va: u64, level: u32) -> usize {
 }
 
 pub fn init() {
-    let (pml4, _) = Cr3::read();
-    let pml4 = pml4.start_address().as_u64();
+    let pml4 = mmu::root();
     KERNEL_PML4.store(pml4, Ordering::Relaxed);
     let t = table(pml4);
     let mut added = 0;
     for e in t.iter_mut().skip(256) {
         if *e & PRESENT == 0 {
-            *e = zeroed_frame().expect("out of memory for kernel page tables") | PRESENT | WRITABLE;
+            *e = zeroed_frame().expect("out of memory for kernel page tables") | pte::KERNEL_TABLE;
             added += 1;
         }
     }
     // Enable the no-execute bit for user data pages.
-    unsafe { Efer::update(|f| f.insert(EferFlags::NO_EXECUTE_ENABLE)) };
-    x86_64::instructions::tlb::flush_all();
+    mmu::enable_features();
+    mmu::flush_all();
     log!("vmm", "kernel half pre-populated ({} new PDPTs), NX enabled", added);
 }
 
@@ -215,7 +213,7 @@ fn walk(pml4: u64, va: u64, create: bool, user: bool) -> Option<&'static mut u64
                 return None;
             }
             let f = if user { zeroed_user_frame()? } else { zeroed_frame()? };
-            *e = f | PRESENT | WRITABLE | if user { USER } else { 0 };
+            *e = f | if user { pte::USER_TABLE } else { pte::KERNEL_TABLE };
         } else if *e & HUGE != 0 {
             return None; // 2 MiB/1 GiB pages are only used by the physical window
         }
@@ -268,7 +266,7 @@ pub fn kmap(frames: &[u64]) -> Option<u64> {
         let va = base + i as u64 * PAGE_SIZE;
         let e = walk(pml4, va, true, false)?;
         *e = f | PRESENT | WRITABLE | NO_EXECUTE;
-        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+        mmu::flush_page(va);
     }
     Some(base)
 }
@@ -280,7 +278,7 @@ pub fn kmap_fixed(va: u64, f: u64) -> bool {
     match walk(kernel_pml4(), va, true, false) {
         Some(e) => {
             *e = f | PRESENT | WRITABLE | NO_EXECUTE;
-            x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+            mmu::flush_page(va);
             true
         }
         None => false,
@@ -292,14 +290,14 @@ pub fn kmap_fixed(va: u64, f: u64) -> bool {
 pub fn kunmap_fixed(va: u64) -> Option<u64> {
     let e = walk(kernel_pml4(), va, false, false)?;
     let old = core::mem::replace(e, 0);
-    x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+    mmu::flush_page(va);
     (old & PRESENT != 0).then_some(old & ADDR)
 }
 
 /// Maps `size` bytes of device memory at `phys` (a framebuffer) into the
 /// kernel virtual area, write-combining where the CPU supports it.
 pub fn kmap_wc(phys: u64, size: u64) -> Option<u64> {
-    if !crate::arch::pat::write_combining() {
+    if !mmu::write_combining() {
         return None;
     }
     let start = phys & !(PAGE_SIZE - 1);
@@ -316,7 +314,7 @@ pub fn kmap_wc(phys: u64, size: u64) -> Option<u64> {
         let e = walk(pml4, va, true, false)?;
         // Bit 7 of a 4 KiB entry selects PAT slot 4: write-combining.
         *e = (start + i * PAGE_SIZE) | PRESENT | WRITABLE | NO_EXECUTE | PAT_4K;
-        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+        mmu::flush_page(va);
     }
     Some(base + (phys - start))
 }
@@ -324,7 +322,7 @@ pub fn kmap_wc(phys: u64, size: u64) -> Option<u64> {
 /// True if `[addr, addr+len)` is entirely mapped for user access (and
 /// writable if `write`) in the address space the CPU runs on.
 pub fn check_current(addr: u64, len: u64, write: bool) -> bool {
-    check_range(Cr3::read().0.start_address().as_u64(), addr, len, write)
+    check_range(mmu::root(), addr, len, write)
 }
 
 /// [`AddressSpace::check`] for the tables at `pml4`.
@@ -354,7 +352,7 @@ fn check_range(pml4: u64, addr: u64, len: u64, write: bool) -> bool {
 /// reports, so nothing is allocated).
 pub fn entries_for(va: u64) -> [u64; 4] {
     let mut out = [0; 4];
-    let mut t = Cr3::read().0.start_address().as_u64();
+    let mut t = mmu::root();
     for (i, level) in (0..=3u32).rev().enumerate() {
         let e = table(t)[idx(va, level)];
         out[i] = e;
@@ -425,7 +423,7 @@ pub fn kunmap(base: u64, pages: u64) {
             let va = base + i * PAGE_SIZE;
             if let Some(e) = walk(pml4, va, false, false) {
                 *e = 0;
-                x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+                mmu::flush_page(va);
             }
         }
     }
@@ -491,7 +489,7 @@ pub fn shootdown(start: u64, pages: u64, cr3: Option<u64>) {
     PENDING.store(targets.len() as u32, Ordering::Release);
     for &c in &targets {
         percpu::CPUS[c].tlb_pending.store(true, Ordering::Release);
-        crate::arch::apic::send_ipi(percpu::CPUS[c].lapic_id.load(Ordering::Relaxed), crate::arch::idt::TLB_VECTOR);
+        crate::arch::irq::send_ipi(c, crate::arch::irq::Ipi::TlbShootdown);
     }
     while PENDING.load(Ordering::Acquire) != 0 {
         service_shootdown();
@@ -508,10 +506,10 @@ pub fn service_shootdown() {
     }
     let (start, pages) = (REQ_START.load(Ordering::Relaxed), REQ_PAGES.load(Ordering::Relaxed));
     if pages > 64 {
-        x86_64::instructions::tlb::flush_all();
+        mmu::flush_all();
     } else {
         for i in 0..pages {
-            x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(start + i * PAGE_SIZE));
+            mmu::flush_page(start + i * PAGE_SIZE);
         }
     }
     PENDING.fetch_sub(1, Ordering::AcqRel);
@@ -606,8 +604,8 @@ impl AddressSpace {
     }
 
     fn invalidate(&self, va: u64) {
-        if Cr3::read().0.start_address().as_u64() == self.pml4 {
-            x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(va));
+        if mmu::root() == self.pml4 {
+            mmu::flush_page(va);
         }
     }
 
@@ -977,8 +975,8 @@ impl AddressSpace {
         // Pages not there yet come when touched, with this protection.
         self.map_lazy(va, pages, prot)?;
         // Permissions shrank too: every CPU running this process must see it.
-        if Cr3::read().0.start_address().as_u64() == self.pml4 {
-            x86_64::instructions::tlb::flush_all();
+        if mmu::root() == self.pml4 {
+            mmu::flush_all();
         }
         shootdown(va, pages, Some(self.pml4));
         for e in copied {
@@ -1169,8 +1167,8 @@ impl AddressSpace {
             swap::drop_ref(s);
         }
         let tables = self.prune(va, end);
-        if (!freed.is_empty() || !tables.is_empty()) && Cr3::read().0.start_address().as_u64() == self.pml4 {
-            x86_64::instructions::tlb::flush_all();
+        if (!freed.is_empty() || !tables.is_empty()) && mmu::root() == self.pml4 {
+            mmu::flush_all();
         }
         // Other threads of this process may run on other CPUs: they must
         // forget the pages (and tables) before the frames can be reused.
@@ -1246,8 +1244,8 @@ impl AddressSpace {
         self.resident = self.resident.saturating_sub(shared);
         // The parent's pages are read-only now: no CPU may keep writing
         // through what it remembers of them.
-        if Cr3::read().0.start_address().as_u64() == self.pml4 {
-            x86_64::instructions::tlb::flush_all();
+        if mmu::root() == self.pml4 {
+            mmu::flush_all();
         }
         shootdown(0, u64::MAX, Some(self.pml4));
         // On failure, dropping the partial copy lets go of what it holds.
@@ -1391,8 +1389,8 @@ impl AddressSpace {
             }
         }
         if !freed.is_empty() {
-            if Cr3::read().0.start_address().as_u64() == self.pml4 {
-                x86_64::instructions::tlb::flush_all();
+            if mmu::root() == self.pml4 {
+                mmu::flush_all();
             }
             shootdown(va, pages, Some(self.pml4));
             for e in freed {
@@ -1558,8 +1556,8 @@ impl AddressSpace {
         }
         // 2. No CPU may reach the frames through what it remembers of the
         // entries before their contents are read.
-        if Cr3::read().0.start_address().as_u64() == self.pml4 {
-            x86_64::instructions::tlb::flush_all();
+        if mmu::root() == self.pml4 {
+            mmu::flush_all();
         }
         let lo = taken.iter().map(|t| t.0).min().unwrap();
         let hi = taken.iter().map(|t| t.0).max().unwrap();
@@ -1937,7 +1935,7 @@ impl AddressSpace {
 impl Drop for AddressSpace {
     fn drop(&mut self) {
         // Never free the address space we're running on.
-        if Cr3::read().0.start_address().as_u64() == self.pml4 {
+        if mmu::root() == self.pml4 {
             unsafe { load(kernel_pml4()) };
         }
         Self::free_level(self.pml4, 3, true);
@@ -1950,7 +1948,5 @@ impl Drop for AddressSpace {
 /// # Safety
 /// `pml4` must be a valid top-level table sharing the kernel half.
 pub unsafe fn load(pml4: u64) {
-    use x86_64::structures::paging::PhysFrame;
-    let (_, flags) = Cr3::read();
-    Cr3::write(PhysFrame::containing_address(x86_64::PhysAddr::new(pml4)), flags);
+    mmu::load_root(pml4);
 }

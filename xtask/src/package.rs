@@ -117,6 +117,7 @@ pub fn gallery(programs: &[Program], version: &str, key: Option<&Key>) -> Option
     let icon = fs::read(root().join("assets/icons/studio.png")).ok()?;
     let m = gina::Manifest {
         format: 2,
+        architecture: crate::arch::current().name().into(),
         id: "dev.example.gallery".into(),
         name: "WaveUI Gallery".into(),
         developer: "WaveSDK Example".into(),
@@ -145,6 +146,7 @@ pub fn doom(programs: &[Program], key: Option<&Key>) -> Option<Vec<u8>> {
     let icon = fs::read(root().join("assets/icons/doom.png")).ok()?;
     let m = gina::Manifest {
         format: 2,
+        architecture: crate::arch::current().name().into(),
         id: "org.waveos.doom".into(),
         name: "Doom".into(),
         developer: "WaveOS".into(),
@@ -229,7 +231,7 @@ mod tests {
         assert_eq!(c.packages[0].permissions, ["network"]);
         // Writing again makes the next version.
         store::write(&dir, &store::Spec::new("T", &key), &[(p, listing)]).unwrap();
-        assert_eq!(store::current_catalog(&dir).unwrap().version, 2);
+        assert_eq!(store::current_catalog_for(&dir, crate::arch::Arch::X86_64).unwrap().version, 2);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

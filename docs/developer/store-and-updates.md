@@ -291,6 +291,42 @@ menu's Restart becomes Update and Restart while an update is ready.
   a screenshot at each step. Pictures from it are in
   [docs/screenshots/store](../screenshots/store/).
 
+## Architectures
+
+WaveOS runs on x86_64 and aarch64, and nothing built for one starts on the
+other. Each layer says which it is for, in text that is signed or hashed,
+and the x86_64 form is what it was before the port, so systems from before
+it read everything as they did:
+
+- **Packages:** the manifest's `architecture` (`x86_64` or `aarch64`), and
+  the executable's ELF machine must agree with it. Inside WaveOS,
+  `gina::Package::parse` refuses another architecture's package ("This app
+  needs a different processor architecture"), so `pkg`, the Installer and
+  the Store never install one; host tools read both.
+- **Catalogues:** each architecture has its own in the same repository
+  (`catalog.txt`/`.sig` for x86_64, `catalog-aarch64.txt`/`.sig` for
+  aarch64, see `gina::repo::catalog_files`), listing only its packages
+  (`packages/`, `packages-aarch64/`) and system updates (`system/<v>/`,
+  `system-aarch64/<v>/`). An aarch64 catalogue carries `arch<TAB>aarch64`
+  in its signed text and the client checks it, so a mirror can't serve one
+  architecture the other's validly signed catalogue. The format 1
+  `index.txt` is x86-only; an aarch64 system never falls back to it.
+- **System updates:** `update.txt` carries `arch<TAB>aarch64` (x86 ones
+  say nothing); Software Update refuses a description for another
+  processor. A slot holds that architecture's bootloader under its own
+  name (`BOOTX64.EFI` or `BOOTAA64.EFI`), which the kernel copies to
+  `\EFI\BOOT\` after a good start. The bootloader skips a slot whose
+  `update.txt` names another architecture, as it skips one whose files
+  don't match, so the EFI partition's system starts instead.
+- **Disks:** the EFI partition records its architecture (`\aurora\arch`,
+  else its boot file); `cargo xtask run` refuses to refresh a disk for the
+  other one, and `cargo xtask migrate-disk` moves a person's files to a
+  new disk without the slots (see docs/BUILDING.md).
+
+`cargo xtask test`'s repositories are x86-only, as the tests are. Host
+tests: `gina::tests::architectures_in_catalogues_and_updates`,
+`xtask::store::tests::a_repository_holds_both_architectures`.
+
 ## Not done
 
 - No binary deltas inside changed files; no compression in transit.
