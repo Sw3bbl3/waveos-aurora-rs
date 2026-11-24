@@ -407,6 +407,9 @@ async function run() {
     v.pause();
     v.removeAttribute('src');
     v.load();
+    // Two seconds of quiet between cases: the recording of the sound card
+    // (which only runs while something plays) is split into cases there.
+    await new Promise(r => setTimeout(r, 2000));
   }
   post({kind: 'done'});
   log('done');

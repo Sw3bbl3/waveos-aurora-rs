@@ -35,7 +35,7 @@ BASE = f'http://127.0.0.1:{PORT}'
 FORWARD = f'wget -qO /tmp/forward.py http://10.0.2.2:{PORT}/forward.py; python3 /tmp/forward.py {PORT} & '
 BROWSERS = {
     # The launchers, with the browsers' own media logs on the system log.
-    'firefox': "sh -c '" + FORWARD + "MOZ_LOG=cubeb:3,PlatformDecoderModule:3 exec /System/Linux/bin/firefox \"{url}\" 2>/dev/kmsg'",
+    'firefox': "sh -c '" + FORWARD + "MOZ_LOG=" + os.environ.get("VIDEO_MOZ_LOG", "cubeb:3,PlatformDecoderModule:3") + " exec /System/Linux/bin/firefox \"{url}\" 2>/dev/kmsg'",
     'voyage': "sh -c '" + FORWARD + "GST_DEBUG=2,alsa*:3,oss*:3 exec /System/Linux/bin/voyage \"{url}\" 2>/dev/kmsg'",
 }
 
@@ -96,9 +96,16 @@ class Sampler(threading.Thread):
         return {k: round(100 * sum(r[i] for r in rows) / total, 1) for i, k in ((1, 'user'), (2, 'kernel'), (3, 'idle'))}
 
 
-def tone_gaps(wav, windows):
-    """Gaps (runs of near-silence of 10 ms or more) in the recorded tone
-    within each (start, end) window of seconds into the recording."""
+def tone_gaps(wav):
+    """The fixture's tone in the recording, one entry per stretch of it,
+    with its gaps (10 ms windows without it) — one stretch per case.
+
+    The recording is not on the host's clock: QEMU writes it only while the
+    guest's sound card runs, and the mixer stops the card after a few
+    seconds of quiet. So the stretches are found in the sound itself: a 10 ms
+    window holds the tone if it crosses zero as often as 440 Hz does and isn't
+    near-silent; quiet shorter than a second inside a stretch is a gap (the
+    page waits two seconds between cases)."""
     data = wav.read_bytes()
     if data[:4] != b'RIFF':
         return None
@@ -116,29 +123,44 @@ def tone_gaps(wav, windows):
     channels, rate = fmt[1], fmt[2]
     frame = 2 * channels
     win = rate // 100  # 10 ms
-    levels = []
+    expect = 2 * 440 * win / rate  # zero crossings of 440 Hz in a window
+    tone, levels = [], []
     for at in range(0, len(pcm) - frame * win, frame * win):
-        chunk = memoryview(pcm)[at:at + frame * win].cast('h')
-        levels.append(max(abs(min(chunk)), abs(max(chunk))))
-    out = []
-    for start, end in windows:
-        a, b = int(start * 100), min(int(end * 100), len(levels))
-        seg = levels[a:b]
-        loud = [i for i, v in enumerate(seg) if v > 1000]
-        if not loud:
-            out.append({'tone_s': 0, 'gaps': 0, 'gap_ms': 0})
+        left = memoryview(pcm)[at:at + frame * win].cast('h')[::channels]
+        level = max(abs(min(left)), abs(max(left)))
+        crossings = sum(1 for a, b in zip(left, left[1:]) if (a < 0) != (b < 0))
+        tone.append(level > 30 and abs(crossings - expect) <= 2)
+        levels.append(level)
+    out, i = [], 0
+    while i < len(tone):
+        if not tone[i]:
+            i += 1
             continue
-        seg = seg[loud[0]:loud[-1] + 1]
-        gaps, gap_ms, run = 0, 0, 0
-        for v in seg + [32767]:
-            if v <= 1000:
-                run += 1
-            else:
-                if run:
-                    gaps += 1
-                    gap_ms += run * 10
-                run = 0
-        out.append({'tone_s': round(len(seg) / 100, 2), 'gaps': gaps, 'gap_ms': gap_ms})
+        start, end, gaps, gap_ms = i, i, 0, 0
+        j = i
+        while j < len(tone):
+            if tone[j]:
+                end = j
+                j += 1
+                continue
+            k = j
+            while k < len(tone) and not tone[k]:
+                k += 1
+            if k == len(tone) or k - j >= 100:
+                break
+            # Not in the first 100 ms: Opus's first packet starts the tone
+            # out of phase (a window that isn't 440 Hz, at full level).
+            if j - start >= 10:
+                gaps += 1
+                gap_ms += (k - j) * 10
+            j = k
+        # Half a second or more at a steady level: a case (the desktop's
+        # sounds fade away).
+        steady = sorted(levels[n] for n in range(start, end + 1) if tone[n])
+        level = steady[len(steady) // 2]
+        if end - start >= 50 and sum(1 for v in steady if abs(v - level) <= level / 4) >= len(steady) * 0.8:
+            out.append({'tone_s': round((end - start + 1) / 100, 2), 'gaps': gaps, 'gap_ms': gap_ms, 'level': level})
+        i = end + 1
     return out
 
 
@@ -205,7 +227,10 @@ def main():
         stream = serial.open('a')
         guest = subprocess.Popen([str(ROOT / 'target/debug/xtask'), 'run', '--no-build', '--no-refresh', '--headless',
                                   '--no-keyboard-capture', '--audio-wav', str(wav), '--smp', args.smp, '--net', args.net,
-                                  '--disk-image', str(out / 'session.img')],
+                                  '--disk-image', str(out / 'session.img'),
+                                  # The clicks below are tools/qmp.py's 1280x800 screen
+                                  # (virtio-gpu, aarch64's default, starts at this size).
+                                  '--resolution', '1280x800'],
                                  cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT)
         wait_for(lambda: 'Aurora desktop ready' in log()[before:], 180, 'the desktop')
         time.sleep(1)
@@ -232,10 +257,14 @@ def main():
         for browser in args.browsers.split(','):
             wav = out / f'audio-{browser}.wav'
             wav.unlink(missing_ok=True)
+            serial_from = len(log())
             boot(wav)
-            boot_time = time.time()
             sampler = Sampler()
-            sampler.start()
+            # x86 only: it reads x86 registers, and under HVF (aarch64 on a
+            # Mac) `info registers -a` ten times a second stops QEMU's main
+            # loop within a minute (virtio requests and the monitor hang).
+            if 'qemu-system-x86_64' in log():
+                sampler.start()
             offset = len(records(0))
             url = (f'{BASE}/mse.html?cases={args.cases}&secs={args.secs}&tag={browser}&decode={args.decode}'
                    + ('&muted=1' if args.muted else ''))
@@ -258,17 +287,25 @@ def main():
             cases = [r for r in got if r.get('kind') == 'case']
             caps = next((r for r in got if r.get('kind') == 'caps'), None)
             decodes = [r for r in got if r.get('kind') == 'decode']
-            # Where each case's measured stretch falls in the recording.
-            windows = []
-            for r in cases:
-                end = r['host_time'] - boot_time
-                windows.append((max(0, end - r.get('wall_s', 0) - 2), end))
-            gaps = tone_gaps(wav, windows) if wav.exists() and not args.muted else None
+            # The tone's stretches in the recording, in the order the cases
+            # played; and each sound stream's own count of underruns (the
+            # mixer found nothing queued), from the system log.
+            stretches = tone_gaps(wav) if wav.exists() and not args.muted else None
+            played = [r for r in cases if r.get('status') == 'played']
+            gaps = None
+            if stretches is not None:
+                if len(stretches) == len(played):
+                    gaps = {r['case']: s for r, s in zip(played, stretches)}
+                else:
+                    failures.append(f'{browser}: {len(stretches)} stretches of tone recorded for {len(played)} cases played')
+            closes = re.findall(r'ALSA playback closed: (\d+) ms played, (\d+) underruns', log()[serial_from:])
+            summary['browsers'].setdefault(browser, {})['streams'] = [
+                {'ms': int(ms), 'underruns': int(u)} for ms, u in closes]
             for i, r in enumerate(cases):
                 end = r['host_time']
                 r['cpu'] = sampler.split(end - r.get('wall_s', 0), end)
-                if gaps:
-                    r['audio'] = gaps[i]
+                if gaps and r['case'] in gaps:
+                    r['audio'] = gaps[r['case']]
                 fps = r.get('presented_fps') or r.get('decoded_fps') or 0
                 if r.get('status') != 'played':
                     if r.get('status') != 'unsupported':
@@ -278,10 +315,10 @@ def main():
                     failures.append(f"{browser} {r['case']}: {fps} frames/s < {args.min_fps}")
                 if args.max_drift and abs(r.get('drift_ms_mean') or 0) > args.max_drift:
                     failures.append(f"{browser} {r['case']}: A/V drift {r.get('drift_ms_mean')} ms")
-                if args.max_gaps >= 0 and gaps and gaps[i]['gaps'] > args.max_gaps:
-                    failures.append(f"{browser} {r['case']}: {gaps[i]['gaps']} gaps in the sound")
-            summary['browsers'][browser] = {'page_s': page_s, 'caps': caps, 'decode': decodes, 'cases': cases,
-                                            'serial_bytes': len(log())}
+                if args.max_gaps >= 0 and gaps and gaps[r['case']]['gaps'] > args.max_gaps:
+                    failures.append(f"{browser} {r['case']}: {gaps[r['case']]['gaps']} gaps in the sound")
+            summary['browsers'].setdefault(browser, {}).update({'page_s': page_s, 'caps': caps, 'decode': decodes,
+                                                                'cases': cases, 'serial_bytes': len(log())})
             serial_log = log()
             summary['browsers'][browser]['media_log'] = [
                 line for line in serial_log.splitlines()
@@ -306,6 +343,10 @@ def main():
                   f"{r.get('presented_fps', ''):>6} {r.get('dropped_frames', ''):>5} {r.get('clock_rate', ''):>5} "
                   f"{r.get('drift_ms_mean', ''):>6} {r.get('stall_seconds', ''):>5} {audio.get('gaps', ''):>4} "
                   f"{cpu.get('user', ''):>5} {cpu.get('kernel', ''):>5} {cpu.get('idle', ''):>5}")
+    for browser, b in summary['browsers'].items():
+        streams = b.get('streams') or []
+        print(f"{browser:8} sound streams: {len(streams)}, {sum(s['ms'] for s in streams) / 1000:.1f} s played, "
+              f"{sum(s['underruns'] for s in streams)} underruns")
     print(out / 'video-results.json')
     if failures:
         for f in failures:

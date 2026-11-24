@@ -37,7 +37,7 @@ pub fn run(args: &[String]) {
     super::prepare_disk(&esp, &disk, false, 3072 * 1024 * 1024, Some(&linux));
     let mut command = Command::new("python3");
     command.arg(super::root().join("tools/smoke_video.py")).arg("--output").arg(&output).arg("--clips").arg(&clips);
-    for key in ["--browsers", "--cases", "--secs", "--net", "--smp", "--min-fps", "--max-drift", "--max-gaps", "--label"] {
+    for key in ["--browsers", "--cases", "--decode", "--secs", "--net", "--smp", "--min-fps", "--max-drift", "--max-gaps", "--label"] {
         if let Some(v) = value(key) {
             command.arg(key).arg(v);
         }
