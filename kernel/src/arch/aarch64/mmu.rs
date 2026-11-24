@@ -119,6 +119,16 @@ pub fn flush_all() {
     unsafe { core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb", options(nostack, preserves_flags)) };
 }
 
+/// The physical address `va` maps to for EL1 reads (`at s1e1r`), if any.
+pub fn virt_to_phys(va: u64) -> Option<u64> {
+    let par: u64;
+    // SAFETY: an address translation query; PAR_EL1 is only ours.
+    unsafe {
+        core::arch::asm!("at s1e1r, {}", "isb", "mrs {}, par_el1", in(reg) va, out(reg) par, options(nostack));
+    }
+    (par & 1 == 0).then_some((par & pte::ADDR) | (va & 0xFFF))
+}
+
 /// Nothing to turn on: execute-never is part of the format.
 pub fn enable_features() {}
 
