@@ -106,6 +106,14 @@ The WaveSDK developer site is [docs/developer/index.html](developer/index.html).
 
 The launcher's own tests: `cargo test -p xtask` checks the option tables, the command lines and presets, and that `cargo xtask launch --no-open` serves the page. `cargo xtask build && cargo test -p xtask --test launcher -- --ignored` also launches a headless WaveOS through the launcher's API (on its own disk, `target/launcher-e2e.img`), waits for `Aurora desktop ready` and stops it. Its sleep test puts the VM to sleep and wakes it over QMP. Some OVMF builds (Ubuntu's, for one) fault while resuming, before WaveOS gets control: the harness notices and runs the suite again with `sleep=off`. Set `AURORA_TEST_SLEEP=off` to skip it from the start.
 
+## Two architectures: x86_64 and aarch64 (port in progress)
+
+`build`, `run`, `test`, `lint`, `image`, `iso` and `launch` take `--arch x86_64|aarch64` (`make run ARCH=aarch64`, or `AURORA_ARCH=aarch64` in the environment, which `./waveos` passes on). Without it the build is x86_64; one constant in `xtask/src/arch.rs` (`DEFAULT_TO_ACCELERATED_HOST`) makes the default this computer's own architecture where QEMU can run it at full speed, once the aarch64 port boots and passes its tests.
+
+On an Apple-silicon Mac, aarch64 runs under Hypervisor.framework (`-accel hvf -cpu host`): at the processor's own speed, where x86_64 is emulated instruction by instruction (TCG). Elsewhere aarch64 is emulated (`-cpu max` under TCG). The aarch64 machine is QEMU's `virt` with a GICv3 (`gic-version=3,msi=gicv2m,highmem=on,virtualization=off`), EDK2's aarch64 firmware (`edk2-aarch64-code.fd`, shipped with Homebrew's QEMU; Debian: `qemu-efi-aarch64`; `AAVMF_CODE`/`AAVMF_VARS` point elsewhere), xHCI with the USB tablet and keyboard, Intel HD Audio, virtio-net, virtio-rng, the disk on virtio-blk (`--disk ahci` adds an AHCI controller), `ramfb` for `--gpu std` and virtio-gpu-pci for `--gpu virtio`. See `xtask/src/virt.rs` for why each.
+
+Each architecture has its own output, so switching never rebuilds the other: `target/<triple>/` for the bootloader and kernel, `target/user` and `target/user-aarch64` for user space, `target/esp` and `target/esp-aarch64` for the EFI partition (`EFI/BOOT/BOOTX64.EFI` or `BOOTAA64.EFI`, and `aurora/arch` naming the architecture), and its own disk: `target/waveos-aurora.img` stays the x86 disk, `target/waveos-aurora-aarch64.img` is the Arm one. A disk records its architecture, and `run` refuses to refresh a disk for the other one (its files are never touched).
+
 ## Booting on real hardware (experimental)
 
 `cargo xtask image` writes `target/waveos-aurora-usb.img`, a complete system to put on a USB stick. [HARDWARE.md](HARDWARE.md) explains how to write it, the boot options, what to check, and the known limits.

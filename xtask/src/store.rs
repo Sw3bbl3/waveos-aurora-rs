@@ -329,7 +329,7 @@ pub fn break_kernel(elf: &[u8]) -> Result<Vec<u8>, String> {
 /// a device starts from), unsigned: `\aurora\update.txt`.
 pub fn describe_esp(esp: &Path, version: &str) -> Result<Update, String> {
     let kernel = fs::read(esp.join("aurora/kernel.elf")).map_err(|e| e.to_string())?;
-    let boot = fs::read(esp.join("EFI/BOOT/BOOTX64.EFI")).map_err(|e| e.to_string())?;
+    let boot = fs::read(esp.join("EFI/BOOT").join(crate::arch::current().boot_file())).map_err(|e| e.to_string())?;
     let tar = fs::read(esp.join("aurora/system.tar")).map_err(|e| e.to_string())?;
     system::describe(version, "", "", part(&kernel), part(&boot), &tar).map_err(str::to_string)
 }
@@ -353,7 +353,7 @@ pub fn add_system_update(repo: &Path, b: &Build, key: &Key) -> Result<SystemRele
     if b.broken {
         kernel = break_kernel(&kernel)?;
     }
-    let boot = read("EFI/BOOT/BOOTX64.EFI")?;
+    let boot = read(&format!("EFI/BOOT/{}", crate::arch::current().boot_file()))?;
     let tar = retag_image(&read("aurora/system.tar")?, b.version)?;
     let mut u =
         system::describe(b.version, b.min_from, b.notes, part(&kernel), part(&boot), &tar).map_err(str::to_string)?;
