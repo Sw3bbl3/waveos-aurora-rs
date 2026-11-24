@@ -155,18 +155,23 @@ fn main() -> Status {
         }
         pt.pml4()
     };
-    // Arm: memory types matter. RAM is normal memory, the framebuffer
-    // non-cacheable, anything else (MMIO) device memory, per 2 MiB block.
+    // Arm: memory types matter. RAM is normal memory, a framebuffer
+    // outside RAM non-cacheable, anything else (MMIO) device memory, per
+    // 2 MiB block.
     #[cfg(target_arch = "aarch64")]
     let pml4_phys = {
         use paging_aarch64::Memory;
         let fb = (framebuffer.phys_addr, framebuffer.phys_addr + framebuffer.size);
         let kind = |p: u64| {
             let end = p + (2 << 20);
-            if fb.0 < end && p < fb.1 {
-                Memory::WriteCombining
-            } else if ram.iter().any(|&(s, e)| s < end && p < e) {
+            // RAM first: a framebuffer in RAM (QEMU's ramfb) shares its
+            // blocks with ordinary memory, which must stay cacheable (the
+            // heap's atomics need it); the kernel maps the framebuffer
+            // itself write-combining.
+            if ram.iter().any(|&(s, e)| s < end && p < e) {
                 Memory::Normal
+            } else if fb.0 < end && p < fb.1 {
+                Memory::WriteCombining
             } else {
                 Memory::Device
             }

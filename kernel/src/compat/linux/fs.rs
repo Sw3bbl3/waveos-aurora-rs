@@ -18,7 +18,8 @@ pub const AT_FDCWD: u64 = -100i64 as u64;
 pub const AT_REMOVEDIR: u64 = 0x200;
 const AT_EMPTY_PATH: u64 = 0x1000;
 pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
-const O_NOFOLLOW: u64 = 0o400000;
+// (O_NOFOLLOW and O_DIRECTORY differ between architectures.)
+use super::abi::native::{O_DIRECTORY, O_NOFOLLOW};
 const O_PATH: u64 = 0o10000000;
 pub const O_CLOEXEC: u64 = 0o2000000;
 
@@ -29,7 +30,6 @@ const O_EXCL: u64 = 0o200;
 pub const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 const O_NONBLOCK: u64 = 0o4000;
-const O_DIRECTORY: u64 = 0o200000;
 
 /// The read-only Linux tree (from the system image) and the writable one.
 pub const SYSTEM_ROOT: &str = "/System/Linux";
@@ -163,6 +163,10 @@ pub enum Special {
     Drm(Arc<super::drm::File>),
     /// A dma-buf: a GPU buffer exported from a card (`PRIME`).
     DmaBuf(Arc<crate::drivers::gpu::BufferObject>),
+    /// A sync file: a fence for a dma-buf's pending work. The processor
+    /// renders and the display reads synchronously here, so every one is
+    /// signalled already (`poll` says readable at once).
+    SyncFile,
 }
 
 impl Special {
@@ -184,7 +188,7 @@ impl Special {
             Special::Event(e) => e.read(out),
             Special::Timer(t) => t.read(out),
             Special::WaveEvents(pid) => super::events::wave_events_read(*pid, out),
-            Special::Epoll(_) | Special::DmaBuf(_) => Err(EINVAL),
+            Special::Epoll(_) | Special::DmaBuf(_) | Special::SyncFile => Err(EINVAL),
             Special::Drm(f) => super::drm::vblank::read(f, out, true),
             Special::Unix(u) => u.recv(out, false, false).map(|r| r.len),
             Special::Shm { file, pos } => {
@@ -223,7 +227,7 @@ impl Special {
             | Special::Inotify(_)
             | Special::Netlink(_) => Err(EINVAL),
             Special::Link(_) => Err(EBADF),
-            Special::Drm(_) | Special::DmaBuf(_) => Err(EINVAL),
+            Special::Drm(_) | Special::DmaBuf(_) | Special::SyncFile => Err(EINVAL),
             Special::Unix(u) => u.send(data, Vec::new(), None, false),
             Special::Shm { file, pos } => {
                 let n = file.write_at(*pos, data)?;
@@ -253,7 +257,7 @@ impl Special {
             Special::Inotify(_) => (0o600, 0),
             Special::Link(_) => (S_IFLNK | 0o777, 0),
             Special::Drm(f) => (S_IFCHR | 0o666, makedev(super::drm::MAJOR, f.minor as u64)),
-            Special::DmaBuf(_) => (0o600, 0),
+            Special::DmaBuf(_) | Special::SyncFile => (0o600, 0),
         }
     }
 }
@@ -357,6 +361,7 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/proc/pressure/memory" => mem(pressure()),
         "/proc/self/status" => mem(status(p)),
         "/proc/self/maps" => mem(super::mm::maps(p)),
+        "/proc/self/auxv" => Special::Mem { data: p.linux.as_ref().map(|l| l.auxv()).unwrap_or_default(), pos: 0 },
         "/proc/self/cmdline" => mem(format!("{}\0", p.name())),
         "/proc/self/comm" | "/proc/self/task/self/comm" => mem(format!("{}\n", p.name())),
         "/proc/self/stat" => mem(format!(
@@ -1144,7 +1149,15 @@ fn folder_entries(host: &str) -> Vec<(String, u8)> {
         "/dev/dri" => return super::drm::node_names().into_iter().map(|n| (n, 2)).collect(),
         "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false), ("pressure", true)],
         "/proc/self" => {
-            &[("exe", false), ("maps", false), ("cmdline", false), ("comm", false), ("stat", false), ("status", false)]
+            &[
+                ("exe", false),
+                ("maps", false),
+                ("cmdline", false),
+                ("comm", false),
+                ("stat", false),
+                ("status", false),
+                ("auxv", false),
+            ]
         }
         "/proc/pressure" => &[("memory", false)],
         "/dev/shm" => return super::shm::names().into_iter().map(|n| (n, DT_REG)).collect(),
@@ -1340,24 +1353,25 @@ fn ids(i: &Info) -> (u32, u32) {
     })
 }
 
-/// Linux's `struct stat` (144 bytes on x86-64).
+/// Linux's `struct stat`, laid out for the architecture (`abi`).
 fn put_stat(ptr: u64, i: &Info) -> Result<u64, isize> {
     let (uid, gid) = ids(i);
-    let mut b = [0u8; 144];
-    let mut w = |off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
-    w(0, 0x803); // st_dev
-    w(8, i.ino);
-    w(16, if i.mode & S_IFDIR != 0 { 2 } else { 1 }); // st_nlink
-    w(24, i.mode as u64 | ((uid as u64) << 32)); // st_mode, st_uid
-    w(32, gid as u64); // st_gid
-    w(40, i.rdev);
-    w(48, i.size);
-    w(56, 4096); // st_blksize
-    w(64, i.size.div_ceil(512)); // st_blocks
-    w(72, i.mtime as u64); // st_atime
-    w(88, i.mtime as u64);
-    w(104, i.ctime as u64);
-    user::put(ptr, &b).map(|_| 0)
+    let s = aurora_linuxabi::Stat {
+        dev: 0x803,
+        ino: i.ino,
+        mode: i.mode,
+        nlink: if i.mode & S_IFDIR != 0 { 2 } else { 1 },
+        uid,
+        gid,
+        rdev: i.rdev,
+        size: i.size,
+        blksize: 4096,
+        blocks: i.size.div_ceil(512),
+        atime: (i.mtime, 0),
+        mtime: (i.mtime, 0),
+        ctime: (i.ctime, 0),
+    };
+    super::abi::native::put_stat(ptr, &s)
 }
 
 pub fn stat_path(p: &Process, dirfd: u64, ptr: u64, buf: u64, flags: u64) -> Result<u64, isize> {
@@ -1523,16 +1537,20 @@ pub fn ioctl(p: &Process, fd: u64, request: u64, arg: u64) -> Result<u64, isize>
     // DRM ('d') requests on a card, dma-buf ('b') ones on a dma-buf.
     if let Handle::Special(s) = &*h {
         let kind = request >> 8 & 0xFF;
-        let (card, dmabuf) = match &*s.lock() {
-            Special::Drm(f) => (Some(f.clone()), false),
-            Special::DmaBuf(_) => (None, true),
-            _ => (None, false),
+        let (card, dmabuf, sync) = match &*s.lock() {
+            Special::Drm(f) => (Some(f.clone()), false, false),
+            Special::DmaBuf(_) => (None, true, false),
+            Special::SyncFile => (None, false, true),
+            _ => (None, false, false),
         };
         if let (Some(f), 0x64) = (&card, kind) {
             return super::drm::ioctl(p, f, request, arg);
         }
         if dmabuf && kind == 0x62 {
-            return super::drm::dmabuf_ioctl(request, arg);
+            return super::drm::dmabuf_ioctl(p, request, arg);
+        }
+        if sync && kind == 0x3E {
+            return super::drm::sync_file_ioctl(p, request, arg);
         }
     }
     match request {

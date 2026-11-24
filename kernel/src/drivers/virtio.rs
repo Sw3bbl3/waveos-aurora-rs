@@ -254,6 +254,8 @@ impl Virtqueue {
         if used_idx == self.last_used {
             return None;
         }
+        // The entry only after the index that publishes it (weakly ordered CPUs).
+        fence(Ordering::Acquire);
         let slot = (self.last_used % self.size) as usize;
         let e = self.used_off + 4 + slot * 8;
         let head = self.mem.read::<u32>(e) as u16;

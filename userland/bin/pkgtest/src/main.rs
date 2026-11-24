@@ -201,7 +201,8 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
 fn copy_catalog(base: &str, from: &str, to: &str, roots: &[u32]) -> Result<(), String> {
     let _ = fs::mkdir(to);
     let _ = fs::mkdir(&format!("{to}root"));
-    for f in ["catalog.txt", "catalog.sig"] {
+    let (txt, sig) = gina::repo::catalog_files(gina::NATIVE_ARCH);
+    for f in [txt, sig] {
         fs::write(&format!("{to}{f}"), &fetch(&format!("{base}{from}/{f}"))?).map_err(|e| format!("{e}"))?;
     }
     for r in roots {

@@ -91,9 +91,10 @@ impl TrapFrame {
     }
 
     /// A frame that starts a program at `pc` with stack `sp` (EL0t,
-    /// interrupts unmasked).
+    /// interrupts unmasked). Its kind is a user one: the exit path loads
+    /// SP_EL0 from it only then (Linux `execve` returns through it).
     pub fn user_start(pc: u64, sp: u64) -> TrapFrame {
-        TrapFrame { pc, sp, ..Default::default() }
+        TrapFrame { pc, sp, kind: KIND_USER, ..Default::default() }
     }
 }
 
@@ -321,6 +322,7 @@ fn sync(f: &mut TrapFrame) {
             super::interrupts::disable();
         }
         EC_DABT_LOWER | EC_DABT_SAME | EC_IABT_LOWER | EC_IABT_SAME => page_fault(f, ec),
+        EC_SYSREG | EC_UNKNOWN if f.user_mode() && linux_mrs(f) => {}
         EC_BRK64 if !f.user_mode() => {
             log!("int", "breakpoint at {:#x}", f.pc);
             f.pc += 4;
@@ -337,6 +339,19 @@ fn sync(f: &mut TrapFrame) {
             }
         }
     }
+}
+
+/// A Linux program's read of an ID register (`mrs`), emulated as Linux
+/// does (`compat::linux::abi::aarch64::emulate_mrs`): true if it was one.
+fn linux_mrs(f: &mut TrapFrame) -> bool {
+    if !crate::proc::current().is_some_and(|p| p.linux.is_some()) {
+        return false;
+    }
+    // (It may read the instruction from user memory.)
+    super::interrupts::enable();
+    let done = crate::compat::linux::abi::aarch64::emulate_mrs(f);
+    super::interrupts::disable();
+    done
 }
 
 /// A fault in a Linux program with a handler for `sig`: true once the
@@ -363,6 +378,16 @@ fn page_fault(f: &mut TrapFrame, ec: u64) {
     // flag, 0b0011xx permission.
     let status = iss & 0x3F;
     let protection = status & 0x3C == 0x0C;
+    // The access flag and dirtiness are kept in software (`mmu::pte`):
+    // set them and go again, at once, whatever the interrupt state.
+    // (Not a kernel access to user memory with PAN on: that one is refused.)
+    let pan_refused = !f.user_mode() && f.pstate & (1 << 22) != 0 && addr < aurora_abi::layout::USER_END;
+    if !pan_refused && (status & 0x3C == 0x08 || (protection && write)) {
+        let root = if addr >= aurora_abi::layout::USER_END { super::mmu::kernel_root() } else { super::mmu::root() };
+        if super::mmu::fix_soft_fault(root, addr, write) {
+            return;
+        }
+    }
     let fixable = !protection || (write && !fetch);
     let interrupts_on = f.pstate & (1 << 7) == 0;
     if fixable

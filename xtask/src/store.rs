@@ -347,10 +347,16 @@ pub fn break_kernel(elf: &[u8]) -> Result<Vec<u8>, String> {
             (u32::from_le_bytes(elf[ph..ph + 4].try_into().unwrap()), u64_at(ph + 8), u64_at(ph + 16), u64_at(ph + 32));
         if kind == 1 && (vaddr..vaddr + filesz).contains(&entry) {
             let at = (offset + entry - vaddr) as usize;
-            // push 0; push 0; lidt [rsp]; ud2
-            const STUB: [u8; 10] = [0x6A, 0x00, 0x6A, 0x00, 0x0F, 0x01, 0x1C, 0x24, 0x0F, 0x0B];
+            // x86-64: push 0; push 0; lidt [rsp]; ud2 (a triple fault resets).
+            const X86: [u8; 10] = [0x6A, 0x00, 0x6A, 0x00, 0x0F, 0x01, 0x1C, 0x24, 0x0F, 0x0B];
+            // aarch64: PSCI SYSTEM_RESET through hvc (QEMU `virt`), then spin:
+            // movz x0, #9; movk x0, #0x8400, lsl #16; hvc #0; b .
+            const ARM: [u8; 16] = [
+                0x20, 0x01, 0x80, 0xD2, 0x00, 0x80, 0xB0, 0xF2, 0x02, 0x00, 0x00, 0xD4, 0x00, 0x00, 0x00, 0x14,
+            ];
+            let stub: &[u8] = if u16_at(18) == 183 { &ARM } else { &X86 };
             let mut out = elf.to_vec();
-            out[at..at + STUB.len()].copy_from_slice(&STUB);
+            out[at..at + stub.len()].copy_from_slice(stub);
             return Ok(out);
         }
     }

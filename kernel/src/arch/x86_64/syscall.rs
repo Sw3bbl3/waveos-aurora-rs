@@ -266,6 +266,12 @@ pub fn enter_user(entry: u64, stack: u64, arg: u64) -> ! {
     unsafe { aurora_enter_user(entry, stack, arg) }
 }
 
+/// The stack pointer a function entered as if called sees, for a stack whose
+/// top is `top` (16-aligned): RSP ≡ 8 (mod 16), the return address's slot.
+pub const fn call_sp(top: u64) -> u64 {
+    top - 8
+}
+
 /// User-mode flags a program may set: the arithmetic flags, direction and
 /// trap; interrupts are always on and IOPL stays 0.
 pub fn user_rflags(rflags: u64) -> u64 {

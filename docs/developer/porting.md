@@ -61,19 +61,29 @@ kernel half that `vmm` copies into every process's root is ignored there
 and `mmu::load_root` changes TTBR0 alone. The virtual layout is the same
 on both (docs/ARCHITECTURE.md, "Memory layout").
 
-Arm entries: `PRESENT` = valid + page/table + access flag + inner
-shareable + PXN (the kernel never executes what it maps at run time);
-`USER` = AP[1]; `NO_EXECUTE` = UXN; `HUGE` is software bit 58, which the
-bootloader sets on its 2 MiB blocks (a block's low bits, `0b01`, can't be
-tested with a mask); software bits are 55-57 and 59-61 (with hardware
-attributes off, 59-62 are ignored by the MMU), and 62 in invalid entries.
-Memory types (MAIR_EL1): 0 normal write-back, 1 device nGnRE (`NO_CACHE`),
-2 normal non-cacheable (`WRITE_COMBINING`), 3 device nGnRnE.
+Arm entries: `PRESENT` = valid + page/table + inner shareable + PXN (bits
+always set together, so `vmm`'s `e & (PRESENT | USER) == PRESENT | USER`
+tests work; the kernel never executes what it maps at run time); `USER` =
+AP[1]; `NO_EXECUTE` = UXN; `ACCESSED` = AF; `HUGE` is software bit 58,
+which the bootloader sets on its 2 MiB blocks (a block's low bits, `0b01`,
+can't be tested with a mask). Software bits: 55-57 and 59-61
+(`SOFT_0..5`; with hardware attributes off, 59-62 are ignored by the MMU),
+**`WRITABLE` = 63 and `DIRTY` = 62** (62 is also `SOFT_NOT_PRESENT` in
+invalid entries). Memory types (MAIR_EL1): 0 normal write-back, 1 device
+nGnRE (`NO_CACHE`), 2 normal non-cacheable (`WRITE_COMBINING`), 3 device
+nGnRnE.
 
-**Milestone 1 limitation:** `WRITABLE` and `DIRTY` are 0 on Arm (every
-mapping is writable, nothing tracks dirtiness). Read-only and copy-on-write
-user pages need the software write bit with AP[2], which comes with user
-programs.
+**Write permission and dirtiness are software bits on Arm** (Apple's
+cores under HVF have no hardware dirty-bit management, FEAT_HAFDBS).
+`vmm` writes every leaf entry through `pte::leaf` (an identity on x86),
+which sets AF and derives the hardware read-only bit AP[2]: a kernel page
+is writable as soon as `WRITABLE`, a user page only once also `DIRTY`. The
+first write to a clean writable page, and any access after the reclaim
+scan cleared AF, fault once; `trap` resolves them at once (interrupts
+masked, no lock: `mmu::fix_soft_fault`, a compare-and-swap) as a CPU with
+hardware management would. Write-protecting a page (fork's copy-on-write,
+`mprotect`) goes through `leaf` and sets AP[2]. `leaf` also makes a frame
+that becomes user-executable fetchable (`cache::sync_code`, see below).
 
 ## The aarch64 port
 
@@ -118,11 +128,22 @@ user mode, so no TSS-like switch is needed) and calls `trap`.
 **x0-x5**, result in **x0** (a negative `aurora_abi::err` value on failure);
 every other register, x8 included, is preserved. The numbers are the same
 as on x86-64 (`libs/abi`). Linux programs use the same registers with
-arm64 Linux's numbers (that table is the Linux layer's, still to come).
+arm64 Linux's numbers (the Linux layer's table: "The Linux layer's
+ABIs").
 
 **User entry:** `enter_user(entry, stack, arg)` starts EL0t with `x0 =
-arg`, every other register zero, SP_EL0 = `stack`, PSTATE = 0 (interrupts
-unmasked). The thread pointer is TPIDR_EL0 (`sched`'s "FS base").
+arg`, every other register zero, SP_EL0 = `stack` (the loader's stack top,
+16-byte aligned for native programs; corekit aligns it again), PSTATE = 0
+(interrupts unmasked, NZCV clear). TPIDR_EL0 is 0 unless the process set a
+thread pointer (`sched`'s "FS base"; native code doesn't use it). New
+threads and forked children start from a full register frame
+(`enter_user_frame`). Pointer authentication: the APIA key is set and
+SCTLR_EL1.EnIA on, so `paciasp`/`autiasp` in user code sign and check
+(one key per boot, shared by every process for now); the other keys
+(IB, DA, DB, GA) are off, so instructions using them are NOPs. BTI landing
+pads are not enforced (no guarded pages). EL0 may read CTR_EL0, use
+`dc zva` and cache maintenance by address (`dc cvau`, `ic ivau`: JITs sync
+their own code), and `wfi`/`wfe`.
 
 **FP/SIMD:** v0-v31, FPSR and FPCR, eagerly saved per task in Linux's
 `user_fpsimd_state` layout (528 bytes). SVE stays off for EL0.
@@ -135,24 +156,44 @@ SYSTEM_OFF; the test runner reads the code from the serial log (QEMU's
 own exit status is 0). This works the same under HVF and TCG, which
 semihosting does not promise.
 
-### Status (milestone 1)
+### Interrupts, CPUs, protections
 
-Works, under HVF and TCG, entered at EL1 or EL2: the loader, the kernel's
-early set-up, memory management (frames, heap, kernel mappings, kernel
-stacks), ACPI tables, the clock, PSCI, the VFS with the system image, the
-boot screen on `ramfb`, the scheduler's start; then the kernel reports the
-CPU and powers off (`arch::aarch64::bringup_done`), before enabling
-interrupts.
+- **GICv3** (`gic.rs`) from the MADT (distributor, redistributors, each
+  CPU's MPIDR) and GTDT (the virtual timer's PPI, 27 on `virt`). Group 1,
+  priority 0xA0, EOI mode 0. SPIs route to the boot CPU. SGI 0
+  reschedules, 1 is a TLB shootdown, 2 halts (panic). MSIs go through the
+  GICv2m frame (`msi=gicv2m`: HVF's GIC has no ITS): a slot's MSI is a
+  write of its SPI to the frame's doorbell. GICv2 is not driven (drivers
+  poll there).
+- **Timer:** the EL1 virtual timer (CNTV), one deadline at a time
+  (CNTV_CVAL is the clock's own count); `fired` masks it before EOI.
+- **SMP:** PSCI `CPU_ON` for each MADT CPU at `aurora_ap_entry`
+  (physical, MMU off) with a start block (MAIR, TCR, SCTLR, TTBR1 = the
+  kernel root, TTBR0 = a 1 GiB-block identity map of the kernel image,
+  stack, CPU index in TPIDR_EL1), cleaned to the point of coherency. TLB
+  maintenance is broadcast (`tlbi vaae1is`); `vmm`'s shootdown IPIs are
+  SGIs too.
+- **Protections:** PAN (SPAN cleared; the copy routine clears PSTATE.PAN
+  around its loop, `.inst`-encoded since the kernel targets ARMv8.0), PXN
+  on all user and run-time kernel mappings, the kernel image W^X, user
+  pointer authentication (above). Not yet: BTI enforcement, kernel PAC
+  (needs `-Zbuild-std` for the kernel: the prebuilt `core` lacks branch
+  protection), ASIDs (TTBR0 switches flush the TLB).
+- **Instruction cache:** Apple's cores report CTR_EL0.IDC = DIC = 0, so
+  code the kernel writes for user space must be cleaned to the point of
+  unification and the I-cache invalidated (`cache::sync_code`, by address
+  through the physical window: the I-cache is PIPT).
 
-Not yet: the GIC (interrupts, IPIs, MSI through GICv2m), the generic timer
-interrupt, secondary CPUs (PSCI CPU_ON), user programs (EL0 is entered by
-`enter_user`, untested), PAN/PXN of the kernel image/W^X, PAC/BTI (needs
-`-Zbuild-std` for the kernel: the prebuilt `core` lacks branch
-protection), user page permissions (see "Milestone 1 limitation"),
-signals for Linux programs (`compat::linux::signal` builds x86 frames only;
-on arm64 a handled signal ends the program), the Linux system call table
-for arm64, the vDSO and the C half of the kernel (x86-only builds), the
-PCI I/O window and ECAM, the second PL011 (telemetry), devices.
+### Status (milestone 2, in progress)
+
+Works under HVF on 1 and 4 vCPUs: interrupts, the timer, SMP, PCI through
+ECAM, virtio-blk and virtio-net on MSI-X (DHCP), xHCI with the USB
+keyboard and tablet, HDA, ACPI AML, the desktop on `ramfb`, native
+programs at EL0.
+
+Not yet: the C half of the kernel (x86-only builds), the PCI I/O
+window, the second PL011 (telemetry), virtio-gpu without a firmware
+framebuffer. The Linux layer's arm64 ABI: see "The Linux layer's ABIs".
 
 ## Native user space on aarch64
 
@@ -210,8 +251,8 @@ the system image).
 ## Linux programs for arm64 (groundwork)
 
 What the Linux layer needs from outside `kernel/src/compat/linux` exists
-for arm64; the layer itself (arm64's system call table, signal frames,
-the auxiliary vector) is still to come.
+for arm64; the layer's own arm64 ABI is described in "The Linux layer's
+ABIs" below.
 
 - **The system image's Linux programs** build for arm64 with `--arch
   aarch64` (`cargo xtask linux-programs --arch aarch64` builds them alone):
@@ -235,6 +276,115 @@ the auxiliary vector) is still to come.
   `run`/`image --arch aarch64` put it on the disk as `/Linux` with the
   same flags as on x86 (`--linux-root`, `--no-linux-root`; by default when
   it can be fetched).
+
+## The Linux layer's ABIs
+
+`kernel/src/compat/linux` implements every Linux call once; what differs
+between the x86-64 and arm64 Linux ABIs is in `compat/linux/abi/` and in
+the data crate `libs/linuxabi` (no kernel dependencies, so the host tests
+check it).
+
+- **One numbering, one table per ABI.** The shared `call()` dispatches by
+  x86-64 numbers (`abi::nr`, the layer's own numbering). An ABI's
+  `lookup(number)` says what a program's number is: `Call::Shared(nr)`,
+  `Call::Own` (the ABI's handler) or `Call::None`. x86-64 is the
+  identity. arm64's is `aurora_linuxabi::aarch64::TABLE`: the generic
+  table (Linux 6.1: 306 calls), each mapped onto the x86-64 call of the
+  same name — every arm64 call has one — except `clone`, whose last two
+  arguments are the other way round (`tls` before `child_tid`) and is
+  `Own`. The paused i386 branch's table (`ia32/table.rs`: `Same(nr,
+  widening)`, `Compat(fn)`, `No`) is the same scheme; it can move to
+  `aurora_linuxabi::{Entry, Map, Table}` and `abi/` with its widening
+  spec added to `Map::Same`.
+- **Memory laid out per ABI, not translated.** `struct stat`
+  (`abi::native::put_stat`: arm64's is 128 bytes with 32-bit
+  `st_nlink`/`st_blksize`), `struct epoll_event` (`EPOLL_EVENT_SIZE`,
+  `EPOLL_DATA_AT`: packed 12 bytes on x86-64, 16 on arm64), the open flags
+  that differ (`O_DIRECTORY`, `O_NOFOLLOW`; also `O_DIRECT`,
+  `O_LARGEFILE`), `MINSIGSTKSZ` (2048 / 5120), `uname`'s machine and
+  `AT_PLATFORM` (`MACHINE`). Everything else the layer reads or writes —
+  `flock`, `statfs`, `termios`, `stack_t`, `siginfo`, the kernel's
+  `sigaction`, signal numbers, `SA_*`, `MAP_*`, `CLONE_*`, `AT_*`,
+  ioctl numbers, errno — is the same on both, which the host tests check
+  value by value.
+- **Signals.** `compat/linux/signal.rs` keeps the shared machinery
+  (actions, masks, pending sets, which signal goes where, restarting);
+  `abi::native::signal` provides `Regs`, `enter_handler`, `sigreturn` and
+  `restart`. arm64's frame is Linux's: a frame record `{x29, x30}`, then
+  the `rt_sigframe` (`siginfo`, `ucontext` with `sigcontext` and a
+  4096-byte record area holding `fpsimd_context`, an `esr_context` for
+  faults and the terminator); the handler gets x0-x2, sp, x29 = the
+  record and x30 = the vDSO's `__kernel_rt_sigreturn` (or `SA_RESTORER`'s
+  address). `rt_sigreturn` checks sp alignment, PSTATE (EL0t, AArch64,
+  DAIF clear), every record (an unknown one, an `extra_context` or SVE
+  record, or a missing `fpsimd_context` ends the program with SIGSEGV, as
+  on Linux) and the alternate stack in `uc_stack`. A call interrupted by
+  a signal is made again by `pc -= 4` and x0 = the call's first argument,
+  which `syscall::dispatch` passes to `signal::on_return` (Linux's
+  `orig_x0`).
+- **vDSO.** `kernel/vdso/vdso-aarch64.c` (built by `kernel/build.rs` for
+  `aarch64-unknown-linux-gnu`, linked with `rust-lld`): `__kernel_
+  clock_gettime`, `__kernel_gettimeofday`, `__kernel_clock_getres`
+  (version `LINUX_2.6.39`, as glibc and musl look them up) read CNTVCT_EL0
+  and the same time page as x86's; `__kernel_rt_sigreturn` is exactly
+  `mov x8, #139; svc #0` with Linux's CFI and a preceding `nop`, which
+  libgcc and libunwind recognise. Unwind tables stay in the image
+  (`PT_GNU_EH_FRAME`).
+- **Start-up.** ELF loading is shared (static, static-PIE, dynamic through
+  `/lib/ld-linux-aarch64.so.1`, the same ASLR layout); arm64 adds
+  `AT_HWCAP2` and `AT_MINSIGSTKSZ` (4720: the frame, the record, 16 bytes
+  of alignment) after the common entries, and `AT_PLATFORM` is
+  `aarch64`. TLS is TPIDR_EL0 (`sched`'s thread pointer), set by
+  `clone(CLONE_SETTLS)`; there is no `arch_prctl`.
+- **CPU features.** `aurora_linuxabi::aarch64::cpu` derives `AT_HWCAP`,
+  `AT_HWCAP2` and `/proc/cpuinfo`'s `Features` line from the ID
+  registers as Linux 6.1 does, never reporting SVE, SME, MTE or BTI (the
+  kernel doesn't switch their state or guard pages yet), PACA/PACG only
+  with user keys, CPUID only when ID-register reads are emulated; and
+  `emulate` gives the sanitised value of an EL0 `mrs` of an ID register
+  (MIDR as it is, MPIDR's RES1 bit, the visible feature fields, 0 for
+  unallocated ones). `abi::aarch64::emulate_mrs(&mut TrapFrame)` decodes
+  the trap (EC 0x18, or EC 0 with an `mrs` at pc), writes Xt and steps
+  over it.
+- **Checked against Linux's headers.** `cargo xtask linux-abi --arch
+  <arch>` fetches Debian 12's `linux-libc-dev` and `libc6-dev` for the
+  architecture (through the pinned snapshot, hashes checked), has clang
+  evaluate every `__NR_*`, the layouts and the constants (nothing runs,
+  so any host works) and writes `libs/linuxabi/tests/headers/<arch>.txt`;
+  `cargo test -p aurora-linuxabi` asserts the tables, encoders and frame
+  code against them.
+
+### What the Linux layer uses from `arch/`
+
+- `arch::cpu::id_registers()`: MIDR and the AArch64 feature registers,
+  read once (HWCAP/HWCAP2, cpuinfo's `Features`, `mrs` emulation).
+- `trap.rs`'s `sync` offers an EL0 system-register trap (EC 0x18) or an
+  undefined instruction (EC 0) from a Linux program to
+  `compat::linux::abi::aarch64::emulate_mrs` before raising SIGILL.
+- CNTKCTL_EL1.EL0VCTEN on every CPU (`timer::start_local`): the vDSO reads
+  CNTVCT_EL0.
+- TPIDR_EL0 is the program's: `sched` reads it back
+  (`arch::cpu::thread_pointer`) when a user task leaves its CPU, and
+  `sched::fs_base` returns the live register, so `fork`/`clone` and
+  switches keep what the program set with `msr`.
+- `TrapFrame::user_start` is a user frame (`KIND_USER`): the exit path
+  loads SP_EL0 from user frames only, and `execve` returns through it.
+
+Still open: TPIDRRO_EL0 zeroed for user programs; BTI guarded pages; the
+B and data pointer-authentication keys (only APIA is on, so `PACA`/`PACG`
+are not advertised); a named `orig_x0` (the dispatcher's saved arguments
+serve).
+
+### Linux programs on aarch64: state
+
+Under HVF (`cargo xtask test --arch aarch64`), the static musl tests pass:
+linuxtest, proctest, nettest, inputtest, linuxfuzz, sandboxtest and the
+sandboxed linuxfuzz, and with `AURORA_TEST_LINUX_ROOT=1` (a root from
+`cargo xtask linux-root --arch aarch64 --base curl`) Debian's dynamically
+linked GNU Hello and curl fetching from the test server. drmtest is
+skipped: the display on `virt` is ramfb, not the PCI device it expects.
+musl's `vfork` is `fork` on arm64 (proctest's memory-sharing check is
+x86-only; `posix_spawn` makes the CLONE_VM | CLONE_VFORK call on both).
 
 ## Tools
 

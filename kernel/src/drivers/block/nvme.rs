@@ -84,6 +84,8 @@ impl QueuePair {
         let phase = self.phase;
         let cq = &self.cq;
         wait_irq(self.irq, 5000, || (cq.read::<u16>(entry + 14) & 1) == phase)?;
+        // The rest of the entry only after its phase bit (weakly ordered CPUs).
+        fence(Ordering::Acquire);
         let status = self.cq.read::<u16>(entry + 14) >> 1;
         let result = self.cq.read::<u32>(entry);
         self.cq_head = (self.cq_head + 1) % QDEPTH;

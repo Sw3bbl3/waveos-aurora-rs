@@ -253,6 +253,7 @@ Then check:
 
 - **Graphics.** On Intel graphics from Skylake to Raptor Lake a native display driver (untested on real hardware, see [above](#intel-graphics)) keeps the firmware's mode and adds a hardware pointer, EDID, hotplug detection and backlight control. Elsewhere WaveOS draws into the framebuffer the firmware set up (GOP). Either way the resolution changes only at boot (the Intel driver's `intel=modeset` aside). Several displays work in virtual machines (virtio-gpu with several scanouts); on real hardware they need a native display driver, and nothing of multi-monitor support (hotplug, per-display modes and scales, a separate presenting task per display, EDID identities for saved arrangements) has run on a real GPU or monitor. Two QEMU std VGAs (`secondary-vga`) are not driven together: only the first is used. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes. In virtual machines, Bochs/QEMU std VGA and virtio-gpu (WaveOS's own driver, with a hardware cursor and the window size followed live) change resolution at once and restore the picture after sleep.
 - **The Linux DRM device** (`/dev/dri/card0`) is tested in QEMU on Bochs VGA, the native virtio-gpu driver and the ported Linux one (`gpu=linux`). Untested: a card on the firmware framebuffer alone (`simpledrm`; QEMU always has Bochs or virtio), devices with real vblank interrupts (no driver has them yet: vblanks are counted from the mode's refresh rate), and more than one card.
+- **Programs' buffers on the screen** (windows showing a Linux program's dma-bufs or shared memory as they are, and full-screen programs scanned out directly) are tested in QEMU on Bochs VGA and virtio-gpu only. Untested: direct scanout on the Intel and AMD drivers (a driver that can't scan a program's buffer out refuses the commit, and the window is composed instead), frame times taken from real vblank interrupts, and scanning out on a display other than the first while others compose.
 - **Storage.** AHCI, NVMe and virtio disks, SD cards and eMMC work, but Intel RST / RAID mode does not. USB storage and SD cards must be FAT32 (exFAT and NTFS aren't supported, and most SD cards above 32 GB come formatted exFAT). Realtek and Alcor PCIe card readers aren't supported (see [SD cards and eMMC](#sd-cards-and-emmc)). Installing to eMMC works the same as to any disk; booting from it needs firmware that can read it, as tablets' and laptops' firmware does (QEMU's OVMF can't, so the tests start the bootloader from a copy on another disk).
 - **Input.**
   - Touchpads and touch screens that connect over I²C (common on laptops since about 2016) have a driver that has not yet run on real hardware (see [above](#i2c-touchpads-and-touch-screens)); on most Intel laptops it polls the touchpad, as there is no GPIO driver yet. Many such touchpads also have a PS/2 fallback, which works as a plain pointer. I²C keyboards and pens aren't supported. USB Precision Touchpads get the full gestures.
@@ -341,7 +342,12 @@ programs yet: every native aarch64 program (corekit's `svc` calls and
 start-up, the run-time detection of the ARMv8 AES/PMULL instructions for
 TLS, the NEON pixel and video paths inside WaveOS — those are checked by
 host tests on an Apple-silicon Mac), the arm64 Linux programs (BusyBox,
-wl-bridge, the C tests, Doom: built, not run) and the arm64 Debian root. The x86 and aarch64 disks'
+wl-bridge, the C tests, Doom: built, not run), the arm64 Debian root, and
+the Linux layer's arm64 ABI — its call table, `stat`/`epoll_event`
+layouts, signal frames and `rt_sigreturn`, restarting, the arm64 vDSO,
+the auxiliary vector and ID-register emulation (the tables, layouts,
+frames and HWCAP decoding are checked by host tests against Debian's
+arm64 headers, `cargo test -p aurora-linuxabi`). The x86 and aarch64 disks'
 architecture checks, `migrate-disk`, the per-architecture catalogues and
 the slot check in the bootloader are tested on the host only (image and
 repository tests; `cargo test -p xtask -p gina`). On QEMU 8.2 (Ubuntu

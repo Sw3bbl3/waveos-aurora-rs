@@ -379,10 +379,65 @@ pub fn dmabuf_of(p: &Process, fd: u64) -> Result<Arc<BufferObject>, isize> {
     }
 }
 
+/// The memory behind descriptor `fd` from byte `offset` for `len` bytes,
+/// as a buffer object, the offset into it and whether it is a dma-buf, for
+/// a window to show without a copy (`win_buffer`): a dma-buf's own buffer object, or the pages of a
+/// shared memory object (`memfd`, `/dev/shm`), held for as long as the
+/// buffer object lives.
+pub fn pixels_of(p: &Process, fd: u64, offset: u64, len: u64) -> Result<(Arc<BufferObject>, u64, bool), isize> {
+    use crate::mm::PAGE_SIZE;
+    let end = offset.checked_add(len).ok_or(EINVAL)?;
+    let shm = match &*p.fd(fd as usize)? {
+        Handle::Special(s) => match &*s.lock() {
+            Special::DmaBuf(bo) => {
+                return if end <= bo.size as u64 { Ok((bo.clone(), offset, true)) } else { Err(EINVAL) };
+            }
+            Special::Shm { file, .. } => file.clone(),
+            _ => return Err(EINVAL),
+        },
+        _ => return Err(EINVAL),
+    };
+    if end > shm.size() {
+        return Err(EINVAL);
+    }
+    let first = offset / PAGE_SIZE;
+    let pages = end.div_ceil(PAGE_SIZE) - first;
+    let frames = shm.frames(first, pages);
+    if frames.len() as u64 != pages {
+        return Err(EINVAL);
+    }
+    let bo = BufferObject::from_shared(&frames).map_err(|_| ENOMEM)?;
+    Ok((bo, offset % PAGE_SIZE, false))
+}
+
 /// ioctls on a dma-buf descriptor: `DMA_BUF_IOCTL_SYNC` (CPU access
-/// brackets; the memory is coherent, so nothing to do) and `SET_NAME`.
-pub fn dmabuf_ioctl(request: u64, arg: u64) -> Result<u64, isize> {
+/// brackets; the memory is coherent, so nothing to do), `SET_NAME`, and
+/// the implicit fences as sync files: `EXPORT_SYNC_FILE` gives a signalled
+/// one (nothing renders or scans out asynchronously yet) and
+/// `IMPORT_SYNC_FILE` takes one (it has nothing to wait for).
+pub fn dmabuf_ioctl(p: &Process, request: u64, arg: u64) -> Result<u64, isize> {
+    const SYNC_READ: u32 = 1;
+    const SYNC_WRITE: u32 = 2;
     match request {
+        // DMA_BUF_IOCTL_EXPORT_SYNC_FILE: { flags, fd }.
+        0xC008_6202 => {
+            let mut a: [u32; 2] = user::get(arg)?;
+            if a[0] & !(SYNC_READ | SYNC_WRITE) != 0 || a[0] == 0 {
+                return Err(EINVAL);
+            }
+            a[1] = super::fs::install_special(p, Special::SyncFile, true)? as u32;
+            user::put(arg, &a)?;
+            Ok(0)
+        }
+        // DMA_BUF_IOCTL_IMPORT_SYNC_FILE: { flags, fd }.
+        0x4008_6203 => {
+            let a: [u32; 2] = user::get(arg)?;
+            if a[0] & !(SYNC_READ | SYNC_WRITE) != 0 || a[0] == 0 {
+                return Err(EINVAL);
+            }
+            sync_file_of(p, a[1] as u64)?;
+            Ok(0)
+        }
         // DMA_BUF_IOCTL_SYNC: flags READ 1, WRITE 2 (RW 3), END 4.
         0x4008_6200 => {
             let flags: u64 = user::get(arg)?;
@@ -395,6 +450,52 @@ pub fn dmabuf_ioctl(request: u64, arg: u64) -> Result<u64, isize> {
         0x4008_6201 | 0x4004_6201 => Ok(0),
         _ => Err(ENOTTY),
     }
+}
+
+fn sync_file_of(p: &Process, fd: u64) -> Result<(), isize> {
+    match &*p.fd(fd as usize)? {
+        Handle::Special(s) if matches!(&*s.lock(), Special::SyncFile) => Ok(()),
+        _ => Err(EINVAL),
+    }
+}
+
+/// ioctls on a sync file (`linux/sync_file.h`): `SYNC_IOC_MERGE` (of two
+/// signalled fences, another) and `SYNC_IOC_FILE_INFO` (signalled, one fence).
+pub fn sync_file_ioctl(p: &Process, request: u64, arg: u64) -> Result<u64, isize> {
+    match request {
+        // struct sync_merge_data: name[32], fd2, fence, flags, pad.
+        0xC030_3E03 => {
+            let mut d = [0u8; 48];
+            user::get_bytes(arg, &mut d)?;
+            sync_file_of(p, i32::from_le_bytes(d[32..36].try_into().unwrap()) as u64)?;
+            let fd = super::fs::install_special(p, Special::SyncFile, true)? as u32;
+            d[36..40].copy_from_slice(&fd.to_le_bytes());
+            user::put_bytes(arg, &d)
+        }
+        // struct sync_file_info: name[32], status, flags, num_fences, pad,
+        // sync_fence_info (an array of struct sync_fence_info, 80 bytes each).
+        0xC038_3E04 => {
+            let mut d = [0u8; 56];
+            user::get_bytes(arg, &mut d)?;
+            let room = u32::from_le_bytes(d[40..44].try_into().unwrap());
+            let list = u64::from_le_bytes(d[48..56].try_into().unwrap());
+            d[..32].fill(0);
+            d[..8].copy_from_slice(b"waveos\0\0");
+            d[32..36].copy_from_slice(&1i32.to_le_bytes());
+            d[40..44].copy_from_slice(&1u32.to_le_bytes());
+            if room > 0 {
+                let mut f = [0u8; 80];
+                f[..9].copy_from_slice(b"software\0");
+                f[32..39].copy_from_slice(b"waveos\0");
+                f[64..68].copy_from_slice(&1i32.to_le_bytes());
+                f[72..80].copy_from_slice(&crate::time::now_ns().to_le_bytes());
+                user::put_bytes(list, &f)?;
+            }
+            user::put_bytes(arg, &d)
+        }
+        _ => Err(ENOTTY),
+    }
+    .map(|_| 0)
 }
 
 /// The frames `mmap` maps for `n` pages at `offset` of descriptor `fd`

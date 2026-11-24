@@ -26,6 +26,41 @@ pub fn flush_line(p: *const u8) {
     unsafe { core::arch::asm!("dc civac, {}", in(reg) p, options(nostack, preserves_flags)) };
 }
 
+/// Makes instructions written to `[va, va + len)` (kernel addresses: the
+/// physical window) visible to instruction fetch from any alias: the data
+/// cache cleaned to the point of unification and the instruction cache
+/// invalidated, each only where CTR_EL0 says it is needed (IDC, DIC).
+pub fn sync_code(va: u64, len: u64) {
+    let ctr = super::regs::read!("ctr_el0");
+    let (idc, dic) = (ctr & (1 << 28) != 0, ctr & (1 << 29) != 0);
+    if idc && dic {
+        return;
+    }
+    let dline = 4u64 << ((ctr >> 16) & 0xF);
+    let iline = 4u64 << (ctr & 0xF);
+    // SAFETY: cache maintenance by address of mapped kernel memory only
+    // affects caching; the barriers order it.
+    unsafe {
+        if !idc {
+            let mut p = va & !(dline - 1);
+            while p < va + len {
+                core::arch::asm!("dc cvau, {}", in(reg) p, options(nostack, preserves_flags));
+                p += dline;
+            }
+        }
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+        if !dic {
+            let mut p = va & !(iline - 1);
+            while p < va + len {
+                core::arch::asm!("ic ivau, {}", in(reg) p, options(nostack, preserves_flags));
+                p += iline;
+            }
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+        }
+        core::arch::asm!("isb", options(nostack, preserves_flags));
+    }
+}
+
 /// Makes everything written so far visible to devices (x86's `wbinvd`).
 /// Arm has no whole-cache clean by address range; set/way operations are
 /// not safe with other CPUs running, and with coherent DMA a barrier is

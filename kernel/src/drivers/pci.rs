@@ -167,6 +167,9 @@ impl Device {
     /// Returns the vector, or `None` if the device supports neither (the
     /// driver then polls). Further MSI-X table entries stay masked.
     pub fn enable_msi(&self, name: &str, handler: fn(usize), arg: usize) -> Option<u8> {
+        if !crate::arch::irq::msi_available() {
+            return None;
+        }
         let caps = self.capabilities();
         let route = if let Some(&(_, cap)) = caps.iter().find(|c| c.0 == CAP_MSIX) {
             let table = self.read32(cap + 4);

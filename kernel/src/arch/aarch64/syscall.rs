@@ -98,6 +98,12 @@ pub fn enter_user(entry: u64, stack: u64, arg: u64) -> ! {
     unsafe { aurora_enter_user(entry, stack, arg) }
 }
 
+/// The stack pointer a function entered as if called sees, for a stack whose
+/// top is `top`: the top itself (16-aligned; the return address is in x30).
+pub const fn call_sp(top: u64) -> u64 {
+    top
+}
+
 /// PSTATE bits a program may set: the condition flags (NZCV); always EL0t
 /// with interrupts unmasked.
 pub fn user_pstate(pstate: u64) -> u64 {

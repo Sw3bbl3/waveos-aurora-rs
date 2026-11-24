@@ -131,6 +131,23 @@ pub fn shm_hold(frame: u64) {
     swap::hold(frame, true);
 }
 
+/// Another holder (an object) for each of `frames`, all or none: false
+/// (and nothing held) if one of them is not a counted frame any more. A
+/// window showing a program's shared memory holds it like this (see
+/// `gpu::BufferObject::from_shared`): frames an object holds are never
+/// swapped out, so the compositor and the display can read them at any time.
+pub fn shm_hold_all(frames: &[u64]) -> bool {
+    for (i, &f) in frames.iter().enumerate() {
+        if !swap::hold(f, true) {
+            for &g in &frames[..i] {
+                swap::release(g, true);
+            }
+            return false;
+        }
+    }
+    true
+}
+
 /// Starts counting frames another owner allocated (a GPU buffer a program
 /// maps), held once by that owner, which lets go with [`shm_release`].
 /// They are device memory: never swapped out, by any mapping, ever (a
@@ -265,7 +282,7 @@ pub fn kmap(frames: &[u64]) -> Option<u64> {
     for (i, &f) in frames.iter().enumerate() {
         let va = base + i as u64 * PAGE_SIZE;
         let e = walk(pml4, va, true, false)?;
-        *e = f | PRESENT | WRITABLE | NO_EXECUTE;
+        *e = pte::leaf(f | PRESENT | WRITABLE | NO_EXECUTE);
         mmu::flush_page(va);
     }
     Some(base)
@@ -277,7 +294,7 @@ pub fn kmap(frames: &[u64]) -> Option<u64> {
 pub fn kmap_fixed(va: u64, f: u64) -> bool {
     match walk(kernel_pml4(), va, true, false) {
         Some(e) => {
-            *e = f | PRESENT | WRITABLE | NO_EXECUTE;
+            *e = pte::leaf(f | PRESENT | WRITABLE | NO_EXECUTE);
             mmu::flush_page(va);
             true
         }
@@ -313,7 +330,7 @@ pub fn kmap_wc(phys: u64, size: u64) -> Option<u64> {
         let va = base + i * PAGE_SIZE;
         let e = walk(pml4, va, true, false)?;
         // Bit 7 of a 4 KiB entry selects PAT slot 4: write-combining.
-        *e = (start + i * PAGE_SIZE) | PRESENT | WRITABLE | NO_EXECUTE | PAT_4K;
+        *e = pte::leaf((start + i * PAGE_SIZE) | PRESENT | WRITABLE | NO_EXECUTE | PAT_4K);
         mmu::flush_page(va);
     }
     Some(base + (phys - start))
@@ -716,7 +733,7 @@ impl AddressSpace {
         }
         let Some(e) = walk(self.pml4, page, true, true) else { return Fault::NoMemory };
         let Some(f) = zeroed_user_frame() else { return Fault::NoMemory };
-        *e = f | Self::flags(prot);
+        *e = pte::leaf(f | Self::flags(prot));
         self.resident += PAGE_SIZE;
         self.invalidate(page);
         Fault::Resolved
@@ -800,7 +817,7 @@ impl AddressSpace {
             }
         };
         // (Still the swap entry: changing it takes this address space's lock.)
-        *walk(self.pml4, page, false, false).unwrap() = e;
+        *walk(self.pml4, page, false, false).unwrap() = pte::leaf(e);
         self.swapped = self.swapped.saturating_sub(1);
         Fault::Resolved
     }
@@ -858,7 +875,7 @@ impl AddressSpace {
             };
             let e = walk(self.pml4, va, false, false).unwrap();
             let writable = if *e & WRITABLE != 0 { WRITABLE } else { 0 };
-            *e = frame | PRESENT | (*e & (USER | NO_EXECUTE)) | writable;
+            *e = pte::leaf(frame | PRESENT | (*e & (USER | NO_EXECUTE)) | writable);
             self.resident += PAGE_SIZE;
             self.swapped = self.swapped.saturating_sub(1);
         }
@@ -917,9 +934,9 @@ impl AddressSpace {
                 if matches!(prot, Prot::ReadExec | Prot::ReadWriteExec) {
                     f &= !NO_EXECUTE;
                 }
-                *e = f;
+                *e = pte::leaf(f);
             } else {
-                *e = zeroed_user_frame().ok_or(ENOMEM)? | Self::flags(prot);
+                *e = pte::leaf(zeroed_user_frame().ok_or(ENOMEM)? | Self::flags(prot));
                 self.resident += PAGE_SIZE;
             }
             self.invalidate(page);
@@ -965,10 +982,10 @@ impl AddressSpace {
                     );
                 }
                 copied.push(*e);
-                *e = f | flags | *e & LOCKED;
+                *e = pte::leaf(f | flags | *e & LOCKED);
                 resident += PAGE_SIZE;
             } else {
-                *e = (*e & (ADDR | SHARED | COUNTED | COPY_ON_WRITE | LOCKED)) | flags;
+                *e = pte::leaf((*e & (ADDR | SHARED | COUNTED | COPY_ON_WRITE | LOCKED)) | flags);
             }
         });
         self.resident += resident;
@@ -1066,7 +1083,7 @@ impl AddressSpace {
                 result = Err(aurora_abi::err::ENOMEM);
                 break;
             };
-            let old = core::mem::replace(e, f | flags | if c { COUNTED } else { 0 });
+            let old = core::mem::replace(e, pte::leaf(f | flags | if c { COUNTED } else { 0 }));
             // A page that wasn't mapped can't be in any TLB.
             if old & PRESENT != 0 {
                 replaced.push(old);
@@ -1281,8 +1298,8 @@ impl AddressSpace {
                 }
                 let writable = if e & WRITABLE != 0 { FORK_WRITE } else { 0 };
                 let both = e & !WRITABLE | SHARED | COUNTED | COPY_ON_WRITE | writable;
-                table(src)[i] = both;
-                table(dst)[i] = both & !LOCKED;
+                table(src)[i] = pte::leaf(both);
+                table(dst)[i] = pte::leaf(both & !LOCKED);
                 adopted.push(e & ADDR);
                 *shared += PAGE_SIZE;
             }
@@ -1327,7 +1344,7 @@ impl AddressSpace {
         let frame = old & ADDR;
         if swap::claim(frame) {
             // The last holder: no copy needed.
-            *e = frame | flags;
+            *e = pte::leaf(frame | flags);
             self.resident += PAGE_SIZE;
             self.invalidate(page);
             return Fault::Resolved;
@@ -1340,7 +1357,7 @@ impl AddressSpace {
                 PAGE_SIZE as usize,
             );
         }
-        *e = copy | flags;
+        *e = pte::leaf(copy | flags);
         self.resident += PAGE_SIZE;
         self.invalidate(page);
         // Other threads must stop reading the shared page before this one writes its own.
@@ -1606,7 +1623,7 @@ impl AddressSpace {
                 } else {
                     // No room for it: it stays, not to be tried again until written.
                     swap::abandon(slot);
-                    *walk(self.pml4, va, false, false).unwrap() = (old | ACCESSED | INCOMPRESSIBLE) & !DIRTY;
+                    *walk(self.pml4, va, false, false).unwrap() = pte::leaf((old | ACCESSED | INCOMPRESSIBLE) & !DIRTY);
                     out.failed += 1;
                     if !swap::has_room() {
                         out.full = true;
@@ -1901,6 +1918,10 @@ impl AddressSpace {
             let n = ((PAGE_SIZE - off) as usize).min(data.len() - done);
             unsafe {
                 core::ptr::copy_nonoverlapping(data[done..].as_ptr(), (phys_to_virt(phys) + off) as *mut u8, n);
+            }
+            if walk(self.pml4, cur, false, false).is_some_and(|e| *e & NO_EXECUTE == 0) {
+                // Program code (the loaders): fetchable as written.
+                crate::arch::cache::sync_code(phys_to_virt(phys) + off, n as u64);
             }
             done += n;
         }

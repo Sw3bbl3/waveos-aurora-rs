@@ -371,6 +371,11 @@ pub fn set_fs_base(base: u64) {
 
 /// The running task's thread pointer.
 pub fn fs_base() -> u64 {
+    // On Arm a program sets TPIDR_EL0 itself: the register is the truth.
+    #[cfg(target_arch = "aarch64")]
+    if crate::proc::current().is_some() {
+        return crate::arch::cpu::thread_pointer();
+    }
     interrupts::without_interrupts(|| {
         SCHED
             .lock()
@@ -645,6 +650,12 @@ fn schedule() {
             let cur = s.tasks.get_mut(&cur_id).unwrap();
             cur.running_on = None;
             let dead = cur.state == State::Dead;
+            // A program may have changed its thread pointer (TPIDR_EL0)
+            // without telling the kernel: keep what it holds.
+            #[cfg(target_arch = "aarch64")]
+            if cur.pid != 0 && !dead {
+                cur.fs_base = crate::arch::cpu::thread_pointer();
+            }
             let flag = if dead { 0 } else { &cur.on_cpu as *const AtomicBool as u64 };
             PREV_ON_CPU[cpu].store(flag, Ordering::Relaxed);
             s.cpus[cpu].prev = dead.then_some(cur_id);

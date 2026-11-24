@@ -94,6 +94,7 @@ dependencies = [
  "aurora-i2c",
  "aurora-igfx",
  "aurora-image",
+ "aurora-linuxabi",
  "aurora-lz4",
  "aurora-nvgfx",
  "aurora-sdmmc",
@@ -184,6 +185,10 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "png",
 ]
+
+[[package]]
+name = "aurora-linuxabi"
+version = "0.8.0"
 
 [[package]]
 name = "aurora-lz4"

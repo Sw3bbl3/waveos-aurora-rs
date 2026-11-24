@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mesa's wl_drm, version 2, as its EGL and Vulkan Wayland platforms use it:
+  the compositor names the DRM device clients render on and takes their
+  buffers as PRIME descriptors. Written down for wl-bridge from the
+  messages Mesa 22.3 sends and expects (requests and events in Mesa's
+  order, so the opcodes match).
+-->
+<protocol name="drm">
+  <interface name="wl_drm" version="2">
+    <request name="authenticate">
+      <arg name="id" type="uint"/>
+    </request>
+    <request name="create_buffer">
+      <arg name="id" type="new_id" interface="wl_buffer"/>
+      <arg name="name" type="uint"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="stride" type="uint"/>
+      <arg name="format" type="uint"/>
+    </request>
+    <request name="create_planar_buffer">
+      <arg name="id" type="new_id" interface="wl_buffer"/>
+      <arg name="name" type="uint"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="format" type="uint"/>
+      <arg name="offset0" type="int"/>
+      <arg name="stride0" type="int"/>
+      <arg name="offset1" type="int"/>
+      <arg name="stride1" type="int"/>
+      <arg name="offset2" type="int"/>
+      <arg name="stride2" type="int"/>
+    </request>
+    <request name="create_prime_buffer" since="2">
+      <arg name="id" type="new_id" interface="wl_buffer"/>
+      <arg name="name" type="fd"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="format" type="uint"/>
+      <arg name="offset0" type="int"/>
+      <arg name="stride0" type="int"/>
+      <arg name="offset1" type="int"/>
+      <arg name="stride1" type="int"/>
+      <arg name="offset2" type="int"/>
+      <arg name="stride2" type="int"/>
+    </request>
+    <event name="device">
+      <arg name="name" type="string"/>
+    </event>
+    <event name="format">
+      <arg name="format" type="uint"/>
+    </event>
+    <event name="authenticated"/>
+    <event name="capabilities">
+      <arg name="value" type="uint"/>
+    </event>
+  </interface>
+</protocol>
