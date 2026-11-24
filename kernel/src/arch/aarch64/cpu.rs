@@ -189,6 +189,13 @@ pub fn frame_pointer() -> u64 {
     fp
 }
 
+/// The calling CPU's user thread pointer (TPIDR_EL0). Programs set it
+/// themselves (`msr tpidr_el0`), so the scheduler reads it back when a task
+/// leaves the CPU.
+pub fn thread_pointer() -> u64 {
+    read!("tpidr_el0")
+}
+
 /// Sets the user thread pointer (TPIDR_EL0) of the calling CPU.
 pub fn set_thread_pointer(base: u64) {
     // SAFETY: TPIDR_EL0 is the user's thread register; the kernel never uses it.
