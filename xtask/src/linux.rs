@@ -241,7 +241,12 @@ fn out_dir() -> PathBuf {
 pub enum Cc {
     MuslGcc,
     /// `triplet`: musl's for the build's architecture (`x86_64-linux-musl`).
-    Clang { musl: PathBuf, builtins: PathBuf, lld: PathBuf, triplet: &'static str },
+    Clang {
+        musl: PathBuf,
+        builtins: PathBuf,
+        lld: PathBuf,
+        triplet: &'static str,
+    },
 }
 
 impl Cc {

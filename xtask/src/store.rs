@@ -626,7 +626,10 @@ mod tests {
         assert!(!String::from_utf8(before).unwrap().contains("\narch\t"));
         assert_eq!(fs::read(dir.join(&c.packages[0].path)).unwrap(), x86);
         let a = current_catalog_for(&dir, Arch::Aarch64).unwrap();
-        assert_eq!((a.arch(), a.packages[0].path.as_str()), ("aarch64", "packages-aarch64/dev.example.both-1.0.0.gina"));
+        assert_eq!(
+            (a.arch(), a.packages[0].path.as_str()),
+            ("aarch64", "packages-aarch64/dev.example.both-1.0.0.gina")
+        );
         assert_eq!(fs::read(dir.join(&a.packages[0].path)).unwrap(), arm);
         assert!(dir.join("catalog-aarch64.sig").exists() && dir.join("index.txt").exists());
         // A package for the other architecture is refused.

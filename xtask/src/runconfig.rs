@@ -128,9 +128,11 @@ fn on_arch(arch: Arch, name: &str, c: &Choice) -> (&'static str, &'static str, &
             "ramfb: the firmware's framebuffer, as the standard VGA is on a PC. The default.",
             &["ramfb"],
         ),
-        (Arch::Aarch64, "gpu", "virtio") => {
-            ("virtio-gpu", "virtio-gpu-pci, driven by WaveOS's native driver; follows the window size.", &["virtio-gpu-pci"])
-        }
+        (Arch::Aarch64, "gpu", "virtio") => (
+            "virtio-gpu",
+            "virtio-gpu-pci, driven by WaveOS's native driver; follows the window size.",
+            &["virtio-gpu-pci"],
+        ),
         (Arch::Aarch64, "disk", "virtio") => {
             ("virtio-blk", "A paravirtual disk made for VMs: the quickest, and the default here.", c.devices)
         }
@@ -357,7 +359,9 @@ impl RunConfig {
     #[cfg(test)]
     pub fn parse(subcommand: &str, args: &[String]) -> Result<RunConfig, String> {
         let arch = match args.iter().position(|a| a == "--arch") {
-            Some(i) => Arch::parse(args.get(i + 1).map(String::as_str).unwrap_or("")).ok_or("--arch x86_64 or aarch64")?,
+            Some(i) => {
+                Arch::parse(args.get(i + 1).map(String::as_str).unwrap_or("")).ok_or("--arch x86_64 or aarch64")?
+            }
             None => Arch::default_choice(),
         };
         let mut c = RunConfig {
@@ -878,7 +882,9 @@ mod tests {
             assert!(p.validate().is_ok(), "{name} for {}", p.arch);
             assert_eq!(RunConfig::from_json(&p.to_json()).unwrap(), p);
         }
-        assert!(builtin_presets_for(Arch::Aarch64).iter().all(|(_, _, p)| p.battery == "none" && p.action == Action::Run));
+        assert!(builtin_presets_for(Arch::Aarch64)
+            .iter()
+            .all(|(_, _, p)| p.battery == "none" && p.action == Action::Run));
         let o = options_json(&|_| QemuCaps::default());
         let arm_gpu = &o["by_arch"]["aarch64"]["gpu"];
         assert_eq!(arm_gpu[0]["label"], "Plain framebuffer");

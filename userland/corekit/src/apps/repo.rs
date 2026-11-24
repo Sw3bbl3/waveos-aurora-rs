@@ -282,7 +282,11 @@ fn verify(source: &str, text: &[u8], sig: &[u8], v2: bool, root: Option<&Root>) 
     // The signed text names its processor: another architecture's
     // catalogue, even validly signed, lists nothing this system can run.
     if index.arch() != gina::NATIVE_ARCH {
-        return Err(format!("{source} served a catalogue for {} systems; this one is {}", index.arch(), gina::NATIVE_ARCH));
+        return Err(format!(
+            "{source} served a catalogue for {} systems; this one is {}",
+            index.arch(),
+            gina::NATIVE_ARCH
+        ));
     }
     Ok(index)
 }
@@ -305,7 +309,8 @@ pub fn catalog(source: &str) -> Result<Catalog> {
     let text = get(&bases, catalog_txt, gina::repo::MAX_INDEX as u64)?;
     let index = match text {
         Some(text) => {
-            let sig = get(&bases, catalog_sig, 4096)?.ok_or_else(|| format!("{source}: its catalogue is not signed"))?;
+            let sig =
+                get(&bases, catalog_sig, 4096)?.ok_or_else(|| format!("{source}: its catalogue is not signed"))?;
             let index = verify(source, &text, &sig, true, root.as_ref())?;
             let digest: [u8; 32] = Sha256::digest(&text).into();
             gina::repo::check_fresh(&index, &digest, now_secs(), &seen).map_err(|e| format!("{source}: {e}"))?;

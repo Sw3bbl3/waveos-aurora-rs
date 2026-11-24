@@ -302,7 +302,12 @@ pub fn check(version: Option<&str>) -> Result<Option<Available>> {
     // Only this processor's system (the catalogue is checked too; this is
     // the signed description itself).
     if update.arch() != gina::NATIVE_ARCH {
-        return Err(format!("WaveOS {} is for {} computers; this one is {}.", update.version, update.arch(), gina::NATIVE_ARCH));
+        return Err(format!(
+            "WaveOS {} is for {} computers; this one is {}.",
+            update.version,
+            update.arch(),
+            gina::NATIVE_ARCH
+        ));
     }
     if !update.min_from.is_empty() && gina::compare_versions(&current, &update.min_from).is_lt() {
         return Err(format!("WaveOS {} can't be updated from this version ({current}).", update.version));
