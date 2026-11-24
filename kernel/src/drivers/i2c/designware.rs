@@ -320,7 +320,7 @@ fn acpi_interrupt(resources: &[Resource], arg: usize) -> Option<(u32, u8)> {
         _ => None,
     })?;
     let vector = crate::arch::irq::alloc("i2c", on_interrupt, arg)?;
-    crate::arch::apic::route_gsi(gsi, vector, level, low).then_some((gsi, vector))
+    crate::arch::irq::route_gsi(gsi, vector, level, low).then_some((gsi, vector))
 }
 
 /// Logs the PCI functions that are DesignWare I²C controllers (whether or

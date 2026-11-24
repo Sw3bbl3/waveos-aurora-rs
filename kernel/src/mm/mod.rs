@@ -259,7 +259,7 @@ static IRQ_OFF_MAX: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 pub(crate) fn tsc() -> u64 {
-    unsafe { core::arch::x86_64::_rdtsc() }
+    crate::arch::cpu::cycles()
 }
 
 /// Records an interrupts-off stretch that began at `start` (a [`tsc`] value).

@@ -22,7 +22,9 @@
 
 use super::nr;
 use crate::arch::fpu::FpuState;
-use crate::arch::syscall::{user_rflags, SyscallFrame};
+#[cfg(target_arch = "x86_64")]
+use crate::arch::syscall::user_rflags;
+use crate::arch::syscall::SyscallFrame;
 use crate::arch::trap::TrapFrame;
 use crate::proc::{self, Process};
 use crate::sched::{self, TaskId};
@@ -333,6 +335,7 @@ const R_RSP: usize = 15;
 const R_RIP: usize = 16;
 const R_RFLAGS: usize = 17;
 
+#[cfg(target_arch = "x86_64")]
 impl Regs {
     fn from_syscall(f: &SyscallFrame) -> Regs {
         // `syscall` keeps rip in rcx and rflags in r11, unless the frame
@@ -378,6 +381,24 @@ impl Regs {
         f.rip = g[R_RIP];
         f.rflags = user_rflags(g[R_RFLAGS]);
     }
+}
+
+// arm64: signal frames (`rt_sigframe` with `sigcontext` and the FP/SIMD
+// record) are not built yet; a handled signal ends the program instead
+// (`enter_handler` fails), and nothing is read from or written to frames.
+#[cfg(target_arch = "aarch64")]
+impl Regs {
+    fn from_syscall(_f: &SyscallFrame) -> Regs {
+        Regs::default()
+    }
+
+    fn write_syscall(&self, _f: &mut SyscallFrame) {}
+
+    fn from_trap(_f: &TrapFrame) -> Regs {
+        Regs::default()
+    }
+
+    fn write_trap(&self, _f: &mut TrapFrame) {}
 }
 
 /// What to do about the signals pending for thread `me`.
@@ -491,7 +512,7 @@ pub fn force(p: &Process, sig: u32, info: Info, f: &mut TrapFrame) -> bool {
 pub fn on_return(f: &mut SyscallFrame, nr: u64, p: &alloc::sync::Arc<Process>) {
     let Some(l) = &p.linux else { return };
     let me = sched::current_id();
-    let interrupted = f.rax == EINTR_RET && nr != nr::RT_SIGRETURN;
+    let interrupted = f.ret() == EINTR_RET && nr != nr::RT_SIGRETURN;
     // Nearly always nothing to do: say so without the lock, which every
     // thread of the process would otherwise take on every system call.
     if !interrupted && !l.signals.any.load(Ordering::Acquire) && l.signals.saved_masks.load(Ordering::Acquire) == 0 {
@@ -521,10 +542,16 @@ pub fn on_return(f: &mut SyscallFrame, nr: u64, p: &alloc::sync::Arc<Process>) {
 }
 
 /// Sets the frame up to make system call `nr` again.
+#[cfg(target_arch = "x86_64")]
 fn restart(f: &mut SyscallFrame, nr: u64) {
     f.rip -= 2; // the `syscall` instruction
     f.rax = nr;
 }
+
+/// arm64: not yet (the result replaced x0, the first argument; Linux keeps
+/// `orig_x0` for this). The call returns EINTR.
+#[cfg(target_arch = "aarch64")]
+fn restart(_f: &mut SyscallFrame, _nr: u64) {}
 
 /// Bytes from the frame's start to the `ucontext` and the `siginfo`.
 const UC: u64 = 8;
@@ -537,6 +564,9 @@ const UC_SIGMASK: u64 = 296;
 
 /// Builds the signal frame on the user stack and points `f` at the handler.
 fn enter_handler(r: &mut Regs, sig: u32, info: Info, a: &Action, old_mask: u64, t: &Thread) -> Result<(), isize> {
+    if cfg!(not(target_arch = "x86_64")) {
+        return Err(ENOSYS); // see the arm64 `Regs`
+    }
     let rsp = r.g[R_RSP];
     let on_alt = t.alt_size != 0 && (t.alt_sp..t.alt_sp + t.alt_size).contains(&rsp);
     let use_alt = a.flags & SA_ONSTACK != 0 && t.alt_size != 0 && !on_alt;
@@ -578,6 +608,7 @@ fn enter_handler(r: &mut Regs, sig: u32, info: Info, a: &Action, old_mask: u64, 
         w(UC_MCONTEXT + i as u64 * 8, *v);
     }
     // cs, gs, fs, ss
+    #[cfg(target_arch = "x86_64")]
     w(UC_MCONTEXT + 144, crate::arch::gdt::USER_CS as u64 | (crate::arch::gdt::USER_SS as u64) << 48);
     w(UC_MCONTEXT + 152, r.err);
     w(UC_MCONTEXT + 160, r.trapno);
@@ -613,7 +644,14 @@ fn enter_handler(r: &mut Regs, sig: u32, info: Info, a: &Action, old_mask: u64, 
     Ok(())
 }
 
+/// `rt_sigreturn` (arm64): no frames to return from yet.
+#[cfg(target_arch = "aarch64")]
+pub fn sigreturn(_p: &Process, _f: &mut SyscallFrame) -> Result<u64, isize> {
+    Err(ENOSYS)
+}
+
 /// `rt_sigreturn`: puts back what the signal frame at the stack holds.
+#[cfg(target_arch = "x86_64")]
 pub fn sigreturn(p: &Process, f: &mut SyscallFrame) -> Result<u64, isize> {
     let l = p.linux.as_ref().ok_or(EINVAL)?;
     let uc = f.rsp; // the handler's `ret` popped the return address

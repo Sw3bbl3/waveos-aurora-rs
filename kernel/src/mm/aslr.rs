@@ -31,7 +31,7 @@ static STATE: AtomicU8 = AtomicU8::new(0);
 pub fn enabled() -> bool {
     match STATE.load(Ordering::Relaxed) {
         // (Reading boot.conf may wait for the disk: not with interrupts off.)
-        0 if !x86_64::instructions::interrupts::are_enabled() => true,
+        0 if !crate::arch::interrupts::are_enabled() => true,
         0 => {
             // Only once the boot volume is there (the first program runs later).
             let off = crate::gui::prefs::boot_option("aslr").as_deref() == Some("off");

@@ -6,7 +6,7 @@
 //! holder can never be preempted and interrupt handlers can share state safely.
 
 use core::ops::{Deref, DerefMut};
-use x86_64::instructions::interrupts;
+use crate::arch::interrupts;
 
 pub struct IrqMutex<T> {
     inner: spin::Mutex<T>,

@@ -27,7 +27,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use x86_64::instructions::interrupts;
+use crate::arch::interrupts;
 
 const QUANTUM_MS: u64 = 10;
 
@@ -283,10 +283,7 @@ fn kick(cpu: Option<usize>) {
             crate::power::idle::ipi_avoided(c);
             return;
         }
-        crate::arch::apic::send_ipi(
-            percpu::CPUS[c].lapic_id.load(Ordering::Relaxed),
-            crate::arch::idt::RESCHEDULE_VECTOR,
-        );
+        crate::arch::irq::send_ipi(c, crate::arch::irq::Ipi::Reschedule);
     }
 }
 
@@ -384,10 +381,7 @@ pub fn fs_base() -> u64 {
 }
 
 fn write_fs_base(base: u64) {
-    // A non-canonical base would fault the wrmsr itself.
-    if base < 0x8000_0000_0000 {
-        unsafe { x86_64::registers::model_specific::Msr::new(0xC000_0100).write(base) };
-    }
+    crate::arch::cpu::set_thread_pointer(base);
 }
 
 /// Spawns a kernel thread that keeps its own SIMD registers across switches,
@@ -451,7 +445,7 @@ fn spawn_inner_fpu(
 }
 
 /// First code run by a new task (called from the asm trampoline).
-pub extern "sysv64" fn task_entry(f: u64, arg: u64) -> ! {
+pub extern "C" fn task_entry(f: u64, arg: u64) -> ! {
     finish_switch();
     interrupts::enable();
     let f: fn(u64) = unsafe { core::mem::transmute(f as usize) };
@@ -564,8 +558,7 @@ fn hang_report(now: u64) {
         crate::kprintln!("\nno output for {} s; tasks:", quiet / 1_000_000_000);
         dump_stacks();
         // The running task's own callers (it is the one switching).
-        let mut rbp: u64;
-        unsafe { core::arch::asm!("mov {}, rbp", out(reg) rbp) };
+        let mut rbp = crate::arch::cpu::frame_pointer();
         crate::kprint!("running task {}:", current_id());
         for _ in 0..24 {
             if rbp == 0 || !rbp.is_multiple_of(8) {
@@ -912,7 +905,7 @@ pub fn idle() -> ! {
             interrupts::disable();
             PARKED.fetch_or(1 << cpu, Ordering::AcqRel);
             loop {
-                x86_64::instructions::hlt();
+                crate::arch::cpu::halt();
             }
         }
     }
@@ -994,11 +987,11 @@ pub fn dump_stacks_of(which: impl Fn(u32) -> bool) {
         // aurora_context_switch pushed rbp, rbx, r12–r15 below its return address.
         let mut frames = [0u64; 20];
         let mut n = 0;
-        if let Some(ret) = read(t.rsp + 48) {
+        if let Some(ret) = read(t.rsp + switch::SAVED_RETURN) {
             frames[0] = ret;
             n = 1;
         }
-        let mut rbp = read(t.rsp + 40).unwrap_or(0);
+        let mut rbp = read(t.rsp + switch::SAVED_FRAME_POINTER).unwrap_or(0);
         while n < frames.len() {
             let (Some(next), Some(ret)) = (read(rbp), read(rbp + 8)) else { break };
             frames[n] = ret;

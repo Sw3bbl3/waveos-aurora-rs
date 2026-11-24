@@ -148,7 +148,7 @@ fn copy(s: &Screen, r: Rect) {
             }
         }
     }
-    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+    crate::arch::cache::wc_fence();
 }
 
 /// The desktop took over the screen: free the boot screen's buffer.

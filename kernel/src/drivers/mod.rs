@@ -13,10 +13,12 @@ pub mod keyboard;
 pub mod keymap;
 pub mod net;
 pub mod pci;
+#[cfg(target_arch = "x86_64")]
 pub mod ps2;
 pub mod rtc;
 pub mod usb;
 pub mod virtio;
+#[cfg(target_arch = "x86_64")]
 pub mod vmmouse;
 pub mod wifi;
 
@@ -28,6 +30,7 @@ pub fn resume() {
     block::sdhci::resume();
     let (w, h) = crate::gui::screen_pixels();
     display::resume(w as u32, h as u32);
+    #[cfg(target_arch = "x86_64")]
     ps2::init();
     audio::resume();
     net::resume();

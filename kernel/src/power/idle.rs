@@ -28,9 +28,8 @@
 use crate::arch::percpu::{self, MAX_CPUS};
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::arch::x86_64::__cpuid;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use x86_64::instructions::interrupts;
+use crate::arch::interrupts;
 
 pub const MAX_STATES: usize = 8;
 
@@ -114,18 +113,18 @@ static MWAIT: AtomicBool = AtomicBool::new(false);
 static LATENCY_LIMIT: AtomicU64 = AtomicU64::new(u64::MAX);
 
 fn hypervisor() -> bool {
-    __cpuid(1).ecx & (1 << 31) != 0
+    crate::arch::cpu::hypervisor()
 }
 
 /// MONITOR/MWAIT usable with interrupts as break events.
 fn mwait_supported() -> bool {
-    __cpuid(1).ecx & (1 << 3) != 0 && __cpuid(0).eax >= 5 && __cpuid(5).ecx & 0b11 == 0b11
+    crate::arch::cpu::mwait_supported()
 }
 
 /// Whether states deeper than C1 keep time: the LAPIC timer keeps running
 /// (ARAT) and the clock is not a TSC that might stop.
 fn deep_allowed() -> bool {
-    let invariant = __cpuid(0x8000_0000).eax >= 0x8000_0007 && __cpuid(0x8000_0007).edx & (1 << 8) != 0;
+    let invariant = crate::arch::cpu::invariant_counter();
     crate::arch::timer::always_running() && (invariant || crate::time::source() != crate::time::Source::Tsc)
 }
 
@@ -155,7 +154,7 @@ pub fn init() {
         });
     }
     if mwait && crate::arch::cpu::vendor() == "GenuineIntel" {
-        let subs = __cpuid(5).edx;
+        let subs = crate::arch::cpu::mwait_substates();
         let count = |c: u32| (subs >> (4 * c)) & 0xF;
         if count(1) >= 2 {
             states.push(State {
@@ -404,24 +403,14 @@ pub fn enter() {
         Kind::Halt => interrupts::enable_and_hlt(),
         Kind::Mwait(hint) => {
             me.polling.store(true, Ordering::SeqCst);
-            let line = &me.need_resched as *const AtomicBool;
-            unsafe {
-                // monitor: rax = address, ecx = extensions, edx = hints.
-                core::arch::asm!("monitor", in("rax") line, in("ecx") 0, in("edx") 0, options(nostack));
-            }
-            if me.need_resched.load(Ordering::SeqCst) {
-                interrupts::enable();
-            } else {
-                // `sti` delays interrupts by one instruction, so none slips
-                // in between it and `mwait` (ECX bit 0: interrupts wake it).
-                unsafe { core::arch::asm!("sti; mwait", in("eax") hint, in("ecx") 1, options(nostack)) };
-            }
+            let line = &me.need_resched as *const AtomicBool as *const u8;
+            crate::arch::cpu::monitor_mwait(line, hint, || me.need_resched.load(Ordering::SeqCst));
             me.polling.store(false, Ordering::SeqCst);
         }
         Kind::Port(port) => {
             // The chipset stops the clock on the read; any interrupt resumes
             // it (with IF still clear), then it is taken.
-            unsafe { x86_64::instructions::port::Port::<u8>::new(port).read() };
+            unsafe { crate::arch::io::Port::<u8>::new(port).read() };
             interrupts::enable();
         }
     }

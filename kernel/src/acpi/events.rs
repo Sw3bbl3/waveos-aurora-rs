@@ -8,7 +8,7 @@ use super::AcpiInfo;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use spin::Once;
-use x86_64::instructions::port::Port;
+use crate::arch::io::Port;
 
 pub const POWER_BUTTON: u32 = 1 << 0;
 pub const SLEEP_BUTTON: u32 = 1 << 1;
@@ -105,7 +105,7 @@ pub fn init(info: &AcpiInfo) -> bool {
         }
         v => v,
     };
-    if !crate::arch::apic::route_gsi(gsi, vector, level, active_low) {
+    if !crate::arch::irq::route_gsi(gsi, vector, level, active_low) {
         log!("acpi", "cannot route the SCI (GSI {})", gsi);
         return false;
     }
@@ -133,7 +133,7 @@ pub fn enable_gpe(n: u32) {
     }
     let (byte, bit) = ((n / 8) as u16, 1u8 << (n % 8));
     outb(b.gpe0 + byte, bit);
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         let en = b.gpe0 + b.gpe_half + byte;
         outb(en, inb(en) | bit);
     });

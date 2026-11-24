@@ -37,7 +37,6 @@ aurora-lz4 = { path = "../libs/lz4" }
 aurora-igfx = { path = "../libs/igfx" }
 aurora-amdgfx = { path = "../libs/amdgfx" }
 aurora-nvgfx = { path = "../libs/nvgfx" }
-x86_64 = "0.15"
 spin = "0.9"
 acpi = "6.1"
 log = "0.4"
@@ -46,3 +45,6 @@ log = "0.4"
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 # PBKDF2 for the account password (gui::account).
 hmac = { version = "0.12", default-features = false }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = "0.15"

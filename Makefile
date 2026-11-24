@@ -41,6 +41,6 @@ iso: ## Build a UEFI ISO for VirtualBox and other VMs, target/waveos-aurora.iso
 clean: ## Delete compiled output; keeps your WaveOS disk and the downloaded Linux packages
 	rm -rf target/debug target/release target/aarch64-apple-darwin target/x86_64-unknown-linux-gnu \
 		target/x86_64-unknown-none target/x86_64-unknown-uefi target/x86_64-unknown-linux-musl \
-		target/aarch64-unknown-none target/aarch64-unknown-uefi \
+		target/aarch64-unknown-none-softfloat target/aarch64-unknown-uefi \
 		target/user target/esp target/esp-test target/iso-esp target/iso-staging \
 		target/user-aarch64 target/esp-aarch64 target/esp-test-aarch64 target/iso-esp-aarch64 target/iso-staging-aarch64

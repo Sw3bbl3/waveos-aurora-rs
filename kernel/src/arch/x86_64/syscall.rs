@@ -47,6 +47,55 @@ pub struct SyscallFrame {
     pub pad: u64,
 }
 
+impl SyscallFrame {
+    /// The system call number (RAX).
+    #[inline]
+    pub fn number(&self) -> u64 {
+        self.rax
+    }
+
+    /// The six arguments (RDI, RSI, RDX, R10, R8, R9).
+    #[inline]
+    pub fn args(&self) -> [u64; 6] {
+        [self.rdi, self.rsi, self.rdx, self.r10, self.r8, self.r9]
+    }
+
+    /// Sets the value the call returns (RAX).
+    #[inline]
+    pub fn set_return(&mut self, v: u64) {
+        self.rax = v;
+    }
+
+    /// The value the call returns (RAX, once it has run).
+    #[inline]
+    pub fn ret(&self) -> u64 {
+        self.rax
+    }
+
+    /// Where the program resumes.
+    #[inline]
+    pub fn pc(&self) -> u64 {
+        self.rip
+    }
+
+    /// The program's stack pointer.
+    #[inline]
+    #[allow(dead_code)] // part of the frame interface (`arch` docs); unused on x86 so far
+    pub fn sp(&self) -> u64 {
+        self.rsp
+    }
+
+    #[inline]
+    pub fn set_sp(&mut self, sp: u64) {
+        self.rsp = sp;
+    }
+
+    /// A frame that starts a program at `pc` with stack `sp` (interrupts on).
+    pub fn user_start(pc: u64, sp: u64) -> SyscallFrame {
+        SyscallFrame { rip: pc, rsp: sp, rflags: 0x202, ..Default::default() }
+    }
+}
+
 global_asm!(
     ".global aurora_syscall_entry",
     "aurora_syscall_entry:",

@@ -5,7 +5,6 @@
 //! handed to programs through `getrandom` (TLS keys).
 
 use crate::sync::IrqMutex;
-use core::arch::x86_64::{__cpuid, _rdtsc};
 
 struct Generator {
     key: [u32; 8],
@@ -52,38 +51,12 @@ fn block(key: &[u32; 8], counter: u64) -> [u32; 16] {
     s
 }
 
-fn rdrand() -> Option<u64> {
-    if __cpuid(1).ecx & (1 << 30) == 0 {
-        return None;
-    }
-    for _ in 0..10 {
-        let mut v = 0u64;
-        if unsafe { core::arch::x86_64::_rdrand64_step(&mut v) } == 1 {
-            return Some(v);
-        }
-    }
-    None
-}
-
-fn rdseed() -> Option<u64> {
-    if __cpuid(7).ebx & (1 << 18) == 0 {
-        return None;
-    }
-    for _ in 0..10 {
-        let mut v = 0u64;
-        if unsafe { core::arch::x86_64::_rdseed64_step(&mut v) } == 1 {
-            return Some(v);
-        }
-    }
-    None
-}
-
 /// 64 bits of entropy-ish input: hardware randomness when available, and
 /// the low bits of timer readings (which jitter with interrupts and caches).
 fn entropy() -> u64 {
-    let mut v = rdseed().or_else(rdrand).unwrap_or(0);
+    let mut v = crate::arch::rng::seed().or_else(crate::arch::rng::random).unwrap_or(0);
     for i in 0..8 {
-        let t = unsafe { _rdtsc() } ^ crate::time::now_ns().rotate_left(i * 7);
+        let t = crate::arch::cpu::cycles() ^ crate::time::now_ns().rotate_left(i * 7);
         v = v.rotate_left(13) ^ t.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
     v
@@ -139,7 +112,7 @@ pub fn chacha_block(key: &[u32; 8], counter: u64) -> [u32; 16] {
 
 /// Whether the CPU provides hardware randomness (otherwise only timer jitter).
 pub fn hardware() -> bool {
-    rdrand().is_some()
+    crate::arch::rng::random().is_some()
 }
 
 #[cfg(feature = "ktest")]
