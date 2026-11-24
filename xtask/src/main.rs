@@ -59,7 +59,7 @@
 //!       --displays N                      with --gpu virtio: N scanouts, plugged in and out by the
 //!                                         multi-monitor test, each checked by QMP screendump (testdisplays.rs)
 //!       --mesa                            only the Mesa tests, on a disk with Debian's Mesa, kmscube, glmark2
-//!                                         and Vulkan tools (target/mesa-root, fetched once) and 2 GiB of
+//!                                         and Vulkan tools (target/mesa-root[-aarch64], fetched once) and 2 GiB of
 //!                                         memory unless --memory-mib says otherwise
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 

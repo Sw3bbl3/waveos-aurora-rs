@@ -136,10 +136,6 @@ const ARCH_SKIPS: &[(&str, &str)] = &[
     ("ACPI: AML, sleep states, battery", "a PC's ACPI: sleep states, \\_S5 and the test battery's SSDT"),
     ("I2C:", "the I2C touchpad is a PC ACPI device (test SSDT)"),
     ("sleep (S3) and wake", "no suspend to RAM on Arm"),
-    (
-        "Linux programs: the DRM device",
-        "the display on `virt` is ramfb, not a PCI device as drmtest expects (virtio-gpu comes later)",
-    ),
 ];
 
 pub fn run() {
@@ -866,6 +862,12 @@ impl InputTestUser {
 /// The harness checks screendumps of both (see `xtask`).
 fn linux_drm() {
     use crate::drivers::gpu::{self, output::Output, Damage};
+    // drmtest checks the card's PCI device in /sys: `virt`'s ramfb (`--gpu
+    // std` on aarch64) has none.
+    if !crate::drivers::pci::devices().iter().any(|d| d.class == 0x03) {
+        crate::kprint!("(skipped: the display is not a PCI device here; see --gpu virtio) ");
+        return;
+    }
     let desktop = Output::open(None).expect("no display");
     let (w, h) = desktop.size();
     unsafe { desktop.back_buffer() }.fill(0xFF33_6699);
@@ -928,6 +930,13 @@ fn linux_modetest() {
 /// Where Debian's Mesa and its programs are when the disk has them
 /// (`cargo xtask test --mesa` puts them there; other disks skip the Mesa tests).
 const MESA_KMSCUBE: &str = "/Linux/usr/bin/kmscube";
+
+/// Debian installs `es2gears` under the architecture's triplet.
+const ES2GEARS: &str = if cfg!(target_arch = "aarch64") {
+    "/usr/bin/es2gears_wayland.aarch64-linux-gnu"
+} else {
+    "/usr/bin/es2gears_wayland.x86_64-linux-gnu"
+};
 
 /// Debian's GNU Hello (glibc, started through the dynamic loader), and curl
 /// fetching from the test server when it is there too: on a disk with a
@@ -1048,7 +1057,7 @@ fn linux_mesa_window() {
         crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
         return;
     }
-    let script = "wl-bridge --background && exec /usr/bin/es2gears_wayland.x86_64-linux-gnu";
+    let script = &alloc::format!("wl-bridge --background && exec {ES2GEARS}");
     let (mut red, mut frames, mut last, mut since, mut dmabuf) = (0usize, 0u32, 0u64, None, 0u32);
     let (code, _) =
         run_linux_program_watched("/System/Linux/bin/busybox", &["sh", "-c", script], None, 300_000, &mut |_| {
@@ -1233,7 +1242,7 @@ fn linux_mesa_composited() {
     let busybox = "/System/Linux/bin/busybox";
 
     // In a window: composited from the program's buffers.
-    let script = "wl-bridge --background && exec /usr/bin/es2gears_wayland.x86_64-linux-gnu";
+    let script = &alloc::format!("wl-bridge --background && exec {ES2GEARS}");
     let (mut shown, mut held) = (0u32, false);
     let (code, _) = run_composited(&mut c, &[busybox, "sh", "-c", script], 300_000, &mut |c, _| {
         let Some(id) = window_titled("es2gears") else { return false };
@@ -1363,7 +1372,7 @@ fn linux_mesa_bench() {
     }
     let mut c = mesa_compositor();
     let busybox = "/System/Linux/bin/busybox";
-    let gears = "/usr/bin/es2gears_wayland.x86_64-linux-gnu";
+    let gears = ES2GEARS;
     let glmark = "/usr/bin/glmark2-es2-wayland -b build:duration=8 -b texture:duration=8";
     let glmark_full = "/usr/bin/glmark2-es2-wayland --fullscreen --visual-config a=0 \
                        -b build:duration=8 -b texture:duration=8";
