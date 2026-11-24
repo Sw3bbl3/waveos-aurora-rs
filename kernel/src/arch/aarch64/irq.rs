@@ -1,16 +1,17 @@
 //! Device interrupts: handler slots ("vectors") for drivers, wired to the
-//! GIC.
+//! GIC (`gic`).
 //!
 //! The interface is the x86 one: [`alloc`] hands out a small number that
 //! names a handler slot; [`route_gsi`] connects a wired interrupt (on Arm a
 //! GIC SPI: GSI = INTID) to it, [`msi_message`] says what a device writes to
-//! raise it. Until the GIC driver is in (milestone 2) no slots are handed
-//! out: drivers fall back to polling, as they do on x86 when a device has
-//! no interrupt.
+//! raise it (a GICv2m doorbell and an SPI). Without a GIC to drive no slots
+//! are handed out: drivers fall back to polling, as they do on x86 when a
+//! device has no interrupt.
 
+use super::gic;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 /// The numbers handed out start here, as on x86 (where they are IDT vectors).
@@ -22,13 +23,11 @@ static ARG: [AtomicUsize; COUNT] = [const { AtomicUsize::new(0) }; COUNT];
 static HITS: [AtomicU64; COUNT] = [const { AtomicU64::new(0) }; COUNT];
 static NAMES: Mutex<Vec<(u8, String)>> = Mutex::new(Vec::new());
 static NEXT: AtomicUsize = AtomicUsize::new(0);
-/// An interrupt controller driver is up (slots can be routed).
-static READY: AtomicBool = AtomicBool::new(false);
 
 /// Reserves a slot that runs `handler(arg)`; `None` when all are taken,
 /// or while no interrupt controller can deliver it (the driver then polls).
 pub fn alloc(name: &str, handler: fn(usize), arg: usize) -> Option<u8> {
-    if !READY.load(Ordering::Acquire) {
+    if !gic::ready() {
         return None;
     }
     let i = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -53,7 +52,6 @@ pub fn list() -> Vec<(u8, String, u64)> {
 }
 
 /// Runs the handler of slot `vector` (from the GIC's interrupt handler).
-#[allow(dead_code)] // called once the GIC routes interrupts
 pub fn dispatch(vector: u8) {
     let i = vector.wrapping_sub(FIRST) as usize;
     if i >= COUNT {
@@ -68,25 +66,30 @@ pub fn dispatch(vector: u8) {
     }
 }
 
-/// An IRQ exception (from `trap`). Nothing unmasks interrupts at the
-/// controller yet, so one arriving is a bug worth stopping for.
+/// An IRQ exception (from `trap`).
 pub fn interrupt() {
-    panic!("IRQ taken, but no interrupt controller driver is running yet");
+    gic::handle();
 }
 
-/// Routes wired interrupt `gsi` to slot `vector`; false while there is no
-/// interrupt controller driver.
-pub fn route_gsi(_gsi: u32, _vector: u8, _level: bool, _active_low: bool) -> bool {
-    false
+/// Routes wired interrupt `gsi` (an SPI) to slot `vector`. GIC SPIs are
+/// active-high or rising-edge; firmware describes them so.
+pub fn route_gsi(gsi: u32, vector: u8, level: bool, _active_low: bool) -> bool {
+    gic::route(gsi, vector, !level)
 }
 
 /// Masks a wired interrupt.
-pub fn mask_gsi(_gsi: u32) {}
+pub fn mask_gsi(gsi: u32) {
+    gic::mask(gsi)
+}
 
-/// The MSI message (address, data) that raises `vector`: none yet (the
-/// device then gets no MSI and its driver polls).
-pub fn msi_message(_vector: u8) -> (u64, u32) {
-    (0, 0)
+/// Whether devices can raise MSIs (a GICv2m frame).
+pub fn msi_available() -> bool {
+    gic::msi_available()
+}
+
+/// The MSI message (address, data) that raises `vector`.
+pub fn msi_message(vector: u8) -> (u64, u32) {
+    gic::msi(vector).unwrap_or((0, 0))
 }
 
 /// Inter-processor interrupts.
@@ -98,5 +101,14 @@ pub enum Ipi {
     TlbShootdown,
 }
 
-/// Sends `ipi` to CPU `cpu`: nothing to send to while only the boot CPU runs.
-pub fn send_ipi(_cpu: usize, _ipi: Ipi) {}
+/// Sends `ipi` to CPU `cpu` (an SGI).
+pub fn send_ipi(cpu: usize, ipi: Ipi) {
+    if !gic::ready() {
+        return;
+    }
+    let sgi = match ipi {
+        Ipi::Reschedule => gic::SGI_RESCHEDULE,
+        Ipi::TlbShootdown => gic::SGI_TLB,
+    };
+    gic::send_sgi(super::percpu::CPUS[cpu].lapic_id.load(Ordering::Relaxed) as u64, sgi);
+}

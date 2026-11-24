@@ -106,9 +106,6 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     proc::init();
     sandbox::init();
     mm::kswapd::init();
-    // Arm bring-up: no interrupt controller driver yet, so it ends here.
-    #[cfg(target_arch = "aarch64")]
-    arch::bringup_done();
     arch::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
     log!("boot", "protections: {}", arch::protect::report());
