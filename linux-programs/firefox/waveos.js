@@ -68,6 +68,10 @@ pref("media.rdd-process.enabled", false);
 pref("media.utility-process.enabled", false);
 pref("media.allow-audio-non-utility", true);
 
+// Sound through ALSA, WaveOS's sound card (docs/LINUX.md), straight away:
+// there is no PulseAudio server to look for first.
+pref("media.cubeb.backend", "alsa");
+
 // Less to do while starting (each is work on Firefox's main thread, or a
 // process, that WaveOS has no use for):
 // - accessibility, which looks for a desktop accessibility bus WaveOS

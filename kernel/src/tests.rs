@@ -57,6 +57,7 @@ const TESTS: &[Test] = &[
     ("sound: HDA playback", sound),
     ("sound: format and rate conversion", crate::drivers::audio::convert::self_test),
     ("sound: device registry and capture streams", sound_devices),
+    ("sound: ALSA hardware parameter rules", crate::compat::linux::sound::self_test),
     ("ACPI: AML, sleep states, battery", acpi_runtime),
     ("USB: hub, keyboard, tablet, storage", usb),
     ("sound: USB audio (isochronous), unplug and replug mid-stream", usb_audio),

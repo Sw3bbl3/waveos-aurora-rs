@@ -14,12 +14,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
+#include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
+#include <sys/timerfd.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -693,11 +695,226 @@ static void sound(void) {
     static short silence[4800 * 2]; // 100 ms
     CHECK(write(dsp, silence, sizeof silence) == (ssize_t)sizeof silence, "OSS: write");
     int delay = -1;
-    CHECK(ioctl(dsp, 0x80045017, &delay) == 0 && delay >= 0 && delay <= (int)sizeof silence, "OSS: delay");
+    // Queued, and what the mixer has put in the device's ring ahead of it (up to 100 ms).
+    CHECK(ioctl(dsp, 0x80045017, &delay) == 0 && delay >= 0 && delay <= (int)sizeof silence + 19200, "OSS: delay");
     CHECK(ioctl(dsp, 0x5001, 0) == 0, "OSS: sync");
     CHECK(ioctl(dsp, 0x80045017, &delay) == 0 && delay == 0, "OSS: everything played");
     close(dsp);
     printf("PASS sound (OSS)\n");
+}
+
+// Sleeps and timeouts are kept to the nanosecond, not the millisecond tick
+// (frame and sound pacing depend on it): nanosleep never wakes early and
+// doesn't spin out its last millisecond; epoll_pwait2's sub-millisecond
+// timeout is waited for, not rounded down to nothing; a timerfd keeps its
+// period.
+#ifndef SYS_epoll_pwait2
+#define SYS_epoll_pwait2 441
+#endif
+static long us_between(struct timespec *a, struct timespec *b) {
+    return (b->tv_sec - a->tv_sec) * 1000000 + (b->tv_nsec - a->tv_nsec) / 1000;
+}
+
+static void precise_timers(void) {
+    struct timespec a, b, nap = {0, 1500000};
+    long late = 0;
+    for (int i = 0; i < 20; i++) {
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        CHECK(nanosleep(&nap, 0) == 0, "nanosleep");
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        long us = us_between(&a, &b);
+        CHECK(us >= 1500, "nanosleep never wakes early");
+        late += us - 1500;
+    }
+    int ep = epoll_create1(0);
+    CHECK(ep >= 0, "epoll_create1");
+    struct epoll_event ev;
+    struct timespec t = {0, 500000};
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    long n = syscall(SYS_epoll_pwait2, ep, &ev, 1, &t, 0, 8);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    CHECK(n == 0 && us_between(&a, &b) >= 500, "epoll_pwait2 waits out a 0.5 ms timeout");
+    close(ep);
+    int tfd = timerfd_create(CLOCK_MONOTONIC, 0);
+    CHECK(tfd >= 0, "timerfd_create");
+    struct itimerspec its = {{0, 4000000}, {0, 4000000}};
+    CHECK(timerfd_settime(tfd, 0, &its, 0) == 0, "timerfd_settime");
+    unsigned long long ticks = 0, v;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    while (ticks < 10) {
+        CHECK(read(tfd, &v, 8) == 8, "timerfd read");
+        ticks += v;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    long ms = us_between(&a, &b) / 1000;
+    CHECK(ms >= 39 && ms < 400, "a 4 ms timerfd ticks ten times in about 40 ms");
+    close(tfd);
+    printf("PASS precise timers (1.5 ms nanosleep: %ld us late on average; ten 4 ms ticks in %ld ms)\n", late / 20, ms);
+}
+
+// ALSA: the card (/dev/snd/controlC0) and its playback device, driven with
+// the kernel's ioctls as libasound does: parameters refined and set, frames
+// written and through the mapped buffer (committed with SYNC_PTR), the
+// start threshold, poll, delay, an underrun and recovering from it.
+struct snd_interval {
+    unsigned int min, max, flags;
+};
+struct snd_hw_params {
+    unsigned int flags;
+    unsigned int masks[3][8];
+    unsigned int mres[5][8];
+    struct snd_interval intervals[12];
+    struct snd_interval ires[9];
+    unsigned int rmask, cmask, info, msbits, rate_num, rate_den;
+    unsigned long fifo_size;
+    unsigned char reserved[64];
+};
+_Static_assert(sizeof(struct snd_hw_params) == 608, "snd_pcm_hw_params");
+struct snd_sw_params {
+    int tstamp_mode;
+    unsigned int period_step, sleep_min;
+    unsigned long avail_min, xfer_align, start_threshold, stop_threshold, silence_threshold, silence_size, boundary;
+    unsigned int proto, tstamp_type;
+    unsigned char reserved[56];
+};
+_Static_assert(sizeof(struct snd_sw_params) == 136, "snd_pcm_sw_params");
+struct snd_sync_ptr {
+    unsigned int flags;
+    union {
+        struct {
+            int state, pad1;
+            unsigned long hw_ptr;
+            struct timespec tstamp;
+            int suspended_state;
+            struct timespec audio_tstamp;
+        } status;
+        unsigned char reserved[64];
+    } s;
+    union {
+        struct {
+            unsigned long appl_ptr, avail_min;
+        } control;
+        unsigned char reserved[64];
+    } c;
+};
+_Static_assert(sizeof(struct snd_sync_ptr) == 136, "snd_pcm_sync_ptr");
+struct snd_xferi {
+    long result;
+    void *buf;
+    unsigned long frames;
+};
+#define PCM_HW_REFINE _IOWR('A', 0x10, struct snd_hw_params)
+#define PCM_HW_PARAMS _IOWR('A', 0x11, struct snd_hw_params)
+#define PCM_WRITEI _IOW('A', 0x50, struct snd_xferi)
+#define PCM_SYNC_PTR _IOWR('A', 0x23, struct snd_sync_ptr)
+enum { P_CHANNELS = 10, P_RATE = 11, P_PERIOD_SIZE = 13, P_PERIODS = 15, P_BUFFER_SIZE = 17 };
+
+static void hw_any(struct snd_hw_params *p) {
+    memset(p, 0, sizeof *p);
+    memset(p->masks, 0xff, sizeof p->masks);
+    for (int i = 0; i < 12; i++) p->intervals[i] = (struct snd_interval){0, ~0u, 0};
+    p->rmask = ~0u;
+}
+static void hw_set(struct snd_hw_params *p, int param, unsigned v) {
+    p->intervals[param - 8] = (struct snd_interval){v, v, 0};
+}
+static int hw_setup(int pcm, int access, struct snd_hw_params *p) {
+    hw_any(p);
+    memset(p->masks, 0, sizeof p->masks);
+    p->masks[0][0] = 1u << access;
+    p->masks[1][0] = 1u << 2; // S16_LE
+    p->masks[2][0] = 1;
+    hw_set(p, P_CHANNELS, 2);
+    hw_set(p, P_RATE, 48000);
+    hw_set(p, P_PERIOD_SIZE, 1024);
+    hw_set(p, P_PERIODS, 4);
+    return ioctl(pcm, PCM_HW_PARAMS, p);
+}
+static int sw_setup(int pcm, unsigned long start) {
+    struct snd_sw_params sw = {0};
+    sw.avail_min = 1024;
+    sw.start_threshold = start;
+    sw.stop_threshold = 4096;
+    return ioctl(pcm, _IOWR('A', 0x13, struct snd_sw_params), &sw) == 0 && sw.boundary >= 4096 ? 0 : -1;
+}
+
+static void alsa(void) {
+    int ctl = open("/dev/snd/controlC0", O_RDONLY);
+    if (ctl < 0) {
+        printf("SKIP ALSA (no sound card, errno %d)\n", errno);
+        return;
+    }
+    int ver = 0, dev = -1;
+    CHECK(ioctl(ctl, _IOR('U', 0x00, int), &ver) == 0 && ver >> 16 == 2, "ALSA: control version");
+    unsigned char card[376];
+    CHECK(ioctl(ctl, _IOR('U', 0x01, card), card) == 0 && strcmp((char *)card + 24, "WaveOS") == 0, "ALSA: card info");
+    CHECK(ioctl(ctl, _IOR('U', 0x30, int), &dev) == 0 && dev == 0, "ALSA: the card's first PCM");
+    CHECK(ioctl(ctl, _IOR('U', 0x30, int), &dev) == 0 && dev == -1, "ALSA: and no other");
+    close(ctl);
+    int pcm = open("/dev/snd/pcmC0D0p", O_RDWR | O_NONBLOCK);
+    CHECK(pcm >= 0, "ALSA: open the PCM");
+    CHECK(ioctl(pcm, _IOR('A', 0x00, int), &ver) == 0 && ver >= 0x2000e, "ALSA: PCM version");
+    struct snd_hw_params p;
+    hw_any(&p);
+    CHECK(ioctl(pcm, PCM_HW_REFINE, &p) == 0, "ALSA: refine");
+    CHECK(p.intervals[P_RATE - 8].min == 48000 && p.intervals[P_RATE - 8].max == 48000, "ALSA: 48 kHz");
+    CHECK(p.intervals[P_CHANNELS - 8].min == 1 && p.intervals[P_CHANNELS - 8].max == 2, "ALSA: one or two channels");
+    hw_any(&p);
+    hw_set(&p, P_RATE, 44100);
+    CHECK(ioctl(pcm, PCM_HW_REFINE, &p) == -1 && errno == EINVAL, "ALSA: a rate it doesn't take is refused");
+    CHECK(hw_setup(pcm, 3, &p) == 0, "ALSA: hw_params (written, 16-bit stereo)");
+    CHECK(p.intervals[P_BUFFER_SIZE - 8].min == 4096 && p.intervals[P_BUFFER_SIZE - 8].max == 4096, "ALSA: buffer size");
+    CHECK(sw_setup(pcm, 2048) == 0, "ALSA: sw_params");
+    CHECK(ioctl(pcm, _IO('A', 0x40)) == 0, "ALSA: prepare");
+    static short tone[4096 * 2];
+    for (int i = 0; i < 4096; i++) tone[2 * i] = tone[2 * i + 1] = (i % 109 - 54) * 100;
+    struct snd_xferi x = {0, tone, 1024};
+    unsigned char st[152];
+    CHECK(ioctl(pcm, PCM_WRITEI, &x) == 0 && x.result == 1024, "ALSA: write");
+    CHECK(ioctl(pcm, _IOR('A', 0x20, st), st) == 0 && *(int *)st == 2, "ALSA: below the start threshold: prepared");
+    x = (struct snd_xferi){0, tone, 3072};
+    CHECK(ioctl(pcm, PCM_WRITEI, &x) == 0 && x.result == 3072, "ALSA: write the rest of the buffer");
+    CHECK(ioctl(pcm, _IOR('A', 0x20, st), st) == 0 && *(int *)st == 3, "ALSA: past the start threshold: running");
+    x = (struct snd_xferi){0, tone, 1024};
+    int r = ioctl(pcm, PCM_WRITEI, &x);
+    CHECK((r == -1 && errno == EAGAIN) || (r == 0 && x.result > 0), "ALSA: a full buffer takes no more (EAGAIN)");
+    struct pollfd pfd = {pcm, POLLOUT, 0};
+    CHECK(poll(&pfd, 1, 3000) == 1 && pfd.revents & POLLOUT, "ALSA: poll says when there is room again");
+    long delay = -1;
+    CHECK(ioctl(pcm, _IOR('A', 0x21, long), &delay) == 0 && delay >= 0 && delay <= 4096 + 9600, "ALSA: delay");
+    // Nothing more written: it runs dry (XRUN); writing says so; prepare recovers.
+    struct timespec dry = {0, 600 * 1000000};
+    nanosleep(&dry, 0);
+    x = (struct snd_xferi){0, tone, 1024};
+    CHECK(ioctl(pcm, PCM_WRITEI, &x) == -1 && errno == EPIPE, "ALSA: an underrun is EPIPE");
+    CHECK(ioctl(pcm, _IO('A', 0x40)) == 0, "ALSA: prepare after the underrun");
+    CHECK(ioctl(pcm, _IO('A', 0x43)) == 0 && ioctl(pcm, _IO('A', 0x12)) == 0, "ALSA: drop, hw_free");
+    // The mapped buffer, committed through SYNC_PTR (the status page isn't mappable).
+    CHECK(hw_setup(pcm, 0, &p) == 0, "ALSA: hw_params (mapped)");
+    CHECK(sw_setup(pcm, 1) == 0, "ALSA: sw_params (mapped)");
+    short *buf = mmap(0, 4096 * 4, PROT_READ | PROT_WRITE, MAP_SHARED, pcm, 0);
+    CHECK(buf != MAP_FAILED, "ALSA: map the buffer");
+    CHECK(mmap(0, 4096, PROT_READ, MAP_SHARED, pcm, 0x80000000) == MAP_FAILED, "ALSA: the status page isn't mapped");
+    CHECK(ioctl(pcm, _IO('A', 0x40)) == 0, "ALSA: prepare (mapped)");
+    memcpy(buf, tone, 2048 * 4);
+    struct snd_sync_ptr sp = {0};
+    sp.c.control.appl_ptr = 2048;
+    sp.c.control.avail_min = 1024;
+    CHECK(ioctl(pcm, PCM_SYNC_PTR, &sp) == 0 && sp.c.control.appl_ptr == 2048 && sp.s.status.state == 3,
+          "ALSA: SYNC_PTR commits the mapped frames and starts");
+    unsigned long hw = 0;
+    for (int i = 0; i < 100 && hw == 0; i++) {
+        struct timespec nap = {0, 20 * 1000000};
+        nanosleep(&nap, 0);
+        sp.flags = 1 | 2 | 4;
+        CHECK(ioctl(pcm, PCM_SYNC_PTR, &sp) == 0, "ALSA: SYNC_PTR (hwsync)");
+        hw = sp.s.status.hw_ptr;
+    }
+    CHECK(hw > 0 && hw <= 2048, "ALSA: the mixer takes the mapped frames");
+    CHECK(ioctl(pcm, _IO('A', 0x44)) == 0, "ALSA: drain");
+    munmap(buf, 4096 * 4);
+    close(pcm);
+    printf("PASS ALSA (refine, write, start threshold, poll, delay %ld frames, underrun, mapped buffer)\n", delay);
 }
 
 int main(int argc, char **argv) {
@@ -716,6 +933,8 @@ int main(int argc, char **argv) {
     machine();
     wave();
     sound();
+    precise_timers();
+    alsa();
     if (failures) {
         printf("linux-test: %d failures\n", failures);
         return 1;

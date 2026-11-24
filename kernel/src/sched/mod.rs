@@ -827,7 +827,13 @@ pub fn yield_now() {
 /// Marks the running task asleep until millisecond tick `until` (or until
 /// woken), with a timer on this CPU to wake it then.
 fn mark_sleeping(until: u64) {
-    let deadline = until.saturating_mul(1_000_000);
+    mark_sleeping_ns(until.saturating_mul(1_000_000));
+}
+
+/// Marks the running task asleep until `deadline` (ns of `time::now_ns`;
+/// `u64::MAX`: no timer), or until woken.
+fn mark_sleeping_ns(deadline: u64) {
+    let until = deadline / 1_000_000;
     if let Some(s) = SCHED.lock().as_mut() {
         let cur = s.cpus[percpu::cpu_id()].current;
         if let Some(t) = s.tasks.get_mut(&cur) {
@@ -862,8 +868,20 @@ pub fn sleep_ms(ms: u64) {
 /// `ready()` already holds. The task is marked sleeping *before* `ready()` is
 /// checked, so a wakeup from another CPU in between is never lost.
 pub fn wait_until(ms: u64, ready: impl Fn() -> bool) {
+    wait_until_deadline(tick_after(ms).saturating_mul(1_000_000), ready)
+}
+
+/// [`wait_until`] to the nanosecond: sleeps until `deadline` (ns of
+/// `time::now_ns`), not the millisecond tick after it — for Linux's
+/// `nanosleep`, `timerfd` and the timeouts of `poll` and `epoll`, which
+/// programs pace frames and sound by.
+pub fn wait_until_ns(deadline: u64, ready: impl Fn() -> bool) {
+    wait_until_deadline(deadline, ready)
+}
+
+fn wait_until_deadline(deadline: u64, ready: impl Fn() -> bool) {
     interrupts::without_interrupts(|| {
-        mark_sleeping(tick_after(ms));
+        mark_sleeping_ns(deadline);
         if ready() {
             if let Some(s) = SCHED.lock().as_mut() {
                 let cur = s.cpus[percpu::cpu_id()].current;

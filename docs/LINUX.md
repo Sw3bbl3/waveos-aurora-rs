@@ -329,12 +329,37 @@ again before `WAVE_EV_BUFFER_RELEASE` says WaveOS no longer reads it.
 display's frame number and time (`CLOCK_MONOTONIC`), its refresh period,
 and whether it was scanned out without a copy.
 
-Programs written for Linux's own sound interfaces reach the same streams
-through OSS: `/dev/dsp` is a WaveOS sound stream, and its `ioctl`s (format,
-channels, rate, buffer space, delay, sync, reset) describe it as it is,
-48 kHz 16-bit stereo, so a program that asks for another rate is told the
-one it gets and converts (GStreamer's `osssink` does, and with it WebKit's
-media). There is no PulseAudio or ALSA.
+Programs written for Linux's own sound interfaces reach the same mixer
+through ALSA and OSS:
+
+- **ALSA:** one sound card, `/dev/snd/controlC0` and its playback device
+  `/dev/snd/pcmC0D0p`, with the kernel's `ioctl`s
+  ([`sound.rs`](../kernel/src/compat/linux/sound.rs)), so the ALSA library
+  and everything over it (Firefox's cubeb, GStreamer's `alsasink` and with
+  it WebKit's media, SDL, PortAudio, Wine) play unchanged. Each open is a
+  stream of its own in the mixer, so any number of programs play at once
+  without `dmix`; `/etc/asound.conf` makes the default device `plug` over
+  the card, which converts what it doesn't take itself. The card takes
+  48 kHz, one or two channels, 16-bit, 32-bit or float samples, written
+  (`snd_pcm_writei`) or through the mapped buffer (`mmap` access,
+  committed with `SYNC_PTR`); the status and control pages aren't mapped,
+  so libasound uses `SYNC_PTR` for them, as it does on some
+  architectures. The hardware pointer is what the mixer has taken; the
+  delay adds what it has mixed into the device's ring and isn't heard
+  yet, so players that time pictures by `snd_pcm_delay` keep them in step
+  with the sound. A stream that runs dry while running goes to `XRUN` as on
+  Linux. `/proc/asound` lists the card. There is no capture device yet
+  (microphones are WaveOS's `record`).
+- **OSS:** `/dev/dsp` is a WaveOS sound stream, and its `ioctl`s (format,
+  channels, rate, buffer space, delay, sync, reset) describe it as it is,
+  48 kHz 16-bit stereo, so a program that asks for another rate is told the
+  one it gets and converts. Its delay counts what the mixer holds too.
+
+There is no PulseAudio or PipeWire server: ALSA is what both browsers (and
+nearly every Linux program) can use without one, in the program's own
+process, with nothing more to start; PulseAudio's library is on the disk
+(Firefox looks for a server first and moves on to ALSA when there is
+none; WaveOS's Firefox settings ask for ALSA straight away).
 
 ## The display (DRM)
 

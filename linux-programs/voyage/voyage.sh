@@ -4,7 +4,7 @@
 # packages on the disk. WebKit's sandbox needs Linux features WaveOS
 # doesn't have yet (namespaces, seccomp), so it is off; pages draw in
 # software, composited as WebKit expects (with Mesa's llvmpipe), and sound goes
-# to WaveOS through OSS (/dev/dsp). `--waveos-dark` (from the Voyage app, when WaveOS is dark) gives
+# to WaveOS through ALSA (/dev/snd). `--waveos-dark` (from the Voyage app, when WaveOS is dark) gives
 # it the dark theme, which pages see as prefers-color-scheme: dark.
 if [ ! -e /usr/lib/voyage/voyage ]; then
     echo "voyage: Voyage isn't on this disk (cargo xtask run --fresh-disk adds it)" >&2
@@ -30,7 +30,9 @@ export GDK_BACKEND=wayland WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 # Skia draws pages on the processor: its GL path, on Mesa's software
 # renderer, loses glyphs (whole tiles of text show as blocks).
 export WEBKIT_SKIA_ENABLE_CPU_RENDERING=1
-# Straight to the OSS sink: PulseAudio and JACK aren't there, and the media
-# clock only runs once an audio sink plays.
-export GST_PLUGIN_FEATURE_RANK=osssink:MAX,pulsesink:NONE,jackaudiosink:NONE,oss4sink:NONE
+# Straight to ALSA (WaveOS's sound card, see docs/LINUX.md): PulseAudio and
+# JACK aren't there, and the media clock only runs once an audio sink plays.
+# ALSA's delay includes what the mixer holds, so pictures keep in step with
+# the sound; OSS is the fallback on a disk without GStreamer's ALSA plugin.
+export GST_PLUGIN_FEATURE_RANK=alsasink:MAX,osssink:PRIMARY,pulsesink:NONE,jackaudiosink:NONE,oss4sink:NONE
 exec /usr/lib/voyage/voyage "$@"

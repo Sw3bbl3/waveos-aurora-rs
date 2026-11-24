@@ -352,6 +352,9 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/dev" | "/proc" | "/proc/self" | "/proc/pressure" | "/dev/shm" | "/dev/dri" => {
             Special::Dir { host: String::from(guest), entries: None, pos: 0 }
         }
+        "/dev/snd" | "/proc/asound" if crate::drivers::audio::present() => {
+            Special::Dir { host: String::from(guest), entries: None, pos: 0 }
+        }
         "/dev/null" => Special::Null,
         "/dev/zero" => Special::Zero,
         "/dev/random" | "/dev/urandom" => Special::Random,
@@ -374,6 +377,10 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         )),
         "/proc/mounts" | "/proc/self/mounts" | "/etc/mtab" => mem(mounts()),
         "/proc/version" => mem(String::from("Linux version 6.12.0-waveos (WaveOS Aurora)\n")),
+        g if g.starts_with("/proc/asound/") => match super::sound::proc_file(&g["/proc/asound/".len()..]) {
+            Some(text) => mem(text),
+            None => return Some(Err(ENOENT)),
+        },
         "/proc/sys/kernel/osrelease" => mem(String::from("6.12.0-waveos\n")),
         "/etc/passwd" => mem(passwd(&user)),
         "/etc/group" => mem(group(&user)),
@@ -734,11 +741,11 @@ pub fn wait_keys(p: &Process, fd: usize, keys: &mut Vec<usize>) {
     }
 }
 
-/// When the soonest timer among `fds` expires (ms from now).
+/// When the soonest timer among `fds` expires (ns of `time::now_ns`).
 fn next_timer(p: &Process, fds: impl Iterator<Item = usize>) -> Option<u64> {
     fds.filter_map(|fd| match &*p.fd(fd).ok()? {
         Handle::Special(s) => match &*s.lock() {
-            Special::Timer(t) => t.due_in(),
+            Special::Timer(t) => t.due_at(),
             _ => None,
         },
         _ => None,
@@ -824,6 +831,10 @@ fn open_guest_mode(p: &Process, guest: &str, flags: u64, mode: u64) -> Result<Ar
     if guest == "/dev/dsp" {
         crate::sandbox::require(aurora_abi::sandbox::AUDIO_OUT)?;
         return crate::drivers::audio::open().map(|s| Arc::new(Handle::Audio(s)));
+    }
+    // ALSA's card: the same mixer (see `super::sound`).
+    if let Some(dev) = super::sound::open(guest) {
+        return dev.map(|d| special(Special::Device(d)));
     }
     // The display devices' DRM nodes. A card drives the display (and can
     // read what it shows); render nodes only draw.
@@ -973,6 +984,16 @@ pub fn shm_of(p: &Process, fd: u64) -> Option<Arc<super::shm::ShmFile>> {
         },
         _ => None,
     }
+}
+
+/// The buffer `mmap` maps at `offset` of descriptor `fd` when it is an ALSA
+/// PCM (None: it isn't one).
+pub fn pcm_buffer(p: &Process, fd: u64, offset: u64) -> Option<Result<Arc<super::shm::ShmFile>, isize>> {
+    let dev = match &*p.fd(fd as usize).ok()? {
+        Handle::Special(s) => s.lock().chardev()?,
+        _ => return None,
+    };
+    super::sound::mmap_buffer(&*dev, offset)
 }
 
 /// `memfd_create`.
@@ -1163,11 +1184,22 @@ fn folder_entries(host: &str) -> Result<Vec<(String, u8)>, isize> {
         };
     }
     let names: &[(&str, bool)] = match host {
+        "/dev" if crate::drivers::audio::present() => &[
+            ("null", false),
+            ("zero", false),
+            ("random", false),
+            ("urandom", false),
+            ("shm", true),
+            ("dri", true),
+            ("snd", true),
+        ],
         "/dev" => {
             &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true), ("dri", true)]
         }
         // Character devices (DT_CHR).
         "/dev/dri" => return Ok(super::drm::node_names().into_iter().map(|n| (n, 2)).collect()),
+        "/dev/snd" => return Ok(super::sound::node_names().into_iter().map(|n| (n, 2)).collect()),
+        "/proc/asound" => &[("cards", false), ("devices", false), ("pcm", false), ("version", false)],
         "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false), ("pressure", true)],
         "/proc/self" => {
             &[
@@ -1258,7 +1290,7 @@ fn info_for_path(p: &Process, guest: &str, follow_link: bool) -> Result<Info, is
         let (mode, rdev, owner) = super::input::node_stat(dev);
         return Ok(Info { owner, mode, size: 0, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
     }
-    if let Some(rdev) = super::drm::node_rdev(guest) {
+    if let Some(rdev) = super::drm::node_rdev(guest).or_else(|| super::sound::node_rdev(guest)) {
         return Ok(Info { owner: None, mode: S_IFCHR | 0o666, size: 0, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
     }
     if let Some(v) = virtual_file(p, guest) {
@@ -1551,7 +1583,7 @@ pub fn ioctl(p: &Process, fd: u64, request: u64, arg: u64) -> Result<u64, isize>
     };
     if let Some(d) = &dev {
         if !matches!(request, 0x541B | 0x5421 | 0x5451 | 0x5450) {
-            return d.ioctl(request as u32, arg);
+            return d.ioctl_nb(request as u32, arg, nonblocking(p, fd));
         }
     }
     // DRM ('d') requests on a card, dma-buf ('b') ones on a dma-buf.
@@ -1642,12 +1674,17 @@ fn oss(stream: &crate::drivers::audio::Stream, request: u64, arg: u64) -> Result
             let info = [(free / FRAGMENT) as i32, (total / FRAGMENT) as i32, FRAGMENT as i32, free as i32];
             user::put(arg, &info).map(|_| 0)
         }
-        // SNDCTL_DSP_GETODELAY: bytes written but not played yet.
-        0x8004_5017 => put((stream.queued() * 2) as i32),
+        // SNDCTL_DSP_GETODELAY: bytes written but not heard yet: queued,
+        // and mixed into the device's ring ahead of what it plays (players
+        // time their pictures by this).
+        0x8004_5017 => {
+            let ahead = if stream.queued() > 0 { crate::drivers::audio::latency_frames() as usize } else { 0 };
+            put(((stream.queued() / 2 + ahead) * 4) as i32)
+        }
         // SNDCTL_DSP_GETOPTR: count_info { bytes played, blocks, ptr }.
         0x800C_5012 => {
-            let played = stream.control(aurora_abi::audio::POSITION)? * 4;
-            user::put(arg, &[played as i32, 0, 0]).map(|_| 0)
+            let played = stream.control(aurora_abi::audio::POSITION)?.saturating_sub(crate::drivers::audio::latency_frames());
+            user::put(arg, &[(played * 4) as i32, 0, 0]).map(|_| 0)
         }
         _ => Err(EINVAL),
     }
@@ -1781,20 +1818,20 @@ pub enum Timeout {
     Timespec(u64),
 }
 
-/// The deadline (uptime ms) for a timeout; `None`: wait forever.
+/// The deadline (ns of `time::now_ns`) for a timeout; `None`: wait forever.
 fn deadline(t: Timeout) -> Result<Option<u64>, isize> {
-    let ms = match t {
+    let ns = match t {
         Timeout::Timeval(0) | Timeout::Timespec(0) => return Ok(None),
         Timeout::Timeval(ptr) => {
             let [sec, usec]: [i64; 2] = user::get(ptr)?;
-            sec.max(0) as u64 * 1000 + (usec.max(0) as u64).div_ceil(1000)
+            (sec.max(0) as u64).saturating_mul(1_000_000_000).saturating_add(usec.max(0) as u64 * 1000)
         }
         Timeout::Timespec(ptr) => {
             let [sec, nsec]: [i64; 2] = user::get(ptr)?;
-            sec.max(0) as u64 * 1000 + (nsec.max(0) as u64).div_ceil(1_000_000)
+            (sec.max(0) as u64).saturating_mul(1_000_000_000).saturating_add(nsec.max(0) as u64)
         }
     };
-    Ok(Some(crate::time::uptime_ms() + ms))
+    Ok(Some(crate::time::now_ns().saturating_add(ns)))
 }
 
 /// Waits until `check` finds something ready (it returns a count), the
@@ -1808,7 +1845,7 @@ fn wait_ready(
 ) -> Result<u64, isize> {
     use crate::proc::readiness;
     loop {
-        let timed_out = deadline.is_some_and(|d| crate::time::uptime_ms() >= d);
+        let timed_out = deadline.is_some_and(|d| crate::time::now_ns() >= d);
         if timed_out {
             return check(true);
         }
@@ -1825,16 +1862,17 @@ fn wait_ready(
         if crate::proc::interrupted() {
             return Err(EINTR);
         }
-        let mut wait = deadline.map_or(1000, |d| d.saturating_sub(crate::time::uptime_ms()));
+        let now = crate::time::now_ns();
+        let mut until = deadline.unwrap_or(now + 1_000_000_000);
         if let Some(t) = next_timer(p, fds.iter().copied()) {
-            wait = wait.min(t);
+            until = until.min(t);
         }
-        watch.wait(wait.max(1));
+        watch.wait_until_ns(until.max(now + 1));
     }
 }
 
 pub fn poll(p: &Process, fds_ptr: u64, count: u64, timeout_ms: i64) -> Result<u64, isize> {
-    let deadline = (timeout_ms >= 0).then(|| crate::time::uptime_ms() + timeout_ms as u64);
+    let deadline = (timeout_ms >= 0).then(|| crate::time::now_ns() + timeout_ms as u64 * 1_000_000);
     poll_until(p, fds_ptr, count, deadline)
 }
 

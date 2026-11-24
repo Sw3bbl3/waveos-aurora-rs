@@ -135,20 +135,21 @@ pub fn futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u64) 
     let shared = op & PRIVATE == 0;
     match op & 0x7F {
         WAIT | WAIT_BITSET => {
-            let ms = if timeout == 0 {
+            let deadline = if timeout == 0 {
                 u64::MAX
             } else {
                 let [sec, nsec]: [i64; 2] = user::get(timeout)?;
-                let rel = (sec.max(0) as u64) * 1000 + (nsec.max(0) as u64).div_ceil(1_000_000);
+                let t = (sec.max(0) as u64).saturating_mul(1_000_000_000).saturating_add(nsec.max(0) as u64);
+                let now = time::now_ns();
                 if op & 0x7F == WAIT_BITSET {
                     // An absolute deadline on CLOCK_MONOTONIC (or REALTIME).
-                    let now = if op & 256 != 0 { realtime_ns() / 1_000_000 } else { time::now_ns() / 1_000_000 };
-                    rel.saturating_sub(now)
+                    let clock = if op & 256 != 0 { realtime_ns() } else { now };
+                    now.saturating_add(t.saturating_sub(clock))
                 } else {
-                    rel
+                    now.saturating_add(t)
                 }
             };
-            match proc::futex::wait_shared(addr, val as u32, ms, shared) {
+            match proc::futex::wait_until_ns(addr, val as u32, deadline, shared) {
                 Err(EAGAIN) if proc::interrupted() => Err(EINTR),
                 r => r,
             }
@@ -343,11 +344,8 @@ pub fn nanosleep(req: u64, rem: u64, absolute: bool, clock: u64) -> Result<u64, 
             }
             return Err(EINTR);
         }
-        let left_ms = (until - now) / 1_000_000;
-        if left_ms == 0 {
-            sched::yield_now();
-        } else {
-            sched::wait_until(left_ms, proc::interrupted);
-        }
+        // To the nanosecond (a frame paced by `nanosleep` wakes when it
+        // asked, and the last part of a sleep isn't spent spinning).
+        sched::wait_until_ns(until, proc::interrupted);
     }
 }

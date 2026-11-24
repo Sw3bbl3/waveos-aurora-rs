@@ -125,6 +125,11 @@ static HEADPHONES: AtomicBool = AtomicBool::new(false);
 static UNDERRUNS: AtomicU64 = AtomicU64::new(0);
 /// Frames the active devices have played since the mixer started.
 static PLAYED: AtomicU64 = AtomicU64::new(0);
+/// When `PLAYED` was last brought up to date (ns of `time::now_ns`).
+static PLAYED_AT: AtomicU64 = AtomicU64::new(0);
+/// Frames the mixer has put in the active device's ring (same count as
+/// `PLAYED`): what is between the two is mixed but not heard yet.
+static WRITTEN: AtomicU64 = AtomicU64::new(0);
 /// Loudest sample of the last mix (for tests and level meters).
 static PEAK: AtomicU32 = AtomicU32::new(0);
 
@@ -298,7 +303,16 @@ struct StreamInner {
     closed: bool,
     writer: Option<TaskId>,
     paused: bool,
+    /// Frames the mixer has taken from it.
     played: u64,
+    /// Samples it may hold before its writer waits.
+    capacity: usize,
+    /// Notified (`proc::readiness`) whenever the mixer takes samples, for
+    /// `poll` on it (0: none).
+    wake_key: usize,
+    /// Times the mixer found it empty after it had been playing.
+    underruns: u64,
+    starved: bool,
 }
 
 impl Stream {
@@ -310,6 +324,10 @@ impl Stream {
                 writer: None,
                 paused: false,
                 played: 0,
+                capacity: STREAM_CAPACITY,
+                wake_key: 0,
+                underruns: 0,
+                starved: true,
             }),
         })
     }
@@ -322,7 +340,7 @@ impl Stream {
         while done < samples {
             {
                 let mut g = self.inner.lock();
-                let room = STREAM_CAPACITY.saturating_sub(g.buf.len());
+                let room = g.capacity.saturating_sub(g.buf.len());
                 if room > 0 {
                     let n = room.min(samples - done);
                     for s in data[done * 2..(done + n) * 2].as_chunks::<2>().0 {
@@ -336,7 +354,10 @@ impl Stream {
                 }
                 g.writer = Some(sched::current_id());
             }
-            sched::wait_until(50, || self.inner.lock().buf.len() < STREAM_CAPACITY);
+            sched::wait_until(50, || {
+                let g = self.inner.lock();
+                g.buf.len() < g.capacity
+            });
         }
         Ok(done * 2)
     }
@@ -348,7 +369,63 @@ impl Stream {
 
     /// Samples that can be written without blocking.
     pub fn room(&self) -> usize {
-        STREAM_CAPACITY.saturating_sub(self.queued())
+        let g = self.inner.lock();
+        g.capacity.saturating_sub(g.buf.len())
+    }
+
+    /// Queues samples without waiting; returns how many fit.
+    pub fn push(&self, samples: &[i16]) -> usize {
+        let mut g = self.inner.lock();
+        let n = g.capacity.saturating_sub(g.buf.len()).min(samples.len());
+        g.buf.extend(samples[..n].iter().copied());
+        n
+    }
+
+    /// Drops what is queued and not mixed yet (the frames played so far
+    /// still count); returns the samples dropped.
+    pub fn drop_queued(&self) -> usize {
+        let mut g = self.inner.lock();
+        let n = g.buf.len();
+        g.buf.clear();
+        g.starved = true;
+        n
+    }
+
+    /// Takes back up to `samples` of the newest samples not mixed yet;
+    /// returns how many.
+    pub fn unqueue(&self, samples: usize) -> usize {
+        let mut g = self.inner.lock();
+        let n = samples.min(g.buf.len());
+        let keep = g.buf.len() - n;
+        g.buf.truncate(keep);
+        n
+    }
+
+    /// How many samples it may hold.
+    pub fn set_capacity(&self, samples: usize) {
+        self.inner.lock().capacity = samples;
+    }
+
+    /// The `proc::readiness` key the mixer notifies as it takes samples.
+    pub fn set_wake_key(&self, key: usize) {
+        self.inner.lock().wake_key = key;
+    }
+
+    /// Frames the mixer has taken, and the times it found it empty.
+    pub fn progress(&self) -> (u64, u64) {
+        let g = self.inner.lock();
+        (g.played, g.underruns)
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        {
+            let mut g = self.inner.lock();
+            g.paused = paused;
+            g.starved = true;
+        }
+        if !paused {
+            MIXER_WAKE.wake_all(); // it may be resting
+        }
     }
 
     /// Waits until everything queued has been mixed (or a signal arrives).
@@ -377,7 +454,10 @@ impl Stream {
         let mut g = self.inner.lock();
         match op {
             audio::PAUSE => g.paused = true,
-            audio::RESUME => g.paused = false,
+            audio::RESUME => {
+                g.paused = false;
+                MIXER_WAKE.wake_all(); // it may be resting
+            }
             audio::FLUSH => {
                 g.buf.clear();
                 g.played = 0;
@@ -491,6 +571,19 @@ pub fn describe() -> Option<String> {
     active().map(|(_, o)| o.describe())
 }
 
+/// Frames mixed into the device's ring that haven't been heard yet: how
+/// far behind what a stream's mixer has taken the sound coming out is.
+/// (The device's position is read each time the mixer wakes; in between,
+/// it moves on at the sample rate.)
+pub fn latency_frames() -> u64 {
+    if active().is_none() {
+        return 0;
+    }
+    let since = crate::time::now_ns().saturating_sub(PLAYED_AT.load(Ordering::Relaxed));
+    let played = PLAYED.load(Ordering::Relaxed) + since.min(1_000_000_000) * RATE as u64 / 1_000_000_000;
+    WRITTEN.load(Ordering::Relaxed).saturating_sub(played)
+}
+
 /// (frames played, underruns, loudest recent sample) — for tests and diagnostics.
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // used by the self-tests
 pub fn counters() -> (u64, u64, u32) {
@@ -513,8 +606,22 @@ fn mix_streams(mix: &mut [i32]) {
         for (m, v) in mix[..n].iter_mut().zip(g.buf.drain(..n)) {
             *m += v as i32;
         }
+        // Ran dry while playing: what it sends next comes after a gap.
+        if n < mix.len() && !g.closed {
+            if !g.starved {
+                g.underruns += 1;
+            }
+            g.starved = true;
+        } else if n > 0 {
+            g.starved = false;
+        }
         if let Some(t) = g.writer.take() {
             sched::wake(t);
+        }
+        if g.wake_key != 0 && n > 0 {
+            let key = g.wake_key;
+            drop(g);
+            crate::proc::readiness::notify(key);
         }
     }
     STREAMS.lock().retain(|s| {
@@ -540,6 +647,12 @@ fn finish(mix: &[i32], out: &mut [i16]) -> u32 {
     peak
 }
 
+/// Some stream isn't paused. (A program may keep a paused stream open for
+/// as long as it runs, as browsers do: the device rests meanwhile.)
+fn playing() -> bool {
+    STREAMS.lock().iter().any(|s| !s.inner.lock().paused)
+}
+
 /// The mixer task: plays to the active output, following it as it changes.
 fn mixer() {
     let mut mix = vec![0i32; LEAD * 2];
@@ -561,8 +674,8 @@ fn mixer() {
             // Nothing to play for a while: the device is stopped (no DMA, no
             // interrupts) until a stream opens or the devices change.
             let gen = GENERATION.load(Ordering::Relaxed);
-            while STREAMS.lock().is_empty() && GENERATION.load(Ordering::Relaxed) == gen {
-                MIXER_WAKE.wait(60_000, || !STREAMS.lock().is_empty() || GENERATION.load(Ordering::Relaxed) != gen);
+            while !playing() && GENERATION.load(Ordering::Relaxed) == gen {
+                MIXER_WAKE.wait(60_000, || playing() || GENERATION.load(Ordering::Relaxed) != gen);
             }
         }
     }
@@ -595,6 +708,7 @@ fn play_to(id: u32, out: &dyn Output, mix: &mut [i32], samples: &mut [i16]) -> b
         played += ((pos + ring - last) % ring) as u64;
         last = pos;
         PLAYED.store(start + played, Ordering::Relaxed);
+        PLAYED_AT.store(crate::time::now_ns(), Ordering::Relaxed);
         if written < played {
             // We fell behind the device: skip ahead instead of writing the past.
             UNDERRUNS.fetch_add(1, Ordering::Relaxed);
@@ -614,8 +728,9 @@ fn play_to(id: u32, out: &dyn Output, mix: &mut [i32], samples: &mut [i16]) -> b
             }
             written += n as u64;
         }
+        WRITTEN.store(start + written, Ordering::Relaxed);
         let now = crate::time::uptime_ms();
-        if STREAMS.lock().is_empty() {
+        if !playing() {
             let since = *quiet_since.get_or_insert(now);
             // Rest once what was written has played out.
             if now >= since + REST_AFTER_MS && played >= written.saturating_sub(LEAD as u64) {

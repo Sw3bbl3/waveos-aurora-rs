@@ -129,6 +129,16 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
             return map_frames(p, addr, n, flags, prot_bits, &frames);
         }
     }
+    // An ALSA PCM's buffer, shared with the mixer side.
+    if flags & MAP_ANONYMOUS == 0 {
+        if let Some(buf) = super::fs::pcm_buffer(p, fd as u64, offset) {
+            let frames = buf?.frames(0, n);
+            if (frames.len() as u64) < n {
+                return Err(EINVAL);
+            }
+            return map_frames(p, addr, n, flags, prot_bits, &frames);
+        }
+    }
     // Shared memory: the same frames in every process that maps it.
     let shared = if flags & MAP_SHARED != 0 {
         if flags & MAP_ANONYMOUS != 0 {
