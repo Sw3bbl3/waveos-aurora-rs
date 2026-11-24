@@ -21,7 +21,7 @@ schemas=/usr/share/glib-2.0/schemas
 if ! grep -q org.gnome.system.proxy "$schemas/gschemas.compiled" 2>/dev/null; then
     own="$HOME/.cache/voyage/schemas"
     if ! grep -q org.gnome.system.proxy "$own/gschemas.compiled" 2>/dev/null; then
-        mkdir -p "$own" && /usr/lib/x86_64-linux-gnu/glib-2.0/glib-compile-schemas --targetdir="$own" "$schemas"
+        mkdir -p "$own" && "/usr/lib/$(uname -m)-linux-gnu/glib-2.0/glib-compile-schemas" --targetdir="$own" "$schemas"
     fi
     export GSETTINGS_SCHEMA_DIR="$own"
 fi

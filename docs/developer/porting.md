@@ -409,10 +409,24 @@ Under HVF (`cargo xtask test --arch aarch64`), the static musl tests pass:
 linuxtest, proctest, nettest, inputtest, linuxfuzz, sandboxtest and the
 sandboxed linuxfuzz, and with `AURORA_TEST_LINUX_ROOT=1` (a root from
 `cargo xtask linux-root --arch aarch64 --base curl`) Debian's dynamically
-linked GNU Hello and curl fetching from the test server. drmtest is
-skipped: the display on `virt` is ramfb, not the PCI device it expects.
-musl's `vfork` is `fork` on arm64 (proctest's memory-sharing check is
-x86-only; `posix_spawn` makes the CLONE_VM | CLONE_VFORK call on both).
+linked GNU Hello and curl fetching from the test server. drmtest runs
+with `--gpu virtio` (virtio-gpu-pci, a real PCI device) and is skipped on
+`--gpu std` (ramfb has no PCI device behind it). musl's `vfork` is `fork`
+on arm64 (proctest's memory-sharing check is x86-only; `posix_spawn` makes
+the CLONE_VM | CLONE_VFORK call on both).
+
+Mesa (`cargo xtask test --arch aarch64 --gpu virtio --mesa`, Debian's arm64
+Mesa in `target/mesa-root-aarch64`): kmscube at the display's 60 Hz,
+glmark2 (desktop GL and GLES), vkcheck on lavapipe, es2gears in a window
+through wl-bridge with dma-bufs, vkcube, and the compositor's zero-copy and
+direct-scanout test all pass.
+
+The browsers (`AURORA_TEST_ROOT=browsers`, the full arm64 root from `cargo
+xtask linux-root --arch aarch64`): Voyage (WebKitGTK) and Firefox ESR start
+and show pages, local and real (Wikipedia, YouTube); the existing browser
+measurement (copies against zero-copy) and the start-up and page-load
+timings (`AURORA_TEST_FILTER="page loads timed"`) pass. See
+docs/LINUX.md for the numbers against x86 under TCG.
 
 ## Tools
 
