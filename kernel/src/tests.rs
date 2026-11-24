@@ -23,7 +23,7 @@ const TESTS: &[Test] = &[
     ("mm: out of memory", mm::selftest::out_of_memory),
     ("isqrt", sqrt),
     ("account_password_hash", crate::gui::account::self_test),
-    ("write-combining mappings", crate::arch::pat::self_test),
+    ("write-combining mappings", crate::arch::mmu::write_combining_self_test),
     ("LinuxKPI: runtime, DRM and the GPU display", linux_kpi),
     ("display: EDID, connectors, mode sets, atomic commits, cursor plane", crate::drivers::gpu::selftest::display),
     ("intel display: firmware takeover on a simulated engine", crate::drivers::gpu::intel::selftest::run),
@@ -118,10 +118,33 @@ const TESTS: &[Test] = &[
     ("persistence across reboot", persistence),
 ];
 
+/// Tests that need what this architecture's machine (QEMU's `virt` for
+/// aarch64) or port doesn't have yet: (name prefix, why).
+#[cfg(target_arch = "x86_64")]
+const ARCH_SKIPS: &[(&str, &str)] = &[];
+#[cfg(target_arch = "aarch64")]
+const ARCH_SKIPS: &[(&str, &str)] = &[
+    ("LinuxKPI:", "the C half of the kernel is built for x86 only"),
+    ("ACPI: AML, sleep states, battery", "a PC's ACPI: sleep states, \\_S5 and the test battery's SSDT"),
+    ("I2C:", "the I2C touchpad is a PC ACPI device (test SSDT)"),
+    ("sleep (S3) and wake", "no suspend to RAM on Arm"),
+    ("clock: the vDSO", "the vDSO is built for x86 only so far"),
+    ("Linux programs:", "the Linux layer for arm64 is not ported yet"),
+    ("sandbox: a Linux program", "the Linux layer for arm64 is not ported yet"),
+    ("sandbox: the Linux fuzzer", "the Linux layer for arm64 is not ported yet"),
+];
+
 pub fn run() {
     // Devices present at boot finish setting up first (the frame counts
     // some tests compare would otherwise move underneath them).
     crate::drivers::usb::settle(10_000);
+    // Under hardware virtualization the tests start well within the time
+    // the boot's own tasks (AML, the boot log) take to finish: wait for them.
+    if cfg!(target_arch = "aarch64") {
+        while crate::time::uptime_ms() < 5_000 {
+            crate::sched::sleep_ms(100);
+        }
+    }
     // `cargo xtask test --filter NAME` runs only matching tests (and the
     // persistence check the harness relies on).
     let filter = crate::gui::prefs::boot_option("test_filter");
@@ -129,9 +152,13 @@ pub fn run() {
     if skip_virtual_hid {
         crate::kprintln!("SKIP virtual USB HID tests: QEMU has no usb-redir device");
     }
+    for (name, why) in ARCH_SKIPS {
+        crate::kprintln!("SKIP {name}: {why}");
+    }
     let chosen: Vec<&Test> = TESTS
         .iter()
         .filter(|(name, _)| !skip_virtual_hid || !name.starts_with("USB HID:"))
+        .filter(|(name, _)| !ARCH_SKIPS.iter().any(|(prefix, _)| name.starts_with(prefix)))
         .filter(|(name, _)| filter.as_deref().is_none_or(|f| name.contains(f) || name.starts_with("persistence")))
         .collect();
     crate::kprintln!("\nrunning {} kernel tests", chosen.len());
@@ -680,6 +707,7 @@ impl InputTestUser {
                 let v = felt.swap(0, Ordering::AcqRel);
                 alloc::format!("ok {} {}", v >> 8, v & 0xFF)
             }
+            #[cfg(target_arch = "x86_64")]
             "key" => {
                 for b in hex(&args) {
                     crate::drivers::ps2::keyboard_byte(b);
@@ -1881,7 +1909,7 @@ fn wavefs_home() {
 fn fat_boot() {
     let kernel = fs::read_all("/Boot/aurora/kernel.elf").expect("kernel on the ESP");
     assert_eq!(&kernel[0..4], b"\x7fELF");
-    assert!(fs::read_all("/Boot/EFI/BOOT/BOOTX64.EFI").unwrap().starts_with(b"MZ"));
+    assert!(fs::read_all(crate::gui::sysupdate::BOOTLOADER).unwrap().starts_with(b"MZ"));
     fs::write_all("/Boot/Aurora test file.txt", b"written by Aster").unwrap();
     assert_eq!(fs::read_all("/Boot/aurora test FILE.txt").unwrap(), b"written by Aster"); // FAT is case-insensitive
     fs::unlink("/Boot/Aurora test file.txt").unwrap();
@@ -2367,23 +2395,21 @@ fn hardening() {
     // W^X: code is not writable, read-only data not executable or writable,
     // data not executable; the physical window (an alias of the code) is
     // not executable.
-    const W: u64 = crate::arch::mmu::pte::WRITABLE;
-    const NX: u64 = crate::arch::mmu::pte::NO_EXECUTE;
+    use crate::arch::mmu::pte::{kernel_executable as x, kernel_writable as w};
     let text = hardening as *const () as u64;
     let rodata = "a string in .rodata".as_ptr() as u64;
     static DATA: AtomicU32 = AtomicU32::new(1);
     let data = &DATA as *const AtomicU32 as u64;
     let e = |va: u64| vmm::kernel_entry(va).expect("kernel image mapped");
-    assert_eq!(e(text) & (W | NX), 0, "kernel .text must be read-only and executable");
-    assert_eq!(e(rodata) & (W | NX), NX, "kernel .rodata must be read-only and no-execute");
-    assert_eq!(e(data) & (W | NX), W | NX, "kernel .data must be writable and no-execute");
-    let pml4 = unsafe { &*(mm::phys_to_virt(vmm::kernel_pml4()) as *const [u64; 512]) };
-    assert!(pml4[256] & NX != 0, "the physical window must be no-execute");
+    assert!(!w(e(text)) && x(e(text)), "kernel .text must be read-only and executable");
+    assert!(!w(e(rodata)) && !x(e(rodata)), "kernel .rodata must be read-only and no-execute");
+    assert!(w(e(data)) && !x(e(data)), "kernel .data must be writable and no-execute");
+    assert!(crate::arch::mmu::window_no_execute(vmm::kernel_pml4()), "the physical window must be no-execute");
     let (mut wx, mut checked) = (0, 0);
     for va in (0xffff_ffff_8000_0000u64..0xffff_ffff_8000_0000 + (64 << 20)).step_by(4096) {
         if let Some(e) = vmm::kernel_entry(va).filter(|e| e & 1 != 0) {
             checked += 1;
-            if e & W != 0 && e & NX == 0 {
+            if w(e) && x(e) {
                 wx += 1;
             }
         }
@@ -2396,7 +2422,8 @@ fn hardening() {
     let mut a = AddressSpace::new().unwrap();
     let va = 0x40_0000;
     a.map_anon(va, 1, Prot::ReadExec).unwrap();
-    a.write_bytes(va, &[0xC3]).unwrap(); // ret
+    let ret: &[u8] = if cfg!(target_arch = "aarch64") { &[0xC0, 0x03, 0x5F, 0xD6] } else { &[0xC3] };
+    a.write_bytes(va, ret).unwrap(); // ret
     crate::arch::interrupts::without_interrupts(|| {
         unsafe { vmm::load(a.cr3()) };
         let plain_read_faults = crate::syscall::user::probe::read_faults(va);
@@ -2404,7 +2431,7 @@ fn hardening() {
         let call_faults = crate::syscall::user::probe::exec_faults(va);
         unsafe { vmm::load(vmm::kernel_pml4()) };
         assert_eq!(plain_read_faults, f.smap, "a kernel read of user memory outside user_copy");
-        assert_eq!(copied, Ok(0xC3), "user_copy reads user memory");
+        assert_eq!(copied, Ok(ret[0]), "user_copy reads user memory");
         assert_eq!(call_faults, f.smep, "the kernel calling into a user page");
     });
     drop(a);
@@ -2664,7 +2691,10 @@ fn acpi_isolation() {
     // Everything else carries on; ACPI answers "unknown" from now on.
     assert_eq!(crate::acpi::power_info().flags & aurora_abi::power::ACPI, 0);
     crate::sched::sleep_ms(20);
-    assert!(crate::acpi::sleep_type(5).is_some(), "sleep types found earlier stay usable");
+    // (Arm firmware has no sleep states: it powers off through PSCI.)
+    if cfg!(target_arch = "x86_64") {
+        assert!(crate::acpi::sleep_type(5).is_some(), "sleep types found earlier stay usable");
+    }
 }
 
 fn usb() {

@@ -10,6 +10,7 @@ pub mod cache;
 pub mod clock;
 pub mod cpu;
 pub mod fpu;
+pub mod gic;
 pub mod interrupts;
 pub mod io;
 pub mod irq;
@@ -45,18 +46,21 @@ pub fn early_init() {
 pub fn init_interrupts(acpi: &crate::acpi::AcpiInfo) {
     psci::init(acpi);
     percpu::init(0);
-}
-
-/// Where Arm bring-up stops for now (milestone 1): before interrupts are
-/// enabled, which needs the GIC driver. Reports what runs and powers off.
-pub fn bringup_done() -> ! {
-    log!("boot", "CPU: {} ({}), EL{}", cpu::brand(), cpu::model(), regs::current_el());
-    log!("boot", "features: {}", cpu::feature_names().join(" "));
-    log!("boot", "protections: {}", protect::report());
-    let (total, free) = crate::mm::frame::counts();
-    log!("boot", "memory: {} MiB, {} MiB free", total * 4096 >> 20, free * 4096 >> 20);
-    log!("boot", "aarch64 bring-up complete up to the scheduler; interrupts (GIC) come next. Powering off.");
-    power::off();
+    log!(
+        "boot",
+        "CPU: {} ({}), entered at EL{}, CTR_EL0 {:#x}",
+        cpu::brand(),
+        cpu::model(),
+        regs::current_el(),
+        regs::read!("ctr_el0")
+    );
+    smp::set_cpus(&acpi.gic.cpus);
+    if gic::init(acpi) {
+        timer::choose(None);
+        log!("timer", "{}", timer::describe());
+        timer::start_local();
+        crate::timer::reprogram();
+    }
 }
 
 /// No legacy (ISA) input devices on Arm platforms.

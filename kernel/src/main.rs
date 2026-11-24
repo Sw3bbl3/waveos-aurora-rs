@@ -3,11 +3,10 @@
 #![no_std]
 #![no_main]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
-// The test build skips the desktop, which leaves parts of it unused.
-#![cfg_attr(feature = "ktest", allow(dead_code))]
-// Arm bring-up stops before the device drivers start (`arch::bringup_done`),
-// which leaves much of the kernel unused there for now.
-#![cfg_attr(target_arch = "aarch64", allow(dead_code, unreachable_code, unused_imports, unused_variables))]
+// The test build skips the desktop, which leaves parts of it unused; and
+// sleep (S3), PS/2 and the HPET exist on x86 only, so on Arm their callees
+// in the drivers (resume paths, scancode sources) go unused.
+#![cfg_attr(any(feature = "ktest", target_arch = "aarch64"), allow(dead_code))]
 
 extern crate alloc;
 
@@ -106,9 +105,6 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     proc::init();
     sandbox::init();
     mm::kswapd::init();
-    // Arm bring-up: no interrupt controller driver yet, so it ends here.
-    #[cfg(target_arch = "aarch64")]
-    arch::bringup_done();
     arch::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
     log!("boot", "protections: {}", arch::protect::report());

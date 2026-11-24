@@ -9,6 +9,7 @@ macro_rules! sysreg_read {
     ($reg:literal) => {{
         let v: u64;
         // SAFETY: reading a system register has no side effect.
+        #[allow(unused_unsafe)]
         unsafe { core::arch::asm!(concat!("mrs {}, ", $reg), out(reg) v, options(nomem, nostack, preserves_flags)) };
         v
     }};
