@@ -1795,6 +1795,52 @@ fn serve_files(listener: std::net::TcpListener, dir: PathBuf, trickle_ms: u64) {
     });
 }
 
+/// The test server's web page for the browser timings (`/web/article.html`):
+/// an article of about 3000 words with headings, styles, pictures (inline
+/// SVG) and a script that builds a table of contents, made here so its
+/// bytes are the same on every run.
+fn web_page(rest: &str) -> Reply {
+    if rest != "article.html" {
+        return Reply::new(String::from("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), Vec::new());
+    }
+    let mut page = String::from(
+        "<!doctype html><html lang=en><meta charset=utf-8><title>WaveOS test article</title>\
+         <meta name=viewport content='width=device-width'>\
+         <style>body{font:17px/1.55 serif;max-width:760px;margin:2em auto;padding:0 1em;color:#222}\
+         h1,h2{font-family:sans-serif}nav{background:#f3f3f3;padding:.5em 1em;border-radius:6px}\
+         figure{margin:1.5em 0}figcaption{font:13px sans-serif;color:#666}</style>\
+         <h1>A test article</h1><nav id=toc><b>Contents</b></nav>",
+    );
+    for i in 0..30 {
+        let hue = i * 12;
+        page.push_str(&format!(
+            "<h2 id=s{i}>Section {i}</h2><figure><svg width=720 height=120 xmlns='http://www.w3.org/2000/svg'>\
+             <rect width=720 height=120 rx=10 fill='hsl({hue},60%,55%)'/><circle cx='{}' cy=60 r=40 fill='#fff8'/>\
+             </svg><figcaption>Figure {i}: a picture drawn from SVG.</figcaption></figure>",
+            60 + i * 20
+        ));
+        for _ in 0..2 {
+            page.push_str(
+                "<p>Browsers load a page in stages: the bytes arrive over the network, the parser builds the \
+                 document, styles are matched and laid out, and the result is painted and composited into the \
+                 window. Each stage has its own costs, and a page like this one, with text, pictures and a \
+                 little script, touches all of them without depending on anything but the server it came \
+                 from.</p>",
+            );
+        }
+    }
+    page.push_str(
+        "<script>for(const h of document.querySelectorAll('h2')){const a=document.createElement('a');\
+         a.href='#'+h.id;a.textContent=h.textContent;const d=document.createElement('div');d.append(a);\
+         document.getElementById('toc').append(d)}</script></html>",
+    );
+    let body = page.into_bytes();
+    Reply::new(
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()),
+        body,
+    )
+}
+
 /// The package tests' repositories (`target/test-repo`, see
 /// `store::test_repositories`), and copies that misbehave on purpose:
 ///
@@ -1808,6 +1854,9 @@ fn repo_response(req: &[u8]) -> Option<Reply> {
     let line = text.lines().next()?;
     let path = line.strip_prefix("GET ")?.split(' ').next()?;
     let (prefix, rest) = path.strip_prefix('/')?.split_once('/')?;
+    if prefix == "web" {
+        return Some(web_page(rest));
+    }
     let base = test_repo_dir();
     let dir = match prefix {
         "repo" | "badrepo" | "flaky" | "corrupt" | "truncated" | "slow" => base.join("main"),
@@ -1937,6 +1986,11 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
         }
         // A longer or reproducible fuzzing run (see `syscall_fuzz` in kernel/src/tests.rs).
         for (var, key) in [
+            // The browser timings: runs per browser, and real sites
+            // ("URL|title prefix,…") to load once each.
+            ("AURORA_BROWSER_RUNS", "browser_runs"),
+            ("AURORA_BROWSER_SITES", "browser_sites"),
+            ("AURORA_BROWSER_ENV", "browser_env"),
             ("AURORA_FUZZ_SEED", "fuzz_seed"),
             ("AURORA_FUZZ_ITERS", "fuzz_iters"),
             ("AURORA_FUZZ_ROUNDS", "fuzz_rounds"),

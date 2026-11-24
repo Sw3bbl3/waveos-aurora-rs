@@ -105,6 +105,7 @@ const TESTS: &[Test] = &[
     ),
     ("Linux programs: Mesa in windows, copies against zero-copy, measured (AURORA_MESA_BENCH=1)", linux_mesa_bench),
     ("Linux programs: browsers in windows, copies against zero-copy, measured", linux_browsers_measured),
+    ("Linux programs: browsers in windows, start-up and page loads timed", linux_browsers_timed),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("Linux programs: Debian's dynamically linked hello and curl", linux_debian),
     ("sandbox: policy, consent, grants, bookmarks, system manifests", crate::sandbox::selftest::policy),
@@ -1452,6 +1453,133 @@ fn linux_mesa_bench() {
 /// Where Voyage is when the disk has the Linux packages
 /// (`AURORA_TEST_ROOT=browsers cargo xtask test --mesa` puts them there).
 const VOYAGE: &str = "/Linux/usr/lib/voyage/voyage";
+
+/// Dark pixels counted when a page is painted (sampled; see [`page_ink`]).
+const PAGE_INK: usize = 400;
+
+/// Dark pixels (text, pictures) in the lower four fifths of a window's
+/// buffers, every other pixel of every other row: a page has been painted
+/// once there are many (the browsers' own bars, above, have few).
+fn page_ink(c: &crate::gui::server::Content) -> usize {
+    let bufs: Vec<(&[u32], u32, u32, u32)> = if c.layers.is_empty() {
+        alloc::vec![(c.px, c.width, c.height, c.stride)]
+    } else {
+        c.layers.iter().map(|l| (l.buffer.pixels(), l.buffer.width, l.buffer.height, l.buffer.stride / 4)).collect()
+    };
+    let mut ink = 0;
+    for (px, w, h, stride) in bufs {
+        for y in (h / 5..h).step_by(2) {
+            let row = (y * stride) as usize;
+            for x in (0..w as usize).step_by(2) {
+                let p = px.get(row + x).copied().unwrap_or(0xFFFF_FFFF);
+                // (Not black: a buffer not drawn yet is all zeros. The
+                // alpha byte isn't looked at: buffers may be XRGB.)
+                if p & 0xFF_FFFF != 0 && ((p >> 16) & 0xFF) + ((p >> 8) & 0xFF) + (p & 0xFF) < 300 {
+                    ink += 1;
+                }
+            }
+        }
+    }
+    ink
+}
+
+/// Browser start-up and page loads, timed (`AURORA_TEST_ROOT=browsers
+/// AURORA_TEST_FILTER="page loads timed" cargo xtask test --mesa`): each
+/// browser is started cold `browser_runs` times (3 by default) on the test
+/// server's article (`/web/article.html`), and once on each real site in
+/// `browser_sites` ("URL|title,…", none by default). For each start: from
+/// the command to its window, to the window having the page's title (the
+/// page is parsed), and to the page's text and pictures being in the
+/// window (painted: [`page_ink`]).
+fn linux_browsers_timed() {
+    if crate::fs::stat(VOYAGE).is_err() {
+        crate::kprint!("(skipped: the browsers are not on this disk; AURORA_TEST_ROOT=browsers runs it) ");
+        return;
+    }
+    if crate::fs::stat("/Documents/.ktest-persist").is_ok() {
+        crate::kprint!("(timed on the first boot) ");
+        return;
+    }
+    let option = |k: &str| crate::gui::prefs::boot_option(k);
+    let runs: u32 = option("browser_runs").and_then(|r| r.parse().ok()).unwrap_or(3);
+    let port = option("test_http_port").unwrap_or_default();
+    let local = alloc::format!("http://10.0.2.2:{port}/web/article.html");
+    let mut pages: Vec<(String, String, u32)> = alloc::vec![(local, String::from("WaveOS test article"), runs)];
+    for site in option("browser_sites").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
+        if let Some((url, title)) = site.split_once('|') {
+            pages.push((String::from(url), String::from(title), 1));
+        }
+    }
+    let browsers: [(&str, &str); 2] =
+        [("voyage", "/System/Linux/bin/voyage"), ("firefox", "/System/Linux/bin/firefox --new-instance")];
+    // `browser_env`: variables for both ("A=1 B=2"), for experiments.
+    let env = option("browser_env").map_or(String::new(), |e| alloc::format!("export {e}; "));
+    let mut c = mesa_compositor();
+    for (page, (url, title, n)) in pages.iter().enumerate() {
+        for run in 0..*n {
+            for (program, cmd) in browsers {
+                let script = alloc::format!("{env}wl-bridge --background && exec {cmd} '{url}'");
+                let t0 = time::uptime_ms();
+                let (mut window, mut titled, mut painted) = (None, None, None);
+                let (mut next_look, mut most_ink) = (0, 0);
+                run_composited(&mut c, &["/System/Linux/bin/busybox", "sh", "-c", &script], 300_000, &mut |_, _| {
+                    let now = time::uptime_ms();
+                    if window.is_none() && window_titled(program).is_some() {
+                        window = Some(now - t0);
+                    }
+                    if let Some(id) = window_titled(title) {
+                        if titled.is_none() {
+                            window.get_or_insert(now - t0);
+                            titled = Some(now - t0);
+                        }
+                        // Painted: the page's text and pictures are in the window.
+                        if painted.is_none() && now >= next_look {
+                            next_look = now + 100;
+                            let ink = crate::gui::server::with_content(id, page_ink).unwrap_or(0);
+                            most_ink = most_ink.max(ink);
+                            if ink > PAGE_INK {
+                                painted = Some(now - t0);
+                                // A picture of it for the record (the first run of each page).
+                                if run == 0 {
+                                    crate::kprintln!("\nharness: screendump browser-{program}-{page}");
+                                }
+                            }
+                        }
+                    }
+                    // (Shown a little longer, for the picture.)
+                    if painted.is_some_and(|p| now > t0 + p + 2000) {
+                        return true;
+                    }
+                    if now > t0 + 240_000 {
+                        // What it shows instead, for the record.
+                        crate::kprintln!("\nharness: screendump browser-{program}-{page}-unpainted");
+                        sched::sleep_ms(1500);
+                        return true;
+                    }
+                    false
+                });
+                stop_bridge();
+                // Every process of it gone before the next start (a cold one).
+                let browser_left = || {
+                    crate::proc::all().iter().any(|p| {
+                        let name = p.name();
+                        p.exit_code().is_none()
+                            && ["firefox", "voyage", "WebKit", "wl-bridge"].iter().any(|n| name.contains(n))
+                    })
+                };
+                eventually(30_000, || !browser_left());
+                let ms = |v: Option<u64>| v.map_or(String::from("-"), |v| alloc::format!("{v}"));
+                crate::kprintln!(
+                    "\n    browser-time: {program} run {run} {url}: window {} ms, title {} ms, painted {} ms (ink {most_ink})",
+                    ms(window),
+                    ms(titled),
+                    ms(painted)
+                );
+                assert!(painted.is_some() || *n == 1, "{program} did not show {url}");
+            }
+        }
+    }
+}
 
 /// A long page with text, boxes and one thing always moving (a CSS
 /// animation, as a page with a spinner or a video changes a small part of
