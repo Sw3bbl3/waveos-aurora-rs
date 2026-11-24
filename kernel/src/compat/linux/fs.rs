@@ -1069,7 +1069,10 @@ pub fn getdents64(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize
             crate::sandbox::check_path(host, crate::sandbox::Access::Read)?;
         }
         let mut list = alloc::vec![(String::from("."), DT_DIR), (String::from(".."), DT_DIR)];
-        list.extend(dir_entries(host));
+        // A folder that can't be listed says why (a folder whose list came
+        // back empty made `rm -rf` report "Directory not empty" where the
+        // truth was "Permission denied").
+        list.extend(dir_entries(host)?);
         *entries = Some(list);
     }
     let entries = entries.as_ref().unwrap();
@@ -1103,50 +1106,68 @@ const DT_REG: u8 = 8;
 const DT_LNK: u8 = 10;
 
 /// The entries of a directory: real ones (and links), or the virtual `/dev` and `/proc`.
-fn dir_entries(host: &str) -> Vec<(String, u8)> {
-    let mut v = plain_entries(host);
+fn dir_entries(host: &str) -> Result<Vec<(String, u8)>, isize> {
+    let mut v = plain_entries(host)?;
     for name in super::links::in_dir(&to_guest(host)) {
         if !v.iter().any(|(n, _)| *n == name) {
             v.push((name, DT_LNK));
         }
     }
-    v
+    Ok(v)
 }
 
-fn plain_entries(host: &str) -> Vec<(String, u8)> {
-    let mut v = folder_entries(host);
-    // What the input devices add (/sys, /dev/input, /run/udev, …).
-    if let Some(extra) = super::input::entries(&to_guest(host)) {
-        for e in extra {
-            if !v.iter().any(|(n, _)| *n == e.0) {
-                v.push(e);
-            }
+fn plain_entries(host: &str) -> Result<Vec<(String, u8)>, isize> {
+    // What the input devices add (/sys, /dev/input, /run/udev, …): those
+    // folders may have nothing on the disk.
+    let extra = super::input::entries(&to_guest(host));
+    let mut v = match folder_entries(host) {
+        Ok(v) => v,
+        Err(_) if extra.is_some() => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    for e in extra.into_iter().flatten() {
+        if !v.iter().any(|(n, _)| *n == e.0) {
+            v.push(e);
         }
     }
-    v
+    Ok(v)
 }
 
-fn folder_entries(host: &str) -> Vec<(String, u8)> {
+fn folder_entries(host: &str) -> Result<Vec<(String, u8)>, isize> {
     let kind = |dir: bool| if dir { DT_DIR } else { DT_REG };
     // A layered system folder: what the disk has, then the system image.
     let guest = to_guest(host);
     if in_system_dirs(&guest) {
+        // Either layer may lack the folder; failing in both is an error.
         let mut v: Vec<(String, u8)> = Vec::new();
+        let mut error = None;
+        let mut listed = false;
         for root in [WRITABLE_ROOT, SYSTEM_ROOT] {
-            for e in fs::readdir(&format!("{root}{guest}")).unwrap_or_default() {
-                if !v.iter().any(|(n, _)| *n == e.name) {
-                    v.push((e.name, kind(e.kind == Kind::Dir)));
+            match fs::readdir(&format!("{root}{guest}")) {
+                Ok(entries) => {
+                    listed = true;
+                    for e in entries {
+                        if !v.iter().any(|(n, _)| *n == e.name) {
+                            v.push((e.name, kind(e.kind == Kind::Dir)));
+                        }
+                    }
                 }
+                Err(ENOENT) => {}
+                Err(e) => error = error.or(Some(e)),
             }
         }
-        return v;
+        return match (listed, error) {
+            (false, Some(e)) => Err(e),
+            (false, None) => Err(ENOENT),
+            _ => Ok(v),
+        };
     }
     let names: &[(&str, bool)] = match host {
         "/dev" => {
             &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true), ("dri", true)]
         }
         // Character devices (DT_CHR).
-        "/dev/dri" => return super::drm::node_names().into_iter().map(|n| (n, 2)).collect(),
+        "/dev/dri" => return Ok(super::drm::node_names().into_iter().map(|n| (n, 2)).collect()),
         "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false), ("pressure", true)],
         "/proc/self" => {
             &[
@@ -1160,10 +1181,9 @@ fn folder_entries(host: &str) -> Vec<(String, u8)> {
             ]
         }
         "/proc/pressure" => &[("memory", false)],
-        "/dev/shm" => return super::shm::names().into_iter().map(|n| (n, DT_REG)).collect(),
+        "/dev/shm" => return Ok(super::shm::names().into_iter().map(|n| (n, DT_REG)).collect()),
         _ => {
-            let mut v: Vec<(String, u8)> = fs::readdir(host)
-                .unwrap_or_default()
+            let mut v: Vec<(String, u8)> = fs::readdir(host)?
                 .into_iter()
                 .filter(|e| !(e.name == ".links" && (host == SYSTEM_ROOT || host == WRITABLE_ROOT)))
                 .map(|e| (e.name, kind(e.kind == Kind::Dir)))
@@ -1176,10 +1196,10 @@ fn folder_entries(host: &str) -> Vec<(String, u8)> {
                     }
                 }
             }
-            return v;
+            return Ok(v);
         }
     };
-    names.iter().map(|&(n, d)| (String::from(n), kind(d))).collect()
+    Ok(names.iter().map(|&(n, d)| (String::from(n), kind(d))).collect())
 }
 
 fn fnv(s: &str) -> u64 {

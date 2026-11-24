@@ -148,6 +148,23 @@ static void removed_while_open(void) {
         closedir(d);
         CHECK(rmdir(p) == 0, "rmdir");
     }
+    // A folder that can't be read says so, rather than looking empty (rm -rf
+    // used to report "Directory not empty" for it). Root may read anything.
+    if (geteuid() != 0) {
+        CHECK(mkdir("/tmp/lto/locked", 0755) == 0 && mkdir("/tmp/lto/locked/inside", 0755) == 0, "mkdir locked");
+        CHECK(chmod("/tmp/lto/locked", 0300) == 0, "chmod 0300");
+        DIR *d = opendir("/tmp/lto/locked");
+        int refused = !d && errno == EACCES;
+        if (d) {
+            errno = 0;
+            struct dirent *e = readdir(d);
+            refused = !e && errno == EACCES;
+            closedir(d);
+        }
+        CHECK(chmod("/tmp/lto/locked", 0755) == 0, "chmod back");
+        CHECK(refused, "listing an unreadable folder fails with EACCES");
+        CHECK(rmdir("/tmp/lto/locked/inside") == 0 && rmdir("/tmp/lto/locked") == 0, "remove locked");
+    }
     // A folder can't go inside itself.
     CHECK(mkdir("/tmp/lto/a", 0755) == 0 && mkdir("/tmp/lto/a/b", 0755) == 0, "mkdir a/b");
     CHECK(rename("/tmp/lto/a", "/tmp/lto/a/b/a") == -1 && errno == EINVAL, "rename into itself");
