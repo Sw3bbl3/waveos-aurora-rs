@@ -126,6 +126,45 @@ impl BufferObject {
         }))
     }
 
+    /// A buffer object over counted frames another owner allocated (a
+    /// program's shared memory: `memfd`, `/dev/shm`), mapped into the
+    /// kernel. Each frame is held for as long as the buffer lives, so a
+    /// window or a plane can show the program's pixels where they are, and
+    /// the memory outlives the program (it is not pageable meanwhile).
+    /// Fails if a frame is no longer counted (the object shrank meanwhile).
+    pub fn from_shared(frames: &[u64]) -> Result<Arc<BufferObject>> {
+        if frames.is_empty() {
+            return Err(Error::Invalid);
+        }
+        if !vmm::shm_hold_all(frames) {
+            return Err(Error::Invalid);
+        }
+        let Some(vaddr) = vmm::kmap(frames) else {
+            for &f in frames {
+                vmm::shm_release(f);
+            }
+            return Err(Error::NoMemory);
+        };
+        let mut chunks: Vec<(u64, usize)> = Vec::new();
+        for &f in frames {
+            match chunks.last_mut() {
+                Some(last) if last.0 + last.1 as u64 == f => last.1 += PAGE_SIZE as usize,
+                _ => chunks.push((f, PAGE_SIZE as usize)),
+            }
+        }
+        let pages = frames.len() as u64;
+        Ok(Arc::new(BufferObject {
+            id: new_id(),
+            size: (pages * PAGE_SIZE) as usize,
+            chunks,
+            vaddr,
+            pages,
+            handle: AtomicU32::new(0),
+            owner: spin::Mutex::new(None),
+            counted: AtomicBool::new(true),
+        }))
+    }
+
     /// The frames, page by page, for mapping into a program (DRM's
     /// `MAP_DUMB`, a dma-buf's `mmap`). From the first call on they are
     /// counted like shared memory (`vmm::shm_count`): each mapping holds
@@ -222,6 +261,26 @@ impl Framebuffer {
             return Err(Error::Invalid);
         }
         Ok(Arc::new(Framebuffer { id: new_id(), bo, width, height, pitch, offset: 0, format }))
+    }
+
+    /// Like [`Framebuffer::new`], the first pixel `offset` bytes into the
+    /// buffer (a program's buffer inside a larger shared memory pool).
+    pub fn with_offset(
+        bo: Arc<BufferObject>,
+        width: u32,
+        height: u32,
+        pitch: u32,
+        offset: u32,
+        format: u32,
+    ) -> Result<Arc<Framebuffer>> {
+        if width == 0 || height == 0 || pitch < width * 4 || !pitch.is_multiple_of(4) || !offset.is_multiple_of(4) {
+            return Err(Error::Invalid);
+        }
+        // Whole rows: `pixels` and drivers read `pitch` bytes of each.
+        if offset as u64 + pitch as u64 * height as u64 > bo.size as u64 {
+            return Err(Error::Invalid);
+        }
+        Ok(Arc::new(Framebuffer { id: new_id(), bo, width, height, pitch, offset, format }))
     }
 
     /// A `w`×`h` 32-bit image in fresh system memory, rows packed.

@@ -697,6 +697,19 @@ impl Desktop {
         self.paint_current(cv);
     }
 
+    /// Crest shows something (a notice, the volume, power): it stays over a
+    /// full-screen window then.
+    pub(super) fn crest_busy(&self) -> bool {
+        crest_on() && self.crest.activity.is_some()
+    }
+
+    /// Crest over a full-screen window, while it shows something.
+    pub(super) fn paint_crest_notice(&self, cv: &mut Canvas) {
+        if self.crest_busy() {
+            self.paint_crest(cv);
+        }
+    }
+
     fn paint_crest(&self, cv: &mut Canvas) {
         let r = self.crest_rect();
         if r.w <= 0 || !self.crest_area().intersects(&cv.clip) {

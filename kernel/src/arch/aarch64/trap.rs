@@ -91,7 +91,8 @@ impl TrapFrame {
     }
 
     /// A frame that starts a program at `pc` with stack `sp` (EL0t,
-    /// interrupts unmasked).
+    /// interrupts unmasked). The exit path loads SP_EL0 from any frame
+    /// whose PSTATE returns to EL0, so Linux `execve` may return through it.
     pub fn user_start(pc: u64, sp: u64) -> TrapFrame {
         TrapFrame { pc, sp, ..Default::default() }
     }
@@ -322,15 +323,11 @@ fn sync(f: &mut TrapFrame) {
             super::interrupts::disable();
         }
         EC_DABT_LOWER | EC_DABT_SAME | EC_IABT_LOWER | EC_IABT_SAME => page_fault(f, ec),
+        EC_SYSREG | EC_UNKNOWN if f.user_mode() && linux_mrs(f) => {}
         EC_BRK64 if !f.user_mode() => {
             log!("int", "breakpoint at {:#x}", f.pc);
             f.pc += 4;
         }
-        // A Linux program reading an ID register (`mrs`): emulated as Linux does.
-        EC_SYSREG | EC_UNKNOWN
-            if f.user_mode()
-                && crate::proc::current().is_some_and(|p| p.linux.is_some())
-                && crate::compat::linux::abi::aarch64::emulate_mrs(f) => {}
         _ => {
             let (sig, code, addr) = match ec {
                 EC_BRK64 => (SIGTRAP, TRAP_BRKPT, f.pc),
@@ -343,6 +340,19 @@ fn sync(f: &mut TrapFrame) {
             }
         }
     }
+}
+
+/// A Linux program's read of an ID register (`mrs`), emulated as Linux
+/// does (`compat::linux::abi::aarch64::emulate_mrs`): true if it was one.
+fn linux_mrs(f: &mut TrapFrame) -> bool {
+    if !crate::proc::current().is_some_and(|p| p.linux.is_some()) {
+        return false;
+    }
+    // (It may read the instruction from user memory.)
+    super::interrupts::enable();
+    let done = crate::compat::linux::abi::aarch64::emulate_mrs(f);
+    super::interrupts::disable();
+    done
 }
 
 /// A fault in a Linux program with a handler for `sig`: true once the

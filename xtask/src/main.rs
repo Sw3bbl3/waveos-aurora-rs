@@ -38,7 +38,7 @@
 //!   cargo xtask linux-root [PKG...]     fetch Debian packages (default: WebKitGTK, Firefox ESR, bash, coreutils,
 //!                                         Python) and their dependencies into target/linux-root (with --arch
 //!                                         aarch64: Debian's arm64 ones, into target/linux-root-aarch64; --base:
-//!                                         only libc, BusyBox and GNU Hello)
+//!                                         only libc, BusyBox and GNU Hello; --into DIR: there instead)
 //!   cargo xtask userland                user space alone
 //!   cargo xtask linux-programs          the Linux programs of the system image alone (BusyBox, the C tests…)
 //!   cargo xtask migrate-disk [--from DISK] [--to DISK]  a new disk for --arch with another one's files
@@ -53,7 +53,9 @@
 //!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 480 (600 under
 //!                                         384 MiB, 1200 over 512);
 //!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run;
-//!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data)
+//!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data;
+//!                                         AURORA_MESA_BENCH=1 with --mesa measures copies against zero-copy;
+//!                                         AURORA_TEST_ROOT=browsers with --mesa measures Voyage and Firefox)
 //!       --displays N                      with --gpu virtio: N scanouts, plugged in and out by the
 //!                                         multi-monitor test, each checked by QMP screendump (testdisplays.rs)
 //!       --mesa                            only the Mesa tests, on a disk with Debian's Mesa, kmscube, glmark2
@@ -455,17 +457,22 @@ fn main() {
             exit(status.code().unwrap_or(1));
         }
         Some("linux-root") => {
+            // `--into DIR`: somewhere else than the architecture's root.
+            let into = args.iter().position(|a| a == "--into").and_then(|i| args.get(i + 1)).cloned();
             let mut pkgs: Vec<String> = args
                 .iter()
                 .skip(1)
-                .filter(|a| !a.starts_with("--") && a.as_str() != arch.name())
+                .filter(|a| !a.starts_with("--") && a.as_str() != arch.name() && Some(*a) != into.as_ref())
                 .cloned()
                 .collect();
             // `--base`: the smallest root (libc, BusyBox, GNU Hello).
             if flag("--base") {
                 pkgs.extend(debian::BASE_PACKAGES.iter().map(|s| s.to_string()));
             }
-            let dir = debian::build(&pkgs_or_default(pkgs));
+            let dir = match &into {
+                Some(d) => debian::build_into(Path::new(d), &pkgs_or_default(pkgs)),
+                None => debian::build(&pkgs_or_default(pkgs)),
+            };
             println!("wrote {} ({} MiB)", dir.display(), dir_size(&dir) >> 20);
         }
         Some("image") => {
@@ -1883,8 +1890,19 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
     let img = arch::current().disk(&root(), "test-disk");
     let shown = if heads > 1 { format!("display {gpu} with {heads} heads") } else { format!("display {gpu}") };
     println!("running kernel tests with the disk on {disk}, network {net}, {shown}, USB on {usb}, {memory_mib} MiB of memory");
-    // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux.
-    let mesa_root = mesa.then(mesa::root_dir);
+    // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux; with
+    // AURORA_TEST_ROOT=browsers, the browser measurements on a disk with the
+    // default Linux packages (Voyage, Firefox) instead.
+    // AURORA_TEST_LINUX_ROOT=1 (or a folder): the architecture's Linux root
+    // (`cargo xtask linux-root`, as it is), or that folder, as /Linux
+    // instead, for the Debian program tests.
+    let browsers = mesa && env::var("AURORA_TEST_ROOT").as_deref() == Ok("browsers");
+    let mesa_root = match env::var("AURORA_TEST_LINUX_ROOT") {
+        Ok(v) if !mesa && v == "1" => Some(debian::root_dir()),
+        Ok(v) if !mesa && !v.is_empty() => Some(PathBuf::from(v)),
+        _ if browsers => Some(linux_root()),
+        _ => mesa.then(mesa::root_dir),
+    };
     let disk_size = match &mesa_root {
         Some(r) => dir_size(r) + 256 * 1024 * 1024,
         // Cards keep their 128 MiB (a size a card can have); a disk gets
@@ -1913,7 +1931,8 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
         if net.starts_with("usb-") {
             image::set_boot_option(&img, "test_usb_net", net).expect("write boot.conf");
         }
-        if let Some(filter) = env::var("AURORA_TEST_FILTER").ok().or(mesa.then(|| String::from("Mesa"))) {
+        let default_filter = if browsers { "browsers in windows" } else { "Mesa" };
+        if let Some(filter) = env::var("AURORA_TEST_FILTER").ok().or(mesa.then(|| String::from(default_filter))) {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
         }
         // A longer or reproducible fuzzing run (see `syscall_fuzz` in kernel/src/tests.rs).
@@ -1931,6 +1950,8 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
             ("AURORA_SWAP_FACTOR", "swap_factor"),
             // MiB left to programs while the fuzzers run (memory pressure).
             ("AURORA_FUZZ_RAM", "fuzz_ram"),
+            // The Mesa tests measure copies against zero-copy (`linux_mesa_bench`).
+            ("AURORA_MESA_BENCH", "mesa_bench"),
         ] {
             if let Ok(v) = env::var(var) {
                 image::set_boot_option(&img, key, &v).expect("write boot.conf");

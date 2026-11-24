@@ -45,8 +45,8 @@ use crate::proc;
 use crate::sync::Mutex;
 use abi::nr;
 use alloc::collections::BTreeMap;
-use core::sync::atomic::{AtomicU64, Ordering};
 use aurora_abi::err::*;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 pub use fs::Special;
 
@@ -192,6 +192,10 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::WIN_SET_TITLE
         | w::WIN_SET_CURSOR
         | w::WIN_SET_PROGRAM
+        | w::WIN_BUFFER
+        | w::WIN_BUFFER_DESTROY
+        | w::WIN_ATTACH
+        | w::WIN_SET_FULLSCREEN
         | w::WIN_CLOSE
         | w::WIN_RESIZE
         | w::NEXT_EVENT
@@ -278,7 +282,7 @@ fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u
     log!(
         "strace",
         "{tid} {native_nr}{}({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) {path} = {result}",
-        abi::native::name(native_nr),
+        label(native_nr),
         a[0],
         a[1],
         a[2],
@@ -557,6 +561,15 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>, number: u64) 
     }
 }
 
+/// " (name)" of native call `n` for logs, where the ABI names its calls
+/// (arm64); nothing on x86-64, whose logs show the number alone.
+fn label(n: u64) -> alloc::string::String {
+    match abi::native::name(n) {
+        "" => alloc::string::String::new(),
+        name => alloc::format!(" ({name})"),
+    }
+}
+
 /// Logs a call Linux programs made that WaveOS doesn't handle, once per number.
 fn unimplemented(n: u64) {
     static SEEN: Mutex<[u64; 8]> = Mutex::new([0; 8]);
@@ -568,6 +581,6 @@ fn unimplemented(n: u64) {
     if seen[word] & bit == 0 {
         seen[word] |= bit;
         let name = proc::current().map(|p| p.name()).unwrap_or_default();
-        log!("linux", "{name}: system call {n}{} is not supported yet (ENOSYS)", abi::native::name(n));
+        log!("linux", "{name}: system call {n}{} is not supported yet (ENOSYS)", label(n));
     }
 }

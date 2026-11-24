@@ -521,7 +521,15 @@ static void machine(void) {
     CHECK(in > 0, "/proc/cpuinfo");
     info[in] = 0;
 #if defined(__aarch64__)
-    CHECK(strstr(info, "Features\t: fp asimd") && strstr(info, "CPU implementer"), "cpuinfo flags");
+    CHECK(strstr(info, "Features\t: fp asimd") && strstr(info, "CPU implementer"), "cpuinfo Features");
+    // ID registers read from user mode trap and are emulated, as on Linux
+    // (HWCAP_CPUID says so), with the same features as the HWCAPs.
+    unsigned long isar0, midr, hwcap = getauxval(AT_HWCAP);
+    CHECK(hwcap & (1UL << 11), "HWCAP_CPUID");
+    __asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
+    __asm__ volatile("mrs %0, id_aa64isar0_el1" : "=r"(isar0));
+    CHECK(midr != 0, "mrs MIDR_EL1");
+    CHECK((((isar0 >> 4) & 0xF) >= 1) == !!(hwcap & (1UL << 3)), "mrs ID_AA64ISAR0_EL1 agrees with HWCAP_AES");
 #else
     CHECK(strstr(info, "flags\t\t: fpu") && strstr(info, " sse2") && strstr(info, "model name"), "cpuinfo flags");
 #endif

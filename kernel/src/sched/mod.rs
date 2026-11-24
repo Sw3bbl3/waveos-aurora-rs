@@ -372,9 +372,11 @@ pub fn set_fs_base(base: u64) {
 /// The running task's thread pointer.
 pub fn fs_base() -> u64 {
     // Where programs set it themselves (Arm's TPIDR_EL0), the register is
-    // the current value.
+    // the current value: a program's (a kernel thread's is stale).
     if let Some(live) = crate::arch::cpu::user_thread_pointer() {
-        return live;
+        if crate::proc::current().is_some() {
+            return live;
+        }
     }
     interrupts::without_interrupts(|| {
         SCHED
@@ -654,7 +656,7 @@ fn schedule() {
             PREV_ON_CPU[cpu].store(flag, Ordering::Relaxed);
             s.cpus[cpu].prev = dead.then_some(cur_id);
             let fpu = cur.fpu.as_mut().filter(|_| !dead).map(|f| &mut **f as *mut FpuState);
-            if cur.pid != 0 {
+            if cur.pid != 0 && !dead {
                 // A thread pointer the program set itself goes with it.
                 if let Some(live) = crate::arch::cpu::user_thread_pointer() {
                     cur.fs_base = live;

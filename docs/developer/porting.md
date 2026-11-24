@@ -386,7 +386,10 @@ check it).
    A program that writes code into its own executable page (a JIT) syncs
    it itself, as on Linux.
 5. **TPIDRRO_EL0** is zeroed on every CPU (`cpu::init_el0`); the kernel
-   never writes it. TPIDR_EL0 is the thread pointer, kept per thread.
+   never writes it. **TPIDR_EL0** is the program's: `sched` reads it back
+   (`arch::cpu::user_thread_pointer`) when a user task leaves its CPU, and
+   `sched::fs_base` returns the live register in a program, so `fork`,
+   `clone` and switches keep what the program set with `msr`.
 6. **Pointer authentication: APIA only.** One APIA key per boot, the same
    in every process; EnIB, EnDA and EnDB stay off (those instructions are
    NOPs) and there is no GA key, so the Linux layer must not advertise
@@ -394,6 +397,22 @@ check it).
    follow-up.
 7. `orig_x0`: not in `TrapFrame`; the Linux layer takes it from
    `syscall::dispatch`'s saved arguments, which covers system calls.
+8. **Returning to a new program:** the exception exit loads SP_EL0 from
+   any frame whose saved PSTATE is EL0t, so a handler that rewrites its
+   frame (`execve`, with `TrapFrame::user_start`) returns on the new stack.
+
+Still open: BTI guarded pages; per-process pointer-authentication keys.
+
+### Linux programs on aarch64: state
+
+Under HVF (`cargo xtask test --arch aarch64`), the static musl tests pass:
+linuxtest, proctest, nettest, inputtest, linuxfuzz, sandboxtest and the
+sandboxed linuxfuzz, and with `AURORA_TEST_LINUX_ROOT=1` (a root from
+`cargo xtask linux-root --arch aarch64 --base curl`) Debian's dynamically
+linked GNU Hello and curl fetching from the test server. drmtest is
+skipped: the display on `virt` is ramfb, not the PCI device it expects.
+musl's `vfork` is `fork` on arm64 (proctest's memory-sharing check is
+x86-only; `posix_spawn` makes the CLONE_VM | CLONE_VFORK call on both).
 
 ## Tools
 

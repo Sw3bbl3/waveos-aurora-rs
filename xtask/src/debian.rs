@@ -63,9 +63,18 @@ pub const DEFAULT_PACKAGES: &[&str] = &[
 /// What `cargo xtask test --mesa` puts on its disk: Mesa's GBM, EGL, GL,
 /// GLES and Vulkan (lavapipe) drivers and the unmodified programs that drive
 /// them full screen through `/dev/dri/card0` (kmscube, glmark2's DRM builds),
+/// glmark2's Wayland build (in a window and full screen through `wl-bridge`),
 /// plus `eglinfo` and `vulkaninfo`.
-pub const MESA_PACKAGES: &[&str] =
-    &["kmscube", "glmark2-drm", "glmark2-es2-drm", "mesa-vulkan-drivers", "vulkan-tools", "mesa-utils-bin"];
+pub const MESA_PACKAGES: &[&str] = &[
+    "kmscube",
+    "glmark2-drm",
+    "glmark2-es2-drm",
+    // The same in a window (Wayland, through wl-bridge), full screen too.
+    "glmark2-es2-wayland",
+    "mesa-vulkan-drivers",
+    "vulkan-tools",
+    "mesa-utils-bin",
+];
 
 /// Packages never installed: they only matter to a running Debian system
 /// (package management, init, the system bus).

@@ -907,7 +907,9 @@ static void uinput(void) {
     CHECK(!strcmp(ask("native-key?"), "a"), "a key typed through uinput reaches WaveOS ('a')");
     struct input_event moved[] = {{{0, 0}, EV_REL, REL_X, 7}, {{0, 0}, EV_REL, REL_Y, 5}, {{0, 0}, EV_SYN, SYN_REPORT, 0}};
     write(u, moved, sizeof moved);
-    CHECK(!strcmp(ask("native-pointer?"), "7 5"), "pointer motion through uinput moves WaveOS's pointer (7, 5)");
+    const char *moved_by = ask("native-pointer?");
+    if (strcmp(moved_by, "7 5")) printf("     the pointer moved by %s\n", moved_by);
+    CHECK(!strcmp(moved_by, "7 5"), "pointer motion through uinput moves WaveOS's pointer (7, 5)");
     ioctl(u, UI_DEV_DESTROY);
     close(u);
 }

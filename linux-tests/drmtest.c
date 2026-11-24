@@ -5,7 +5,9 @@
 // ioctls, master rules, KMS objects and properties, dumb buffers mapped
 // through the card, a mode set, page flips and atomic commits with their
 // events (read through epoll), vblank waits, the cursor, PRIME export and
-// import (a dma-buf passed over a local socket and mapped), error paths,
+// import (a dma-buf passed over a local socket and mapped), dma-buf fences
+// as sync files, WaveOS windows showing dma-bufs and shared memory as they
+// are (win_buffer, win_attach, release events), error paths,
 // and the desktop coming back when the program closes the card and when
 // it is killed. It asks the test harness for pictures of the screen
 // ("harness: screendump" in the kernel log), which it checks afterwards.
@@ -20,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -30,6 +33,8 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "../libs/linux/include/waveos.h"
 
 // ---------------------------------------------------------------- drm.h
 
@@ -897,6 +902,9 @@ static int recv_fd(int sock) {
     return fd;
 }
 
+static void fences(int dmabuf);
+static void window_buffers(int dmabuf);
+
 /// PRIME: a buffer as a dma-buf, mapped, passed to another process and
 /// imported there into another open file of the card.
 static void prime(void) {
@@ -946,8 +954,99 @@ static void prime(void) {
     a.map[1] = a.map[0];
     close(sv[0]);
     munmap(map, a.size);
+    fences(dmabuf);
+    window_buffers(dmabuf);
     close(dmabuf);
     printf("drm-test: PRIME export, mmap, SCM_RIGHTS, import\n");
+}
+
+/// A dma-buf's implicit fences: poll says it is ready for reading and
+/// writing (nothing renders asynchronously), EXPORT_SYNC_FILE gives a
+/// signalled sync file (poll, SYNC_IOC_FILE_INFO, SYNC_IOC_MERGE), and
+/// IMPORT_SYNC_FILE takes one.
+static void fences(int dmabuf) {
+    struct pollfd pf = {.fd = dmabuf, .events = POLLIN | POLLOUT};
+    CHECK(poll(&pf, 1, 0) == 1 && (pf.revents & (POLLIN | POLLOUT)) == (POLLIN | POLLOUT), "dma-buf poll");
+    struct { uint32_t flags; int32_t fd; } ex = {.flags = 3, .fd = -1};
+    CHECK(ioctl(dmabuf, _IOWR('b', 2, ex), &ex) == 0 && ex.fd >= 0, "DMA_BUF_IOCTL_EXPORT_SYNC_FILE");
+    struct pollfd sp = {.fd = ex.fd, .events = POLLIN};
+    CHECK(poll(&sp, 1, 0) == 1 && (sp.revents & POLLIN), "the sync file is signalled");
+    struct {
+        char name[32];
+        int32_t status;
+        uint32_t flags, num_fences, pad;
+        uint64_t info;
+    } fi = {0};
+    CHECK(ioctl(ex.fd, _IOWR('>', 4, fi), &fi) == 0 && fi.status == 1 && fi.num_fences == 1, "SYNC_IOC_FILE_INFO");
+    struct {
+        char name[32];
+        int32_t fd2, fence;
+        uint32_t flags, pad;
+    } m = {.fd2 = ex.fd, .fence = -1};
+    CHECK(ioctl(ex.fd, _IOWR('>', 3, m), &m) == 0 && m.fence >= 0, "SYNC_IOC_MERGE");
+    struct { uint32_t flags; int32_t fd; } im = {.flags = 2, .fd = m.fence};
+    CHECK(ioctl(dmabuf, _IOW('b', 3, im), &im) == 0, "DMA_BUF_IOCTL_IMPORT_SYNC_FILE");
+    struct { uint32_t flags; int32_t fd; } bad = {.flags = 0, .fd = -1};
+    FAILS(dmabuf, _IOWR('b', 2, bad), &bad, EINVAL, "exporting a fence for nothing");
+    im.fd = 0;
+    FAILS(dmabuf, _IOW('b', 3, im), &im, EINVAL, "importing something that is no sync file");
+    close(m.fence);
+    close(ex.fd);
+    printf("drm-test: dma-buf fences, sync files\n");
+}
+
+/// Waits for a BUFFER_RELEASE of `buffer` on the program's windows.
+static int released(long buffer) {
+    struct wave_event e;
+    for (int i = 0; i < 200; i++) {
+        while (wave_next_event(&e, 10) == 1) {
+            if (e.kind == WAVE_EV_BUFFER_RELEASE && e.a == (uint32_t)buffer) return 1;
+        }
+    }
+    return 0;
+}
+
+/// A WaveOS window showing a dma-buf, then shared memory, as they are:
+/// win_buffer over each, win_attach swapping them (the one replaced comes
+/// back as a BUFFER_RELEASE event), back to the window's own surface, and
+/// the errors (formats, strides, sizes, descriptors that hold no pixels,
+/// buffers of nobody's).
+static void window_buffers(int dmabuf) {
+    long win = wave_win_create(160, 120, "drmtest", 7, 0);
+    CHECK(win > 0, "a window (%ld)", win);
+    long db = wave_win_buffer(dmabuf, 0, 64, 64, a.pitch, DRM_FORMAT_XRGB8888);
+    CHECK(db > 0, "win_buffer over a dma-buf (%ld)", db);
+    int memfd = memfd_create("pixels", MFD_CLOEXEC);
+    CHECK(memfd >= 0 && ftruncate(memfd, 8192 + 64 * 64 * 4) == 0, "memfd");
+    long sb = wave_win_buffer(memfd, 8192, 64, 64, 256, DRM_FORMAT_ARGB8888);
+    CHECK(sb > 0, "win_buffer over shared memory (%ld)", sb);
+    CHECK(wave_win_buffer(memfd, 8192, 64, 64, 256, 0x34325258 + 1) == -EINVAL, "an unknown format");
+    CHECK(wave_win_buffer(memfd, 0, 64, 64, 128, DRM_FORMAT_XRGB8888) == -EINVAL, "rows shorter than the width");
+    CHECK(wave_win_buffer(memfd, 8192, 64, 65, 256, DRM_FORMAT_XRGB8888) == -EINVAL, "more than the memory holds");
+    CHECK(wave_win_buffer(1, 0, 64, 64, 256, DRM_FORMAT_XRGB8888) == -EINVAL, "a descriptor without pixels");
+    CHECK(wave_win_attach(win, db, 1, 0, 0, 64, 64) == 0, "win_attach the dma-buf");
+    // Both as layers: the shared memory's middle over the dma-buf, scaled up.
+    struct wave_layer layers[2] = {
+        {.buffer = (uint32_t)db, .src = {0, 0, 64, 64}, .dst = {0, 0, 160, 120}},
+        {.buffer = (uint32_t)sb, .src = {16, 16, 32, 32}, .dst = {40, 30, 64, 64}},
+    };
+    CHECK(wave_win_attach_layers(win, layers, 2, 1, 0, 0, 160, 120) == 0, "win_attach as layers");
+    layers[1].src[2] = 100;
+    CHECK(wave_win_attach_layers(win, layers, 2, 1, 0, 0, 160, 120) == -EINVAL, "a layer outside its buffer");
+    CHECK(wave_win_attach(win, sb, 1, 0, 0, 64, 64) == 0, "win_attach the shared memory");
+    CHECK(released(db), "the dma-buf came back when replaced");
+    CHECK(wave_win_attach(win, 0, 1, 0, 0, 0, 0) == 0, "back to the window's surface");
+    CHECK(released(sb), "the shared memory came back");
+    CHECK(wave_win_buffer_destroy(db) == 0 && wave_win_buffer_destroy(sb) == 0, "win_buffer_destroy");
+    CHECK(wave_win_buffer_destroy(db) == -EBADF, "destroying twice");
+    CHECK(wave_win_attach(win, db, 1, 0, 0, 64, 64) == -EBADF, "attaching a destroyed buffer");
+    // Shown and destroyed: the window keeps it until it shows another.
+    long again = wave_win_buffer(dmabuf, 0, 64, 64, a.pitch, DRM_FORMAT_XRGB8888);
+    CHECK(again > 0 && wave_win_attach(win, again, 1, 0, 0, 64, 64) == 0, "attached again");
+    CHECK(wave_win_buffer_destroy(again) == 0, "destroyed while shown");
+    CHECK(wave_win_close(win) == 0, "closing the window");
+    close(memfd);
+    printf("drm-test: windows show dma-bufs and shared memory as they are\n");
 }
 
 /// Formats and modifiers: the planes list theirs in IN_FORMATS, each with
