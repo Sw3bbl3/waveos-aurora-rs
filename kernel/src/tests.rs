@@ -2093,6 +2093,12 @@ fn mutex_long_hold() {
         if time::uptime_ms() < start + 20 {
             continue;
         }
+        // Contenders that looked again at this same millisecond (their
+        // timers and ours fire together, as on a fast CPU they do every
+        // time) get to run and go back to sleep before we look.
+        for _ in 0..4 {
+            sched::yield_now();
+        }
         let tasks = sched::list();
         let mine: Vec<_> = tasks.iter().filter(|t| ids.contains(&t.id)).collect();
         all_asleep |= mine.len() == 3 && mine.iter().all(|t| matches!(t.state, sched::State::Sleeping(_)));

@@ -189,8 +189,15 @@ semihosting does not promise.
 Works under HVF on 1 and 4 vCPUs: interrupts, the timer, SMP, PCI through
 ECAM, virtio-blk and virtio-net on MSI-X (DHCP), xHCI with the USB
 keyboard, tablet, storage and audio, HDA, SD cards (sdhci-pci), ACPI AML,
-the desktop on `ramfb`, native programs at EL0; the kernel self-tests
-(`cargo xtask test --arch aarch64`, list of skips in `tests::ARCH_SKIPS`).
+the desktop on `ramfb`, native programs at EL0, Linux programs (the
+static arm64 tests: files, memory, threads, clocks with the vDSO,
+processes and signals, sockets, input devices). `cargo xtask test --arch
+aarch64` passes on 1 and 4 vCPUs under HVF; `tests::ARCH_SKIPS` lists what
+it skips and why: the C half of the kernel (LinuxKPI), a PC's ACPI sleep
+states and SSDT devices (test battery, I2C touchpad), S3, and the DRM
+device tests (the display is ramfb, not a PCI GPU). Known: on 4 vCPUs the
+first USB storage command after a while idle can lose its status phase;
+the driver resets the device and the retry succeeds.
 
 Not yet: the C half of the kernel (x86-only builds), the PCI I/O window,
 the second PL011 (telemetry), virtio-gpu without a firmware framebuffer.
