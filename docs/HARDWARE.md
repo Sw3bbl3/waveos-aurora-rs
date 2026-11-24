@@ -333,7 +333,8 @@ The aarch64 port runs only on QEMU's `virt` machine so far (HVF on Apple
 silicon, TCG elsewhere). Untested anywhere else: real Arm hardware (other
 UEFI firmware, GICv2 systems, non-coherent DMA, PL011 consoles at other
 addresses than `virt`'s, PSCI through `smc` on hardware, firmware entering
-at EL2 with E2H forced on).
+at EL2 with E2H forced on, GICv4 redistributor layouts, more than one
+GICv2m frame or an ITS, big.LITTLE CPUs with differing ID registers).
 
 Not yet run anywhere, because the aarch64 kernel doesn't start user
 programs yet: every native aarch64 program (corekit's `svc` calls and
