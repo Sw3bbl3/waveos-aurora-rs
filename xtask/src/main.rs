@@ -460,12 +460,6 @@ fn main() {
             println!("wrote {}", out.display());
         }
         Some("test") => {
-            if aarch64 {
-                // No isa-debug-exit on `virt`: the runner needs the kernel's
-                // way of reporting (see virt.rs) before it can run there.
-                eprintln!("cargo xtask test --arch aarch64: not yet; the aarch64 kernel has no self-test harness");
-                exit(2);
-            }
             let n = args
                 .iter()
                 .position(|a| a == "--displays")
@@ -2381,7 +2375,13 @@ fn run_tests_once(
         return Err(output);
     }
     let cut = output.contains("harness: power cut") && output.contains("\ntest result: ok.");
-    match status.and_then(|s| s.code()) {
+    // `virt` has no isa-debug-exit: the aarch64 kernel prints the code and
+    // powers off (docs/developer/porting.md); read it as that device's status.
+    let status = status.and_then(|s| s.code()).map(|code| match arch::current() {
+        arch::Arch::Aarch64 => exit_line(&output).map_or(1, |c| (c as i32) << 1 | 1),
+        arch::Arch::X86_64 => code,
+    });
+    match status {
         Some(33) => Ok(output),
         Some(_) if cut => {
             println!("harness: the power was cut mid-install after the tests passed, as planned");
@@ -2398,8 +2398,20 @@ fn run_tests_once(
     }
 }
 
+/// The code in the last `[aurora-exit N]` line the kernel printed.
+fn exit_line(output: &str) -> Option<u32> {
+    output.lines().rev().find_map(|l| l.trim().strip_prefix("[aurora-exit ")?.strip_suffix(']')?.parse().ok())
+}
+
 #[cfg(test)]
 mod rtc_tests {
+    #[test]
+    fn aarch64_exit_line() {
+        assert_eq!(super::exit_line("x\n[aurora-exit 16]\n"), Some(16));
+        assert_eq!(super::exit_line("[aurora-exit 17]\nlater\n"), Some(17));
+        assert_eq!(super::exit_line("no code"), None);
+    }
+
     #[test]
     fn seed_utc_and_guest_offset() {
         assert_eq!(super::rtc_timestamp(946684800), "2000-01-01T00:00:00");

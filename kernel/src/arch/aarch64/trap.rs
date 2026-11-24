@@ -365,7 +365,9 @@ fn page_fault(f: &mut TrapFrame, ec: u64) {
     let protection = status & 0x3C == 0x0C;
     // The access flag and dirtiness are kept in software (`mmu::pte`):
     // set them and go again, at once, whatever the interrupt state.
-    if status & 0x3C == 0x08 || (protection && write) {
+    // (Not a kernel access to user memory with PAN on: that one is refused.)
+    let pan_refused = !f.user_mode() && f.pstate & (1 << 22) != 0 && addr < aurora_abi::layout::USER_END;
+    if !pan_refused && (status & 0x3C == 0x08 || (protection && write)) {
         let root = if addr >= aurora_abi::layout::USER_END { super::mmu::kernel_root() } else { super::mmu::root() };
         if super::mmu::fix_soft_fault(root, addr, write) {
             return;

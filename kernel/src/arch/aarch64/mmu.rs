@@ -77,13 +77,31 @@ pub mod pte {
     /// nG: the TLB entry belongs to one address space (ASID).
     pub const NOT_GLOBAL: u64 = 1 << 11;
 
+    /// Whether a kernel leaf entry allows writing, and running code at EL1
+    /// (tests).
+    #[cfg(feature = "ktest")]
+    pub fn kernel_writable(e: u64) -> bool {
+        e & READ_ONLY == 0
+    }
+
+    #[cfg(feature = "ktest")]
+    pub fn kernel_executable(e: u64) -> bool {
+        e & PXN == 0
+    }
+
     /// A leaf entry as written: the access flag set, and AP[2] (read-only)
     /// unless the page is writable and — for user pages — dirty. Invalid
-    /// entries (swap entries) pass unchanged.
+    /// entries (swap entries) pass unchanged. A page that becomes
+    /// executable for user code has its frame's instructions made visible
+    /// to instruction fetch first (`cache::sync_code`: Apple's cores, and
+    /// others, don't keep the instruction cache coherent by themselves).
     #[inline]
-    pub const fn leaf(e: u64) -> u64 {
+    pub fn leaf(e: u64) -> u64 {
         if e & 1 == 0 {
             return e;
+        }
+        if e & USER != 0 && e & NO_EXECUTE == 0 {
+            super::super::cache::sync_code(crate::mm::phys_to_virt(e & ADDR), 4096);
         }
         let e = e | ACCESSED;
         if e & WRITABLE != 0 && (e & DIRTY != 0 || e & USER == 0) {
@@ -214,4 +232,38 @@ pub fn write_combining() -> bool {
 #[cfg(feature = "ktest")]
 pub fn no_execute_enabled() -> bool {
     true
+}
+
+/// Whether the physical window is never executable at EL1 (tests): the
+/// bootloader's blocks there carry PXN.
+#[cfg(feature = "ktest")]
+pub fn window_no_execute(root: u64) -> bool {
+    let va = crate::mm::phys_to_virt(0x4000_0000);
+    let mut t = root;
+    for level in (1..=3).rev() {
+        // SAFETY: page tables are in RAM, in the physical window.
+        let e = unsafe { *(crate::mm::phys_to_virt(t) as *const u64).add(((va >> (12 + 9 * level)) & 0x1FF) as usize) };
+        if e & 1 == 0 {
+            return true;
+        }
+        if e & 0b11 == 0b01 {
+            return e & pte::PXN != 0;
+        }
+        t = e & pte::ADDR;
+    }
+    false
+}
+
+/// A write-combining (normal non-cacheable) mapping has that memory type
+/// (tests). Only the entry is checked: the page is never touched through
+/// two memory types at once.
+#[cfg(feature = "ktest")]
+pub fn write_combining_self_test() {
+    let frame = crate::mm::frame::alloc().expect("a frame");
+    let va = crate::mm::vmm::kmap_wc(frame, 4096).expect("a write-combining mapping");
+    let e = crate::mm::vmm::kernel_entry(va).expect("the mapping's entry");
+    assert_eq!((e >> 2) & 7, 2, "AttrIndx 2 (normal non-cacheable)");
+    assert_eq!(e & pte::ADDR, frame);
+    crate::mm::vmm::kunmap(va, 1);
+    crate::mm::frame::free(frame);
 }

@@ -1902,6 +1902,10 @@ impl AddressSpace {
             unsafe {
                 core::ptr::copy_nonoverlapping(data[done..].as_ptr(), (phys_to_virt(phys) + off) as *mut u8, n);
             }
+            if walk(self.pml4, cur, false, false).is_some_and(|e| *e & NO_EXECUTE == 0) {
+                // Program code (the loaders): fetchable as written.
+                crate::arch::cache::sync_code(phys_to_virt(phys) + off, n as u64);
+            }
             done += n;
         }
         Ok(())

@@ -46,7 +46,14 @@ pub fn early_init() {
 pub fn init_interrupts(acpi: &crate::acpi::AcpiInfo) {
     psci::init(acpi);
     percpu::init(0);
-    log!("boot", "CPU: {} ({}), entered at EL{}", cpu::brand(), cpu::model(), regs::current_el());
+    log!(
+        "boot",
+        "CPU: {} ({}), entered at EL{}, CTR_EL0 {:#x}",
+        cpu::brand(),
+        cpu::model(),
+        regs::current_el(),
+        regs::read!("ctr_el0")
+    );
     smp::set_cpus(&acpi.gic.cpus);
     if gic::init(acpi) {
         timer::choose(None);

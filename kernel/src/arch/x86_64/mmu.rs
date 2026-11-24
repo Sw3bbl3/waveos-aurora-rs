@@ -48,6 +48,17 @@ pub mod pte {
     pub const fn leaf(e: u64) -> u64 {
         e
     }
+
+    /// Whether a kernel leaf entry allows writing, and running code (tests).
+    #[cfg(feature = "ktest")]
+    pub fn kernel_writable(e: u64) -> bool {
+        e & WRITABLE != 0
+    }
+
+    #[cfg(feature = "ktest")]
+    pub fn kernel_executable(e: u64) -> bool {
+        e & NO_EXECUTE == 0
+    }
 }
 
 /// The page-table root (physical address) the CPU runs on (CR3).
@@ -91,6 +102,21 @@ pub fn enable_features() {
 /// Whether write-combining mappings ([`pte::WRITE_COMBINING`]) are available.
 pub fn write_combining() -> bool {
     super::pat::write_combining()
+}
+
+/// Whether the physical window is never executable (tests): its PML4 slot
+/// is no-execute.
+#[cfg(feature = "ktest")]
+pub fn window_no_execute(root: u64) -> bool {
+    // SAFETY: the root table is in RAM, in the physical window.
+    let top = unsafe { &*(crate::mm::phys_to_virt(root) as *const [u64; 512]) };
+    top[256] & pte::NO_EXECUTE != 0
+}
+
+/// Write-combining mappings use the PAT slot set up for them (tests).
+#[cfg(feature = "ktest")]
+pub fn write_combining_self_test() {
+    super::pat::self_test()
 }
 
 /// Whether the no-execute bit is enabled (tests).
