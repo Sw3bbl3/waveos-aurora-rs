@@ -121,13 +121,13 @@ impl<H: Hw> bo::Unbind for Release<H> {
 fn flush_cache(va: u64, len: u64) {
     let mut p = va & !63;
     while p < va + len {
-        unsafe { core::arch::asm!("clflush [{}]", in(reg) p, options(nostack, preserves_flags)) };
+        crate::arch::cache::flush_line(p as *const u8);
         p += 64;
     }
 }
 
 fn fence() {
-    unsafe { core::arch::asm!("mfence", options(nostack, preserves_flags)) };
+    crate::arch::cache::full_fence();
 }
 
 // ----------------------------------------------------------- the device

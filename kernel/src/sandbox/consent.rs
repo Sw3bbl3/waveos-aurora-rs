@@ -272,7 +272,7 @@ pub fn ask(p: &Profile, bit: u64) -> Result<(), isize> {
         decide(p.uid, &p.id, bit, Some(a));
         return if a { Ok(()) } else { Err(EACCES) };
     }
-    let blocking_ok = x86_64::instructions::interrupts::are_enabled();
+    let blocking_ok = crate::arch::interrupts::are_enabled();
     let Some(me) = crate::proc::current() else { return Err(EACCES) };
     if !crate::gui::server::running() || !blocking_ok {
         return Err(EACCES);

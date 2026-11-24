@@ -442,7 +442,7 @@ impl<H: Hw> Amd<H> {
         // Drain the write-combining buffers, then a read through the
         // aperture so the writes have left the CPU before the flip.
         unsafe {
-            core::arch::asm!("sfence", options(nostack, preserves_flags));
+            crate::arch::cache::wc_fence();
             core::ptr::read_volatile(base as *const u32);
         }
     }
@@ -479,7 +479,7 @@ impl<H: Hw> Amd<H> {
                     out[y * CURSOR as usize + x] = scanout::premultiply(px);
                 }
             }
-            unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+            crate::arch::cache::wc_fence();
         }
         let addr = self.gpu(at + s.cursor_slot[i] as u64 * scanout::CURSOR_BYTES);
         scanout::cursor_show(&*self.hw, &self.info, h.fw.pipes[0], addr, k.dst.0, k.dst.1);

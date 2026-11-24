@@ -44,6 +44,8 @@ pub struct AcpiInfo {
     /// General-purpose event block 0 (status bytes, then enable bytes).
     pub gpe0_blk: u16,
     pub gpe0_blk_len: u8,
+    /// FADT ARM_BOOT_ARCH flags (PSCI present, PSCI through `hvc`; 0 on x86).
+    pub arm_boot_arch: u16,
 }
 
 impl AcpiInfo {
@@ -169,6 +171,9 @@ unsafe fn parse_fadt(table: u64, info: &mut AcpiInfo) {
         info.boot_arch = read::<u16>(table + 109);
     }
     info.fadt_flags = read::<u32>(table + 112);
+    if len >= 131 {
+        info.arm_boot_arch = read::<u16>(table + 129);
+    }
     info.smi_cmd = read::<u32>(table + 48) as u16;
     info.acpi_enable = read::<u8>(table + 52);
     info.pm1a_cnt = read::<u32>(table + 64) as u16;

@@ -161,8 +161,7 @@ mod imp {
     /// Logs the return addresses on the stack (the kernel keeps frame pointers).
     #[no_mangle]
     extern "C" fn waveos_backtrace() {
-        let mut rbp: u64;
-        unsafe { core::arch::asm!("mov {}, rbp", out(reg) rbp) };
+        let mut rbp = crate::arch::cpu::frame_pointer();
         for depth in 0..16 {
             // Frames live on kernel stacks (heap); stop at anything else.
             if rbp & 7 != 0 || rbp < bootinfo::PHYS_OFFSET {

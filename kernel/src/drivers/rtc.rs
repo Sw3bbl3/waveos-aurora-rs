@@ -1,7 +1,9 @@
-//! CMOS real-time clock.
+//! The real-time clock: the CMOS RTC on x86, the PL031 on Arm (QEMU `virt`).
 
-use x86_64::instructions::interrupts::without_interrupts;
-use x86_64::instructions::port::Port;
+#[cfg(target_arch = "x86_64")]
+use crate::arch::interrupts::without_interrupts;
+#[cfg(target_arch = "x86_64")]
+use crate::arch::io::Port;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct DateTime {
@@ -17,8 +19,10 @@ pub struct DateTime {
 /// machine: a read on one CPU must not select a register under another's
 /// (two programs reading the date at once got the day as the month, and
 /// `weekday` indexed past its table — found by `fuzz`).
+#[cfg(target_arch = "x86_64")]
 static CMOS: crate::sync::IrqMutex<()> = crate::sync::IrqMutex::new(());
 
+#[cfg(target_arch = "x86_64")]
 fn cmos(reg: u8) -> u8 {
     unsafe {
         Port::<u8>::new(0x70).write(reg | 0x80); // keep NMI disabled bit set
@@ -26,11 +30,13 @@ fn cmos(reg: u8) -> u8 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn raw() -> [u8; 7] {
     while cmos(0x0A) & 0x80 != 0 {}
     [cmos(0x00), cmos(0x02), cmos(0x04), cmos(0x07), cmos(0x08), cmos(0x09), cmos(0x32)]
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn now() -> DateTime {
     without_interrupts(|| {
         let _cmos = CMOS.lock();
@@ -88,6 +94,7 @@ impl DateTime {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cmos_write(reg: u8, value: u8) {
     unsafe {
         Port::<u8>::new(0x70).write(reg | 0x80);
@@ -96,6 +103,7 @@ fn cmos_write(reg: u8, value: u8) {
 }
 
 /// Sets the hardware clock (local time).
+#[cfg(target_arch = "x86_64")]
 pub fn set(d: &DateTime) {
     without_interrupts(|| {
         let _cmos = CMOS.lock();
@@ -123,4 +131,36 @@ pub fn set(d: &DateTime) {
         cmos_write(0x32, enc((d.year / 100) as u8));
         cmos_write(0x0B, status_b & !0x80);
     });
+}
+
+/// The PL031 on QEMU's `virt` (its fixed address there; the firmware
+/// describes it only in the device tree). It counts seconds; the kernel
+/// keeps local time in it, as in the CMOS RTC.
+#[cfg(target_arch = "aarch64")]
+const PL031: u64 = 0x0901_0000;
+
+#[cfg(target_arch = "aarch64")]
+fn pl031() -> *mut u32 {
+    crate::mm::phys_to_virt(PL031) as *mut u32
+}
+
+/// Seconds from 1970 (the PL031's count) to 2000.
+#[cfg(target_arch = "aarch64")]
+const UNIX_2000: u64 = 946_684_800;
+
+#[cfg(target_arch = "aarch64")]
+pub fn now() -> DateTime {
+    // SAFETY: the data register (offset 0) of the PL031, device-mapped in
+    // the physical window.
+    let unix = unsafe { pl031().read_volatile() } as u64;
+    let d = aurora_abi::calendar::from_seconds_since_2000(unix.saturating_sub(UNIX_2000));
+    DateTime { year: d.year, month: d.month, day: d.day, hour: d.hour, minute: d.minute, second: d.second }
+}
+
+/// Sets the hardware clock (local time).
+#[cfg(target_arch = "aarch64")]
+pub fn set(d: &DateTime) {
+    let unix = crate::time::seconds_since_2000(d) + UNIX_2000;
+    // SAFETY: the load register (offset 8) of the PL031.
+    unsafe { pl031().add(2).write_volatile(unix as u32) };
 }

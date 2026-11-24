@@ -17,7 +17,7 @@ use crate::arch::{apic, fpu, gdt, idt, percpu, smp, syscall};
 use crate::mm::{phys_to_virt, vmm};
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, Ordering};
-use x86_64::instructions::port::Port;
+use crate::arch::io::Port;
 
 global_asm!(
     // aurora_s3_save(ctx): callee-saved registers, stack and return address; returns 0.
@@ -122,7 +122,7 @@ pub fn suspend() -> Result<(), &'static str> {
         return Err("could not stop the other processors");
     }
 
-    let resumed = x86_64::instructions::interrupts::without_interrupts(|| {
+    let resumed = crate::arch::interrupts::without_interrupts(|| {
         let ioapic = apic::save_ioapic();
         let pci = crate::drivers::pci::save();
         crate::time::suspend();
@@ -140,7 +140,7 @@ pub fn suspend() -> Result<(), &'static str> {
         if unsafe { aurora_s3_save(&raw mut CONTEXT) } == 0 {
             // Clear WAK_STS, flush caches, then SLP_TYP and SLP_EN.
             outw(info.pm1a_evt, 1 << 15);
-            unsafe { core::arch::asm!("wbinvd") };
+            super::cache::write_back_all();
             for (port, typ) in [(info.pm1a_cnt, typa), (info.pm1b_cnt, typb)] {
                 if port != 0 {
                     let v = inw(port) & !(0x7 << 10);

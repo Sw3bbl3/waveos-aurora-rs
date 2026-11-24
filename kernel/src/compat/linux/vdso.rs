@@ -111,11 +111,7 @@ pub fn read_ns(real: bool) -> Option<u64> {
         if ok == 0 {
             return None;
         }
-        let d = unsafe {
-            core::arch::x86_64::_mm_lfence();
-            core::arch::x86_64::_rdtsc()
-        }
-        .wrapping_sub(base);
+        let d = crate::arch::cpu::cycles_ordered().wrapping_sub(base);
         let mut t = ((d as u128 * mult as u128) >> 32) as i64 + offset;
         t = t.max(0);
         if real {

@@ -246,6 +246,6 @@ impl Vram {
             }
         }
         // Drain the write-combining buffers so the frame reaches the screen now.
-        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        crate::arch::cache::wc_fence();
     }
 }

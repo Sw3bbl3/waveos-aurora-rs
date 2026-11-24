@@ -36,6 +36,11 @@ global_asm!(
     entry = sym crate::sched::task_entry,
 );
 
+/// Where a switched-out task's saved RBP and return address sit, above its
+/// saved stack pointer (for stack dumps).
+pub const SAVED_FRAME_POINTER: u64 = 40;
+pub const SAVED_RETURN: u64 = 48;
+
 extern "sysv64" {
     fn aurora_context_switch(save_rsp: *mut u64, load_rsp: u64);
     fn aurora_task_trampoline();

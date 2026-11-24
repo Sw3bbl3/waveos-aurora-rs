@@ -93,7 +93,7 @@ pub fn start() {
 /// and never inside an interrupt handler (which runs with interrupts off).
 pub(crate) fn simd_allowed() -> bool {
     crate::arch::percpu::this().simd.load(core::sync::atomic::Ordering::Relaxed)
-        && x86_64::instructions::interrupts::are_enabled()
+        && crate::arch::interrupts::are_enabled()
 }
 
 /// A display driver reported new display modes (a host window resized,
@@ -373,5 +373,5 @@ pub fn panic_screen(details: &str) {
     }
     // A scanout buffer in ordinary RAM (Intel graphics) is read by a display
     // engine that doesn't snoop the CPU caches: write the picture back.
-    unsafe { core::arch::asm!("wbinvd", options(nostack)) };
+    crate::arch::cache::write_back_all();
 }

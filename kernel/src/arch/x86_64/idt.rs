@@ -259,10 +259,10 @@ pub extern "sysv64" fn trap(f: &mut TrapFrame) {
         // signal frame may have to make a stack page (or un-share one since
         // `fork`), which waits for locks; with interrupts off the copy
         // failed and the program was killed instead (`iretq` restores IF).
-        x86_64::instructions::interrupts::enable();
+        crate::arch::interrupts::enable();
         crate::proc::check_killed();
         crate::compat::linux::signal::on_trap_return(f);
-        x86_64::instructions::interrupts::disable();
+        crate::arch::interrupts::disable();
     }
 }
 
@@ -277,9 +277,9 @@ fn user_fault(f: &mut TrapFrame, sig: u32, code: i32, addr: u64) -> bool {
     let info = crate::compat::linux::signal::Info { code, addr, ..Default::default() };
     // Interrupts on (they were, in ring 3): the signal frame may land on a
     // stack page that must be made or un-shared first (see `trap`).
-    x86_64::instructions::interrupts::enable();
+    crate::arch::interrupts::enable();
     let entered = crate::compat::linux::signal::force(&p, sig, info, f);
-    x86_64::instructions::interrupts::disable();
+    crate::arch::interrupts::disable();
     entered
 }
 
@@ -301,10 +301,10 @@ fn page_fault(f: &mut TrapFrame) {
         && interrupts_on
         && (f.user_mode() || crate::syscall::user::fixup(f.rip, addr).is_some())
     {
-        x86_64::instructions::interrupts::enable();
+        crate::arch::interrupts::enable();
         let resolved = crate::proc::resolve_fault(addr, write);
         let killed = !resolved && f.user_mode() && crate::proc::current_killed();
-        x86_64::instructions::interrupts::disable();
+        crate::arch::interrupts::disable();
         // (Ended meanwhile — by the out-of-memory killer, say: the thread
         // leaves on the way back to user mode, with no crash to report.)
         if resolved || killed {
@@ -326,9 +326,9 @@ fn page_fault(f: &mut TrapFrame) {
         );
     }
     // Mapped but not allowed (written while read-only, say), or not mapped.
-    x86_64::instructions::interrupts::enable();
+    crate::arch::interrupts::enable();
     let mapped = code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) || crate::proc::is_mapped(addr);
-    x86_64::instructions::interrupts::disable();
+    crate::arch::interrupts::disable();
     let si_code = if mapped { SEGV_ACCERR } else { SEGV_MAPERR };
     if !user_fault(f, SIGSEGV, si_code, addr) {
         fatal("Page Fault (#PF)", (&*f).into(), format_args!("address {:#x}, {:?}", addr, code));

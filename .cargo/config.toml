@@ -5,15 +5,17 @@ xtask = "run --quiet --package xtask --"
 # Stack-smashing protection with a per-boot random canary (kernel/src/stackguard.rs).
 rustflags = ["-C", "code-model=kernel", "-C", "relocation-model=static", "-C", "force-frame-pointers=yes", "--cfg", "aes_force_soft", "-Z", "stack-protector=strong", "--cfg", "aurora_ssp"]
 
-# The aarch64 kernel: the same protections. Stack-smashing protection with
+# The aarch64 kernel: soft-float like the x86 one (it never touches the
+# FP/SIMD registers, so only user state is switched), and the same
+# protections. Stack-smashing protection with
 # the same per-boot canary; `aes_force_soft` keeps the AES crate off the
-# vector registers; branch protection signs return addresses (PAC) and
-# marks indirect-branch targets (BTI). PAC and BTI instructions are hints,
-# so they cost nothing on processors without them. The small code model is
+# vector registers. No `-Z branch-protection` (PAC/BTI) here: the prebuilt
+# core and compiler_builtins lack it and rustc refuses the mix; it needs
+# `-Zbuild-std` for the kernel (a follow-up). The small code model is
 # position-independent by construction (ADRP), so a higher-half kernel
 # needs no `code-model=kernel` equivalent.
-[target.aarch64-unknown-none]
-rustflags = ["-C", "relocation-model=static", "-C", "force-frame-pointers=yes", "--cfg", "aes_force_soft", "-Z", "stack-protector=strong", "--cfg", "aurora_ssp", "-Z", "branch-protection=bti,pac-ret"]
+[target.aarch64-unknown-none-softfloat]
+rustflags = ["-C", "relocation-model=static", "-C", "force-frame-pointers=yes", "--cfg", "aes_force_soft", "-Z", "stack-protector=strong", "--cfg", "aurora_ssp"]
 
 # Linux programs (linux-programs/) link with the toolchain's own lld, so
 # they build on any host (a Mac's `cc` can't link Linux executables).

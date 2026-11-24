@@ -327,6 +327,14 @@ Not supported:
 
 Performance (QEMU 11 under TCG on a Mac; QEMU's usb-net moves one frame per transfer, and its numbers vary from run to run): a megabyte to or from the host takes about 20–70 ms over usb-net on xHCI (15–50 MB/s), like virtio-net and faster than the emulated e1000 in the same setup, and about 2 s on EHCI (via its UHCI companion, at full speed: 0.5 MB/s each way). See [the developer notes](developer/usb-networking.md) for the measurements and where the time goes.
 
+## 64-bit Arm
+
+The aarch64 port runs only on QEMU's `virt` machine so far (HVF on Apple
+silicon, TCG elsewhere). Untested anywhere else: real Arm hardware (other
+UEFI firmware, GICv2 systems, non-coherent DMA, PL011 consoles at other
+addresses than `virt`'s, PSCI through `smc` on hardware, firmware entering
+at EL2 with E2H forced on).
+
 ## Compatibility
 
 Please add a row for each machine you try.

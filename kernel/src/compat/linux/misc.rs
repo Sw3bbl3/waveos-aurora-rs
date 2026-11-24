@@ -54,13 +54,13 @@ pub fn clone_thread(
     if flags & (CLONE_VM | CLONE_THREAD) != CLONE_VM | CLONE_THREAD {
         return Err(ENOSYS);
     }
-    if stack == 0 || stack >= aurora_abi::layout::USER_END || f.rip >= aurora_abi::layout::USER_END {
+    if stack == 0 || stack >= aurora_abi::layout::USER_END || f.pc() >= aurora_abi::layout::USER_END {
         return Err(EINVAL);
     }
     // The child returns from the same call with 0, on its own stack.
     let mut child = *f;
-    child.rax = 0;
-    child.rsp = stack;
+    child.set_return(0);
+    child.set_sp(stack);
     let fs = if flags & CLONE_SETTLS != 0 { tls } else { sched::fs_base() };
     let linux = p.linux.as_ref().ok_or(EINVAL)?;
     // The thread must not run before its bookkeeping is in place, so its

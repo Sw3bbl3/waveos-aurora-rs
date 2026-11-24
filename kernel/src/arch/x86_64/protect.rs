@@ -125,6 +125,23 @@ pub fn wanted_cr4() -> u64 {
         | if f.umip { CR4_UMIP } else { 0 }
 }
 
+/// Asserts that the calling CPU has on what CPUID offers (tests).
+#[cfg(feature = "ktest")]
+pub fn assert_this_cpu() {
+    let f = features();
+    let cr4 = Cr4::read();
+    assert_eq!(cr4.contains(Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION), f.smep, "SMEP as CPUID says");
+    assert_eq!(cr4.contains(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION), f.smap, "SMAP as CPUID says");
+    assert_eq!(cr4.bits() & CR4_UMIP != 0, f.umip, "UMIP as CPUID says");
+    assert!(Cr0::read().contains(Cr0Flags::WRITE_PROTECT), "CR0.WP");
+}
+
+/// Whether the calling CPU's protections are on now (tests: after sleep).
+#[cfg(feature = "ktest")]
+pub fn this_cpu_protected() -> bool {
+    Cr4::read_raw() & wanted_cr4() == wanted_cr4()
+}
+
 pub fn smap() -> bool {
     AURORA_SMAP.load(Ordering::Relaxed)
 }

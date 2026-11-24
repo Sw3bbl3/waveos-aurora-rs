@@ -2,9 +2,12 @@
 
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
+#![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 // The test build skips the desktop, which leaves parts of it unused.
 #![cfg_attr(feature = "ktest", allow(dead_code))]
+// Arm bring-up stops before the device drivers start (`arch::bringup_done`),
+// which leaves much of the kernel unused there for now.
+#![cfg_attr(target_arch = "aarch64", allow(dead_code, unreachable_code, unused_imports, unused_variables))]
 
 extern crate alloc;
 
@@ -40,9 +43,24 @@ use drivers::input;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The kernel's entry from the bootloader (`bootinfo::KernelEntry`), on
+/// the boot stack with interrupts off and the bootloader's page tables.
+#[cfg(target_arch = "x86_64")]
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
+    kernel_main(boot_info)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[no_mangle]
+#[link_section = ".text._start"]
+pub extern "C" fn _start(boot_info: &'static BootInfo) -> ! {
+    kernel_main(boot_info)
+}
+
+#[inline(always)]
+fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // First of all: nothing protected has been entered yet that will return.
     stackguard::init();
     drivers::serial::init();
@@ -53,32 +71,27 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     assert_eq!(boot_info.version, bootinfo::BOOTINFO_VERSION, "bootloader/kernel version mismatch");
 
     telemetry::stage("cpu", "CPU tables: GDT, TSS, IDT, syscall");
-    arch::gdt::init(0);
-    arch::idt::init();
-    arch::syscall::init();
-    arch::fpu::init();
-    arch::protect::init();
-    arch::pat::init();
-    log!("boot", "GDT, TSS and IDT loaded");
+    arch::early_init();
+    log!("boot", "{}", arch::EARLY_INIT_DONE);
 
     telemetry::stage("memory", "Memory: frames, heap, page tables");
     mm::init(boot_info);
 
     telemetry::stage("interrupts", "ACPI, clocks, APIC timer and interrupt routing");
     let acpi = acpi::parse(boot_info.rsdp_phys);
+    #[cfg(target_arch = "x86_64")]
     drivers::hpet::init(acpi.hpet);
     time::init_clock();
-    arch::apic::init(&acpi);
-    arch::percpu::init(0);
+    arch::init_interrupts(&acpi);
     let cpu_ids = acpi.cpu_apic_ids.clone();
 
     let fb = boot_info.framebuffer;
     input::set_screen_size(fb.width as i32, fb.height as i32);
     telemetry::stage("input", "Keyboard and mouse");
     drivers::keymap::validate();
+    #[cfg(target_arch = "x86_64")]
     drivers::ps2::init();
-    arch::apic::route_isa_irq(&acpi, 1, arch::idt::KEYBOARD_VECTOR);
-    arch::apic::route_isa_irq(&acpi, 12, arch::idt::MOUSE_VECTOR);
+    arch::route_legacy_input(&acpi);
     let ecam = acpi.ecam;
     power::init(acpi);
 
@@ -93,7 +106,10 @@ pub extern "sysv64" fn _start(boot_info: &'static BootInfo) -> ! {
     proc::init();
     sandbox::init();
     mm::kswapd::init();
-    x86_64::instructions::interrupts::enable();
+    // Arm bring-up: no interrupt controller driver yet, so it ends here.
+    #[cfg(target_arch = "aarch64")]
+    arch::bringup_done();
+    arch::interrupts::enable();
     log!("boot", "interrupts enabled; CPU: {}", arch::cpu::brand());
     log!("boot", "protections: {}", arch::protect::report());
 
@@ -150,7 +166,7 @@ fn initrd(boot_info: &BootInfo) -> &'static [u8] {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    x86_64::instructions::interrupts::disable();
+    arch::interrupts::disable();
     // The AML interpreter runs on its own task; if it fails, only ACPI stops.
     if acpi::is_acpi_task() {
         unsafe { drivers::serial::force_unlock() };
