@@ -321,6 +321,7 @@ fn sync(f: &mut TrapFrame) {
             super::interrupts::disable();
         }
         EC_DABT_LOWER | EC_DABT_SAME | EC_IABT_LOWER | EC_IABT_SAME => page_fault(f, ec),
+        EC_SYSREG | EC_UNKNOWN if f.user_mode() && linux_mrs(f) => {}
         EC_BRK64 if !f.user_mode() => {
             log!("int", "breakpoint at {:#x}", f.pc);
             f.pc += 4;
@@ -337,6 +338,19 @@ fn sync(f: &mut TrapFrame) {
             }
         }
     }
+}
+
+/// A Linux program's read of an ID register (`mrs`), emulated as Linux
+/// does (`compat::linux::abi::aarch64::emulate_mrs`): true if it was one.
+fn linux_mrs(f: &mut TrapFrame) -> bool {
+    if !crate::proc::current().is_some_and(|p| p.linux.is_some()) {
+        return false;
+    }
+    // (It may read the instruction from user memory.)
+    super::interrupts::enable();
+    let done = crate::compat::linux::abi::aarch64::emulate_mrs(f);
+    super::interrupts::disable();
+    done
 }
 
 /// A fault in a Linux program with a handler for `sig`: true once the
