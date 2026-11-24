@@ -1807,13 +1807,13 @@ fn repo_response(req: &[u8]) -> Option<Reply> {
     };
     let mut reply = file_reply(&text, &dir, rest);
     let ranged = text.contains("\r\nRange: ");
-    let payload = rest.starts_with("packages/") || rest.starts_with("system/objects/");
+    let payload = rest.starts_with("packages/") || rest.starts_with("packages-aarch64/") || rest.starts_with("system/objects/");
     if !reply.head.starts_with("HTTP/1.1 200") {
         return Some(reply);
     }
     let whole = |body: &[u8]| format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
     match prefix {
-        "badrepo" if rest == "index.txt" || rest == "catalog.txt" => {
+        "badrepo" if rest == "index.txt" || rest == "catalog.txt" || rest == "catalog-aarch64.txt" => {
             reply.body = String::from_utf8_lossy(&reply.body).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes();
             reply.head = whole(&reply.body);
         }
