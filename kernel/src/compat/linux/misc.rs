@@ -173,7 +173,8 @@ pub fn sched_getaffinity(len: u64, ptr: u64) -> Result<u64, isize> {
 
 pub fn uname(ptr: u64) -> Result<u64, isize> {
     let mut b = [0u8; 65 * 6];
-    let fields = ["Linux", "aurora", "6.12.0-waveos", "#1 SMP WaveOS Aurora", "x86_64", "(none)"];
+    let machine = super::abi::native::MACHINE;
+    let fields = ["Linux", "aurora", "6.12.0-waveos", "#1 SMP WaveOS Aurora", machine, "(none)"];
     for (i, f) in fields.iter().enumerate() {
         b[i * 65..i * 65 + f.len()].copy_from_slice(f.as_bytes());
     }

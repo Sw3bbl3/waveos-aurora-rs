@@ -340,7 +340,12 @@ programs yet: every native aarch64 program (corekit's `svc` calls and
 start-up, the run-time detection of the ARMv8 AES/PMULL instructions for
 TLS, the NEON pixel and video paths inside WaveOS — those are checked by
 host tests on an Apple-silicon Mac), the arm64 Linux programs (BusyBox,
-wl-bridge, the C tests, Doom: built, not run) and the arm64 Debian root. The x86 and aarch64 disks'
+wl-bridge, the C tests, Doom: built, not run), the arm64 Debian root, and
+the Linux layer's arm64 ABI — its call table, `stat`/`epoll_event`
+layouts, signal frames and `rt_sigreturn`, restarting, the arm64 vDSO,
+the auxiliary vector and ID-register emulation (the tables, layouts,
+frames and HWCAP decoding are checked by host tests against Debian's
+arm64 headers, `cargo test -p aurora-linuxabi`). The x86 and aarch64 disks'
 architecture checks, `migrate-disk`, the per-architecture catalogues and
 the slot check in the bootloader are tested on the host only (image and
 repository tests; `cargo test -p xtask -p gina`). On QEMU 8.2 (Ubuntu

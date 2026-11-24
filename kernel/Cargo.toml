@@ -22,6 +22,7 @@ bootinfo = { path = "../libs/bootinfo" }
 lumen = { path = "../libs/gfx" }
 aurora-abi = { path = "../libs/abi" }
 aurora-elf = { path = "../libs/elf" }
+aurora-linuxabi = { path = "../libs/linuxabi" }
 aurorafs = { path = "../libs/aurorafs" }
 fat32 = { path = "../libs/fat32" }
 aurora-image = { path = "../libs/image" }

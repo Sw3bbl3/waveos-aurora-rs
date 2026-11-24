@@ -1,6 +1,7 @@
 # Linux programs on WaveOS
 
-WaveOS runs programs built for Linux (x86-64) next to its own. The kernel
+WaveOS runs programs built for Linux (x86-64, and arm64 on the aarch64
+port) next to its own. The kernel
 recognises them when it starts them, gives them the start-up Linux programs
 expect, and carries out their system calls with Linux's numbers and meanings.
 The code is in [`kernel/src/compat/linux`](../kernel/src/compat/linux).
@@ -16,6 +17,46 @@ This is being built in steps. What works today:
 | M4 | Sockets (TCP, UDP, local) | Done |
 | M5 | Shared memory and a Wayland bridge, for GTK programs | Done |
 | M6 | Firefox ESR | Done |
+| A1 | arm64 programs: the generic call table, arm64 layouts, signal frames, vDSO | Built and host-tested; waits for user mode on aarch64 |
+
+## Two ABIs: x86-64 and arm64
+
+On the aarch64 port, Linux programs are arm64 ones (Debian's `arm64`
+packages, `aarch64-unknown-linux-musl` builds). The layer implements
+each call once; what differs between the ABIs is in
+`kernel/src/compat/linux/abi/` and `libs/linuxabi` (details in
+[developer/porting.md](developer/porting.md#the-linux-layers-abis)):
+
+| | x86-64 | arm64 |
+|---|---|---|
+| System call | `syscall`; number in rax, arguments rdi, rsi, rdx, r10, r8, r9 | `svc #0`; number in x8, arguments x0-x5, result in x0 |
+| Call table | Linux's x86-64 table (the layer's numbering) | the generic table: no `open`, `stat`, `fork`, `pipe`, `poll`, `select`, `dup2`, `rename`, `mkdir`, `epoll_wait`… only their `*at`/`p*`/`*2`/`3` forms, which x86-64 programs use too |
+| `clone` | `(flags, stack, ptid, ctid, tls)` | `(flags, stack, ptid, tls, ctid)` |
+| TLS | FS base, `arch_prctl` | TPIDR_EL0, set by the program or `clone(CLONE_SETTLS)` |
+| `struct stat` | 144 bytes | 128 bytes (32-bit `st_nlink`, `st_blksize`) |
+| `struct epoll_event` | packed, 12 bytes | 16 bytes |
+| Open flags | `O_DIRECTORY` 0o200000, `O_NOFOLLOW` 0o400000, `O_DIRECT` 0o40000, `O_LARGEFILE` 0o100000 | 0o40000, 0o100000, 0o200000, 0o400000 |
+| `MINSIGSTKSZ` | 2048 | 5120 |
+| Signal frame | SIMD state (XSAVE), restorer address, `ucontext`, `siginfo` | frame record, `siginfo`, `ucontext` with `fpsimd_context` (and `esr_context` for faults); x30 = the vDSO's `__kernel_rt_sigreturn` unless `SA_RESTORER` |
+| Restarted calls | rip -= 2, rax = the number | pc -= 4, x0 = the first argument |
+| vDSO | `__vdso_clock_gettime`, `__vdso_gettimeofday`, `__vdso_time` (TSC) | `__kernel_clock_gettime`, `__kernel_gettimeofday`, `__kernel_clock_getres`, `__kernel_rt_sigreturn` (CNTVCT_EL0) |
+| Auxiliary vector | `AT_HWCAP` = `cpuid` 1 EDX, `AT_PLATFORM` "x86_64" | `AT_HWCAP`, `AT_HWCAP2` from the ID registers, `AT_PLATFORM` "aarch64", `AT_MINSIGSTKSZ` |
+| `/proc/cpuinfo` | `flags`, family/model | `Features`, `CPU implementer`/`part`… |
+| `uname -m` | `x86_64` | `aarch64` |
+
+Everything else they read and write — `flock`, `statfs`, `termios`,
+`siginfo`, `sigaction`, signal numbers, `mmap`/`clone`/`SA_` flags, ioctl
+numbers, errno — is the same, and the host tests (`cargo test -p
+aurora-linuxabi`) check each value against Debian 12's Linux and glibc
+headers for both architectures (`cargo xtask linux-abi --arch <arch>`
+regenerates them). arm64's `PROT_BTI` and `PROT_MTE` are accepted and
+ignored; BTI, MTE, SVE and SME are not offered to programs.
+
+Not yet on arm64: running anything (the aarch64 kernel doesn't enter user
+mode yet); full `AT_HWCAP`/`AT_HWCAP2` and EL0 ID-register reads wait for
+the arch layer to expose the ID registers (until then `AT_HWCAP` has the
+12 basic bits, `AT_HWCAP2` is 0 and an `mrs` of an ID register is
+`SIGILL`); `extra_context` frames (only needed with SVE).
 
 ## The shell
 
@@ -93,7 +134,7 @@ Writing to the file, or deleting it, drops it from the cache.
   `/dev/kmsg` (the system log: `2>/dev/kmsg` keeps a program's messages);
   the input devices and what describes them (`/dev/input`, `/dev/hidraw*`,
   `/dev/uinput`, `/sys`, `/run/udev`; see below);
-  `/proc/self/exe`, `/proc/meminfo` (with swap and the compressed store
+  `/proc/self/exe`, `/proc/self/auxv`, `/proc/meminfo` (with swap and the compressed store
   as `Zswap`), `/proc/pressure/memory`, `/proc/self/status` and
   `/proc/<pid>/status` (`VmRSS`, `VmSwap`, `VmLck`), `/proc/mounts`;
   `/proc/cpuinfo` and `/sys/devices/system/cpu`, as Linux writes them

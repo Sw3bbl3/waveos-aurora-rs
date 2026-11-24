@@ -215,7 +215,7 @@ pub fn sys_files() -> Vec<(String, Option<String>)> {
 pub fn cpuinfo() -> String {
     let n = crate::arch::percpu::count();
     let (implementer, variant, part, revision) = crate::arch::cpu::midr_fields();
-    let features = crate::arch::cpu::linux_features();
+    let features = super::abi::native::features();
     let mut s = String::new();
     for i in 0..n {
         s.push_str(&format!(

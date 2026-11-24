@@ -427,6 +427,7 @@ pub fn spawn_confined(
         let start = linux::exec::load(&data, &image, &linux::fs::to_guest(path), argv, env, &mut aspace)?;
         let state = linux::Linux::new(start.brk);
         state.configure(env);
+        state.started(&start);
         (start.entry, start.sp, 0, Some(state))
     } else {
         let (sp, block) = load_waveos(&data, &image, argv, &mut aspace)?;
