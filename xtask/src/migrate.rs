@@ -77,9 +77,11 @@ fn apps(vol: &mut Home) -> Vec<App> {
             if active.is_empty() || active.contains('/') {
                 continue;
             }
-            let text = String::from_utf8_lossy(&image::home_file(vol, &format!("{dir}/{active}/manifest.toml"))).into_owned();
+            let text =
+                String::from_utf8_lossy(&image::home_file(vol, &format!("{dir}/{active}/manifest.toml"))).into_owned();
             let Ok(m) = gina::Manifest::parse(&text) else { continue };
-            let receipt = String::from_utf8_lossy(&image::home_file(vol, &format!("{dir}/{active}/META/receipt"))).into_owned();
+            let receipt =
+                String::from_utf8_lossy(&image::home_file(vol, &format!("{dir}/{active}/META/receipt"))).into_owned();
             let source = receipt.lines().find_map(|l| l.strip_prefix("source=")).unwrap_or_default().to_string();
             out.push(App {
                 root: root.clone(),
@@ -108,7 +110,10 @@ pub fn migrate(src: &Path, esp: &Path, out: &Path, arch: Arch) -> io::Result<Rep
     }
     match image::disk_arch(src)? {
         Some(a) if a == arch.name() => {
-            return Err(io::Error::other(format!("{} is a disk for {a} already: there is nothing to migrate", src.display())))
+            return Err(io::Error::other(format!(
+                "{} is a disk for {a} already: there is nothing to migrate",
+                src.display()
+            )))
         }
         _ => {}
     }
@@ -153,7 +158,9 @@ pub fn migrate(src: &Path, esp: &Path, out: &Path, arch: Arch) -> io::Result<Rep
                 if let Some((text, _)) = &registry {
                     let kept: String = String::from_utf8_lossy(text)
                         .lines()
-                        .filter(|l| !l.starts_with("app\t") || !left.iter().any(|a| l.split('\t').nth(1) == Some(&a.id)))
+                        .filter(|l| {
+                            !l.starts_with("app\t") || !left.iter().any(|a| l.split('\t').nth(1) == Some(&a.id))
+                        })
                         .map(|l| format!("{l}\n"))
                         .collect();
                     image::write_with_owner(to, &format!("{root}/.registry"), kept.as_bytes(), owner).map_err(err)?;
@@ -174,7 +181,13 @@ pub fn migrate(src: &Path, esp: &Path, out: &Path, arch: Arch) -> io::Result<Rep
             if a.arch == arch.name() {
                 report.moved_apps.push((a.root.clone(), a.id.clone()));
             } else {
-                report.reinstall.push((a.root.clone(), a.id.clone(), a.version.clone(), a.name.clone(), a.arch.clone()));
+                report.reinstall.push((
+                    a.root.clone(),
+                    a.id.clone(),
+                    a.version.clone(),
+                    a.name.clone(),
+                    a.arch.clone(),
+                ));
             }
         }
         {
@@ -278,11 +291,17 @@ mod tests {
                 vol.mkdir_all(&format!("{generation}/META")).unwrap();
                 vol.write_file(&format!("{generation}/manifest.toml"), manifest(id, arch).as_bytes()).unwrap();
                 vol.write_file(&format!("{generation}/bin/app"), b"\x7fELF program").unwrap();
-                vol.write_file(&format!("{generation}/META/receipt"), b"installed_at=1\nsource=https://example.org/repo/\n")
-                    .unwrap();
+                vol.write_file(
+                    &format!("{generation}/META/receipt"),
+                    b"installed_at=1\nsource=https://example.org/repo/\n",
+                )
+                .unwrap();
                 vol.write_file(&format!("{root}/{id}/active"), b"1.2.0-abcd\n").unwrap();
-                vol.write_file(&format!("{root}/.registry"), format!("gina-registry 1\napp\t{id}\t1.2.0\tApp\n").as_bytes())
-                    .unwrap();
+                vol.write_file(
+                    &format!("{root}/.registry"),
+                    format!("gina-registry 1\napp\t{id}\t1.2.0\tApp\n").as_bytes(),
+                )
+                .unwrap();
             }
             vol.mkdir_all("/Library/Containers/dev.example.x86app").unwrap();
             vol.write_file("/Library/Containers/dev.example.x86app/save.dat", b"level 7").unwrap();
@@ -325,8 +344,12 @@ mod tests {
         assert_eq!(image::home_file(&mut vol, "/Applications/.registry"), b"gina-registry 1\n");
         assert_eq!(image::home_file(&mut vol, "/Library/Containers/dev.example.x86app/save.dat"), b"level 7");
         // The aarch64 app moved as it was.
-        assert_eq!(image::home_file(&mut vol, "/Library/Applications/dev.example.armapp/1.2.0-abcd/bin/app"), b"\x7fELF program");
-        assert!(image::home_file(&mut vol, "/Library/Applications/.registry").ends_with(b"dev.example.armapp\t1.2.0\tApp\n"));
+        assert_eq!(
+            image::home_file(&mut vol, "/Library/Applications/dev.example.armapp/1.2.0-abcd/bin/app"),
+            b"\x7fELF program"
+        );
+        assert!(image::home_file(&mut vol, "/Library/Applications/.registry")
+            .ends_with(b"dev.example.armapp\t1.2.0\tApp\n"));
         assert!(vol.resolve("/Library/Applications/.reinstall").is_err());
         // No update slots, no x86 Linux packages; the Linux home stays.
         assert!(vol.resolve("/.system").is_err());
