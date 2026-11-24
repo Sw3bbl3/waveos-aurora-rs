@@ -172,9 +172,10 @@ afford to lose without a copy.
   - `concurrent.rs`: four threads making the kernel VFS's sequences of calls
     (a lookup per path component, then the operation; descriptors kept
     across removals) through a scheduler that picks who takes the volume
-    lock next from a seed, so a bad interleaving is found again. The fuzz
-    seeds of failing runs are replayed first. `AURORAFS_RACE_SEEDS`,
-    `_OPS`, `_THREADS`.
+    lock next from a seed, so a bad interleaving is found again. Besides
+    `fsck`, one thread writes files nobody else names, whose contents must
+    survive whatever the others' descriptors do. The fuzz seeds of failing
+    runs are replayed first. `AURORAFS_RACE_SEEDS`, `_OPS`, `_THREADS`.
   - `regressions.rs`: the minimal reproducers of the bugs below.
 - `cargo xtask test` checks the home volume with `fsck` after each fuzzer
   (`home_volume_ok`), checks it on the host after the first boot's power
@@ -200,6 +201,7 @@ afford to lose without a copy.
 | "inode 199 allocated but unreachable" after the native fuzzer, no crash | Making a file on a full disk: the inode was allocated, the folder couldn't grow, the error left the inode | Failed operations are rolled back |
 | A moved file lost on a full disk | A move rewrote the source folder, then failed to grow the destination | The same |
 | "dir N: Corrupt" or unreachable inodes while the fuzzers run | A descriptor kept across its file's removal: the inode number went to a new folder, and a truncate through the old descriptor cut the folder's contents | Open inodes are pinned (`open_ino`); the library refuses to write or truncate a folder |
+| A file synced and never touched again came back holding another file's data (`cargo xtask powercut`, cut 32) | `open` looked the path up, then pinned the inode in a second call: in between, another thread removed the file and a new file got its inode, which the descriptor then held and wrote | `open` resolves the folder, then looks the name up and pins it in one call (`Filesystem::open_at`, `Volume::open_at`); the race harness now checks files' contents, not just the structure |
 | Subtrees cut off by racing renames | The VFS checks "not into itself" on paths; a racing rename made them stale, and the library did the move | The library checks, inside the operation |
 | Free counts disagreeing with the bitmaps after a torn commit | CRC-32 can't tell superblock images apart | CRC-32C as well |
 

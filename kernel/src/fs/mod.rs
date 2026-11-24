@@ -87,6 +87,14 @@ pub trait Filesystem: Send + Sync {
     fn open_ino(&self, _ino: Ino) -> FsResult<()> {
         Ok(())
     }
+    /// Looks `name` up in `dir` and holds what it names open, at once. An
+    /// inode number from an earlier lookup is not enough: the file may be
+    /// removed meanwhile and its inode given to a new one.
+    fn open_at(&self, dir: Ino, name: &str) -> FsResult<Ino> {
+        let ino = self.lookup(dir, name)?;
+        self.open_ino(ino)?;
+        Ok(ino)
+    }
     /// One holder of `ino` closed it.
     fn close_ino(&self, _ino: Ino) {}
     /// Shutting down: writes everything out and, where the filesystem
@@ -325,6 +333,36 @@ fn lookup_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String)> {
     Ok((fs, ino, mount))
 }
 
+/// [`lookup_full`], holding the file open (`open_ino`): the last
+/// component is looked up and held in one call (`Filesystem::open_at`), so
+/// what is held is what the path names, never a new file that got the inode
+/// of one removed meanwhile. The caller owns the hold.
+fn open_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String)> {
+    crate::sandbox::check_path(path, crate::sandbox::Access::Stat)?;
+    let (fs, rest, mount) = mount_full(path)?;
+    let cred = perm::caller();
+    let (dir, last) = match rest.rfind('/') {
+        Some(i) if !rest[i + 1..].is_empty() => (&rest[..i], Some(&rest[i + 1..])),
+        _ => (rest.as_str(), None),
+    };
+    let ino = match last {
+        None => {
+            let ino = walk(&fs, dir, &mount, cred.as_ref())?;
+            fs.open_ino(ino)?;
+            ino
+        }
+        Some(name) => {
+            if name.len() > aurora_abi::NAME_MAX {
+                return Err(ENAMETOOLONG);
+            }
+            let d = walk(&fs, dir, &mount, cred.as_ref())?;
+            perm::search(cred.as_ref(), &fs, &mount, d)?;
+            fs.open_at(d, name)?
+        }
+    };
+    Ok((fs, ino, mount))
+}
+
 /// Resolves the parent directory of `path` and returns (fs, dir inode,
 /// final name, mount point).
 fn parent_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String, String)> {
@@ -546,33 +584,41 @@ pub fn open_mode(path: &str, flags: usize, mode: Option<u16>) -> FsResult<OpenFi
     let writable = flags & (WRITE | APPEND | TRUNCATE) != 0;
     let mut created = false;
     let access = if writable { crate::sandbox::Access::Write } else { crate::sandbox::Access::Read };
-    crate::sandbox::check_path(&resolve("/", path), access)?;
-    let (fs, ino, mount) = match lookup_full(&resolve("/", path)) {
-        Ok(found) => {
-            if flags & CREATE != 0 && flags & EXCLUSIVE != 0 {
-                return Err(EEXIST);
-            }
-            found
-        }
-        Err(ENOENT) if flags & CREATE != 0 => {
-            let (fs, dir, name, mount) = parent_full(path)?;
-            if fs.read_only() {
-                return Err(EROFS);
-            }
-            perm::check_create(&fs, &mount, dir, &name)?;
-            let owner = perm::new_owner(perm::caller().as_ref(), &fs, &mount, dir, Kind::File, mode);
-            let ino = fs.create_owned(dir, &name, Kind::File, owner)?;
-            index::added(&resolve("/", path), false);
-            created = true;
-            (fs, ino, mount)
-        }
-        Err(e) => return Err(e),
-    };
+    let full = resolve("/", path);
+    crate::sandbox::check_path(&full, access)?;
     // Held from here on (and let go if any check below fails, by the drop).
-    fs.open_ino(ino)?;
+    let mut tries = 0;
+    let (fs, ino, mount) = loop {
+        tries += 1;
+        match open_full(&full) {
+            Ok(found) => break found,
+            // Missing: made, then opened like any other (if it went again
+            // meanwhile, or someone else made it first, the loop says).
+            Err(ENOENT) if flags & CREATE != 0 && tries < 8 => {
+                let (fs, dir, name, mount) = parent_full(path)?;
+                if fs.read_only() {
+                    return Err(EROFS);
+                }
+                perm::check_create(&fs, &mount, dir, &name)?;
+                let owner = perm::new_owner(perm::caller().as_ref(), &fs, &mount, dir, Kind::File, mode);
+                match fs.create_owned(dir, &name, Kind::File, owner) {
+                    Ok(_) => {
+                        index::added(&full, false);
+                        created = true;
+                    }
+                    Err(EEXIST) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    };
     let file =
         OpenFile { fs, ino, pos: 0, readable: flags & READ != 0 || !writable, writable, append: flags & APPEND != 0 };
     let fs = &file.fs;
+    if flags & CREATE != 0 && flags & EXCLUSIVE != 0 && !created {
+        return Err(EEXIST);
+    }
     let md = fs.metadata(ino)?;
     if writable && fs.read_only() {
         return Err(EROFS);

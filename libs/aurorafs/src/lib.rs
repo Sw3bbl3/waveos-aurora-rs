@@ -1626,6 +1626,16 @@ impl<D: Disk> Volume<D> {
         Ok(())
     }
 
+    /// Looks `name` up in `dir` and holds what it names open
+    /// ([`Volume::open_inode`]), at once. Pinning an inode number found by
+    /// an earlier lookup is not the same: the file may have been removed in
+    /// between and its inode given to a new one.
+    pub fn open_at(&mut self, dir: u64, name: &str) -> Result<u64> {
+        let ino = self.lookup(dir, name)?;
+        self.open_inode(ino)?;
+        Ok(ino)
+    }
+
     /// One holder of `ino` let go; an orphan is freed at its last close.
     pub fn close_inode(&mut self, ino: u64) -> Result<()> {
         let Some(n) = self.open.get_mut(&ino) else { return Ok(()) };

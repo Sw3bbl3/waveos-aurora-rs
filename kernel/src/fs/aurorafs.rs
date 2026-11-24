@@ -268,6 +268,9 @@ impl Filesystem for AuroraFs {
     fn open_ino(&self, ino: Ino) -> FsResult<()> {
         self.vol.lock().open_inode(ino).map_err(errno)
     }
+    fn open_at(&self, dir: Ino, name: &str) -> FsResult<Ino> {
+        self.vol.lock().open_at(dir, name).map_err(errno)
+    }
     fn close_ino(&self, ino: Ino) {
         // (A failure to free an orphan here is repaired at the next mount.)
         let _ = self.vol.lock().close_inode(ino);

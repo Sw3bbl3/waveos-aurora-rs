@@ -61,8 +61,24 @@ struct State {
     calls: u64,
     /// The first inconsistency `fsck` found, with the call it followed.
     broken: Option<String>,
-    /// Pin open files (what the kernel does now); off: as it did before.
-    pin: bool,
+    /// How `open` holds the file it opens.
+    mode: OpenMode,
+    /// Files only their writer names ("sealed"), and what they must hold.
+    sealed: Vec<(String, Vec<u8>)>,
+}
+
+/// How the VFS's `open` gets hold of a file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OpenMode {
+    /// Not at all (before 0.8.1): a descriptor names an inode number.
+    Unpinned,
+    /// Resolves the path, then pins the inode it found, in another call:
+    /// the file may be removed in between, and its inode given to a new
+    /// file, which the descriptor then holds and writes.
+    LookupThenPin,
+    /// Resolves the folder, then looks the name up and pins what it names
+    /// in one call (`Volume::open_at`): what the kernel does.
+    Atomic,
 }
 
 /// The volume behind a deterministic scheduler.
@@ -111,8 +127,11 @@ impl Shared {
         self.cv.notify_all();
     }
 
+    fn mode(&self) -> OpenMode {
+        self.s.lock().unwrap().mode
+    }
     fn pin(&self) -> bool {
-        self.s.lock().unwrap().pin
+        self.mode() != OpenMode::Unpinned
     }
 }
 
@@ -157,18 +176,23 @@ impl Vfs<'_> {
         Ok((d, name.to_string()))
     }
     fn open(&self, path: &str, create: bool, truncate: bool) -> R<Fd> {
-        let ino = match self.lookup(path) {
-            Ok(i) => i,
-            Err(Error::NotFound) if create => {
-                let (d, name) = self.parent(path)?;
-                self.call("create", |v| v.create(d, &name, Kind::File))?
-            }
-            Err(e) => return Err(e),
-        };
         let writable = create || truncate;
-        if self.sh.pin() {
-            self.call("open", |v| v.open_inode(ino))?;
-        }
+        let ino = if self.sh.mode() == OpenMode::Atomic {
+            self.open_atomic(path, create)?
+        } else {
+            let ino = match self.lookup(path) {
+                Ok(i) => i,
+                Err(Error::NotFound) if create => {
+                    let (d, name) = self.parent(path)?;
+                    self.call("create", |v| v.create(d, &name, Kind::File))?
+                }
+                Err(e) => return Err(e),
+            };
+            if self.sh.pin() {
+                self.call("open", |v| v.open_inode(ino))?;
+            }
+            ino
+        };
         let md = self.call("stat", |v| v.stat(ino));
         let md = match md {
             Ok(m) => m,
@@ -185,6 +209,22 @@ impl Vfs<'_> {
             let _ = self.call("truncate", |v| v.truncate(ino, 0));
         }
         Ok(Fd { ino, writable })
+    }
+    /// `open_mode` as the kernel does it: the folder, then the name looked
+    /// up and pinned at once; made first if asked and missing. A race (the
+    /// name made or removed meanwhile) starts over.
+    fn open_atomic(&self, path: &str, create: bool) -> R<u64> {
+        for _ in 0..8 {
+            let (d, name) = self.parent(path)?;
+            match self.call("open_at", |v| v.open_at(d, &name)) {
+                Err(Error::NotFound) if create => match self.call("create", |v| v.create(d, &name, Kind::File)) {
+                    Ok(_) | Err(Error::Exists) => continue,
+                    Err(e) => return Err(e),
+                },
+                r => return r,
+            }
+        }
+        Err(Error::NotFound)
     }
     fn close(&self, fd: Fd) {
         if self.sh.pin() {
@@ -254,7 +294,20 @@ fn worker(sh: &Shared, me: usize, seed: u64, ops: usize) {
     let fs = Vfs { sh, me };
     let mut r = Rng::new(seed.wrapping_mul(31).wrapping_add(me as u64));
     let mut fds: Vec<Fd> = Vec::new();
-    for _ in 0..ops {
+    for op in 0..ops {
+        // Thread 0 also writes files nobody else names: whatever another
+        // descriptor does must never show up in them.
+        if me == 0 && op % 3 == 0 {
+            let path = format!("/s/{op}");
+            let data = pattern_bytes(r.below(6000) as usize + 1, r.next() as u8);
+            if let Ok(fd) = fs.open(&path, true, false) {
+                let ok = fs.write(&fd, 0, &data).is_ok();
+                fs.close(fd);
+                if ok {
+                    sh.s.lock().unwrap().sealed.push((path, data));
+                }
+            }
+        }
         let p = *r.pick(PATHS);
         let q = *r.pick(PATHS);
         let _ = match r.below(16) {
@@ -299,9 +352,10 @@ fn worker(sh: &Shared, me: usize, seed: u64, ops: usize) {
 }
 
 /// Runs `threads` workers from `seed`; returns the first inconsistency.
-fn race(seed: u64, threads: usize, ops: usize, pin: bool) -> core::result::Result<u64, String> {
+fn race(seed: u64, threads: usize, ops: usize, mode: OpenMode) -> core::result::Result<u64, String> {
     let mut vol = Volume::format(Ram(vec![0; 2048 * BLOCK]), "Race", [5; 16], now).unwrap();
     let t = vol.create(ROOT, "t", Kind::Dir).unwrap();
+    vol.create(ROOT, "s", Kind::Dir).unwrap();
     for d in ["a", "b"] {
         vol.create(t, d, Kind::Dir).unwrap();
     }
@@ -314,7 +368,8 @@ fn race(seed: u64, threads: usize, ops: usize, pin: bool) -> core::result::Resul
             rng: Rng::new(seed),
             calls: 0,
             broken: None,
-            pin,
+            mode,
+            sealed: Vec::new(),
         }),
         cv: Condvar::new(),
     });
@@ -335,6 +390,14 @@ fn race(seed: u64, threads: usize, ops: usize, pin: bool) -> core::result::Resul
         return Err(b);
     }
     s.vol.fsck().map_err(|e| format!("at the end: {e}"))?;
+    for (path, want) in core::mem::take(&mut s.sealed) {
+        let ino = s.vol.resolve(&path).map_err(|e| format!("{path}: {e:?}"))?;
+        let mut got = vec![0u8; s.vol.stat(ino).unwrap().size as usize];
+        s.vol.read(ino, 0, &mut got).unwrap();
+        if got != want {
+            return Err(format!("{path} holds what another file's descriptor wrote ({} bytes, wrote {})", got.len(), want.len()));
+        }
+    }
     if s.vol.orphans() != 0 {
         return Err(format!("{} orphans left with every descriptor closed", s.vol.orphans()));
     }
@@ -356,7 +419,7 @@ fn racing_threads_keep_the_volume_consistent() {
     let logged = [0x6141_bd9d_f9a5_b45d, 0x79a5_28c7_ec20_2727, 0xd651_ed71_8519_91ce, 0x3881_d99d_95c2_982d];
     let mut calls = 0;
     for seed in logged.into_iter().chain(first..first + seeds) {
-        match race(seed, threads, ops, true) {
+        match race(seed, threads, ops, OpenMode::Atomic) {
             Ok(n) => calls += n,
             Err(e) => panic!("seed {seed:#x}: {e}"),
         }
@@ -364,15 +427,26 @@ fn racing_threads_keep_the_volume_consistent() {
     std::println!("{} seeds, {threads} threads of {ops} operations: {calls} volume calls", seeds + 4);
 }
 
-/// Without pinning open files, a descriptor outlives its file's inode: the
-/// number goes to the next file or folder made, and the descriptor writes
-/// into that. The volume itself stays consistent (writes and truncates
-/// refuse folders), which is what this checks; the files' contents don't.
+/// Pinning an inode only after looking it up, in a second call, is not
+/// enough: the file can go in between and its inode be given to a new one,
+/// which the descriptor then holds and writes into. (Found by `cargo xtask
+/// powercut`: a synced file came back holding another file's data. The
+/// kernel's `open` used to do this.) The harness must see it.
 #[test]
-fn racing_threads_without_pinning_stay_consistent() {
+fn pinning_after_the_lookup_writes_into_other_files() {
+    let found = (1..=200).find_map(|seed| race(seed, 4, 120, OpenMode::LookupThenPin).err());
+    let e = found.expect("no seed showed the lookup-then-pin race");
+    assert!(e.contains("another file's descriptor"), "{e}");
+}
+
+/// Without pinning at all, a descriptor outlives its file's inode in the
+/// same way; the volume's structure still holds (writes and truncates
+/// refuse folders), but files' contents don't.
+#[test]
+fn racing_threads_without_pinning_keep_the_structure() {
     for seed in 1..=20 {
-        if let Err(e) = race(seed, 4, 80, false) {
-            panic!("seed {seed}: {e}");
+        if let Err(e) = race(seed, 4, 80, OpenMode::Unpinned) {
+            assert!(e.contains("another file's descriptor"), "seed {seed}: {e}");
         }
     }
 }
