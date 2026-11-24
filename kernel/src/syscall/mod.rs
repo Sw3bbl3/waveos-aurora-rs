@@ -34,7 +34,7 @@ pub extern "C" fn dispatch(f: &mut SyscallFrame) {
         Err(e) => (-e.abs()) as u64,
     });
     if let Some(p) = linux {
-        crate::compat::linux::signal::on_return(f, nr, p);
+        crate::compat::linux::signal::on_return(f, nr, &a, p);
     }
     proc::check_killed_of(p.as_deref());
 }

@@ -72,6 +72,7 @@ mod image;
 mod launcher;
 mod libdrm;
 mod linux;
+mod linuxabi;
 mod mesa;
 mod migrate;
 mod monitor;
@@ -321,6 +322,7 @@ fn main() {
                 }
             }
         }
+        Some("linux-abi") => linuxabi::generate(arch),
         Some("linux-programs") => {
             // The Linux programs of the system image alone, for `--arch`.
             for (dest, src) in linux::programs() {

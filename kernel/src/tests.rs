@@ -69,6 +69,7 @@ const TESTS: &[Test] = &[
     ("Wi-Fi: scan, WPA2 join, DHCP over CCMP (simulated network)", wifi),
     ("sleep (S3) and wake", sleep_and_wake),
     ("clock: the vDSO agrees with the kernel's clocks (after sleep, set-clock, zone)", vdso_clock),
+    ("Linux ABI: call lookup, the vDSO's symbols", linux_abi),
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
@@ -1106,6 +1107,38 @@ fn linux_mesa_glmark2() {
         assert!(text.contains("glmark2 Score:"), "{program} did not finish");
         assert!(flips >= 10, "{program} flipped {flips} times");
         crate::kprint!("[{program}: {flips} flips] ");
+    }
+}
+
+/// The Linux layer's ABI: numbers reach the calls they name, and the vDSO
+/// exports what the C libraries look up (arm64's signal return among them).
+fn linux_abi() {
+    use crate::compat::linux::abi::{self, nr, Call};
+    use crate::compat::linux::vdso;
+    let native = |name: &str, x86: u64| if cfg!(target_arch = "aarch64") {
+        aurora_linuxabi::aarch64::TABLE.number(name).unwrap()
+    } else {
+        x86
+    };
+    for (name, n) in [("openat", nr::OPENAT), ("newfstatat", nr::NEWFSTATAT), ("rt_sigreturn", nr::RT_SIGRETURN)] {
+        assert_eq!(abi::native::lookup(native(name, n)), Call::Shared(n), "{name}");
+        assert_eq!(abi::native::canonical(native(name, n)), n, "{name}");
+    }
+    if cfg!(target_arch = "aarch64") {
+        assert_eq!(abi::native::lookup(native("clone", 0)), Call::Own);
+        assert_eq!(abi::native::lookup(1000), Call::None);
+    }
+    let wanted: &[&str] = if cfg!(target_arch = "aarch64") {
+        &["__kernel_clock_gettime", "__kernel_gettimeofday", "__kernel_clock_getres", "__kernel_rt_sigreturn"]
+    } else {
+        &["__vdso_clock_gettime", "__vdso_gettimeofday", "__vdso_time"]
+    };
+    if vdso::symbol(wanted[0]).is_none() {
+        crate::kprint!("(no vDSO in this build) ");
+        return;
+    }
+    for name in wanted {
+        assert!(vdso::symbol(name).is_some(), "the vDSO has no {name}");
     }
 }
 

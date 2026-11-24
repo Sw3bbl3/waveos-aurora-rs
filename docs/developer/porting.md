@@ -128,7 +128,8 @@ user mode, so no TSS-like switch is needed) and calls `trap`.
 **x0-x5**, result in **x0** (a negative `aurora_abi::err` value on failure);
 every other register, x8 included, is preserved. The numbers are the same
 as on x86-64 (`libs/abi`). Linux programs use the same registers with
-arm64 Linux's numbers (that table is the Linux layer's, still to come).
+arm64 Linux's numbers (the Linux layer's table: "The Linux layer's
+ABIs").
 
 **User entry:** `enter_user(entry, stack, arg)` starts EL0t with `x0 =
 arg`, every other register zero, SP_EL0 = `stack` (the loader's stack top,
@@ -183,18 +184,18 @@ semihosting does not promise.
   unification and the I-cache invalidated (`cache::sync_code`, by address
   through the physical window: the I-cache is PIPT).
 
-### Status (milestone 2, in progress)
+### Status (milestone 2)
 
 Works under HVF on 1 and 4 vCPUs: interrupts, the timer, SMP, PCI through
 ECAM, virtio-blk and virtio-net on MSI-X (DHCP), xHCI with the USB
-keyboard and tablet, HDA, ACPI AML, the desktop on `ramfb`, native
-programs at EL0.
+keyboard, tablet, storage and audio, HDA, SD cards (sdhci-pci), ACPI AML,
+the desktop on `ramfb`, native programs at EL0; the kernel self-tests
+(`cargo xtask test --arch aarch64`, list of skips in `tests::ARCH_SKIPS`).
 
-Not yet: signals for Linux programs (`compat::linux::signal` builds x86
-frames only; on arm64 a handled signal ends the program), the Linux
-system call table for arm64, the vDSO and the C half of the kernel
-(x86-only builds), the PCI I/O window, the second PL011 (telemetry),
-virtio-gpu without a firmware framebuffer.
+Not yet: the C half of the kernel (x86-only builds), the PCI I/O window,
+the second PL011 (telemetry), virtio-gpu without a firmware framebuffer.
+The Linux layer's arm64 ABI (call table, signal frames, vDSO) is in place:
+see "The Linux layer's ABIs".
 
 ## Native user space on aarch64
 
@@ -252,8 +253,8 @@ the system image).
 ## Linux programs for arm64 (groundwork)
 
 What the Linux layer needs from outside `kernel/src/compat/linux` exists
-for arm64; the layer itself (arm64's system call table, signal frames,
-the auxiliary vector) is still to come.
+for arm64; the layer's own arm64 ABI is described in "The Linux layer's
+ABIs" below.
 
 - **The system image's Linux programs** build for arm64 with `--arch
   aarch64` (`cargo xtask linux-programs --arch aarch64` builds them alone):
@@ -277,6 +278,107 @@ the auxiliary vector) is still to come.
   `run`/`image --arch aarch64` put it on the disk as `/Linux` with the
   same flags as on x86 (`--linux-root`, `--no-linux-root`; by default when
   it can be fetched).
+
+## The Linux layer's ABIs
+
+`kernel/src/compat/linux` implements every Linux call once; what differs
+between the x86-64 and arm64 Linux ABIs is in `compat/linux/abi/` and in
+the data crate `libs/linuxabi` (no kernel dependencies, so the host tests
+check it).
+
+- **One numbering, one table per ABI.** The shared `call()` dispatches by
+  x86-64 numbers (`abi::nr`, the layer's own numbering). An ABI's
+  `lookup(number)` says what a program's number is: `Call::Shared(nr)`,
+  `Call::Own` (the ABI's handler) or `Call::None`. x86-64 is the
+  identity. arm64's is `aurora_linuxabi::aarch64::TABLE`: the generic
+  table (Linux 6.1: 306 calls), each mapped onto the x86-64 call of the
+  same name — every arm64 call has one — except `clone`, whose last two
+  arguments are the other way round (`tls` before `child_tid`) and is
+  `Own`. The paused i386 branch's table (`ia32/table.rs`: `Same(nr,
+  widening)`, `Compat(fn)`, `No`) is the same scheme; it can move to
+  `aurora_linuxabi::{Entry, Map, Table}` and `abi/` with its widening
+  spec added to `Map::Same`.
+- **Memory laid out per ABI, not translated.** `struct stat`
+  (`abi::native::put_stat`: arm64's is 128 bytes with 32-bit
+  `st_nlink`/`st_blksize`), `struct epoll_event` (`EPOLL_EVENT_SIZE`,
+  `EPOLL_DATA_AT`: packed 12 bytes on x86-64, 16 on arm64), the open flags
+  that differ (`O_DIRECTORY`, `O_NOFOLLOW`; also `O_DIRECT`,
+  `O_LARGEFILE`), `MINSIGSTKSZ` (2048 / 5120), `uname`'s machine and
+  `AT_PLATFORM` (`MACHINE`). Everything else the layer reads or writes —
+  `flock`, `statfs`, `termios`, `stack_t`, `siginfo`, the kernel's
+  `sigaction`, signal numbers, `SA_*`, `MAP_*`, `CLONE_*`, `AT_*`,
+  ioctl numbers, errno — is the same on both, which the host tests check
+  value by value.
+- **Signals.** `compat/linux/signal.rs` keeps the shared machinery
+  (actions, masks, pending sets, which signal goes where, restarting);
+  `abi::native::signal` provides `Regs`, `enter_handler`, `sigreturn` and
+  `restart`. arm64's frame is Linux's: a frame record `{x29, x30}`, then
+  the `rt_sigframe` (`siginfo`, `ucontext` with `sigcontext` and a
+  4096-byte record area holding `fpsimd_context`, an `esr_context` for
+  faults and the terminator); the handler gets x0-x2, sp, x29 = the
+  record and x30 = the vDSO's `__kernel_rt_sigreturn` (or `SA_RESTORER`'s
+  address). `rt_sigreturn` checks sp alignment, PSTATE (EL0t, AArch64,
+  DAIF clear), every record (an unknown one, an `extra_context` or SVE
+  record, or a missing `fpsimd_context` ends the program with SIGSEGV, as
+  on Linux) and the alternate stack in `uc_stack`. A call interrupted by
+  a signal is made again by `pc -= 4` and x0 = the call's first argument,
+  which `syscall::dispatch` passes to `signal::on_return` (Linux's
+  `orig_x0`).
+- **vDSO.** `kernel/vdso/vdso-aarch64.c` (built by `kernel/build.rs` for
+  `aarch64-unknown-linux-gnu`, linked with `rust-lld`): `__kernel_
+  clock_gettime`, `__kernel_gettimeofday`, `__kernel_clock_getres`
+  (version `LINUX_2.6.39`, as glibc and musl look them up) read CNTVCT_EL0
+  and the same time page as x86's; `__kernel_rt_sigreturn` is exactly
+  `mov x8, #139; svc #0` with Linux's CFI and a preceding `nop`, which
+  libgcc and libunwind recognise. Unwind tables stay in the image
+  (`PT_GNU_EH_FRAME`).
+- **Start-up.** ELF loading is shared (static, static-PIE, dynamic through
+  `/lib/ld-linux-aarch64.so.1`, the same ASLR layout); arm64 adds
+  `AT_HWCAP2` and `AT_MINSIGSTKSZ` (4720: the frame, the record, 16 bytes
+  of alignment) after the common entries, and `AT_PLATFORM` is
+  `aarch64`. TLS is TPIDR_EL0 (`sched`'s thread pointer), set by
+  `clone(CLONE_SETTLS)`; there is no `arch_prctl`.
+- **CPU features.** `aurora_linuxabi::aarch64::cpu` derives `AT_HWCAP`,
+  `AT_HWCAP2` and `/proc/cpuinfo`'s `Features` line from the ID
+  registers as Linux 6.1 does, never reporting SVE, SME, MTE or BTI (the
+  kernel doesn't switch their state or guard pages yet), PACA/PACG only
+  with user keys, CPUID only when ID-register reads are emulated; and
+  `emulate` gives the sanitised value of an EL0 `mrs` of an ID register
+  (MIDR as it is, MPIDR's RES1 bit, the visible feature fields, 0 for
+  unallocated ones). `abi::aarch64::emulate_mrs(&mut TrapFrame)` decodes
+  the trap (EC 0x18, or EC 0 with an `mrs` at pc), writes Xt and steps
+  over it.
+- **Checked against Linux's headers.** `cargo xtask linux-abi --arch
+  <arch>` fetches Debian 12's `linux-libc-dev` and `libc6-dev` for the
+  architecture (through the pinned snapshot, hashes checked), has clang
+  evaluate every `__NR_*`, the layouts and the constants (nothing runs,
+  so any host works) and writes `libs/linuxabi/tests/headers/<arch>.txt`;
+  `cargo test -p aurora-linuxabi` asserts the tables, encoders and frame
+  code against them.
+
+### What the Linux layer needs from `arch/` (requested, not done here)
+
+1. **ID registers:** `arch::aarch64::cpu::id_registers() -> IdRegs`-like
+   raw values of MIDR, ID_AA64PFR0/1, ISAR0/1/2, MMFR0/1/2 (read once).
+   Until then `abi::aarch64::id_regs()` returns `None`: `AT_HWCAP` is
+   `arch::cpu::linux_hwcap()` (12 bits), `AT_HWCAP2` is 0 and `mrs` isn't
+   emulated.
+2. **`mrs` emulation hook:** in `arch/aarch64/trap.rs`'s `sync`, for EC
+   0x18 (and EC 0) from EL0 of a Linux process, call
+   `crate::compat::linux::abi::aarch64::emulate_mrs(f)` before raising
+   SIGILL; if it returns true, return to the program.
+3. **EL0 counter access:** CNTKCTL_EL1.EL0VCTEN (bit 1) set on every CPU,
+   so the vDSO can read CNTVCT_EL0 (and CNTFRQ_EL0) at EL0.
+4. **I-cache coherency for JITs and loaded code:** SCTLR_EL1.UCI/UCT/DZE
+   are set (EL0 `dc cvau`, `ic ivau`, CTR_EL0, `dc zva`); the kernel must
+   also clean the D-cache to PoU and invalidate the I-cache when it maps
+   pages executable that it wrote (file pages, `mprotect` to PROT_EXEC of
+   pages written by the kernel).
+5. **TPIDRRO_EL0** zeroed for user programs, and TPIDR_EL0 kept per thread
+   (done: `sched`'s thread pointer).
+6. Optional: a named `orig_x0` slot in `TrapFrame` (today the Linux layer
+   gets it from `syscall::dispatch`'s saved arguments, which covers system
+   calls; nothing else needs it).
 
 ## Tools
 
