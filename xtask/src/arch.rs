@@ -68,21 +68,22 @@ impl Arch {
         }
     }
 
-    /// Whether user space builds for this architecture yet (corekit's
-    /// system calls and start-up code for aarch64 follow the kernel's).
-    pub fn userland_ported(self) -> bool {
-        self == Arch::X86_64
-    }
-
     /// RUSTFLAGS for user programs (beside the linker script). Frame
     /// pointers everywhere, for the kernel's stack traces; on aarch64 also
     /// branch protection (return addresses signed with PAC, indirect branch
     /// targets marked for BTI), which are hint instructions on processors
-    /// without those features.
+    /// without those features. And the RustCrypto crates' ARMv8 paths: AES
+    /// and GHASH/POLYVAL with the AES and PMULL instructions where the
+    /// processor has them (detected at run time, see corekit's `cpu_has`;
+    /// otherwise their constant-time portable code), ChaCha20 with NEON,
+    /// which every aarch64 WaveOS machine has.
     pub fn user_rustflags(self) -> &'static str {
         match self {
             Arch::X86_64 => "-C force-frame-pointers=yes",
-            Arch::Aarch64 => "-C force-frame-pointers=yes -Z branch-protection=bti,pac-ret",
+            Arch::Aarch64 => {
+                "-C force-frame-pointers=yes -Z branch-protection=bti,pac-ret \
+                 --cfg aes_armv8 --cfg polyval_armv8 --cfg chacha20_force_neon"
+            }
         }
     }
 

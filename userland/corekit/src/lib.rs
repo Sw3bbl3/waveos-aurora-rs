@@ -34,6 +34,7 @@ pub mod prefs;
 pub mod process;
 pub mod rt;
 pub mod sandbox;
+mod start;
 pub mod sync;
 pub mod sys;
 pub mod thread;
@@ -74,15 +75,25 @@ impl core::fmt::Display for Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Declares the program's `main(args) -> i32`.
+/// Declares the program's `main(args) -> i32`. On x86-64 this is the
+/// program's entry point; on aarch64 `_start` (in `start.rs`) prepares
+/// the registers first and calls it.
 #[macro_export]
 macro_rules! entry {
     ($main:path) => {
+        #[cfg(target_arch = "x86_64")]
         #[no_mangle]
         #[link_section = ".text._start"]
         #[allow(clippy::not_unsafe_ptr_arg_deref)] // only the kernel calls it
         pub extern "C" fn _start(block: *const u64) -> ! {
             // SAFETY: the kernel passes the argument block to `_start`.
+            unsafe { $crate::rt::start(block, $main) }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        #[no_mangle]
+        #[allow(clippy::not_unsafe_ptr_arg_deref)] // only `_start` calls it
+        pub extern "C" fn __aurora_start(block: *const u64) -> ! {
+            // SAFETY: `_start` passes on the argument block the kernel gave it.
             unsafe { $crate::rt::start(block, $main) }
         }
     };

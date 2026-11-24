@@ -35,3 +35,8 @@ opt-level = 3
 codegen-units = 1
 lto = true
 strip = true
+
+# The CPU feature detection the RustCrypto crates use, taught to ask WaveOS
+# on aarch64 (see vendor/cpufeatures/WAVEOS-PATCHES.md).
+[patch.crates-io]
+cpufeatures = { path = "../vendor/cpufeatures" }

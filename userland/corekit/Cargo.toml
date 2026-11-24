@@ -14,3 +14,7 @@ linked_list_allocator = "0.10"
 
 gina.workspace = true
 sha2 = { version = "0.10", default-features = false }
+
+# ARMv8 crypto detection for the RustCrypto crates (see sys::cpu_has).
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+cpufeatures = "0.2"

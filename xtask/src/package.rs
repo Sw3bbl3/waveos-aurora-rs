@@ -117,6 +117,7 @@ pub fn gallery(programs: &[Program], version: &str, key: Option<&Key>) -> Option
     let icon = fs::read(root().join("assets/icons/studio.png")).ok()?;
     let m = gina::Manifest {
         format: 2,
+        architecture: crate::arch::current().name().into(),
         id: "dev.example.gallery".into(),
         name: "WaveUI Gallery".into(),
         developer: "WaveSDK Example".into(),
@@ -145,6 +146,7 @@ pub fn doom(programs: &[Program], key: Option<&Key>) -> Option<Vec<u8>> {
     let icon = fs::read(root().join("assets/icons/doom.png")).ok()?;
     let m = gina::Manifest {
         format: 2,
+        architecture: crate::arch::current().name().into(),
         id: "org.waveos.doom".into(),
         name: "Doom".into(),
         developer: "WaveOS".into(),

@@ -35,16 +35,14 @@ fn corner_coverage(r: &Rect, radius: i32, x: i32, y: i32) -> u32 {
     (radius as i64 * 256 + 128 - d).clamp(0, 256) as u32
 }
 
-/// `dst = mix(a, b, t)` for whole rows (t 0..=256), alpha set; SSE2 in the
+/// `dst = mix(a, b, t)` for whole rows (t 0..=256), alpha set; SIMD in the
 /// compositor and wherever the target has it.
 #[inline]
 fn mix_rows(dst: &mut [u32], a: &[u32], b: &[u32], t: i32) {
     let n = dst.len().min(a.len()).min(b.len());
-    #[allow(unused_mut)] // Only the x86 SIMD path advances this cursor.
     let mut done = 0;
-    #[cfg(target_arch = "x86_64")]
     if n >= 8 && crate::simd::enabled() {
-        // SAFETY: SSE2 is usable; all three hold n pixels.
+        // SAFETY: SIMD is usable; all three hold n pixels.
         done = unsafe { crate::simd::mix_rows(dst.as_mut_ptr(), a.as_ptr(), b.as_ptr(), n, t.clamp(0, 256) as u32) };
     }
     for ((o, &x), &y) in dst[done..n].iter_mut().zip(&a[done..n]).zip(&b[done..n]) {
@@ -56,9 +54,7 @@ fn mix_rows(dst: &mut [u32], a: &[u32], b: &[u32], t: i32) {
 #[inline]
 fn mix_over(dst: &mut [u32], b: &[u32], t: i32) {
     let n = dst.len().min(b.len());
-    #[allow(unused_mut)]
     let mut done = 0;
-    #[cfg(target_arch = "x86_64")]
     if n >= 8 && crate::simd::enabled() {
         // SAFETY: as above; the routine reads each group before writing it.
         done = unsafe { crate::simd::mix_rows(dst.as_mut_ptr(), dst.as_ptr(), b.as_ptr(), n, t.clamp(0, 256) as u32) };

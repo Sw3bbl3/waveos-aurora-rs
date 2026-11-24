@@ -282,6 +282,12 @@ fn main() {
         Some("build") => {
             build(profile, false);
         }
+        Some("userland") => {
+            // User space alone (`--arch` picks which), e.g. while the
+            // kernel for an architecture is still being brought up.
+            let programs = build_userland(profile);
+            println!("built {} programs into {}", programs.len(), arch.user_target_dir(&root()).display());
+        }
         Some("lint") => lint(),
         Some("launch") => launcher::main(&args[1..]),
         Some("run") => {
@@ -688,6 +694,25 @@ fn cargo_build(package: &str, target: &str, profile: Profile, features: &[&str])
 /// Runs clippy over everything with warnings as errors: the host libraries
 /// and tools, the kernel (with and without its self-tests), the bootloader,
 /// and user space for its own target.
+/// The libraries user programs are built from, linted for a bare aarch64
+/// target by `lint --arch aarch64`.
+const AARCH64_USER_LIBS: &[&str] = &[
+    "aurora-abi",
+    "aurora-desktop",
+    "aurora-elf",
+    "aurora-image",
+    "aurora-lz4",
+    "aurora-wav",
+    "aurora-zip",
+    "gina",
+    "lumen",
+    "nebula-engine",
+    "nebula-media",
+    "nebula-script",
+    "nebula-secure",
+    "nebula-web",
+];
+
 fn lint() {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let deny = ["--", "-D", "warnings"];
@@ -701,6 +726,37 @@ fn lint() {
         .current_dir(root())
         .args(["clippy", "--workspace", "--all-targets", "--exclude", "aster", "--exclude", "firstlight"])
         .args(deny));
+    if arch::current() == arch::Arch::Aarch64 {
+        // User space first (it stands on its own), then the libraries it
+        // uses for a bare aarch64 target (clippy checks only a workspace's
+        // own members: this is where their NEON and ARMv8 crypto paths are
+        // checked on a computer of either architecture), then the kernel
+        // and the bootloader. No Linux programs for aarch64 yet.
+        let mut user = Command::new(&cargo);
+        userland_cargo(&mut user, "clippy", Profile::Release);
+        run(user.args(deny));
+        let arch = arch::current();
+        run(Command::new(&cargo)
+            .current_dir(root())
+            .args(["clippy", "--release", "-Zjson-target-spec", "-Zbuild-std=core,alloc"])
+            .arg("--target")
+            .arg(root().join("userland").join(format!("{}.json", arch.user_target())))
+            .args(AARCH64_USER_LIBS.iter().flat_map(|p| ["--package", p]))
+            .env("RUSTFLAGS", arch.user_rustflags())
+            .args(deny));
+        run(Command::new(&cargo)
+            .current_dir(root())
+            .args(["clippy", "--package", "firstlight", "--target", arch::current().uefi_target(), "--release"])
+            .args(deny));
+        for features in [&[][..], &["--features", "ktest"]] {
+            run(Command::new(&cargo)
+                .current_dir(root())
+                .args(["clippy", "--package", "aster", "--target", arch::current().kernel_target(), "--release"])
+                .args(features)
+                .args(deny));
+        }
+        return;
+    }
     for features in [&[][..], &["--features", "ktest"]] {
         run(Command::new(&cargo)
             .current_dir(root())
@@ -821,10 +877,6 @@ fn build_userland(profile: Profile) -> Vec<Program> {
         return Vec::new();
     }
     let arch = arch::current();
-    if !arch.userland_ported() {
-        println!("note: user space isn't ported to {} yet: the system image has no programs", arch.name());
-        return Vec::new();
-    }
     let target_dir = arch.user_target_dir(&root());
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     userland_cargo(&mut cmd, "build", profile);
@@ -1003,10 +1055,9 @@ fn bundle_sdk(t: &mut tar::Tar) {
     ] {
         walk(t, &base, &base.join(relative));
     }
-    t.file(
-        "Developer/SDK/userland/x86_64-aurora-user.json",
-        &fs::read(base.join("userland/x86_64-aurora-user.json")).unwrap(),
-    );
+    for spec in arch::ALL.map(|a| format!("userland/{}.json", a.user_target())) {
+        t.file(&format!("Developer/SDK/{spec}"), &fs::read(base.join(&spec)).unwrap());
+    }
     let user = fs::read_to_string(base.join("userland/Cargo.toml")).unwrap();
     let user = user
         .lines()
