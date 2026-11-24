@@ -117,6 +117,22 @@ const TESTS: &[Test] = &[
     ("persistence across reboot", persistence),
 ];
 
+/// Tests that need what this architecture's machine (QEMU's `virt` for
+/// aarch64) or port doesn't have yet: (name prefix, why).
+#[cfg(target_arch = "x86_64")]
+const ARCH_SKIPS: &[(&str, &str)] = &[];
+#[cfg(target_arch = "aarch64")]
+const ARCH_SKIPS: &[(&str, &str)] = &[
+    ("LinuxKPI:", "the C half of the kernel is built for x86 only"),
+    ("ACPI: AML, sleep states, battery", "a PC's ACPI: sleep states, \\_S5 and the test battery's SSDT"),
+    ("I2C:", "the I2C touchpad is a PC ACPI device (test SSDT)"),
+    ("sleep (S3) and wake", "no suspend to RAM on Arm"),
+    ("clock: the vDSO", "the vDSO is built for x86 only so far"),
+    ("Linux programs:", "the Linux layer for arm64 is not ported yet"),
+    ("sandbox: a Linux program", "the Linux layer for arm64 is not ported yet"),
+    ("sandbox: the Linux fuzzer", "the Linux layer for arm64 is not ported yet"),
+];
+
 pub fn run() {
     // Devices present at boot finish setting up first (the frame counts
     // some tests compare would otherwise move underneath them).
@@ -135,9 +151,13 @@ pub fn run() {
     if skip_virtual_hid {
         crate::kprintln!("SKIP virtual USB HID tests: QEMU has no usb-redir device");
     }
+    for (name, why) in ARCH_SKIPS {
+        crate::kprintln!("SKIP {name}: {why}");
+    }
     let chosen: Vec<&Test> = TESTS
         .iter()
         .filter(|(name, _)| !skip_virtual_hid || !name.starts_with("USB HID:"))
+        .filter(|(name, _)| !ARCH_SKIPS.iter().any(|(prefix, _)| name.starts_with(prefix)))
         .filter(|(name, _)| filter.as_deref().is_none_or(|f| name.contains(f) || name.starts_with("persistence")))
         .collect();
     crate::kprintln!("\nrunning {} kernel tests", chosen.len());
@@ -2638,7 +2658,10 @@ fn acpi_isolation() {
     // Everything else carries on; ACPI answers "unknown" from now on.
     assert_eq!(crate::acpi::power_info().flags & aurora_abi::power::ACPI, 0);
     crate::sched::sleep_ms(20);
-    assert!(crate::acpi::sleep_type(5).is_some(), "sleep types found earlier stay usable");
+    // (Arm firmware has no sleep states: it powers off through PSCI.)
+    if cfg!(target_arch = "x86_64") {
+        assert!(crate::acpi::sleep_type(5).is_some(), "sleep types found earlier stay usable");
+    }
 }
 
 fn usb() {

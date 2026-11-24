@@ -871,8 +871,8 @@ fn build(profile: Profile, test: bool) -> PathBuf {
     fs::write(esp.join("aurora/update.txt"), factory.encode()).expect("write update.txt");
     // Both architectures' halves of the same demo repository (store.rs).
     store::demo_repository(&programs, &esp, &root().join("target/repo"));
-    if test && arch == arch::Arch::X86_64 {
-        store::test_repositories(&programs, &esp, &root().join("target/test-repo"));
+    if test {
+        store::test_repositories(&programs, &esp, &test_repo_dir());
     }
     esp
 }
@@ -1799,7 +1799,7 @@ fn repo_response(req: &[u8]) -> Option<Reply> {
     let line = text.lines().next()?;
     let path = line.strip_prefix("GET ")?.split(' ').next()?;
     let (prefix, rest) = path.strip_prefix('/')?.split_once('/')?;
-    let base = root().join("target/test-repo");
+    let base = test_repo_dir();
     let dir = match prefix {
         "repo" | "badrepo" | "flaky" | "corrupt" | "truncated" | "slow" => base.join("main"),
         "stale" | "expired" | "rotated" => base.join(prefix),
@@ -1830,6 +1830,12 @@ fn repo_response(req: &[u8]) -> Option<Reply> {
         _ => {}
     }
     Some(reply)
+}
+
+/// `target/test-repo`, with the architecture's suffix: each architecture's
+/// test repositories hold its own packages and system updates.
+fn test_repo_dir() -> PathBuf {
+    root().join(format!("target/test-repo{}", arch::current().suffix()))
 }
 
 /// A free port on the host (for forwarding into the guest).
