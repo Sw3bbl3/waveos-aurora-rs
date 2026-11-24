@@ -17,7 +17,7 @@ This is being built in steps. What works today:
 | M4 | Sockets (TCP, UDP, local) | Done |
 | M5 | Shared memory and a Wayland bridge, for GTK programs | Done |
 | M6 | Firefox ESR | Done |
-| A1 | arm64 programs: the generic call table, arm64 layouts, signal frames, vDSO | Built and host-tested; waits for user mode on aarch64 |
+| A1 | arm64 programs: the generic call table, arm64 layouts, signal frames, vDSO | Done: the static tests and Debian's hello and curl pass under HVF |
 
 ## Two ABIs: x86-64 and arm64
 
@@ -52,11 +52,10 @@ headers for both architectures (`cargo xtask linux-abi --arch <arch>`
 regenerates them). arm64's `PROT_BTI` and `PROT_MTE` are accepted and
 ignored; BTI, MTE, SVE and SME are not offered to programs.
 
-Not yet on arm64: running anything (the aarch64 kernel doesn't enter user
-mode yet); full `AT_HWCAP`/`AT_HWCAP2` and EL0 ID-register reads wait for
-the arch layer to expose the ID registers (until then `AT_HWCAP` has the
-12 basic bits, `AT_HWCAP2` is 0 and an `mrs` of an ID register is
-`SIGILL`); `extra_context` frames (only needed with SVE).
+Not yet on arm64: `extra_context` frames (only needed with SVE), the
+DRM device's test on `virt` (its display is ramfb, not PCI), Mesa and the
+browsers (next). musl's `vfork` is plain `fork` on arm64 (it has no
+`vfork` of its own there).
 
 ## The shell
 

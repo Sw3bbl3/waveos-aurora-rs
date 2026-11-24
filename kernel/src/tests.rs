@@ -806,6 +806,10 @@ impl InputTestUser {
                 alloc::format!("ok {}", names.join("|"))
             }
             "drain-native" => {
+                // (From the middle of the screen: earlier tests may have
+                // left the pointer at an edge, where motion is clamped.)
+                let (w, h) = input::screen_size();
+                input::warp(w / 2, h / 2);
                 while input::pop().is_some() {}
                 self.pointer_from = input::pointer_position();
                 ok

@@ -354,29 +354,37 @@ check it).
   `cargo test -p aurora-linuxabi` asserts the tables, encoders and frame
   code against them.
 
-### What the Linux layer needs from `arch/` (requested, not done here)
+### What the Linux layer uses from `arch/`
 
-1. **ID registers:** `arch::aarch64::cpu::id_registers() -> IdRegs`-like
-   raw values of MIDR, ID_AA64PFR0/1, ISAR0/1/2, MMFR0/1/2 (read once).
-   Until then `abi::aarch64::id_regs()` returns `None`: `AT_HWCAP` is
-   `arch::cpu::linux_hwcap()` (12 bits), `AT_HWCAP2` is 0 and `mrs` isn't
-   emulated.
-2. **`mrs` emulation hook:** in `arch/aarch64/trap.rs`'s `sync`, for EC
-   0x18 (and EC 0) from EL0 of a Linux process, call
-   `crate::compat::linux::abi::aarch64::emulate_mrs(f)` before raising
-   SIGILL; if it returns true, return to the program.
-3. **EL0 counter access:** CNTKCTL_EL1.EL0VCTEN (bit 1) set on every CPU,
-   so the vDSO can read CNTVCT_EL0 (and CNTFRQ_EL0) at EL0.
-4. **I-cache coherency for JITs and loaded code:** SCTLR_EL1.UCI/UCT/DZE
-   are set (EL0 `dc cvau`, `ic ivau`, CTR_EL0, `dc zva`); the kernel must
-   also clean the D-cache to PoU and invalidate the I-cache when it maps
-   pages executable that it wrote (file pages, `mprotect` to PROT_EXEC of
-   pages written by the kernel).
-5. **TPIDRRO_EL0** zeroed for user programs, and TPIDR_EL0 kept per thread
-   (done: `sched`'s thread pointer).
-6. Optional: a named `orig_x0` slot in `TrapFrame` (today the Linux layer
-   gets it from `syscall::dispatch`'s saved arguments, which covers system
-   calls; nothing else needs it).
+- `arch::cpu::id_registers()`: MIDR and the AArch64 feature registers,
+  read once (HWCAP/HWCAP2, cpuinfo's `Features`, `mrs` emulation).
+- `trap.rs`'s `sync` offers an EL0 system-register trap (EC 0x18) or an
+  undefined instruction (EC 0) from a Linux program to
+  `compat::linux::abi::aarch64::emulate_mrs` before raising SIGILL.
+- CNTKCTL_EL1.EL0VCTEN on every CPU (`timer::start_local`): the vDSO reads
+  CNTVCT_EL0.
+- TPIDR_EL0 is the program's: `sched` reads it back
+  (`arch::cpu::thread_pointer`) when a user task leaves its CPU, and
+  `sched::fs_base` returns the live register, so `fork`/`clone` and
+  switches keep what the program set with `msr`.
+- `TrapFrame::user_start` is a user frame (`KIND_USER`): the exit path
+  loads SP_EL0 from user frames only, and `execve` returns through it.
+
+Still open: TPIDRRO_EL0 zeroed for user programs; BTI guarded pages; the
+B and data pointer-authentication keys (only APIA is on, so `PACA`/`PACG`
+are not advertised); a named `orig_x0` (the dispatcher's saved arguments
+serve).
+
+### Linux programs on aarch64: state
+
+Under HVF (`cargo xtask test --arch aarch64`), the static musl tests pass:
+linuxtest, proctest, nettest, inputtest, linuxfuzz, sandboxtest and the
+sandboxed linuxfuzz, and with `AURORA_TEST_LINUX_ROOT=1` (a root from
+`cargo xtask linux-root --arch aarch64 --base curl`) Debian's dynamically
+linked GNU Hello and curl fetching from the test server. drmtest is
+skipped: the display on `virt` is ramfb, not the PCI device it expects.
+musl's `vfork` is `fork` on arm64 (proctest's memory-sharing check is
+x86-only; `posix_spawn` makes the CLONE_VM | CLONE_VFORK call on both).
 
 ## Tools
 
