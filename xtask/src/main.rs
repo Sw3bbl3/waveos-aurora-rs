@@ -56,6 +56,7 @@
 //!                                         memory unless --memory-mib says otherwise
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
+mod arch;
 mod battery;
 mod debian;
 mod display;
@@ -76,6 +77,7 @@ mod store;
 mod tar;
 mod testdisplays;
 mod usbredir;
+mod virt;
 mod voyage;
 mod webcheck;
 
@@ -85,12 +87,10 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const UEFI_TARGET: &str = "x86_64-unknown-uefi";
-const KERNEL_TARGET: &str = "x86_64-unknown-none";
-const USER_TARGET: &str = "x86_64-aurora-user";
-
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    // `--arch` (see arch.rs): every path and target below follows it.
+    let arch = arch::select_from_args(&args);
     let flag = |f: &str| args.iter().any(|a| a == f);
     let number = |name: &str, default: u64, min: u64, max: u64| -> u64 {
         match args.iter().position(|a| a == name) {
@@ -105,8 +105,14 @@ fn main() {
         }
     };
     let profile = if flag("--debug") { Profile::Debug } else { Profile::Release };
-    let disk =
-        args.iter().position(|a| a == "--disk").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("ahci");
+    // aarch64's `virt` machine has no built-in SATA: virtio is its disk.
+    let aarch64 = arch == arch::Arch::Aarch64;
+    let disk = args
+        .iter()
+        .position(|a| a == "--disk")
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+        .unwrap_or(if aarch64 { "virtio" } else { "ahci" });
     let smp: u32 =
         args.iter().position(|a| a == "--smp").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(4);
     if !runconfig::accepts(runconfig::DISKS, disk) {
@@ -279,20 +285,32 @@ fn main() {
         Some("lint") => lint(),
         Some("launch") => launcher::main(&args[1..]),
         Some("run") => {
-            let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let developer = flag("--developer");
             let img = args
                 .iter()
                 .position(|a| a == "--disk-image")
                 .and_then(|i| args.get(i + 1))
                 .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    root().join(if developer { "target/waveos-developer.img" } else { "target/waveos-aurora.img" })
-                });
+                .unwrap_or_else(|| arch.disk(&root(), if developer { "waveos-developer" } else { "waveos-aurora" }));
+            // A disk for the other architecture: say so before building
+            // (`refresh_esp` refuses it anyway).
+            if !flag("--fresh-disk") {
+                if let Ok(Some(disk)) = image::disk_arch(&img) {
+                    if disk != arch.name() {
+                        let e = image::ArchMismatch { disk, new: arch.name().to_string() };
+                        eprintln!("{}: {e}", img.display());
+                        exit(1);
+                    }
+                }
+            }
+            let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let size = number("--disk-size-mib", if developer { 8192 } else { 256 }, 128, 65536) * 1024 * 1024;
             if !flag("--no-refresh") {
                 // Voyage, Firefox and the other Linux programs live on the disk, in /Linux.
-                let linux = if flag("--linux-root") {
+                let linux = if aarch64 {
+                    // Debian's amd64 packages: no use to an ARM disk.
+                    None
+                } else if flag("--linux-root") {
                     Some(linux_root())
                 } else if flag("--no-linux-root") {
                     None
@@ -392,8 +410,8 @@ fn main() {
         }
         Some("image") => {
             let esp = build(profile, false);
-            let out = root().join("target/waveos-aurora-usb.img");
-            let linux = if flag("--no-linux-root") { None } else { optional_linux_root() };
+            let out = arch.disk(&root(), "waveos-aurora-usb");
+            let linux = if flag("--no-linux-root") || aarch64 { None } else { optional_linux_root() };
             let size = linux.as_deref().map_or(DISK_SIZE, |l| DISK_SIZE.max(dir_size(l) + 512 * 1024 * 1024));
             image::create_with(&esp, &root().join("assets/home"), linux.as_deref(), &out, size)
                 .expect("image creation failed");
@@ -403,14 +421,14 @@ fn main() {
         Some("iso") => {
             let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let target = root().join("target");
-            let staging = target.join("iso-staging");
+            let staging = target.join(format!("iso-staging{}", arch.suffix()));
             if staging.exists() {
                 fs::remove_dir_all(&staging).expect("remove old ISO staging directory");
             }
             fs::create_dir_all(staging.join("EFI/BOOT")).expect("create ISO staging directory");
             // The boot image holds 32 MiB at most, so the system image goes in
             // compressed (the bootloader inflates it).
-            let iso_esp = target.join("iso-esp");
+            let iso_esp = target.join(format!("iso-esp{}", arch.suffix()));
             let _ = fs::remove_dir_all(&iso_esp);
             copy_tree(&esp, &iso_esp).expect("copy the ESP");
             let tar = iso_esp.join("aurora/system.tar");
@@ -421,7 +439,7 @@ fn main() {
             }
             let boot_image = staging.join("EFI/BOOT/efiboot.img");
             image::create_efi_boot_image(&iso_esp, &boot_image).expect("create EFI boot image");
-            let out = target.join("waveos-aurora.iso");
+            let out = target.join(format!("waveos-aurora{}.iso", arch.suffix()));
             let status = Command::new("xorriso")
                 .args(["-as", "mkisofs", "-iso-level", "3", "-R", "-J", "-V", "WAVEOS_AURORA"])
                 .arg("-o")
@@ -436,6 +454,12 @@ fn main() {
             println!("wrote {}", out.display());
         }
         Some("test") => {
+            if aarch64 {
+                // No isa-debug-exit on `virt`: the runner needs the kernel's
+                // way of reporting (see virt.rs) before it can run there.
+                eprintln!("cargo xtask test --arch aarch64: not yet; the aarch64 kernel has no self-test harness");
+                exit(2);
+            }
             let n = args
                 .iter()
                 .position(|a| a == "--displays")
@@ -577,6 +601,10 @@ fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64, linux: Option<&P
                 "{} has an unsupported layout; disk preserved. Back it up before using --fresh-disk",
                 img.display()
             ),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                eprintln!("{}: {e}", img.display());
+                exit(1);
+            }
             Err(e) => panic!("could not update {}: {e}; disk preserved", img.display()),
         }
         let Some(linux) = linux else { return };
@@ -639,7 +667,7 @@ fn strip_debug(kernel: &Path) {
 }
 
 fn esp_dir(test: bool) -> PathBuf {
-    root().join(if test { "target/esp-test" } else { "target/esp" })
+    arch::current().esp_dir(&root(), test)
 }
 
 fn cargo_build(package: &str, target: &str, profile: Profile, features: &[&str]) {
@@ -676,13 +704,13 @@ fn lint() {
     for features in [&[][..], &["--features", "ktest"]] {
         run(Command::new(&cargo)
             .current_dir(root())
-            .args(["clippy", "--package", "aster", "--target", KERNEL_TARGET, "--release"])
+            .args(["clippy", "--package", "aster", "--target", arch::current().kernel_target(), "--release"])
             .args(features)
             .args(deny));
     }
     run(Command::new(&cargo)
         .current_dir(root())
-        .args(["clippy", "--package", "firstlight", "--target", UEFI_TARGET, "--release"])
+        .args(["clippy", "--package", "firstlight", "--target", arch::current().uefi_target(), "--release"])
         .args(deny));
     let mut user = Command::new(&cargo);
     userland_cargo(&mut user, "clippy", Profile::Release);
@@ -696,33 +724,51 @@ fn lint() {
 
 /// Builds both halves and lays out an EFI System Partition directory.
 fn build(profile: Profile, test: bool) -> PathBuf {
+    let arch = arch::current();
     verify_toolchain();
-    cargo_build("firstlight", UEFI_TARGET, profile, &[]);
-    cargo_build("aster", KERNEL_TARGET, profile, if test { &["ktest"] } else { &[] });
+    cargo_build("firstlight", arch.uefi_target(), profile, &[]);
+    cargo_build("aster", arch.kernel_target(), profile, if test { &["ktest"] } else { &[] });
 
     let target = root().join("target");
     let esp = esp_dir(test);
     fs::create_dir_all(esp.join("EFI/BOOT")).unwrap();
     fs::create_dir_all(esp.join("aurora")).unwrap();
-    fs::copy(target.join(UEFI_TARGET).join(profile.dir()).join("firstlight.efi"), esp.join("EFI/BOOT/BOOTX64.EFI"))
-        .expect("copy bootloader");
-    fs::copy(target.join(KERNEL_TARGET).join(profile.dir()).join("aster"), esp.join("aurora/kernel.elf"))
+    // Only this architecture's boot file: firmware that finds the other
+    // one would start a bootloader for the wrong kernel.
+    for other in arch::ALL.iter().filter(|a| **a != arch) {
+        let _ = fs::remove_file(esp.join("EFI/BOOT").join(other.boot_file()));
+    }
+    fs::copy(
+        target.join(arch.uefi_target()).join(profile.dir()).join("firstlight.efi"),
+        esp.join("EFI/BOOT").join(arch.boot_file()),
+    )
+    .expect("copy bootloader");
+    fs::copy(target.join(arch.kernel_target()).join(profile.dir()).join("aster"), esp.join("aurora/kernel.elf"))
         .expect("copy kernel");
+    // Which processor the partition is for: disks refuse an ESP refresh
+    // for the other one (see `image::refresh_esp`).
+    fs::write(esp.join(image::ARCH_FILE), format!("{}\n", arch.name())).expect("write the architecture");
     if profile == Profile::Release {
         // Keep the full ELF for host GDB. DWARF is never loaded by UEFI and
         // would otherwise crowd the bounded El Torito EFI boot image.
         strip_debug(&esp.join("aurora/kernel.elf"));
     }
     let mut programs = build_userland(profile);
-    programs.extend(linux::programs());
+    if arch == arch::Arch::X86_64 {
+        programs.extend(linux::programs());
+    } else {
+        println!("note: the Linux programs (BusyBox, Doom, the Wayland bridge…) are x86_64-only so far: not in the aarch64 image");
+    }
     system_image(&programs, &esp.join("aurora/system.tar"));
     // What a device starts from: its system described as an update, for
     // the updater to work out which files a newer one changes.
     let factory = store::describe_esp(&esp, env!("CARGO_PKG_VERSION")).expect("describe the system");
     fs::write(esp.join("aurora/update.txt"), factory.encode()).expect("write update.txt");
-    store::demo_repository(&programs, &esp, &root().join("target/repo"));
-    if test {
-        store::test_repositories(&programs, &esp, &root().join("target/test-repo"));
+    if arch == arch::Arch::X86_64 {
+        store::demo_repository(&programs, &esp, &root().join("target/repo"));
+        if test {
+            store::test_repositories(&programs, &esp, &root().join("target/test-repo"));
+        }
     }
     esp
 }
@@ -774,7 +820,12 @@ fn build_userland(profile: Profile) -> Vec<Program> {
     if !manifest.exists() {
         return Vec::new();
     }
-    let target_dir = root().join("target/user");
+    let arch = arch::current();
+    if !arch.userland_ported() {
+        println!("note: user space isn't ported to {} yet: the system image has no programs", arch.name());
+        return Vec::new();
+    }
+    let target_dir = arch.user_target_dir(&root());
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     userland_cargo(&mut cmd, "build", profile);
     let status = cmd.status().expect("failed to run cargo for userland");
@@ -782,7 +833,7 @@ fn build_userland(profile: Profile) -> Vec<Program> {
         exit(status.code().unwrap_or(1));
     }
 
-    let out_dir = target_dir.join(USER_TARGET).join(profile.dir());
+    let out_dir = target_dir.join(arch.user_target()).join(profile.dir());
     let mut programs = Vec::new();
     for entry in fs::read_dir(&out_dir).unwrap() {
         let path = entry.unwrap().path();
@@ -810,11 +861,13 @@ fn build_userland(profile: Profile) -> Vec<Program> {
 }
 
 /// Sets up `cmd` to run cargo `subcommand` over the user-space workspace.
-/// User programs are built for our own target (ring 3 with SSE2; the kernel
-/// is soft-float), so core and alloc are rebuilt for it.
+/// User programs are built for our own target (ring 3 with SSE2 or NEON; the
+/// kernel is soft-float), so core and alloc are rebuilt for it, in a target
+/// folder per architecture.
 fn userland_cargo(cmd: &mut Command, subcommand: &str, profile: Profile) {
+    let arch = arch::current();
     let user_ld = root().join("userland/corekit/user.ld");
-    let spec = root().join("userland").join(format!("{USER_TARGET}.json"));
+    let spec = root().join("userland").join(format!("{}.json", arch.user_target()));
     cmd.current_dir(root().join("userland"))
         .args([
             subcommand,
@@ -826,8 +879,8 @@ fn userland_cargo(cmd: &mut Command, subcommand: &str, profile: Profile) {
         .arg("--target")
         .arg(&spec)
         .arg("--target-dir")
-        .arg(root().join("target/user"))
-        .env("RUSTFLAGS", format!("-C link-arg=--script={} -C force-frame-pointers=yes", user_ld.display()));
+        .arg(arch.user_target_dir(&root()))
+        .env("RUSTFLAGS", format!("-C link-arg=--script={} {}", user_ld.display(), arch.user_rustflags()));
     if profile == Profile::Release {
         cmd.arg("--release");
     }
@@ -1192,7 +1245,119 @@ fn disk_args(img: &Path, opts: &RunOpts) -> Vec<String> {
     a
 }
 
+/// QEMU's `-rtc` value: the guest's RTC is local to its chosen offset, not
+/// the host's zone. A fresh guest defaults to UTC. Using host localtime made
+/// its TLS clock several hours wrong, especially around DST and new
+/// certificates.
+fn rtc_arg(img: &Path) -> String {
+    let offset = image::preference(img, "utc_offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| (-720..=840).contains(v))
+        .unwrap_or(0);
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    format!("base={},clock=host", rtc_timestamp(unix + offset * 60))
+}
+
+/// A USB controller with a tablet (absolute pointer), a hub with a keyboard
+/// behind it, the USB stick, the virtual HID devices and the USB speaker;
+/// and the bus and hub port `--usb` gives them.
+fn usb_args(opts: &RunOpts) -> (Vec<String>, &'static str, &'static str) {
+    let mut a: Vec<String> = Vec::new();
+    let mut device = |d: String| a.extend([String::from("-device"), d]);
+    let (bus, tablet, hub, stick_port) = match opts.usb {
+        "ehci" => {
+            // An ICH9 EHCI with its three UHCI companions: the high-speed
+            // tablet and stick stay on EHCI; the full-speed hub (and the
+            // keyboard behind it) is handed to a companion.
+            device("ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on".into());
+            for (i, f) in [(1, 0), (2, 1), (3, 2)] {
+                device(format!(
+                    "ich9-usb-uhci{i},masterbus=ehci.0,firstport={},addr=1d.{f},multifunction=on",
+                    (i - 1) * 2
+                ));
+            }
+            ("ehci.0", "2", "3", "1")
+        }
+        "ehci-ohci" => {
+            // VirtualBox's USB 2.0 controller: an EHCI with an OHCI companion.
+            device("ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on".into());
+            device("pci-ohci,masterbus=ehci.0,firstport=0,num-ports=6,addr=1d.0,multifunction=on".into());
+            ("ehci.0", "2", "3", "1")
+        }
+        "ohci" => {
+            device("pci-ohci,id=ohci,num-ports=4".into());
+            ("ohci.0", "2", "3", "1")
+        }
+        "uhci" => {
+            // Two ports: the stick, and a hub with the tablet and keyboard.
+            device("piix3-usb-uhci,id=uhci".into());
+            ("uhci.0", "2.2", "2", "1")
+        }
+        _ => {
+            // Eight USB 2 ports (QEMU's default is four): room for the USB
+            // network adapters beside the tablet, stick, hub and speaker.
+            device("qemu-xhci,id=xhci,p2=8,p3=4".into());
+            ("xhci.0", "1", "3", "2")
+        }
+    };
+    device(format!("usb-hub,bus={bus},port={hub}"));
+    device(format!("usb-tablet,bus={bus},port={tablet}"));
+    device(format!("usb-kbd,bus={bus},port={hub}.1"));
+    a.extend(usbredir::qemu_args(&opts.virtual_hid, bus, hub));
+    if let Some(stick) = &opts.usb_stick {
+        a.extend(["-drive".into(), format!("id=stick,if=none,format=raw,file={}", stick.display())]);
+        a.extend(["-device".into(), format!("usb-storage,bus={bus},port={stick_port},drive=stick")]);
+    }
+    if opts.usb_audio {
+        // Recorded on its own when recording, so tests can tell it played.
+        let audiodev = match opts.audio.strip_prefix("wav:") {
+            Some(path) => {
+                a.extend([
+                    "-audiodev".into(),
+                    format!("wav,id=usbsnd,path={}", usb_audio_wav(Path::new(path)).display()),
+                ]);
+                "usbsnd"
+            }
+            None => "snd",
+        };
+        a.extend(["-device".into(), usb_audio_device(bus, audiodev)]);
+    }
+    (a, bus, hub)
+}
+
+/// A network card on QEMU's user networking (NAT; the host is 10.0.2.2).
+/// `pci_extra` goes on a PCI card's `-device` (aarch64 turns off the x86
+/// option ROMs QEMU would otherwise offer its firmware).
+fn net_args(opts: &RunOpts, bus: &str, hub: &str, pci_extra: &str) -> Vec<String> {
+    let mut a: Vec<String> = Vec::new();
+    if opts.net.starts_with("usb-") {
+        a.extend(["-netdev".into(), format!("user,id=net0{}", opts.netdev_extra)]);
+        a.extend(["-device".into(), usb_net_device(bus, hub, 0)]);
+        if opts.second_usb_net {
+            a.extend(["-netdev".into(), "user,id=net1".into()]);
+            a.extend(["-device".into(), usb_net_device(bus, hub, 1)]);
+        }
+    } else if opts.net != "none" {
+        a.extend(["-netdev".into(), format!("user,id=net0{}", opts.netdev_extra)]);
+        let card = match opts.net {
+            "e1000" => "e1000,netdev=net0",
+            "e1000e" => "e1000e,netdev=net0",
+            "igb" => "igb,netdev=net0",
+            "rtl8139" => "rtl8139,netdev=net0",
+            _ => "virtio-net-pci,netdev=net0,disable-legacy=on",
+        };
+        a.extend(["-device".into(), format!("{card}{pci_extra}")]);
+    } else {
+        // Without an explicit opt-out, QEMU silently creates a default NIC.
+        a.extend(["-nic".into(), "none".into()]);
+    }
+    a
+}
+
 fn qemu(img: &Path, opts: &RunOpts) -> Command {
+    if arch::current() == arch::Arch::Aarch64 {
+        return virt::qemu(img, opts);
+    }
     let code = find_ovmf();
     let vars = ovmf_vars(&code);
     let monitor = session_dir().join("qemu-monitor.sock");
@@ -1248,63 +1413,8 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     };
     cmd.arg("-audiodev").arg(backend);
     cmd.args(["-device", "ich9-intel-hda", "-device", "hda-output,audiodev=snd"]);
-    // A USB controller with a tablet (absolute pointer), a hub with a
-    // keyboard behind it, and the USB stick.
-    let (bus, tablet, hub, stick_port) = match opts.usb {
-        "ehci" => {
-            // An ICH9 EHCI with its three UHCI companions: the high-speed
-            // tablet and stick stay on EHCI; the full-speed hub (and the
-            // keyboard behind it) is handed to a companion.
-            cmd.args(["-device", "ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on"]);
-            for (i, f) in [(1, 0), (2, 1), (3, 2)] {
-                cmd.arg("-device").arg(format!(
-                    "ich9-usb-uhci{i},masterbus=ehci.0,firstport={},addr=1d.{f},multifunction=on",
-                    (i - 1) * 2
-                ));
-            }
-            ("ehci.0", "2", "3", "1")
-        }
-        "ehci-ohci" => {
-            // VirtualBox's USB 2.0 controller: an EHCI with an OHCI companion.
-            cmd.args(["-device", "ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on"]);
-            cmd.args(["-device", "pci-ohci,masterbus=ehci.0,firstport=0,num-ports=6,addr=1d.0,multifunction=on"]);
-            ("ehci.0", "2", "3", "1")
-        }
-        "ohci" => {
-            cmd.args(["-device", "pci-ohci,id=ohci,num-ports=4"]);
-            ("ohci.0", "2", "3", "1")
-        }
-        "uhci" => {
-            // Two ports: the stick, and a hub with the tablet and keyboard.
-            cmd.args(["-device", "piix3-usb-uhci,id=uhci"]);
-            ("uhci.0", "2.2", "2", "1")
-        }
-        _ => {
-            // Eight USB 2 ports (QEMU's default is four): room for the USB
-            // network adapters beside the tablet, stick, hub and speaker.
-            cmd.args(["-device", "qemu-xhci,id=xhci,p2=8,p3=4"]);
-            ("xhci.0", "1", "3", "2")
-        }
-    };
-    cmd.arg("-device").arg(format!("usb-hub,bus={bus},port={hub}"));
-    cmd.arg("-device").arg(format!("usb-tablet,bus={bus},port={tablet}"));
-    cmd.arg("-device").arg(format!("usb-kbd,bus={bus},port={hub}.1"));
-    cmd.args(usbredir::qemu_args(&opts.virtual_hid, bus, hub));
-    if let Some(stick) = &opts.usb_stick {
-        cmd.arg("-drive").arg(format!("id=stick,if=none,format=raw,file={}", stick.display()));
-        cmd.arg("-device").arg(format!("usb-storage,bus={bus},port={stick_port},drive=stick"));
-    }
-    if opts.usb_audio {
-        // Recorded on its own when recording, so tests can tell it played.
-        let audiodev = match opts.audio.strip_prefix("wav:") {
-            Some(path) => {
-                cmd.arg("-audiodev").arg(format!("wav,id=usbsnd,path={}", usb_audio_wav(Path::new(path)).display()));
-                "usbsnd"
-            }
-            None => "snd",
-        };
-        cmd.arg("-device").arg(usb_audio_device(bus, audiodev));
-    }
+    let (usb, bus, hub) = usb_args(opts);
+    cmd.args(usb);
     if let Some(source) = opts.host_battery {
         let page = battery::start(source, root().join("target/battery-page"));
         cmd.arg("-object").arg(format!(
@@ -1324,39 +1434,10 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         fs::write(&ssdt, i2c_ssdt::build()).expect("write I2C SSDT");
         cmd.arg("-acpitable").arg(format!("file={}", ssdt.display()));
     }
-    // A network card on QEMU's user networking (NAT; the host is 10.0.2.2).
-    if opts.net.starts_with("usb-") {
-        cmd.arg("-netdev").arg(format!("user,id=net0{}", opts.netdev_extra));
-        cmd.arg("-device").arg(usb_net_device(bus, hub, 0));
-        if opts.second_usb_net {
-            cmd.arg("-netdev").arg("user,id=net1");
-            cmd.arg("-device").arg(usb_net_device(bus, hub, 1));
-        }
-    } else if opts.net != "none" {
-        cmd.arg("-netdev").arg(format!("user,id=net0{}", opts.netdev_extra));
-        cmd.arg("-device").arg(match opts.net {
-            "e1000" => "e1000,netdev=net0",
-            "e1000e" => "e1000e,netdev=net0",
-            "igb" => "igb,netdev=net0",
-            "rtl8139" => "rtl8139,netdev=net0",
-            _ => "virtio-net-pci,netdev=net0,disable-legacy=on",
-        });
-    } else {
-        // Without an explicit opt-out, QEMU silently creates a default NIC.
-        cmd.args(["-nic", "none"]);
-    }
+    cmd.args(net_args(opts, bus, hub, ""));
     // Allow S3 (suspend to RAM); wake with QMP `system_wakeup` or a key press.
     cmd.args(["-global", "ICH9-LPC.disable_s3=0"]);
-    // The guest's RTC is local to its chosen offset, not the host's zone.
-    // A fresh guest defaults to UTC. Using host localtime made its TLS clock
-    // several hours wrong, especially around DST and new certificates.
-    let offset = image::preference(img, "utc_offset")
-        .and_then(|v| v.parse::<i64>().ok())
-        .filter(|v| (-720..=840).contains(v))
-        .unwrap_or(0);
-    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    let rtc = rtc_timestamp(unix + offset * 60);
-    cmd.args(["-rtc", &format!("base={rtc},clock=host")]);
+    cmd.args(["-rtc", &rtc_arg(img)]);
     cmd.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     cmd.args(["-serial", "stdio"]);
     if let Some(sock) = &opts.telemetry {
@@ -1692,7 +1773,7 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
         strip_debug(&esp.join("aurora/kernel.elf"));
         println!("testing the kernel {}", Path::new(&kernel).display());
     }
-    let img = root().join("target/test-disk.img");
+    let img = arch::current().disk(&root(), "test-disk");
     let shown = if heads > 1 { format!("display {gpu} with {heads} heads") } else { format!("display {gpu}") };
     println!("running kernel tests with the disk on {disk}, network {net}, {shown}, USB on {usb}, {memory_mib} MiB of memory");
     // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux.

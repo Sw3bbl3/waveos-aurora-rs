@@ -38,6 +38,8 @@ pub struct Image {
     pub gnu_note: bool,
     /// `EI_OSABI` (3 = GNU/Linux).
     pub osabi: u8,
+    /// `e_machine`: [`EM_X86_64`] or [`EM_AARCH64`].
+    pub machine: u16,
     /// Page-aligned lowest virtual address of any PT_LOAD segment.
     pub virt_start: u64,
     /// Page-aligned end of the highest PT_LOAD segment.
@@ -49,7 +51,25 @@ const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
 const PT_NOTE: u32 = 4;
 const ET_DYN: u16 = 3;
-const EM_X86_64: u16 = 62;
+pub const EM_X86_64: u16 = 62;
+pub const EM_AARCH64: u16 = 183;
+
+/// The machine this code is built for: what the bootloader and the kernel
+/// can run.
+pub const NATIVE_MACHINE: u16 = if cfg!(target_arch = "aarch64") { EM_AARCH64 } else { EM_X86_64 };
+
+/// Which machines [`parse`] accepts. Inside WaveOS (the bootloader, the
+/// kernel, user programs: built for no operating system or for UEFI) only
+/// [`NATIVE_MACHINE`], so a program for the other architecture is not
+/// executable. On a development host (xtask packaging apps for either
+/// architecture, the libraries' tests) both.
+pub fn accepts_machine(machine: u16) -> bool {
+    if cfg!(any(target_os = "none", target_os = "uefi")) {
+        machine == NATIVE_MACHINE
+    } else {
+        machine == EM_X86_64 || machine == EM_AARCH64
+    }
+}
 
 fn u16_at(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes(b[o..o + 2].try_into().unwrap())
@@ -65,7 +85,8 @@ pub fn parse(file: &[u8]) -> Option<Image> {
     if file.len() < 64 || &file[0..4] != b"\x7fELF" || file[4] != 2 || file[5] != 1 {
         return None; // not ELF64 little-endian
     }
-    if u16_at(file, 18) != EM_X86_64 {
+    let machine = u16_at(file, 18);
+    if !accepts_machine(machine) {
         return None;
     }
     let entry = u64_at(file, 24);
@@ -135,6 +156,7 @@ pub fn parse(file: &[u8]) -> Option<Image> {
         waveos_note,
         gnu_note,
         osabi: file[7],
+        machine,
         virt_start: lo,
         virt_end: hi,
         segments,
@@ -193,7 +215,15 @@ mod tests {
     #[test]
     fn reads_segments() {
         let img = parse(&tiny()).unwrap();
+        assert_eq!(img.machine, EM_X86_64);
         assert_eq!(img.entry, 0x400078);
+        // The same program for aarch64 (a host accepts both), and for a
+        // machine WaveOS doesn't run on.
+        let mut arm = tiny();
+        arm[18..20].copy_from_slice(&EM_AARCH64.to_le_bytes());
+        assert_eq!(parse(&arm).unwrap().machine, EM_AARCH64);
+        arm[18..20].copy_from_slice(&243u16.to_le_bytes()); // RISC-V
+        assert!(parse(&arm).is_none());
         assert_eq!((img.virt_start, img.virt_end), (0x400000, 0x401000));
         assert_eq!(img.segments.len(), 1);
         assert_eq!(img.segments[0].flags, PF_R | PF_X);
