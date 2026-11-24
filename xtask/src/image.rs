@@ -381,6 +381,8 @@ pub(crate) fn new_disk_around(
     to.set_times(aurorafs::ROOT, root.ctime, root.mtime).map_err(err)?;
     to.commit().map_err(err)?;
     to.fsck().map_err(io::Error::other)?;
+    // Made clean: its first start needs no check.
+    to.unmount().map_err(err)?;
     drop(to);
     new.sync_all()
 }

@@ -2079,7 +2079,7 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
 /// as target/powercut-failed.img.
 fn power_cuts(profile: Profile, disk: &str, smp: u32, iterations: u32) {
     let esp = build(profile, true);
-    let img = root().join("target/powercut-disk.img");
+    let img = arch::current().disk(&root(), "powercut-disk");
     image::create_with(&esp, &root().join("assets/home"), None, &img, 256 * 1024 * 1024).expect("disk creation failed");
     let seed: u64 = env::var("AURORA_POWERCUT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1)
@@ -2136,7 +2136,7 @@ fn power_cuts(profile: Profile, disk: &str, smp: u32, iterations: u32) {
 }
 
 fn fail_cut(img: &Path, it: u32, why: &str) -> ! {
-    let keep = root().join("target/powercut-failed.img");
+    let keep = arch::current().disk(&root(), "powercut-failed");
     let _ = fs::copy(img, &keep);
     eprintln!("\npower cut {it} FAILED: {why}\n(the disk is kept as {})", keep.display());
     exit(1);

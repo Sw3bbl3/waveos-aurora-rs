@@ -45,6 +45,9 @@ fn loose_inode(v: &mut Volume<MemDisk>, links: u32) -> u64 {
     .unwrap()
 }
 
+/// What a report should hold.
+type Expect<'a> = dyn Fn(&Problem) -> bool + 'a;
+
 fn has(r: &Report, f: impl Fn(&Problem) -> bool) -> bool {
     r.problems.iter().any(f)
 }
@@ -105,7 +108,7 @@ fn every_problem_is_reported_at_once_and_repaired() {
     .unwrap();
     v.commit().unwrap();
     let r = v.check();
-    let want: &[(&str, &dyn Fn(&Problem) -> bool)] = &[
+    let want: &[(&str, &Expect<'_>)] = &[
         ("unreachable", &|p| matches!(p, Problem::Unreachable { ino, links: 1, .. } if *ino == lost)),
         ("orphan", &|p| matches!(p, Problem::Unreachable { ino, links: 0, .. } if *ino == orphan)),
         ("dangling", &|p| matches!(p, Problem::BadEntry { fault: EntryFault::Dangling, ino: 900, .. })),
