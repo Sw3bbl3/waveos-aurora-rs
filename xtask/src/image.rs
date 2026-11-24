@@ -237,7 +237,7 @@ pub fn grow(img: &Path, size: u64) -> io::Result<()> {
                 let (uid, gid) = from.default_owner();
                 to.enable_owners(uid, gid).map_err(err)?;
             }
-            copy_tree(&mut from, &mut to, aurorafs::ROOT, "").map_err(err)?;
+            copy_tree(&mut from, &mut to, aurorafs::ROOT, "", &|_| false).map_err(err)?;
             let root = from.stat(aurorafs::ROOT).map_err(err)?;
             if from.has_own_owner(aurorafs::ROOT).map_err(err)? {
                 to.set_owner(aurorafs::ROOT, root.owner).map_err(err)?;
@@ -274,21 +274,120 @@ fn home_volume(file: &mut File, (start, end): (u64, u64)) -> aurorafs::Result<au
     aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now)
 }
 
-/// Copies the folder `dir` of `from` to `path` on `to`, times included.
+/// The home volume of a disk image, as `migrate.rs` works on it.
+pub(crate) type Home<'a> = aurorafs::Volume<WaveDisk<'a>>;
+
+/// Makes `out`, a disk of `size` bytes with the EFI partition folder `esp`
+/// and a home volume holding a copy of the one on `src` (label, owners,
+/// times), leaving out the paths `skip` names (`/a/b`, as on the volume);
+/// `finish` then sees the source and the new volume to add what replaces
+/// them. `src` is mounted, which replays its journal: pass a copy.
+pub(crate) fn new_disk_around(
+    src: &Path,
+    esp: &Path,
+    out: &Path,
+    size: u64,
+    skip: &dyn Fn(&str) -> bool,
+    finish: &mut dyn FnMut(&mut Home, &mut Home) -> io::Result<()>,
+) -> io::Result<()> {
+    let err = |e: aurorafs::Error| io::Error::other(format!("AuroraFS: {e:?}"));
+    let mut old = OpenOptions::new().read(true).write(true).open(src)?;
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    old.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE))?;
+    old.read_exact(&mut entry)?;
+    if entry[0..16] != aurorafs::PARTITION_TYPE {
+        return Err(io::Error::other("the disk has no AuroraFS volume"));
+    }
+    let home = partition(&mut old, 1)?;
+    let mut from = home_volume(&mut old, home).map_err(err)?;
+    let l = layout(size);
+    let mut new = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(out)?;
+    new.set_len(size)?;
+    write_gpt(&mut new, &l)?;
+    format_esp(&mut new, ESP_START, ESP_SECTORS, esp)?;
+    let bytes = (l.home_end - l.home_start + 1) * SECTOR;
+    let disk =
+        WaveDisk { region: Region { file: &mut new, start: l.home_start * SECTOR, len: bytes, pos: 0 }, blocks: bytes / 4096 };
+    let mut to = aurorafs::Volume::format(disk, &from.label(), pseudo_guid(3), now).map_err(err)?;
+    if from.features() & aurorafs::FEATURE_OWNERS != 0 {
+        let (uid, gid) = from.default_owner();
+        to.enable_owners(uid, gid).map_err(err)?;
+    }
+    copy_tree(&mut from, &mut to, aurorafs::ROOT, "", skip).map_err(err)?;
+    finish(&mut from, &mut to)?;
+    let root = from.stat(aurorafs::ROOT).map_err(err)?;
+    if from.has_own_owner(aurorafs::ROOT).map_err(err)? {
+        to.set_owner(aurorafs::ROOT, root.owner).map_err(err)?;
+    }
+    to.set_times(aurorafs::ROOT, root.ctime, root.mtime).map_err(err)?;
+    to.commit().map_err(err)?;
+    to.fsck().map_err(io::Error::other)?;
+    drop(to);
+    new.sync_all()
+}
+
+/// Mounts the home volume of the disk image open as `file` (replaying its
+/// journal, which writes).
+pub(crate) fn open_home(file: &mut File) -> io::Result<Home<'_>> {
+    let home = partition(file, 1)?;
+    home_volume(file, home).map_err(|e| io::Error::other(format!("AuroraFS: {e:?}")))
+}
+
+/// A file's contents on a home volume, and its own owner if it has one
+/// (`None` when there is no such file).
+pub(crate) fn read_with_owner(vol: &mut Home, path: &str) -> Option<(Vec<u8>, Option<aurorafs::Owner>)> {
+    let ino = vol.resolve(path).ok()?;
+    let owner = own_owner(vol, ino).ok()?;
+    Some((read_file(vol, path), owner))
+}
+
+/// Writes `data` to `path` (its folder must exist), with `owner` if given.
+pub(crate) fn write_with_owner(
+    vol: &mut Home,
+    path: &str,
+    data: &[u8],
+    owner: Option<aurorafs::Owner>,
+) -> aurorafs::Result<()> {
+    let ino = vol.write_file(path, data)?;
+    if let Some(o) = owner {
+        vol.set_owner(ino, o)?;
+    }
+    Ok(())
+}
+
+/// The names in folder `path` (empty if there is none).
+pub(crate) fn list(vol: &mut Home, path: &str) -> Vec<String> {
+    let Ok(ino) = vol.resolve(path) else { return Vec::new() };
+    let mut names: Vec<String> = vol.readdir(ino).unwrap_or_default().into_iter().map(|e| e.name).collect();
+    names.sort();
+    names
+}
+
+/// A file's contents on a home volume (empty if it isn't there).
+pub(crate) fn home_file(vol: &mut Home, path: &str) -> Vec<u8> {
+    read_file(vol, path)
+}
+
+/// Copies the folder `dir` of `from` to `path` on `to`, times included,
+/// except what `skip` names.
 fn copy_tree<A: aurorafs::Disk, B: aurorafs::Disk>(
     from: &mut aurorafs::Volume<A>,
     to: &mut aurorafs::Volume<B>,
     dir: u64,
     path: &str,
+    skip: &dyn Fn(&str) -> bool,
 ) -> aurorafs::Result<()> {
     let parent = to.resolve(path)?;
     let mut buf = vec![0u8; 1 << 20];
     for e in from.readdir(dir)? {
+        if skip(&format!("{path}/{}", e.name)) {
+            continue;
+        }
         let meta = from.stat(e.ino)?;
         let owner = from.has_own_owner(e.ino)?.then_some(meta.owner);
         let ino = to.create_owned(parent, &e.name, e.kind, owner)?;
         if e.kind == aurorafs::Kind::Dir {
-            copy_tree(from, to, e.ino, &format!("{path}/{}", e.name))?;
+            copy_tree(from, to, e.ino, &format!("{path}/{}", e.name), skip)?;
         } else {
             let mut at = 0;
             while at < meta.size {
@@ -734,7 +833,7 @@ fn copy_to_fat<T: fatfs::ReadWriteSeek>(src: &Path, dst: &fatfs::Dir<T>, pack: b
 // ------------------------------------------------------------ AuroraFS
 
 /// A partition of the image file seen as 4 KiB AuroraFS blocks.
-struct WaveDisk<'a> {
+pub(crate) struct WaveDisk<'a> {
     region: Region<'a>,
     blocks: u64,
 }
@@ -900,7 +999,7 @@ fn crc32(data: &[u8]) -> u32 {
 }
 
 /// A window onto a byte range of the image file.
-struct Region<'a> {
+pub(crate) struct Region<'a> {
     file: &'a mut File,
     start: u64,
     len: u64,

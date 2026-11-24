@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(c.packages[0].permissions, ["network"]);
         // Writing again makes the next version.
         store::write(&dir, &store::Spec::new("T", &key), &[(p, listing)]).unwrap();
-        assert_eq!(store::current_catalog(&dir).unwrap().version, 2);
+        assert_eq!(store::current_catalog_for(&dir, crate::arch::Arch::X86_64).unwrap().version, 2);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

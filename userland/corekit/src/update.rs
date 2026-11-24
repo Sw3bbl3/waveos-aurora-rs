@@ -7,7 +7,7 @@
 //! ```text
 //! esp   \aurora\kernel.elf + system.tar on the EFI partition (/Boot): as installed
 //! a, b  /.system/a/, /.system/b/ on the home volume: kernel.elf, system.tar,
-//!       BOOTX64.EFI, update.txt and update.sig of an update
+//!       BOOTX64.EFI (BOOTAA64.EFI on aarch64), update.txt and update.sig of an update
 //! ```
 //!
 //! An update is written to the slot that isn't running, verified by
@@ -51,6 +51,8 @@ use sha2::{Digest, Sha256};
 
 pub const SLOTS: &str = "/.system";
 pub const BOOT_CONF: &str = "/Boot/aurora/boot.conf";
+/// The bootloader's file on the EFI partition and in a slot, for this processor.
+pub const BOOT_FILE: &str = if cfg!(target_arch = "aarch64") { "BOOTAA64.EFI" } else { "BOOTX64.EFI" };
 pub const UPDATE_KEYS: &str = "/System/Keys/Updates";
 /// Starts a new system gets before the previous one is started instead.
 pub const TRIES: u32 = 3;
@@ -206,7 +208,7 @@ fn running_files() -> Vec<([u8; 32], String)> {
     let mut out = Vec::new();
     if let Some(u) = fs::read(&desc).ok().and_then(|b| Update::parse(&b).ok()) {
         out.push((u.kernel.sha256, kernel));
-        out.push((u.bootloader.sha256, String::from("/Boot/EFI/BOOT/BOOTX64.EFI")));
+        out.push((u.bootloader.sha256, format!("/Boot/EFI/BOOT/{BOOT_FILE}")));
         for item in &u.layout {
             if let Item::File { path, sha256, size } = item {
                 if *size > 0 {
@@ -297,6 +299,11 @@ pub fn check(version: Option<&str>) -> Result<Option<Available>> {
         return Ok(None);
     };
     let update = describe(&catalog, &release)?;
+    // Only this processor's system (the catalogue is checked too; this is
+    // the signed description itself).
+    if update.arch() != gina::NATIVE_ARCH {
+        return Err(format!("WaveOS {} is for {} computers; this one is {}.", update.version, update.arch(), gina::NATIVE_ARCH));
+    }
     if !update.min_from.is_empty() && gina::compare_versions(&current, &update.min_from).is_lt() {
         return Err(format!("WaveOS {} can't be updated from this version ({current}).", update.version));
     }
@@ -381,7 +388,7 @@ pub fn install(av: &Available, mut progress: impl FnMut(u64, u64)) -> Result<Str
     let total = av.installed_size();
     let mut written = 0u64;
     let result = (|| -> Result<()> {
-        for (name, part) in [("kernel.elf", &u.kernel), ("BOOTX64.EFI", &u.bootloader)] {
+        for (name, part) in [("kernel.elf", &u.kernel), (BOOT_FILE, &u.bootloader)] {
             let bytes = object(&part.sha256)?;
             fs::write(&format!("{staging}/{name}"), &bytes).map_err(io)?;
             written += part.size;
@@ -426,7 +433,7 @@ pub fn install(av: &Available, mut progress: impl FnMut(u64, u64)) -> Result<Str
         fs::try_sync_path(&staging).map_err(io)?;
         fs::try_sync().map_err(io)?;
         // Read everything back before anything points at it.
-        for (name, part) in [("kernel.elf", &u.kernel), ("BOOTX64.EFI", &u.bootloader), ("system.tar", &u.system)] {
+        for (name, part) in [("kernel.elf", &u.kernel), (BOOT_FILE, &u.bootloader), ("system.tar", &u.system)] {
             if !download::verified(&format!("{staging}/{name}"), part.size, &part.sha256) {
                 return Err(format!("{name} did not read back as written: the disk may be failing."));
             }
@@ -465,13 +472,14 @@ pub fn arm(tries: u32) -> Result<String> {
     let previous = booted_slot();
     if crate::prefs::get("system_bootloader").as_deref() == Some("legacy") {
         // This bootloader can't start updates: put the update's own in place first.
-        let new = fs::read(&format!("{}/BOOTX64.EFI", slot_dir(&slot))).map_err(io)?;
-        let tmp = "/Boot/EFI/BOOT/BOOTX64.NEW";
+        let new = fs::read(&format!("{}/{BOOT_FILE}", slot_dir(&slot))).map_err(io)?;
+        let tmp = &format!("/Boot/EFI/BOOT/{}.NEW", BOOT_FILE.trim_end_matches(".EFI"));
+        let boot = format!("/Boot/EFI/BOOT/{BOOT_FILE}");
         fs::write(tmp, &new).map_err(io)?;
         fs::try_sync_path(tmp).map_err(io)?;
-        if fs::rename(tmp, "/Boot/EFI/BOOT/BOOTX64.EFI").is_err() {
-            fs::remove("/Boot/EFI/BOOT/BOOTX64.EFI").map_err(io)?;
-            fs::rename(tmp, "/Boot/EFI/BOOT/BOOTX64.EFI").map_err(io)?;
+        if fs::rename(tmp, &boot).is_err() {
+            fs::remove(&boot).map_err(io)?;
+            fs::rename(tmp, &boot).map_err(io)?;
         }
     }
     let tries = tries.clamp(1, 9).to_string();

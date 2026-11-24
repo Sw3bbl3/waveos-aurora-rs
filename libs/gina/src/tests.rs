@@ -523,7 +523,7 @@ fn system_update_rebuilds_the_image() {
     let old = system_tar(&[("version.txt", b"WaveOS Aurora 0.8.0\n"), ("Apps/Files.elf", &[7; 1000]), ("empty", b"")]);
     let new = system_tar(&[("version.txt", b"WaveOS Aurora 0.8.1\n"), ("Apps/Files.elf", &[7; 1000]), ("empty", b"")]);
     let part = |b: &[u8]| system::Part { sha256: Sha256::digest(b).into(), size: b.len() as u64 };
-    let u = system::describe("0.8.1", "0.8", "Fixes.\nMore fixes.", part(b"kernel"), part(b"boot"), &new).unwrap();
+    let u = system::describe("x86_64", "0.8.1", "0.8", "Fixes.\nMore fixes.", part(b"kernel"), part(b"boot"), &new).unwrap();
     assert_eq!(system::Update::parse(u.encode().as_bytes()), Ok(u.clone()));
     assert_eq!(system::tar_size(&u.layout), new.len() as u64);
     // Only what changed is missing: the new version.txt, kernel and bootloader.
@@ -600,7 +600,7 @@ fn corrupt_inputs_never_panic() {
     });
     let tar = system_tar(&[("version.txt", b"WaveOS Aurora 0.8.1\n"), ("Apps/A.elf", &[1; 700])]);
     let part = system::Part { sha256: [1; 32], size: 10 };
-    let update = system::describe("0.8.1", "0.8", "Notes", part, part, &tar).unwrap();
+    let update = system::describe("x86_64", "0.8.1", "0.8", "Notes", part, part, &tar).unwrap();
     aurora_mutate::check("gina-system-update", &[update.encode().into_bytes()], 3000, |bytes| {
         if let Ok(u) = system::Update::parse(bytes) {
             assert_eq!(system::Update::parse(u.encode().as_bytes()), Ok(u));
@@ -627,4 +627,31 @@ fn required_resources_and_abi() {
     assert!(pack(&m, &[("bin/app", &elf())]).is_err());
     assert!(Manifest::parse(&manifest().encode().replace("abi = 1", "abi = 99")).is_err());
     assert!(Manifest::parse(&manifest().encode().replace("format = 1", "format = 3")).is_err());
+}
+
+/// Catalogues and system updates name their processor; x86_64 ones read
+/// exactly as before the port.
+#[test]
+fn architectures_in_catalogues_and_updates() {
+    assert_eq!(repo::catalog_files("x86_64"), ("catalog.txt", "catalog.sig"));
+    assert_eq!(repo::catalog_files("aarch64"), ("catalog-aarch64.txt", "catalog-aarch64.sig"));
+    let x86 = catalog();
+    assert_eq!(x86.arch(), "x86_64");
+    assert!(!x86.encode().contains("\narch\t"));
+    let arm = repo::Index { architecture: "aarch64".into(), ..catalog() };
+    let text = arm.encode();
+    assert!(text.contains("\nexpires\t") && text.contains("\narch\taarch64\n"));
+    let back = repo::Index::parse(text.as_bytes()).unwrap();
+    assert_eq!((back.arch(), &back), ("aarch64", &arm));
+    assert!(repo::Index::parse(text.replace("arch\taarch64", "arch\triscv64").as_bytes()).is_err());
+
+    let tar = system_tar(&[("version.txt", b"WaveOS Aurora 0.8.1\n")]);
+    let part = system::Part { sha256: [1; 32], size: 10 };
+    let x86 = system::describe("x86_64", "0.8.1", "", "", part, part, &tar).unwrap();
+    assert!(!x86.encode().contains("\narch\t"));
+    assert_eq!(x86.arch(), "x86_64");
+    let arm = system::describe("aarch64", "0.8.1", "", "", part, part, &tar).unwrap();
+    assert!(arm.encode().contains("\narch\taarch64\n"));
+    assert_eq!(system::Update::parse(arm.encode().as_bytes()).unwrap().arch(), "aarch64");
+    assert_eq!((system::boot_file("aarch64"), system::boot_file("x86_64")), ("BOOTAA64.EFI", "BOOTX64.EFI"));
 }

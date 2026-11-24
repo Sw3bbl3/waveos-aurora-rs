@@ -16,7 +16,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub const SLOTS: &str = "/.system";
 const BOOT_CONF: &str = "/Boot/aurora/boot.conf";
-const BOOTLOADER: &str = "/Boot/EFI/BOOT/BOOTX64.EFI";
+/// The bootloader on the EFI partition and its name in a slot (this processor's).
+const BOOT_FILE: &str = if cfg!(target_arch = "aarch64") { "BOOTAA64.EFI" } else { "BOOTX64.EFI" };
+const BOOTLOADER: &str = if cfg!(target_arch = "aarch64") { "/Boot/EFI/BOOT/BOOTAA64.EFI" } else { "/Boot/EFI/BOOT/BOOTX64.EFI" };
 
 static FLAGS: AtomicU32 = AtomicU32::new(0);
 static MARKED: AtomicBool = AtomicBool::new(false);
@@ -131,11 +133,11 @@ fn install_bootloader(slot: &str) {
     if slot == "esp" {
         return;
     }
-    let Ok(new) = crate::fs::read_all(&format!("{SLOTS}/{slot}/BOOTX64.EFI")) else { return };
+    let Ok(new) = crate::fs::read_all(&format!("{SLOTS}/{slot}/{BOOT_FILE}")) else { return };
     if new.len() < 4096 || &new[..2] != b"MZ" || crate::fs::read_all(BOOTLOADER).is_ok_and(|old| old == new) {
         return;
     }
-    let tmp = "/Boot/EFI/BOOT/BOOTX64.NEW";
+    let tmp = if cfg!(target_arch = "aarch64") { "/Boot/EFI/BOOT/BOOTAA64.NEW" } else { "/Boot/EFI/BOOT/BOOTX64.NEW" };
     let ok = crate::fs::write_all(tmp, &new).is_ok()
         && crate::fs::read_all(tmp).is_ok_and(|b| b == new)
         && (crate::fs::rename(tmp, BOOTLOADER).is_ok()

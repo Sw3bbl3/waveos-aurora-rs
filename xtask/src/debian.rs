@@ -11,6 +11,12 @@
 //! Symbolic links go into `.links`, since WaveOS's file systems have none.
 //! Maintainer scripts don't run; the few things they would set up are done
 //! here (see [`configure`]).
+//!
+//! Each architecture has its own root (`target/linux-root` for x86_64,
+//! `target/linux-root-aarch64`), from Debian's `amd64` or `arm64` index:
+//! both are listed, with their hashes, in the one pinned `Release`, so the
+//! chain of hashes is the same. Names that depend on the architecture
+//! (Debian's, the multiarch triplet) come from `arch.rs`.
 
 use super::linux::{fetch, gunzip, unpack_deb};
 use super::root;
@@ -20,7 +26,16 @@ use std::path::{Path, PathBuf};
 
 const SNAPSHOT: &str = "https://snapshot.debian.org/archive/debian/20261001T000000Z";
 const RELEASE_SHA256: &str = "abcf5882746e0f68171f41adbb4ac01b74b49d62d203379befb9265804311a4f";
-const INDEX: &str = "main/binary-amd64/Packages.gz";
+
+/// The package index of the build's architecture, as `Release` names it.
+fn index_path() -> String {
+    format!("main/binary-{}/Packages.gz", crate::arch::current().debian())
+}
+
+/// The smallest root that shows the way works: the C library, BusyBox and
+/// GNU Hello (a dynamically linked program, so the loader runs too).
+/// `cargo xtask linux-root --base`.
+pub const BASE_PACKAGES: &[&str] = &["libc6", "busybox", "hello"];
 
 /// What `cargo xtask linux-root` installs without arguments.
 /// (WenQuanYi Micro Hei: Chinese, Japanese and Korean text, which DejaVu
@@ -99,11 +114,11 @@ fn index() -> BTreeMap<String, Package> {
     let sha = text
         .split("SHA256:")
         .nth(1)
-        .and_then(|sums| sums.lines().find(|l| l.ends_with(&format!(" {INDEX}"))))
+        .and_then(|sums| sums.lines().find(|l| l.ends_with(&format!(" {}", index_path()))))
         .and_then(|l| l.split_whitespace().next())
         .expect("index checksum in Release")
         .to_string();
-    let gz = fetch(&format!("{SNAPSHOT}/dists/bookworm/{INDEX}"), &sha).expect("Debian package index");
+    let gz = fetch(&format!("{SNAPSHOT}/dists/bookworm/{}", index_path()), &sha).expect("Debian package index");
     let raw = String::from_utf8(gunzip(&fs::read(gz).unwrap())).unwrap();
     let mut out = BTreeMap::new();
     for para in raw.split("\n\n") {
@@ -172,9 +187,15 @@ fn resolve<'a>(idx: &'a BTreeMap<String, Package>, wanted: &[String]) -> Vec<&'a
     seen.into_values().collect()
 }
 
-/// Builds `target/linux-root` from `packages` (and what they need).
+/// The build's architecture's Linux root: `target/linux-root` (x86_64)
+/// or `target/linux-root-aarch64`.
+pub fn root_dir() -> PathBuf {
+    root().join(format!("target/linux-root{}", crate::arch::current().suffix()))
+}
+
+/// Builds [`root_dir`] from `packages` (and what they need).
 pub fn build(packages: &[String]) -> PathBuf {
-    build_into(&root().join("target/linux-root"), packages)
+    build_into(&root_dir(), packages)
 }
 
 /// Builds a Linux root in `out` from `packages` (and what they need).
@@ -312,18 +333,19 @@ fn configure(root: &Path, links: &mut BTreeMap<String, String>) {
     // Libraries that `update-alternatives` links into place when a package
     // is installed (FFmpeg, in GStreamer's libav plugin, needs BLAS and
     // LAPACK): linked to the one implementation in the root.
+    let triplet = crate::arch::current().multiarch();
     for (lib, dir) in [("libblas.so.3", "blas"), ("liblapack.so.3", "lapack")] {
-        let from = root.join("usr/lib/x86_64-linux-gnu").join(dir);
+        let from = root.join("usr/lib").join(triplet).join(dir);
         let real =
             fs::read_dir(&from).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
         if let Some(file) = real.filter(|f| f.starts_with(lib)).min() {
-            links.insert(format!("/usr/lib/x86_64-linux-gnu/{lib}"), format!("{dir}/{file}"));
+            links.insert(format!("/usr/lib/{triplet}/{lib}"), format!("{dir}/{file}"));
         }
     }
     // An empty loader cache: the loader then searches the usual folders.
     let etc = root.join("etc");
     fs::create_dir_all(&etc).unwrap();
-    fs::write(etc.join("ld.so.conf"), "/usr/local/lib\n/lib/x86_64-linux-gnu\n/usr/lib/x86_64-linux-gnu\n").unwrap();
+    fs::write(etc.join("ld.so.conf"), format!("/usr/local/lib\n/lib/{triplet}\n/usr/lib/{triplet}\n")).unwrap();
     fs::write(etc.join("machine-id"), "5761766553797374656d4c696e757830\n").unwrap();
     for (tool, dir) in GENERATED {
         let dir = root.join(dir);
