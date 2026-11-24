@@ -5,7 +5,7 @@ use super::idt::{PIC_BASE_VECTOR, SPURIOUS_VECTOR};
 use crate::acpi::AcpiInfo;
 use crate::mm::phys_to_virt;
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::instructions::port::Port;
+use crate::arch::io::Port;
 
 static LAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 /// LAPIC timer count for one millisecond (divide-by-16), measured once on the BSP.
@@ -239,7 +239,7 @@ fn wait_icr() {
 
 /// Sends a fixed interrupt `vector` to the CPU with local APIC id `apic`.
 pub fn send_ipi(apic: u32, vector: u8) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         wait_icr();
         lapic_write(LAPIC_ICR_HIGH, apic << 24);
         lapic_write(LAPIC_ICR_LOW, vector as u32);
@@ -249,7 +249,7 @@ pub fn send_ipi(apic: u32, vector: u8) {
 
 /// Sends `vector` to every other CPU.
 pub fn broadcast_ipi(vector: u8) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         wait_icr();
         lapic_write(LAPIC_ICR_HIGH, 0);
         // Destination shorthand 0b11: all excluding self.
@@ -265,7 +265,7 @@ pub fn broadcast_ipi(vector: u8) {
 /// ICR_HIGH, and the INIT would reset a running CPU.
 pub fn start_ap(apic: u32, page: u64, delay_us: impl Fn(u64)) {
     let send = |low: u32| {
-        x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::arch::interrupts::without_interrupts(|| {
             wait_icr();
             lapic_write(LAPIC_ICR_HIGH, apic << 24);
             lapic_write(LAPIC_ICR_LOW, low);

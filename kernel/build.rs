@@ -30,6 +30,11 @@ fn main() {
     println!("cargo:rerun-if-changed=vdso");
     println!("cargo:rerun-if-env-changed=WAVEOS_CC");
 
+    // The C half and the vDSO are x86-64 code so far: other architectures
+    // build without them (as without clang).
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64") {
+        return;
+    }
     let cc = std::env::var("WAVEOS_CC").unwrap_or_else(|_| "clang".into());
     if Command::new(&cc).arg("--version").output().is_err() {
         println!("cargo:warning=clang not found: building without the Linux GPU drivers (set WAVEOS_CC to use another clang)");

@@ -36,7 +36,7 @@ use bootinfo::PHYS_OFFSET;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use x86_64::instructions::interrupts;
+use crate::arch::interrupts;
 
 const PAGE: usize = PAGE_SIZE as usize;
 const NCLASSES: usize = 40;
@@ -663,7 +663,7 @@ mod large {
     pub fn free(p: *mut u8, size: usize) {
         let (base, pages) = (p as u64, (size as u64).div_ceil(PAGE_SIZE));
         LARGE_BYTES.fetch_sub(pages * PAGE_SIZE, Ordering::Relaxed);
-        if !x86_64::instructions::interrupts::are_enabled() {
+        if !crate::arch::interrupts::are_enabled() {
             let mut d = DEFERRED.lock();
             if let Some(slot) = d.iter_mut().find(|s| s.1 == 0) {
                 *slot = (base, pages);
@@ -676,7 +676,7 @@ mod large {
     }
 
     fn release_deferred() {
-        if !x86_64::instructions::interrupts::are_enabled() {
+        if !crate::arch::interrupts::are_enabled() {
             return;
         }
         loop {

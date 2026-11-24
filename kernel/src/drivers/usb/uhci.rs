@@ -20,7 +20,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{fence, AtomicU32, AtomicUsize, Ordering};
-use x86_64::instructions::port::Port;
+use crate::arch::io::Port;
 
 // I/O registers.
 const USBCMD: u16 = 0x00;

@@ -129,7 +129,7 @@ pub fn load(
         strings.push(0);
         at
     };
-    let platform = add(b"x86_64", &mut strings);
+    let platform = add(if cfg!(target_arch = "aarch64") { &b"aarch64"[..] } else { &b"x86_64"[..] }, &mut strings);
     let execfn = add(exec_path.as_bytes(), &mut strings);
     let args: Vec<usize> = argv.iter().map(|a| add(a.as_bytes(), &mut strings)).collect();
     let envs: Vec<usize> = env.iter().map(|e| add(e.as_bytes(), &mut strings)).collect();
@@ -137,7 +137,7 @@ pub fn load(
     let strings_at = (random_at - strings.len() as u64) & !0xF;
     let addr = |off: usize| strings_at + off as u64;
 
-    let hwcap = core::arch::x86_64::__cpuid(1).edx as u64;
+    let hwcap = crate::arch::cpu::linux_hwcap();
     // Who the program runs as (its parent's, or the session's for the desktop's).
     let cred = crate::users::current().unwrap_or_else(crate::users::session);
     let (uid, gid) = (cred.uid as u64, cred.gid as u64);

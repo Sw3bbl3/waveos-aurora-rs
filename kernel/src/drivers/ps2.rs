@@ -11,7 +11,7 @@ use super::vmmouse;
 use crate::sync::IrqMutex;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
-use x86_64::instructions::port::Port;
+use crate::arch::io::Port;
 
 const DATA: u16 = 0x60;
 const STATUS: u16 = 0x64;
@@ -296,7 +296,7 @@ pub fn mouse_irq() {
 
 /// Sets the keyboard's lights (only Caps Lock is used).
 fn set_lights(caps: bool) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         write_data(0xED);
         let _ = read_data(); // ACK
         write_data((caps as u8) << 2);
@@ -306,7 +306,7 @@ fn set_lights(caps: bool) {
 
 /// Sets the keyboard's auto-repeat: `delay` 0–3 (250–1000 ms), `rate` 0 (30/s) – 31 (2/s).
 pub fn set_typematic(delay: u8, rate: u8) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         write_data(0xF3);
         let _ = read_data(); // ACK
         write_data((delay & 3) << 5 | (rate & 31));

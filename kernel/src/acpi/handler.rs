@@ -9,7 +9,7 @@ use acpi::{Handle, PciAddress, PhysicalMapping};
 use alloc::collections::BTreeMap;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
-use x86_64::instructions::port::Port;
+use crate::arch::io::Port;
 
 #[derive(Clone, Copy)]
 pub struct KernelHandler;

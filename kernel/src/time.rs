@@ -1,11 +1,12 @@
 //! Monotonic kernel time.
 //!
-//! The clock is the CPU's time-stamp counter, calibrated against the HPET
-//! (or the PIT) at boot, when the TSC runs at a constant rate (invariant TSC,
-//! or any hypervisor). Otherwise the HPET counter itself, and as a last
-//! resort the 1 kHz scheduler tick. "Ticks" are milliseconds.
+//! The clock is the CPU's cycle counter when it runs at a known, constant
+//! rate (`arch::clock`): on x86 the time-stamp counter, calibrated against
+//! the HPET (or the PIT) at boot when it is invariant or under any
+//! hypervisor; on Arm the generic timer's virtual count. Otherwise the HPET
+//! counter itself, and as a last resort the 1 kHz scheduler tick. "Ticks"
+//! are milliseconds. (The names say TSC: the cycle counter of any CPU.)
 
-use core::arch::x86_64::{__cpuid, _rdtsc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Scheduler tick frequency in Hz (ticks are milliseconds).
@@ -34,73 +35,22 @@ pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Calibrates the TSC against the HPET or the PIT (call once, early, with interrupts off).
+/// Makes the CPU's cycle counter the clock if it runs at a known, constant
+/// rate (`arch::clock`: on x86 the TSC, calibrated against the HPET or the
+/// PIT; on Arm the generic timer). Call once, early, with interrupts off.
 pub fn init_clock() {
-    let invariant = __cpuid(0x8000_0000).eax >= 0x8000_0007 && __cpuid(0x8000_0007).edx & (1 << 8) != 0;
-    let hypervisor = __cpuid(1).ecx & (1 << 31) != 0;
-    if !invariant && !hypervisor {
-        log!("time", "TSC not invariant; using {:?} as the clock", source());
+    let Some(hz) = crate::arch::clock::counter_hz() else {
+        log!("time", "{} not invariant; using {:?} as the clock", crate::arch::clock::NAME, source());
         return;
-    }
-    const MS: u64 = 20;
-    let hz = if crate::drivers::hpet::present() {
-        hpet_tsc_hz()
-    } else {
-        let (t0, t1) = pit_wait(|| unsafe { _rdtsc() }, MS);
-        (t1 - t0) * 1000 / MS
     };
-    TSC_BASE.store(unsafe { _rdtsc() }, Ordering::Relaxed);
+    TSC_BASE.store(crate::arch::cpu::cycles(), Ordering::Relaxed);
     TSC_MULT.store(((1_000_000_000u128 << 32) / hz as u128) as u64, Ordering::Relaxed);
     TSC_HZ.store(hz, Ordering::Release);
-    log!("time", "TSC at {}.{:02} GHz is the clock", hz / 1_000_000_000, hz / 10_000_000 % 100);
-}
-
-/// The TSC frequency measured against the HPET: the median of several short
-/// windows. Under a hypervisor the host can pause this CPU at any point, which
-/// stretches one window or separates a TSC read from its HPET read; the median
-/// discards such windows, and each sample keeps the TSC read that sat in the
-/// tightest pair of HPET reads.
-fn hpet_tsc_hz() -> u64 {
-    use crate::drivers::hpet;
-    let sample = || {
-        let mut best = (u64::MAX, 0u64, 0u64);
-        for _ in 0..8 {
-            let h0 = hpet::nanos();
-            let t = unsafe { _rdtsc() };
-            let h1 = hpet::nanos();
-            if h1 - h0 < best.0 {
-                best = (h1 - h0, t, h0 + (h1 - h0) / 2);
-            }
-        }
-        (best.1, best.2)
-    };
-    let mut rates = [0u64; 5];
-    for rate in rates.iter_mut() {
-        let (t0, h0) = sample();
-        hpet::spin_us(8000);
-        let (t1, h1) = sample();
-        *rate = ((t1 - t0) as u128 * 1_000_000_000 / (h1 - h0).max(1) as u128) as u64;
-    }
-    rates.sort_unstable();
-    rates[rates.len() / 2]
-}
-
-/// Reads `f` before and after `ms` milliseconds measured by PIT channel 2.
-fn pit_wait(f: impl Fn() -> u64, ms: u64) -> (u64, u64) {
-    use x86_64::instructions::port::Port;
-    unsafe {
-        let mut ctl = Port::<u8>::new(0x61);
-        let mut mode = Port::<u8>::new(0x43);
-        let mut ch2 = Port::<u8>::new(0x42);
-        let v = ctl.read();
-        ctl.write((v & !0x02) | 0x01);
-        mode.write(0b1011_0000);
-        let count = (1_193_182 * ms / 1000) as u16;
-        ch2.write(count as u8);
-        let a = f();
-        ch2.write((count >> 8) as u8);
-        while ctl.read() & 0x20 == 0 {}
-        (a, f())
+    let name = crate::arch::clock::NAME;
+    if hz >= 1_000_000_000 {
+        log!("time", "{} at {}.{:02} GHz is the clock", name, hz / 1_000_000_000, hz / 10_000_000 % 100);
+    } else {
+        log!("time", "{} at {}.{:02} MHz is the clock", name, hz / 1_000_000, hz / 10_000 % 100);
     }
 }
 
@@ -133,7 +83,7 @@ pub fn suspend() {
 pub fn resume() {
     crate::drivers::hpet::resume();
     if TSC_HZ.load(Ordering::Relaxed) != 0 {
-        TSC_BASE.store(unsafe { _rdtsc() }, Ordering::Relaxed);
+        TSC_BASE.store(crate::arch::cpu::cycles(), Ordering::Relaxed);
     }
     let at = SUSPENDED_AT.load(Ordering::Acquire) as i64;
     OFFSET_NS.store(at - raw_ns() as i64, Ordering::Release);
@@ -156,7 +106,7 @@ pub fn tsc_params() -> (bool, u64, u64, i64) {
 fn raw_ns() -> u64 {
     let hz = TSC_HZ.load(Ordering::Relaxed);
     if hz != 0 {
-        let d = unsafe { _rdtsc() }.wrapping_sub(TSC_BASE.load(Ordering::Relaxed));
+        let d = crate::arch::cpu::cycles().wrapping_sub(TSC_BASE.load(Ordering::Relaxed));
         return ((d as u128 * TSC_MULT.load(Ordering::Relaxed) as u128) >> 32) as u64;
     }
     if crate::drivers::hpet::present() {

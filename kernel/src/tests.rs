@@ -2189,7 +2189,7 @@ fn timer_queue() {
         let slot =
             (0..16).find(|&s| ARMED_ON[s].compare_exchange(u32::MAX, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok());
         let Some(slot) = slot else { return };
-        x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::arch::interrupts::without_interrupts(|| {
             ARMED_ON[slot].store(crate::arch::percpu::cpu_id() as u32, Ordering::SeqCst);
             crate::timer::call_after_ms(5, fire, slot as u64, "ktest");
         });
@@ -2326,22 +2326,16 @@ fn user_copy_fault() {
 fn hardening() {
     use crate::arch::protect;
     use crate::mm::vmm::{self, AddressSpace, Prot};
-    use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
     let f = protect::features();
-    let cr4 = Cr4::read();
-    assert_eq!(cr4.contains(Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION), f.smep, "SMEP as CPUID says");
-    assert_eq!(cr4.contains(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION), f.smap, "SMAP as CPUID says");
-    assert_eq!(cr4.bits() & (1 << 11) != 0, f.umip, "UMIP as CPUID says");
-    assert!(Cr0::read().contains(Cr0Flags::WRITE_PROTECT), "CR0.WP");
+    protect::assert_this_cpu();
     assert!(protect::every_cpu().0, "SMEP/SMAP/UMIP on every CPU");
-    assert!(x86_64::registers::model_specific::Efer::read()
-        .contains(x86_64::registers::model_specific::EferFlags::NO_EXECUTE_ENABLE));
+    assert!(crate::arch::mmu::no_execute_enabled(), "no-execute enabled");
 
     // W^X: code is not writable, read-only data not executable or writable,
     // data not executable; the physical window (an alias of the code) is
     // not executable.
-    const W: u64 = 1 << 1;
-    const NX: u64 = 1 << 63;
+    const W: u64 = crate::arch::mmu::pte::WRITABLE;
+    const NX: u64 = crate::arch::mmu::pte::NO_EXECUTE;
     let text = hardening as *const () as u64;
     let rodata = "a string in .rodata".as_ptr() as u64;
     static DATA: AtomicU32 = AtomicU32::new(1);
@@ -2370,7 +2364,7 @@ fn hardening() {
     let va = 0x40_0000;
     a.map_anon(va, 1, Prot::ReadExec).unwrap();
     a.write_bytes(va, &[0xC3]).unwrap(); // ret
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         unsafe { vmm::load(a.cr3()) };
         let plain_read_faults = crate::syscall::user::probe::read_faults(va);
         let copied: Result<u8, isize> = crate::syscall::user::get(va);
@@ -2850,8 +2844,7 @@ fn sleep_and_wake() {
     let (protected, inits) = crate::arch::protect::every_cpu();
     assert!(protected && inits >= 2, "SMEP/SMAP/UMIP not back on every CPU after sleep");
     assert!(
-        x86_64::registers::control::Cr4::read_raw() & crate::arch::protect::wanted_cr4()
-            == crate::arch::protect::wanted_cr4(),
+        crate::arch::protect::this_cpu_protected(),
         "CR4 protections lost across sleep"
     );
     // Drivers were reset and restarted: the disk, sound and USB work again.

@@ -312,7 +312,7 @@ impl Drop for File {
 /// The desktop gets the display back from file `id` (if it took it).
 /// Needs a task that may block; from anywhere else a helper task does it.
 fn give_back(dev: &Arc<dyn KmsDevice>, id: u64) {
-    if x86_64::instructions::interrupts::are_enabled() {
+    if crate::arch::interrupts::are_enabled() {
         gpu::owner::give_back(&**dev, id);
         return;
     }

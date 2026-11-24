@@ -71,3 +71,37 @@ pub fn install(idt: &mut InterruptDescriptorTable) {
         0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
         32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63);
 }
+
+/// Routes global system interrupt `gsi` (an I/O APIC input) to `vector`, on
+/// the boot CPU; false if no I/O APIC has that input.
+pub fn route_gsi(gsi: u32, vector: u8, level: bool, active_low: bool) -> bool {
+    apic::route_gsi(gsi, vector, level, active_low)
+}
+
+/// Masks a global system interrupt (a stuck shared line).
+pub fn mask_gsi(gsi: u32) {
+    apic::mask_gsi(gsi)
+}
+
+/// The MSI message (address, data) that raises `vector` on the boot CPU.
+pub fn msi_message(vector: u8) -> (u64, u32) {
+    (0xFEE0_0000 | (apic::boot_apic_id() as u64) << 12, vector as u32)
+}
+
+/// Inter-processor interrupts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ipi {
+    /// Look at the run queue (`sched::on_reschedule_ipi`).
+    Reschedule,
+    /// Service a TLB shootdown (`vmm::service_shootdown`).
+    TlbShootdown,
+}
+
+/// Sends `ipi` to CPU `cpu` (an index into `percpu::CPUS`).
+pub fn send_ipi(cpu: usize, ipi: Ipi) {
+    let vector = match ipi {
+        Ipi::Reschedule => super::idt::RESCHEDULE_VECTOR,
+        Ipi::TlbShootdown => super::idt::TLB_VECTOR,
+    };
+    apic::send_ipi(super::percpu::CPUS[cpu].lapic_id.load(Ordering::Relaxed), vector);
+}

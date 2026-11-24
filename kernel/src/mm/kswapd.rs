@@ -89,7 +89,7 @@ pub fn wake() {
 /// Whether the running task may wait for memory: not with interrupts off
 /// (it may hold a spinning lock), and not `kswapd` itself.
 fn may_wait() -> bool {
-    x86_64::instructions::interrupts::are_enabled() && crate::sched::current_id() != TASK.load(Ordering::Relaxed)
+    crate::arch::interrupts::are_enabled() && crate::sched::current_id() != TASK.load(Ordering::Relaxed)
 }
 
 fn above_min() -> bool {

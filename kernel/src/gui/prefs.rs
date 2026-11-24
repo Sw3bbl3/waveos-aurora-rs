@@ -3,7 +3,7 @@
 
 use super::server::{self, Command};
 use super::settings;
-use crate::drivers::{audio, display, keymap, ps2};
+use crate::drivers::{audio, display, keymap};
 use alloc::string::String;
 use aurora_abi::{err::*, pref};
 use lumen::displays;
@@ -144,7 +144,9 @@ pub fn apply_system(key: &str) {
         pref::REPEAT_DELAY | pref::REPEAT_RATE => {
             let delay = get(pref::REPEAT_DELAY).and_then(|v| v.parse().ok()).unwrap_or(1u8);
             let rate = get(pref::REPEAT_RATE).and_then(|v| v.parse().ok()).unwrap_or(8u8);
-            ps2::set_typematic(delay.min(3), rate.min(31));
+            #[cfg(target_arch = "x86_64")]
+            crate::drivers::ps2::set_typematic(delay.min(3), rate.min(31));
+            let _ = (delay, rate);
         }
         pref::VOLUME | pref::MUTED => {
             let volume = get(pref::VOLUME).and_then(|v| v.parse().ok()).unwrap_or(70u32);

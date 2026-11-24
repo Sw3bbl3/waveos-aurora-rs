@@ -7,7 +7,7 @@ use crate::mm::{paging, phys_to_virt};
 use crate::sync::IrqMutex;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use x86_64::instructions::port::Port;
+use crate::arch::io::Port;
 
 static ECAM: AtomicU64 = AtomicU64::new(0);
 static DEVICES: IrqMutex<Vec<Device>> = IrqMutex::new(Vec::new());
@@ -69,7 +69,7 @@ pub fn read32(bus: u8, dev: u8, func: u8, off: u16) -> u32 {
     match ecam_ptr(bus, dev, func, off) {
         Some(p) => unsafe { p.read_volatile() },
         None => unsafe {
-            x86_64::instructions::interrupts::without_interrupts(|| {
+            crate::arch::interrupts::without_interrupts(|| {
                 Port::<u32>::new(0xCF8).write(legacy_addr(bus, dev, func, off));
                 Port::<u32>::new(0xCFC).read()
             })
@@ -81,7 +81,7 @@ pub fn write32(bus: u8, dev: u8, func: u8, off: u16, value: u32) {
     match ecam_ptr(bus, dev, func, off) {
         Some(p) => unsafe { p.write_volatile(value) },
         None => unsafe {
-            x86_64::instructions::interrupts::without_interrupts(|| {
+            crate::arch::interrupts::without_interrupts(|| {
                 Port::<u32>::new(0xCF8).write(legacy_addr(bus, dev, func, off));
                 Port::<u32>::new(0xCFC).write(value);
             })
@@ -259,7 +259,7 @@ fn shared_dispatch(index: usize) {
     l.unclaimed += 1;
     if l.unclaimed == 100_000 {
         // Something we don't drive holds the line: mask it, and its drivers poll.
-        crate::arch::apic::mask_gsi(l.gsi);
+        crate::arch::irq::mask_gsi(l.gsi);
         for &(_, _, line) in &l.handlers {
             line.live.store(false, Ordering::Release);
         }
@@ -302,7 +302,7 @@ fn route_intx(req: &IntxRequest, resolver: IntxResolver) {
                 return;
             };
             lines.push(SharedLine { gsi, handlers: Vec::new(), unclaimed: 0 });
-            if !crate::arch::apic::route_gsi(gsi, vector, level, active_low) {
+            if !crate::arch::irq::route_gsi(gsi, vector, level, active_low) {
                 log!("pci", "{}: GSI {} is not on the I/O APIC; polling", req.name, gsi);
                 return;
             }
@@ -316,7 +316,7 @@ fn route_intx(req: &IntxRequest, resolver: IntxResolver) {
     // A device already holding its line up from before (while the pin was
     // masked) would wait forever on some interrupt controllers, which only
     // see a new rising level: run its handler once so it lets go.
-    x86_64::instructions::interrupts::without_interrupts(|| (req.handler)(req.arg));
+    crate::arch::interrupts::without_interrupts(|| (req.handler)(req.arg));
     log!("pci", "{}: INT{} → GSI {}", req.name, (b'A' + req.pin) as char, gsi);
 }
 
@@ -339,15 +339,15 @@ fn program_msi(r: &MsiRoute) {
         let old = read32(b, d, f, off & !3);
         write32(b, d, f, off & !3, (old & !(0xFFFF << shift)) | (v as u32) << shift);
     };
-    let address = 0xFEE0_0000 | crate::arch::apic::boot_apic_id() << 12;
+    let (address, message) = crate::arch::irq::msi_message(r.vector);
     let cap = r.cap;
     match r.msix_entry {
         Some(entry) => {
             let e = entry as *mut u32;
             unsafe {
-                e.write_volatile(address);
-                e.add(1).write_volatile(0);
-                e.add(2).write_volatile(r.vector as u32);
+                e.write_volatile(address as u32);
+                e.add(1).write_volatile((address >> 32) as u32);
+                e.add(2).write_volatile(message);
                 e.add(3).write_volatile(0); // unmasked
             }
             // Enable MSI-X and clear the function-wide mask.
@@ -355,14 +355,14 @@ fn program_msi(r: &MsiRoute) {
         }
         None => {
             let control = rd16(cap + 2);
-            write32(b, d, f, cap + 4, address);
+            write32(b, d, f, cap + 4, address as u32);
             let data = if control & (1 << 7) != 0 {
-                write32(b, d, f, cap + 8, 0); // upper address (64-bit capable)
+                write32(b, d, f, cap + 8, (address >> 32) as u32); // upper address (64-bit capable)
                 cap + 12
             } else {
                 cap + 8
             };
-            wr16(data, r.vector as u16);
+            wr16(data, message as u16);
             // One message (MME = 0), enabled.
             wr16(cap + 2, (control & !(0x7 << 4)) | 1);
         }

@@ -13,11 +13,13 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::arch::x86_64::{__cpuid, __cpuid_count, CpuidResult};
+#[cfg(target_arch = "x86_64")]
+use crate::arch::cpu::{cpuid as __cpuid, cpuid_count as __cpuid_count, CpuidResult};
 
 /// Linux's names for the `cpuid` bits it shows, per register:
 /// leaf 1 EDX, leaf 1 ECX, leaf 7 EBX, leaf 7 ECX, leaf 7 EDX,
 /// leaf 0x8000_0001 EDX, leaf 0x8000_0001 ECX (bit, name).
+#[cfg(target_arch = "x86_64")]
 const L1_EDX: &[(u32, &str)] = &[
     (0, "fpu"),
     (1, "vme"),
@@ -44,6 +46,7 @@ const L1_EDX: &[(u32, &str)] = &[
     (27, "ss"),
     (28, "ht"),
 ];
+#[cfg(target_arch = "x86_64")]
 const L1_ECX: &[(u32, &str)] = &[
     (0, "pni"),
     (1, "pclmulqdq"),
@@ -64,6 +67,7 @@ const L1_ECX: &[(u32, &str)] = &[
     (30, "rdrand"),
     (31, "hypervisor"),
 ];
+#[cfg(target_arch = "x86_64")]
 const L7_EBX: &[(u32, &str)] = &[
     (0, "fsgsbase"),
     (3, "bmi1"),
@@ -81,27 +85,28 @@ const L7_EBX: &[(u32, &str)] = &[
     (24, "clwb"),
     (29, "sha_ni"),
 ];
+#[cfg(target_arch = "x86_64")]
 const L7_ECX: &[(u32, &str)] = &[(2, "umip"), (8, "gfni"), (9, "vaes"), (10, "vpclmulqdq"), (22, "rdpid")];
+#[cfg(target_arch = "x86_64")]
 const L7_EDX: &[(u32, &str)] = &[(4, "fsrm"), (10, "md_clear")];
+#[cfg(target_arch = "x86_64")]
 const E1_EDX: &[(u32, &str)] = &[(11, "syscall"), (20, "nx"), (26, "pdpe1gb"), (27, "rdtscp"), (29, "lm")];
+#[cfg(target_arch = "x86_64")]
 const E1_ECX: &[(u32, &str)] =
     &[(0, "lahf_lm"), (5, "abm"), (6, "sse4a"), (8, "3dnowprefetch"), (11, "xop"), (16, "fma4"), (21, "tbm")];
 
 /// Flags needing AVX state (YMM) enabled by the kernel.
+#[cfg(target_arch = "x86_64")]
 const NEEDS_AVX: &[&str] = &["avx", "fma", "f16c", "avx2", "vaes", "vpclmulqdq", "fma4", "xop"];
 
 /// XCR0: the register state the kernel enabled for programs.
+#[cfg(target_arch = "x86_64")]
 fn xcr0() -> u64 {
-    if __cpuid(1).ecx & (1 << 27) == 0 {
-        return 0;
-    }
-    let (lo, hi): (u32, u32);
-    // SAFETY: OSXSAVE is set, so XGETBV is allowed.
-    unsafe { core::arch::asm!("xgetbv", in("ecx") 0u32, out("eax") lo, out("edx") hi, options(nomem, nostack)) };
-    (hi as u64) << 32 | lo as u64
+    crate::arch::cpu::xcr0()
 }
 
 /// The `flags` line.
+#[cfg(target_arch = "x86_64")]
 fn flags() -> String {
     let max = __cpuid(0).eax;
     let max_ext = __cpuid(0x8000_0000).eax;
@@ -134,6 +139,7 @@ fn flags() -> String {
 }
 
 /// `/proc/cpuinfo`: one paragraph per processor, as Linux writes it.
+#[cfg(target_arch = "x86_64")]
 pub fn cpuinfo() -> String {
     let n = crate::arch::percpu::count();
     let l1 = __cpuid(1);
@@ -202,4 +208,21 @@ pub fn sys_files() -> Vec<(String, Option<String>)> {
         }
     }
     v
+}
+
+/// `/proc/cpuinfo` on arm64: one paragraph per processor, as Linux writes it.
+#[cfg(target_arch = "aarch64")]
+pub fn cpuinfo() -> String {
+    let n = crate::arch::percpu::count();
+    let (implementer, variant, part, revision) = crate::arch::cpu::midr_fields();
+    let features = crate::arch::cpu::linux_features();
+    let mut s = String::new();
+    for i in 0..n {
+        s.push_str(&format!(
+            "processor\t: {i}\nBogoMIPS\t: {}.00\nFeatures\t: {features}\nCPU implementer\t: {implementer:#04x}\n\
+             CPU architecture: 8\nCPU variant\t: {variant:#x}\nCPU part\t: {part:#05x}\nCPU revision\t: {revision}\n\n",
+            crate::time::tsc_hz() * 2 / 1_000_000
+        ));
+    }
+    s
 }
