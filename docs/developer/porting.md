@@ -425,5 +425,13 @@ x86-only; `posix_spawn` makes the CLONE_VM | CLONE_VFORK call on both).
   (`xtask/src/migrate.rs`), see BUILDING.md.
 - Repositories and updates per architecture: store-and-updates.md,
   "Architectures".
+- The desktop as a person uses it: `tools/smoke_desktop.py OUTDIR --arch
+  aarch64` (after `cargo xtask build --arch aarch64`) boots twice on a fresh
+  disk and drives everything over QMP: first-run setup typed in, Terminal
+  running commands, Files, Settings, Notes with a note typed, a window
+  dragged, Shut Down from the menu; then the login screen with the saved
+  password and the note and folder still on disk. About 80 s under HVF;
+  `--pace 0.2` presses keys and moves on five times faster (races),
+  `--smp 1` on one processor.
 - CI: `host-arm64` runs the host tests on an arm64 runner (the NEON
   paths); `aarch64` builds, lints and boots the aarch64 system under TCG.
