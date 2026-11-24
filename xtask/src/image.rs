@@ -81,7 +81,10 @@ pub fn preference(img: &Path, key: &str) -> Option<String> {
     let end = u64::from_le_bytes(entry[40..48].try_into().ok()?);
     let bytes = end.checked_sub(start)?.checked_add(1)?.checked_mul(SECTOR)?;
     let region = Region { file: &mut file, start: start * SECTOR, len: bytes, pos: 0 };
-    let mut volume = aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now).ok()?;
+    // Read-only: mounting writes (a journal replay, the mount count), and
+    // a volume mounted here would be checked at its next start.
+    let disk = Overlay::new(WaveDisk { region, blocks: bytes / 4096 });
+    let mut volume = aurorafs::Volume::mount(disk, now).ok()?;
     let data = read_file(&mut volume, "/Settings/aurora.conf");
     core::str::from_utf8(&data).ok()?.lines().find_map(|line| {
         let (k, v) = line.split_once('=')?;
@@ -89,33 +92,56 @@ pub fn preference(img: &Path, key: &str) -> Option<String> {
     })
 }
 
-/// Mounts the home volume of a copy of `img` (replaying its journal, as a
-/// start would) and checks it with `fsck`; `img` itself is not changed.
-pub fn check_home_copy(img: &Path) -> Result<(), String> {
-    let copy = img.with_extension("check.img");
-    fs::copy(img, &copy).map_err(|e| e.to_string())?;
-    let result = (|| {
-        let mut file = OpenOptions::new().read(true).write(true).open(&copy).map_err(|e| e.to_string())?;
-        let mut entry = [0u8; ENTRY_SIZE as usize];
-        file.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE)).map_err(|e| e.to_string())?;
-        file.read_exact(&mut entry).map_err(|e| e.to_string())?;
-        let start = u64::from_le_bytes(entry[32..40].try_into().unwrap());
-        let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
-        let bytes = (end - start + 1) * SECTOR;
-        let region = Region { file: &mut file, start: start * SECTOR, len: bytes, pos: 0 };
-        let mut vol = aurorafs::Volume::mount(WaveDisk { region, blocks: bytes / 4096 }, now)
-            .map_err(|e| format!("mount: {e:?}"))?;
-        vol.fsck()
-    })();
-    let _ = fs::remove_file(&copy);
-    result
+/// Mounts the home volume of `img` as the next start would (replaying its
+/// journal, in memory: `img` is not changed) and checks it. Files that
+/// were open when the power went (orphans) are expected after a cut, and
+/// counted; anything else is an error. Returns the volume, for more reads.
+pub fn check_home_copy(img: &Path) -> Result<usize, String> {
+    let mut file = OpenOptions::new().read(true).open(img).map_err(|e| e.to_string())?;
+    let mut vol = home_overlay(&mut file).map_err(|e| format!("mount: {e}"))?;
+    let report = vol.check();
+    if !report.only_orphans() {
+        return Err(report.summary(40));
+    }
+    Ok(report.problems.len())
+}
+
+/// The contents of `path` on the home volume of `img`, as the next start
+/// would find them (read through an overlay: `img` is not changed).
+pub fn read_home_file(img: &Path, path: &str) -> Result<Vec<u8>, String> {
+    let mut file = OpenOptions::new().read(true).open(img).map_err(|e| e.to_string())?;
+    let mut vol = home_overlay(&mut file).map_err(|e| format!("mount: {e}"))?;
+    let ino = vol.resolve(path).map_err(|e| format!("{path}: {e:?}"))?;
+    let size = vol.stat(ino).map_err(|e| format!("{path}: {e:?}"))?.size as usize;
+    let mut buf = vec![0; size];
+    vol.read(ino, 0, &mut buf).map_err(|e| format!("{path}: {e:?}"))?;
+    Ok(buf)
+}
+
+/// The home volume of the image open in `file`, mounted read-only (its
+/// journal replayed into an overlay).
+fn home_overlay(file: &mut File) -> io::Result<aurorafs::Volume<Overlay<WaveDisk<'_>>>> {
+    let mut entry = [0u8; ENTRY_SIZE as usize];
+    file.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE))?;
+    file.read_exact(&mut entry)?;
+    if entry[0..16] != aurorafs::PARTITION_TYPE {
+        return Err(io::Error::other("the disk has no AuroraFS volume"));
+    }
+    let start = u64::from_le_bytes(entry[32..40].try_into().unwrap());
+    let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
+    let bytes = (end - start + 1) * SECTOR;
+    let region = Region { file, start: start * SECTOR, len: bytes, pos: 0 };
+    aurorafs::Volume::mount(Overlay::new(WaveDisk { region, blocks: bytes / 4096 }), now)
+        .map_err(|e| io::Error::other(format!("AuroraFS: {e:?}")))
 }
 
 /// Checks the home volume of disk image `img` (`cargo xtask fsck IMG`):
-/// replays its journal in memory, runs `fsck`, and lists the top folders.
-/// (The journal replay writes: run it on a copy to keep the image as it was.)
-pub fn check_home(img: &Path) -> io::Result<String> {
-    let mut file = OpenOptions::new().read(true).write(true).open(img)?;
+/// replays its journal in memory, checks everything, reports every problem
+/// found, and lists the top folders. The image is not changed, unless
+/// `repair` (`--repair`): then what can safely be repaired is (see
+/// `aurorafs::Volume::repair`), and written back.
+pub fn check_home(img: &Path, repair: bool) -> io::Result<String> {
+    let mut file = OpenOptions::new().read(true).write(repair).open(img)?;
     let mut entry = [0u8; ENTRY_SIZE as usize];
     file.seek(SeekFrom::Start(2 * SECTOR + ENTRY_SIZE))?;
     file.read_exact(&mut entry)?;
@@ -125,11 +151,42 @@ pub fn check_home(img: &Path) -> io::Result<String> {
     let start = u64::from_le_bytes(entry[32..40].try_into().unwrap());
     let end = u64::from_le_bytes(entry[40..48].try_into().unwrap());
     let err = |e: aurorafs::Error| io::Error::other(format!("AuroraFS: {e:?}"));
-    let mut vol = home_volume(&mut file, (start, end)).map_err(err)?;
     let mut out = String::new();
-    vol.fsck().map_err(io::Error::other)?;
+    if repair {
+        let mut vol = home_volume(&mut file, (start, end)).map_err(err)?;
+        let (found, left) = vol.repair().map_err(err)?;
+        vol.unmount().map_err(err)?;
+        out.push_str(&format!("fsck: found {} problem(s):\n{}", found.problems.len() + found.more, found.summary(usize::MAX)));
+        if !left.is_clean() {
+            out.push_str(&format!("fsck: {} left after repair:\n{}", left.problems.len() + left.more, left.summary(usize::MAX)));
+            return Err(io::Error::other(out));
+        }
+        out.push_str("fsck: repaired; the volume is clean\n");
+        return Ok(out);
+    }
+    drop(file);
+    let mut file = OpenOptions::new().read(true).open(img)?;
+    let mut vol = home_overlay(&mut file)?;
+    let report = vol.check();
+    if !report.is_clean() {
+        let only = if report.only_orphans() { " (only files open at a power cut: freed at the next start)" } else { "" };
+        let msg = format!(
+            "{} problem(s){only}:\n{}{} files, {} folders checked",
+            report.problems.len() + report.more,
+            report.summary(usize::MAX),
+            report.files,
+            report.folders
+        );
+        if report.only_orphans() {
+            out.push_str(&format!("fsck: {msg}\n"));
+        } else {
+            return Err(io::Error::other(msg));
+        }
+    } else {
+        out.push_str(&format!("fsck: clean ({} files, {} folders, {})\n", report.files, report.folders, if vol.was_clean() { "cleanly unmounted" } else { "not cleanly unmounted" }));
+    }
     let (total, free) = vol.space();
-    out.push_str(&format!("fsck: clean; {} of {} MiB free\n", free >> 20, total >> 20));
+    out.push_str(&format!("{} of {} MiB free\n", free >> 20, total >> 20));
     for dir in ["/", "/Security"] {
         let ino = vol.resolve(dir).map_err(err)?;
         for e in vol.readdir(ino).map_err(err)? {
@@ -194,6 +251,7 @@ pub fn add_linux(img: &Path, linux: &Path, settings: &[(String, PathBuf)]) -> io
     };
     vol.commit().map_err(err)?;
     vol.fsck().map_err(io::Error::other)?;
+    vol.unmount().map_err(err)?;
     Ok(done)
 }
 
@@ -245,6 +303,7 @@ pub fn grow(img: &Path, size: u64) -> io::Result<()> {
             to.set_times(aurorafs::ROOT, root.ctime, root.mtime).map_err(err)?;
             to.commit().map_err(err)?;
             to.fsck().map_err(io::Error::other)?;
+            to.unmount().map_err(err)?;
             if !same_tree(&mut from, &mut to, aurorafs::ROOT, aurorafs::ROOT).map_err(err)? {
                 return Err(io::Error::other("the copy differs from the disk"));
             }
@@ -322,6 +381,8 @@ pub(crate) fn new_disk_around(
     to.set_times(aurorafs::ROOT, root.ctime, root.mtime).map_err(err)?;
     to.commit().map_err(err)?;
     to.fsck().map_err(io::Error::other)?;
+    // Made clean: its first start needs no check.
+    to.unmount().map_err(err)?;
     drop(to);
     new.sync_all()
 }
@@ -832,6 +893,44 @@ fn copy_to_fat<T: fatfs::ReadWriteSeek>(src: &Path, dst: &fatfs::Dir<T>, pack: b
 
 // ------------------------------------------------------------ AuroraFS
 
+/// A disk whose writes stay in memory: mounting (which replays the journal
+/// and writes the mount count) leaves what is underneath as it was.
+struct Overlay<D> {
+    under: D,
+    written: std::collections::HashMap<u64, Box<aurorafs::Block>>,
+}
+
+impl<D: aurorafs::Disk> Overlay<D> {
+    fn new(under: D) -> Overlay<D> {
+        Overlay { under, written: std::collections::HashMap::new() }
+    }
+}
+
+impl<D: aurorafs::Disk> aurorafs::Disk for Overlay<D> {
+    fn blocks(&self) -> u64 {
+        self.under.blocks()
+    }
+    fn read(&mut self, block: u64, buf: &mut aurorafs::Block) -> aurorafs::Result<()> {
+        match self.written.get(&block) {
+            Some(b) => {
+                buf.copy_from_slice(&b[..]);
+                Ok(())
+            }
+            None => self.under.read(block, buf),
+        }
+    }
+    fn write(&mut self, block: u64, buf: &aurorafs::Block) -> aurorafs::Result<()> {
+        if block >= self.blocks() {
+            return Err(aurorafs::Error::Io);
+        }
+        self.written.insert(block, Box::new(*buf));
+        Ok(())
+    }
+    fn flush(&mut self) -> aurorafs::Result<()> {
+        Ok(())
+    }
+}
+
 /// A partition of the image file seen as 4 KiB AuroraFS blocks.
 pub(crate) struct WaveDisk<'a> {
     region: Region<'a>,
@@ -889,6 +988,8 @@ fn mkfs_home(file: &mut File, start: u64, sectors: u64, home: &Path, linux: Opti
     }
     vol.commit().map_err(err)?;
     vol.fsck().map_err(io::Error::other)?;
+    // Made clean: the first start needs no check.
+    vol.unmount().map_err(err)?;
     Ok(())
 }
 

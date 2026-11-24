@@ -350,7 +350,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>, number: u64) 
         nr::STATFS => fs::statfs_path(&p, a[0], a[1]),
         nr::FSTATFS => fs::fstatfs(&p, a[0], a[1]),
         nr::FALLOCATE => fs::fallocate(&p, a[0], a[1], a[2], a[3]),
-        nr::FSYNC | nr::FDATASYNC | nr::FLOCK | nr::FADVISE64 | nr::READAHEAD => {
+        nr::FSYNC | nr::FDATASYNC | nr::SYNCFS => fs::fsync(&p, a[0]),
+        nr::FLOCK | nr::FADVISE64 | nr::READAHEAD => {
             p.fd(a[0] as usize)?;
             Ok(0)
         }

@@ -42,6 +42,9 @@ pub struct BlockCache {
     capacity: usize,
     clock: u64,
     per_block: u64,
+    /// Blocks went to the device since its last flush (so a flush with
+    /// nothing dirty still has to flush the device).
+    unflushed: bool,
     pub hits: u64,
     pub misses: u64,
 }
@@ -59,6 +62,7 @@ impl BlockCache {
             by_use: BTreeMap::new(),
             capacity,
             clock: 0,
+            unflushed: false,
             hits: 0,
             misses: 0,
         })
@@ -112,6 +116,7 @@ impl BlockCache {
             let e = self.entries.remove(&victim).unwrap();
             HELD.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
             if e.dirty {
+                self.unflushed = true;
                 self.dev.write(victim * self.per_block, &e.data[..])?;
             }
         }
@@ -202,9 +207,15 @@ impl BlockCache {
         self.insert(block, data, true)
     }
 
-    /// Writes back every dirty block (merging runs of adjacent blocks), then flushes the device.
+    /// Writes back every dirty block (merging runs of adjacent blocks), then
+    /// flushes the device. With nothing written since the last flush, there
+    /// is nothing to do (an `fsync` of an unchanged volume costs nothing).
     pub fn flush(&mut self) -> Result<(), isize> {
         let dirty: alloc::vec::Vec<u64> = self.entries.iter().filter(|(_, e)| e.dirty).map(|(&b, _)| b).collect();
+        if dirty.is_empty() && !self.unflushed {
+            return Ok(());
+        }
+        self.unflushed = true;
         let mut i = 0;
         while i < dirty.len() {
             let mut j = i + 1;
@@ -221,7 +232,9 @@ impl BlockCache {
             }
             i = j;
         }
-        self.dev.flush()
+        self.dev.flush()?;
+        self.unflushed = false;
+        Ok(())
     }
 }
 

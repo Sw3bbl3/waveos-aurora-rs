@@ -177,6 +177,7 @@ pub const FALLOCATE: u64 = 285;
 pub const DUP3: u64 = 292;
 pub const PIPE2: u64 = 293;
 pub const PRLIMIT64: u64 = 302;
+pub const SYNCFS: u64 = 306;
 pub const RENAMEAT2: u64 = 316;
 pub const GETRANDOM: u64 = 318;
 pub const MEMFD_CREATE: u64 = 319;

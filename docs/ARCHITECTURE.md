@@ -274,7 +274,7 @@ Syscall numbers and structs live in `libs/abi`. They cover processes, memory, fi
 | `/System` | TarFS over the boot-time `system.tar` | Read-only |
 | `/Boot` | FAT32 on the EFI System Partition | Read/write, long file names, case-insensitive |
 
-Disk-backed filesystems sit on `fs/cache.rs`, a write-back cache of 4 KiB blocks with LRU eviction. Its `flush` writes dirty blocks in order, merging adjacent runs, and then flushes the device. A `flusher` kernel task calls `sync_all` every 5 s, and shutdown and restart sync first.
+Disk-backed filesystems sit on `fs/cache.rs`, a write-back cache of 4 KiB blocks with LRU eviction. Its `flush` writes dirty blocks in order, merging adjacent runs, and then flushes the device (and does nothing when nothing was written since the last flush). Eviction may write a dirty block at any time, in any order: the device flush is the only ordering filesystems rely on. A `flusher` kernel task calls `sync_all` every 5 s; shutdown and restart call `unmount_all`, which commits and marks AuroraFS volumes cleanly unmounted. An `OpenFile` holds its inode open on its filesystem (`open_ino`/`close_ino`), so a file removed while open lives on for its descriptors; Linux `fsync`, `fdatasync` and `syncfs` commit the volume.
 
 ### AuroraFS on-disk format (`libs/aurorafs`)
 
@@ -290,14 +290,18 @@ data               file contents; directories are files of (inode, kind, name) r
 
 **Consistency.** Every metadata change (superblock, bitmaps, inodes, directory contents) goes into the running transaction. The transaction is an overlay of block images that reads also see. `commit` then:
 1. Flushes file data, which is written in place ("ordered mode"), so metadata never points at unwritten blocks.
-2. Writes a descriptor, the block images and a commit record with a CRC over all of them to the journal, then flushes.
+2. Writes a descriptor, the block images and a commit record with two checksums over all of them (CRC-32, and CRC-32C since 0.8.1: CRC-32 can't tell one superblock image from another) to the journal, then flushes.
 3. Copies the images to their home locations.
+
+Each public call is one *operation* (`Volume::op`): a transaction is committed only between operations, and an operation that fails part-way (a full disk) is undone from its undo log, so a crash or an error never leaves half of one. After an operation the transaction is committed if it holds over half the journal; an operation too big for the journal fails and changes nothing. A folder can't be moved into its own subtree (checked inside the operation, not just on paths), and an open file that loses its last name becomes an orphan (no links) until its last close.
 
 On mount, a complete, checksummed transaction left in the journal is replayed, and a torn one is ignored. Freed blocks are not reused until the transaction that freed them commits. Freeing a block also revokes any journaled image of it, so a replay can never overwrite file data that later reused the block.
 
+**Checking.** A "cleanly unmounted" mark in the superblock extension (set by `unmount` at shutdown, cleared by the next commit) tells the next mount whether to check. If not clean, the kernel runs `Volume::check` (every problem: bad entries, unparsable folders, inodes reached twice or not at all, link counts, blocks claimed twice, leaks, bitmap and count mismatches), frees orphans quietly, repairs the rest where safe (`Volume::repair`; unreachable files go to `/lost+found`) and posts a notification. The guarantees, the journal's protocol, each disk driver's flush and the tests (model checking with simulated power cuts at every write, racing threads with seeded interleavings, `cargo xtask powercut`) are in [developer/aurorafs.md](developer/aurorafs.md).
+
 **Owners** are a compatible feature (`FEATURE_OWNERS`): a checksummed superblock extension (bytes 188–255) holds the feature bits and the volume's *default owner*, which every inode without its own owner belongs to. Older kernels ignore the extension and still mount the volume; inodes they rewrite fall back to the default owner. A volume from before owners gets them at its first boot with them: the default owner becomes the first account (uid 1000), its personal folders become private, and `/Security` and `/Applications` are made.
 
-The same crate formats volumes on the host (`xtask/src/image.rs`). Its tests (`cargo test -p aurorafs`) simulate power cuts by keeping only flushed writes, and check the result with `fsck`.
+The same crate formats volumes on the host (`xtask/src/image.rs`), and `cargo xtask fsck IMG [--repair]` checks one (through an in-memory overlay unless repairing). Its tests (`cargo test -p aurorafs`) simulate power cuts at every write boundary, with lost, reordered and torn writes, and check the result with `fsck` and against a model of the tree.
 
 ### FAT32 (`libs/fat32`)
 

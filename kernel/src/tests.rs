@@ -143,6 +143,10 @@ const ARCH_SKIPS: &[(&str, &str)] = &[
 ];
 
 pub fn run() {
+    // `cargo xtask powercut`: filesystem work until the power goes.
+    if let Some(iteration) = crate::gui::prefs::boot_option("fs_stress") {
+        fs_stress(iteration.parse().unwrap_or(0));
+    }
     // Devices present at boot finish setting up first (the frame counts
     // some tests compare would otherwise move underneath them).
     crate::drivers::usb::settle(10_000);
@@ -487,6 +491,133 @@ fn syscall_fuzz() {
     );
     let heap_after = mm::heap::usage().1;
     crate::kprint!("[seed {seed}, heap {} KiB → {} KiB] ", heap_before / 1024, heap_after / 1024);
+    home_volume_ok("the native fuzzer");
+}
+
+/// `cargo xtask powercut` (boot option `fs_stress=N`, the iteration): four
+/// threads make, write, rename, truncate and remove files and folders in
+/// one small tree on the home volume, keep descriptors open across
+/// removals, and race each other, until the harness cuts the power at a
+/// random moment. Meanwhile the main thread writes a file at a time into
+/// `/Stress/durable/iN`, syncs, and only then says so ("fsstress: durable
+/// PATH LEN"): the harness checks that every file it was told about
+/// survived the cut, whole. The first line says what this start's check at
+/// mount found.
+fn fs_stress(iteration: u32) -> ! {
+    let (root, _) = fs::lookup("/").unwrap();
+    match root.mount_check() {
+        None => crate::kprintln!("fsstress: mount check: not needed (cleanly unmounted)"),
+        Some(r) if r.is_empty() => crate::kprintln!("fsstress: mount check: clean"),
+        Some(r) if r.lines().all(|l| l.contains("an orphan")) => {
+            crate::kprintln!("fsstress: mount check: {} orphan(s) freed", r.lines().count())
+        }
+        Some(r) => crate::kprintln!("fsstress: mount check: PROBLEMS\n{r}"),
+    }
+    let _ = fs::mkdir("/Stress");
+    let _ = fs::mkdir("/Stress/w");
+    let _ = fs::mkdir("/Stress/durable");
+    // What the harness has checked already goes (keeps the folder small).
+    if let Ok(old) = fs::readdir("/Stress/durable") {
+        for e in old {
+            if e.name.trim_start_matches('i').parse::<u32>().is_ok_and(|n| n + 2 < iteration) {
+                let _ = fs::remove_tree(&alloc::format!("/Stress/durable/{}", e.name));
+            }
+        }
+    }
+    STRESS_SEED.store(iteration.wrapping_mul(2_654_435_761) ^ time::uptime_ms() as u32, Ordering::Relaxed);
+    for _ in 0..4 {
+        sched::spawn("fsstress", fs_stress_worker);
+    }
+    let dir = alloc::format!("/Stress/durable/i{iteration}");
+    let _ = fs::mkdir(&dir);
+    crate::kprintln!("fsstress: running (iteration {iteration})");
+    let mut n = 0u32;
+    loop {
+        let len = 1000 + (n as usize * 7919) % 60_000;
+        let path = alloc::format!("{dir}/{n}");
+        if fs::write_all(&path, &durable_bytes(iteration, n, len)).is_ok() && fs::try_sync_all().is_ok() {
+            crate::kprintln!("fsstress: durable {path} {len}");
+        }
+        n += 1;
+        sched::sleep_ms(150);
+    }
+}
+
+/// The contents of durable file `n` of iteration `it` (the harness makes
+/// the same bytes to compare).
+fn durable_bytes(it: u32, n: u32, len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i as u32).wrapping_mul(31).wrapping_add(it * 7 + n * 13) as u8).collect()
+}
+
+static STRESS_SEED: AtomicU32 = AtomicU32::new(0);
+static STRESS_WORKER: AtomicU32 = AtomicU32::new(0);
+
+fn fs_stress_worker() {
+    let me = STRESS_WORKER.fetch_add(1, Ordering::Relaxed);
+    let mut x = (STRESS_SEED.load(Ordering::Relaxed) as u64) << 8 | me as u64 | 1;
+    let mut rnd = move |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n.max(1)
+    };
+    const NAMES: &[&str] = &["a", "b", "c", "d", "a/x", "a/y", "b/x", "a/x/z", "b/x/z", "c/q"];
+    let mut held: Vec<fs::OpenFile> = Vec::new();
+    let data: Vec<u8> = (0..(512 * 1024)).map(|i| (i * 7 + me as usize) as u8).collect();
+    loop {
+        let p = alloc::format!("/Stress/w/{}", NAMES[rnd(NAMES.len() as u64) as usize]);
+        let q = alloc::format!("/Stress/w/{}", NAMES[rnd(NAMES.len() as u64) as usize]);
+        let len = match rnd(10) {
+            0 => rnd(data.len() as u64) as usize,
+            _ => rnd(40_000) as usize,
+        };
+        let _ = match rnd(14) {
+            0..=1 => fs::mkdir(&p),
+            2..=4 => fs::open(&p, aurora_abi::open::WRITE | aurora_abi::open::CREATE).and_then(|mut f| {
+                f.seek(rnd(200_000) as i64, aurora_abi::seek::SET)?;
+                f.write(&data[..len])?;
+                if rnd(2) == 0 {
+                    held.push(f);
+                }
+                Ok(())
+            }),
+            5..=6 => fs::rename(&p, &q),
+            7 => fs::unlink(&p),
+            8 => fs::remove_tree(&p),
+            9 => fs::write_atomic(&p, &data[..len]).map(|_| ()),
+            10..=11 if !held.is_empty() => {
+                let i = rnd(held.len() as u64) as usize;
+                match rnd(3) {
+                    0 => held[i].truncate(rnd(100_000)),
+                    _ => held[i].write(&data[..len]).map(|_| ()),
+                }
+            }
+            12 if !held.is_empty() => {
+                let i = rnd(held.len() as u64) as usize;
+                drop(held.swap_remove(i));
+                Ok(())
+            }
+            _ => fs::try_sync_all(),
+        };
+        if held.len() > 6 {
+            held.remove(0);
+        }
+        sched::yield_now();
+    }
+}
+
+/// The home volume (AuroraFS) is consistent: run after everything that
+/// hammers it (the fuzzers). Whatever the fuzzers left in their scratch
+/// folders stays: the next boot fuzzing on top of it is a test too.
+pub fn home_volume_ok(what: &str) {
+    fs::sync_all();
+    let (root, _) = fs::lookup("/").unwrap();
+    if !root.describe().contains("AuroraFS") {
+        return;
+    }
+    if let Err(e) = root.check() {
+        panic!("after {what}, the home volume is not consistent: {e}");
+    }
 }
 
 /// What memory costs a program with no pressure on it: `fuzz swap` maps
@@ -1887,9 +2018,7 @@ fn linux_fuzz() {
     let _squeezed = fuzz_pressure();
     let before = free_frames();
     run_linux_test_with("linuxfuzz", &["linuxfuzz", &seed, &children, &calls], "linuxfuzz passed", 30 * 60_000);
-    // What its own clean-up could not remove (a child may have taken the
-    // permissions away): the next boot starts from the same place.
-    let _ = fs::remove_tree("/Linux/tmp/lfz");
+    home_volume_ok("the Linux fuzzer");
     let deadline = time::uptime_ms() + 10_000;
     while free_frames() + FUZZ_SLACK < before && time::uptime_ms() < deadline {
         let _ = crate::gui::server::take_commands();
@@ -2425,7 +2554,7 @@ fn wavefs_ramdisk() {
         fs.sync().unwrap();
         fs.check().unwrap();
     }
-    let fs = AuroraFs::mount(dev).unwrap();
+    let fs = AuroraFs::mount(dev.clone()).unwrap();
     let docs = fs.lookup(fs.root(), "Documents").unwrap();
     let f = fs.lookup(docs, "note.txt").unwrap();
     let mut buf = [0u8; 19];
@@ -2433,6 +2562,39 @@ fn wavefs_ramdisk() {
     assert_eq!(&buf, b"kept across remount");
     let b = fs.lookup(docs, "big.bin").unwrap();
     assert_eq!(fs.metadata(b).unwrap().size, 300_000);
+    fs.check().unwrap();
+    // A file removed while open stays (its inode isn't given to anything
+    // new), is written through its holder, and goes at the last close.
+    fs.open_ino(f).unwrap();
+    fs.unlink(docs, "note.txt").unwrap();
+    let dir = fs.create(docs, "new-folder", Kind::Dir).unwrap();
+    assert_ne!(dir, f, "a removed file's inode was reused while open");
+    fs.write(f, 0, b"still writable").unwrap();
+    assert_eq!(fs.truncate(dir, 0), Err(aurora_abi::err::EISDIR));
+    fs.check().unwrap();
+    fs.close_ino(f);
+    assert!(fs.metadata(f).is_err(), "freed at the last close");
+    // A folder can't be moved into itself, whatever the caller checked.
+    let inner = fs.create(dir, "inner", Kind::Dir).unwrap();
+    assert_eq!(fs.rename(docs, "new-folder", inner, "x"), Err(aurora_abi::err::EINVAL));
+    fs.check().unwrap();
+    // Left open at a power cut: the next mount (not clean) frees it.
+    let g = fs.create(docs, "open-at-the-cut", Kind::File).unwrap();
+    fs.write(g, 0, &[1u8; 9000]).unwrap();
+    fs.open_ino(g).unwrap();
+    fs.unlink(docs, "open-at-the-cut").unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+    let fs = AuroraFs::mount(dev.clone()).unwrap();
+    let report = fs.mount_check().expect("checked at mount");
+    assert!(report.contains("an orphan") && report.lines().all(|l| l.contains("an orphan")), "{report}");
+    fs.check().unwrap();
+    assert!(fs.metadata(g).is_err());
+    // A clean unmount needs no check at the next mount.
+    fs.unmount().unwrap();
+    drop(fs);
+    let fs = AuroraFs::mount(dev).unwrap();
+    assert!(fs.mount_check().is_none(), "a cleanly unmounted volume was checked");
     fs.check().unwrap();
 }
 
@@ -2456,6 +2618,35 @@ fn wavefs_home() {
     root.check().unwrap();
     let (total, free) = root.space().unwrap();
     assert!(free > 0 && free < total);
+    // A descriptor kept across the file's removal: its inode is not given
+    // to the folders made meanwhile, so a truncate through it can't cut
+    // one of them (how the fuzzers used to corrupt folders).
+    let mut f = fs::open("/Documents/held.txt", aurora_abi::open::WRITE | aurora_abi::open::CREATE).unwrap();
+    f.write(b"held open").unwrap();
+    fs::unlink("/Documents/held.txt").unwrap();
+    for i in 0..4 {
+        fs::mkdir(&alloc::format!("/Documents/after-{i}")).unwrap();
+        fs::write_all(&alloc::format!("/Documents/after-{i}/x"), b"x").unwrap();
+    }
+    f.truncate(0).unwrap();
+    f.write(b"still mine").unwrap();
+    root.check().unwrap();
+    drop(f);
+    for i in 0..4 {
+        fs::remove_tree(&alloc::format!("/Documents/after-{i}")).unwrap();
+    }
+    fs::sync_all();
+    root.check().unwrap();
+    // On a start after a power cut (the harness cuts one at the end of the
+    // first boot) the check at mount ran; it may only have found files that
+    // were open when the power went.
+    if let Some(report) = root.mount_check() {
+        assert!(report.lines().all(|l| l.contains("an orphan")), "the check at mount found:\n{report}");
+        match report.lines().count() {
+            0 => crate::kprint!("[checked at mount: clean] "),
+            n => crate::kprint!("[checked at mount: {n} file(s) open at the cut, freed] "),
+        }
+    }
 }
 
 fn fat_boot() {

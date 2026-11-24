@@ -110,6 +110,68 @@ static void files(void) {
     printf("PASS files and folders\n");
 }
 
+// A file removed while open stays readable and writable through its
+// descriptor, and nothing new gets its inode meanwhile (on AuroraFS a new
+// file or folder used to be given it, and a write or ftruncate through the
+// old descriptor then landed in that, corrupting a folder).
+static void removed_while_open(void) {
+    mkdir("/tmp", 0755);
+    mkdir("/tmp/lto", 0755);
+    int fd = open("/tmp/lto/gone", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    CHECK(fd >= 0, "create");
+    CHECK(write(fd, "kept after unlink", 17) == 17, "write");
+    struct stat before;
+    CHECK(fstat(fd, &before) == 0, "fstat");
+    CHECK(unlink("/tmp/lto/gone") == 0, "unlink while open");
+    CHECK(access("/tmp/lto/gone", F_OK) != 0 && errno == ENOENT, "the name is gone");
+    // New files and folders take other inodes.
+    for (int i = 0; i < 8; i++) {
+        char p[64];
+        snprintf(p, sizeof p, "/tmp/lto/d%d", i);
+        CHECK(mkdir(p, 0755) == 0, "mkdir after unlink");
+        struct stat st;
+        CHECK(stat(p, &st) == 0 && st.st_ino != before.st_ino, "a new folder has its own inode");
+    }
+    char buf[32] = {0};
+    CHECK(pread(fd, buf, 17, 0) == 17 && memcmp(buf, "kept after unlink", 17) == 0, "read after unlink");
+    CHECK(pwrite(fd, "more", 4, 17) == 4, "write after unlink");
+    CHECK(ftruncate(fd, 5) == 0, "ftruncate after unlink");
+    struct stat after;
+    CHECK(fstat(fd, &after) == 0 && after.st_size == 5, "size after ftruncate");
+    CHECK(fsync(fd) == 0 && fdatasync(fd) == 0, "fsync and fdatasync");
+    CHECK(close(fd) == 0, "close");
+    for (int i = 0; i < 8; i++) {
+        char p[64];
+        snprintf(p, sizeof p, "/tmp/lto/d%d", i);
+        DIR *d = opendir(p);
+        CHECK(d, "the folders are intact");
+        closedir(d);
+        CHECK(rmdir(p) == 0, "rmdir");
+    }
+    // A folder that can't be read says so, rather than looking empty (rm -rf
+    // used to report "Directory not empty" for it). Root may read anything.
+    if (geteuid() != 0) {
+        CHECK(mkdir("/tmp/lto/locked", 0755) == 0 && mkdir("/tmp/lto/locked/inside", 0755) == 0, "mkdir locked");
+        CHECK(chmod("/tmp/lto/locked", 0300) == 0, "chmod 0300");
+        DIR *d = opendir("/tmp/lto/locked");
+        int refused = !d && errno == EACCES;
+        if (d) {
+            errno = 0;
+            struct dirent *e = readdir(d);
+            refused = !e && errno == EACCES;
+            closedir(d);
+        }
+        CHECK(chmod("/tmp/lto/locked", 0755) == 0, "chmod back");
+        CHECK(refused, "listing an unreadable folder fails with EACCES");
+        CHECK(rmdir("/tmp/lto/locked/inside") == 0 && rmdir("/tmp/lto/locked") == 0, "remove locked");
+    }
+    // A folder can't go inside itself.
+    CHECK(mkdir("/tmp/lto/a", 0755) == 0 && mkdir("/tmp/lto/a/b", 0755) == 0, "mkdir a/b");
+    CHECK(rename("/tmp/lto/a", "/tmp/lto/a/b/a") == -1 && errno == EINVAL, "rename into itself");
+    CHECK(rmdir("/tmp/lto/a/b") == 0 && rmdir("/tmp/lto/a") == 0 && rmdir("/tmp/lto") == 0, "clean up");
+    printf("PASS files removed while open, fsync\n");
+}
+
 static void memory(void) {
     size_t big = 64 << 20;
     char *p = malloc(big);
@@ -634,6 +696,7 @@ int main(int argc, char **argv) {
     start(argc, argv);
     auxv();
     files();
+    removed_while_open();
     memory();
     swapping();
     threads();

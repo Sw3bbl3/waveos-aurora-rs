@@ -44,6 +44,8 @@ const VIRTQ_DESC_F_WRITE: u16 = 2;
 const BLK_T_IN: u32 = 0;
 const BLK_T_OUT: u32 = 1;
 const BLK_T_FLUSH: u32 = 4;
+/// Feature: the device has a write cache that `BLK_T_FLUSH` writes out.
+const BLK_F_FLUSH: u32 = 1 << 9;
 
 const QSIZE: u16 = 16;
 const MAX_BYTES: usize = 64 * 1024;
@@ -216,7 +218,11 @@ impl Common {
         self.w32(o + 4, (v >> 32) as u32);
     }
 
-    /// Resets the device and negotiates VIRTIO_F_VERSION_1 (feature bit 32), nothing else.
+    /// Resets the device and negotiates VIRTIO_F_VERSION_1 (feature bit 32)
+    /// and, if offered, VIRTIO_BLK_F_FLUSH (bit 9): a write cache the driver
+    /// flushes (`flush`, at every filesystem commit). Without it a device
+    /// must write through, each write durable before it completes (QEMU
+    /// then flushes the host file after every write).
     fn negotiate(&self) -> bool {
         self.w8(DEVICE_STATUS, 0);
         if wait_for(500, || self.r8(DEVICE_STATUS) == 0).is_err() {
@@ -229,8 +235,10 @@ impl Common {
             log!("virtio", "device is not virtio 1.0");
             return false;
         }
+        self.w32(DEVICE_FEATURE_SELECT, 0);
+        let low = self.r32(DEVICE_FEATURE) & BLK_F_FLUSH;
         self.w32(DRIVER_FEATURE_SELECT, 0);
-        self.w32(DRIVER_FEATURE, 0);
+        self.w32(DRIVER_FEATURE, low);
         self.w32(DRIVER_FEATURE_SELECT, 1);
         self.w32(DRIVER_FEATURE, 1);
         self.w8(DEVICE_STATUS, STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK);
