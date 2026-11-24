@@ -822,7 +822,8 @@ pub struct NetInterface {
     pub tx_bytes: u64,
     pub driver: [u8; 32],
     pub driver_len: u32,
-    pub _pad2: u32,
+    /// Link speed in Mb/s (0: unknown).
+    pub speed_mbps: u32,
 }
 
 /// `sys_report` kinds.

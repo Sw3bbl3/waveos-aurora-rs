@@ -74,6 +74,7 @@ const TRB_ADDRESS_DEVICE: u32 = 11;
 const TRB_CONFIGURE_EP: u32 = 12;
 const TRB_EVALUATE_CTX: u32 = 13;
 const TRB_RESET_EP: u32 = 14;
+const TRB_STOP_EP: u32 = 15;
 const TRB_SET_DEQUEUE: u32 = 16;
 const TRB_TRANSFER_EVENT: u32 = 32;
 const TRB_COMMAND_DONE: u32 = 33;
@@ -91,7 +92,13 @@ const CC_SHORT: u8 = 13;
 const CC_TIMEOUT: u8 = super::TIMEOUT;
 
 const RING_TRBS: usize = 256;
-const EVENT_TRBS: usize = 256;
+/// Event ring entries. A full ring makes the controller drop events (QEMU
+/// does), so it is generous, and the driver hands entries back as it goes.
+const EVENT_TRBS: usize = 1024;
+/// Events handled before the dequeue pointer is handed back mid-drain.
+const ERDP_BATCH: usize = 16;
+const TRB_HOST_CONTROLLER: u32 = 37;
+const CC_EVENT_RING_FULL: u8 = 21;
 
 /// A producer ring (command or transfer), ending in a link TRB back to its start.
 struct Ring {
@@ -163,11 +170,20 @@ pub struct Completion {
     pub slot: u8,
 }
 
+/// An IN endpoint kept busy with queued transfers: an interrupt pipe
+/// (reports), or a bulk stream (a network adapter's receive path).
 struct Pipe {
     handler: Arc<dyn PipeHandler>,
-    buf: Dma,
+    /// One buffer per queued transfer, `stride` apart in one allocation,
+    /// shared with the handler while it reads a completed one (so a pipe
+    /// closed meanwhile can't free it).
+    buf: Arc<Dma>,
+    stride: usize,
     size: usize,
-    /// Queued TRB → its slice of `buf`.
+    count: usize,
+    /// Failed transfers in a row (the pipe is given up after a few).
+    errors: u32,
+    /// Queued TRB → its buffer.
     trbs: BTreeMap<u64, usize>,
 }
 
@@ -176,7 +192,11 @@ struct SlotState {
     input: Dma,
     rings: [Option<Ring>; 32],
     speed: Speed,
+    /// Which device this is: slots are reused once a device is unplugged.
+    epoch: u64,
 }
+
+static EPOCH: AtomicU64 = AtomicU64::new(1);
 
 struct Inner {
     cmd: Ring,
@@ -200,6 +220,11 @@ pub struct Controller {
     done: WaitQueue,
     irq: WaitQueue,
     has_irq: AtomicBool,
+    /// The `xhci-events` task: commands it issues (recovering a pipe) must
+    /// drain the event ring themselves, as nobody else will.
+    event_task: AtomicU64,
+    /// The controller reported a full event ring (events were dropped).
+    events_lost: AtomicBool,
     pipes: IrqMutex<BTreeMap<(u8, u8), Pipe>>,
     /// Isochronous streams by (slot, endpoint DCI).
     isos: IrqMutex<BTreeMap<(u8, u8), iso::Stream>>,
@@ -314,7 +339,8 @@ pub fn probe(dev: &pci::Device) {
     let Some(cmd) = Ring::new() else { return };
     w64(op + CRCR, cmd.phys() | 1);
 
-    let (Some(segment), Some(table)) = (Dma::new(EVENT_TRBS * 16), Dma::new(64)) else { return };
+    // (Aligned to its size: a segment must not cross a 64 KiB boundary.)
+    let (Some(segment), Some(table)) = (Dma::new_aligned(EVENT_TRBS * 16), Dma::new(64)) else { return };
     table.write::<u64>(0, segment.phys);
     table.write::<u32>(8, EVENT_TRBS as u32);
     w32(rt + ERSTSZ, 1);
@@ -336,6 +362,8 @@ pub fn probe(dev: &pci::Device) {
         done: WaitQueue::new(),
         irq: WaitQueue::new(),
         has_irq: AtomicBool::new(false),
+        event_task: AtomicU64::new(u64::MAX),
+        events_lost: AtomicBool::new(false),
         pipes: IrqMutex::new(BTreeMap::new()),
         isos: IrqMutex::new(BTreeMap::new()),
         interrupts: AtomicU64::new(0),
@@ -398,6 +426,7 @@ impl Controller {
     }
 
     fn event_task(&'static self) {
+        self.event_task.store(crate::sched::current_id(), Ordering::Release);
         loop {
             if self.has_irq.load(Ordering::Relaxed) {
                 self.irq.wait(1000, || self.event_pending());
@@ -416,6 +445,7 @@ impl Controller {
 
     fn drain_events(&self) {
         let mut any = false;
+        let mut since_erdp = 0;
         loop {
             let trb = {
                 let mut ev = self.events.lock();
@@ -434,12 +464,54 @@ impl Controller {
             };
             any = true;
             self.handle_event(trb.0, trb.1, trb.2);
+            // Hand entries back while still draining: under a steady stream
+            // the ring would otherwise look full to the controller.
+            since_erdp += 1;
+            if since_erdp == ERDP_BATCH {
+                since_erdp = 0;
+                self.write_erdp();
+            }
         }
         if any {
-            let ev = self.events.lock();
-            w64(self.rt + ERDP, (ev.segment.phys + (ev.dequeue * 16) as u64) | (1 << 3));
-            drop(ev);
+            self.write_erdp();
             self.done.wake_all();
+        }
+        if self.events_lost.swap(false, Ordering::AcqRel) {
+            self.resync_pipes();
+        }
+    }
+
+    fn write_erdp(&self) {
+        let ev = self.events.lock();
+        w64(self.rt + ERDP, (ev.segment.phys + (ev.dequeue * 16) as u64) | (1 << 3));
+    }
+
+    /// The event ring overflowed, so completions went missing: every pipe
+    /// and stream may have buffers the controller finished that we will
+    /// never hear of. Stop each endpoint, skip what was queued, and queue
+    /// all its buffers again.
+    fn resync_pipes(&self) {
+        let keys: Vec<(u8, u8)> = self.pipes.lock().keys().copied().collect();
+        log!("xhci", "controller {}: event ring overflowed; restarting {} pipes", self.index, keys.len());
+        for (slot, ep) in keys {
+            self.command(0, TRB_STOP_EP << 10 | (ep as u32) << 16 | (slot as u32) << 24);
+            let dequeue = {
+                let inner = self.inner.lock();
+                inner.slots.get(&slot).and_then(|s| s.rings[ep as usize].as_ref()).map(|r| r.dequeue_pointer())
+            };
+            if let Some(d) = dequeue {
+                self.command(d, TRB_SET_DEQUEUE << 10 | (ep as u32) << 16 | (slot as u32) << 24);
+            }
+            let count = match self.pipes.lock().get_mut(&(slot, ep)) {
+                Some(p) => {
+                    p.trbs.clear();
+                    p.count
+                }
+                None => continue,
+            };
+            for i in 0..count {
+                self.queue_pipe_buffer(slot, ep, i);
+            }
         }
     }
 
@@ -468,32 +540,50 @@ impl Controller {
                     bus.port_changed((param >> 24) as u8);
                 }
             }
+            TRB_HOST_CONTROLLER if code == CC_EVENT_RING_FULL => {
+                self.events_lost.store(true, Ordering::Release);
+            }
             _ => {}
         }
     }
 
     fn pipe_event(&self, slot: u8, ep: u8, trb: u64, code: u8, residual: u32) {
-        let (handler, data) = {
+        let ok = code == CC_SUCCESS || code == CC_SHORT;
+        let (handler, buf, index, at, n, errors, count) = {
             let mut pipes = self.pipes.lock();
             let Some(p) = pipes.get_mut(&(slot, ep)) else { return };
-            let Some(off) = p.trbs.remove(&trb) else { return };
+            let Some(index) = p.trbs.remove(&trb) else { return };
+            p.errors = if ok { 0 } else { p.errors + 1 };
             let n = p.size.saturating_sub(residual as usize);
-            let data = p.buf.bytes()[off..off + n].to_vec();
-            (p.handler.clone(), (off, data))
+            (p.handler.clone(), p.buf.clone(), index, index * p.stride, n, p.errors, p.count)
         };
-        if code == CC_SUCCESS || code == CC_SHORT {
-            handler.data(&data.1);
+        if ok {
+            // Read in place: the controller is done with this buffer until it is queued again.
+            handler.data(&buf.bytes()[at..at + n]);
+            self.queue_pipe_buffer(slot, ep, index);
+            return;
         }
-        if code == CC_STALL {
-            self.recover(slot, ep);
+        // A STALL or a transaction error halted the endpoint: reset it, skip
+        // what was still queued, and queue every buffer again. A device that
+        // keeps failing (or has gone) is given up on.
+        if errors > 8 {
+            if errors == 9 {
+                log!("xhci", "slot {} endpoint {}: stopped polling after repeated errors ({})", slot, ep, code);
+            }
+            return;
         }
-        // Queue the buffer again (unless the device has gone).
-        self.queue_pipe_buffer(slot, ep, data.0);
+        self.recover(slot, ep);
+        if let Some(p) = self.pipes.lock().get_mut(&(slot, ep)) {
+            p.trbs.clear();
+        }
+        for i in 0..count {
+            self.queue_pipe_buffer(slot, ep, i);
+        }
     }
 
-    fn queue_pipe_buffer(&self, slot: u8, ep: u8, off: usize) {
+    fn queue_pipe_buffer(&self, slot: u8, ep: u8, index: usize) {
         let (phys, size) = match self.pipes.lock().get(&(slot, ep)) {
-            Some(p) => (p.buf.phys + off as u64, p.size),
+            Some(p) => (p.buf.phys + (index * p.stride) as u64, p.size),
             None => return,
         };
         let trb = {
@@ -502,20 +592,55 @@ impl Controller {
             ring.push(phys, size as u32, TRB_NORMAL << 10 | TRB_IOC | TRB_ISP)
         };
         if let Some(p) = self.pipes.lock().get_mut(&(slot, ep)) {
-            p.trbs.insert(trb, off);
+            p.trbs.insert(trb, index);
         }
         self.doorbell(slot, ep);
     }
 
-    fn open_pipe_inner(&self, slot: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool {
-        const BUFFERS: usize = 4;
-        let size = (ep.max_packet as usize).clamp(8, 1024);
-        let Some(buf) = Dma::new(size * BUFFERS) else { return false };
-        self.pipes.lock().insert((slot, ep.dci()), Pipe { handler, buf, size, trbs: BTreeMap::new() });
-        for i in 0..BUFFERS {
-            self.queue_pipe_buffer(slot, ep.dci(), i * size);
+    /// Keeps `count` transfers of `size` bytes (at most 64 KiB) queued on an
+    /// IN endpoint. The buffers sit a power of two apart in an allocation
+    /// aligned to its own size, so none crosses the 64 KiB boundary a
+    /// single TRB must not span.
+    fn open_stream_inner(
+        &self,
+        slot: u8,
+        ep: &Endpoint,
+        size: usize,
+        count: usize,
+        handler: Arc<dyn PipeHandler>,
+    ) -> bool {
+        let size = size.clamp(8, 64 * 1024);
+        let stride = size.next_power_of_two();
+        let n = count.max(1);
+        let Some(buf) = Dma::new_aligned(stride * n) else { return false };
+        let buf = Arc::new(buf);
+        self.pipes
+            .lock()
+            .insert((slot, ep.dci()), Pipe { handler, buf, stride, size, count: n, errors: 0, trbs: BTreeMap::new() });
+        for i in 0..n {
+            self.queue_pipe_buffer(slot, ep.dci(), i);
         }
         true
+    }
+
+    /// Takes the transfers queued on an endpoint back (after a timeout):
+    /// stop it, and move its dequeue pointer past them.
+    fn cancel(&self, slot: u8, epoch: u64, dci: u8, trbs: &[u64]) {
+        // Unplugged meanwhile (and the slot perhaps given to another device).
+        if self.inner.lock().slots.get(&slot).map(|s| s.epoch) != Some(epoch) {
+            self.completions.lock().retain(|t, _| !trbs.contains(t));
+            return;
+        }
+        self.command(0, TRB_STOP_EP << 10 | (dci as u32) << 16 | (slot as u32) << 24);
+        let dequeue = {
+            let inner = self.inner.lock();
+            inner.slots.get(&slot).and_then(|s| s.rings[dci as usize].as_ref()).map(|r| r.dequeue_pointer())
+        };
+        if let Some(d) = dequeue {
+            self.command(d, TRB_SET_DEQUEUE << 10 | (dci as u32) << 16 | (slot as u32) << 24);
+        }
+        // A completion that slipped in before the stop has nobody to read it.
+        self.completions.lock().retain(|t, _| !trbs.contains(t));
     }
 
     /// Waits for the completion of any of `trbs`: the last one, or an earlier
@@ -527,7 +652,8 @@ impl Controller {
             c.contains_key(&last)
                 || trbs.iter().any(|t| c.get(t).is_some_and(|e| e.code != CC_SUCCESS && e.code != CC_SHORT))
         };
-        let ok = if self.has_irq.load(Ordering::Relaxed) {
+        let from_events = crate::sched::current_id() == self.event_task.load(Ordering::Acquire);
+        let ok = if self.has_irq.load(Ordering::Relaxed) && !from_events {
             self.done.wait(timeout_ms, finished)
         } else {
             let end = crate::time::uptime_ms() + timeout_ms;
@@ -621,37 +747,63 @@ impl Controller {
     /// A bulk (or interrupt OUT) transfer of `len` bytes at `phys`, split at
     /// 64 KiB boundaries as TRBs require. Returns the bytes transferred.
     fn bulk(&self, slot: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8> {
+        self.bulk_batch(slot, ep, &[(phys, len)], timeout_ms)
+    }
+
+    /// Several transfers (TDs) queued at once with one doorbell, and one
+    /// completion to wait for (the last; an error on any ends the wait).
+    /// Returns the bytes moved (all of them, less a short last IN transfer's
+    /// residual).
+    fn bulk_batch(&self, slot: u8, ep: &Endpoint, parts: &[(u64, usize)], timeout_ms: u64) -> Result<usize, u8> {
         let dci = ep.dci();
-        let trbs = {
+        let (trbs, epoch) = {
             let mut inner = self.inner.lock();
-            let ring = inner.slots.get_mut(&slot).and_then(|s| s.rings[dci as usize].as_mut()).ok_or(CC_TIMEOUT)?;
+            let state = inner.slots.get_mut(&slot).ok_or(CC_TIMEOUT)?;
+            let epoch = state.epoch;
+            let ring = state.rings[dci as usize].as_mut().ok_or(CC_TIMEOUT)?;
             let mut trbs = Vec::new();
-            let mut done = 0usize;
             let max_packet = ep.max_packet.max(1) as usize;
-            loop {
-                let addr = phys + done as u64;
-                let chunk = ((0x1_0000 - (addr & 0xFFFF)) as usize).min(len - done);
-                let last = done + chunk >= len;
-                // TD size: packets still to come after this TRB (capped at 31).
-                let remaining = (len - done - chunk).div_ceil(max_packet).min(31) as u32;
-                let flags = if last { TRB_IOC | TRB_ISP } else { TRB_CHAIN | TRB_ISP };
-                trbs.push(ring.push(addr, chunk as u32 | remaining << 17, TRB_NORMAL << 10 | flags));
-                done += chunk;
-                if last {
-                    break;
+            for (k, &(phys, len)) in parts.iter().enumerate() {
+                let final_td = k + 1 == parts.len();
+                let mut done = 0usize;
+                loop {
+                    let addr = phys + done as u64;
+                    let chunk = ((0x1_0000 - (addr & 0xFFFF)) as usize).min(len - done);
+                    let last = done + chunk >= len;
+                    // TD size: packets still to come after this TRB (capped at 31).
+                    let remaining = (len - done - chunk).div_ceil(max_packet).min(31) as u32;
+                    let flags = match (last, final_td) {
+                        (true, true) => TRB_IOC | TRB_ISP,
+                        // Earlier TDs complete silently (errors still report).
+                        (true, false) => TRB_ISP,
+                        _ => TRB_CHAIN | TRB_ISP,
+                    };
+                    trbs.push(ring.push(addr, chunk as u32 | remaining << 17, TRB_NORMAL << 10 | flags));
+                    done += chunk;
+                    if last {
+                        break;
+                    }
                 }
             }
-            trbs
+            (trbs, epoch)
         };
+        if trbs.is_empty() {
+            return Ok(0);
+        }
         self.doorbell(slot, dci);
         let c = self.wait_completion(&trbs, timeout_ms);
         if c.code != CC_SUCCESS {
-            if c.code == CC_STALL {
-                self.recover(slot, dci);
+            match c.code {
+                CC_STALL => self.recover(slot, dci),
+                // Still queued: a later transfer must not land in this one's
+                // buffer (which its owner may reuse or free).
+                CC_TIMEOUT => self.cancel(slot, epoch, dci, &trbs),
+                _ => {}
             }
             return Err(c.code);
         }
-        Ok(len.saturating_sub(c.residual as usize))
+        let total: usize = parts.iter().map(|p| p.1).sum();
+        Ok(total.saturating_sub(c.residual as usize))
     }
 
     // ------------------------------------------------------------ devices
@@ -867,7 +1019,8 @@ impl Hcd for Controller {
             inner.dcbaa.write::<u64>(slot as usize * 8, output.phys);
             let mut rings: [Option<Ring>; 32] = Default::default();
             rings[1] = Some(ep0);
-            inner.slots.insert(slot, SlotState { output, input, rings, speed: pos.speed });
+            let epoch = EPOCH.fetch_add(1, Ordering::Relaxed);
+            inner.slots.insert(slot, SlotState { output, input, rings, speed: pos.speed, epoch });
         }
         let c = self.command(input_phys, TRB_ADDRESS_DEVICE << 10 | (slot as u32) << 24);
         if c.code != CC_SUCCESS {
@@ -900,12 +1053,20 @@ impl Hcd for Controller {
         self.bulk(slot, ep, phys, len, timeout_ms)
     }
 
+    fn transfer_batch(&self, slot: u8, ep: &Endpoint, parts: &[(u64, usize)], timeout_ms: u64) -> Result<usize, u8> {
+        self.bulk_batch(slot, ep, parts, timeout_ms)
+    }
+
     fn configure(&self, slot: u8, eps: &[Endpoint], hub: Option<HubInfo>) -> bool {
         self.configure_inner(slot, eps, hub)
     }
 
     fn open_pipe(&self, slot: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool {
-        self.open_pipe_inner(slot, ep, handler)
+        self.open_stream_inner(slot, ep, (ep.max_packet as usize).clamp(8, 1024), 4, handler)
+    }
+
+    fn open_stream(&self, slot: u8, ep: &Endpoint, size: usize, count: usize, handler: Arc<dyn PipeHandler>) -> bool {
+        self.open_stream_inner(slot, ep, size, count, handler)
     }
 
     fn release(&self, slot: u8) {

@@ -484,12 +484,12 @@ impl Table {
 }
 
 fn flush(s: &mut Stack, id: ConnId, now: u64) {
-    let (dst, segs) = match s.tcp.conns.get_mut(&id) {
-        Some(c) => (c.remote.0, c.output(now)),
+    let (src, dst, segs) = match s.tcp.conns.get_mut(&id) {
+        Some(c) => (c.local.0, c.remote.0, c.output(now)),
         None => return,
     };
     for seg in segs {
-        let _ = s.send_ip(dst, PROTO_TCP, &seg);
+        let _ = s.send_ip_from(src, dst, PROTO_TCP, &seg);
     }
 }
 
@@ -661,8 +661,8 @@ pub fn abort(s: &mut Stack, id: ConnId) {
     if !matches!(c.state, State::Closed | State::Listen | State::TimeWait | State::SynSent) {
         let seq = c.snd_nxt;
         let seg = c.segment(seq, RST | ACK, &[]);
-        let dst = c.remote.0;
-        let _ = s.send_ip(dst, PROTO_TCP, &seg);
+        let (src, dst) = (c.local.0, c.remote.0);
+        let _ = s.send_ip_from(src, dst, PROTO_TCP, &seg);
     }
     s.tcp.conns.remove(&id);
 }

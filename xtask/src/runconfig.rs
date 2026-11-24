@@ -53,6 +53,18 @@ pub const NETS: &[Choice] = &[
     choice("e1000e", "Intel e1000e", "Intel's PCI Express card (82574L), as in many real PCs.", &["e1000e"]),
     choice("igb", "Intel igb", "Intel's 82576 server gigabit card, on the igb driver.", &["igb"]),
     choice("rtl8139", "Realtek RTL8139", "Realtek's classic 100 Mbit card.", &["rtl8139"]),
+    choice(
+        "usb-ecm",
+        "USB Ethernet (CDC-ECM)",
+        "QEMU's usb-net adapter in its CDC-ECM configuration, as a dock or USB-C dongle presents itself.",
+        &["usb-net"],
+    ),
+    choice(
+        "usb-rndis",
+        "USB tethering (RNDIS)",
+        "QEMU's usb-net adapter in its RNDIS configuration, as an Android phone's USB tethering presents itself.",
+        &["usb-net"],
+    ),
     choice("none", "No network", "No network card: for offline checks.", &[]),
 ];
 

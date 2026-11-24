@@ -44,6 +44,11 @@ impl Config {
         }
     }
 
+    /// An unplugged card's slot: no address anyone can match, no solicitations.
+    pub fn gone() -> Config {
+        Config { solicited: u8::MAX, addrs: vec![([0; 16], 128, u64::MAX)], ..Config::loopback() }
+    }
+
     /// A card's link-local address, from its MAC (modified EUI-64).
     pub fn new(mac: [u8; 6]) -> Config {
         let mut ll = [0u8; 16];
@@ -229,6 +234,7 @@ impl Stack {
     fn router_advert(&mut self, i: usize, src: Ip6, p: &[u8], now: u64) {
         let lifetime = be16(p, 6) as u64;
         let mac = self.ifaces[i].mac;
+        let name = self.ifaces[i].name.clone();
         let mut learned = None;
         let mut dns = Vec::new();
         let v6 = &mut self.ifaces[i].v6;
@@ -258,10 +264,11 @@ impl Stack {
                     if flags & 0x40 != 0 && plen == 64 && !link_local(&prefix) {
                         let mut a = prefix;
                         a[8..].copy_from_slice(&interface_id(mac));
+                        let known = v6.addrs.iter().any(|x| x.0 == a);
                         v6.addrs.retain(|(x, _, _)| *x != a);
                         if valid > 0 {
-                            if !v6.addrs.iter().any(|x| x.0 == a) {
-                                log!("net", "eth{}: IPv6 {}/64", i - 1, ip6_str(&a));
+                            if !known {
+                                log!("net", "{}: IPv6 {}/64", name, ip6_str(&a));
                             }
                             v6.addrs.push((a, 64, until));
                         }

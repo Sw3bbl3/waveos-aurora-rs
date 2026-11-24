@@ -98,7 +98,11 @@ struct Device {
     max_packet0: u16,
     /// Endpoint address → (max packet, next data toggle).
     eps: BTreeMap<u8, (u16, bool)>,
+    /// Held by a control transfer in flight.
     busy: Arc<Mutex<()>>,
+    /// Held by a transfer in flight on that endpoint: endpoints run side by
+    /// side (a network adapter's receive waits while it transmits).
+    ep_busy: BTreeMap<u8, Arc<Mutex<()>>>,
 }
 
 struct Pipe {
@@ -498,9 +502,16 @@ impl Hcd for Uhci {
 
     fn new_device(&self, pos: &Position) -> Option<u8> {
         let addr = self.addresses.alloc()?;
-        self.devices
-            .lock()
-            .insert(addr, Device { pos: *pos, max_packet0: 8, eps: BTreeMap::new(), busy: Arc::new(Mutex::new(())) });
+        self.devices.lock().insert(
+            addr,
+            Device {
+                pos: *pos,
+                max_packet0: 8,
+                eps: BTreeMap::new(),
+                busy: Arc::new(Mutex::new(())),
+                ep_busy: BTreeMap::new(),
+            },
+        );
         // Until SET_ADDRESS, the device answers at 0: send it from there.
         let set_address = Setup { request_type: 0, request: 5, value: addr as u16, index: 0, length: 0 };
         if self.control_at(0, pos, 8, set_address, None).is_err() {
@@ -525,7 +536,12 @@ impl Hcd for Uhci {
     }
 
     fn transfer(&self, dev: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8> {
-        let (pos, _, busy) = self.device(dev).ok_or(TIMEOUT)?;
+        let (pos, busy) = self
+            .devices
+            .lock()
+            .get(&dev)
+            .and_then(|d| Some((d.pos, d.ep_busy.get(&ep.address)?.clone())))
+            .ok_or(TIMEOUT)?;
         let _busy = busy.lock();
         let (mps, toggle) = *self.devices.lock().get(&dev).and_then(|d| d.eps.get(&ep.address)).ok_or(TIMEOUT)?;
         let pid = if ep.is_in() { PID_IN } else { PID_OUT };
@@ -558,6 +574,7 @@ impl Hcd for Uhci {
         let Some(d) = devs.get_mut(&dev) else { return false };
         for e in eps {
             d.eps.entry(e.address).or_insert((e.max_packet, false));
+            d.ep_busy.entry(e.address).or_insert_with(|| Arc::new(Mutex::new(())));
         }
         true
     }
@@ -605,9 +622,14 @@ impl Hcd for Uhci {
             self.pool.free(p.qh);
             self.pool.free(p.td);
         }
-        if let Some(d) = self.devices.lock().remove(&dev) {
-            // Wait for a transfer in flight to give up.
+        // (The table's lock is let go first: a transfer finishing needs it.)
+        let removed = self.devices.lock().remove(&dev);
+        if let Some(d) = removed {
+            // Wait for transfers in flight to give up.
             drop(d.busy.lock());
+            for b in d.ep_busy.values() {
+                drop(b.lock());
+            }
         }
         self.addresses.free(dev);
     }

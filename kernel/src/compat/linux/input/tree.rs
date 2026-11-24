@@ -168,7 +168,7 @@ pub fn usb_dirs(u: &UsbPlace) -> (String, String, Option<String>) {
     let pci = if u.pci.is_empty() { "0000:00:00.0" } else { &u.pci };
     let name = format!("{}-{}", u.bus, u.ports);
     let device = format!("/sys/devices/pci0000:00/{pci}/usb{}/{name}", u.bus);
-    let interface = format!("{device}/{name}:1.{}", u.interface);
+    let interface = format!("{device}/{name}:{}.{}", u.config.max(1), u.interface);
     let hid = (u.hid != 0).then(|| format!("{interface}/{}", hid_name(u)));
     (device, interface, hid)
 }
@@ -354,7 +354,7 @@ pub fn id_path(loc: &Location) -> Option<String> {
         Location::Serio(n) => Some(format!("platform-i8042-serio-{n}")),
         Location::Usb(u) => {
             let pci = if u.pci.is_empty() { "0000:00:00.0" } else { &u.pci };
-            Some(format!("pci-{pci}-usb-0:{}:1.{}", u.ports, u.interface))
+            Some(format!("pci-{pci}-usb-0:{}:{}.{}", u.ports, u.config.max(1), u.interface))
         }
         Location::I2c(path) => Some(format!("platform-{}", i2c_name(path))),
     }

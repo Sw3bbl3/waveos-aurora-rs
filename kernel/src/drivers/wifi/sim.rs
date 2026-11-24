@@ -61,7 +61,7 @@ impl Radio for SimRadio {
             replies.extend(ap.receive(frame));
             // Requests the station sent through the AP, answered by the "network".
             for eth in core::mem::take(&mut ap.received) {
-                if let Some(ip) = dhcp_reply(&eth) {
+                if let Some(ip) = dhcp_reply(&eth, SERVER_IP, CLIENT_IP) {
                     replies.extend(ap.send_to_station(0x0800, &ip));
                 }
             }
@@ -73,7 +73,7 @@ impl Radio for SimRadio {
     }
 }
 
-fn checksum(b: &[u8]) -> u16 {
+pub(crate) fn checksum(b: &[u8]) -> u16 {
     let mut sum: u32 = b.chunks(2).map(|c| u32::from(c[0]) << 8 | u32::from(*c.get(1).unwrap_or(&0))).sum();
     while sum > 0xFFFF {
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -82,8 +82,9 @@ fn checksum(b: &[u8]) -> u16 {
 }
 
 /// Answers a DHCP discover with an offer and a request with an
-/// acknowledgement; returns the IPv4 packet.
-fn dhcp_reply(eth: &[u8]) -> Option<Vec<u8>> {
+/// acknowledgement (`client` in a /24, `server` the router and DNS);
+/// returns the IPv4 packet. The USB network tests' simulated devices use it too.
+pub(crate) fn dhcp_reply(eth: &[u8], server: [u8; 4], client: [u8; 4]) -> Option<Vec<u8>> {
     let ip = eth.get(14..)?;
     if eth[12..14] != [0x08, 0x00] || ip.len() < 28 || ip[9] != 17 {
         return None;
@@ -115,19 +116,19 @@ fn dhcp_reply(eth: &[u8]) -> Option<Vec<u8>> {
     m[2] = 6;
     m[4..8].copy_from_slice(&req[4..8]); // transaction id
     m[10..12].copy_from_slice(&req[10..12]); // flags
-    m[16..20].copy_from_slice(&CLIENT_IP);
-    m[20..24].copy_from_slice(&SERVER_IP);
+    m[16..20].copy_from_slice(&client);
+    m[20..24].copy_from_slice(&server);
     m[28..44].copy_from_slice(&req[28..44]); // client hardware address
     m[236..240].copy_from_slice(&[99, 130, 83, 99]);
     m.extend_from_slice(&[53, 1, reply_kind]);
     m.extend_from_slice(&[54, 4]);
-    m.extend_from_slice(&SERVER_IP);
+    m.extend_from_slice(&server);
     m.extend_from_slice(&[51, 4, 0, 0, 0x0E, 0x10]); // one hour
     m.extend_from_slice(&[1, 4, 255, 255, 255, 0]);
     m.extend_from_slice(&[3, 4]);
-    m.extend_from_slice(&SERVER_IP);
+    m.extend_from_slice(&server);
     m.extend_from_slice(&[6, 4]);
-    m.extend_from_slice(&SERVER_IP);
+    m.extend_from_slice(&server);
     m.push(255);
 
     let udp_len = 8 + m.len();
@@ -136,7 +137,7 @@ fn dhcp_reply(eth: &[u8]) -> Option<Vec<u8>> {
     p[2..4].copy_from_slice(&((20 + udp_len) as u16).to_be_bytes());
     p[8] = 64;
     p[9] = 17;
-    p[12..16].copy_from_slice(&SERVER_IP);
+    p[12..16].copy_from_slice(&server);
     p[16..20].copy_from_slice(&[255; 4]);
     let sum = checksum(&p);
     p[10..12].copy_from_slice(&sum.to_be_bytes());

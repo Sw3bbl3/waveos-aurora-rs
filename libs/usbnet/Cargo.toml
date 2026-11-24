@@ -1,0 +1,12 @@
+[package]
+name = "aurora-usbnet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# no_std and integer-only: the kernel's USB network drivers run it on
+# whatever a (possibly hostile) device sends; the host tests and fuzzes it.
+[dependencies]
+
+[dev-dependencies]
+aurora-mutate = { path = "../mutate" }

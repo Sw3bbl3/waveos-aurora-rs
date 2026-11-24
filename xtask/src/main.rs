@@ -11,7 +11,9 @@
 //!                                         insert it from the QEMU monitor (`eject sdcard`, `change sdcard …`)
 //!       --fresh-disk                      recreate the disk (erases files saved inside WaveOS)
 //!       --monitor                         open the live System Explorer (http://127.0.0.1:7777)
-//!       --net virtio|e1000|e1000e|igb|rtl8139|none  network card (default virtio; also for `test`)
+//!       --net virtio|e1000|e1000e|igb|rtl8139|usb-ecm|usb-rndis|none  network card (default virtio; also
+//!                                         for `test`); usb-ecm and usb-rndis are QEMU's usb-net adapter on
+//!                                         the --usb controller, in its CDC-ECM or RNDIS configuration
 //!       --smp N                           number of CPUs (default 4)
 //!       --memory-mib N                    guest RAM in MiB (default 4096)
 //!       --audio-wav PATH                  record guest audio to a WAV file
@@ -114,7 +116,7 @@ fn main() {
     let net =
         args.iter().position(|a| a == "--net").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("virtio");
     if !runconfig::accepts(runconfig::NETS, net) {
-        eprintln!("--net must be virtio, e1000, e1000e, igb, rtl8139 or none");
+        eprintln!("--net must be virtio, e1000, e1000e, igb, rtl8139, usb-ecm, usb-rndis or none");
         exit(2);
     }
     let gpu = args.iter().position(|a| a == "--gpu").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("std");
@@ -304,6 +306,8 @@ fn main() {
             image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
                 .expect("write boot.conf");
             image::set_boot_option(&img, "gpu", gpu_driver(gpu)).expect("write boot.conf");
+            // QEMU's usb-net offers RNDIS and CDC-ECM: which one --net asked for.
+            image::set_boot_option(&img, "usbnet", usb_net_mode(net)).expect("write boot.conf");
             // A keyboard-driven game controller, for Wave Play without one.
             image::set_boot_option(&img, "virtual_gamepad", if flag("--virtual-gamepad") { "1" } else { "0" })
                 .expect("write boot.conf");
@@ -343,6 +347,7 @@ fn main() {
                 }),
                 net,
                 netdev_extra: String::new(),
+                second_usb_net: false,
                 gpu,
                 resolution: Some(displays.primary()),
                 displays,
@@ -1055,8 +1060,11 @@ struct RunOpts<'a> {
     /// A USB speaker (`usb-audio`, id `usbaudio`): a UAC 1 device with an
     /// isochronous endpoint.
     usb_audio: bool,
-    /// Network card: virtio, e1000, e1000e, igb, rtl8139 or none (QEMU user networking).
+    /// Network card: virtio, e1000, e1000e, igb, rtl8139, usb-ecm, usb-rndis or none (QEMU user networking).
     net: &'a str,
+    /// A second USB network adapter on its own user network (`net1`, id
+    /// `usbnet1`): the tests' two-adapters-at-once check.
+    second_usb_net: bool,
     /// Extra user-networking options, e.g. host port forwards.
     netdev_extra: String,
     /// Display adapter: std (Bochs VGA) or virtio (virtio-vga, driven by the ported Linux driver).
@@ -1272,7 +1280,9 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
             ("uhci.0", "2.2", "2", "1")
         }
         _ => {
-            cmd.args(["-device", "qemu-xhci,id=xhci"]);
+            // Eight USB 2 ports (QEMU's default is four): room for the USB
+            // network adapters beside the tablet, stick, hub and speaker.
+            cmd.args(["-device", "qemu-xhci,id=xhci,p2=8,p3=4"]);
             ("xhci.0", "1", "3", "2")
         }
     };
@@ -1315,7 +1325,14 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         cmd.arg("-acpitable").arg(format!("file={}", ssdt.display()));
     }
     // A network card on QEMU's user networking (NAT; the host is 10.0.2.2).
-    if opts.net != "none" {
+    if opts.net.starts_with("usb-") {
+        cmd.arg("-netdev").arg(format!("user,id=net0{}", opts.netdev_extra));
+        cmd.arg("-device").arg(usb_net_device(bus, hub, 0));
+        if opts.second_usb_net {
+            cmd.arg("-netdev").arg("user,id=net1");
+            cmd.arg("-device").arg(usb_net_device(bus, hub, 1));
+        }
+    } else if opts.net != "none" {
         cmd.arg("-netdev").arg(format!("user,id=net0{}", opts.netdev_extra));
         cmd.arg("-device").arg(match opts.net {
             "e1000" => "e1000,netdev=net0",
@@ -1370,6 +1387,41 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     cmd
 }
 
+/// The root port (or, on the two- and four-port USB 1 controllers, hub
+/// port) of USB network adapter `n` (0 or 1).
+fn usb_net_port(bus: &str, hub: &str, n: usize) -> String {
+    match bus {
+        "uhci.0" | "ohci.0" => format!("{hub}.{}", 7 + n),
+        _ => format!("{}", 5 + n),
+    }
+}
+
+/// The bus name and hub port `qemu` gives each `--usb` controller.
+fn usb_bus_and_hub(usb: &str) -> (&'static str, &'static str) {
+    match usb {
+        "ehci" | "ehci-ohci" => ("ehci.0", "3"),
+        "ohci" => ("ohci.0", "3"),
+        "uhci" => ("uhci.0", "2"),
+        _ => ("xhci.0", "3"),
+    }
+}
+
+/// The `-device` argument for USB network adapter `n` on `bus` (netdev `net<n>`).
+fn usb_net_device(bus: &str, hub: &str, n: usize) -> String {
+    let port = usb_net_port(bus, hub, n);
+    format!("usb-net,id=usbnet{n},netdev=net{n},bus={bus},port={port},mac=52:54:00:12:35:{:02x}", 0x56 + n)
+}
+
+/// Which configuration of QEMU's usb-net the kernel picks (`usbnet=` in
+/// boot.conf); empty (the kernel's own choice) for other cards.
+fn usb_net_mode(net: &str) -> &'static str {
+    match net {
+        "usb-rndis" => "rndis",
+        "usb-ecm" => "ecm",
+        _ => "",
+    }
+}
+
 /// The kernel's virtio-gpu driver for `--gpu` (`gpu=` in boot.conf).
 fn gpu_driver(gpu: &str) -> &'static str {
     if gpu == "virtio-linux" {
@@ -1412,6 +1464,28 @@ fn serve_test_http(listener: std::net::TcpListener) {
                 let Some(req) = read_request(&mut conn) else { return };
                 if let Some(r) = repo_response(&req) {
                     r.send(&mut conn);
+                } else if req.starts_with(b"POST /sink ") {
+                    // The upload test: read the body, answer with its size.
+                    use std::io::Read;
+                    let head = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
+                    let want = String::from_utf8_lossy(&req[..head])
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string())
+                        })
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let mut got = req.len() - head;
+                    let mut buf = [0u8; 1024];
+                    while got < want {
+                        match conn.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => got += n,
+                        }
+                    }
+                    let text = got.to_string();
+                    let r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len());
+                    let _ = conn.write_all(r.as_bytes());
                 } else if req.starts_with(b"GET /big ") {
                     let mut r =
                         format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
@@ -1646,6 +1720,11 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
         if let Some(driver) = test_net_driver(net) {
             image::set_boot_option(&img, "test_net_driver", driver).expect("write boot.conf");
         }
+        // USB networking: the configuration to pick, and the hot-plug tests.
+        image::set_boot_option(&img, "usbnet", usb_net_mode(net)).expect("write boot.conf");
+        if net.starts_with("usb-") {
+            image::set_boot_option(&img, "test_usb_net", net).expect("write boot.conf");
+        }
         if let Some(filter) = env::var("AURORA_TEST_FILTER").ok().or(mesa.then(|| String::from("Mesa"))) {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
         }
@@ -1877,6 +1956,8 @@ fn test_net_driver(net: &str) -> Option<&'static str> {
         "e1000e" => "82574L",
         "igb" => "82576",
         "rtl8139" => "RTL8139",
+        "usb-ecm" => "CDC-ECM",
+        "usb-rndis" => "RNDIS",
         _ => return None,
     })
 }
@@ -2009,6 +2090,7 @@ fn run_tests_once(
         audio: format!("wav:{}", audio.display()),
         net,
         netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
+        second_usb_net: net.starts_with("usb-"),
         gpu,
         resolution: None,
         displays: if heads > 1 {
@@ -2044,6 +2126,7 @@ fn run_tests_once(
     let woke = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (slept_w, woke_w) = (slept_at.clone(), woke.clone());
     let sd_path = media.sd_card.to_path_buf();
+    let usb_kind = usb.to_string();
     let reader = std::thread::spawn(move || {
         let mut all = String::new();
         let mut harness = testdisplays::Harness::new(heads > 1);
@@ -2067,6 +2150,24 @@ fn run_tests_once(
                 );
                 if let Err(e) = qmp_execute(&add) {
                     eprintln!("could not plug the USB speaker back in: {e}");
+                }
+            }
+            // The USB network test pulls adapter N out mid-transfer and puts it back.
+            if let Some(n) = line.split("harness: unplug usbnet").nth(1).and_then(|n| n.trim().parse::<usize>().ok()) {
+                let del = format!(r#"{{"execute": "device_del", "arguments": {{"id": "usbnet{n}"}}}}"#);
+                if let Err(e) = qmp_execute(&del) {
+                    eprintln!("could not unplug USB network adapter {n}: {e}");
+                }
+            }
+            if let Some(n) = line.split("harness: replug usbnet").nth(1).and_then(|n| n.trim().parse::<usize>().ok()) {
+                let (bus, hub) = usb_bus_and_hub(&usb_kind);
+                let add = format!(
+                    r#"{{"execute": "device_add", "arguments": {{"driver": "usb-net", "id": "usbnet{n}", "netdev": "net{n}", "bus": "{bus}", "port": "{}", "mac": "52:54:00:12:35:{:02x}"}}}}"#,
+                    usb_net_port(bus, hub, n),
+                    0x56 + n
+                );
+                if let Err(e) = qmp_execute(&add) {
+                    eprintln!("could not plug USB network adapter {n} back in: {e}");
                 }
             }
             // A picture of the screen, checked after the run (`check_screendumps`).

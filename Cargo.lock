@@ -97,6 +97,7 @@ dependencies = [
  "aurora-lz4",
  "aurora-nvgfx",
  "aurora-sdmmc",
+ "aurora-usbnet",
  "aurora-wav",
  "aurora-wifi",
  "aurorafs",
@@ -202,6 +203,13 @@ version = "0.8.0"
 [[package]]
 name = "aurora-sdmmc"
 version = "0.8.0"
+
+[[package]]
+name = "aurora-usbnet"
+version = "0.8.0"
+dependencies = [
+ "aurora-mutate",
+]
 
 [[package]]
 name = "aurora-wav"

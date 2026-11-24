@@ -658,7 +658,10 @@ impl Hcd for Ohci {
             self.pool.free(p.dummy);
             self.pool.free(p.ed);
         }
-        if let Some(d) = self.devices.lock().remove(&dev) {
+        // The table's lock (interrupts off) is let go before waiting on
+        // transfers in flight and the controller.
+        let removed = self.devices.lock().remove(&dev);
+        if let Some(d) = removed {
             for ep in core::iter::once(&d.ep0).chain(d.eps.values()) {
                 let dummy = ep.queue.lock();
                 let list = if ep.bulk {
