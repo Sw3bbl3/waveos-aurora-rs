@@ -141,6 +141,13 @@ pub fn frame_pointer() -> u64 {
     rbp
 }
 
+/// The thread pointer as the running program left it, where programs set
+/// it themselves: never on x86 (FS base changes only through `arch_prctl`).
+#[inline(always)]
+pub fn user_thread_pointer() -> Option<u64> {
+    None
+}
+
 /// Sets the user thread pointer (FS base) of the calling CPU.
 pub fn set_thread_pointer(base: u64) {
     // A non-canonical base would fault the wrmsr itself.

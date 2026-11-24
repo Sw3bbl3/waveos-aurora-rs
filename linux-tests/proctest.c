@@ -169,7 +169,10 @@ static void spawning(void) {
     }
     CHECK(pid > 0, "vfork");
     CHECK(waitpid(pid, &status, 0) == pid && WEXITSTATUS(status) == 3, "vfork child");
+#if !defined(__aarch64__)
+    // (musl's vfork on arm64 is clone(SIGCHLD): a plain fork, no sharing.)
     CHECK(touched == 1, "vfork shares memory");
+#endif
     printf("PASS posix_spawn and vfork\n");
 }
 

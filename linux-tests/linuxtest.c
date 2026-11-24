@@ -439,7 +439,9 @@ static void clocks(void) {
     struct timespec k1, v, k2, first;
     syscall(SYS_clock_gettime, CLOCK_REALTIME, &first);
     long rounds = 0, real_sec = first.tv_sec;
-    while (real_sec < first.tv_sec + 2 && rounds < 1000000) {
+    // (A bound on rounds only in case the clock stood still: under hardware
+    // virtualization a million rounds take well under two seconds.)
+    while (real_sec < first.tv_sec + 2 && rounds < 100000000) {
         for (int clock = CLOCK_REALTIME; clock <= CLOCK_MONOTONIC; clock++) {
             syscall(SYS_clock_gettime, clock, &k1);
             clock_gettime(clock, &v);
@@ -518,7 +520,11 @@ static void machine(void) {
     close(fd);
     CHECK(in > 0, "/proc/cpuinfo");
     info[in] = 0;
+#if defined(__aarch64__)
+    CHECK(strstr(info, "Features\t: fp asimd") && strstr(info, "CPU implementer"), "cpuinfo flags");
+#else
     CHECK(strstr(info, "flags\t\t: fpu") && strstr(info, " sse2") && strstr(info, "model name"), "cpuinfo flags");
+#endif
     free(info);
     char online[32] = {0};
     fd = open("/sys/devices/system/cpu/online", O_RDONLY);

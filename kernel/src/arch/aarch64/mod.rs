@@ -47,6 +47,7 @@ pub fn early_init() {
 pub fn init_interrupts(acpi: &crate::acpi::AcpiInfo) {
     psci::init(acpi);
     percpu::init(0);
+    let _ = cpu::id_regs(); // read once, on the boot CPU
     log!(
         "boot",
         "CPU: {} ({}), entered at EL{}, CTR_EL0 {:#x}",

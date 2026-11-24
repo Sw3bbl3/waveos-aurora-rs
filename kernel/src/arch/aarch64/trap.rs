@@ -150,9 +150,10 @@ macro_rules! vectors {
             "bl {trap}",
             "ldp x1, x2, [sp, #248]",
             "ldr x3, [sp, #264]",
-            "ldr x4, [sp, #288]",
-            "cmp x4, #4",
-            "b.lo 3f",
+            // Back to EL0 (by the saved PSTATE, which a handler may have
+            // rewritten, as `execve` does): the user stack pointer too.
+            "tst x3, #0xf",
+            "b.ne 3f",
             "msr sp_el0, x1",
             "3:",
             "msr elr_el1, x2",
@@ -325,6 +326,11 @@ fn sync(f: &mut TrapFrame) {
             log!("int", "breakpoint at {:#x}", f.pc);
             f.pc += 4;
         }
+        // A Linux program reading an ID register (`mrs`): emulated as Linux does.
+        EC_SYSREG | EC_UNKNOWN
+            if f.user_mode()
+                && crate::proc::current().is_some_and(|p| p.linux.is_some())
+                && crate::compat::linux::abi::aarch64::emulate_mrs(f) => {}
         _ => {
             let (sig, code, addr) = match ec {
                 EC_BRK64 => (SIGTRAP, TRAP_BRKPT, f.pc),

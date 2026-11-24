@@ -128,10 +128,6 @@ const ARCH_SKIPS: &[(&str, &str)] = &[
     ("ACPI: AML, sleep states, battery", "a PC's ACPI: sleep states, \\_S5 and the test battery's SSDT"),
     ("I2C:", "the I2C touchpad is a PC ACPI device (test SSDT)"),
     ("sleep (S3) and wake", "no suspend to RAM on Arm"),
-    ("clock: the vDSO", "the vDSO is built for x86 only so far"),
-    ("Linux programs:", "the Linux layer for arm64 is not ported yet"),
-    ("sandbox: a Linux program", "the Linux layer for arm64 is not ported yet"),
-    ("sandbox: the Linux fuzzer", "the Linux layer for arm64 is not ported yet"),
 ];
 
 pub fn run() {
@@ -153,7 +149,7 @@ pub fn run() {
         crate::kprintln!("SKIP virtual USB HID tests: QEMU has no usb-redir device");
     }
     for (name, why) in ARCH_SKIPS {
-        crate::kprintln!("SKIP {name}: {why}");
+        crate::kprintln!("SKIP tests \"{name}…\": {why}");
     }
     let chosen: Vec<&Test> = TESTS
         .iter()

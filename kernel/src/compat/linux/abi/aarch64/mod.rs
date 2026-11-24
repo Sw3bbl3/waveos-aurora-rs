@@ -65,12 +65,10 @@ pub fn put_stat(ptr: u64, s: &aurora_linuxabi::Stat) -> Result<u64, isize> {
     crate::syscall::user::put(ptr, &abi::encode_stat(s)).map(|_| 0)
 }
 
-/// The ID registers features are decided by. Not readable outside
-/// `arch::` yet (see docs/developer/porting.md, "Linux programs for
-/// arm64"): until the arch layer provides them, `AT_HWCAP` is
-/// `arch::cpu::linux_hwcap()` and ID-register reads aren't emulated.
+/// The ID registers features are decided by, as the boot CPU read them
+/// at start-up (`arch::aarch64::cpu::id_regs`).
 fn id_regs() -> Option<cpu::IdRegs> {
-    None
+    Some(crate::arch::aarch64::cpu::id_regs())
 }
 
 /// What the kernel does for programs beyond the processor's features.

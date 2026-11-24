@@ -356,29 +356,37 @@ check it).
   `cargo test -p aurora-linuxabi` asserts the tables, encoders and frame
   code against them.
 
-### What the Linux layer needs from `arch/` (requested, not done here)
+### What the Linux layer gets from `arch/`
 
-1. **ID registers:** `arch::aarch64::cpu::id_registers() -> IdRegs`-like
-   raw values of MIDR, ID_AA64PFR0/1, ISAR0/1/2, MMFR0/1/2 (read once).
-   Until then `abi::aarch64::id_regs()` returns `None`: `AT_HWCAP` is
-   `arch::cpu::linux_hwcap()` (12 bits), `AT_HWCAP2` is 0 and `mrs` isn't
-   emulated.
-2. **`mrs` emulation hook:** in `arch/aarch64/trap.rs`'s `sync`, for EC
-   0x18 (and EC 0) from EL0 of a Linux process, call
-   `crate::compat::linux::abi::aarch64::emulate_mrs(f)` before raising
-   SIGILL; if it returns true, return to the program.
-3. **EL0 counter access:** CNTKCTL_EL1.EL0VCTEN (bit 1) set on every CPU,
-   so the vDSO can read CNTVCT_EL0 (and CNTFRQ_EL0) at EL0.
-4. **I-cache coherency for JITs and loaded code:** SCTLR_EL1.UCI/UCT/DZE
-   are set (EL0 `dc cvau`, `ic ivau`, CTR_EL0, `dc zva`); the kernel must
-   also clean the D-cache to PoU and invalidate the I-cache when it maps
-   pages executable that it wrote (file pages, `mprotect` to PROT_EXEC of
-   pages written by the kernel).
-5. **TPIDRRO_EL0** zeroed for user programs, and TPIDR_EL0 kept per thread
-   (done: `sched`'s thread pointer).
-6. Optional: a named `orig_x0` slot in `TrapFrame` (today the Linux layer
-   gets it from `syscall::dispatch`'s saved arguments, which covers system
-   calls; nothing else needs it).
+1. **ID registers:** `arch::aarch64::cpu::id_regs()` returns
+   `aurora_linuxabi::aarch64::cpu::IdRegs` (MIDR, ID_AA64PFR0/1,
+   ISAR0/1/2, MMFR0/1/2), read once on the boot CPU at start-up;
+   `abi::aarch64::id_regs()` returns it.
+2. **`mrs` emulation:** `trap::sync` calls
+   `compat::linux::abi::aarch64::emulate_mrs(f)` for EC 0x18 and EC 0
+   from EL0 of a Linux process before raising SIGILL, and returns to the
+   program when it returns true.
+3. **EL0 counter access:** `cpu::init_el0` sets CNTKCTL_EL1.EL0VCTEN on
+   every CPU (the vDSO reads CNTVCT_EL0; CNTFRQ_EL0 is always readable).
+4. **Instruction cache:** SCTLR_EL1.UCI/UCT/DZE are set (EL0 `dc cvau`,
+   `ic ivau`, CTR_EL0, `dc zva`). The kernel cleans the D-cache to PoU and
+   invalidates the I-cache (`cache::sync_code`, only where CTR_EL0 says it
+   is needed) whenever a user page becomes executable: every leaf entry
+   `vmm` writes goes through `pte::leaf`, which does it for a user page
+   without UXN — new mappings (file pages from the page cache included),
+   `mprotect` to PROT_EXEC, copy-on-write copies, swap-in — and when the
+   loaders write code into an already executable page (`vmm::write_bytes`).
+   A program that writes code into its own executable page (a JIT) syncs
+   it itself, as on Linux.
+5. **TPIDRRO_EL0** is zeroed on every CPU (`cpu::init_el0`); the kernel
+   never writes it. TPIDR_EL0 is the thread pointer, kept per thread.
+6. **Pointer authentication: APIA only.** One APIA key per boot, the same
+   in every process; EnIB, EnDA and EnDB stay off (those instructions are
+   NOPs) and there is no GA key, so the Linux layer must not advertise
+   PACA/PACG. Per-process keys (switched with the address space) are a
+   follow-up.
+7. `orig_x0`: not in `TrapFrame`; the Linux layer takes it from
+   `syscall::dispatch`'s saved arguments, which covers system calls.
 
 ## Tools
 
