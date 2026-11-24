@@ -186,6 +186,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-linuxabi"
+version = "0.8.0"
+
+[[package]]
 name = "aurora-lz4"
 version = "0.8.0"
 dependencies = [
