@@ -108,7 +108,7 @@ flush:
 |---|---|---|
 | AHCI (SATA) | `FLUSH CACHE EXT` (0xEA), waited for | |
 | NVMe | Flush command on the I/O queue, waited for | |
-| virtio-blk | `VIRTIO_BLK_T_FLUSH`, waited for | `VIRTIO_BLK_F_FLUSH` is negotiated (since 0.8.1), so the device may cache writes; before, QEMU wrote through, flushing the host file after every write |
+| virtio-blk | `VIRTIO_BLK_T_FLUSH`, waited for | `VIRTIO_BLK_F_FLUSH` is negotiated (since 0.8.1), so the device may cache writes; before, QEMU wrote through, flushing the host file after every write (one A/B under TCG, `cargo xtask powercut --disk virtio --iterations 15`, same seed: 154 synced files under load with the flush feature, 135 without) |
 | SDHCI (eMMC) | `SWITCH` to `FLUSH_CACHE` when the card's cache is on, then wait while busy | |
 | SDHCI (SD) | wait while the card is busy | SD cards have no cache to flush |
 | USB mass storage | `SYNCHRONIZE CACHE(10)` | a device that refuses it is taken to have no cache |
