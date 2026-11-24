@@ -528,6 +528,17 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>, number: u64) 
         },
         // One priority for every policy (as SCHED_OTHER has on Linux).
         nr::SCHED_GET_PRIORITY_MAX | nr::SCHED_GET_PRIORITY_MIN => Ok(0),
+        nr::SCHED_GETATTR => misc::sched_getattr(&p, a[0], a[1], a[2], a[3]),
+        // As sched_setscheduler: the ordinary policies, nice values kept by nobody.
+        nr::SCHED_SETATTR => {
+            let [_size, policy]: [u32; 2] = crate::syscall::user::get(a[1])?;
+            match policy {
+                0 | 3 | 5 => Ok(0),
+                1 | 2 | 6 => Err(EPERM),
+                _ => Err(EINVAL),
+            }
+        }
+        nr::GET_MEMPOLICY => misc::get_mempolicy(a[0], a[1], a[2], a[4]),
         nr::GETPRIORITY => Ok(20),
         nr::RT_SIGACTION => signal::sigaction(&p, a[0], a[1], a[2]),
         nr::RT_SIGPROCMASK => signal::sigprocmask(&p, a[0], a[1], a[2]),

@@ -162,6 +162,48 @@ pub fn futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u64) 
     }
 }
 
+/// `sched_getattr`: every thread runs under SCHED_OTHER at nice 0 (WaveOS
+/// has one policy for programs), so that is what the `struct sched_attr`
+/// says (VER1, 56 bytes; a smaller `size` gets its first part).
+pub fn sched_getattr(p: &proc::Process, pid: u64, attr: u64, size: u64, flags: u64) -> Result<u64, isize> {
+    const VER1: usize = 56;
+    if attr == 0 || flags != 0 || (size as usize) < 48 {
+        return Err(EINVAL);
+    }
+    if pid != 0 && pid as u32 != p.pid && super::signal::task_of(p, pid).is_none() {
+        return Err(ESRCH);
+    }
+    let n = (size as usize).min(VER1);
+    let mut a = [0u8; VER1];
+    a[0..4].copy_from_slice(&(n as u32).to_le_bytes()); // size; policy, flags, nice, priority, runtime… 0
+    a[52..56].copy_from_slice(&1024u32.to_le_bytes()); // sched_util_max: the whole CPU
+    user::put_bytes(attr, &a[..n]).map(|_| 0)
+}
+
+/// `get_mempolicy`: one memory node and the default policy. With
+/// MPOL_F_MEMS_ALLOWED the node mask is node 0; with MPOL_F_NODE |
+/// MPOL_F_ADDR `mode` is the node of the address (0).
+pub fn get_mempolicy(mode: u64, nodemask: u64, maxnode: u64, flags: u64) -> Result<u64, isize> {
+    const MEMS_ALLOWED: u64 = 4;
+    if flags & !7 != 0 {
+        return Err(EINVAL);
+    }
+    if mode != 0 {
+        user::put(mode, &0i32)?; // MPOL_DEFAULT, or node 0
+    }
+    if nodemask != 0 {
+        if maxnode == 0 {
+            return Err(EINVAL);
+        }
+        let words = maxnode.div_ceil(64).min(16);
+        for i in 0..words {
+            let bits: u64 = if i == 0 && flags & MEMS_ALLOWED != 0 { 1 } else { 0 };
+            user::put(nodemask + i * 8, &bits)?;
+        }
+    }
+    Ok(0)
+}
+
 pub fn sched_getaffinity(len: u64, ptr: u64) -> Result<u64, isize> {
     let n = crate::arch::percpu::count() as u64;
     let mask: u64 = if n >= 64 { u64::MAX } else { (1 << n) - 1 };

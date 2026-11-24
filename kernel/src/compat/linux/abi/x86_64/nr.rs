@@ -189,3 +189,6 @@ pub const CLOSE_RANGE: u64 = 436;
 pub const MINCORE: u64 = 27;
 pub const FACCESSAT2: u64 = 439;
 pub const EPOLL_PWAIT2: u64 = 441;
+pub const SCHED_SETATTR: u64 = 314;
+pub const SCHED_GETATTR: u64 = 315;
+pub const GET_MEMPOLICY: u64 = 239;
