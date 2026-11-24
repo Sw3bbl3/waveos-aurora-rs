@@ -160,6 +160,19 @@ struct wave_gamepad_state {
 #define WAVE_AUDIO_RATE 48000
 #define WAVE_AUDIO_POSITION 3
 
+#if defined(__aarch64__)
+/* arm64: the Linux system call instruction and registers (number in x8). */
+static inline long wave_call(long n, long a, long b, long c, long d, long e) {
+    register long x8 __asm__("x8") = WAVE_BASE + n;
+    register long x0 __asm__("x0") = a;
+    register long x1 __asm__("x1") = b;
+    register long x2 __asm__("x2") = c;
+    register long x3 __asm__("x3") = d;
+    register long x4 __asm__("x4") = e;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
+    return x0;
+}
+#else
 static inline long wave_call(long n, long a, long b, long c, long d, long e) {
     long ret;
     register long r10 __asm__("r10") = d;
@@ -170,6 +183,7 @@ static inline long wave_call(long n, long a, long b, long c, long d, long e) {
                      : "rcx", "r11", "memory");
     return ret;
 }
+#endif
 
 /* Opens a window `width` x `height` points; returns its id. */
 static inline long wave_win_create(int width, int height, const char *title, int title_len, int flags) {

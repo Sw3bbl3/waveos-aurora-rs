@@ -1,14 +1,33 @@
 //! The system calls the bridge makes: Linux ones (local sockets with
 //! descriptors, `poll`, `mmap`, `memfd`) and WaveOS's window calls, which
 //! Linux programs reach at `0x5741_0000 + n` (see `libs/linux/include/waveos.h`).
+//!
+//! Built for x86_64 and aarch64 Linux: the system call instruction and the
+//! Linux numbers differ (arm64 has the generic table, without `fork`,
+//! `poll` or `unlink`, which become `clone`, `ppoll` and `unlinkat`);
+//! WaveOS's own calls have the same numbers on both.
 
-#[cfg(any(not(test), target_arch = "x86_64"))]
+#[cfg(any(not(test), target_os = "linux"))]
 use std::arch::asm;
 
 pub type Fd = i32;
 
 /// A Linux system call; negative results are `-errno`.
-#[cfg(any(not(test), target_arch = "x86_64"))]
+#[cfg(all(any(not(test), target_os = "linux"), target_arch = "aarch64"))]
+pub fn call(n: i64, a: [i64; 6]) -> i64 {
+    let ret: i64;
+    unsafe {
+        asm!("svc #0",
+            in("x8") n,
+            inlateout("x0") a[0] => ret,
+            in("x1") a[1], in("x2") a[2], in("x3") a[3], in("x4") a[4], in("x5") a[5],
+            options(nostack));
+    }
+    ret
+}
+
+/// A Linux system call; negative results are `-errno`.
+#[cfg(all(any(not(test), target_os = "linux"), target_arch = "x86_64"))]
 pub fn call(n: i64, a: [i64; 6]) -> i64 {
     let ret: i64;
     unsafe {
@@ -22,28 +41,80 @@ pub fn call(n: i64, a: [i64; 6]) -> i64 {
     ret
 }
 
-#[cfg(all(test, not(target_arch = "x86_64")))]
+#[cfg(all(test, not(target_os = "linux")))]
 pub fn call(_: i64, _: [i64; 6]) -> i64 {
     panic!("Guest syscall attempted in a host renderer test")
 }
 
-const SOCKET: i64 = 41;
-const CONNECT: i64 = 42;
-const FORK: i64 = 57;
-const SETSID: i64 = 112;
-const ACCEPT4: i64 = 288;
-const SENDMSG: i64 = 46;
-const RECVMSG: i64 = 47;
-const BIND: i64 = 49;
-const LISTEN: i64 = 50;
-const CLOSE: i64 = 3;
-const POLL: i64 = 7;
-const MMAP: i64 = 9;
-const MUNMAP: i64 = 11;
-const MEMFD_CREATE: i64 = 319;
-const WRITE: i64 = 1;
-const FTRUNCATE: i64 = 77;
-const UNLINK: i64 = 87;
+#[cfg(not(target_arch = "aarch64"))]
+mod nr {
+    pub const SOCKET: i64 = 41;
+    pub const CONNECT: i64 = 42;
+    pub const FORK: i64 = 57;
+    pub const SETSID: i64 = 112;
+    pub const ACCEPT4: i64 = 288;
+    pub const SENDMSG: i64 = 46;
+    pub const RECVMSG: i64 = 47;
+    pub const BIND: i64 = 49;
+    pub const LISTEN: i64 = 50;
+    pub const CLOSE: i64 = 3;
+    pub const POLL: i64 = 7;
+    pub const MMAP: i64 = 9;
+    pub const MUNMAP: i64 = 11;
+    pub const MEMFD_CREATE: i64 = 319;
+    pub const WRITE: i64 = 1;
+    pub const FTRUNCATE: i64 = 77;
+    pub const UNLINK: i64 = 87;
+    pub const GETSOCKOPT: i64 = 55;
+    pub const READ: i64 = 0;
+    pub const PIPE2: i64 = 293;
+    pub const FCNTL: i64 = 72;
+}
+
+/// arm64's numbers (Linux's generic table); `fork`, `poll` and `unlink`
+/// have none: see [`fork`], [`poll`] and [`unlink`].
+#[cfg(target_arch = "aarch64")]
+mod nr {
+    pub const SOCKET: i64 = 198;
+    pub const CONNECT: i64 = 203;
+    pub const CLONE: i64 = 220;
+    pub const SETSID: i64 = 157;
+    pub const ACCEPT4: i64 = 242;
+    pub const SENDMSG: i64 = 211;
+    pub const RECVMSG: i64 = 212;
+    pub const BIND: i64 = 200;
+    pub const LISTEN: i64 = 201;
+    pub const CLOSE: i64 = 57;
+    pub const PPOLL: i64 = 73;
+    pub const MMAP: i64 = 222;
+    pub const MUNMAP: i64 = 215;
+    pub const MEMFD_CREATE: i64 = 279;
+    pub const WRITE: i64 = 64;
+    pub const FTRUNCATE: i64 = 46;
+    pub const UNLINKAT: i64 = 35;
+    pub const GETSOCKOPT: i64 = 209;
+    pub const READ: i64 = 63;
+    pub const PIPE2: i64 = 59;
+    pub const FCNTL: i64 = 25;
+}
+
+use nr::*;
+
+/// `fork()`: 0 in the child, the child's pid in the parent.
+fn fork() -> i64 {
+    #[cfg(target_arch = "aarch64")]
+    return call(CLONE, [17 /* SIGCHLD */, 0, 0, 0, 0, 0]);
+    #[cfg(not(target_arch = "aarch64"))]
+    return call(FORK, [0; 6]);
+}
+
+/// Removes the file at `path` (NUL-terminated).
+fn unlink(path: &[u8]) -> i64 {
+    #[cfg(target_arch = "aarch64")]
+    return call(UNLINKAT, [-100 /* AT_FDCWD */, path.as_ptr() as i64, 0, 0, 0, 0]);
+    #[cfg(not(target_arch = "aarch64"))]
+    return call(UNLINK, [path.as_ptr() as i64, 0, 0, 0, 0, 0]);
+}
 
 const AF_UNIX: i64 = 1;
 const SOCK_STREAM: i64 = 1;
@@ -67,7 +138,7 @@ pub fn listen_unix(path: &str) -> Result<Fd, i64> {
     addr[0] = AF_UNIX as u8;
     addr[2..2 + path.len()].copy_from_slice(path.as_bytes());
     let cpath = format!("{path}\0");
-    call(UNLINK, [cpath.as_ptr() as i64, 0, 0, 0, 0, 0]);
+    unlink(cpath.as_bytes());
     let r = call(BIND, [fd, addr.as_ptr() as i64, (2 + path.len() + 1) as i64, 0, 0, 0]);
     if r < 0 {
         return Err(r);
@@ -96,7 +167,7 @@ pub fn answers(path: &str) -> bool {
 /// Carries on in a new process of its own (a new session); the caller's
 /// process ends.
 pub fn detach() {
-    match call(FORK, [0; 6]) {
+    match fork() {
         0 => {
             call(SETSID, [0; 6]);
         }
@@ -208,6 +279,14 @@ pub struct PollFd {
 pub const POLLIN: i16 = 1;
 
 pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> i64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // ppoll with a timespec (none: wait for ever) and no signal mask.
+        let ts = [timeout_ms as i64 / 1000, (timeout_ms as i64 % 1000) * 1_000_000];
+        let ts = if timeout_ms < 0 { 0 } else { ts.as_ptr() as i64 };
+        call(PPOLL, [fds.as_mut_ptr() as i64, fds.len() as i64, ts, 0, 8, 0])
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     call(POLL, [fds.as_mut_ptr() as i64, fds.len() as i64, timeout_ms as i64, 0, 0, 0])
 }
 
@@ -311,7 +390,6 @@ pub fn win_set_program(id: u32, pid: i32) {
     call(WAVE + WIN_SET_PROGRAM, [id as i64, pid as i64, 0, 0, 0, 0]);
 }
 
-const GETSOCKOPT: i64 = 55;
 const SOL_SOCKET: i64 = 1;
 const SO_PEERCRED: i64 = 17;
 
@@ -385,9 +463,6 @@ pub fn set_clipboard_text(text: &[u8]) {
     call(WAVE + CLIPBOARD_SET, [1, text.as_ptr() as i64, text.len() as i64, 0, 0, 0]);
 }
 
-const READ: i64 = 0;
-const PIPE2: i64 = 293;
-const FCNTL: i64 = 72;
 const O_NONBLOCK: i64 = 0o4000;
 const O_CLOEXEC: i64 = 0o2000000;
 

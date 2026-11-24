@@ -275,6 +275,7 @@ static void credentials(void) {
 // each thread's YMM registers across switches.
 static atomic_int avx_go;
 
+#if !defined(__aarch64__)
 static void *avx_other(void *arg) {
     (void)arg;
     static const unsigned char ones[32] = {[0 ... 31] = 0xEE};
@@ -285,7 +286,36 @@ static void *avx_other(void *arg) {
     }
     return 0;
 }
+#endif
 
+#if defined(__aarch64__)
+// On Arm the same check for the NEON registers (always there): each
+// thread's v1 survives switches.
+static void *neon_other(void *arg) {
+    (void)arg;
+    static const unsigned char ones[16] = {[0 ... 15] = 0xEE};
+    while (!atomic_load(&avx_go)) sched_yield();
+    for (int i = 0; i < 200; i++) {
+        __asm__ volatile("ld1 {v1.16b}, [%0]" ::"r"(ones) : "v1", "memory");
+        sched_yield();
+    }
+    return 0;
+}
+
+static void avx(void) {
+    unsigned char mine[16], back[16];
+    for (int i = 0; i < 16; i++) mine[i] = (unsigned char)(i * 7 + 1);
+    pthread_t t;
+    CHECK(pthread_create(&t, 0, neon_other, 0) == 0, "thread");
+    __asm__ volatile("ld1 {v1.16b}, [%0]" ::"r"(mine) : "v1", "memory");
+    atomic_store(&avx_go, 1);
+    for (int i = 0; i < 200; i++) sched_yield();
+    __asm__ volatile("st1 {v1.16b}, [%0]" ::"r"(back) : "memory");
+    pthread_join(t, 0);
+    CHECK(memcmp(mine, back, 16) == 0, "NEON registers survive switches");
+    printf("PASS avx (NEON on this processor)\n");
+}
+#else
 static void avx(void) {
     unsigned a, b, c, d;
     __asm__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
@@ -309,6 +339,7 @@ static void avx(void) {
     CHECK(memcmp(mine, back, 32) == 0, "YMM registers survive switches");
     printf("PASS avx\n");
 }
+#endif
 
 static __thread int local = 5;
 static atomic_int total;
