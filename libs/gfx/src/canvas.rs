@@ -71,11 +71,10 @@ pub fn blend_row(row: &mut [u32], c: u32, a: u32) {
         row.fill(c | 0xFF00_0000);
         return;
     }
-    #[cfg(target_arch = "x86_64")]
     if row.len() >= 8 && crate::simd::enabled() {
         let mut i = 0;
         loop {
-            // SAFETY: `enabled` said SSE2 may be used here.
+            // SAFETY: `enabled` said SIMD may be used here.
             i += unsafe { crate::simd::blend_row(&mut row[i..], c, a) };
             if row.len() - i < 4 {
                 break;
@@ -109,12 +108,10 @@ pub fn blend_row(row: &mut [u32], c: u32, a: u32) {
 /// Blends black at a per-pixel opacity (`shade[i]`, 0..=255) over `row`.
 #[inline]
 pub fn shade_row(row: &mut [u32], shade: &[u32]) {
-    #[allow(unused_mut)] // Only the x86 SIMD path advances this cursor.
     let mut i = 0;
-    #[cfg(target_arch = "x86_64")]
     if row.len() >= 8 && crate::simd::enabled() {
         loop {
-            // SAFETY: `enabled` said SSE2 may be used here; `shade` matches `row`.
+            // SAFETY: `enabled` said SIMD may be used here; `shade` matches `row`.
             i += unsafe { crate::simd::shade_row(&mut row[i..], &shade[i..]) };
             if row.len() - i < 4 {
                 break;

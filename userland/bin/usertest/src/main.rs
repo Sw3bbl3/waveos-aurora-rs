@@ -54,9 +54,17 @@ fn main(args: corekit::Args) -> i32 {
         return 0;
     }
     if args.get(1).map(String::as_str) == Some("umip") {
-        // With UMIP, `smsw` in ring 3 faults instead of revealing CR0.
+        // With UMIP, `smsw` in ring 3 faults instead of revealing CR0; at
+        // EL0, reading a system control register is always undefined.
         let msw: u64;
-        unsafe { core::arch::asm!("smsw {0}", out(reg) msw) };
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("smsw {0}", out(reg) msw)
+        };
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("mrs {0}, sctlr_el1", out(reg) msw)
+        };
         black_box(msw);
         return 0;
     }
@@ -239,11 +247,16 @@ fn hardening() {
     let stack = |s: &str| s.split(' ').next().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
     check("ASLR: two stacks differ", stack(&a) != stack(&b));
     // UMIP: `smsw` from ring 3 ends the program where the CPU has UMIP.
+    #[cfg(target_arch = "x86_64")]
     let umip = core::arch::x86_64::__cpuid_count(7, 0).ecx & (1 << 2) != 0;
     match process::spawn("/System/Bin/usertest", &["umip"], Stdio::default()) {
         Ok(pid) => {
             let code = process::wait(pid, None).ok();
+            #[cfg(target_arch = "x86_64")]
             check("UMIP: smsw faults in ring 3 (or runs without UMIP)", code == Some(if umip { -11 } else { 0 }));
+            // A fault ends a program with a negative status (its signal).
+            #[cfg(target_arch = "aarch64")]
+            check("EL0 can't read SCTLR_EL1: the program is stopped", code.is_some_and(|c| c < 0));
         }
         Err(_) => check("spawn umip child", false),
     }

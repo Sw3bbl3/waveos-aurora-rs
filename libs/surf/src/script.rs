@@ -3257,7 +3257,14 @@ pub fn install(rt: &mut Realm, url: &str, viewport: (i32, i32), storage: BTreeMa
 
     let nav = rt.new_object();
     for (k, v) in [
-        ("userAgent", "Mozilla/5.0 (X11; WaveOS Aurora x86_64) Nebula/0.8 Pulsar/0.8"),
+        (
+            "userAgent",
+            if cfg!(target_arch = "aarch64") {
+                "Mozilla/5.0 (X11; WaveOS Aurora aarch64) Nebula/0.8 Pulsar/0.8"
+            } else {
+                "Mozilla/5.0 (X11; WaveOS Aurora x86_64) Nebula/0.8 Pulsar/0.8"
+            },
+        ),
         ("appName", "Netscape"),
         ("appVersion", "5.0 (WaveOS Aurora)"),
         ("platform", "WaveOS"),

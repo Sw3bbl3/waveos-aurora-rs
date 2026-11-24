@@ -8,6 +8,9 @@ use alloc::{
     vec::Vec,
 };
 use corekit::{fs, process};
+
+/// The compiler target of apps built here: this system's own architecture.
+const TARGET: &str = if cfg!(target_arch = "aarch64") { "aarch64-aurora-user" } else { "x86_64-aurora-user" };
 pub type Result<T> = core::result::Result<T, String>;
 fn io(e: corekit::Error) -> String {
     format!("{e}")
@@ -46,6 +49,7 @@ pub fn new_project(path: &str, id: &str, name: &str) -> Result<()> {
     }
     let m = gina::Manifest {
         format: 1,
+        architecture: corekit::abi::ARCH.into(),
         id: id.into(),
         name: name.into(),
         developer: "Independent Developer".into(),
@@ -63,8 +67,8 @@ pub fn new_project(path: &str, id: &str, name: &str) -> Result<()> {
          waveui = { path = \"/System/Developer/SDK/userland/waveui\" }\n\
          [profile.dev]\npanic = \"abort\"\n[profile.release]\npanic = \"abort\"\n",
     );
-    let config = String::from(
-        "[target.x86_64-aurora-user]\nrustflags = [\"-C\", \"link-arg=--script=/System/Developer/SDK/userland/corekit/user.ld\", \"-C\", \"force-frame-pointers=yes\"]\n",
+    let config = format!(
+        "[target.{TARGET}]\nrustflags = [\"-C\", \"link-arg=--script=/System/Developer/SDK/userland/corekit/user.ld\", \"-C\", \"force-frame-pointers=yes\"]\n",
     );
     let layout = String::from("heading Welcome to your app\nlabel Built with WaveUI\nbutton Continue\n");
     let files = [
@@ -215,7 +219,7 @@ pub fn build(project: &str, mut log: impl FnMut(&str), cancel: &core::sync::atom
             "--manifest-path",
             &manifest,
             "--target",
-            "/System/Developer/SDK/userland/x86_64-aurora-user.json",
+            &format!("/System/Developer/SDK/userland/{TARGET}.json"),
             "--target-dir",
             &out,
             "-Zjson-target-spec",
@@ -252,7 +256,7 @@ pub fn build(project: &str, mut log: impl FnMut(&str), cancel: &core::sync::atom
     if code != 0 {
         return Err(format!("Compiler exited with status {code}. The installed app was preserved."));
     }
-    let binary = fs::read(&format!("{out}/x86_64-aurora-user/debug/gina-app")).map_err(io)?;
+    let binary = fs::read(&format!("{out}/{TARGET}/debug/gina-app")).map_err(io)?;
     fs::write(&format!("{out}/app.elf"), &binary).map_err(io)?;
     Ok(())
 }
