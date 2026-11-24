@@ -252,6 +252,19 @@ Three calls fit windows into a program's own main loop:
   the arrow, a text I-beam, a pointing hand, a crosshair, busy, not
   allowed, resize left–right or up–down, move, or none.
 
+A window can also show pixels the program already has, without copying
+them into the window: `wave_win_buffer(fd, offset, width, height, stride,
+format)` makes a buffer over a dma-buf (a DRM buffer exported with PRIME)
+or shared memory (`memfd`, `/dev/shm`), in `XRGB8888` or premultiplied
+`ARGB8888`, and `wave_win_attach(window, buffer, scale, x, y, w, h)` shows
+it (buffer 0: the window's own surface again). The compositor reads the
+buffer where it is — a full-screen window's (`wave_win_set_fullscreen`) is
+scanned out by the display itself — so the program must not draw into it
+again before `WAVE_EV_BUFFER_RELEASE` says WaveOS no longer reads it.
+`WAVE_EV_FRAME` says when the window's last picture was shown: the
+display's frame number and time (`CLOCK_MONOTONIC`), its refresh period,
+and whether it was scanned out without a copy.
+
 Programs written for Linux's own sound interfaces reach the same streams
 through OSS: `/dev/dsp` is a WaveOS sound stream, and its `ioctl`s (format,
 channels, rate, buffer space, delay, sync, reset) describe it as it is,
@@ -280,7 +293,8 @@ program drops master, closes the card or exits — also when it crashes or
 is killed. While it holds the screen, keys and the pointer still go to the
 desktop. Mesa runs on it unmodified (see [Mesa](#mesa-opengl-and-vulkan));
 render nodes, syncobjs and tiled formats are what hardware drivers will
-need next (see
+need next (a dma-buf's fences, as sync files, are always signalled today;
+see
 [display-core.md](developer/display-core.md#what-hardware-drivers-still-need)).
 
 ## Mesa (OpenGL and Vulkan)
@@ -294,11 +308,17 @@ OpenGL 4.5 through EGL, and Vulkan 1.3 through lavapipe.
   with events). `kmscube` and `glmark2-drm`/`glmark2-es2-drm` run as they
   are; the program takes the display from the desktop and gives it back
   when it ends.
-- **In a window**, through `wl-bridge`: Mesa's EGL on Wayland draws into
-  shared memory, and the bridge copies each frame into the WaveOS window
-  (`wl-bridge &` then `es2gears_wayland`).
+- **In a window**, through `wl-bridge`: Mesa's EGL on Wayland renders
+  into buffers on the DRM device and hands them over as dma-bufs, which
+  the window shows as they are — no copy before the compositor's own, and
+  none at all full screen, where the display scans them out
+  (`wl-bridge &` then `es2gears_wayland`, or `glmark2-es2-wayland
+  --fullscreen`). `/etc/drirc` tells Mesa to use `kms_swrast` on WaveOS's
+  display devices, which is what makes this happen.
 - **Vulkan** with lavapipe: rendering and reading back (`vulkaninfo`
-  lists it). Presenting full screen through `VK_KHR_display` is untried.
+  lists it), and in a window (`vkcube-wayland`): lavapipe's Wayland
+  swapchain uses shared memory, which the window shows as it is too. Presenting full screen
+  through `VK_KHR_display` is untried.
 
 `kmscube` is among the default packages (in Terminal: `kmscube`; Return
 ends it). The others (`glmark2-drm`, `mesa-vulkan-drivers`,
@@ -323,23 +343,34 @@ wl-bridge &
 gtk3-demo
 ```
 
-Each top-level window becomes a WaveOS window. The bridge copies every
-frame the program commits (shared-memory buffers, `wl_shm`) into the
-window, with its sub-surfaces and pop-up menus, and sends WaveOS's pointer,
+Each top-level window becomes a WaveOS window. It shows the buffers the
+program commits as they are — shared memory (`wl_shm`) or dma-bufs
+(`zwp_linux_dmabuf_v1` version 4 with feedback, and Mesa's `wl_drm`), its
+main surface, sub-surfaces (a browser's page, a video through a viewport)
+and pop-up menus as layers WaveOS stacks itself — and the program gets each
+back (`wl_buffer.release`) when WaveOS no longer reads it. Only what WaveOS
+can't show that way (other pixel formats) is composed by the bridge from
+copies. When a program says all of a surface changed, the bridge compares
+it with what is on screen and passes on only what did. Frame callbacks and presentation
+feedback (`wp_presentation`) are answered when the window's picture is on
+the screen, at the display's frame start. A full-screen request
+(`xdg_toplevel.set_fullscreen`) makes the WaveOS window full screen. The
+bridge sends WaveOS's pointer,
 scroll and key events back as Wayland events (a US keymap, built by the
 program's xkbcommon from the system's XKB data). WaveOS draws the window
 frame and resizes windows; the program is told the new size and draws
 again. Copying in a program offers the text to WaveOS's clipboard, and
 WaveOS's clipboard is what programs paste.
 
-OpenGL programs work the same way: with no GPU buffers offered (no
-`linux-dmabuf`), Mesa's EGL draws in software into shared memory, and the
-bridge copies each frame.
+OpenGL programs work the same way: Mesa's EGL renders with llvmpipe into
+dumb buffers on the DRM device and hands them over as dma-bufs (see
+[display-core.md](developer/display-core.md#mesa-in-a-window)).
+`WL_BRIDGE_COPY=1` in the bridge's environment makes it copy every frame
+as it used to, for comparisons.
 
 What isn't there yet: pop-up menus stay inside their window, drag and drop
-between programs, GPU buffers (`linux-dmabuf`: programs draw in software;
-see [display-core.md](developer/display-core.md#mesa-in-a-window) for the
-design), input methods, and touch.
+between programs, buffers from a GPU (render nodes, tiled layouts, fences
+to wait on), input methods, and touch.
 
 ## Voyage
 

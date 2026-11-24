@@ -1,0 +1,65 @@
+<?xml version="1.0" standalone="yes"?>
+<!--
+  /etc/drirc on WaveOS: which of Mesa's drivers renders on WaveOS's
+  display devices.
+
+  WaveOS's virtio-gpu has no 3D yet (no virgl or Venus), and the VGA-style
+  devices never had any: Mesa renders with llvmpipe through kms_swrast, on
+  the DRM device's dumb buffers. Saying so here makes Mesa use it at once
+  (GBM no longer tries virgl first), and also on Wayland: Mesa's EGL then
+  renders straight into dma-bufs it hands to wl-bridge, which WaveOS shows
+  without a copy, instead of drawing into shared memory.
+
+  Except for the browsers: with a GL device on Wayland, WebKit (Voyage)
+  and GTK draw their windows with GL, which on llvmpipe is slower than
+  their own drawing into shared memory (measured: a third of the frames
+  while scrolling). Without the override they keep that, and WaveOS shows
+  their shared memory without a copy too. (An empty dri_driver means "no
+  override": Mesa picks as it would without this file.)
+
+  Remove the virtio_gpu entry when virtio-gpu 3D arrives.
+-->
+<driconf>
+    <device driver="loader" kernel_driver="virtio_gpu">
+        <application name="All">
+            <option name="dri_driver" value="kms_swrast"/>
+        </application>
+        <application name="Voyage" executable="voyage">
+            <option name="dri_driver" value=""/>
+        </application>
+        <application name="WebKit" executable="WebKitWebProcess">
+            <option name="dri_driver" value=""/>
+        </application>
+        <application name="Firefox" executable="firefox-esr">
+            <option name="dri_driver" value=""/>
+        </application>
+    </device>
+    <device driver="loader" kernel_driver="bochs-drm">
+        <application name="All">
+            <option name="dri_driver" value="kms_swrast"/>
+        </application>
+        <application name="Voyage" executable="voyage">
+            <option name="dri_driver" value=""/>
+        </application>
+        <application name="WebKit" executable="WebKitWebProcess">
+            <option name="dri_driver" value=""/>
+        </application>
+        <application name="Firefox" executable="firefox-esr">
+            <option name="dri_driver" value=""/>
+        </application>
+    </device>
+    <device driver="loader" kernel_driver="simpledrm">
+        <application name="All">
+            <option name="dri_driver" value="kms_swrast"/>
+        </application>
+        <application name="Voyage" executable="voyage">
+            <option name="dri_driver" value=""/>
+        </application>
+        <application name="WebKit" executable="WebKitWebProcess">
+            <option name="dri_driver" value=""/>
+        </application>
+        <application name="Firefox" executable="firefox-esr">
+            <option name="dri_driver" value=""/>
+        </application>
+    </device>
+</driconf>

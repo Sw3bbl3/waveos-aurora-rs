@@ -96,7 +96,14 @@ const TESTS: &[Test] = &[
     ("Linux programs: Mesa's kmscube (GBM, EGL, GLES on llvmpipe) on the DRM device", linux_mesa_kmscube),
     ("Linux programs: Mesa's desktop OpenGL and GLES (glmark2) on the DRM device", linux_mesa_glmark2),
     ("Linux programs: Mesa's Vulkan (lavapipe), a triangle read back (vkcheck)", linux_mesa_vulkan),
-    ("Linux programs: Mesa in a WaveOS window (es2gears through wl-bridge)", linux_mesa_window),
+    ("Linux programs: Mesa in a WaveOS window (es2gears through wl-bridge, dma-bufs)", linux_mesa_window),
+    ("Linux programs: Mesa's Vulkan in a WaveOS window (vkcube on lavapipe, shared memory)", linux_mesa_vulkan_window),
+    (
+        "Linux programs: Mesa in windows with the compositor: zero-copy, direct scanout and back, clients killed mid-frame",
+        linux_mesa_composited,
+    ),
+    ("Linux programs: Mesa in windows, copies against zero-copy, measured (AURORA_MESA_BENCH=1)", linux_mesa_bench),
+    ("Linux programs: browsers in windows, copies against zero-copy, measured", linux_browsers_measured),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
     ("sandbox: policy, consent, grants, bookmarks, system manifests", crate::sandbox::selftest::policy),
     ("sandbox: a native program refused, given files, allowed and revoked (sbxtest)", crate::sandbox::selftest::programs),
@@ -961,10 +968,12 @@ fn linux_mesa_vulkan() {
 }
 
 /// Mesa drawing into a WaveOS window instead of the whole screen: Mesa's
-/// `es2gears` demo, a Wayland client, through `wl-bridge`. EGL's Wayland
-/// platform renders with llvmpipe into shared-memory buffers (`wl_shm`),
-/// which the bridge copies into the window on each commit. The window must
-/// show the red gear, turning: its picture changes from frame to frame.
+/// `es2gears` demo, a Wayland client, through `wl-bridge`. With `/etc/drirc`
+/// naming `kms_swrast` for the card, EGL's Wayland platform renders with
+/// llvmpipe into dumb buffers on the DRM device and hands them to the bridge
+/// as dma-bufs (`wl_drm`, `zwp_linux_dmabuf_v1`); the bridge attaches them
+/// to the window as they are (`win_attach`). The window must show the red
+/// gear, turning (its picture changes from frame to frame), from dma-bufs.
 /// (es2gears' own frame-rate line stays in its output buffer, a pipe here.)
 fn linux_mesa_window() {
     if crate::fs::stat(MESA_KMSCUBE).is_err() {
@@ -972,26 +981,17 @@ fn linux_mesa_window() {
         return;
     }
     let script = "wl-bridge --background && exec /usr/bin/es2gears_wayland.x86_64-linux-gnu";
-    let (mut red, mut frames, mut last, mut since) = (0usize, 0u32, 0u64, None);
+    let (mut red, mut frames, mut last, mut since, mut dmabuf) = (0usize, 0u32, 0u64, None, 0u32);
     let (code, _) =
         run_linux_program_watched("/System/Linux/bin/busybox", &["sh", "-c", script], None, 300_000, &mut |_| {
             for (id, _, title) in crate::gui::server::windows() {
                 if title != "es2gears" {
                     continue;
                 }
-                let seen = crate::gui::server::with_surface_scaled(id, |px, _, _, _| {
-                    let red = px
-                        .iter()
-                        .filter(|&&p| {
-                            let (r, g, b) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
-                            r > 150 && g < 80 && b < 80
-                        })
-                        .count();
-                    // A cheap fingerprint of the picture.
-                    let sum = px.iter().step_by(7).fold(0u64, |h, &p| h.rotate_left(5) ^ p as u64);
-                    (red, sum)
-                });
-                if let Some((r, sum)) = seen {
+                if crate::gui::server::attached(id).is_some_and(|(b, ..)| b.dmabuf) {
+                    dmabuf += 1;
+                }
+                if let Some((r, sum)) = crate::gui::server::with_content(id, window_picture) {
                     red = red.max(r);
                     if r > 200 && sum != last {
                         last = sum;
@@ -1003,14 +1003,524 @@ fn linux_mesa_window() {
             // Enough once it has turned for a while.
             frames >= 30 || since.is_some_and(|t| time::uptime_ms() > t + 20_000)
         });
-    // The bridge runs on in the background: it goes too.
-    for p in crate::proc::all().iter().filter(|p| p.name() == "wl-bridge") {
-        let _ = crate::proc::kill(p.pid);
-    }
+    stop_bridge();
     assert_eq!(code, Some(crate::proc::KILLED_CODE), "es2gears ended by itself");
     assert!(red > 200, "the window shows no red gear ({red} red pixels)");
     assert!(frames >= 5, "the gears did not turn ({frames} different pictures)");
-    crate::kprint!("[{frames} different pictures, {red} red pixels] ");
+    assert!(dmabuf > 0, "es2gears' frames did not reach the window as dma-bufs");
+    crate::kprint!("[{frames} different pictures, {red} red pixels, from dma-bufs] ");
+}
+
+/// Vulkan in a WaveOS window: `vkcube-wayland` on lavapipe, whose Wayland
+/// swapchain presents shared memory (`wl_shm`). The bridge attaches it to
+/// the window as it is too (no copy): the window must show shared memory,
+/// and the cube must turn.
+fn linux_mesa_vulkan_window() {
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return;
+    }
+    let script = "wl-bridge --background && exec /usr/bin/vkcube-wayland --c 100000";
+    let (mut frames, mut last, mut shm, mut since) = (0u32, 0u64, 0u32, None);
+    let (code, text) =
+        run_linux_program_watched("/System/Linux/bin/busybox", &["sh", "-c", script], None, 300_000, &mut |_| {
+            let Some(id) = window_titled("vkcube") else { return false };
+            if crate::gui::server::attached(id).is_some_and(|(b, ..)| !b.dmabuf) {
+                shm += 1;
+            }
+            if let Some((_, sum)) = crate::gui::server::with_content(id, window_picture) {
+                if sum != last {
+                    last = sum;
+                    frames += 1;
+                    since.get_or_insert(time::uptime_ms());
+                }
+            }
+            frames >= 20 || since.is_some_and(|t| time::uptime_ms() > t + 30_000)
+        });
+    stop_bridge();
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "vkcube ended by itself: {text}");
+    assert!(frames >= 5, "the cube did not turn ({frames} different pictures)");
+    assert!(shm > 0, "vkcube's frames did not reach the window as they are");
+    crate::kprint!("[{frames} different pictures, from shared memory as it is] ");
+}
+
+/// Red pixels in what a window shows, and a cheap fingerprint of the picture.
+fn window_picture(c: &crate::gui::server::Content) -> (usize, u64) {
+    let (mut red, mut sum) = (0, 0u64);
+    for y in 0..c.height as usize {
+        let row = &c.px[y * c.stride as usize..y * c.stride as usize + c.width as usize];
+        for (x, &p) in row.iter().enumerate() {
+            let (r, g, b) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
+            if r > 150 && g < 80 && b < 80 {
+                red += 1;
+            }
+            if x % 7 == 0 {
+                sum = sum.rotate_left(5) ^ (p & 0xFF_FFFF) as u64;
+            }
+        }
+    }
+    (red, sum)
+}
+
+/// Ends the bridge a test started in the background (and waits until it
+/// is gone, so the next test's bridge is its own).
+fn stop_bridge() {
+    for p in crate::proc::all().iter().filter(|p| p.name() == "wl-bridge") {
+        let _ = crate::proc::kill(p.pid);
+    }
+    eventually(5000, || !crate::proc::all().iter().any(|p| p.name() == "wl-bridge" && p.exit_code().is_none()));
+}
+
+/// Like [`run_linux_program_watched`] with Lumen Server running (`c`): its
+/// frames, not the test, answer windows' presents.
+fn run_composited(
+    c: &mut crate::gui::screens::Compositor,
+    argv: &[&str],
+    timeout_ms: u64,
+    watch: &mut dyn FnMut(&mut crate::gui::screens::Compositor, &[u8]) -> bool,
+) -> (Option<i64>, String) {
+    let (r, w) = crate::proc::new_pipe(false);
+    let pid = crate::proc::spawn(argv[0], &argv[1..], [None, Some(w.clone()), Some(w)], 0).expect("spawn");
+    let p = crate::proc::get(pid).unwrap();
+    let reader = match &*r {
+        crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
+        _ => unreachable!(),
+    };
+    let (mut out, mut buf) = (Vec::new(), [0u8; 512]);
+    let deadline = time::uptime_ms() + timeout_ms;
+    loop {
+        c.frame();
+        if p.exit_code().is_none() && watch(c, &out) {
+            let _ = crate::proc::kill(pid);
+        }
+        if reader.readable() {
+            match reader.read(&mut buf, true) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => {}
+            }
+        } else if p.exit_code().is_some() || time::uptime_ms() > deadline {
+            break;
+        } else {
+            sched::sleep_ms(4);
+        }
+    }
+    let text = String::from(String::from_utf8_lossy(&out));
+    for line in text.lines() {
+        crate::kprintln!("    {line}");
+    }
+    (p.exit_code(), text)
+}
+
+/// The client window whose title starts with `name`, or that shows what a
+/// program called `name` draws (a bridge's window).
+fn window_titled(name: &str) -> Option<u32> {
+    use crate::gui::server;
+    let program = |id: u32| server::program_of(id).and_then(crate::proc::get).map(|p| p.name());
+    server::windows().into_iter().find(|w| w.2.starts_with(name) || program(w.0).is_some_and(|n| n.contains(name))).map(|w| w.0)
+}
+
+/// Asks the harness for a screendump of the main display and the pixels it
+/// must show (device pixels, from `pixel`), then holds the picture still:
+/// no frame runs while the harness takes it.
+fn hold_and_screendump(c: &crate::gui::screens::Compositor, pixel: impl Fn(u32, u32) -> u32) {
+    assert!(c.wait_presented(3000), "the display never took its picture");
+    let s = &c.screens[c.main];
+    let (w, h) = s.out.size();
+    let mut line = alloc::format!("\nharness: screendump {}", s.head());
+    for (fx, fy) in [(1, 1), (4, 4), (6, 2), (2, 6), (7, 7), (4, 1)] {
+        let (x, y) = (w * fx / 8, h * fy / 8);
+        line.push_str(&alloc::format!(" {x},{y}={:06x}", pixel(x, y) & 0xFF_FFFF));
+    }
+    crate::kprintln!("{line}");
+    sched::sleep_ms(1500);
+}
+
+/// The compositor on the display, for the Mesa tests that run with it.
+fn mesa_compositor() -> crate::gui::screens::Compositor {
+    crate::gui::settings::load();
+    let _ = crate::gui::server::take_commands();
+    let mut c = crate::gui::screens::Compositor::new();
+    c.desktop.dismiss_shore();
+    c.settle(3000);
+    c
+}
+
+/// Mesa in a window with Lumen Server running: es2gears' dma-bufs are
+/// composited where they are (no copy before the compositor's own), the
+/// screen shows its window (a screendump checked against the compositor's
+/// picture), and es2gears killed mid-frame leaves a working desktop and
+/// bridge behind. Then full screen (glmark2's Wayland build, `--fullscreen`,
+/// a visual without alpha): the display scans the program's dma-bufs out
+/// directly (a screendump checked against the buffer on the plane), goes
+/// back to compositing for a notice, for Shoal and (without a cursor plane)
+/// for the pointer shown again, and to scanning out after each; glmark2
+/// killed while scanned out gives the plane back.
+fn linux_mesa_composited() {
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return;
+    }
+    let mut c = mesa_compositor();
+    let busybox = "/System/Linux/bin/busybox";
+
+    // In a window: composited from the program's buffers.
+    let script = "wl-bridge --background && exec /usr/bin/es2gears_wayland.x86_64-linux-gnu";
+    let (mut shown, mut held) = (0u32, false);
+    let (code, _) = run_composited(&mut c, &[busybox, "sh", "-c", script], 300_000, &mut |c, _| {
+        let Some(id) = window_titled("es2gears") else { return false };
+        if crate::gui::server::attached(id).is_some_and(|(b, ..)| b.dmabuf) {
+            shown += 1;
+        }
+        if shown >= 20 && !held {
+            held = true;
+            c.settle(500);
+            let s = &c.screens[c.main];
+            hold_and_screendump(c, |x, y| s.pixel(x, y));
+            return false;
+        }
+        // Killed mid-frame, once the screen was checked.
+        held && shown >= 30
+    });
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "es2gears ended by itself");
+    assert!(held, "es2gears' window never showed its dma-bufs ({shown} frames)");
+    c.settle(2000);
+    assert!(window_titled("es2gears").is_none(), "es2gears' window outlived it");
+    assert!(crate::proc::all().iter().any(|p| p.name() == "wl-bridge"), "the bridge died with its client");
+
+    // Full screen: scanned out, and back for what shows over it.
+    let script = "wl-bridge --background && exec /usr/bin/glmark2-es2-wayland --fullscreen \
+                  --visual-config a=0 -b build:duration=120";
+    #[derive(PartialEq, Debug)]
+    enum Step {
+        Start,
+        Scanout,
+        Notice,
+        Again,
+        Shoal,
+        Back,
+        Arrow,
+        Last,
+    }
+    // Without a cursor plane the pointer is drawn into the picture: scanning
+    // out waits until the program hides it (a cursor change, both ways).
+    let plane = crate::gui::cursor::hardware();
+    let hide = |id: u32, hidden: bool| {
+        use aurora_abi::cursor::{ARROW, HIDDEN};
+        crate::gui::server::set_cursor(id, if hidden { HIDDEN } else { ARROW })
+    };
+    let mut step = Step::Start;
+    let mut since = time::uptime_ms();
+    let (code, text) = run_composited(&mut c, &[busybox, "sh", "-c", script], 600_000, &mut |c, _| {
+        let Some(id) = window_titled("glmark2") else { return false };
+        let main = c.main;
+        let scanning = c.screens[main].scanning_out() == Some(id);
+        match step {
+            Step::Start if crate::gui::server::pictures(id) >= 10 && c.wait_presented(1000) => {
+                if !plane {
+                    assert!(!scanning, "scanned out with the pointer drawn over it");
+                    hide(id, true);
+                }
+                (step, since) = (Step::Scanout, time::uptime_ms());
+            }
+            Step::Scanout if scanning && c.screens[main].scanned_total >= 10 => {
+                // The buffer on the plane stays there (and unwritten) while no frame runs.
+                let b = c.screens[main].scanout_buffer().expect("a scanned-out buffer");
+                assert!(b.dmabuf, "glmark2's frames are not dma-bufs");
+                let stride = b.stride / 4;
+                hold_and_screendump(c, |x, y| b.pixels()[(y * stride + x) as usize]);
+                crate::gui::notify::system("Scanout test", "A notice over a full-screen program");
+                (step, since) = (Step::Notice, time::uptime_ms());
+            }
+            Step::Notice if !scanning && c.screens[main].shows_back_buffer() => {
+                // Composed again, the notice over the program.
+                let s = &c.screens[main];
+                hold_and_screendump(c, |x, y| s.pixel(x, y));
+                (step, since) = (Step::Again, time::uptime_ms());
+            }
+            Step::Again if scanning => {
+                c.desktop.toggle_launcher();
+                (step, since) = (Step::Shoal, time::uptime_ms());
+            }
+            Step::Shoal if !scanning && c.screens[main].shows_back_buffer() => {
+                c.desktop.toggle_launcher();
+                (step, since) = (Step::Back, time::uptime_ms());
+            }
+            Step::Back if scanning => {
+                let next = if plane { Step::Last } else { Step::Arrow };
+                if !plane {
+                    hide(id, false);
+                }
+                (step, since) = (next, time::uptime_ms());
+            }
+            Step::Arrow if !scanning && c.screens[main].shows_back_buffer() => {
+                hide(id, true);
+                (step, since) = (Step::Last, time::uptime_ms());
+            }
+            // Killed mid-frame while scanned out.
+            Step::Last if scanning && c.screens[main].scanned_total >= 40 => return true,
+            _ => assert!(time::uptime_ms() < since + 60_000, "stuck at {step:?} (scanning out: {scanning})"),
+        }
+        false
+    });
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "glmark2 ended by itself: {text}");
+    c.settle(2000);
+    let s = &c.screens[c.main];
+    assert!(s.scanning_out().is_none() && s.shows_back_buffer(), "the desktop's picture did not come back");
+    assert!(crate::proc::all().iter().any(|p| p.name() == "wl-bridge"), "the bridge died with its client");
+    stop_bridge();
+    let scanned = s.scanned_total;
+    c.close();
+    crate::kprint!("[{shown} frames composited from dma-bufs, {scanned} scanned out] ");
+}
+
+/// Mesa's frames in windows, measured (`cargo xtask test --mesa` with
+/// `AURORA_MESA_BENCH=1`): es2gears in a window, and glmark2's Wayland
+/// build in a window and full screen, each with the bridge copying every
+/// frame as before (`WL_BRIDGE_COPY=1`: shared memory, copied into the
+/// window) and without (dma-bufs shown as they are, scanned out full
+/// screen), interleaved, three rounds; medians of frames per second and of
+/// the compositor's time per frame. The bridge writes its own per-frame
+/// breakdown (client, hand-off, until shown) to the log as each ends.
+fn linux_mesa_bench() {
+    if crate::fs::stat(MESA_KMSCUBE).is_err() || crate::gui::prefs::boot_option("mesa_bench").as_deref() != Some("1")
+    {
+        crate::kprint!("(skipped: AURORA_MESA_BENCH=1 with --mesa runs it) ");
+        return;
+    }
+    // Once is enough: the first boot (the second finds its marker).
+    if crate::fs::stat("/Documents/.ktest-persist").is_ok() {
+        crate::kprint!("(measured on the first boot) ");
+        return;
+    }
+    let mut c = mesa_compositor();
+    let busybox = "/System/Linux/bin/busybox";
+    let gears = "/usr/bin/es2gears_wayland.x86_64-linux-gnu";
+    let glmark = "/usr/bin/glmark2-es2-wayland -b build:duration=8 -b texture:duration=8";
+    let glmark_full = "/usr/bin/glmark2-es2-wayland --fullscreen --visual-config a=0 \
+                       -b build:duration=8 -b texture:duration=8";
+    let cases: [(&str, &str, Option<u64>); 3] =
+        [("es2gears window", gears, Some(12_000)), ("glmark2 window", glmark, None), ("glmark2 full", glmark_full, None)];
+    // Each run: (case, copied), [frames per second, compositor's share of
+    // the time (per mille), its composing and presenting time per picture
+    // (µs), glmark2's score].
+    let mut results: Vec<(usize, bool, [u64; 5])> = Vec::new();
+    for round in 0..3 {
+        for (k, (name, cmd, run_ms)) in cases.iter().enumerate() {
+            for copy in [round % 2 == 0, round % 2 != 0] {
+                // (Exported: the launch scripts start the bridge too, should it not be up yet.)
+                let env = if copy { "export WL_BRIDGE_COPY=1; " } else { "" };
+                let script = alloc::format!("{env}wl-bridge --background && exec {cmd}");
+                let before = c.totals;
+                let (mut first, mut pictures, mut window) = (None, 0u64, None);
+                let (_, text) = run_composited(&mut c, &[busybox, "sh", "-c", &script], 300_000, &mut |_, _| {
+                    let title = if k == 0 { "es2gears" } else { "glmark2" };
+                    if let Some(id) = window_titled(title) {
+                        window = Some(id);
+                        let n = crate::gui::server::pictures(id);
+                        let (t0, n0) = *first.get_or_insert((time::uptime_ms(), n));
+                        pictures = n - n0;
+                        return run_ms.is_some_and(|ms| time::uptime_ms() > t0 + ms);
+                    }
+                    false
+                });
+                let ms = first.map_or(1, |f: (u64, u64)| time::uptime_ms() - f.0).max(1);
+                let fps = pictures * 1000 / ms;
+                let t = c.totals;
+                let n = pictures.max(1);
+                let busy = (t.busy_ns - before.busy_ns) / 1000 / ms;
+                let compose = (t.paint_ns - before.paint_ns) / n / 1000;
+                let present = (t.present_ns - before.present_ns + t.scan_ns - before.scan_ns) / n / 1000;
+                let score = text
+                    .split("glmark2 Score:")
+                    .nth(1)
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                crate::kprintln!(
+                    "\nbench: {name} {}: {fps} frames/s over {ms} ms; compositor busy {}.{}% of the time, per picture \
+                     composing {compose} us, presenting {present} us ({} scanned out); score {score}",
+                    if copy { "copied" } else { "zero-copy" },
+                    busy / 10,
+                    busy % 10,
+                    t.scanned - before.scanned
+                );
+                let _ = window;
+                stop_bridge();
+                c.settle(1000);
+                results.push((k, copy, [fps, busy, compose, present, score]));
+            }
+        }
+    }
+    for (k, (name, ..)) in cases.iter().enumerate() {
+        for copy in [true, false] {
+            let median = |i: usize| {
+                let mut x: Vec<u64> = results.iter().filter(|r| (r.0, r.1) == (k, copy)).map(|r| r.2[i]).collect();
+                x.sort_unstable();
+                x.get(x.len() / 2).copied().unwrap_or(0)
+            };
+            let (fps, busy, compose, present, score) = (median(0), median(1), median(2), median(3), median(4));
+            crate::kprintln!(
+                "bench: median {name} {}: {fps} frames/s; compositor busy {}.{}%, composing {compose} us, \
+                 presenting {present} us a picture; score {score}",
+                if copy { "copied" } else { "zero-copy" },
+                busy / 10,
+                busy % 10
+            );
+        }
+    }
+    c.close();
+}
+
+/// Where Voyage is when the disk has the Linux packages
+/// (`AURORA_TEST_ROOT=browsers cargo xtask test --mesa` puts them there).
+const VOYAGE: &str = "/Linux/usr/lib/voyage/voyage";
+
+/// A long page with text, boxes and one thing always moving (a CSS
+/// animation, as a page with a spinner or a video changes a small part of
+/// the window on every frame), for the browser measurements.
+const SCROLL_PAGE: &str = "<!doctype html><meta charset=utf-8><title>scroll</title>\
+<style>body{font:16px sans-serif;margin:24px;background:#fafafa}p{max-width:720px;line-height:1.5}\
+.box{display:inline-block;width:120px;height:60px;margin:4px;background:linear-gradient(#4a8,#28c);border-radius:8px}\
+#spin{position:fixed;right:24px;top:24px;width:48px;height:48px;border-radius:24px;border:6px solid #28c;\
+border-top-color:transparent;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style>\
+<div id=spin></div>";
+
+/// Browsers in windows, measured (`AURORA_TEST_ROOT=browsers cargo xtask
+/// test --mesa`): Voyage (WebKit) and Firefox show a long local page with a
+/// spinner, then scroll it a notch at a time; each with the bridge copying
+/// every frame as before (`WL_BRIDGE_COPY=1`) and without (the browser's
+/// buffers shown as they are, as layers), interleaved, three rounds. For each
+/// run: how the bridge shows the window (its log), pictures per second while
+/// idle (the spinner) and scrolling, the compositor's busy share and time per
+/// picture, and input to photon: from a scroll event to the compositor
+/// having painted the browser's next picture (median).
+fn linux_browsers_measured() {
+    if crate::fs::stat(VOYAGE).is_err() {
+        crate::kprint!("(skipped: the browsers are not on this disk; AURORA_TEST_ROOT=browsers runs it) ");
+        return;
+    }
+    if crate::fs::stat("/Documents/.ktest-persist").is_ok() {
+        crate::kprint!("(measured on the first boot) ");
+        return;
+    }
+    let mut page = alloc::string::String::from(SCROLL_PAGE);
+    for i in 0..160 {
+        page.push_str(&alloc::format!(
+            "<h2>Section {i}</h2><p>WaveOS shows Linux browsers through the Wayland bridge. This paragraph is \
+             here to be scrolled past: its words wrap at the page's width, and the boxes below it are \
+             drawn with gradients and rounded corners.</p><div class=box></div><div class=box></div>"
+        ));
+    }
+    crate::fs::write_all("/Linux/tmp/waveos-scroll.html", page.as_bytes()).expect("write the page");
+    let mut c = mesa_compositor();
+    let busybox = "/System/Linux/bin/busybox";
+    let browsers: [(&str, &str, &str); 2] = [
+        ("voyage", "voyage", "/System/Linux/bin/voyage file:///tmp/waveos-scroll.html"),
+        ("firefox", "firefox", "/System/Linux/bin/firefox --new-instance file:///tmp/waveos-scroll.html"),
+    ];
+    for round in 0..3 {
+        for (name, program, cmd) in browsers {
+            for copy in [round % 2 == 0, round % 2 != 0] {
+                // (Exported: the launch scripts start the bridge too, should it not be up yet.)
+                let env = if copy { "export WL_BRIDGE_COPY=1; " } else { "" };
+                let script = alloc::format!("{env}wl-bridge --background && exec {cmd}");
+                let before = c.totals;
+                #[derive(PartialEq)]
+                enum Phase {
+                    Loading,
+                    Idle,
+                    Scrolling,
+                }
+                let mut phase = Phase::Loading;
+                let (mut since, mut mark, mut notches) = (time::uptime_ms(), (0u64, before), 0u32);
+                let mut idle = (0u64, 0u64);
+                let mut scroll = (0u64, 0u64, before);
+                let mut waits: Vec<u64> = Vec::new();
+                let mut pending: Option<(u64, u64, bool)> = None;
+                let (_, _) = run_composited(&mut c, &[busybox, "sh", "-c", &script], 900_000, &mut |c, _| {
+                    let Some(id) = window_titled(program).or_else(|| window_titled("scroll")) else {
+                        return time::uptime_ms() > since + 600_000;
+                    };
+                    let n = crate::gui::server::pictures(id);
+                    let now = time::uptime_ms();
+                    match phase {
+                        // Loaded once 20 s passed since the window appeared.
+                        Phase::Loading if now > since + 20_000 => {
+                            // The pointer over the page, for the scrolls.
+                            if let Some(r) = c.desktop.client_content(id) {
+                                let b = c.desktop.bounds();
+                                let at = r.center();
+                                crate::drivers::input::push(crate::drivers::input::InputEvent::Pointer {
+                                    x: at.0 - b.x,
+                                    y: at.1 - b.y,
+                                    buttons: 0,
+                                });
+                            }
+                            (phase, since, mark) = (Phase::Idle, now, (n, c.totals));
+                        }
+                        Phase::Loading => {}
+                        Phase::Idle if now > since + 10_000 => {
+                            let ms = (now - since).max(1);
+                            idle = ((n - mark.0) * 1000 / ms, (c.totals.busy_ns - mark.1.busy_ns) / 1000 / ms);
+                            (phase, since) = (Phase::Scrolling, now);
+                            scroll = (n, 0, c.totals);
+                        }
+                        Phase::Idle => {}
+                        Phase::Scrolling => {
+                            // A picture after the last scroll, and a frame of the
+                            // compositor's since (it painted it): input to photon.
+                            if let Some((t0, n0, seen)) = pending {
+                                if seen {
+                                    waits.push(time::now_ns() / 1000 - t0);
+                                    pending = None;
+                                } else if n > n0 {
+                                    pending = Some((t0, n0, true));
+                                } else if time::now_ns() / 1000 > t0 + 5_000_000 {
+                                    // No picture for it (the page didn't move).
+                                    pending = None;
+                                }
+                            }
+                            if pending.is_none() && notches < 30 && now >= since + notches as u64 * 400 {
+                                crate::drivers::input::push(crate::drivers::input::InputEvent::Scroll { dx: 0, dy: 120 });
+                                pending = Some((time::now_ns() / 1000, n, false));
+                                notches += 1;
+                            }
+                            if notches >= 30 && pending.is_none() || now > since + 60_000 {
+                                scroll.1 = (n - scroll.0) * 1000 / (now - since).max(1);
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                });
+                stop_bridge();
+                for p in crate::proc::all().iter().filter(|p| p.name().contains(program) || p.name().contains("WebKit")) {
+                    let _ = crate::proc::kill(p.pid);
+                }
+                c.settle(2000);
+                let t = c.totals;
+                let frames = (t.frames - scroll.2.frames).max(1);
+                let compose = (t.paint_ns - scroll.2.paint_ns) / frames / 1000;
+                let present = (t.present_ns - scroll.2.present_ns) / frames / 1000;
+                waits.sort_unstable();
+                let photon = waits.get(waits.len() / 2).copied().unwrap_or(0);
+                crate::kprintln!(
+                    "\nbrowser-bench: {name} {}: idle {} pictures/s, compositor busy {}.{}%; scrolling {} pictures/s, \
+                     composing {compose} us, presenting {present} us a frame; scroll to photon median {} ms over {} \
+                     notches",
+                    if copy { "copied" } else { "zero-copy" },
+                    idle.0,
+                    idle.1 / 10,
+                    idle.1 % 10,
+                    scroll.1,
+                    photon / 1000,
+                    waits.len()
+                );
+            }
+        }
+    }
+    c.close();
 }
 
 /// Runs a Mesa program from the Linux packages full screen (it takes the
@@ -1076,7 +1586,8 @@ fn linux_mesa_glmark2() {
         assert!(text.contains("llvmpipe"), "{program} did not render with llvmpipe");
         assert!(text.contains(api), "{program} did not report {api}");
         assert!(text.contains("glmark2 Score:"), "{program} did not finish");
-        assert!(flips >= 10, "{program} flipped {flips} times");
+        // (At 3840x2400 under emulation on a loaded host, a few frames a second.)
+        assert!(flips >= 4, "{program} flipped {flips} times");
         crate::kprint!("[{program}: {flips} flips] ");
     }
 }

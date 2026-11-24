@@ -471,6 +471,99 @@ pub mod wp_viewport {
     }
 }
 
+pub mod zwp_linux_dmabuf_v1 {
+    pub const NAME: &str = "zwp_linux_dmabuf_v1";
+    pub const VERSION: u32 = 6;
+    pub const REQUESTS: &[&str] = &["", "n", "n", "no"];
+    pub mod req {
+        pub const DESTROY: u16 = 0;
+        pub const CREATE_PARAMS: u16 = 1;
+        pub const GET_DEFAULT_FEEDBACK: u16 = 2;
+        pub const GET_SURFACE_FEEDBACK: u16 = 3;
+    }
+    pub mod ev {
+        pub const FORMAT: u16 = 0;
+        pub const MODIFIER: u16 = 1;
+    }
+}
+
+pub mod zwp_linux_buffer_params_v1 {
+    pub const NAME: &str = "zwp_linux_buffer_params_v1";
+    pub const VERSION: u32 = 6;
+    pub const REQUESTS: &[&str] = &["", "huuuuu", "iiuu", "niiuu", "a"];
+    pub mod req {
+        pub const DESTROY: u16 = 0;
+        pub const ADD: u16 = 1;
+        pub const CREATE: u16 = 2;
+        pub const CREATE_IMMED: u16 = 3;
+        pub const SET_SAMPLING_DEVICE: u16 = 4;
+    }
+    pub mod ev {
+        pub const CREATED: u16 = 0;
+        pub const FAILED: u16 = 1;
+    }
+}
+
+pub mod zwp_linux_dmabuf_feedback_v1 {
+    pub const NAME: &str = "zwp_linux_dmabuf_feedback_v1";
+    pub const VERSION: u32 = 6;
+    pub const REQUESTS: &[&str] = &[""];
+    pub mod req {
+        pub const DESTROY: u16 = 0;
+    }
+    pub mod ev {
+        pub const DONE: u16 = 0;
+        pub const FORMAT_TABLE: u16 = 1;
+        pub const MAIN_DEVICE: u16 = 2;
+        pub const TRANCHE_DONE: u16 = 3;
+        pub const TRANCHE_TARGET_DEVICE: u16 = 4;
+        pub const TRANCHE_FORMATS: u16 = 5;
+        pub const TRANCHE_FLAGS: u16 = 6;
+    }
+}
+
+pub mod wp_presentation {
+    pub const NAME: &str = "wp_presentation";
+    pub const VERSION: u32 = 2;
+    pub const REQUESTS: &[&str] = &["", "on"];
+    pub mod req {
+        pub const DESTROY: u16 = 0;
+        pub const FEEDBACK: u16 = 1;
+    }
+    pub mod ev {
+        pub const CLOCK_ID: u16 = 0;
+    }
+}
+
+pub mod wp_presentation_feedback {
+    pub const NAME: &str = "wp_presentation_feedback";
+    pub const VERSION: u32 = 2;
+    pub const REQUESTS: &[&str] = &[];
+    pub mod ev {
+        pub const SYNC_OUTPUT: u16 = 0;
+        pub const PRESENTED: u16 = 1;
+        pub const DISCARDED: u16 = 2;
+    }
+}
+
+pub mod wl_drm {
+    pub const NAME: &str = "wl_drm";
+    pub const VERSION: u32 = 2;
+    pub const REQUESTS: &[&str] = &["u", "nuiiuu", "nuiiuiiiiii", "nhiiuiiiiii"];
+    pub mod req {
+        pub const AUTHENTICATE: u16 = 0;
+        pub const CREATE_BUFFER: u16 = 1;
+        pub const CREATE_PLANAR_BUFFER: u16 = 2;
+        pub const CREATE_PRIME_BUFFER: u16 = 3;
+    }
+    pub mod ev {
+        pub const DEVICE: u16 = 0;
+        pub const FORMAT: u16 = 1;
+        pub const AUTHENTICATED: u16 = 2;
+        pub const CAPABILITIES: u16 = 3;
+    }
+}
+
 /// The request signatures of interface `name`.
 pub fn requests(name: &str) -> &'static [&'static str] {
     match name {
@@ -505,6 +598,12 @@ pub fn requests(name: &str) -> &'static [&'static str] {
         zxdg_toplevel_decoration_v1::NAME => zxdg_toplevel_decoration_v1::REQUESTS,
         wp_viewporter::NAME => wp_viewporter::REQUESTS,
         wp_viewport::NAME => wp_viewport::REQUESTS,
+        zwp_linux_dmabuf_v1::NAME => zwp_linux_dmabuf_v1::REQUESTS,
+        zwp_linux_buffer_params_v1::NAME => zwp_linux_buffer_params_v1::REQUESTS,
+        zwp_linux_dmabuf_feedback_v1::NAME => zwp_linux_dmabuf_feedback_v1::REQUESTS,
+        wp_presentation::NAME => wp_presentation::REQUESTS,
+        wp_presentation_feedback::NAME => wp_presentation_feedback::REQUESTS,
+        wl_drm::NAME => wl_drm::REQUESTS,
         _ => &[],
     }
 }

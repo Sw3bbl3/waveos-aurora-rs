@@ -163,6 +163,10 @@ pub enum Special {
     Drm(Arc<super::drm::File>),
     /// A dma-buf: a GPU buffer exported from a card (`PRIME`).
     DmaBuf(Arc<crate::drivers::gpu::BufferObject>),
+    /// A sync file: a fence for a dma-buf's pending work. The processor
+    /// renders and the display reads synchronously here, so every one is
+    /// signalled already (`poll` says readable at once).
+    SyncFile,
 }
 
 impl Special {
@@ -184,7 +188,7 @@ impl Special {
             Special::Event(e) => e.read(out),
             Special::Timer(t) => t.read(out),
             Special::WaveEvents(pid) => super::events::wave_events_read(*pid, out),
-            Special::Epoll(_) | Special::DmaBuf(_) => Err(EINVAL),
+            Special::Epoll(_) | Special::DmaBuf(_) | Special::SyncFile => Err(EINVAL),
             Special::Drm(f) => super::drm::vblank::read(f, out, true),
             Special::Unix(u) => u.recv(out, false, false).map(|r| r.len),
             Special::Shm { file, pos } => {
@@ -223,7 +227,7 @@ impl Special {
             | Special::Inotify(_)
             | Special::Netlink(_) => Err(EINVAL),
             Special::Link(_) => Err(EBADF),
-            Special::Drm(_) | Special::DmaBuf(_) => Err(EINVAL),
+            Special::Drm(_) | Special::DmaBuf(_) | Special::SyncFile => Err(EINVAL),
             Special::Unix(u) => u.send(data, Vec::new(), None, false),
             Special::Shm { file, pos } => {
                 let n = file.write_at(*pos, data)?;
@@ -253,7 +257,7 @@ impl Special {
             Special::Inotify(_) => (0o600, 0),
             Special::Link(_) => (S_IFLNK | 0o777, 0),
             Special::Drm(f) => (S_IFCHR | 0o666, makedev(super::drm::MAJOR, f.minor as u64)),
-            Special::DmaBuf(_) => (0o600, 0),
+            Special::DmaBuf(_) | Special::SyncFile => (0o600, 0),
         }
     }
 }
@@ -1523,16 +1527,20 @@ pub fn ioctl(p: &Process, fd: u64, request: u64, arg: u64) -> Result<u64, isize>
     // DRM ('d') requests on a card, dma-buf ('b') ones on a dma-buf.
     if let Handle::Special(s) = &*h {
         let kind = request >> 8 & 0xFF;
-        let (card, dmabuf) = match &*s.lock() {
-            Special::Drm(f) => (Some(f.clone()), false),
-            Special::DmaBuf(_) => (None, true),
-            _ => (None, false),
+        let (card, dmabuf, sync) = match &*s.lock() {
+            Special::Drm(f) => (Some(f.clone()), false, false),
+            Special::DmaBuf(_) => (None, true, false),
+            Special::SyncFile => (None, false, true),
+            _ => (None, false, false),
         };
         if let (Some(f), 0x64) = (&card, kind) {
             return super::drm::ioctl(p, f, request, arg);
         }
         if dmabuf && kind == 0x62 {
-            return super::drm::dmabuf_ioctl(request, arg);
+            return super::drm::dmabuf_ioctl(p, request, arg);
+        }
+        if sync && kind == 0x3E {
+            return super::drm::sync_file_ioctl(p, request, arg);
         }
     }
     match request {

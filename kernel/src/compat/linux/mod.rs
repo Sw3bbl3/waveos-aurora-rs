@@ -354,6 +354,10 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::WIN_SET_TITLE
         | w::WIN_SET_CURSOR
         | w::WIN_SET_PROGRAM
+        | w::WIN_BUFFER
+        | w::WIN_BUFFER_DESTROY
+        | w::WIN_ATTACH
+        | w::WIN_SET_FULLSCREEN
         | w::WIN_CLOSE
         | w::WIN_RESIZE
         | w::NEXT_EVENT

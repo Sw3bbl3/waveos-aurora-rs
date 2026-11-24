@@ -1,6 +1,7 @@
 """Generates linux-programs/wl-bridge/src/protocol.rs from the Wayland
 protocol XML files in linux-programs/wl-bridge/protocols (from Debian's
-libwayland-dev 1.21 and wayland-protocols 1.31).
+libwayland-dev 1.21 and wayland-protocols 1.31; linux-dmabuf and presentation-time
+from wayland-protocols 1.45; wayland-drm.xml, Mesa's wl_drm, written down here).
 
     python3 tools/wayland_protocol.py
 """
@@ -8,7 +9,15 @@ import os
 import xml.etree.ElementTree as ET
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "linux-programs", "wl-bridge")
-FILES = ["wayland.xml", "xdg-shell.xml", "xdg-decoration-unstable-v1.xml", "viewporter.xml"]
+FILES = [
+    "wayland.xml",
+    "xdg-shell.xml",
+    "xdg-decoration-unstable-v1.xml",
+    "viewporter.xml",
+    "linux-dmabuf-v1.xml",
+    "presentation-time.xml",
+    "wayland-drm.xml",
+]
 CODES = {"int": "i", "uint": "u", "fixed": "f", "string": "s", "object": "o", "new_id": "n", "array": "a", "fd": "h"}
 
 

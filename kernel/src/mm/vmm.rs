@@ -131,6 +131,23 @@ pub fn shm_hold(frame: u64) {
     swap::hold(frame, true);
 }
 
+/// Another holder (an object) for each of `frames`, all or none: false
+/// (and nothing held) if one of them is not a counted frame any more. A
+/// window showing a program's shared memory holds it like this (see
+/// `gpu::BufferObject::from_shared`): frames an object holds are never
+/// swapped out, so the compositor and the display can read them at any time.
+pub fn shm_hold_all(frames: &[u64]) -> bool {
+    for (i, &f) in frames.iter().enumerate() {
+        if !swap::hold(f, true) {
+            for &g in &frames[..i] {
+                swap::release(g, true);
+            }
+            return false;
+        }
+    }
+    true
+}
+
 /// Starts counting frames another owner allocated (a GPU buffer a program
 /// maps), held once by that owner, which lets go with [`shm_release`].
 /// They are device memory: never swapped out, by any mapping, ever (a

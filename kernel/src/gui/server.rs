@@ -7,12 +7,14 @@
 //! structural changes are forwarded to the compositor through `COMMANDS`.
 
 use super::geom::Rect;
+use crate::drivers::gpu::{fourcc, BufferObject};
 use crate::mm::vmm::{self, Prot};
 use crate::mm::{frame, phys_to_virt, PAGE_SIZE};
 use crate::sync::IrqMutex;
 use crate::{proc, sched};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use aurora_abi::{err::*, nr, Event, SurfaceInfo};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -59,6 +61,108 @@ pub struct Client {
     scale: u32,
     /// The id of the display the window is on (0 until it appears).
     display: u32,
+    /// Shown instead of the surface (`win_attach`): a buffer of the
+    /// program's and the scale it was drawn at.
+    attached: Option<Attached>,
+    /// Counts `win_attach` calls (a display scanning a buffer out shows
+    /// it again when the program attached it again with new pixels).
+    attaches: u64,
+    /// Presents and attaches since the window opened.
+    pictures: u64,
+    /// The window asked to be full screen (`win_set_fullscreen`).
+    pub fullscreen: bool,
+}
+
+/// Pixels a program's windows show instead of their own surfaces
+/// (`win_buffer`): a dma-buf, or pages of shared memory, read where they
+/// are — never copied into the window — by the compositor, or scanned out
+/// by a display. Held until the program destroys it and nothing shows it.
+pub struct WinBuffer {
+    pub id: u32,
+    pub pid: u32,
+    pub bo: Arc<BufferObject>,
+    /// Byte offset of the first pixel in `bo`.
+    pub offset: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Bytes from one row to the next.
+    pub stride: u32,
+    /// DRM fourcc: `XRGB8888`, or `ARGB8888` (premultiplied, as Wayland's).
+    pub format: u32,
+    /// A dma-buf (a DRM buffer), not shared memory.
+    pub dmabuf: bool,
+}
+
+impl WinBuffer {
+    /// The pixels, `stride / 4` words a row (the last row may stop at `width`).
+    pub fn pixels(&self) -> &[u32] {
+        let words = (self.stride / 4) as usize * (self.height as usize - 1) + self.width as usize;
+        unsafe { core::slice::from_raw_parts((self.bo.vaddr() + self.offset as u64) as *const u32, words) }
+    }
+
+    /// No alpha: what the display shows is exactly the pixels.
+    pub fn opaque(&self) -> bool {
+        self.format == fourcc::XRGB8888
+    }
+}
+
+/// Buffers a window shows (`win_attach`), bottom first, and the scale they
+/// were drawn at.
+#[derive(Clone)]
+pub struct Attached {
+    pub layers: Vec<Layer>,
+    pub scale: u32,
+}
+
+/// The part `src` (its pixels) of `buffer` at `dst` (window pixels).
+#[derive(Clone)]
+pub struct Layer {
+    pub buffer: Arc<WinBuffer>,
+    pub src: Rect,
+    pub dst: Rect,
+}
+
+impl Attached {
+    fn holds(&self, id: u32) -> bool {
+        self.layers.iter().any(|l| l.buffer.id == id)
+    }
+
+    /// One buffer shown whole and unscaled at the window's corner.
+    fn single(&self) -> Option<&Arc<WinBuffer>> {
+        let [l] = &self.layers[..] else { return None };
+        let full = Rect::new(0, 0, l.buffer.width as i32, l.buffer.height as i32);
+        (l.src == full && l.dst == full).then_some(&l.buffer)
+    }
+
+    /// The buffer that is all a `w`×`h`-pixel window shows: alone, or the
+    /// topmost layer, opaque, whole and unscaled over all of it (what lies
+    /// under it never shows), for a display to scan out.
+    fn covering(&self, w: u32, h: u32) -> Option<&Arc<WinBuffer>> {
+        if let Some(b) = self.single() {
+            return Some(b);
+        }
+        let l = self.layers.last()?;
+        let full = Rect::new(0, 0, l.buffer.width as i32, l.buffer.height as i32);
+        let window = Rect::new(0, 0, w as i32, h as i32);
+        (l.buffer.opaque() && l.src == full && l.dst == full && full == window).then_some(&l.buffer)
+    }
+}
+
+/// What a window shows, for the compositor: its surface, or a buffer the
+/// program attached.
+pub struct Content<'a> {
+    pub px: &'a [u32],
+    /// Device pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Pixels from one row to the next.
+    pub stride: u32,
+    /// The scale it was drawn at.
+    pub scale: u32,
+    /// A program's buffer (`Some(opaque)`), or the window's own surface.
+    pub buffer: Option<bool>,
+    /// Several of the program's buffers stacked (empty: `px` is all).
+    pub layers: &'a [Layer],
 }
 
 /// Changes the compositor must apply on its next frame.
@@ -67,6 +171,8 @@ pub enum Command {
     Closed(u32),
     Present(u32, Rect),
     Title(u32),
+    /// A window asked to be full screen, or not (`server::fullscreen`).
+    Fullscreen(u32),
     /// A window's pointer shape changed.
     Cursor,
     /// A program, its arguments, and (asked by a sandboxed app) the files
@@ -156,6 +262,13 @@ pub fn program_of(id: u32) -> Option<u32> {
 }
 
 static CLIENTS: IrqMutex<BTreeMap<u32, Client>> = IrqMutex::new(BTreeMap::new());
+/// Every process's window buffers, by id.
+static BUFFERS: IrqMutex<BTreeMap<u32, Arc<WinBuffer>>> = IrqMutex::new(BTreeMap::new());
+static NEXT_BUFFER: AtomicU32 = AtomicU32::new(1);
+/// Buffers a display scans out directly: (display, window, buffer).
+static ON_PLANES: IrqMutex<Vec<(u32, u32, Arc<WinBuffer>)>> = IrqMutex::new(Vec::new());
+/// A process may hold this many window buffers.
+const MAX_BUFFERS: usize = 64;
 static COMMANDS: IrqMutex<VecDeque<Command>> = IrqMutex::new(VecDeque::new());
 /// Task blocked in `next_event`, per process.
 static WAITERS: IrqMutex<BTreeMap<u32, u64>> = IrqMutex::new(BTreeMap::new());
@@ -262,15 +375,112 @@ fn free_surface(s: Surface, pid: u32, unmap_user: bool) {
 
 // ------------------------------------------------------- compositor side
 
-/// Runs `f` with the window's pixels (row stride = width; both in device
-/// pixels). Holds the client lock, so the surface cannot be freed underneath
-/// the compositor. `f` also gets the scale the surface was drawn at.
-pub fn with_surface_scaled<R>(id: u32, f: impl FnOnce(&[u32], u32, u32, u32) -> R) -> Option<R> {
+/// Runs `f` with what window `id` shows: the buffer the program attached,
+/// or its own surface. Holds the client lock, so neither can go (nor the
+/// program attach another) while the compositor reads it.
+pub fn with_content<R>(id: u32, f: impl FnOnce(&Content) -> R) -> Option<R> {
     let clients = CLIENTS.lock();
     let c = clients.get(&id)?;
-    let s = &c.surface;
-    let px = unsafe { core::slice::from_raw_parts(s.kva as *const u32, (s.width * s.height) as usize) };
-    Some(f(px, s.width, s.height, s.scale))
+    let content = match &c.attached {
+        Some(a) => {
+            let b = &a.layers[0].buffer;
+            Content {
+                px: b.pixels(),
+                width: b.width,
+                height: b.height,
+                stride: b.stride / 4,
+                scale: a.scale,
+                buffer: Some(b.opaque()),
+                layers: if a.single().is_some() { &[] } else { &a.layers[..] },
+            }
+        }
+        None => {
+            let s = &c.surface;
+            Content {
+                px: unsafe { core::slice::from_raw_parts(s.kva as *const u32, (s.width * s.height) as usize) },
+                width: s.width,
+                height: s.height,
+                stride: s.width,
+                scale: s.scale,
+                buffer: None,
+                layers: &[],
+            }
+        }
+    };
+    Some(f(&content))
+}
+
+/// The buffer window `id` shows, when the program attached one, with its
+/// scale and how many attaches there have been (a display may scan it out
+/// instead of compositing it).
+pub fn attached(id: u32) -> Option<(Arc<WinBuffer>, u32, u64)> {
+    let clients = CLIENTS.lock();
+    let c = clients.get(&id)?;
+    let a = c.attached.as_ref()?;
+    // The window's size in its pixels at the attach's scale.
+    let (pw, ph) = c.surface.points();
+    a.covering(pw as u32 * a.scale, ph as u32 * a.scale).map(|b| (b.clone(), a.scale, c.attaches))
+}
+
+/// The buffers window `id` shows as layers (self-tests).
+#[cfg(feature = "ktest")]
+pub fn layers(id: u32) -> Vec<Arc<WinBuffer>> {
+    CLIENTS.lock().get(&id).and_then(|c| c.attached.as_ref()).map_or(Vec::new(), |a| {
+        a.layers.iter().map(|l| l.buffer.clone()).collect()
+    })
+}
+
+/// Sets the pointer's shape over window `id` as its program would.
+#[cfg(feature = "ktest")]
+pub fn set_cursor(id: u32, shape: u32) {
+    if let Some(c) = CLIENTS.lock().get_mut(&id) {
+        c.cursor = shape;
+    }
+    send(Command::Cursor);
+}
+
+/// How many pictures window `id` presented (or attached) since it opened.
+#[cfg(feature = "ktest")]
+pub fn pictures(id: u32) -> u64 {
+    CLIENTS.lock().get(&id).map_or(0, |c| c.pictures)
+}
+
+/// The display window `id` is on (0: none yet).
+pub fn display_of(id: u32) -> u32 {
+    CLIENTS.lock().get(&id).map_or(0, |c| c.display)
+}
+
+/// Display `display` scans out `on` (window, buffer) now, or nothing of a
+/// window's (`None`): the buffer it scanned out before is released unless
+/// its window still shows it. Called once the display has let go of it.
+pub fn set_on_plane(display: u32, on: Option<(u32, Arc<WinBuffer>)>) {
+    let before = {
+        let mut planes = ON_PLANES.lock();
+        let at = planes.iter().position(|p| p.0 == display);
+        let before = at.map(|i| planes.remove(i));
+        if let Some((w, b)) = on {
+            planes.push((display, w, b));
+        }
+        before
+    };
+    if let Some((_, window, b)) = before {
+        let busy = ON_PLANES.lock().iter().any(|p| p.2.id == b.id)
+            || CLIENTS.lock().get(&window).and_then(|c| c.attached.as_ref()).is_some_and(|a| a.holds(b.id));
+        if !busy {
+            release(window, b.id);
+        }
+    }
+}
+
+/// Tells the program its buffer `buffer` is no longer read (`BUFFER_RELEASE`
+/// on the window that showed it).
+fn release(window: u32, buffer: u32) {
+    push_event(window, Event { kind: aurora_abi::event::BUFFER_RELEASE, a: buffer, ..Default::default() });
+}
+
+/// Whether window `id` asked to be full screen.
+pub fn fullscreen(id: u32) -> bool {
+    CLIENTS.lock().get(&id).is_some_and(|c| c.fullscreen)
 }
 
 /// The window is shown at scale `k` (it moved to a display with that
@@ -402,13 +612,45 @@ pub fn events_waiting(pid: u32) -> usize {
     CLIENTS.lock().values().filter(|c| c.pid == pid).map(|c| c.events.len()).sum()
 }
 
+/// When a frame was shown (see `aurora_abi::frame`).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Shown {
+    /// The display's frame counter, its refresh period and the frame's start (ns).
+    pub seq: u64,
+    pub refresh_ns: u64,
+    pub time_ns: u64,
+    /// `aurora_abi::frame` flags.
+    pub flags: i32,
+}
+
 /// The compositor has shown window `id`'s last present: a `FRAME` event,
-/// unless one is already waiting.
+/// unless one is already waiting (its time is then brought up to date).
+/// (The self-tests answer presents with it when no compositor runs.)
+#[cfg(feature = "ktest")]
 pub fn frame_done(id: u32) {
-    let pending = CLIENTS.lock().get(&id).is_none_or(|c| c.events.iter().any(|e| e.kind == aurora_abi::event::FRAME));
-    if !pending {
-        push_event(id, Event { kind: aurora_abi::event::FRAME, ..Default::default() });
+    frame_shown(id, Shown { time_ns: crate::time::now_ns(), refresh_ns: 16_666_667, ..Default::default() });
+}
+
+/// Like [`frame_done`], saying when the frame was shown.
+pub fn frame_shown(id: u32, at: Shown) {
+    let ev = Event {
+        kind: aurora_abi::event::FRAME,
+        x: at.flags,
+        a: at.seq as u32,
+        b: at.refresh_ns.min(u32::MAX as u64) as u32,
+        c: at.time_ns as u32,
+        d: (at.time_ns >> 32) as u32,
+        ..Default::default()
+    };
+    {
+        let mut clients = CLIENTS.lock();
+        let Some(c) = clients.get_mut(&id) else { return };
+        if let Some(e) = c.events.iter_mut().find(|e| e.kind == aurora_abi::event::FRAME) {
+            *e = Event { window: id, ..ev };
+            return;
+        }
     }
+    push_event(id, ev);
 }
 
 /// The pointer shape window `id` asked for.
@@ -428,6 +670,9 @@ pub fn process_exited(pid: u32) {
         send(Command::Closed(id));
         crate::telemetry::window("close", id, pid, &c.title);
     }
+    // Its buffers go once nothing shows them (a display scanning one out
+    // keeps it until the compositor has moved on).
+    BUFFERS.lock().retain(|_, b| b.pid != pid);
     WAITERS.lock().remove(&pid);
 }
 
@@ -501,6 +746,10 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
                     program: None,
                     scale,
                     display: 0,
+                    attached: None,
+                    attaches: 0,
+                    pictures: 0,
+                    fullscreen: false,
                 },
             );
             send(Command::Created(id));
@@ -574,10 +823,124 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
             let id = a[0] as u32;
             owned(id, pid)?;
             // Device pixels in, points out (rounded outwards).
-            let k = CLIENTS.lock().get(&id).map_or(1, |c| c.surface.scale as i32);
+            let k = CLIENTS.lock().get_mut(&id).map_or(1, |c| {
+                c.pictures += 1;
+                c.surface.scale as i32
+            });
             let (x0, y0) = (a[1] as i32 / k, a[2] as i32 / k);
             let (x1, y1) = ((a[1] as i32 + a[3] as i32 + k - 1) / k, (a[2] as i32 + a[4] as i32 + k - 1) / k);
             send(Command::Present(id, Rect::new(x0, y0, x1 - x0, y1 - y0)));
+            Ok(0)
+        }
+        nr::WIN_BUFFER => {
+            let (width, height) = (a[2] as u32, (a[2] >> 32) as u32);
+            let (offset, stride, format) = (a[1], a[3], a[4] as u32);
+            if !(1..=16384).contains(&width) || !(1..=16384).contains(&height) {
+                return Err(EINVAL);
+            }
+            if format != fourcc::XRGB8888 && format != fourcc::ARGB8888 {
+                return Err(EINVAL);
+            }
+            if stride < width as u64 * 4 || !stride.is_multiple_of(4) || !offset.is_multiple_of(4) || stride > 1 << 20 {
+                return Err(EINVAL);
+            }
+            let bytes = stride * (height as u64 - 1) + width as u64 * 4;
+            if BUFFERS.lock().values().filter(|b| b.pid == pid).count() >= MAX_BUFFERS {
+                return Err(EMFILE);
+            }
+            let p = proc::current().ok_or(EPERM)?;
+            let (bo, at, dmabuf) = crate::compat::linux::drm::pixels_of(&p, a[0], offset, bytes)?;
+            let id = NEXT_BUFFER.fetch_add(1, Ordering::Relaxed);
+            let stride = stride as u32;
+            let b = WinBuffer { id, pid, bo, offset: at as u32, width, height, stride, format, dmabuf };
+            BUFFERS.lock().insert(id, Arc::new(b));
+            Ok(id as u64)
+        }
+        nr::WIN_BUFFER_DESTROY => {
+            let id = a[0] as u32;
+            let mut buffers = BUFFERS.lock();
+            match buffers.get(&id) {
+                Some(b) if b.pid == pid => {
+                    buffers.remove(&id);
+                    Ok(0)
+                }
+                _ => Err(EBADF),
+            }
+        }
+        nr::WIN_ATTACH => {
+            let id = a[0] as u32;
+            owned(id, pid)?;
+            let scale = ((a[1] >> 32) as u32).clamp(1, 4);
+            let buffer = |b: u32| match BUFFERS.lock().get(&b) {
+                Some(b) if b.pid == pid => Ok(b.clone()),
+                _ => Err(EBADF),
+            };
+            let layered = a[1] & aurora_abi::attach::LAYERS != 0;
+            let (new, damage) = if layered {
+                let n = (a[1] as u32 & !(aurora_abi::attach::LAYERS as u32)) as usize;
+                if n == 0 || n > aurora_abi::attach::MAX_LAYERS {
+                    return Err(EINVAL);
+                }
+                let raw = crate::syscall::user::slice(a[2], (n * core::mem::size_of::<aurora_abi::WinLayer>()) as u64)?;
+                let mut layers = Vec::with_capacity(n);
+                for chunk in raw.as_chunks::<{ core::mem::size_of::<aurora_abi::WinLayer>() }>().0 {
+                    let w = |at: usize| i32::from_le_bytes(chunk[at..at + 4].try_into().unwrap());
+                    let b = buffer(w(0) as u32)?;
+                    let src = Rect::new(w(8), w(12), w(16), w(20));
+                    let dst = Rect::new(w(24), w(28), w(32), w(36));
+                    let whole = Rect::new(0, 0, b.width as i32, b.height as i32);
+                    if src.is_empty() || dst.is_empty() || src.intersect(&whole) != src {
+                        return Err(EINVAL);
+                    }
+                    layers.push(Layer { buffer: b, src, dst });
+                }
+                let d = Rect::new(a[3] as i32, (a[3] >> 32) as i32, a[4] as i32, (a[4] >> 32) as i32);
+                (Some(Attached { layers, scale }), d)
+            } else {
+                let d = Rect::new(a[2] as i32, (a[2] >> 32) as i32, a[3] as i32, (a[3] >> 32) as i32);
+                match a[1] as u32 {
+                    0 => (None, d),
+                    b => {
+                        let b = buffer(b)?;
+                        let full = Rect::new(0, 0, b.width as i32, b.height as i32);
+                        (Some(Attached { layers: alloc::vec![Layer { buffer: b, src: full, dst: full }], scale }), d)
+                    }
+                }
+            };
+            let (gone, k) = {
+                let mut clients = CLIENTS.lock();
+                let c = clients.get_mut(&id).ok_or(EBADF)?;
+                let k = if new.is_some() { scale } else { c.surface.scale };
+                let old = core::mem::replace(&mut c.attached, new);
+                c.attaches += 1;
+                c.pictures += 1;
+                let now = c.attached.as_ref();
+                let mut gone: Vec<u32> = old
+                    .map(|o| o.layers.iter().map(|l| l.buffer.id).filter(|&b| !now.is_some_and(|n| n.holds(b))).collect())
+                    .unwrap_or_default();
+                gone.dedup();
+                (gone, k as i32)
+            };
+            // Those it no longer shows are read no more (the compositor
+            // reads under the lock), unless a display scans one out.
+            for b in gone {
+                if !ON_PLANES.lock().iter().any(|p| p.2.id == b) {
+                    release(id, b);
+                }
+            }
+            let (x, y, w, h) = (damage.x.max(0), damage.y.max(0), damage.w, damage.h);
+            let (x0, y0) = (x / k, y / k);
+            let (x1, y1) = ((x.saturating_add(w.max(0)) + k - 1) / k, (y.saturating_add(h.max(0)) + k - 1) / k);
+            send(Command::Present(id, Rect::new(x0, y0, x1 - x0, y1 - y0)));
+            Ok(0)
+        }
+        nr::WIN_SET_FULLSCREEN => {
+            let id = a[0] as u32;
+            owned(id, pid)?;
+            if let Some(c) = CLIENTS.lock().get_mut(&id) {
+                c.fullscreen = a[1] != 0;
+            }
+            send(Command::Fullscreen(id));
             Ok(0)
         }
         nr::WIN_SET_CURSOR => {
