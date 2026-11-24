@@ -138,8 +138,9 @@ const ARCH_SKIPS: &[(&str, &str)] = &[
     ("sleep (S3) and wake", "no suspend to RAM on Arm"),
     (
         "Linux programs: the DRM device",
-        "the display on `virt` is ramfb, not a PCI device as drmtest expects (virtio-gpu comes later)",
+        "the display is ramfb, not a PCI GPU: virtio-gpu without a firmware framebuffer is not driven on arm64 yet",
     ),
+    ("Linux programs: libdrm's modetest", "as the DRM device test"),
 ];
 
 pub fn run() {
@@ -165,7 +166,7 @@ pub fn run() {
         crate::kprintln!("SKIP virtual USB HID tests: QEMU has no usb-redir device");
     }
     for (name, why) in ARCH_SKIPS {
-        crate::kprintln!("SKIP {name}: {why}");
+        crate::kprintln!("SKIP tests \"{name}…\": {why}");
     }
     let chosen: Vec<&Test> = TESTS
         .iter()
@@ -949,6 +950,10 @@ impl InputTestUser {
                 let (w, h) = input::screen_size();
                 input::warp(w / 2, h / 2);
                 while input::pop().is_some() {}
+                // Away from the edges, wherever earlier tests left it and
+                // whatever the screen size, so motion isn't clamped.
+                let (w, h) = input::screen_size();
+                input::warp(w / 2, h / 2);
                 self.pointer_from = input::pointer_position();
                 ok
             }
@@ -2830,6 +2835,12 @@ fn mutex_long_hold() {
         sched::sleep_ms(2);
         if time::uptime_ms() < start + 20 {
             continue;
+        }
+        // Contenders that looked again at this same millisecond (their
+        // timers and ours fire together, as on a fast CPU they do every
+        // time) get to run and go back to sleep before we look.
+        for _ in 0..4 {
+            sched::yield_now();
         }
         let tasks = sched::list();
         let mine: Vec<_> = tasks.iter().filter(|t| ids.contains(&t.id)).collect();

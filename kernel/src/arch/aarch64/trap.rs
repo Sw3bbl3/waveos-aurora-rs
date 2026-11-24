@@ -91,10 +91,10 @@ impl TrapFrame {
     }
 
     /// A frame that starts a program at `pc` with stack `sp` (EL0t,
-    /// interrupts unmasked). Its kind is a user one: the exit path loads
-    /// SP_EL0 from it only then (Linux `execve` returns through it).
+    /// interrupts unmasked). The exit path loads SP_EL0 from any frame
+    /// whose PSTATE returns to EL0, so Linux `execve` may return through it.
     pub fn user_start(pc: u64, sp: u64) -> TrapFrame {
-        TrapFrame { pc, sp, kind: KIND_USER, ..Default::default() }
+        TrapFrame { pc, sp, ..Default::default() }
     }
 }
 
@@ -151,9 +151,10 @@ macro_rules! vectors {
             "bl {trap}",
             "ldp x1, x2, [sp, #248]",
             "ldr x3, [sp, #264]",
-            "ldr x4, [sp, #288]",
-            "cmp x4, #4",
-            "b.lo 3f",
+            // Back to EL0 (by the saved PSTATE, which a handler may have
+            // rewritten, as `execve` does): the user stack pointer too.
+            "tst x3, #0xf",
+            "b.ne 3f",
             "msr sp_el0, x1",
             "3:",
             "msr elr_el1, x2",

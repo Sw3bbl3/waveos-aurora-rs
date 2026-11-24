@@ -184,16 +184,25 @@ semihosting does not promise.
   unification and the I-cache invalidated (`cache::sync_code`, by address
   through the physical window: the I-cache is PIPT).
 
-### Status (milestone 2, in progress)
+### Status (milestone 2)
 
 Works under HVF on 1 and 4 vCPUs: interrupts, the timer, SMP, PCI through
 ECAM, virtio-blk and virtio-net on MSI-X (DHCP), xHCI with the USB
-keyboard and tablet, HDA, ACPI AML, the desktop on `ramfb`, native
-programs at EL0.
+keyboard, tablet, storage and audio, HDA, SD cards (sdhci-pci), ACPI AML,
+the desktop on `ramfb`, native programs at EL0, Linux programs (the
+static arm64 tests: files, memory, threads, clocks with the vDSO,
+processes and signals, sockets, input devices). `cargo xtask test --arch
+aarch64` passes on 1 and 4 vCPUs under HVF; `tests::ARCH_SKIPS` lists what
+it skips and why: the C half of the kernel (LinuxKPI), a PC's ACPI sleep
+states and SSDT devices (test battery, I2C touchpad), S3, and the DRM
+device tests (the display is ramfb, not a PCI GPU). Known: on 4 vCPUs the
+first USB storage command after a while idle can lose its status phase;
+the driver resets the device and the retry succeeds.
 
-Not yet: the C half of the kernel (x86-only builds), the PCI I/O
-window, the second PL011 (telemetry), virtio-gpu without a firmware
-framebuffer. The Linux layer's arm64 ABI: see "The Linux layer's ABIs".
+Not yet: the C half of the kernel (x86-only builds), the PCI I/O window,
+the second PL011 (telemetry), virtio-gpu without a firmware framebuffer.
+The Linux layer's arm64 ABI (call table, signal frames, vDSO) is in place:
+see "The Linux layer's ABIs".
 
 ## Native user space on aarch64
 
@@ -354,26 +363,45 @@ check it).
   `cargo test -p aurora-linuxabi` asserts the tables, encoders and frame
   code against them.
 
-### What the Linux layer uses from `arch/`
+### What the Linux layer gets from `arch/`
 
-- `arch::cpu::id_registers()`: MIDR and the AArch64 feature registers,
-  read once (HWCAP/HWCAP2, cpuinfo's `Features`, `mrs` emulation).
-- `trap.rs`'s `sync` offers an EL0 system-register trap (EC 0x18) or an
-  undefined instruction (EC 0) from a Linux program to
-  `compat::linux::abi::aarch64::emulate_mrs` before raising SIGILL.
-- CNTKCTL_EL1.EL0VCTEN on every CPU (`timer::start_local`): the vDSO reads
-  CNTVCT_EL0.
-- TPIDR_EL0 is the program's: `sched` reads it back
-  (`arch::cpu::thread_pointer`) when a user task leaves its CPU, and
-  `sched::fs_base` returns the live register, so `fork`/`clone` and
-  switches keep what the program set with `msr`.
-- `TrapFrame::user_start` is a user frame (`KIND_USER`): the exit path
-  loads SP_EL0 from user frames only, and `execve` returns through it.
+1. **ID registers:** `arch::aarch64::cpu::id_regs()` returns
+   `aurora_linuxabi::aarch64::cpu::IdRegs` (MIDR, ID_AA64PFR0/1,
+   ISAR0/1/2, MMFR0/1/2), read once on the boot CPU at start-up;
+   `abi::aarch64::id_regs()` returns it.
+2. **`mrs` emulation:** `trap::sync` calls
+   `compat::linux::abi::aarch64::emulate_mrs(f)` for EC 0x18 and EC 0
+   from EL0 of a Linux process before raising SIGILL, and returns to the
+   program when it returns true.
+3. **EL0 counter access:** `cpu::init_el0` sets CNTKCTL_EL1.EL0VCTEN on
+   every CPU (the vDSO reads CNTVCT_EL0; CNTFRQ_EL0 is always readable).
+4. **Instruction cache:** SCTLR_EL1.UCI/UCT/DZE are set (EL0 `dc cvau`,
+   `ic ivau`, CTR_EL0, `dc zva`). The kernel cleans the D-cache to PoU and
+   invalidates the I-cache (`cache::sync_code`, only where CTR_EL0 says it
+   is needed) whenever a user page becomes executable: every leaf entry
+   `vmm` writes goes through `pte::leaf`, which does it for a user page
+   without UXN — new mappings (file pages from the page cache included),
+   `mprotect` to PROT_EXEC, copy-on-write copies, swap-in — and when the
+   loaders write code into an already executable page (`vmm::write_bytes`).
+   A program that writes code into its own executable page (a JIT) syncs
+   it itself, as on Linux.
+5. **TPIDRRO_EL0** is zeroed on every CPU (`cpu::init_el0`); the kernel
+   never writes it. **TPIDR_EL0** is the program's: `sched` reads it back
+   (`arch::cpu::user_thread_pointer`) when a user task leaves its CPU, and
+   `sched::fs_base` returns the live register in a program, so `fork`,
+   `clone` and switches keep what the program set with `msr`.
+6. **Pointer authentication: APIA only.** One APIA key per boot, the same
+   in every process; EnIB, EnDA and EnDB stay off (those instructions are
+   NOPs) and there is no GA key, so the Linux layer must not advertise
+   PACA/PACG. Per-process keys (switched with the address space) are a
+   follow-up.
+7. `orig_x0`: not in `TrapFrame`; the Linux layer takes it from
+   `syscall::dispatch`'s saved arguments, which covers system calls.
+8. **Returning to a new program:** the exception exit loads SP_EL0 from
+   any frame whose saved PSTATE is EL0t, so a handler that rewrites its
+   frame (`execve`, with `TrapFrame::user_start`) returns on the new stack.
 
-Still open: TPIDRRO_EL0 zeroed for user programs; BTI guarded pages; the
-B and data pointer-authentication keys (only APIA is on, so `PACA`/`PACG`
-are not advertised); a named `orig_x0` (the dispatcher's saved arguments
-serve).
+Still open: BTI guarded pages; per-process pointer-authentication keys.
 
 ### Linux programs on aarch64: state
 

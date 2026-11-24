@@ -65,14 +65,10 @@ pub fn put_stat(ptr: u64, s: &aurora_linuxabi::Stat) -> Result<u64, isize> {
     crate::syscall::user::put(ptr, &abi::encode_stat(s)).map(|_| 0)
 }
 
-/// The ID registers features are decided by (the boot CPU's, read once:
-/// QEMU gives every CPU the same).
+/// The ID registers features are decided by, as the boot CPU read them
+/// at start-up (`arch::aarch64::cpu::id_regs`).
 fn id_regs() -> Option<cpu::IdRegs> {
-    static REGS: spin::Once<cpu::IdRegs> = spin::Once::new();
-    Some(*REGS.call_once(|| {
-        let [midr, pfr0, pfr1, isar0, isar1, isar2, mmfr0, mmfr1, mmfr2] = crate::arch::cpu::id_registers();
-        cpu::IdRegs { midr, pfr0, pfr1, isar0, isar1, isar2, mmfr0, mmfr1, mmfr2 }
-    }))
+    Some(crate::arch::aarch64::cpu::id_regs())
 }
 
 /// What the kernel does for programs beyond the processor's features.

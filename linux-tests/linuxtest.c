@@ -501,10 +501,9 @@ static void clocks(void) {
     struct timespec k1, v, k2, first;
     syscall(SYS_clock_gettime, CLOCK_REALTIME, &first);
     long rounds = 0, real_sec = first.tv_sec;
-    // (A bound on the rounds, not the time, in case the clock stands still:
-    // generous, as a round is a few microseconds under hardware
-    // virtualization.)
-    while (real_sec < first.tv_sec + 2 && rounds < 50000000) {
+    // (A bound on rounds only in case the clock stood still: under hardware
+    // virtualization a million rounds take well under two seconds.)
+    while (real_sec < first.tv_sec + 2 && rounds < 100000000) {
         for (int clock = CLOCK_REALTIME; clock <= CLOCK_MONOTONIC; clock++) {
             syscall(SYS_clock_gettime, clock, &k1);
             clock_gettime(clock, &v);

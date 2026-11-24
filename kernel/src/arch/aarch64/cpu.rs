@@ -98,6 +98,40 @@ pub fn feature_names() -> Vec<&'static str> {
     .collect()
 }
 
+/// What user code may read, on the calling CPU (every CPU at start-up):
+/// the virtual count (CNTKCTL_EL1.EL0VCTEN: the vDSO's clocks read
+/// CNTVCT_EL0 directly) and nothing else of the timers; and a zero
+/// TPIDRRO_EL0 (the kernel keeps nothing there).
+pub fn init_el0() {
+    // SAFETY: EL0's view of the generic timer and a register the kernel
+    // does not use.
+    unsafe {
+        regs::write!("cntkctl_el1", 1 << 1);
+        regs::write!("tpidrro_el0", 0u64);
+    }
+    regs::isb();
+}
+
+/// The ID registers, as read on the boot CPU at start-up (every CPU of a
+/// `virt` machine is the same; on big.LITTLE hardware Linux would take the
+/// common subset, which this doesn't do yet): what the Linux layer derives
+/// AT_HWCAP/AT_HWCAP2 and emulated `mrs` reads from.
+pub fn id_regs() -> aurora_linuxabi::aarch64::cpu::IdRegs {
+    static REGS: spin::Once<aurora_linuxabi::aarch64::cpu::IdRegs> = spin::Once::new();
+    *REGS.call_once(|| aurora_linuxabi::aarch64::cpu::IdRegs {
+        midr: read!("midr_el1"),
+        pfr0: read!("id_aa64pfr0_el1"),
+        pfr1: read!("id_aa64pfr1_el1"),
+        isar0: read!("id_aa64isar0_el1"),
+        isar1: read!("id_aa64isar1_el1"),
+        // ID_AA64ISAR2_EL1 and ID_AA64MMFR2_EL1 by encoding (v8.7 / v8.2 names).
+        isar2: read!("s3_0_c0_c6_2"),
+        mmfr0: read!("id_aa64mmfr0_el1"),
+        mmfr1: read!("id_aa64mmfr1_el1"),
+        mmfr2: read!("s3_0_c0_c7_2"),
+    })
+}
+
 /// MIDR_EL1's implementer, variant, part number and revision.
 pub fn midr_fields() -> (u64, u64, u64, u64) {
     let m = midr();
@@ -189,28 +223,11 @@ pub fn frame_pointer() -> u64 {
     fp
 }
 
-/// The ID registers Linux programs' features come from, in this order:
-/// MIDR_EL1, ID_AA64PFR0/1, ID_AA64ISAR0/1/2, ID_AA64MMFR0/1/2 (for
-/// `compat::linux`: HWCAPs and emulated EL0 `mrs`).
-pub fn id_registers() -> [u64; 9] {
-    [
-        midr(),
-        read!("id_aa64pfr0_el1"),
-        read!("id_aa64pfr1_el1"),
-        read!("id_aa64isar0_el1"),
-        read!("id_aa64isar1_el1"),
-        read!("id_aa64isar2_el1"),
-        read!("id_aa64mmfr0_el1"),
-        read!("id_aa64mmfr1_el1"),
-        read!("id_aa64mmfr2_el1"),
-    ]
-}
-
-/// The calling CPU's user thread pointer (TPIDR_EL0). Programs set it
-/// themselves (`msr tpidr_el0`), so the scheduler reads it back when a task
-/// leaves the CPU.
-pub fn thread_pointer() -> u64 {
-    read!("tpidr_el0")
+/// The thread pointer as the running program left it: EL0 writes
+/// TPIDR_EL0 itself (`msr tpidr_el0`), so the register is the truth.
+#[inline(always)]
+pub fn user_thread_pointer() -> Option<u64> {
+    Some(read!("tpidr_el0"))
 }
 
 /// Sets the user thread pointer (TPIDR_EL0) of the calling CPU.
