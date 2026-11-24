@@ -318,6 +318,24 @@ pub fn classes() {
 /// The buddy allocator: runs of every shape, alignment, the 4 GiB limit,
 /// double frees, and the free count coming back.
 pub fn frames() {
+    // Tasks the previous tests started may still be exiting (their stacks
+    // and memory coming back): wait until the free count holds still. On
+    // a fast machine (hardware virtualization) they overlap this test.
+    let (mut last, mut still) = (frame::counts().1, 0);
+    for _ in 0..60 {
+        crate::sched::sleep_ms(50);
+        let now = frame::counts().1;
+        still = if now == last { still + 1 } else { 0 };
+        if still == 4 {
+            break;
+        }
+        last = now;
+    }
+    // A run the lists can't give is retried after the heap gives back its
+    // idle slabs: let it give them now, so they don't count as found
+    // memory below (where RAM is more broken up by the firmware, as on
+    // Arm's `virt`, the long runs take that path).
+    super::heap::reclaim();
     frame::drain_caches();
     frame::check();
     let before = frame::counts().1;

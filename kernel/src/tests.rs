@@ -121,6 +121,13 @@ pub fn run() {
     // Devices present at boot finish setting up first (the frame counts
     // some tests compare would otherwise move underneath them).
     crate::drivers::usb::settle(10_000);
+    // Under hardware virtualization the tests start well within the time
+    // the boot's own tasks (AML, the boot log) take to finish: wait for them.
+    if cfg!(target_arch = "aarch64") {
+        while crate::time::uptime_ms() < 5_000 {
+            crate::sched::sleep_ms(100);
+        }
+    }
     // `cargo xtask test --filter NAME` runs only matching tests (and the
     // persistence check the harness relies on).
     let filter = crate::gui::prefs::boot_option("test_filter");

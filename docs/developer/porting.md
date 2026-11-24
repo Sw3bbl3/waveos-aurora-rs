@@ -61,19 +61,29 @@ kernel half that `vmm` copies into every process's root is ignored there
 and `mmu::load_root` changes TTBR0 alone. The virtual layout is the same
 on both (docs/ARCHITECTURE.md, "Memory layout").
 
-Arm entries: `PRESENT` = valid + page/table + access flag + inner
-shareable + PXN (the kernel never executes what it maps at run time);
-`USER` = AP[1]; `NO_EXECUTE` = UXN; `HUGE` is software bit 58, which the
-bootloader sets on its 2 MiB blocks (a block's low bits, `0b01`, can't be
-tested with a mask); software bits are 55-57 and 59-61 (with hardware
-attributes off, 59-62 are ignored by the MMU), and 62 in invalid entries.
-Memory types (MAIR_EL1): 0 normal write-back, 1 device nGnRE (`NO_CACHE`),
-2 normal non-cacheable (`WRITE_COMBINING`), 3 device nGnRnE.
+Arm entries: `PRESENT` = valid + page/table + inner shareable + PXN (bits
+always set together, so `vmm`'s `e & (PRESENT | USER) == PRESENT | USER`
+tests work; the kernel never executes what it maps at run time); `USER` =
+AP[1]; `NO_EXECUTE` = UXN; `ACCESSED` = AF; `HUGE` is software bit 58,
+which the bootloader sets on its 2 MiB blocks (a block's low bits, `0b01`,
+can't be tested with a mask). Software bits: 55-57 and 59-61
+(`SOFT_0..5`; with hardware attributes off, 59-62 are ignored by the MMU),
+**`WRITABLE` = 63 and `DIRTY` = 62** (62 is also `SOFT_NOT_PRESENT` in
+invalid entries). Memory types (MAIR_EL1): 0 normal write-back, 1 device
+nGnRE (`NO_CACHE`), 2 normal non-cacheable (`WRITE_COMBINING`), 3 device
+nGnRnE.
 
-**Milestone 1 limitation:** `WRITABLE` and `DIRTY` are 0 on Arm (every
-mapping is writable, nothing tracks dirtiness). Read-only and copy-on-write
-user pages need the software write bit with AP[2], which comes with user
-programs.
+**Write permission and dirtiness are software bits on Arm** (Apple's
+cores under HVF have no hardware dirty-bit management, FEAT_HAFDBS).
+`vmm` writes every leaf entry through `pte::leaf` (an identity on x86),
+which sets AF and derives the hardware read-only bit AP[2]: a kernel page
+is writable as soon as `WRITABLE`, a user page only once also `DIRTY`. The
+first write to a clean writable page, and any access after the reclaim
+scan cleared AF, fault once; `trap` resolves them at once (interrupts
+masked, no lock: `mmu::fix_soft_fault`, a compare-and-swap) as a CPU with
+hardware management would. Write-protecting a page (fork's copy-on-write,
+`mprotect`) goes through `leaf` and sets AP[2]. `leaf` also makes a frame
+that becomes user-executable fetchable (`cache::sync_code`, see below).
 
 ## The aarch64 port
 
@@ -121,8 +131,18 @@ as on x86-64 (`libs/abi`). Linux programs use the same registers with
 arm64 Linux's numbers (that table is the Linux layer's, still to come).
 
 **User entry:** `enter_user(entry, stack, arg)` starts EL0t with `x0 =
-arg`, every other register zero, SP_EL0 = `stack`, PSTATE = 0 (interrupts
-unmasked). The thread pointer is TPIDR_EL0 (`sched`'s "FS base").
+arg`, every other register zero, SP_EL0 = `stack` (the loader's stack top,
+16-byte aligned for native programs; corekit aligns it again), PSTATE = 0
+(interrupts unmasked, NZCV clear). TPIDR_EL0 is 0 unless the process set a
+thread pointer (`sched`'s "FS base"; native code doesn't use it). New
+threads and forked children start from a full register frame
+(`enter_user_frame`). Pointer authentication: the APIA key is set and
+SCTLR_EL1.EnIA on, so `paciasp`/`autiasp` in user code sign and check
+(one key per boot, shared by every process for now); the other keys
+(IB, DA, DB, GA) are off, so instructions using them are NOPs. BTI landing
+pads are not enforced (no guarded pages). EL0 may read CTR_EL0, use
+`dc zva` and cache maintenance by address (`dc cvau`, `ic ivau`: JITs sync
+their own code), and `wfi`/`wfe`.
 
 **FP/SIMD:** v0-v31, FPSR and FPCR, eagerly saved per task in Linux's
 `user_fpsimd_state` layout (528 bytes). SVE stays off for EL0.
@@ -135,24 +155,46 @@ SYSTEM_OFF; the test runner reads the code from the serial log (QEMU's
 own exit status is 0). This works the same under HVF and TCG, which
 semihosting does not promise.
 
-### Status (milestone 1)
+### Interrupts, CPUs, protections
 
-Works, under HVF and TCG, entered at EL1 or EL2: the loader, the kernel's
-early set-up, memory management (frames, heap, kernel mappings, kernel
-stacks), ACPI tables, the clock, PSCI, the VFS with the system image, the
-boot screen on `ramfb`, the scheduler's start; then the kernel reports the
-CPU and powers off (`arch::aarch64::bringup_done`), before enabling
-interrupts.
+- **GICv3** (`gic.rs`) from the MADT (distributor, redistributors, each
+  CPU's MPIDR) and GTDT (the virtual timer's PPI, 27 on `virt`). Group 1,
+  priority 0xA0, EOI mode 0. SPIs route to the boot CPU. SGI 0
+  reschedules, 1 is a TLB shootdown, 2 halts (panic). MSIs go through the
+  GICv2m frame (`msi=gicv2m`: HVF's GIC has no ITS): a slot's MSI is a
+  write of its SPI to the frame's doorbell. GICv2 is not driven (drivers
+  poll there).
+- **Timer:** the EL1 virtual timer (CNTV), one deadline at a time
+  (CNTV_CVAL is the clock's own count); `fired` masks it before EOI.
+- **SMP:** PSCI `CPU_ON` for each MADT CPU at `aurora_ap_entry`
+  (physical, MMU off) with a start block (MAIR, TCR, SCTLR, TTBR1 = the
+  kernel root, TTBR0 = a 1 GiB-block identity map of the kernel image,
+  stack, CPU index in TPIDR_EL1), cleaned to the point of coherency. TLB
+  maintenance is broadcast (`tlbi vaae1is`); `vmm`'s shootdown IPIs are
+  SGIs too.
+- **Protections:** PAN (SPAN cleared; the copy routine clears PSTATE.PAN
+  around its loop, `.inst`-encoded since the kernel targets ARMv8.0), PXN
+  on all user and run-time kernel mappings, the kernel image W^X, user
+  pointer authentication (above). Not yet: BTI enforcement, kernel PAC
+  (needs `-Zbuild-std` for the kernel: the prebuilt `core` lacks branch
+  protection), ASIDs (TTBR0 switches flush the TLB).
+- **Instruction cache:** Apple's cores report CTR_EL0.IDC = DIC = 0, so
+  code the kernel writes for user space must be cleaned to the point of
+  unification and the I-cache invalidated (`cache::sync_code`, by address
+  through the physical window: the I-cache is PIPT).
 
-Not yet: the GIC (interrupts, IPIs, MSI through GICv2m), the generic timer
-interrupt, secondary CPUs (PSCI CPU_ON), user programs (EL0 is entered by
-`enter_user`, untested), PAN/PXN of the kernel image/W^X, PAC/BTI (needs
-`-Zbuild-std` for the kernel: the prebuilt `core` lacks branch
-protection), user page permissions (see "Milestone 1 limitation"),
-signals for Linux programs (`compat::linux::signal` builds x86 frames only;
-on arm64 a handled signal ends the program), the Linux system call table
-for arm64, the vDSO and the C half of the kernel (x86-only builds), the
-PCI I/O window and ECAM, the second PL011 (telemetry), devices.
+### Status (milestone 2, in progress)
+
+Works under HVF on 1 and 4 vCPUs: interrupts, the timer, SMP, PCI through
+ECAM, virtio-blk and virtio-net on MSI-X (DHCP), xHCI with the USB
+keyboard and tablet, HDA, ACPI AML, the desktop on `ramfb`, native
+programs at EL0.
+
+Not yet: signals for Linux programs (`compat::linux::signal` builds x86
+frames only; on arm64 a handled signal ends the program), the Linux
+system call table for arm64, the vDSO and the C half of the kernel
+(x86-only builds), the PCI I/O window, the second PL011 (telemetry),
+virtio-gpu without a firmware framebuffer.
 
 ## Native user space on aarch64
 
