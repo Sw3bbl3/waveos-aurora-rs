@@ -134,7 +134,7 @@ Writing to the file, or deleting it, drops it from the cache.
   `/dev/kmsg` (the system log: `2>/dev/kmsg` keeps a program's messages);
   the input devices and what describes them (`/dev/input`, `/dev/hidraw*`,
   `/dev/uinput`, `/sys`, `/run/udev`; see below);
-  `/proc/self/exe`, `/proc/meminfo` (with swap and the compressed store
+  `/proc/self/exe`, `/proc/self/auxv`, `/proc/meminfo` (with swap and the compressed store
   as `Zswap`), `/proc/pressure/memory`, `/proc/self/status` and
   `/proc/<pid>/status` (`VmRSS`, `VmSwap`, `VmLck`), `/proc/mounts`;
   `/proc/cpuinfo` and `/sys/devices/system/cpu`, as Linux writes them
