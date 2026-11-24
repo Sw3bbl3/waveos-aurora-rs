@@ -41,6 +41,13 @@ pub mod pte {
     pub const KERNEL_TABLE: u64 = PRESENT | WRITABLE;
     /// … at a next-level table of user mappings.
     pub const USER_TABLE: u64 = PRESENT | WRITABLE | USER;
+
+    /// A leaf entry as written: the x86 format needs nothing more (on Arm
+    /// this derives the hardware permission bits from the software ones).
+    #[inline(always)]
+    pub const fn leaf(e: u64) -> u64 {
+        e
+    }
 }
 
 /// The page-table root (physical address) the CPU runs on (CR3).

@@ -363,6 +363,14 @@ fn page_fault(f: &mut TrapFrame, ec: u64) {
     // flag, 0b0011xx permission.
     let status = iss & 0x3F;
     let protection = status & 0x3C == 0x0C;
+    // The access flag and dirtiness are kept in software (`mmu::pte`):
+    // set them and go again, at once, whatever the interrupt state.
+    if status & 0x3C == 0x08 || (protection && write) {
+        let root = if addr >= aurora_abi::layout::USER_END { super::mmu::kernel_root() } else { super::mmu::root() };
+        if super::mmu::fix_soft_fault(root, addr, write) {
+            return;
+        }
+    }
     let fixable = !protection || (write && !fetch);
     let interrupts_on = f.pstate & (1 << 7) == 0;
     if fixable
