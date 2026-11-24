@@ -54,6 +54,16 @@
 //!       --mesa                            only the Mesa tests, on a disk with Debian's Mesa, kmscube, glmark2
 //!                                         and Vulkan tools (target/mesa-root, fetched once) and 2 GiB of
 //!                                         memory unless --memory-mib says otherwise
+//!   cargo xtask powercut [--iterations N] [--disk ...] [--smp N]
+//!                                       cut the power N times (default 300) at random moments while
+//!                                         four threads hammer the home volume (boot option fs_stress); after
+//!                                         each cut the volume is mounted and checked here (journal replayed
+//!                                         in memory) and every file the guest synced must be there, whole;
+//!                                         the next start carries on from the cut disk (AURORA_POWERCUT_SEED)
+//!   cargo xtask fsck [IMG] [--repair]   check the home volume of IMG (default target/test-disk.img), every
+//!                                         problem listed; the image is not changed unless --repair, which
+//!                                         repairs what is safe to and writes it back (never on a disk you
+//!                                         can't afford to lose without a copy)
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
 mod battery;
@@ -134,13 +144,20 @@ fn main() {
 
     match args.first().map(String::as_str) {
         Some("web-check") => webcheck::run(&args[1..]),
-        Some("fsck") => match image::check_home(Path::new(args.get(1).map(String::as_str).unwrap_or("target/test-disk.img"))) {
-            Ok(report) => print!("{report}"),
-            Err(e) => {
-                eprintln!("fsck: {e}");
-                exit(1);
+        Some("fsck") => {
+            let img = args[1..].iter().find(|a| !a.starts_with("--")).map(String::as_str).unwrap_or("target/test-disk.img");
+            match image::check_home(Path::new(img), flag("--repair")) {
+                Ok(report) => print!("{report}"),
+                Err(e) => {
+                    eprintln!("fsck: {e}");
+                    exit(1);
+                }
             }
-        },
+        }
+        Some("powercut") => {
+            let iterations = number("--iterations", 300, 1, 100_000);
+            power_cuts(profile, disk, smp, iterations as u32);
+        }
         Some("docs") => {
             println!("{}", help::build(&root()).unwrap_or_else(|e| panic!("{e}")).display());
         }
@@ -1805,7 +1822,8 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
             // next start's own job) must be consistent.
             if boot == 1 && output.contains("harness: power cut") {
                 match image::check_home_copy(&img) {
-                    Ok(()) => println!("harness: the home volume after the power cut checks clean"),
+                    Ok(0) => println!("harness: the home volume after the power cut checks clean"),
+                    Ok(n) => println!("harness: the home volume after the power cut checks clean ({n} file(s) open at the cut, freed at the next start)"),
                     Err(e) => {
                         eprintln!("\npower cut check FAILED: the home volume after the cut: {e}");
                         exit(1);
@@ -1861,6 +1879,178 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
         break;
     }
     println!("\nall kernel tests passed (both boots){}", if sleep { "" } else { " — without the sleep test" });
+}
+
+/// `cargo xtask powercut`: boots the self-test kernel `iterations` times on
+/// one disk with the boot option `fs_stress`, and cuts the power (QMP
+/// `quit`: what the guest had not written is lost) at a random moment once
+/// the stress is running. After each cut, the home volume, mounted here as
+/// the next start would mount it, must check clean (files open at the cut
+/// aside: the next start frees them), and every file the guest said it had
+/// synced ("fsstress: durable PATH LEN") must be there with its contents.
+/// The next start then mounts the cut disk itself (and must find nothing
+/// but such files: "fsstress: mount check"). On a failure the disk is kept
+/// as target/powercut-failed.img.
+fn power_cuts(profile: Profile, disk: &str, smp: u32, iterations: u32) {
+    let esp = build(profile, true);
+    let img = root().join("target/powercut-disk.img");
+    image::create_with(&esp, &root().join("assets/home"), None, &img, 256 * 1024 * 1024).expect("disk creation failed");
+    let seed: u64 = env::var("AURORA_POWERCUT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1)
+    });
+    println!("power cuts: {iterations} on {disk}, seed {seed} (AURORA_POWERCUT_SEED)");
+    let mut rng = seed | 1;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let (mut orphans, mut durable_checked, mut started) = (0usize, 0usize, Instant::now());
+    for it in 1..=iterations {
+        image::set_boot_option(&img, "fs_stress", &it.to_string()).expect("write boot.conf");
+        // 0.2 to 6 seconds of stress before the cut.
+        let delay = Duration::from_millis(200 + next() % 5800);
+        let output = match run_until_cut(&img, disk, smp, delay) {
+            Ok(o) => o,
+            Err(e) => fail_cut(&img, it, &e),
+        };
+        if let Some(problems) = output.split("fsstress: mount check: PROBLEMS").nth(1) {
+            fail_cut(&img, it, &format!("the guest's check at mount found problems:{problems}"));
+        }
+        match image::check_home_copy(&img) {
+            Ok(n) => orphans += n,
+            Err(e) => fail_cut(&img, it, &format!("the home volume after the cut: {e}")),
+        }
+        // What the guest synced survived. (Of this start's files only: the
+        // guest removes the ones from two starts ago.)
+        for line in output.lines().filter_map(|l| l.split("fsstress: durable ").nth(1)) {
+            let mut parts = line.split_whitespace();
+            let (Some(path), Some(len)) = (parts.next(), parts.next().and_then(|l| l.parse::<usize>().ok())) else {
+                continue;
+            };
+            let n: u32 = path.rsplit('/').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            let want: Vec<u8> =
+                (0..len).map(|i| (i as u32).wrapping_mul(31).wrapping_add(it * 7 + n * 13) as u8).collect();
+            match image::read_home_file(&img, path) {
+                Ok(got) if got == want => durable_checked += 1,
+                Ok(got) => fail_cut(&img, it, &format!("{path} was synced with {len} bytes but holds {} other ones", got.len())),
+                Err(e) => fail_cut(&img, it, &format!("{path} was synced but is gone: {e}")),
+            }
+        }
+        if it % 10 == 0 || it == iterations {
+            println!(
+                "power cuts: {it} of {iterations} done, all clean; {durable_checked} synced files checked, {orphans} open files freed ({:.0} s per cut)",
+                started.elapsed().as_secs_f64() / 10f64.min(it as f64)
+            );
+            started = Instant::now();
+        }
+    }
+    println!("\nall {iterations} power cuts left a consistent volume");
+}
+
+fn fail_cut(img: &Path, it: u32, why: &str) -> ! {
+    let keep = root().join("target/powercut-failed.img");
+    let _ = fs::copy(img, &keep);
+    eprintln!("\npower cut {it} FAILED: {why}\n(the disk is kept as {})", keep.display());
+    exit(1);
+}
+
+/// One start with `fs_stress`: the power is cut `delay` after the stress
+/// says it is running. Returns what the guest printed.
+fn run_until_cut(img: &Path, disk: &str, smp: u32, delay: Duration) -> Result<String, String> {
+    use std::io::{BufRead, BufReader};
+    let opts = RunOpts {
+        memory_mib: 512,
+        keyboard_capture: false,
+        headless: true,
+        gdb: false,
+        log_int: false,
+        disk,
+        allow_reboot: false,
+        telemetry: None,
+        smp,
+        audio: String::from("none"),
+        net: "none",
+        netdev_extra: String::new(),
+        second_usb_net: false,
+        gpu: "std",
+        resolution: None,
+        displays: displays::Displays::single(displays::DEFAULT_SIZE),
+        usb: "xhci",
+        virtual_hid: Vec::new(),
+        battery: false,
+        host_battery: None,
+        usb_audio: false,
+        usb_stick: None,
+        emmc_partitions: false,
+        sd_card: None,
+    };
+    let mut cmd = qemu(img, &opts);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("qemu: {e}"))?;
+    let stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut all = String::new();
+        let mut cut_at: Option<Instant> = None;
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        loop {
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(line) => {
+                    if line.contains("fsstress: running") {
+                        cut_at = Some(Instant::now() + delay);
+                    }
+                    if line.contains("fsstress:") || line.contains("aurorafs:") || line.contains("panic") || line.contains("PANIC") {
+                        println!("{line}");
+                    }
+                    all.push_str(&line);
+                    all.push('\n');
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
+            if cut_at.is_some_and(|t| Instant::now() >= t) {
+                // The power goes: QEMU stops at once.
+                if let Err(e) = qmp_command("quit") {
+                    eprintln!("could not cut the power: {e}");
+                }
+                cut_at = None;
+                all.push_str("harness: power cut\n");
+            }
+        }
+        all
+    });
+    let start = Instant::now();
+    loop {
+        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(300) {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = reader.join().unwrap_or_default();
+    if !output.contains("harness: power cut") {
+        return Err(format!("the stress never ran (or the guest stopped by itself):\n{}", tail(&output, 40)));
+    }
+    if output.contains("KERNEL PANIC") {
+        return Err(format!("the guest panicked:\n{}", tail(&output, 40)));
+    }
+    Ok(output)
+}
+
+fn tail(s: &str, lines: usize) -> String {
+    let all: Vec<&str> = s.lines().collect();
+    all[all.len().saturating_sub(lines)..].join("\n")
 }
 
 /// Where the screendump the guest asked for as `name` goes.

@@ -2077,6 +2077,18 @@ pub fn ftruncate(p: &Process, fd: u64, len: u64) -> Result<u64, isize> {
     }
 }
 
+/// `fsync`, `fdatasync`, `syncfs`: when they return, the file (and, as
+/// AuroraFS commits one journal transaction for everything, every change
+/// before it on the same volume) is on the disk. Other descriptors
+/// (pipes, sockets) have nothing to write out.
+pub fn fsync(p: &Process, fd: u64) -> Result<u64, isize> {
+    let fs = match &*p.fd(fd as usize)? {
+        Handle::File(f) => f.lock().fs.clone(),
+        _ => return Ok(0),
+    };
+    fs.sync().map(|_| 0)
+}
+
 /// `fallocate`: makes room for `len` bytes at `off` (the file grows unless
 /// `FALLOC_FL_KEEP_SIZE`); other modes (punching holes) aren't supported.
 pub fn fallocate(p: &Process, fd: u64, mode: u64, off: u64, len: u64) -> Result<u64, isize> {

@@ -29,6 +29,19 @@
 //! until it commits. After a crash, `mount` replays the last committed
 //! transaction, so the on-disk structure is always consistent.
 //!
+//! **Operations are atomic.** Each public call that changes the volume runs
+//! as one operation: a transaction is committed only between operations,
+//! never in the middle of one, and an operation that fails part-way (a full
+//! disk, a read error) puts back every change it made. After a power cut the
+//! volume holds the tree as it was after some operation, and everything up
+//! to the last [`Volume::commit`] (sync) is there. `docs/developer/aurorafs.md`
+//! has the whole list of guarantees.
+//!
+//! **Orphans.** A file removed while open ([`Volume::open_inode`]) keeps its
+//! inode, with no links, until it is closed. After a crash such inodes are
+//! freed by [`Volume::repair`], which the kernel runs at mount when the
+//! volume was not cleanly unmounted ([`Volume::was_clean`]).
+//!
 //! This crate is `no_std`; the kernel and the host tools (`xtask mkfs`) share it.
 
 #![no_std]
@@ -37,19 +50,30 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod check;
 mod crc;
 #[cfg(test)]
+mod check_tests;
+#[cfg(test)]
+mod concurrent;
+#[cfg(test)]
 mod owner_tests;
+#[cfg(test)]
+mod regressions;
+#[cfg(test)]
+mod stress;
 #[cfg(test)]
 mod tests;
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+pub use check::{EntryFault, Problem, Report};
 pub use crc::crc32;
+use crc::{Crc32, Crc32c};
 
 pub const BLOCK: usize = 4096;
 pub const MAGIC: [u8; 8] = *b"WAVEFS01";
@@ -82,6 +106,13 @@ const MAX_EXTENTS: usize = DIRECT_EXTENTS + EXTENTS_PER_BLOCK;
 const DESC_MAGIC: [u8; 8] = *b"WJRNDESC";
 const COMMIT_MAGIC: [u8; 8] = *b"WJRNCMIT";
 const DESC_CAPACITY: usize = (BLOCK - 24) / 8;
+/// Commit record, byte 28: bytes 24..28 hold a CRC-32C of the transaction
+/// (see `write_journal`).
+const JOURNAL_CRC32C: u32 = 0x4332_3343; // "C32C"
+/// Superblock extension, byte 200: the volume was cleanly unmounted.
+const CLEAN_MAGIC: u32 = 0x4E41_454C; // "LEAN"
+/// The folder `repair` puts unreachable files and folders back into.
+pub const LOST_AND_FOUND: &str = "lost+found";
 
 pub type Block = [u8; BLOCK];
 
@@ -212,6 +243,10 @@ struct Superblock {
     /// Owner of inodes that carry none.
     default_uid: u32,
     default_gid: u32,
+    /// Cleanly unmounted (extension byte 200). Only `unmount` writes it;
+    /// every other commit clears it, so an older kernel (which writes zero
+    /// there) leaves the volume marked as not clean: the safe direction.
+    clean: bool,
 }
 
 /// The superblock extension: bytes 188..252 with a CRC32 at 252. A volume
@@ -250,10 +285,13 @@ impl Superblock {
         put_u64(&mut b[..], 176, self.journal_seq);
         let crc = crc32(&b[..184]);
         put_u32(&mut b[..], 184, crc);
-        if self.features != 0 {
+        if self.features != 0 || self.clean {
             put_u32(&mut b[..], EXT_START, self.features);
             put_u32(&mut b[..], EXT_START + 4, self.default_uid);
             put_u32(&mut b[..], EXT_START + 8, self.default_gid);
+            if self.clean {
+                put_u32(&mut b[..], EXT_START + 12, CLEAN_MAGIC);
+            }
             let crc = crc32(&b[EXT_START..EXT_CRC]);
             put_u32(&mut b[..], EXT_CRC, crc);
         }
@@ -289,6 +327,7 @@ impl Superblock {
             features: 0,
             default_uid: 0,
             default_gid: 0,
+            clean: false,
         };
         let mut sb = sb;
         let ext_crc = get_u32(b, EXT_CRC);
@@ -298,6 +337,7 @@ impl Superblock {
             sb.features = get_u32(b, EXT_START) & KNOWN_FEATURES;
             sb.default_uid = get_u32(b, EXT_START + 4);
             sb.default_gid = get_u32(b, EXT_START + 8);
+            sb.clean = get_u32(b, EXT_START + 12) == CLEAN_MAGIC;
         }
         if !sb.geometry_ok() {
             return Err(Error::Corrupt);
@@ -402,6 +442,30 @@ pub struct Volume<D: Disk> {
     pending_free: Vec<Extent>,
     alloc_hint: u64,
     now: fn() -> u64,
+    /// The running operation's undo log (see [`Volume::op`]).
+    undo: Option<Undo>,
+    /// Inodes held open (`open_inode`), and how many times.
+    open: BTreeMap<u64, u32>,
+    /// Inodes removed while open: no links, freed at their last close.
+    orphans: BTreeSet<u64>,
+    /// The superblock said "cleanly unmounted" when this mount began.
+    was_clean: bool,
+}
+
+/// What the running operation changed, so that it can be put back if the
+/// operation fails part-way.
+struct Undo {
+    /// Each block's pending image before the operation first changed it
+    /// (None: it had none).
+    txn: BTreeMap<u64, Option<Box<Block>>>,
+    /// Bitmap bytes before they changed: (inode bitmap?, byte, old value).
+    bits: Vec<(bool, usize, u8)>,
+    dirty_bmap: Vec<bool>,
+    dirty_imap: Vec<bool>,
+    sb: Superblock,
+    pending_free: usize,
+    alloc_hint: u64,
+    orphans: BTreeSet<u64>,
 }
 
 fn bit(map: &[u8], i: u64) -> bool {
@@ -455,6 +519,7 @@ fn layout(blocks: u64) -> Result<Superblock> {
         features: FEATURE_OWNERS,
         default_uid: FIRST_UID,
         default_gid: FIRST_GID,
+        clean: false,
     })
 }
 
@@ -480,6 +545,10 @@ impl<D: Disk> Volume<D> {
             pending_free: Vec::new(),
             alloc_hint: sb.data_start,
             now,
+            undo: None,
+            open: BTreeMap::new(),
+            orphans: BTreeSet::new(),
+            was_clean: true,
             disk,
             sb,
         };
@@ -546,6 +615,10 @@ impl<D: Disk> Volume<D> {
             pending_free: Vec::new(),
             alloc_hint: sb.data_start,
             now,
+            undo: None,
+            open: BTreeMap::new(),
+            orphans: BTreeSet::new(),
+            was_clean: false,
             disk,
             sb,
         };
@@ -561,6 +634,9 @@ impl<D: Disk> Volume<D> {
         vol.dirty_imap = vec![false; vol.sb.ibitmap_blocks as usize];
         vol.bmap = vol.load_region(vol.sb.bbitmap_start, vol.sb.bbitmap_blocks)?;
         vol.imap = vol.load_region(vol.sb.ibitmap_start, vol.sb.ibitmap_blocks)?;
+        vol.was_clean = vol.sb.clean;
+        // Mounted: not clean until `unmount` says so.
+        vol.sb.clean = false;
         vol.sb.mount_count += 1;
         vol.dirty_super();
         vol.commit()?;
@@ -579,6 +655,30 @@ impl<D: Disk> Volume<D> {
 
     pub fn into_disk(self) -> D {
         self.disk
+    }
+
+    /// The volume had been cleanly unmounted ([`Volume::unmount`]) when it
+    /// was mounted. If not, the kernel checks it ([`Volume::check`]) and
+    /// repairs what it safely can ([`Volume::repair`]).
+    pub fn was_clean(&self) -> bool {
+        self.was_clean
+    }
+
+    /// Commits everything and marks the volume cleanly unmounted, so that
+    /// the next mount needs no check. Nothing may be open: files removed
+    /// while open are freed by the next mount's repair instead, and the
+    /// volume is then left marked as not clean. Changes made after this
+    /// clear the mark again with their commit.
+    pub fn unmount(&mut self) -> Result<()> {
+        self.commit()?;
+        if !self.orphans.is_empty() {
+            return Ok(());
+        }
+        self.sb.clean = true;
+        self.dirty_super();
+        let r = self.commit();
+        self.sb.clean = false;
+        r
     }
 
     pub fn disk(&mut self) -> &mut D {
@@ -611,7 +711,17 @@ impl<D: Disk> Volume<D> {
         }
     }
 
+    /// Notes `block`'s pending image before the running operation changes it.
+    fn note_txn(&mut self, block: u64) {
+        if let Some(u) = self.undo.as_mut() {
+            if let alloc::collections::btree_map::Entry::Vacant(e) = u.txn.entry(block) {
+                e.insert(self.txn.get(&block).cloned());
+            }
+        }
+    }
+
     fn meta_write(&mut self, block: u64, data: &Block) {
+        self.note_txn(block);
         match self.txn.get_mut(&block) {
             Some(img) => img.copy_from_slice(data),
             None => {
@@ -628,21 +738,43 @@ impl<D: Disk> Volume<D> {
     }
 
     /// Writes all pending metadata atomically: journal, then home locations.
+    /// When it returns, every operation before it is durable.
     pub fn commit(&mut self) -> Result<()> {
+        // Never in the middle of an operation: that is what keeps them atomic.
+        debug_assert!(self.undo.is_none(), "commit inside an operation");
         self.stage_bitmaps();
         if self.txn.is_empty() {
             self.pending_free.clear();
             return self.disk.flush();
         }
+        // (Operations keep the transaction within the journal; only
+        // `enable_owners`-style callers outside one could overflow it.)
+        if self.txn_blocks() > self.journal_capacity() {
+            return Err(Error::TooBig);
+        }
         self.sb.journal_seq += 1;
         self.dirty_super();
         let blocks: Vec<u64> = self.txn.keys().copied().collect();
-        if blocks.len() + 2 > self.sb.journal_blocks as usize || blocks.len() > DESC_CAPACITY {
-            return Err(Error::TooBig);
-        }
         // 1. File data (written in place) must be durable before the commit record.
         self.disk.flush()?;
         // 2. Journal: descriptor, images, commit record.
+        self.write_journal(&blocks)?;
+        self.disk.flush()?;
+        // 3. Checkpoint: copy images home. (Durable by the next commit's first
+        //    flush; until then, a crash is repaired by replaying the journal.)
+        self.checkpoint()
+    }
+
+    /// Writes the transaction (blocks `blocks` of it) to the journal:
+    /// descriptor, images, commit record. The commit record carries two
+    /// checksums of descriptor and images: CRC-32, which kernels before
+    /// 0.8.1 check, and CRC-32C (marked by `JOURNAL_CRC32C` at byte 28),
+    /// which this version also requires when the mark is there. CRC-32 alone
+    /// cannot tell one superblock image from another: a superblock ends its
+    /// checked part with its own CRC-32, and CRC-32 over data followed by
+    /// its CRC-32 is the same for all data, so a new superblock that a power
+    /// cut left in the slot of an old transaction's passed for the old one.
+    fn write_journal(&mut self, blocks: &[u64]) -> Result<()> {
         let mut desc = zero_block();
         desc[0..8].copy_from_slice(&DESC_MAGIC);
         put_u64(&mut desc[..], 8, self.sb.journal_seq);
@@ -650,25 +782,25 @@ impl<D: Disk> Volume<D> {
         for (i, b) in blocks.iter().enumerate() {
             put_u64(&mut desc[..], 24 + i * 8, *b);
         }
-        let mut crc_input: Vec<u8> = Vec::with_capacity((blocks.len() + 1) * BLOCK);
-        crc_input.extend_from_slice(&desc[..]);
+        let (mut c32, mut c32c) = (Crc32::new(), Crc32c::new());
+        c32.update(&desc[..]);
+        c32c.update(&desc[..]);
         let j = self.sb.journal_start;
         self.disk.write(j, &desc)?;
         for (i, b) in blocks.iter().enumerate() {
             let img = &self.txn[b];
-            crc_input.extend_from_slice(&img[..]);
+            c32.update(&img[..]);
+            c32c.update(&img[..]);
             self.disk.write(j + 1 + i as u64, img)?;
         }
         let mut cmt = zero_block();
         cmt[0..8].copy_from_slice(&COMMIT_MAGIC);
         put_u64(&mut cmt[..], 8, self.sb.journal_seq);
         put_u32(&mut cmt[..], 16, blocks.len() as u32);
-        put_u32(&mut cmt[..], 20, crc32(&crc_input));
-        self.disk.write(j + 1 + blocks.len() as u64, &cmt)?;
-        self.disk.flush()?;
-        // 3. Checkpoint: copy images home. (Durable by the next commit's first
-        //    flush; until then, a crash is repaired by replaying the journal.)
-        self.checkpoint()
+        put_u32(&mut cmt[..], 20, c32.finish());
+        put_u32(&mut cmt[..], 24, c32c.finish());
+        put_u32(&mut cmt[..], 28, JOURNAL_CRC32C);
+        self.disk.write(j + 1 + blocks.len() as u64, &cmt)
     }
 
     fn checkpoint(&mut self) -> Result<()> {
@@ -687,28 +819,7 @@ impl<D: Disk> Volume<D> {
         self.sb.journal_seq += 1;
         self.dirty_super();
         let blocks: Vec<u64> = self.txn.keys().copied().collect();
-        let mut desc = zero_block();
-        desc[0..8].copy_from_slice(&DESC_MAGIC);
-        put_u64(&mut desc[..], 8, self.sb.journal_seq);
-        put_u32(&mut desc[..], 16, blocks.len() as u32);
-        for (i, b) in blocks.iter().enumerate() {
-            put_u64(&mut desc[..], 24 + i * 8, *b);
-        }
-        let mut crc_input = Vec::new();
-        crc_input.extend_from_slice(&desc[..]);
-        let j = self.sb.journal_start;
-        self.disk.write(j, &desc)?;
-        for (i, b) in blocks.iter().enumerate() {
-            crc_input.extend_from_slice(&self.txn[b][..]);
-            let img = self.txn[b].clone();
-            self.disk.write(j + 1 + i as u64, &img)?;
-        }
-        let mut cmt = zero_block();
-        cmt[0..8].copy_from_slice(&COMMIT_MAGIC);
-        put_u64(&mut cmt[..], 8, self.sb.journal_seq);
-        put_u32(&mut cmt[..], 16, blocks.len() as u32);
-        put_u32(&mut cmt[..], 20, crc32(&crc_input));
-        self.disk.write(j + 1 + blocks.len() as u64, &cmt)?;
+        self.write_journal(&blocks)?;
         self.disk.flush()
     }
 
@@ -748,24 +859,37 @@ impl<D: Disk> Volume<D> {
             return Ok(false); // incomplete transaction: discard
         }
         let mut images = Vec::with_capacity(count);
-        let mut crc_input = Vec::with_capacity((count + 1) * BLOCK);
-        crc_input.extend_from_slice(&desc[..]);
+        let (mut c32, mut c32c) = (Crc32::new(), Crc32c::new());
+        c32.update(&desc[..]);
+        c32c.update(&desc[..]);
         for i in 0..count {
             let mut img = zero_block();
             self.disk.read(j + 1 + i as u64, &mut img)?;
-            crc_input.extend_from_slice(&img[..]);
+            c32.update(&img[..]);
+            c32c.update(&img[..]);
             images.push(img);
         }
-        if crc32(&crc_input) != get_u32(&cmt[..], 20) {
+        if c32.finish() != get_u32(&cmt[..], 20) {
             return Ok(false);
         }
-        for (i, img) in images.iter().enumerate() {
-            let home = get_u64(&desc[..], 24 + i * 8);
-            if home < self.disk.blocks() {
-                self.disk.write(home, img)?;
-            }
+        // Written by this version: the stronger checksum must match too (a
+        // journal from an older kernel has only CRC-32).
+        if get_u32(&cmt[..], 28) == JOURNAL_CRC32C && c32c.finish() != get_u32(&cmt[..], 24) {
+            return Ok(false);
+        }
+        // A home location must be inside the volume and outside the journal
+        // (only a corrupt descriptor that still matched its checksum could
+        // say otherwise; such a transaction is not replayed at all).
+        let journal = self.sb.journal_start..self.sb.journal_start + self.sb.journal_blocks;
+        let homes: Vec<u64> = (0..count).map(|i| get_u64(&desc[..], 24 + i * 8)).collect();
+        if homes.iter().any(|&h| h >= self.sb.blocks.min(self.disk.blocks()) || journal.contains(&h)) {
+            return Ok(false);
+        }
+        for (home, img) in homes.iter().zip(&images) {
+            self.disk.write(*home, img)?;
         }
         // Invalidate the journal so the transaction is not replayed again.
+        // (Replaying it twice would do no harm: the images are whole blocks.)
         self.disk.flush()?;
         self.disk.write(j, &zero_block())?;
         self.disk.flush()?;
@@ -782,10 +906,22 @@ impl<D: Disk> Volume<D> {
         !bit(&self.bmap, b) && !self.is_pending_free(b)
     }
 
+    /// Sets bit `i` of the block bitmap (or the inode bitmap), noting the
+    /// old byte for the running operation's undo log.
+    fn set_map_bit(&mut self, inode_map: bool, i: u64, v: bool) {
+        let byte = (i / 8) as usize;
+        let map = if inode_map { &mut self.imap } else { &mut self.bmap };
+        if let Some(u) = self.undo.as_mut() {
+            u.bits.push((inode_map, byte, map[byte]));
+        }
+        set_bit(map, i, v);
+        let dirty = if inode_map { &mut self.dirty_imap } else { &mut self.dirty_bmap };
+        dirty[(i / (BLOCK as u64 * 8)) as usize] = true;
+    }
+
     fn mark_blocks(&mut self, start: u64, len: u64, used: bool) {
         for b in start..start + len {
-            set_bit(&mut self.bmap, b, used);
-            self.dirty_bmap[(b / (BLOCK as u64 * 8)) as usize] = true;
+            self.set_map_bit(false, b, used);
         }
         if used {
             self.sb.free_blocks = self.sb.free_blocks.saturating_sub(len);
@@ -836,7 +972,10 @@ impl<D: Disk> Volume<D> {
         // Revoke journaled images of these blocks (e.g. directory contents): once
         // free they may hold file data, which a replay must never overwrite.
         for b in e.start..e.start + e.len as u64 {
-            self.txn.remove(&b);
+            if self.txn.contains_key(&b) {
+                self.note_txn(b);
+                self.txn.remove(&b);
+            }
         }
         self.mark_blocks(e.start, e.len as u64, false);
         self.pending_free.push(e);
@@ -845,8 +984,7 @@ impl<D: Disk> Volume<D> {
     fn alloc_inode(&mut self) -> Result<u64> {
         for i in 1..self.sb.inodes {
             if !bit(&self.imap, i) {
-                set_bit(&mut self.imap, i, true);
-                self.dirty_imap[(i / (BLOCK as u64 * 8)) as usize] = true;
+                self.set_map_bit(true, i, true);
                 self.sb.free_inodes = self.sb.free_inodes.saturating_sub(1);
                 self.dirty_super();
                 return Ok(i);
@@ -856,8 +994,7 @@ impl<D: Disk> Volume<D> {
     }
 
     fn free_inode(&mut self, ino: u64) {
-        set_bit(&mut self.imap, ino, false);
-        self.dirty_imap[(ino / (BLOCK as u64 * 8)) as usize] = true;
+        self.set_map_bit(true, ino, false);
         self.sb.free_inodes += 1;
         self.dirty_super();
     }
@@ -1081,21 +1218,15 @@ impl<D: Disk> Volume<D> {
         Ok(self.read_inode(ino)?.owner.is_some())
     }
 
-    /// The raw flag bits of an inode (fsck checks for unknown ones).
-    fn raw_inode_flags(&mut self, ino: u64) -> Result<u16> {
-        let (blk, off) = self.inode_location(ino)?;
-        let mut b = zero_block();
-        self.meta_read(blk, &mut b)?;
-        Ok(get_u16(&b[..], off + 250))
-    }
 
     /// Gives a file or folder an owner, a group and a mode.
     pub fn set_owner(&mut self, ino: u64, owner: Owner) -> Result<()> {
-        let mut inode = self.read_inode(ino)?;
-        inode.owner = Some(Owner { mode: owner.mode & 0o7777, ..owner });
-        inode.ctime = (self.now)();
-        self.write_inode(ino, &inode)?;
-        self.maybe_commit()
+        self.op(|v| {
+            let mut inode = v.read_inode(ino)?;
+            inode.owner = Some(Owner { mode: owner.mode & 0o7777, ..owner });
+            inode.ctime = (v.now)();
+            v.write_inode(ino, &inode)
+        })
     }
 
     pub fn read(&mut self, ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize> {
@@ -1134,7 +1265,16 @@ impl<D: Disk> Volume<D> {
         Ok(len)
     }
 
+    /// Writes file data (a folder's contents are the volume's own business:
+    /// `IsDir`).
     pub fn write(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<usize> {
+        if self.read_inode(ino)?.kind()? == Kind::Dir {
+            return Err(Error::IsDir);
+        }
+        self.op(|v| v.write_inner(ino, offset, data))
+    }
+
+    fn write_inner(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<usize> {
         let mut inode = self.read_inode(ino)?;
         let dir = inode.kind()? == Kind::Dir;
         let end = offset.checked_add(data.len() as u64).ok_or(Error::TooBig)?;
@@ -1178,11 +1318,19 @@ impl<D: Disk> Volume<D> {
         inode.size = inode.size.max(end);
         inode.mtime = (self.now)();
         self.write_inode(ino, &inode)?;
-        self.maybe_commit()?;
         Ok(data.len())
     }
 
+    /// Sets a file's size: what it loses is freed, what it gains reads as
+    /// zeros. Folders: `IsDir`.
     pub fn truncate(&mut self, ino: u64, size: u64) -> Result<()> {
+        if self.read_inode(ino)?.kind()? == Kind::Dir {
+            return Err(Error::IsDir);
+        }
+        self.op(|v| v.truncate_inner(ino, size))
+    }
+
+    fn truncate_inner(&mut self, ino: u64, size: u64) -> Result<()> {
         let mut inode = self.read_inode(ino)?;
         if size > inode.size {
             if size > MAX_FILE_SIZE {
@@ -1196,7 +1344,7 @@ impl<D: Disk> Volume<D> {
             let mut at = inode.size;
             while at < size {
                 let n = (size - at).min(ZERO_FILL as u64) as usize;
-                self.write(ino, at, &zeros[..n])?;
+                self.write_inner(ino, at, &zeros[..n])?;
                 at += n as u64;
             }
             return Ok(());
@@ -1215,8 +1363,7 @@ impl<D: Disk> Volume<D> {
         }
         inode.size = size;
         inode.mtime = (self.now)();
-        self.write_inode(ino, &inode)?;
-        self.maybe_commit()
+        self.write_inode(ino, &inode)
     }
 
     /// Gives file `ino` blocks for `size` bytes without writing them (a
@@ -1225,25 +1372,23 @@ impl<D: Disk> Volume<D> {
     /// must never let it be read. Fails before allocating anything if the
     /// blocks don't fit.
     pub fn allocate(&mut self, ino: u64, size: u64) -> Result<()> {
-        let mut inode = self.read_inode(ino)?;
-        if inode.kind()? != Kind::File {
-            return Err(Error::IsDir);
-        }
-        if size > MAX_FILE_SIZE {
-            return Err(Error::TooBig);
-        }
-        let blocks = size.div_ceil(BLOCK as u64);
-        let had = inode.allocated_blocks();
-        if blocks.saturating_sub(had) > self.sb.free_blocks {
-            return Err(Error::NoSpace);
-        }
-        if let Err(e) = self.grow(&mut inode, blocks) {
-            self.shrink(&mut inode, had);
-            return Err(e);
-        }
-        inode.size = inode.size.max(size);
-        inode.mtime = (self.now)();
-        self.write_inode(ino, &inode)?;
+        self.op(|v| {
+            let mut inode = v.read_inode(ino)?;
+            if inode.kind()? != Kind::File {
+                return Err(Error::IsDir);
+            }
+            if size > MAX_FILE_SIZE {
+                return Err(Error::TooBig);
+            }
+            let blocks = size.div_ceil(BLOCK as u64);
+            if blocks.saturating_sub(inode.allocated_blocks()) > v.sb.free_blocks {
+                return Err(Error::NoSpace);
+            }
+            v.grow(&mut inode, blocks)?;
+            inode.size = inode.size.max(size);
+            inode.mtime = (v.now)();
+            v.write_inode(ino, &inode)
+        })?;
         self.commit()
     }
 
@@ -1256,20 +1401,111 @@ impl<D: Disk> Volume<D> {
 
     /// Sets a file's or folder's times, as when copying it from another volume.
     pub fn set_times(&mut self, ino: u64, ctime: u64, mtime: u64) -> Result<()> {
-        let mut inode = self.read_inode(ino)?;
-        inode.ctime = ctime;
-        inode.mtime = mtime;
-        self.write_inode(ino, &inode)?;
-        self.maybe_commit()
+        self.op(|v| {
+            let mut inode = v.read_inode(ino)?;
+            inode.ctime = ctime;
+            inode.mtime = mtime;
+            v.write_inode(ino, &inode)
+        })
     }
 
-    /// Commits early when a transaction grows large.
-    fn maybe_commit(&mut self) -> Result<()> {
-        let limit = ((self.sb.journal_blocks as usize).saturating_sub(64)).min(DESC_CAPACITY - 64);
-        if self.txn.len() + self.dirty_bmap.len() + self.dirty_imap.len() > limit {
-            self.commit()?;
+    // ------------------------------------------------------ operations
+
+    /// The most blocks one transaction may hold (the journal also needs a
+    /// descriptor and a commit record).
+    fn journal_capacity(&self) -> usize {
+        (self.sb.journal_blocks as usize).saturating_sub(2).min(DESC_CAPACITY)
+    }
+
+    /// Blocks the running transaction would commit: its images, the
+    /// bitmap blocks still to be staged, and the superblock.
+    fn txn_blocks(&self) -> usize {
+        let staged = |dirty: &[bool], start: u64| {
+            dirty.iter().enumerate().filter(|&(i, &d)| d && !self.txn.contains_key(&(start + i as u64))).count()
+        };
+        self.txn.len()
+            + staged(&self.dirty_bmap, self.sb.bbitmap_start)
+            + staged(&self.dirty_imap, self.sb.ibitmap_start)
+            + usize::from(!self.txn.contains_key(&0))
+    }
+
+    /// Runs `f` as one operation. A transaction is never committed inside
+    /// one; if `f` fails, every change it made to the metadata is put back
+    /// (file data it wrote in place stays, as with any failed write), so a
+    /// failing call leaves the volume as it found it. After `f`, the
+    /// transaction is committed if it is within 64 blocks of filling the
+    /// journal (or past half of a small one).
+    ///
+    /// An operation too big for what is left of the journal is undone and,
+    /// if a transaction was already running, run again after committing it.
+    /// One too big for the whole journal fails with `TooBig`.
+    fn op<T>(&mut self, mut f: impl FnMut(&mut Self) -> Result<T>) -> Result<T> {
+        if self.undo.is_some() {
+            // Part of an operation already running.
+            return f(self);
         }
-        Ok(())
+        for attempt in 0..2 {
+            self.undo = Some(Undo {
+                txn: BTreeMap::new(),
+                bits: Vec::new(),
+                dirty_bmap: self.dirty_bmap.clone(),
+                dirty_imap: self.dirty_imap.clone(),
+                sb: self.sb.clone(),
+                pending_free: self.pending_free.len(),
+                alloc_hint: self.alloc_hint,
+                orphans: self.orphans.clone(),
+            });
+            let started_empty = self.txn_blocks() <= 1;
+            let r = f(self).and_then(|v| if self.txn_blocks() > self.journal_capacity() { Err(Error::TooBig) } else { Ok(v) });
+            let undo = self.undo.take().unwrap();
+            match r {
+                Ok(v) => {
+                    let capacity = self.journal_capacity();
+                    if self.txn_blocks() > capacity.saturating_sub(64).max(capacity / 2) {
+                        // The operation is done (in memory) either way; a
+                        // commit that fails here is tried again by the next
+                        // one, and reported by `sync`.
+                        let _ = self.commit();
+                    }
+                    return Ok(v);
+                }
+                Err(e) => {
+                    self.rollback(undo);
+                    if e == Error::TooBig && attempt == 0 && !started_empty {
+                        self.commit()?;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(Error::TooBig)
+    }
+
+    fn rollback(&mut self, u: Undo) {
+        for (b, img) in u.txn {
+            match img {
+                Some(img) => {
+                    self.txn.insert(b, img);
+                }
+                None => {
+                    self.txn.remove(&b);
+                }
+            }
+        }
+        for (inode_map, byte, old) in u.bits.into_iter().rev() {
+            if inode_map {
+                self.imap[byte] = old;
+            } else {
+                self.bmap[byte] = old;
+            }
+        }
+        self.dirty_bmap = u.dirty_bmap;
+        self.dirty_imap = u.dirty_imap;
+        self.sb = u.sb;
+        self.pending_free.truncate(u.pending_free);
+        self.alloc_hint = u.alloc_hint;
+        self.orphans = u.orphans;
     }
 
     // ------------------------------------------------------ directories
@@ -1309,8 +1545,8 @@ impl<D: Disk> Volume<D> {
             bytes.push(e.name.len() as u8);
             bytes.extend_from_slice(e.name.as_bytes());
         }
-        self.write(dir, 0, &bytes)?;
-        self.truncate(dir, bytes.len() as u64)
+        self.write_inner(dir, 0, &bytes)?;
+        self.truncate_inner(dir, bytes.len() as u64)
     }
 
     fn check_name(name: &str) -> Result<()> {
@@ -1334,52 +1570,132 @@ impl<D: Disk> Volume<D> {
     /// Creates a file or folder with an owner (None: the volume's default).
     pub fn create_owned(&mut self, dir: u64, name: &str, kind: Kind, owner: Option<Owner>) -> Result<u64> {
         Self::check_name(name)?;
-        let mut entries = self.readdir(dir)?;
-        if entries.iter().any(|e| e.name == name) {
-            return Err(Error::Exists);
-        }
-        let ino = self.alloc_inode()?;
-        let t = (self.now)();
-        let links = if kind == Kind::Dir { 2 } else { 1 };
-        let owner = owner.map(|o| Owner { mode: o.mode & 0o7777, ..o });
-        self.write_inode(ino, &Inode::new(kind as u16, links, t, owner))?;
-        entries.push(DirEntry { name: String::from(name), ino, kind });
-        self.write_dir(dir, &entries)?;
-        Ok(ino)
+        self.op(|v| {
+            let mut entries = v.live_dir(dir)?;
+            if entries.iter().any(|e| e.name == name) {
+                return Err(Error::Exists);
+            }
+            let ino = v.alloc_inode()?;
+            let t = (v.now)();
+            let links = if kind == Kind::Dir { 2 } else { 1 };
+            let owner = owner.map(|o| Owner { mode: o.mode & 0o7777, ..o });
+            v.write_inode(ino, &Inode::new(kind as u16, links, t, owner))?;
+            entries.push(DirEntry { name: String::from(name), ino, kind });
+            v.write_dir(dir, &entries)?;
+            Ok(ino)
+        })
     }
 
+    /// The entries of folder `dir`, which must still have a name: a folder
+    /// removed while open takes no new entries (`NotFound`, as on Linux),
+    /// or they would be lost with it at its last close.
+    fn live_dir(&mut self, dir: u64) -> Result<Vec<DirEntry>> {
+        if self.orphans.contains(&dir) {
+            return Err(Error::NotFound);
+        }
+        self.readdir(dir)
+    }
+
+    /// The last name of `ino` is gone: frees it, or, while it is open,
+    /// keeps it as an orphan with no links until its last close.
     fn release(&mut self, ino: u64) -> Result<()> {
         let mut inode = self.read_inode(ino)?;
+        if self.open.contains_key(&ino) {
+            inode.links = 0;
+            inode.ctime = (self.now)();
+            self.write_inode(ino, &inode)?;
+            self.orphans.insert(ino);
+            return Ok(());
+        }
         self.shrink(&mut inode, 0);
         let empty = Inode::new(0, 0, 0, None);
         self.write_inode(ino, &empty)?;
         self.free_inode(ino);
+        self.orphans.remove(&ino);
         Ok(())
+    }
+
+    /// Notes that `ino` is open (a file descriptor): if its last name goes,
+    /// its inode and data stay, readable and writable through it, until
+    /// [`Volume::close_inode`]. Without this, a removed file's inode number
+    /// could be given to a new file or folder while someone still wrote to
+    /// (or truncated) it by number.
+    pub fn open_inode(&mut self, ino: u64) -> Result<()> {
+        self.read_inode(ino)?;
+        *self.open.entry(ino).or_insert(0) += 1;
+        Ok(())
+    }
+
+    /// One holder of `ino` let go; an orphan is freed at its last close.
+    pub fn close_inode(&mut self, ino: u64) -> Result<()> {
+        let Some(n) = self.open.get_mut(&ino) else { return Ok(()) };
+        *n -= 1;
+        if *n > 0 {
+            return Ok(());
+        }
+        self.open.remove(&ino);
+        if self.orphans.contains(&ino) {
+            self.op(|v| v.release(ino))?;
+        }
+        Ok(())
+    }
+
+    /// Inodes removed while open and not yet closed.
+    pub fn orphans(&self) -> usize {
+        self.orphans.len()
     }
 
     /// Removes a file or an empty directory.
     pub fn unlink(&mut self, dir: u64, name: &str) -> Result<()> {
-        let mut entries = self.readdir(dir)?;
-        let pos = entries.iter().position(|e| e.name == name).ok_or(Error::NotFound)?;
-        let e = entries[pos].clone();
-        if e.kind == Kind::Dir && !self.readdir(e.ino)?.is_empty() {
-            return Err(Error::NotEmpty);
-        }
-        entries.remove(pos);
-        self.write_dir(dir, &entries)?;
-        self.release(e.ino)?;
-        self.maybe_commit()
+        self.op(|v| {
+            let mut entries = v.readdir(dir)?;
+            let pos = entries.iter().position(|e| e.name == name).ok_or(Error::NotFound)?;
+            let e = entries[pos].clone();
+            if e.kind == Kind::Dir && !v.readdir(e.ino)?.is_empty() {
+                return Err(Error::NotEmpty);
+            }
+            entries.remove(pos);
+            v.write_dir(dir, &entries)?;
+            v.release(e.ino)
+        })
     }
 
+    /// Folder `dir` is `target` or has it somewhere inside.
+    fn contains(&mut self, dir: u64, target: u64) -> Result<bool> {
+        let mut stack = vec![dir];
+        let mut seen = BTreeSet::new();
+        while let Some(d) = stack.pop() {
+            if d == target {
+                return Ok(true);
+            }
+            if !seen.insert(d) {
+                continue; // (only a corrupt volume has cycles)
+            }
+            stack.extend(self.readdir(d)?.into_iter().filter(|e| e.kind == Kind::Dir).map(|e| e.ino));
+        }
+        Ok(false)
+    }
+
+    /// Moves (and renames) an entry; a file at the destination is replaced.
+    /// A folder can't be moved into itself or anything inside it
+    /// (`Invalid`), whatever paths the caller resolved before: the check is
+    /// made here, in the same operation as the move.
     pub fn rename(&mut self, from_dir: u64, from: &str, to_dir: u64, to: &str) -> Result<()> {
         Self::check_name(to)?;
+        self.op(|v| v.rename_inner(from_dir, from, to_dir, to))
+    }
+
+    fn rename_inner(&mut self, from_dir: u64, from: &str, to_dir: u64, to: &str) -> Result<()> {
         let mut src = self.readdir(from_dir)?;
         let pos = src.iter().position(|e| e.name == from).ok_or(Error::NotFound)?;
         let mut entry = src[pos].clone();
         if from_dir == to_dir && from == to {
             return Ok(());
         }
-        let mut dst = if from_dir == to_dir { src.clone() } else { self.readdir(to_dir)? };
+        let mut dst = if from_dir == to_dir { src.clone() } else { self.live_dir(to_dir)? };
+        if entry.kind == Kind::Dir && from_dir != to_dir && self.contains(entry.ino, to_dir)? {
+            return Err(Error::Invalid);
+        }
         let mut replaced = None;
         if let Some(i) = dst.iter().position(|e| e.name == to) {
             let old = dst[i].clone();
@@ -1402,79 +1718,6 @@ impl<D: Disk> Volume<D> {
         }
         if let Some(ino) = replaced {
             self.release(ino)?;
-        }
-        self.maybe_commit()
-    }
-
-    // --------------------------------------------------------- checking
-
-    /// Verifies structural consistency: every allocated block is referenced
-    /// exactly once, every live inode is reachable, directory entries are valid.
-    pub fn fsck(&mut self) -> core::result::Result<(), String> {
-        use alloc::format;
-        let mut owner: BTreeMap<u64, u64> = BTreeMap::new();
-        let mut seen: BTreeMap<u64, bool> = BTreeMap::new();
-        let mut stack = vec![ROOT];
-        while let Some(ino) = stack.pop() {
-            if seen.insert(ino, true).is_some() {
-                return Err(format!("inode {ino} reachable twice"));
-            }
-            let inode = self.read_inode(ino).map_err(|e| format!("inode {ino}: {e:?}"))?;
-            let flags = self.raw_inode_flags(ino).map_err(|e| format!("inode {ino}: {e:?}"))?;
-            if flags & !IFLAG_OWNED != 0 {
-                return Err(format!("inode {ino}: unknown flags {flags:#x}"));
-            }
-            if let Some(o) = inode.owner {
-                if o.uid == u32::MAX || o.gid == u32::MAX {
-                    return Err(format!("inode {ino}: invalid owner {}:{}", o.uid, o.gid));
-                }
-            }
-            if inode.allocated_blocks() < inode.size.div_ceil(BLOCK as u64) {
-                return Err(format!("inode {ino}: size {} exceeds its blocks", inode.size));
-            }
-            let mut blocks: Vec<u64> = Vec::new();
-            for e in &inode.extents {
-                for b in e.start..e.start + e.len as u64 {
-                    blocks.push(b);
-                }
-            }
-            if inode.extent_block != 0 {
-                blocks.push(inode.extent_block);
-            }
-            for b in blocks {
-                if b < self.sb.data_start || b >= self.sb.blocks - 1 {
-                    return Err(format!("inode {ino}: block {b} outside the data area"));
-                }
-                if let Some(o) = owner.insert(b, ino) {
-                    return Err(format!("block {b} owned by inodes {o} and {ino}"));
-                }
-                if !bit(&self.bmap, b) {
-                    return Err(format!("block {b} used by inode {ino} but free in the bitmap"));
-                }
-            }
-            if inode.kind() == Ok(Kind::Dir) {
-                for e in self.readdir(ino).map_err(|e| format!("dir {ino}: {e:?}"))? {
-                    let child = self.read_inode(e.ino).map_err(|x| format!("entry {} -> {}: {x:?}", e.name, e.ino))?;
-                    if child.kind() != Ok(e.kind) {
-                        return Err(format!("entry {} has the wrong kind", e.name));
-                    }
-                    stack.push(e.ino);
-                }
-            }
-        }
-        for b in self.sb.data_start..self.sb.blocks - 1 {
-            if bit(&self.bmap, b) && !owner.contains_key(&b) {
-                return Err(format!("block {b} marked used but unreferenced (leak)"));
-            }
-        }
-        for i in 2..self.sb.inodes {
-            if bit(&self.imap, i) && !seen.contains_key(&i) {
-                return Err(format!("inode {i} allocated but unreachable"));
-            }
-        }
-        let free = (self.sb.data_start..self.sb.blocks - 1).filter(|&b| !bit(&self.bmap, b)).count() as u64;
-        if free != self.sb.free_blocks {
-            return Err(format!("free block count {} != bitmap {}", self.sb.free_blocks, free));
         }
         Ok(())
     }

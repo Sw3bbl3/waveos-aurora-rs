@@ -427,7 +427,6 @@ pub fn fuzz_native() {
     let (code, _) = run("/System/Bin/fuzz", &argv, s, None, 20 * 60_000, &mut |_, _| {});
     assert_eq!(code, Some(0), "the sandboxed fuzzer reported failures");
     oracle_intact("the native fuzzer");
-    let _ = fs::remove_tree("/fuzz");
     crate::kprint!("[seed {seed}] ");
 }
 
@@ -444,11 +443,7 @@ pub fn fuzz_linux() {
     let declared = cap::LINUX | cap::SPAWN | cap::NET_CLIENT | cap::NET_SERVER | cap::AUDIO_OUT | cap::NOTIFY;
     let s = sandbox("org.waveos.test.linuxfuzz", declared);
     let argv = ["linuxfuzz", &seed, "3", "200", ORACLE];
-    let tmp = format!("{}/tmp/lfz", s.profile.container);
     let (code, out) = run(path, &argv, s, None, 20 * 60_000, &mut |_, _| {});
-    // What its own clean-up could not remove (a child may have taken the
-    // permissions away): the next boot starts from the same place.
-    let _ = fs::remove_tree(&tmp);
     assert_eq!(code, Some(0), "the sandboxed Linux fuzzer failed");
     assert!(out.contains("linuxfuzz passed"), "the sandboxed Linux fuzzer did not finish");
     oracle_intact("the Linux fuzzer");

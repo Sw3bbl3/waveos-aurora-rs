@@ -1035,7 +1035,7 @@ impl Compositor {
             let wait = self.frame();
             self.first_frame_done();
             if let Some(action) = self.desktop.power {
-                crate::fs::sync_all();
+                crate::fs::unmount_all();
                 sched::sleep_ms(800);
                 match action {
                     PowerAction::Shutdown => crate::power::shutdown(),

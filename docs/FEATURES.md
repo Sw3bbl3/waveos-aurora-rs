@@ -77,7 +77,7 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - PCI enumeration, plus interrupt-driven **AHCI** (SATA), **virtio-blk** and **NVMe** drivers
   - **SD cards and eMMC** on SD Host Controllers (PCI or ACPI): PIO, SDMA and ADMA2, high speed, UHS-I, eMMC HS200 (and HS400 on request), TRIM and cache flush, recovery from bus errors. WaveOS installs to and runs from them; eMMC boot partitions stay untouched
   - **USB sticks and SD cards** appear in Files under Locations when plugged in and can be ejected; booted from one, WaveOS keeps your files on it
-  - your files live on **AuroraFS**, our own journaled filesystem, and survive reboots and power cuts
+  - your files live on **AuroraFS**, our own journaled filesystem, and survive reboots and power cuts: every change is all-or-nothing, `fsync` and Sync make changes durable at once (otherwise within 5 seconds), a file deleted while open stays usable until closed, and after an unexpected shutdown the disk is checked and repaired at the next start (with a notification; anything adrift goes to `/lost+found`). `cargo xtask fsck IMG` checks a disk image and lists every problem; see [developer/aurorafs.md](developer/aurorafs.md)
   - the EFI partition is readable and writable at `/Boot` (FAT32 with long file names)
   - `/System` is the read-only system image
 - **Files**, a real file manager: icon and sortable list views, multiple selection with a rubber band, **drag and drop** (between windows, onto folders, onto Harbor), search as you type, Quick Look (Space), picture thumbnails, and a **Trash** with Put Back.

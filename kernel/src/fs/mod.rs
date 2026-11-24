@@ -80,6 +80,21 @@ pub trait Filesystem: Send + Sync {
     fn sync(&self) -> FsResult<()> {
         Ok(())
     }
+    /// `ino` is open (an [`OpenFile`]): if its last name is removed, the
+    /// filesystem keeps it, readable and writable, until [`Filesystem::close_ino`].
+    /// Without that, the number could go to a new file or folder while a
+    /// descriptor still wrote to (or truncated) it.
+    fn open_ino(&self, _ino: Ino) -> FsResult<()> {
+        Ok(())
+    }
+    /// One holder of `ino` closed it.
+    fn close_ino(&self, _ino: Ino) {}
+    /// Shutting down: writes everything out and, where the filesystem
+    /// keeps one, sets its "cleanly unmounted" mark (the next mount then
+    /// needs no check).
+    fn unmount(&self) -> FsResult<()> {
+        self.sync()
+    }
     /// Memory is short: give back what a cache holds (without waiting
     /// for a lock someone holds).
     fn shrink(&self) {}
@@ -120,6 +135,12 @@ pub trait Filesystem: Send + Sync {
     #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     fn check(&self) -> Result<(), String> {
         Ok(())
+    }
+    /// What the check at mount found, one problem per line ("" for
+    /// nothing), if the volume was not cleanly unmounted and so was checked.
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+    fn mount_check(&self) -> Option<String> {
+        None
     }
 }
 
@@ -473,6 +494,18 @@ pub fn shrink_caches() {
     }
 }
 
+/// Before the power goes (shut down, restart): writes every filesystem out
+/// and marks those that keep such a mark cleanly unmounted. They stay
+/// mounted; anything changed after this clears the mark again.
+pub fn unmount_all() {
+    let all: Vec<Arc<dyn Filesystem>> = MOUNTS.lock().iter().map(|m| m.fs.clone()).collect();
+    for fs in all {
+        if let Err(e) = fs.unmount() {
+            log!("vfs", "unmounting {} failed: {}", fs.describe(), aurora_abi::err::name(e));
+        }
+    }
+}
+
 pub fn try_sync_all() -> FsResult<()> {
     let all: Vec<Arc<dyn Filesystem>> = MOUNTS.lock().iter().map(|m| m.fs.clone()).collect();
     let mut error = None;
@@ -485,7 +518,8 @@ pub fn try_sync_all() -> FsResult<()> {
     error.map_or(Ok(()), Err)
 }
 
-/// An open file (or directory) handle.
+/// An open file (or directory) handle. It holds its inode open on the
+/// filesystem ([`Filesystem::open_ino`]) until dropped.
 pub struct OpenFile {
     pub fs: Arc<dyn Filesystem>,
     pub ino: Ino,
@@ -493,6 +527,12 @@ pub struct OpenFile {
     pub readable: bool,
     pub writable: bool,
     pub append: bool,
+}
+
+impl Drop for OpenFile {
+    fn drop(&mut self) {
+        self.fs.close_ino(self.ino);
+    }
 }
 
 pub fn open(path: &str, flags: usize) -> FsResult<OpenFile> {
@@ -528,6 +568,11 @@ pub fn open_mode(path: &str, flags: usize, mode: Option<u16>) -> FsResult<OpenFi
         }
         Err(e) => return Err(e),
     };
+    // Held from here on (and let go if any check below fails, by the drop).
+    fs.open_ino(ino)?;
+    let file =
+        OpenFile { fs, ino, pos: 0, readable: flags & READ != 0 || !writable, writable, append: flags & APPEND != 0 };
+    let fs = &file.fs;
     let md = fs.metadata(ino)?;
     if writable && fs.read_only() {
         return Err(EROFS);
@@ -537,13 +582,13 @@ pub fn open_mode(path: &str, flags: usize, mode: Option<u16>) -> FsResult<OpenFi
     }
     // The creator may write what it just made, whatever its mode says.
     if !created {
-        perm::check_open(&fs, &mount, ino, flags & READ != 0 || !writable, writable)?;
+        perm::check_open(fs, &mount, ino, flags & READ != 0 || !writable, writable)?;
     }
     if flags & TRUNCATE != 0 {
-        mapcache::forget(&fs, ino);
+        mapcache::forget(fs, ino);
         fs.truncate(ino, 0)?;
     }
-    Ok(OpenFile { fs, ino, pos: 0, readable: flags & READ != 0 || !writable, writable, append: flags & APPEND != 0 })
+    Ok(file)
 }
 
 impl OpenFile {
