@@ -4,6 +4,7 @@ use alloc::vec;
 fn manifest() -> Manifest {
     Manifest {
         format: 1,
+        architecture: "x86_64".into(),
         id: "dev.example.hello".into(),
         name: "Hello".into(),
         developer: "Example".into(),
@@ -11,6 +12,40 @@ fn manifest() -> Manifest {
         entry: "bin/app".into(),
         ..Default::default()
     }
+}
+
+/// [`elf`] for aarch64.
+fn arm_elf() -> Vec<u8> {
+    let mut b = elf();
+    b[18..20].copy_from_slice(&aurora_elf::EM_AARCH64.to_le_bytes());
+    b
+}
+
+#[test]
+fn architectures() {
+    // Before the port every manifest said x86_64; an empty field still does.
+    let old = Manifest { architecture: String::new(), ..manifest() };
+    assert_eq!(old.arch(), "x86_64");
+    assert!(old.encode().contains("architecture = \"x86_64\"\n"));
+    // An aarch64 package: on a development host (these tests) it parses,
+    // and it says it isn't for an x86 system.
+    let arm = Manifest { architecture: "aarch64".into(), ..manifest() };
+    let bytes = pack(&arm, &[("bin/app", &arm_elf())]).unwrap();
+    let p = Package::parse(&bytes).unwrap();
+    assert_eq!(p.manifest.arch(), "aarch64");
+    assert_eq!(p.manifest.runs_here(), NATIVE_ARCH == "aarch64");
+    // A manifest that misstates its executable's processor.
+    assert_eq!(
+        pack(&arm, &[("bin/app", &elf())]).unwrap_err(),
+        "The executable is for a different processor than the manifest says"
+    );
+    assert_eq!(
+        pack(&manifest(), &[("bin/app", &arm_elf())]).unwrap_err(),
+        "The executable is for a different processor than the manifest says"
+    );
+    // Architectures WaveOS doesn't run on.
+    let text = manifest().encode().replace("x86_64", "riscv64");
+    assert_eq!(Manifest::parse(&text), Err("This app needs a different processor architecture"));
 }
 
 fn manifest2() -> Manifest {

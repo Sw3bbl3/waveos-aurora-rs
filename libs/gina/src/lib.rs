@@ -129,10 +129,34 @@ pub fn sensitive_permission(permission: &str) -> bool {
     )
 }
 
+/// The processor architectures a package can be for (`architecture` in
+/// its manifest), named as `aurora_abi::ARCH` names them.
+pub const ARCHITECTURES: &[&str] = &["x86_64", "aarch64"];
+
+/// The architecture of the system this code runs in.
+pub const NATIVE_ARCH: &str = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+
+/// Whether this build is part of WaveOS itself (the kernel, apps, the
+/// installer: no host operating system), where only [`NATIVE_ARCH`]
+/// packages are installable; development hosts handle every architecture.
+const ON_WAVEOS: bool = cfg!(any(target_os = "none", target_os = "uefi"));
+
+/// The ELF machine of an architecture's executables.
+fn elf_machine(arch: &str) -> u16 {
+    if arch == "aarch64" {
+        aurora_elf::EM_AARCH64
+    } else {
+        aurora_elf::EM_X86_64
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Manifest {
     /// 1 or 2 (see the crate documentation).
     pub format: u32,
+    /// One of [`ARCHITECTURES`]; empty means x86_64, as every package made
+    /// before the aarch64 port is (see [`Manifest::arch`]).
+    pub architecture: String,
     pub id: String,
     pub name: String,
     /// The author or publisher (`developer` in format 1, `author` in format 2).
@@ -290,7 +314,8 @@ impl Manifest {
         if get("abi")?.parse::<u32>().ok() != Some(ABI) {
             return Err("Unsupported package format or ABI");
         }
-        if quoted(get("architecture")?)? != "x86_64" {
+        let architecture = quoted(get("architecture")?)?;
+        if !ARCHITECTURES.contains(&architecture.as_str()) {
             return Err("This app needs a different processor architecture");
         }
         let sdk = quoted(get("sdk")?)?;
@@ -302,6 +327,7 @@ impl Manifest {
         let list = |k: &str| values.get(k).map(|v| strings(v)).transpose().map(Option::unwrap_or_default);
         let m = Self {
             format,
+            architecture,
             id: quoted(get("id")?)?,
             name: quoted(get("name")?)?,
             developer: quoted(get(if format == 1 { "developer" } else { "author" })?)?,
@@ -383,13 +409,14 @@ impl Manifest {
         }
         let array = |v: &[String]| format!("[{}]", v.iter().map(|s| q(s)).collect::<Vec<_>>().join(", "));
         let mut out = format!(
-            "format = {}\nid = {}\nname = {}\n{} = {}\nversion = {}\narchitecture = \"x86_64\"\nsdk = \"0.9\"\nabi = 1\nentry = {}\nicon = {}\nresources = {}\nextensions = {}\n",
+            "format = {}\nid = {}\nname = {}\n{} = {}\nversion = {}\narchitecture = {}\nsdk = \"0.9\"\nabi = 1\nentry = {}\nicon = {}\nresources = {}\nextensions = {}\n",
             self.format.max(1),
             q(&self.id),
             q(&self.name),
             if self.format == 2 { "author" } else { "developer" },
             q(&self.developer),
             q(&self.version),
+            q(self.arch()),
             q(&self.entry),
             q(&self.icon),
             array(&self.resources),
@@ -406,6 +433,20 @@ impl Manifest {
             );
         }
         out
+    }
+
+    /// The architecture the app is for (x86_64 when the field is empty).
+    pub fn arch(&self) -> &str {
+        if self.architecture.is_empty() {
+            "x86_64"
+        } else {
+            &self.architecture
+        }
+    }
+
+    /// Whether the app runs on this system's processor.
+    pub fn runs_here(&self) -> bool {
+        self.arch() == NATIVE_ARCH
     }
 
     /// The dependencies, parsed (they were validated with the manifest).
@@ -640,6 +681,11 @@ impl<'a> Package<'a> {
         }
         let manifest_bytes = files.iter().find(|f| f.path == "manifest.toml").ok_or("Missing manifest.toml")?.bytes;
         let manifest = Manifest::parse(core::str::from_utf8(manifest_bytes).map_err(|_| "Manifest is not UTF-8")?)?;
+        // Inside WaveOS, only apps for this processor; tools on a
+        // development computer read packages for either.
+        if ON_WAVEOS && !manifest.runs_here() {
+            return Err("This app needs a different processor architecture");
+        }
         let find = |p: &str| files.iter().find(|f| f.path == p).map(|f| f.bytes);
         let (hashes_bytes, signature) = if manifest.format == 2 {
             if files.iter().any(|f| f.path.starts_with("META/") && f.path != HASHES && f.path != SIGNATURE)
@@ -661,6 +707,9 @@ impl<'a> Package<'a> {
         };
         let executable = files.iter().find(|f| f.path == manifest.entry).ok_or("Missing executable")?;
         let image = aurora_elf::parse(executable.bytes).ok_or("Invalid native executable")?;
+        if image.machine != elf_machine(manifest.arch()) {
+            return Err("The executable is for a different processor than the manifest says");
+        }
         if executable.bytes[16..18] != 2u16.to_le_bytes()
             || image.virt_start < 0x400000
             || image.virt_end >= 0x0000800000000000
