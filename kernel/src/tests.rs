@@ -116,6 +116,7 @@ const TESTS: &[Test] = &[
     ("sandbox: the Linux fuzzer never reaches the oracle", crate::sandbox::selftest::fuzz_linux),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
+    ("storage: request latency (reads, writes, flushes, a file synced)", block_latency),
     ("SD/eMMC: the card the system runs from, and the second reader's card", sd_cards),
     ("SD card: data integrity by PIO, SDMA and ADMA2, across block and buffer boundaries", sd_integrity),
     ("SD card: throughput by PIO, SDMA and ADMA2, against the system disk", sd_throughput),
@@ -527,13 +528,26 @@ fn fs_stress(iteration: u32) -> ! {
     }
     let dir = alloc::format!("/Stress/durable/i{iteration}");
     let _ = fs::mkdir(&dir);
-    crate::kprintln!("fsstress: running (iteration {iteration})");
+    crate::kprintln!("fsstress: running (iteration {iteration}, at {} ms)", time::now_ns() / 1_000_000);
     let mut n = 0u32;
     loop {
         let len = 1000 + (n as usize * 7919) % 60_000;
         let path = alloc::format!("{dir}/{n}");
-        if fs::write_all(&path, &durable_bytes(iteration, n, len)).is_ok() && fs::try_sync_all().is_ok() {
-            crate::kprintln!("fsstress: durable {path} {len}");
+        let t0 = time::now_ns();
+        let written = fs::write_all(&path, &durable_bytes(iteration, n, len));
+        let t1 = time::now_ns();
+        let synced = written.is_ok() && fs::try_sync_all().is_ok();
+        let t2 = time::now_ns();
+        if synced {
+            // (The harness reads the path and length; the times are for people.)
+            crate::kprintln!(
+                "fsstress: durable {path} {len} (at {} ms: write {} ms, sync {} ms)",
+                t0 / 1_000_000,
+                (t1 - t0) / 1_000_000,
+                (t2 - t1) / 1_000_000
+            );
+        } else {
+            crate::kprintln!("fsstress: not synced {path}: {written:?} ({} ms)", (t2 - t0) / 1_000_000);
         }
         n += 1;
         sched::sleep_ms(150);
@@ -2337,6 +2351,55 @@ fn block_round_trip() {
     assert!(disk.read(disk.sectors(), &mut back[..ss as usize]).is_err(), "out-of-range read must fail");
     let after = interrupts();
     assert!(after > before, "no {} completion interrupts ({} → {})", owner, before, after);
+}
+
+/// How long the system disk takes per request, from the issuing task's view
+/// (submission, the device, the completion interrupt, the wake-up): what an
+/// `fsync` is made of. Prints the numbers; fails only on an error or on a
+/// request slower than a second, which no emulated disk should be.
+fn block_latency() {
+    let disk = main_disk();
+    let ss = disk.sector_size() as u64;
+    let scratch = disk.sectors() - 33 - (1 << 20) / ss;
+    let mut buf = alloc::vec![0x5Au8; 64 * 1024];
+    let mut report = alloc::string::String::new();
+    let mut measure = |what: &str, n: usize, f: &mut dyn FnMut(usize)| {
+        let mut us: Vec<u64> = (0..n)
+            .map(|i| {
+                let t0 = time::now_ns();
+                f(i);
+                (time::now_ns() - t0) / 1000
+            })
+            .collect();
+        us.sort_unstable();
+        let mean = us.iter().sum::<u64>() / n as u64;
+        let line = alloc::format!(
+            "{what}: mean {mean} us, median {} us, p90 {} us, max {} us ({n})",
+            us[n / 2],
+            us[n * 9 / 10],
+            us[n - 1]
+        );
+        assert!(us[n - 1] < 1_000_000, "{line}");
+        report.push_str(&alloc::format!("\n  {line}"));
+    };
+    measure("4 KiB read", 200, &mut |i| disk.read(scratch + (i as u64 % 64) * 8, &mut buf[..4096]).unwrap());
+    measure("4 KiB write", 200, &mut |i| disk.write(scratch + (i as u64 % 64) * 8, &buf[..4096]).unwrap());
+    measure("64 KiB write", 50, &mut |i| disk.write(scratch + (i as u64 % 8) * 128, &buf).unwrap());
+    measure("flush, nothing written", 50, &mut |_| disk.flush().unwrap());
+    measure("4 KiB write + flush", 50, &mut |i| {
+        disk.write(scratch + (i as u64 % 64) * 8, &buf[..4096]).unwrap();
+        disk.flush().unwrap();
+    });
+    let _ = fs::mkdir("/Stress");
+    measure("4 KiB file written and synced", 30, &mut |i| {
+        let path = alloc::format!("/Stress/latency-{}", i % 4);
+        fs::write_all(&path, &buf[..4096]).unwrap();
+        fs::try_sync_all().unwrap();
+    });
+    for i in 0..4 {
+        let _ = fs::unlink(&alloc::format!("/Stress/latency-{i}"));
+    }
+    crate::kprint!(" [{} on {}{report}\n]", disk.name(), disk.describe());
 }
 
 /// The second SD reader's card: the block device whose volume is AURORA-SD.

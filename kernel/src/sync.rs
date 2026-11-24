@@ -168,17 +168,31 @@ impl<T> Drop for MutexGuard<'_, T> {
 /// (safe in interrupt context) makes it runnable to re-check its condition.
 pub struct WaitQueue {
     waiters: IrqMutex<alloc::vec::Vec<crate::sched::TaskId>>,
+    /// How many times [`WaitQueue::wake_all`] has run. A waiter notes it
+    /// before it looks: a wake-up it missed (one that took it off the list
+    /// while it was still running, so [`crate::sched::wake`] found nothing
+    /// to do) shows as a change, and it looks again instead of sleeping.
+    wakes: core::sync::atomic::AtomicU64,
 }
 
 impl WaitQueue {
     pub const fn new() -> Self {
-        Self { waiters: IrqMutex::new(alloc::vec::Vec::new()) }
+        Self { waiters: IrqMutex::new(alloc::vec::Vec::new()), wakes: core::sync::atomic::AtomicU64::new(0) }
     }
 
     /// Waits until `done()` holds, for at most `timeout_ms`; returns whether
     /// it did. Polls briefly first — fast devices often finish within
     /// microseconds, cheaper than a round trip through the scheduler.
+    ///
+    /// That poll often sees a completion before its interrupt arrives, so a
+    /// late interrupt for the last request can come while the task is on the
+    /// list for the next one but not yet asleep: `wake_all` takes it off the
+    /// list and the wake-up finds it running. Without `wakes`, it would then
+    /// sleep off the list, and the next request's interrupt would find
+    /// nobody to wake (a disk request "lost" until the timeout, seconds,
+    /// under hardware virtualization, where the poll wins most races).
     pub fn wait(&self, timeout_ms: u64, done: impl Fn() -> bool) -> bool {
+        use core::sync::atomic::Ordering;
         for _ in 0..200 {
             if done() {
                 return true;
@@ -188,6 +202,7 @@ impl WaitQueue {
         let me = crate::sched::current_id();
         let deadline = crate::time::uptime_ms() + timeout_ms;
         loop {
+            let seen = self.wakes.load(Ordering::SeqCst);
             if done() {
                 return true;
             }
@@ -197,14 +212,19 @@ impl WaitQueue {
             }
             self.waiters.lock().push(me);
             // Sleeps unless `done()` holds once the task is marked sleeping, so
-            // an interrupt between the check and the sleep is not lost. The
+            // an interrupt between the check and the sleep is not lost; nor
+            // one that took it off the list before that (`wakes` moved). The
             // idle task (early boot) cannot sleep and simply polls.
-            crate::sched::wait_until((deadline - now).max(1), &done);
+            crate::sched::wait_until((deadline - now).max(1), || {
+                self.wakes.load(Ordering::SeqCst) != seen || done()
+            });
             self.waiters.lock().retain(|&t| t != me);
         }
     }
 
     pub fn wake_all(&self) {
+        // (Before the list is taken: a waiter it takes sees the change.)
+        self.wakes.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         let waiters = core::mem::take(&mut *self.waiters.lock());
         for t in waiters {
             crate::sched::wake(t);
