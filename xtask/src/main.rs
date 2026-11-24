@@ -55,7 +55,11 @@
 //!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run;
 //!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data;
 //!                                         AURORA_MESA_BENCH=1 with --mesa measures copies against zero-copy;
-//!                                         AURORA_TEST_ROOT=browsers with --mesa measures Voyage and Firefox)
+//!                                         AURORA_TEST_ROOT=browsers with --mesa measures Voyage and Firefox;
+//!                                         AURORA_TEST_FILTER="page loads timed" times their cold starts and
+//!                                         page loads: AURORA_BROWSER_RUNS=N, AURORA_BROWSER_SITES="URL|title,…",
+//!                                         AURORA_BROWSER_ENV="VAR=value …";
+//!                                         AURORA_TEST_LINUX_ROOT=1|DIR: a Linux root as /Linux)
 //!       --displays N                      with --gpu virtio: N scanouts, plugged in and out by the
 //!                                         multi-monitor test, each checked by QMP screendump (testdisplays.rs)
 //!       --mesa                            only the Mesa tests, on a disk with Debian's Mesa, kmscube, glmark2

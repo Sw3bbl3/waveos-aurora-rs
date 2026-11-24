@@ -52,10 +52,34 @@ headers for both architectures (`cargo xtask linux-abi --arch <arch>`
 regenerates them). arm64's `PROT_BTI` and `PROT_MTE` are accepted and
 ignored; BTI, MTE, SVE and SME are not offered to programs.
 
-Not yet on arm64: `extra_context` frames (only needed with SVE), the
-DRM device's test on `virt` (its display is ramfb, not PCI), Mesa and the
-browsers (next). musl's `vfork` is plain `fork` on arm64 (it has no
-`vfork` of its own there).
+On aarch64 under HVF, Mesa (kmscube, glmark2, lavapipe, es2gears and
+vkcube in windows) and both browsers work: Voyage and Firefox ESR show
+local pages, Wikipedia and YouTube. With `--gpu virtio` the display is a
+PCI device and drmtest runs; on `--gpu std` (ramfb) it is skipped.
+
+Browser start-up, timed (`AURORA_TEST_ROOT=browsers
+AURORA_TEST_FILTER="page loads timed" cargo xtask test [--arch aarch64]
+--gpu virtio --mesa`): each start is cold (every browser process and
+window gone before the next), on the test server's article; "painted"
+is the article's text and pictures in the window. Medians, milliseconds,
+one machine (an Apple M2 Mac on mains power), 2026-11-24:
+
+| | aarch64, HVF (5 runs) | x86-64, TCG (3 runs) |
+|---|---|---|
+| Voyage: window | 2537 | 11756 |
+| Voyage: page painted | 2836 | 16233 |
+| Firefox: window | 1432 | 16635 |
+| Firefox: page painted | 2050 | 21610 |
+
+One run each of real sites (not signed in; real sites vary by the
+minute): Wikipedia's "Web browser" article painted in 18.6 s (Voyage) and
+3.0 s (Firefox) on aarch64, against 32.2 s and 29.0 s on x86-64; YouTube's
+home page in 15.1 s and 4.3 s, against 36.6 s and 43.3 s. Voyage takes
+about 11.7 s to show its window for an `https://` address on aarch64
+against 2.5 s for the local `http://` page: not yet explained.
+
+Not yet on arm64: `extra_context` frames (only needed with SVE). musl's
+`vfork` is plain `fork` on arm64 (it has no `vfork` of its own there).
 
 ## The shell
 

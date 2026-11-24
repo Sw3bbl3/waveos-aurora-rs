@@ -1567,7 +1567,10 @@ fn linux_browsers_timed() {
                             && ["firefox", "voyage", "WebKit", "wl-bridge"].iter().any(|n| name.contains(n))
                     })
                 };
-                eventually(30_000, || !browser_left());
+                // (Its windows too: a window outlives its program briefly.)
+                eventually(60_000, || {
+                    !browser_left() && window_titled(title).is_none() && window_titled(program).is_none()
+                });
                 let ms = |v: Option<u64>| v.map_or(String::from("-"), |v| alloc::format!("{v}"));
                 crate::kprintln!(
                     "\n    browser-time: {program} run {run} {url}: window {} ms, title {} ms, painted {} ms (ink {most_ink})",
