@@ -1856,7 +1856,7 @@ fn wavefs_home() {
 fn fat_boot() {
     let kernel = fs::read_all("/Boot/aurora/kernel.elf").expect("kernel on the ESP");
     assert_eq!(&kernel[0..4], b"\x7fELF");
-    assert!(fs::read_all("/Boot/EFI/BOOT/BOOTX64.EFI").unwrap().starts_with(b"MZ"));
+    assert!(fs::read_all(crate::gui::sysupdate::BOOTLOADER).unwrap().starts_with(b"MZ"));
     fs::write_all("/Boot/Aurora test file.txt", b"written by Aster").unwrap();
     assert_eq!(fs::read_all("/Boot/aurora test FILE.txt").unwrap(), b"written by Aster"); // FAT is case-insensitive
     fs::unlink("/Boot/Aurora test file.txt").unwrap();

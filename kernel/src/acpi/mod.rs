@@ -11,7 +11,10 @@ pub mod processor;
 mod runtime;
 mod tables;
 
-pub use runtime::{finish_sleep, is_acpi_task, on_panic, power_info, prepare_sleep, sleep_type, start};
+pub use runtime::{is_acpi_task, on_panic, power_info, sleep_type, start};
+// For sleep (S3), x86 only.
+#[cfg(target_arch = "x86_64")]
+pub use runtime::{finish_sleep, prepare_sleep};
 #[cfg(feature = "ktest")]
 pub use runtime::{running, test_panic};
 pub use tables::*;

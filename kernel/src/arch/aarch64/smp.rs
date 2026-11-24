@@ -116,8 +116,8 @@ pub fn start_aps(_cpu_ids: &[u8], _trampoline: u64) -> usize {
     let Some(block) = page() else { return 1 };
     let bv = crate::mm::phys_to_virt(block) as *mut u64;
     let mut up = 1;
-    for i in 0..listed {
-        let mpidr = MPIDRS[i].load(Ordering::Relaxed);
+    for slot in MPIDRS.iter().take(listed) {
+        let mpidr = slot.load(Ordering::Relaxed);
         if mpidr == me {
             continue;
         }
