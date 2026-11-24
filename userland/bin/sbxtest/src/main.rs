@@ -165,9 +165,19 @@ fn grants() {
         other => fail(&format!("bookmark: {other:?}")),
     }
     refused("bookmark something not given", sandbox::bookmark(&secret()));
-    // A drop.
+    // A drop. (The harness drops and brings this program to the front
+    // once it sees it started, which on a fast machine may be after this
+    // point: ask again for a while.)
     let mut buf = [0u8; 256];
-    match call(nr::DRAG_DATA, &[buf.as_mut_ptr() as u64, buf.len() as u64]) {
+    let mut dropped = call(nr::DRAG_DATA, &[buf.as_mut_ptr() as u64, buf.len() as u64]);
+    for _ in 0..100 {
+        if !matches!(dropped, Err(e) if e.is(ENOENT)) {
+            break;
+        }
+        corekit::time::sleep_ms(10);
+        dropped = call(nr::DRAG_DATA, &[buf.as_mut_ptr() as u64, buf.len() as u64]);
+    }
+    match dropped {
         Ok(n) => {
             let path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
             allowed("read the dropped file", fs::read(path.trim()));
@@ -175,7 +185,15 @@ fn grants() {
         Err(e) => fail(&format!("drag_data: {e}")),
     }
     // A paste (the app is in front).
-    match clipboard_get(abi::clip::FILES) {
+    let mut pasted = clipboard_get(abi::clip::FILES);
+    for _ in 0..100 {
+        if !matches!(pasted, Err(ref e) if e.is(EPERM)) {
+            break;
+        }
+        corekit::time::sleep_ms(10);
+        pasted = clipboard_get(abi::clip::FILES);
+    }
+    match pasted {
         Ok(list) => {
             allowed("read the pasted file", fs::read(list.lines().next().unwrap_or("")));
         }

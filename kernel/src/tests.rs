@@ -128,6 +128,11 @@ const ARCH_SKIPS: &[(&str, &str)] = &[
     ("ACPI: AML, sleep states, battery", "a PC's ACPI: sleep states, \\_S5 and the test battery's SSDT"),
     ("I2C:", "the I2C touchpad is a PC ACPI device (test SSDT)"),
     ("sleep (S3) and wake", "no suspend to RAM on Arm"),
+    (
+        "Linux programs: the DRM device",
+        "the display is ramfb, not a PCI GPU: virtio-gpu without a firmware framebuffer is not driven on arm64 yet",
+    ),
+    ("Linux programs: libdrm's modetest", "as the DRM device test"),
 ];
 
 pub fn run() {
@@ -802,6 +807,10 @@ impl InputTestUser {
             }
             "drain-native" => {
                 while input::pop().is_some() {}
+                // Away from the edges, wherever earlier tests left it and
+                // whatever the screen size, so motion isn't clamped.
+                let (w, h) = input::screen_size();
+                input::warp(w / 2, h / 2);
                 self.pointer_from = input::pointer_position();
                 ok
             }
