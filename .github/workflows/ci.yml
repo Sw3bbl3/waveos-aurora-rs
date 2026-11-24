@@ -68,6 +68,24 @@ jobs:
           grep -q "Aster kernel" serial-arm.log
           grep -q "mounted System image" serial-arm.log
 
+  aarch64-kernel:
+    # The aarch64 kernel self-tests (with the arm64 Linux programs), emulated
+    # on an x86 runner: the default architecture on Apple-silicon Macs.
+    name: aarch64 kernel tests (QEMU virt, TCG, virtio-gpu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU and EDK2 for aarch64
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 clang
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Kernel self-tests, two boots on the same disk
+        env:
+          AURORA_TEST_TIMEOUT: "2400"
+        run: cargo xtask test --arch aarch64
+
   kernel:
     name: Kernel tests (${{ matrix.disk }}, ${{ matrix.smp }} CPU, ${{ matrix.net }})
     runs-on: ubuntu-24.04

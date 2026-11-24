@@ -209,7 +209,10 @@ mod tests {
         };
         let p = pack(&m, &[("bin/app", &elf)], Some(&key)).unwrap();
         let listing = store::Listing { featured: true, about: "About A".into(), ..Default::default() };
-        store::write(&dir, &store::Spec::new("T", &key), &[(p.clone(), listing.clone())]).unwrap();
+        // (An x86-64 program: the repository's x86-64 half, whatever the
+        // host's default architecture.)
+        let spec = || store::Spec { arch: crate::arch::Arch::X86_64, ..store::Spec::new("T", &key) };
+        store::write(&dir, &spec(), &[(p.clone(), listing.clone())]).unwrap();
         // Format 1, for older systems.
         let text = fs::read(dir.join("index.txt")).unwrap();
         let sig = gina::Signature::parse(&fs::read_to_string(dir.join("index.sig")).unwrap()).unwrap();
@@ -230,7 +233,7 @@ mod tests {
         assert_eq!(c.packages[0].about, "About A");
         assert_eq!(c.packages[0].permissions, ["network"]);
         // Writing again makes the next version.
-        store::write(&dir, &store::Spec::new("T", &key), &[(p, listing)]).unwrap();
+        store::write(&dir, &spec(), &[(p, listing)]).unwrap();
         assert_eq!(store::current_catalog_for(&dir, crate::arch::Arch::X86_64).unwrap().version, 2);
         fs::remove_dir_all(&dir).unwrap();
     }

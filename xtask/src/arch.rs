@@ -14,10 +14,9 @@ use std::sync::OnceLock;
 
 /// Whether `--arch` defaults to this computer's own architecture where QEMU
 /// can run it with hardware virtualization (aarch64 on Apple-silicon Macs
-/// and on arm64 Linux with KVM). Off until the aarch64 port boots and passes
-/// its tests: until then every build without `--arch` is x86_64. Turning it
-/// on is the whole switch.
-pub const DEFAULT_TO_ACCELERATED_HOST: bool = false;
+/// and on arm64 Linux with KVM; x86-64 elsewhere). On since the aarch64
+/// port runs the desktop, Linux programs and the browsers.
+pub const DEFAULT_TO_ACCELERATED_HOST: bool = true;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Arch {
@@ -197,16 +196,23 @@ impl Arch {
     /// One line for the launcher and the console: what this choice costs.
     pub fn speed_note(self) -> &'static str {
         if self.accelerated_here() {
-            "Runs at full speed on this computer"
+            "Runs at full speed on this computer (hardware virtualization)"
         } else {
-            "Emulated, slow"
+            "Emulated instruction by instruction here: works, but many times slower"
         }
     }
 
     /// The default without `--arch` (see [`DEFAULT_TO_ACCELERATED_HOST`]).
     pub fn default_choice() -> Arch {
-        match Arch::host() {
-            Some(host) if DEFAULT_TO_ACCELERATED_HOST && host.accelerated_here() => host,
+        Arch::default_on(Arch::host(), |a| a.accelerated_here())
+    }
+
+    /// The default on a computer of architecture `host` where
+    /// `accelerated(arch)` says whether QEMU runs `arch` at full speed
+    /// (tests give any host here).
+    pub fn default_on(host: Option<Arch>, accelerated: impl Fn(Arch) -> bool) -> Arch {
+        match host {
+            Some(host) if DEFAULT_TO_ACCELERATED_HOST && accelerated(host) => host,
             _ => Arch::X86_64,
         }
     }
@@ -264,10 +270,19 @@ mod tests {
         assert_eq!(Arch::Aarch64.boot_file(), "BOOTAA64.EFI");
     }
 
+    /// The default on every kind of host: the host's own architecture
+    /// where QEMU runs it at full speed, x86-64 everywhere else.
     #[test]
-    fn the_default_stays_x86_until_switched() {
-        if !DEFAULT_TO_ACCELERATED_HOST {
-            assert_eq!(Arch::default_choice(), Arch::X86_64);
-        }
+    fn the_default_is_the_accelerated_host() {
+        let all = |_: Arch| true;
+        let none = |_: Arch| false;
+        // An Apple-silicon Mac (HVF), or arm64 Linux with KVM.
+        assert_eq!(Arch::default_on(Some(Arch::Aarch64), all), Arch::Aarch64);
+        // An x86 PC, with or without KVM.
+        assert_eq!(Arch::default_on(Some(Arch::X86_64), all), Arch::X86_64);
+        assert_eq!(Arch::default_on(Some(Arch::X86_64), none), Arch::X86_64);
+        // arm64 Linux without /dev/kvm, and any other host: emulated x86-64.
+        assert_eq!(Arch::default_on(Some(Arch::Aarch64), none), Arch::X86_64);
+        assert_eq!(Arch::default_on(None, all), Arch::X86_64);
     }
 }

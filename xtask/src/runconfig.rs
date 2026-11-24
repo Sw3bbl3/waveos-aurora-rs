@@ -123,14 +123,12 @@ pub fn available_on(arch: Arch, name: &str, value: &str) -> bool {
 /// display devices), with the label and help that go with them.
 fn on_arch(arch: Arch, name: &str, c: &Choice) -> (&'static str, &'static str, &'static [&'static str]) {
     match (arch, name, c.value) {
-        (Arch::Aarch64, "gpu", "std") => (
-            "Plain framebuffer",
-            "ramfb: the firmware's framebuffer, as the standard VGA is on a PC. The default.",
-            &["ramfb"],
-        ),
+        (Arch::Aarch64, "gpu", "std") => {
+            ("Plain framebuffer", "ramfb: the firmware's fixed 1024×768 framebuffer, a fallback.", &["ramfb"])
+        }
         (Arch::Aarch64, "gpu", "virtio") => (
             "virtio-gpu",
-            "virtio-gpu-pci, driven by WaveOS's native driver; follows the window size.",
+            "virtio-gpu-pci, driven by WaveOS's native driver; follows the window size. The default.",
             &["virtio-gpu-pci"],
         ),
         (Arch::Aarch64, "disk", "virtio") => {
@@ -211,7 +209,9 @@ impl RunConfig {
             action: Action::Run,
             arch: arch.name().into(),
             displays: vec![displays::DEFAULT_SIZE],
-            gpu: "std".into(),
+            // `virt`'s "std" is the firmware's fixed-size ramfb: Arm's
+            // display is virtio-gpu.
+            gpu: if arch == Arch::Aarch64 { "virtio" } else { "std" }.into(),
             smp: 4,
             memory_mib: 4096,
             // `virt` has no built-in SATA (see main.rs).
@@ -255,15 +255,22 @@ impl RunConfig {
     }
 
     /// The arguments after `cargo xtask run` (or `test`), in a fixed order,
-    /// leaving out everything at its default: what a person would type.
+    /// leaving out everything at its default: what a person would type on
+    /// this computer.
     pub fn args(&self) -> Vec<String> {
+        self.args_where(Arch::default_choice())
+    }
+
+    /// [`RunConfig::args`] on a computer whose default architecture is
+    /// `default` (`--arch` is left out for that one).
+    pub fn args_where(&self, default: Arch) -> Vec<String> {
         let d = RunConfig::default_for(self.arch());
         let mut a: Vec<String> = Vec::new();
         let opt = |a: &mut Vec<String>, name: &str, value: String| {
             a.push(name.into());
             a.push(value);
         };
-        if self.arch() != Arch::default_choice() {
+        if self.arch() != default {
             opt(&mut a, "--arch", self.arch.clone());
         }
         if self.action == Action::Test {
@@ -349,20 +356,26 @@ impl RunConfig {
 
     /// The command to type, quoted for a POSIX shell where needed.
     pub fn command_line(&self) -> String {
+        self.command_line_where(Arch::default_choice())
+    }
+
+    /// [`RunConfig::command_line`] where `default` is the default architecture.
+    pub fn command_line_where(&self, default: Arch) -> String {
         let mut words = vec![String::from("cargo xtask"), self.subcommand().into()];
-        words.extend(self.args().iter().map(|a| shell_quote(a)));
+        words.extend(self.args_where(default).iter().map(|a| shell_quote(a)));
         words.join(" ")
     }
 
-    /// Reads `cargo xtask run|test` arguments (the inverse of [`RunConfig::args`]),
-    /// which the tests use to check the two agree.
+    /// Reads `cargo xtask run|test` arguments (the inverse of
+    /// [`RunConfig::args_where`]) on a computer whose default architecture
+    /// is `default`, which the tests use to check the two agree.
     #[cfg(test)]
-    pub fn parse(subcommand: &str, args: &[String]) -> Result<RunConfig, String> {
+    pub fn parse(subcommand: &str, args: &[String], default: Arch) -> Result<RunConfig, String> {
         let arch = match args.iter().position(|a| a == "--arch") {
             Some(i) => {
                 Arch::parse(args.get(i + 1).map(String::as_str).unwrap_or("")).ok_or("--arch x86_64 or aarch64")?
             }
-            None => Arch::default_choice(),
+            None => default,
         };
         let mut c = RunConfig {
             action: match subcommand {
@@ -430,9 +443,6 @@ impl RunConfig {
             if !available_on(arch, name, v) {
                 return Err(format!("{v} isn't on the {} machine", arch.name()));
             }
-        }
-        if arch == Arch::Aarch64 && self.action == Action::Test {
-            return Err("the kernel tests run on x86_64 only, for now".into());
         }
         if self.displays.is_empty() || self.displays.len() > MAX_DISPLAYS {
             return Err(format!("between 1 and {MAX_DISPLAYS} displays"));
@@ -561,7 +571,11 @@ pub fn builtin_presets_for(arch: Arch) -> Vec<(&'static str, &'static str, RunCo
     let d = RunConfig::default_for(arch);
     if arch == Arch::Aarch64 {
         return vec![
-            ("Default", "cargo xtask run --arch aarch64: 4 CPUs, 4 GiB, one display, the disk on virtio.", d.clone()),
+            (
+                "Default",
+                "What cargo xtask run does on an Apple-silicon Mac: 4 CPUs, 4 GiB, one display on virtio-gpu.",
+                d.clone(),
+            ),
             (
                 "Low memory laptop",
                 "1 GiB and 2 CPUs: how WaveOS feels on a small machine.",
@@ -577,7 +591,17 @@ pub fn builtin_presets_for(arch: Arch) -> Vec<(&'static str, &'static str, RunCo
                 "NVMe, Intel e1000e and USB 3 on PCI Express, as an Arm workstation has.",
                 RunConfig { disk: "nvme".into(), net: "e1000e".into(), usb: "xhci".into(), ..d.clone() },
             ),
-            ("Headless", "No window and no sound: the serial log only.", RunConfig { headless: true, ..d }),
+            ("Headless", "No window and no sound: the serial log only.", RunConfig { headless: true, ..d.clone() }),
+            (
+                "Plain framebuffer",
+                "The firmware's fixed 1024×768 ramfb instead of virtio-gpu: the fallback display.",
+                RunConfig { gpu: "std".into(), ..d.clone() },
+            ),
+            (
+                "Kernel tests",
+                "cargo xtask test: the kernel self-tests on a fresh test disk, booted twice.",
+                RunConfig { action: Action::Test, ..d },
+            ),
         ];
     }
     vec![
@@ -694,9 +718,10 @@ pub fn options_json(caps: &dyn Fn(Arch) -> QemuCaps) -> Value {
             "battery": table("battery", BATTERIES),
             "default": RunConfig::default_for(a).to_json(),
             "qemu": {"found": caps.found, "version": caps.version, "binary": a.qemu_binary()},
-            // No Linux packages for Arm yet, and no kernel self-tests.
-            "linux_root": a == Arch::X86_64,
-            "tests": a == Arch::X86_64,
+            // Both have Linux packages (Debian's amd64 or arm64) and the
+            // kernel self-tests.
+            "linux_root": true,
+            "tests": true,
         })
     };
     // The page starts on the architecture this launcher was started for.
@@ -733,11 +758,35 @@ mod tests {
         s.split_whitespace().map(String::from).collect()
     }
 
+    /// x86-64's defaults: the tests below state their architecture, so
+    /// they mean the same on an x86 PC and on an Apple-silicon Mac.
+    fn x86() -> RunConfig {
+        RunConfig::default_for(Arch::X86_64)
+    }
+
     #[test]
     fn defaults_give_the_bare_command() {
-        let c = RunConfig::default();
-        assert!(c.args().is_empty());
-        assert_eq!(c.command_line(), "cargo xtask run");
+        for a in arch::ALL {
+            let c = RunConfig::default_for(a);
+            assert!(c.args_where(a).is_empty());
+            assert_eq!(c.command_line_where(a), "cargo xtask run");
+            // On a computer whose default is the other one, `--arch` says which.
+            let other = if a == Arch::X86_64 { Arch::Aarch64 } else { Arch::X86_64 };
+            assert_eq!(c.command_line_where(other), format!("cargo xtask run --arch {}", a.name()));
+        }
+        assert!(RunConfig::default().args().is_empty());
+    }
+
+    #[test]
+    fn arm_shows_virtio_gpu_and_tests() {
+        let c = RunConfig::default_for(Arch::Aarch64);
+        assert_eq!((c.gpu.as_str(), c.disk.as_str()), ("virtio", "virtio"));
+        let ramfb = RunConfig { gpu: "std".into(), ..c.clone() };
+        assert_eq!(ramfb.command_line_where(Arch::Aarch64), "cargo xtask run --gpu std");
+        let t = RunConfig { action: Action::Test, ..c };
+        assert!(t.validate().is_ok());
+        assert_eq!(t.command_line_where(Arch::Aarch64), "cargo xtask test");
+        assert_eq!(t.command_line_where(Arch::X86_64), "cargo xtask test --arch aarch64");
     }
 
     #[test]
@@ -745,53 +794,41 @@ mod tests {
         let cases: &[(&str, RunConfig)] = &[
             (
                 "--smp 2 --memory-mib 1024 --battery",
-                RunConfig { smp: 2, memory_mib: 1024, battery: "sim".into(), ..Default::default() },
+                RunConfig { smp: 2, memory_mib: 1024, battery: "sim".into(), ..x86() },
             ),
-            (
-                "--displays 2 --gpu virtio",
-                RunConfig { displays: vec![(1920, 1080); 2], gpu: "virtio".into(), ..Default::default() },
-            ),
-            (
-                "--displays 3 --resolution 2560x1440",
-                RunConfig { displays: vec![(2560, 1440); 3], ..Default::default() },
-            ),
+            ("--displays 2 --gpu virtio", RunConfig { displays: vec![(1920, 1080); 2], gpu: "virtio".into(), ..x86() }),
+            ("--displays 3 --resolution 2560x1440", RunConfig { displays: vec![(2560, 1440); 3], ..x86() }),
             (
                 "--displays 2 --resolution 1920x1080,1280x800",
-                RunConfig { displays: vec![(1920, 1080), (1280, 800)], ..Default::default() },
+                RunConfig { displays: vec![(1920, 1080), (1280, 800)], ..x86() },
             ),
             (
                 "--resolution 2560x1600 --gpu virtio",
-                RunConfig { displays: vec![(2560, 1600)], gpu: "virtio".into(), ..Default::default() },
+                RunConfig { displays: vec![(2560, 1600)], gpu: "virtio".into(), ..x86() },
             ),
-            ("--disk nvme --net e1000e", RunConfig { disk: "nvme".into(), net: "e1000e".into(), ..Default::default() }),
-            ("--fresh-disk --no-linux-root", RunConfig { fresh_disk: true, linux: false, ..Default::default() }),
+            ("--disk nvme --net e1000e", RunConfig { disk: "nvme".into(), net: "e1000e".into(), ..x86() }),
+            ("--fresh-disk --no-linux-root", RunConfig { fresh_disk: true, linux: false, ..x86() }),
             (
                 "--usb ehci-ohci --usb-stick --wifi-sim --no-sound",
-                RunConfig {
-                    usb: "ehci-ohci".into(),
-                    usb_stick: true,
-                    wifi_sim: true,
-                    sound: false,
-                    ..Default::default()
-                },
+                RunConfig { usb: "ehci-ohci".into(), usb_stick: true, wifi_sim: true, sound: false, ..x86() },
             ),
             (
                 "--battery=host --no-keyboard-capture --monitor",
-                RunConfig { battery: "host".into(), keyboard_capture: false, monitor: true, ..Default::default() },
+                RunConfig { battery: "host".into(), keyboard_capture: false, monitor: true, ..x86() },
             ),
             (
                 "--debug --gdb --headless --no-build",
-                RunConfig { debug: true, gdb: true, headless: true, build: false, ..Default::default() },
+                RunConfig { debug: true, gdb: true, headless: true, build: false, ..x86() },
             ),
             (
                 "--disk-image target/x.img --developer",
-                RunConfig { disk_image: Some("target/x.img".into()), developer_disk: true, ..Default::default() },
+                RunConfig { disk_image: Some("target/x.img".into()), developer_disk: true, ..x86() },
             ),
         ];
         for (typed, config) in cases {
-            assert_eq!(config.args(), words(typed), "for {typed}");
-            assert_eq!(&RunConfig::parse("run", &words(typed)).unwrap(), config, "parsing {typed}");
-            assert_eq!(config.command_line(), format!("cargo xtask run {typed}"));
+            assert_eq!(config.args_where(Arch::X86_64), words(typed), "for {typed}");
+            assert_eq!(&RunConfig::parse("run", &words(typed), Arch::X86_64).unwrap(), config, "parsing {typed}");
+            assert_eq!(config.command_line_where(Arch::X86_64), format!("cargo xtask run {typed}"));
         }
     }
 
@@ -804,9 +841,9 @@ mod tests {
             gpu: "virtio".into(),
             monitor: true,
             displays: vec![(1920, 1080); 2],
-            ..Default::default()
+            ..x86()
         };
-        assert_eq!(c.command_line(), "cargo xtask test --disk virtio --smp 1 --gpu virtio");
+        assert_eq!(c.command_line_where(Arch::X86_64), "cargo xtask test --disk virtio --smp 1 --gpu virtio");
     }
 
     #[test]
@@ -820,14 +857,14 @@ mod tests {
             fresh_disk: true,
             battery: "host".into(),
             disk_image: Some("a b.img".into()),
-            ..Default::default()
+            ..x86()
         };
         let text = serde_json::to_string(&everything.to_json()).unwrap();
         assert_eq!(RunConfig::from_json(&serde_json::from_str(&text).unwrap()).unwrap(), everything);
         // An old file with only some keys.
         let partial = RunConfig::from_json(&json!({"smp": 2})).unwrap();
         assert_eq!(partial, RunConfig { smp: 2, ..RunConfig::default_for(Arch::X86_64) });
-        assert_eq!(everything.command_line().matches("'a b.img'").count(), 1);
+        assert_eq!(everything.command_line_where(Arch::X86_64).matches("'a b.img'").count(), 1);
     }
 
     #[test]
@@ -836,8 +873,8 @@ mod tests {
         assert!(RunConfig::from_json(&json!({"displays": []})).is_err());
         assert!(RunConfig::from_json(&json!({"displays": vec!["1920x1080"; 5]})).is_err());
         assert!(RunConfig::from_json(&json!({"displays": ["20x20"]})).is_err());
-        assert!(RunConfig::parse("run", &words("--disk floppy")).is_err());
-        assert!(RunConfig::parse("run", &words("--frobnicate")).is_err());
+        assert!(RunConfig::parse("run", &words("--disk floppy"), Arch::X86_64).is_err());
+        assert!(RunConfig::parse("run", &words("--frobnicate"), Arch::X86_64).is_err());
     }
 
     #[test]
@@ -867,24 +904,24 @@ mod tests {
     /// machine has, and the page's per-processor tables.
     #[test]
     fn each_processor_has_its_own_machine() {
-        let other = arch::ALL.into_iter().find(|a| *a != Arch::default_choice()).unwrap();
-        let c = RunConfig::default_for(other);
-        assert_eq!(c.command_line(), format!("cargo xtask run --arch {}", other.name()));
-        assert_eq!(RunConfig::parse("run", &words(&format!("--arch {}", other.name()))).unwrap(), c);
+        for (here, other) in [(Arch::X86_64, Arch::Aarch64), (Arch::Aarch64, Arch::X86_64)] {
+            let c = RunConfig::default_for(other);
+            assert_eq!(c.command_line_where(here), format!("cargo xtask run --arch {}", other.name()));
+            let typed = words(&format!("--arch {}", other.name()));
+            assert_eq!(RunConfig::parse("run", &typed, here).unwrap(), c);
+        }
         let arm = RunConfig::default_for(Arch::Aarch64);
         assert_eq!(arm.disk, "virtio");
         let with_ahci = RunConfig { disk: "ahci".into(), ..arm.clone() };
-        assert!(with_ahci.args().windows(2).any(|w| w[0] == "--disk" && w[1] == "ahci"));
+        assert!(with_ahci.args_where(Arch::Aarch64).windows(2).any(|w| w[0] == "--disk" && w[1] == "ahci"));
         assert!(RunConfig { battery: "sim".into(), ..arm.clone() }.validate().is_err());
         assert!(RunConfig { gpu: "virtio-linux".into(), ..arm.clone() }.validate().is_err());
-        assert!(RunConfig { action: Action::Test, ..arm.clone() }.validate().is_err());
+        assert!(RunConfig { action: Action::Test, ..arm.clone() }.validate().is_ok());
         for (name, _, p) in builtin_presets() {
             assert!(p.validate().is_ok(), "{name} for {}", p.arch);
             assert_eq!(RunConfig::from_json(&p.to_json()).unwrap(), p);
         }
-        assert!(builtin_presets_for(Arch::Aarch64)
-            .iter()
-            .all(|(_, _, p)| p.battery == "none" && p.action == Action::Run));
+        assert!(builtin_presets_for(Arch::Aarch64).iter().all(|(_, _, p)| p.battery == "none"));
         let o = options_json(&|_| QemuCaps::default());
         let arm_gpu = &o["by_arch"]["aarch64"]["gpu"];
         assert_eq!(arm_gpu[0]["label"], "Plain framebuffer");

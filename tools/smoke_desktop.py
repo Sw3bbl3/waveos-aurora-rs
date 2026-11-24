@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Use the desktop the way a person does, over two boots, and check each step.
 
-  AURORA_SESSION_DIR=target/sd tools/smoke_desktop.py OUTDIR [--arch aarch64] [--smp N] [--pace F] [--keep-disk]
+  AURORA_SESSION_DIR=target/sd tools/smoke_desktop.py OUTDIR [--arch ARCH] [--gpu GPU] [--smp N] [--pace F] [--keep-disk]
+
+Without --arch and --gpu it boots what `cargo xtask run` boots on this
+computer (on an Apple-silicon Mac: aarch64 on virtio-gpu); `--gpu std` is
+the plain framebuffer (ramfb on aarch64).
 
 Builds nothing: run `cargo xtask build [--arch ...]` first. It starts the
 guest itself (`cargo xtask run --no-build --headless` on a fresh disk,
@@ -55,9 +59,13 @@ class Smoke:
     def start(self, fresh):
         self.boot += 1
         self.log = os.path.join(self.a.out, f"boot{self.boot}.log")
-        cmd = ["cargo", "xtask", "run", "--arch", self.a.arch, "--no-build", "--headless", "--no-open",
+        cmd = ["cargo", "xtask", "run", "--no-build", "--headless", "--no-open",
                "--no-sound", "--no-keyboard-capture", "--no-linux-root", "--smp", str(self.a.smp),
                "--disk-image", self.disk]
+        if self.a.arch:
+            cmd[3:3] = ["--arch", self.a.arch]
+        if self.a.gpu:
+            cmd += ["--gpu", self.a.gpu]
         if fresh:
             cmd.append("--fresh-disk")
         print(f"boot {self.boot}: {' '.join(cmd)}")
@@ -280,30 +288,28 @@ class Smoke:
         to a layout instead, so the second one stops short of where it began.)"""
         w, h, a = self.screen()
         stride = w * 3
-        # The window's top edge: the first dark row under the top bar, in the middle column.
         x = w // 2
-        top = next((y for y in range(56, h // 2)
-                    if max(a[y * stride + x * 3: y * stride + x * 3 + 3]) < 70), None)
+
+        def top_edge(px):
+            """The window's top edge: the first dark row under the top bar, in the middle column."""
+            return next((y for y in range(56, h // 2)
+                         if max(px[y * stride + x * 3: y * stride + x * 3 + 3]) < 70), None)
+
+        top = top_edge(a)
         if top is None:
             self.fail("no window found to drag")
             return
-
-        def strip(px, y0):
-            return [px[(y0 + r) * stride + c * 3 + k] for r in range(-6, 7) for c in range(16, w * 3 // 4, 2) for k in range(3)]
-
-        def diff(s, t):
-            return sum(abs(p - q) for p, q in zip(s, t)) / len(s)
-
+        # Where the top edge must be after each drag (by the bar's own
+        # position, so the check means the same at any screen size).
         title_y, dy = top + 16, 36
-        before = strip(a, title_y)
         for k, (y0, y1) in enumerate(((title_y, title_y + dy), (title_y + dy, title_y + dy - 20))):
             self.drag(w // 3, y0, w // 3, y1)
             self.nap(0.8)
             self.shot(f"08-dragged-{k}")
             _, _, b = self.screen()
-            moved, stayed = diff(before, strip(b, y1)), diff(before, strip(b, y0))
-            print(f"  drag {k}: the title bar's strip differs by {moved:.1f} at the pointer, {stayed:.1f} where it was")
-            if not (moved < 8 and stayed > moved + 10):
+            now, want = top_edge(b), top + (y1 - title_y)
+            print(f"  drag {k}: the window's top edge is at {now}, expected {want}")
+            if now is None or abs(now - want) > 2:
                 self.fail("the window follows a title-bar drag")
                 return
         print("  ok: the window follows title-bar drags")
@@ -337,7 +343,8 @@ class Smoke:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("out")
-    ap.add_argument("--arch", default="aarch64")
+    ap.add_argument("--arch", default=None, help="default: this computer's (what `cargo xtask run` picks)")
+    ap.add_argument("--gpu", default=None, help="default: the architecture's (virtio on aarch64, std on x86_64)")
     ap.add_argument("--smp", default=4, type=int)
     ap.add_argument("--keep-disk", action="store_true")
     ap.add_argument("--pace", default=1.0, type=float,

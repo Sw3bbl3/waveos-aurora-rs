@@ -623,6 +623,15 @@ static void machine(void) {
     CHECK(pipe(fds) == 0 && write(fds[1], "hi", 2) == 2, "pipe");
     char got[2];
     CHECK(read(fds[0], got, 2) == 2 && got[0] == 'h', "pipe read");
+    // The scheduling attributes (SCHED_OTHER at nice 0) and the memory
+    // policy (the default, one node), as glib and WebKit ask.
+    unsigned int attr[14];
+    memset(attr, 0xff, sizeof attr);
+    CHECK(syscall(SYS_sched_getattr, 0, attr, sizeof attr, 0) == 0 && attr[0] == 56 && attr[1] == 0, "sched_getattr");
+    int policy = -1;
+    unsigned long nodes = ~0UL;
+    CHECK(syscall(SYS_get_mempolicy, &policy, &nodes, 64, 0, 0) == 0 && policy == 0 && nodes == 0, "get_mempolicy");
+    CHECK(syscall(SYS_get_mempolicy, 0, &nodes, 64, 0, 4) == 0 && nodes == 1, "get_mempolicy: the allowed nodes");
     printf("PASS machine (%s %s)\n", u.sysname, u.release);
 }
 
