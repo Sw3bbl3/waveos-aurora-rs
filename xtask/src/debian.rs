@@ -207,12 +207,38 @@ pub fn build(packages: &[String]) -> PathBuf {
     build_into(&root_dir(), packages)
 }
 
+/// What fetching the packages will download.
+fn download_note(bytes: u64) -> String {
+    if bytes == 0 {
+        String::from("all of them already downloaded")
+    } else {
+        format!(
+            "downloading {} MiB from snapshot.debian.org, once (--no-linux-root leaves the Linux programs off)",
+            bytes.div_ceil(1 << 20)
+        )
+    }
+}
+
 /// Builds a Linux root in `out` from `packages` (and what they need).
 pub fn build_into(out: &Path, packages: &[String]) -> PathBuf {
     let idx = index();
     let list = resolve(&idx, packages);
     let size: u64 = list.iter().map(|p| p.get("Installed-Size").parse::<u64>().unwrap_or(0)).sum();
-    println!("Linux root: {} Debian packages, {} MiB installed", list.len(), size / 1024);
+    // What has to come over the network first (downloads stay in
+    // target/downloads, so only the first time).
+    let cache = root().join("target/downloads");
+    let missing: u64 = list
+        .iter()
+        .filter(|p| !cache.join(p.get("Filename").rsplit('/').next().unwrap_or("")).exists())
+        .map(|p| p.get("Size").parse::<u64>().unwrap_or(0))
+        .sum();
+    println!(
+        "Linux root: {} Debian {} packages, {} MiB installed; {}",
+        list.len(),
+        crate::arch::current().debian(),
+        size / 1024,
+        download_note(missing)
+    );
     let out = out.to_path_buf();
     let _ = fs::remove_dir_all(&out);
     fs::create_dir_all(&out).unwrap();

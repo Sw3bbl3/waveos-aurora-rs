@@ -84,7 +84,7 @@ The **System Explorer** is a live map of the whole OS. Watch it boot, see each C
 
 ## Get started
 
-You need a Mac (Apple silicon or Intel) or a Linux PC, [rustup](https://rustup.rs) and QEMU (`brew install qemu`, or `sudo apt install qemu-system-x86 ovmf`).
+You need a Mac (Apple silicon or Intel) or a Linux PC, [rustup](https://rustup.rs) and QEMU (`brew install qemu`, or `sudo apt install qemu-system-x86 ovmf`, plus `qemu-system-arm qemu-efi-aarch64` on an Arm PC).
 
 ```sh
 git clone https://github.com/Sw3bbl3/waveos-aurora-rs.git
@@ -96,7 +96,9 @@ make run
 
 A minute later, you're at the desktop. Add `--monitor` to open the System Explorer alongside it.
 
-**On an Apple-silicon Mac,** WaveOS also builds for Arm: `make run ARCH=aarch64` (or choose **Arm** under Processor in the launcher) runs it under Hypervisor.framework at the processor's own speed, where the x86-64 build is emulated instruction by instruction. The Arm port is new: today it boots to the kernel's scheduler, and user programs, the GIC and devices are on their way ([porting.md](docs/developer/porting.md)). Your files can come along: `cargo xtask migrate-disk --arch aarch64` makes an Arm disk with everything on your x86 one, which it only reads ([BUILDING.md](docs/BUILDING.md#two-architectures-x86_64-and-aarch64-port-in-progress)). To try a real PC, see [HARDWARE.md](docs/HARDWARE.md); for every build command, see [FEATURES.md](docs/FEATURES.md#build-commands).
+**Which processor.** WaveOS runs on 64-bit Arm and on x86-64, and by default on your computer's own where QEMU can run it at full speed: on an **Apple-silicon Mac** that is Arm, under Hypervisor.framework, many times faster than the x86-64 build, which QEMU emulates instruction by instruction there. On an x86 PC it is x86-64. The other one is always a choice away: `make run ARCH=x86_64` (or `ARCH=aarch64`), `cargo xtask run --arch x86_64`, or **Processor** in the launcher.
+
+**Each processor has its own disk** (`target/waveos-aurora-aarch64.img` for Arm, `target/waveos-aurora.img` for x86-64). The first Arm run makes a new one and never touches the x86 disk; if you have used WaveOS on x86 before, it says so, and `cargo xtask migrate-disk --arch aarch64` copies your files across, reading the x86 disk only ([BUILDING.md](docs/BUILDING.md#two-architectures-x86_64-and-aarch64)). The first run also fetches Debian's packages for the Linux programs (Voyage, Firefox ESR…) and says how much it downloads (about 1.9 GB for Arm, once); `--no-linux-root` leaves them off. How the port works: [porting.md](docs/developer/porting.md). To try a real PC, see [HARDWARE.md](docs/HARDWARE.md); for every build command, see [FEATURES.md](docs/FEATURES.md#build-commands).
 
 ## Under the hood
 

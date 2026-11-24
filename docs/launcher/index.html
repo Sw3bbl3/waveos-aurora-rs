@@ -376,7 +376,7 @@ dialog .buttons { justify-content: flex-end; }
       <div class="row" data-run-only>
         <div class="label">Linux packages</div>
         <div class="control"><label class="switch"><input type="checkbox" id="linux"><span class="track"></span><span>Voyage, Firefox, bash, Python</span></label></div>
-        <div class="help">Fetched once into target/linux-root and put on the disk as /Linux. Off: a smaller disk, NetSurf as the browser.</div>
+        <div class="help">Debian's packages for this processor, fetched once (about 1.9 GB for Arm, 1.3 GB for x86-64) into target/linux-root (-aarch64 for Arm) and put on the disk as /Linux. Off: a smaller disk, NetSurf as the browser.</div>
       </div>
       <div class="row" data-run-only>
         <div class="label">Developer disk</div>
@@ -590,7 +590,7 @@ function render() {
   seg($("action"), [{ value: "run", label: "Desktop" }, { value: "test", label: "Kernel tests", available: O.tests }], config.action, (v) => set({ action: v }));
   $("action-help").textContent = isTest()
     ? "cargo xtask test: the kernel self-tests on a fresh test disk (512 MiB, no window), booted twice. Your own disk isn't touched."
-    : "cargo xtask run: WaveOS on your persistent disk, " + diskPath() + ". Files saved inside WaveOS are kept.";
+    : "cargo xtask run: WaveOS on your persistent disk, " + diskPath() + ". Files saved inside WaveOS are kept. Each processor has its own disk.";
 
   // Displays
   const n = config.displays.length;

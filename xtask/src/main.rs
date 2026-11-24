@@ -19,8 +19,9 @@
 //!       --audio-wav PATH                  record guest audio to a WAV file
 //!       --usb-audio                       add a USB speaker (QEMU's usb-audio, isochronous; with --audio-wav
 //!                                         it records to PATH-usb.wav)
-//!       --gpu std|virtio|virtio-linux     display adapter (default std; virtio runs the native virtio-gpu
-//!                                         driver, virtio-linux the ported Linux driver)
+//!       --gpu std|virtio|virtio-linux     display adapter (default std on x86-64, virtio on aarch64; virtio
+//!                                         runs the native virtio-gpu driver, virtio-linux the ported Linux
+//!                                         driver; aarch64's std is the firmware's 1024x768 ramfb)
 //!       --resolution WxH[,WxH…]           virtio's starting screen size (default 1920x1080; WaveOS then
 //!                                         follows the QEMU window when you resize it); with several
 //!                                         displays, one size each (std: the extra displays' EDID size)
@@ -148,7 +149,10 @@ fn main() {
         eprintln!("--net must be virtio, e1000, e1000e, igb, rtl8139, usb-ecm, usb-rndis or none");
         exit(2);
     }
-    let gpu = args.iter().position(|a| a == "--gpu").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("std");
+    // aarch64's "std" is the firmware's fixed-size ramfb: its display is virtio-gpu.
+    let default_gpu = if aarch64 { "virtio" } else { "std" };
+    let gpu =
+        args.iter().position(|a| a == "--gpu").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or(default_gpu);
     if !runconfig::accepts(runconfig::GPUS, gpu) {
         eprintln!("--gpu must be std, virtio or virtio-linux");
         exit(2);
@@ -368,6 +372,14 @@ fn main() {
                 .and_then(|i| args.get(i + 1))
                 .map(PathBuf::from)
                 .unwrap_or_else(|| arch.disk(&root(), if developer { "waveos-developer" } else { "waveos-aurora" }));
+            // The first run of an architecture: its own new disk. The
+            // other's disk (the files made before) is left alone; say where
+            // the files are and how to bring them across.
+            if !args.iter().any(|a| a == "--disk-image") {
+                if let Some(note) = other_disk_note(&root(), arch, developer) {
+                    eprintln!("{note}");
+                }
+            }
             // A disk for the other architecture: say so before building
             // (`refresh_esp` refuses it anyway).
             if !flag("--fresh-disk") {
@@ -645,6 +657,28 @@ fn linux_root() -> PathBuf {
     let dir = if complete { dir } else { debian::build(&pkgs_or_default(Vec::new())) };
     debian::waveos_settings(&dir);
     dir
+}
+
+/// When `arch` has no disk of its own yet (under `root`) and the other
+/// architecture has one: a note that the files are there, and how to copy
+/// them across. Nothing is read from or written to the other disk.
+fn other_disk_note(root: &Path, arch: arch::Arch, developer: bool) -> Option<String> {
+    let stem = if developer { "waveos-developer" } else { "waveos-aurora" };
+    let mine = arch.disk(root, stem);
+    let other = arch::ALL.into_iter().find(|a| *a != arch)?;
+    let theirs = other.disk(root, stem);
+    (!mine.exists() && theirs.exists()).then(|| {
+        format!(
+            "note: this is the first {} run, so it gets its own new disk, {}.\n      \
+             Your files are on the {} disk, {}, which is left as it is;\n      \
+             `cargo xtask migrate-disk --arch {}` copies them to the new one.",
+            arch.name(),
+            mine.display(),
+            other.name(),
+            theirs.display(),
+            arch.name()
+        )
+    })
 }
 
 /// [`linux_root`], or nothing (with a warning) when the packages can't be
@@ -2736,6 +2770,30 @@ fn exit_line(output: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod rtc_tests {
+    /// A first aarch64 run beside an x86 personal disk: a note, and the x86
+    /// disk untouched; nothing once the aarch64 disk exists, or with no
+    /// other disk.
+    #[test]
+    fn first_run_on_the_other_architecture() {
+        use super::arch::Arch;
+        let root = std::env::temp_dir().join(format!("waveos-disknote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        assert_eq!(super::other_disk_note(&root, Arch::Aarch64, false), None);
+        let x86 = Arch::X86_64.disk(&root, "waveos-aurora");
+        std::fs::write(&x86, b"x86 files").unwrap();
+        let note = super::other_disk_note(&root, Arch::Aarch64, false).unwrap();
+        assert!(note.contains("migrate-disk --arch aarch64") && note.contains("waveos-aurora.img"), "{note}");
+        assert!(note.contains("waveos-aurora-aarch64.img"), "{note}");
+        // The same from the other side, and for the developer disk.
+        assert_eq!(super::other_disk_note(&root, Arch::X86_64, false), None);
+        assert_eq!(super::other_disk_note(&root, Arch::Aarch64, true), None);
+        std::fs::write(Arch::Aarch64.disk(&root, "waveos-aurora"), b"arm").unwrap();
+        assert_eq!(super::other_disk_note(&root, Arch::Aarch64, false), None);
+        assert_eq!(std::fs::read(&x86).unwrap(), b"x86 files");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn aarch64_exit_line() {
         assert_eq!(super::exit_line("x\n[aurora-exit 16]\n"), Some(16));

@@ -2,6 +2,8 @@
 # Runs WaveOS Aurora, for those without make:
 #   ./waveos          open the launcher (same as `make run`)
 #   ./waveos quick    boot the configuration launched last (same as `make quick`)
+#   ./waveos --arch x86_64   the launcher for the other processor (by default
+#                     this computer's own where QEMU runs it at full speed)
 # Anything else goes to `cargo xtask launch`, e.g. ./waveos --no-open
 cd "$(dirname "$0")" || exit 1
 if ! command -v cargo >/dev/null 2>&1; then
