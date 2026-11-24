@@ -98,6 +98,20 @@ pub fn feature_names() -> Vec<&'static str> {
     .collect()
 }
 
+/// What user code may read, on the calling CPU (every CPU at start-up):
+/// the virtual count (CNTKCTL_EL1.EL0VCTEN: the vDSO's clocks read
+/// CNTVCT_EL0 directly) and nothing else of the timers; and a zero
+/// TPIDRRO_EL0 (the kernel keeps nothing there).
+pub fn init_el0() {
+    // SAFETY: EL0's view of the generic timer and a register the kernel
+    // does not use.
+    unsafe {
+        regs::write!("cntkctl_el1", 1 << 1);
+        regs::write!("tpidrro_el0", 0u64);
+    }
+    regs::isb();
+}
+
 /// MIDR_EL1's implementer, variant, part number and revision.
 pub fn midr_fields() -> (u64, u64, u64, u64) {
     let m = midr();

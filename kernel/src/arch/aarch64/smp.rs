@@ -167,6 +167,7 @@ extern "C" fn ap_main(cpu: u64) -> ! {
     unsafe { super::mmu::load_root(crate::mm::vmm::kernel_pml4()) };
     super::trap::init();
     super::fpu::init();
+    super::cpu::init_el0();
     super::protect::init();
     percpu::init(cpu);
     super::gic::init_cpu(cpu);

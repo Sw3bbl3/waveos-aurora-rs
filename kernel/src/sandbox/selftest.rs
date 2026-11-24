@@ -313,9 +313,11 @@ pub fn programs() {
     crate::gui::clipboard::set(aurora_abi::clip::FILES, pasted.as_bytes()).unwrap();
     let mut started = false;
     let (code, out) = run(sbx, &["sbxtest", "grants"], sandbox("org.waveos.test.sbx", 0), None, 60_000, &mut |pid, _| {
+        // In front throughout: a window of an earlier program going away
+        // meanwhile would otherwise take the focus back to nothing.
+        crate::gui::server::set_frontmost_pid(pid);
         if !started {
             started = true;
-            crate::gui::server::set_frontmost_pid(pid);
             crate::gui::dnd::deliver(pid, format!("{ORACLE}/dropped.txt").into_bytes(), true);
         }
     });

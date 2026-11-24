@@ -38,6 +38,7 @@ pub fn early_init() {
     percpu::set_this(0);
     trap::init();
     fpu::init();
+    cpu::init_el0();
     protect::init();
 }
 
