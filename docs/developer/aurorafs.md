@@ -188,9 +188,9 @@ afford to lose without a copy.
   (orphans aside), checks that every file the guest synced is there and
   whole, and lets the next start mount the cut disk (whose own check must
   find nothing but orphans). `AURORA_POWERCUT_SEED` repeats a run,
-  `--disk ahci|virtio|nvme` picks the controller. It has been run on
-  x86-64 guests; the library, the stress and the checks have nothing
-  architecture-specific (the host harness runs natively on arm64 Macs).
+  `--disk ahci|virtio|nvme` picks the controller and `--arch aarch64`
+  runs it on arm64 (virtio only; with HVF on an arm64 Mac). Nothing in
+  the library, the stress or the checks is architecture-specific.
 
 ## Bugs this found (0.8.1)
 
