@@ -91,9 +91,10 @@ impl TrapFrame {
     }
 
     /// A frame that starts a program at `pc` with stack `sp` (EL0t,
-    /// interrupts unmasked).
+    /// interrupts unmasked). Its kind is a user one: the exit path loads
+    /// SP_EL0 from it only then (Linux `execve` returns through it).
     pub fn user_start(pc: u64, sp: u64) -> TrapFrame {
-        TrapFrame { pc, sp, ..Default::default() }
+        TrapFrame { pc, sp, kind: KIND_USER, ..Default::default() }
     }
 }
 
