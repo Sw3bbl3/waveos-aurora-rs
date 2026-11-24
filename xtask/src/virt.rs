@@ -43,9 +43,29 @@ use std::process::{exit, Command};
 
 /// The machine and its options.
 pub const MACHINE: &str = "virt,gic-version=3,msi=gicv2m,highmem=on,virtualization=off";
+/// The same for a QEMU too old to choose the MSI controller (before the
+/// `msi` property; Ubuntu 24.04's 8.2): there TCG gives the GICv3 an ITS.
+pub const MACHINE_WITHOUT_MSI_CHOICE: &str = "virt,gic-version=3,highmem=on,virtualization=off";
+
+/// [`MACHINE`], or what this QEMU can do of it (it is asked once).
+fn machine() -> &'static str {
+    let help = Command::new(Arch::Aarch64.qemu_binary())
+        .args(["-machine", "virt,help"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    if help.lines().any(|l| l.trim_start().starts_with("msi=")) {
+        MACHINE
+    } else {
+        eprintln!("note: this QEMU can't choose the MSI controller (msi=gicv2m); the guest gets QEMU's default");
+        MACHINE_WITHOUT_MSI_CHOICE
+    }
+}
 
 /// What [`args`] needs from the host, gathered once (and made up in tests).
 pub struct Env {
+    /// `-machine`.
+    pub machine: &'static str,
     /// EDK2's code flash and this session's variable store.
     pub code: PathBuf,
     pub vars: PathBuf,
@@ -143,7 +163,7 @@ pub fn qemu(img: &Path, opts: &RunOpts) -> Command {
     if opts.battery || opts.host_battery.is_some() {
         eprintln!("warning: the simulated battery is x86-only for now (an ACPI table for the q35 machine); left out");
     }
-    let env = Env { code, vars, monitor, qmp, accels, cpu, macos, rtc: rtc_arg(img) };
+    let env = Env { machine: machine(), code, vars, monitor, qmp, accels, cpu, macos, rtc: rtc_arg(img) };
     let mut cmd = Command::new(Arch::Aarch64.qemu_binary());
     cmd.args(args(img, opts, &env));
     if !opts.headless {
@@ -156,7 +176,7 @@ pub fn qemu(img: &Path, opts: &RunOpts) -> Command {
 pub fn args(img: &Path, opts: &RunOpts, env: &Env) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
     let mut push = |items: &[&str]| a.extend(items.iter().map(|s| s.to_string()));
-    push(&["-machine", MACHINE, "-cpu", &env.cpu]);
+    push(&["-machine", env.machine, "-cpu", &env.cpu]);
     for accel in &env.accels {
         push(&["-accel", accel]);
     }
@@ -267,6 +287,7 @@ mod tests {
     fn env(accelerated: bool, macos: bool) -> Env {
         let (accels, cpu) = accel_and_cpu(accelerated, macos);
         Env {
+            machine: MACHINE,
             code: "/fw/code.fd".into(),
             vars: "/s/aavmf-vars.fd".into(),
             monitor: "/s/m.sock".into(),

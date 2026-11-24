@@ -87,6 +87,46 @@ impl Arch {
         }
     }
 
+    /// Debian's name for the architecture (`dists/…/binary-<this>`).
+    pub fn debian(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "amd64",
+            Arch::Aarch64 => "arm64",
+        }
+    }
+
+    /// The multiarch triplet: Debian's library folders (`/usr/lib/<this>`).
+    pub fn multiarch(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "x86_64-linux-gnu",
+            Arch::Aarch64 => "aarch64-linux-gnu",
+        }
+    }
+
+    /// musl's triplet (Debian's `musl-dev` folders, clang's `--target`).
+    pub fn musl(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "x86_64-linux-musl",
+            Arch::Aarch64 => "aarch64-linux-musl",
+        }
+    }
+
+    /// glibc's dynamic loader (`PT_INTERP` of Debian's programs).
+    pub fn linux_loader(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "/lib64/ld-linux-x86-64.so.2",
+            Arch::Aarch64 => "/lib/ld-linux-aarch64.so.1",
+        }
+    }
+
+    /// The Rust target of the repository's own Linux programs.
+    pub fn linux_musl_target(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "x86_64-unknown-linux-musl",
+            Arch::Aarch64 => "aarch64-unknown-linux-musl",
+        }
+    }
+
     /// The removable-media boot file UEFI firmware starts (`\EFI\BOOT\…`).
     pub fn boot_file(self) -> &'static str {
         match self {

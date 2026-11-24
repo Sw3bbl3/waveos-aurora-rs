@@ -36,7 +36,12 @@
 //!                                         as /Linux, and on older disks when there's room
 //!       --linux-root                      a fresh disk with the Linux packages (stops if they can't be fetched)
 //!   cargo xtask linux-root [PKG...]     fetch Debian packages (default: WebKitGTK, Firefox ESR, bash, coreutils,
-//!                                         Python) and their dependencies into target/linux-root
+//!                                         Python) and their dependencies into target/linux-root (with --arch
+//!                                         aarch64: Debian's arm64 ones, into target/linux-root-aarch64; --base:
+//!                                         only libc, BusyBox and GNU Hello)
+//!   cargo xtask userland                user space alone
+//!   cargo xtask linux-programs          the Linux programs of the system image alone (BusyBox, the C tests…)
+//!   cargo xtask migrate-disk [--from DISK] [--to DISK]  a new disk for --arch with another one's files
 //!   cargo xtask image [--no-linux-root] build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
@@ -68,6 +73,7 @@ mod launcher;
 mod libdrm;
 mod linux;
 mod mesa;
+mod migrate;
 mod monitor;
 mod netsurf;
 mod package;
@@ -282,6 +288,45 @@ fn main() {
         Some("build") => {
             build(profile, false);
         }
+        Some("migrate-disk") => {
+            // A disk for this architecture with the files of one for the
+            // other (see migrate.rs). The source is only read.
+            let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(PathBuf::from);
+            let other = arch::ALL.into_iter().find(|a| *a != arch).expect("two architectures");
+            let from = value("--from").unwrap_or_else(|| other.disk(&root(), "waveos-aurora"));
+            let to = value("--to").unwrap_or_else(|| arch.disk(&root(), "waveos-aurora"));
+            if !from.exists() {
+                eprintln!("{} isn't there; name the disk to migrate with --from", from.display());
+                exit(2);
+            }
+            let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
+            println!("migrating {} to a new {} disk, {}", from.display(), arch.name(), to.display());
+            match migrate::migrate(&from, &esp, &to, arch) {
+                Ok(r) => {
+                    println!("wrote {} (fsck clean); {} was only read", to.display(), from.display());
+                    for (root, id) in &r.moved_apps {
+                        println!("  app moved: {id} ({root})");
+                    }
+                    for (root, id, version, name, a) in &r.reinstall {
+                        println!("  to reinstall: {name} {version} ({id}, {a}; listed in {root}/.reinstall)");
+                    }
+                    for l in &r.left_out {
+                        println!("  left out: {l}");
+                    }
+                    println!("boot it with: cargo xtask run --arch {}", arch.name());
+                }
+                Err(e) => {
+                    eprintln!("migrate-disk: {e}");
+                    exit(1);
+                }
+            }
+        }
+        Some("linux-programs") => {
+            // The Linux programs of the system image alone, for `--arch`.
+            for (dest, src) in linux::programs() {
+                println!("{dest:<32} {}", src.display());
+            }
+        }
         Some("userland") => {
             // User space alone (`--arch` picks which), e.g. while the
             // kernel for an architecture is still being brought up.
@@ -313,10 +358,8 @@ fn main() {
             let size = number("--disk-size-mib", if developer { 8192 } else { 256 }, 128, 65536) * 1024 * 1024;
             if !flag("--no-refresh") {
                 // Voyage, Firefox and the other Linux programs live on the disk, in /Linux.
-                let linux = if aarch64 {
-                    // Debian's amd64 packages: no use to an ARM disk.
-                    None
-                } else if flag("--linux-root") {
+                // (Debian's packages for the build's architecture.)
+                let linux = if flag("--linux-root") {
                     Some(linux_root())
                 } else if flag("--no-linux-root") {
                     None
@@ -410,14 +453,23 @@ fn main() {
             exit(status.code().unwrap_or(1));
         }
         Some("linux-root") => {
-            let pkgs: Vec<String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).cloned().collect();
+            let mut pkgs: Vec<String> = args
+                .iter()
+                .skip(1)
+                .filter(|a| !a.starts_with("--") && a.as_str() != arch.name())
+                .cloned()
+                .collect();
+            // `--base`: the smallest root (libc, BusyBox, GNU Hello).
+            if flag("--base") {
+                pkgs.extend(debian::BASE_PACKAGES.iter().map(|s| s.to_string()));
+            }
             let dir = debian::build(&pkgs_or_default(pkgs));
             println!("wrote {} ({} MiB)", dir.display(), dir_size(&dir) >> 20);
         }
         Some("image") => {
             let esp = build(profile, false);
             let out = arch.disk(&root(), "waveos-aurora-usb");
-            let linux = if flag("--no-linux-root") || aarch64 { None } else { optional_linux_root() };
+            let linux = if flag("--no-linux-root") { None } else { optional_linux_root() };
             let size = linux.as_deref().map_or(DISK_SIZE, |l| DISK_SIZE.max(dir_size(l) + 512 * 1024 * 1024));
             image::create_with(&esp, &root().join("assets/home"), linux.as_deref(), &out, size)
                 .expect("image creation failed");
@@ -552,10 +604,11 @@ fn pkgs_or_default(pkgs: Vec<String>) -> Vec<String> {
     }
 }
 
-/// `target/linux-root`, built with the default packages if it isn't there
-/// yet (or is missing one of them), with WaveOS's settings for its programs.
+/// `target/linux-root` (`-aarch64` for aarch64), built with the default
+/// packages if it isn't there yet (or is missing one of them), with
+/// WaveOS's settings for its programs.
 fn linux_root() -> PathBuf {
-    let dir = root().join("target/linux-root");
+    let dir = debian::root_dir();
     let installed = fs::read_to_string(dir.join("packages.txt")).unwrap_or_default();
     let complete = dir.join(".links").exists()
         && debian::DEFAULT_PACKAGES.iter().all(|p| installed.lines().any(|l| l.split(' ').next() == Some(*p)));
@@ -724,8 +777,9 @@ fn lint() {
         // User space first (it stands on its own), then the libraries it
         // uses for a bare aarch64 target (clippy checks only a workspace's
         // own members: this is where their NEON and ARMv8 crypto paths are
-        // checked on a computer of either architecture), then the kernel
-        // and the bootloader. No Linux programs for aarch64 yet.
+        // checked on a computer of either architecture), the Linux
+        // programs for aarch64-unknown-linux-musl, then the bootloader and
+        // the kernel.
         let mut user = Command::new(&cargo);
         userland_cargo(&mut user, "clippy", Profile::Release);
         run(user.args(deny));
@@ -738,6 +792,11 @@ fn lint() {
             .args(AARCH64_USER_LIBS.iter().flat_map(|p| ["--package", p]))
             .env("RUSTFLAGS", arch.user_rustflags())
             .args(deny));
+        for name in linux::rust_program_names() {
+            let mut cmd = Command::new(&cargo);
+            linux::rust_cargo(&mut cmd, "clippy", name);
+            run(cmd.arg("--all-targets").args(deny));
+        }
         run(Command::new(&cargo)
             .current_dir(root())
             .args(["clippy", "--package", "firstlight", "--target", arch::current().uefi_target(), "--release"])
@@ -804,21 +863,16 @@ fn build(profile: Profile, test: bool) -> PathBuf {
         strip_debug(&esp.join("aurora/kernel.elf"));
     }
     let mut programs = build_userland(profile);
-    if arch == arch::Arch::X86_64 {
-        programs.extend(linux::programs());
-    } else {
-        println!("note: the Linux programs (BusyBox, Doom, the Wayland bridge…) are x86_64-only so far: not in the aarch64 image");
-    }
+    programs.extend(linux::programs());
     system_image(&programs, &esp.join("aurora/system.tar"));
     // What a device starts from: its system described as an update, for
     // the updater to work out which files a newer one changes.
     let factory = store::describe_esp(&esp, env!("CARGO_PKG_VERSION")).expect("describe the system");
     fs::write(esp.join("aurora/update.txt"), factory.encode()).expect("write update.txt");
-    if arch == arch::Arch::X86_64 {
-        store::demo_repository(&programs, &esp, &root().join("target/repo"));
-        if test {
-            store::test_repositories(&programs, &esp, &root().join("target/test-repo"));
-        }
+    // Both architectures' halves of the same demo repository (store.rs).
+    store::demo_repository(&programs, &esp, &root().join("target/repo"));
+    if test && arch == arch::Arch::X86_64 {
+        store::test_repositories(&programs, &esp, &root().join("target/test-repo"));
     }
     esp
 }

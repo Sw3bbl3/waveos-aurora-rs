@@ -49,8 +49,10 @@ pub fn build_sdlprobe(linux: &Path) -> Option<PathBuf> {
 fn build_c(linux: &Path, name: &str, what: &str, sources: &[PathBuf], libs: &[&str]) -> Option<PathBuf> {
     // Library names are often symbolic links, which the root lists in `.links`.
     let links = fs::read_to_string(linux.join(".links")).unwrap_or_default();
+    let arch = crate::arch::current();
+    let triplet = arch.multiarch();
     let find = |name: &str| {
-        ["usr/lib/x86_64-linux-gnu", "lib/x86_64-linux-gnu"].iter().find_map(|dir| {
+        [format!("usr/lib/{triplet}"), format!("lib/{triplet}")].iter().find_map(|dir| {
             let direct = linux.join(dir).join(name);
             if direct.exists() {
                 return Some(direct);
@@ -66,7 +68,7 @@ fn build_c(linux: &Path, name: &str, what: &str, sources: &[PathBuf], libs: &[&s
         eprintln!("warning: the Linux packages lack its libraries, so {what} is left out");
         return None;
     };
-    let out_dir = root().join("target/linux");
+    let out_dir = root().join(format!("target/linux{}", arch.suffix()));
     let exe = out_dir.join(name);
     let newest = sources.iter().filter_map(|s| fs::metadata(s).and_then(|m| m.modified()).ok()).max();
     if fs::metadata(&exe).and_then(|m| m.modified()).ok() >= newest && newest.is_some() {
@@ -89,16 +91,17 @@ fn build_c(linux: &Path, name: &str, what: &str, sources: &[PathBuf], libs: &[&s
     fs::create_dir_all(&out_dir).ok()?;
     let obj = out_dir.join(format!("{name}.o"));
     let compiled = Command::new("clang")
-        .args(["--target=x86_64-linux-gnu", "-nostdinc", "-fno-pie", "-O2", "-Wall", "-Werror"])
+        .arg(format!("--target={triplet}"))
+        .args(["-nostdinc", "-fno-pie", "-O2", "-Wall", "-Werror"])
         .args(["-Wno-unused-function", "-Werror=implicit-function-declaration"])
         .arg("-isystem")
         .arg(&builtins)
         .arg("-isystem")
-        .arg(libc_dev.join("usr/include/x86_64-linux-gnu"))
+        .arg(libc_dev.join("usr/include").join(triplet))
         .arg("-isystem")
         .arg(libc_dev.join("usr/include"))
         .arg("-isystem")
-        .arg(kernel_dev.join("usr/include/x86_64-linux-gnu"))
+        .arg(kernel_dev.join("usr/include").join(triplet))
         .arg("-isystem")
         .arg(kernel_dev.join("usr/include"))
         .arg("-c")
@@ -110,9 +113,9 @@ fn build_c(linux: &Path, name: &str, what: &str, sources: &[PathBuf], libs: &[&s
     if !compiled {
         return warn("it did not compile");
     }
-    let crt = libc_dev.join("usr/lib/x86_64-linux-gnu");
+    let crt = libc_dev.join("usr/lib").join(triplet);
     let linked = Command::new(lld)
-        .args(["-flavor", "gnu", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "--allow-shlib-undefined"])
+        .args(["-flavor", "gnu", "--dynamic-linker", arch.linux_loader(), "--allow-shlib-undefined"])
         .args(["--as-needed", "-s", "-o"])
         .arg(&exe)
         .arg(crt.join("crt1.o"))

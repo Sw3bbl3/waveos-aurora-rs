@@ -10,6 +10,7 @@
 //! gina-system-update 1
 //! version<TAB>0.8.1
 //! min_from<TAB>0.8               the oldest system it can update
+//! arch<TAB>aarch64               the processor (absent: x86_64)
 //! published<TAB>1732300000
 //! notes<TAB>What's new…          (\n, \t and \\ escaped)
 //! kernel<TAB><sha256><TAB><size>
@@ -65,6 +66,8 @@ impl Item {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Update {
     pub version: String,
+    /// One of [`crate::ARCHITECTURES`]; empty means x86_64 (see [`Update::arch`]).
+    pub architecture: String,
     pub min_from: String,
     pub published: u64,
     pub notes: String,
@@ -106,6 +109,12 @@ impl Update {
             match line.split('\t').collect::<Vec<_>>().as_slice() {
                 ["version", v] if u.version.is_empty() => u.version = v.to_string(),
                 ["min_from", v] if u.min_from.is_empty() => u.min_from = v.to_string(),
+                ["arch", a] if u.architecture.is_empty() => {
+                    if !crate::ARCHITECTURES.contains(a) {
+                        return Err("The system update is for an unknown processor");
+                    }
+                    u.architecture = if *a == "x86_64" { String::new() } else { a.to_string() };
+                }
                 ["published", v] if u.published == 0 => {
                     u.published = v.parse().map_err(|_| "Invalid date in the system update")?
                 }
@@ -160,6 +169,11 @@ impl Update {
             "gina-system-update 1\nversion\t{}\nmin_from\t{}\npublished\t{}\n",
             self.version, self.min_from, self.published
         );
+        // x86_64 descriptions say nothing, as before the port, so systems
+        // from before it still read them.
+        if self.arch() != "x86_64" {
+            out += &format!("arch\t{}\n", self.arch());
+        }
         if !self.notes.is_empty() {
             out += &format!("notes\t{}\n", repo::escape(&self.notes));
         }
@@ -173,6 +187,15 @@ impl Update {
             }
         }
         out
+    }
+
+    /// The architecture the update is for.
+    pub fn arch(&self) -> &str {
+        if self.architecture.is_empty() {
+            "x86_64"
+        } else {
+            &self.architecture
+        }
     }
 
     /// The objects a device holding `have` (hashes of the files it has)
@@ -200,6 +223,16 @@ pub fn signed_message(text: &[u8]) -> Vec<u8> {
     let mut m = UPDATE_DOMAIN.to_vec();
     m.extend_from_slice(text);
     m
+}
+
+/// The removable-media boot file of an architecture's bootloader, as it
+/// is named on the EFI partition and in an update slot.
+pub fn boot_file(arch: &str) -> &'static str {
+    if arch == "aarch64" {
+        "BOOTAA64.EFI"
+    } else {
+        "BOOTX64.EFI"
+    }
 }
 
 /// An object's path in a repository.
@@ -291,6 +324,7 @@ pub fn layout_of(tar: &[u8]) -> Result<Vec<(Item, core::ops::Range<usize>)>> {
 /// Builds the description of an update to the system image `tar` (the
 /// `kernel` and `bootloader` given by hash and size).
 pub fn describe(
+    arch: &str,
     version: &str,
     min_from: &str,
     notes: &str,
@@ -301,6 +335,7 @@ pub fn describe(
     let layout: Vec<Item> = layout_of(tar)?.into_iter().map(|(i, _)| i).collect();
     let u = Update {
         version: version.into(),
+        architecture: if arch == "x86_64" { String::new() } else { arch.into() },
         min_from: min_from.into(),
         published: 0,
         notes: notes.into(),
