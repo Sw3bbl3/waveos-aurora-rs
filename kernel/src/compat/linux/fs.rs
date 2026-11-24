@@ -2147,8 +2147,16 @@ pub fn ftruncate(p: &Process, fd: u64, len: u64) -> Result<u64, isize> {
     if let Some(shm) = shm_of(p, fd) {
         return shm.resize(len).map(|_| 0);
     }
-    match &*p.fd(fd as usize)? {
-        Handle::File(f) => f.lock().truncate(len).map(|_| 0),
+    let h = p.fd(fd as usize)?;
+    match &*h {
+        Handle::File(f) => {
+            f.lock().truncate(len)?;
+            // Shared mappings made through this description follow.
+            if let Some(shared) = super::mm::file_shared_of(&h) {
+                shared.resize(len)?;
+            }
+            Ok(0)
+        }
         _ => Err(EINVAL),
     }
 }

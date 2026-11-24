@@ -174,6 +174,18 @@ static void removed_while_open(void) {
     printf("PASS files removed while open, fsync\n");
 }
 
+// A child writes to shared memory `w`: does the parent see it?
+static int fork_and_wait_sees(unsigned char *w) {
+    w[0] = 1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        w[0] = 99;
+        _exit(0);
+    }
+    int status;
+    return pid > 0 && waitpid(pid, &status, 0) == pid && w[0] == 99;
+}
+
 static void memory(void) {
     size_t big = 64 << 20;
     char *p = malloc(big);
@@ -217,6 +229,32 @@ static void memory(void) {
     errno = 0;
     CHECK(mincore(mc, 4 * 4096, vec) == -1 && errno == ENOMEM, "mincore over unmapped pages");
     munmap(mc, 2 * 4096);
+    // Code written through one shared mapping of a deleted file and run
+    // through another (GStreamer's ORC makes its code this way).
+    mkdir("/tmp", 0755);
+    char tmpl[] = "/tmp/orcexec.XXXXXX";
+    int fd = mkstemp(tmpl);
+    CHECK(fd >= 0 && unlink(tmpl) == 0 && ftruncate(fd, 65536) == 0, "a deleted 64 KiB file");
+    unsigned char *x = mmap(0, 65536, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
+    unsigned char *w = mmap(0, 65536, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(x != MAP_FAILED && w != MAP_FAILED, "map it executable and writable");
+#if defined(__aarch64__)
+    static const unsigned char code[] = {0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6}; // mov w0, #42; ret
+#else
+    static const unsigned char code[] = {0xb8, 42, 0, 0, 0, 0xc3}; // mov eax, 42; ret
+#endif
+    memcpy(w + 8192, code, sizeof code);
+#if defined(__aarch64__)
+    // What __clear_cache does (no compiler runtime here): clean the written
+    // line to where instructions are fetched from, drop the stale one.
+    __asm__ volatile("dc cvau, %0\n dsb ish\n ic ivau, %1\n dsb ish\n isb" ::"r"(w + 8192), "r"(x + 8192) : "memory");
+#endif
+    CHECK(memcmp(x + 8192, code, sizeof code) == 0, "what one mapping writes, the other sees");
+    CHECK(((int (*)(void))(x + 8192))() == 42, "and runs");
+    CHECK(fork_and_wait_sees(w), "a child writes through the mapping it inherited");
+    munmap(x, 65536);
+    munmap(w, 65536);
+    close(fd);
     printf("PASS memory\n");
 }
 
