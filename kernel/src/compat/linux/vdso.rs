@@ -124,6 +124,33 @@ pub fn read_ns(real: bool) -> Option<u64> {
     }
 }
 
+/// Where the vDSO's symbol `name` is, from the image's start (arm64's
+/// signal return goes through `__kernel_rt_sigreturn`).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))] // (the self-tests use it there)
+pub fn symbol(name: &str) -> Option<u64> {
+    elf_symbol(IMAGE, name)
+}
+
+/// Looks `name` up in the dynamic symbols of the ELF file `elf`.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+fn elf_symbol(elf: &[u8], name: &str) -> Option<u64> {
+    let u16_at = |o: usize| Some(u16::from_le_bytes(elf.get(o..o + 2)?.try_into().ok()?) as usize);
+    let u32_at = |o: usize| Some(u32::from_le_bytes(elf.get(o..o + 4)?.try_into().ok()?) as usize);
+    let u64_at = |o: usize| Some(u64::from_le_bytes(elf.get(o..o + 8)?.try_into().ok()?));
+    let (shoff, shentsize, shnum) = (u64_at(0x28)? as usize, u16_at(0x3A)?, u16_at(0x3C)?);
+    let section = |i: usize| shoff + i * shentsize;
+    // SHT_DYNSYM, and the string table it links to.
+    let dynsym = (0..shnum).map(section).find(|&s| u32_at(s + 4) == Some(11))?;
+    let strtab = section(u32_at(dynsym + 40)?);
+    let (syms, size) = (u64_at(dynsym + 24)? as usize, u64_at(dynsym + 32)? as usize);
+    let strs = u64_at(strtab + 24)? as usize;
+    (0..size / 24).map(|i| syms + i * 24).find_map(|sym| {
+        let at = strs + u32_at(sym)?;
+        let end = at + elf.get(at..)?.iter().position(|&b| b == 0)?;
+        (&elf[at..end] == name.as_bytes()).then(|| u64_at(sym + 8)).flatten()
+    })
+}
+
 /// Maps the time page and the vDSO into `aspace` just below `below`;
 /// returns the image's address (`AT_SYSINFO_EHDR`), or 0 without one.
 pub fn map(aspace: &mut AddressSpace, below: u64) -> u64 {

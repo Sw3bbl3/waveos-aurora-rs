@@ -20,6 +20,11 @@
 use crate::Map::*;
 use crate::{e, Entry, Table};
 
+/// Numbers the layer names: the call with code of its own, and the ones
+/// signal delivery decides by.
+pub const CLONE: u64 = 220;
+pub const RT_SIGRETURN: u64 = 139;
+
 /// Every arm64 call number up to the last one in Linux 6.1's headers.
 pub static TABLE: Table = Table(&ENTRIES);
 

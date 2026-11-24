@@ -71,6 +71,8 @@ fn arm64_calls_map_to_the_x86_64_calls_of_the_same_name() {
     }
     assert_eq!(aarch64::TABLE.same(56), Some(257)); // openat
     assert_eq!(aarch64::TABLE.same(139), Some(15)); // rt_sigreturn
+    assert_eq!(aarch64::TABLE.number("clone"), Some(aarch64::table::CLONE));
+    assert_eq!(aarch64::TABLE.number("rt_sigreturn"), Some(aarch64::table::RT_SIGRETURN));
 }
 
 #[test]
@@ -137,10 +139,14 @@ fn epoll_event_layouts() {
 fn constants_that_differ() {
     let (a, x) = (arm(), x86());
     for (h, consts) in [
-        (&a, [aarch64::O_DIRECTORY, aarch64::O_NOFOLLOW, aarch64::O_DIRECT, aarch64::O_LARGEFILE, aarch64::MINSIGSTKSZ]),
+        (
+            &a,
+            [aarch64::O_DIRECTORY, aarch64::O_NOFOLLOW, aarch64::O_DIRECT, aarch64::O_LARGEFILE, aarch64::MINSIGSTKSZ],
+        ),
         (&x, [x86_64::O_DIRECTORY, x86_64::O_NOFOLLOW, x86_64::O_DIRECT, x86_64::O_LARGEFILE, x86_64::MINSIGSTKSZ]),
     ] {
-        for (name, value) in ["O_DIRECTORY", "O_NOFOLLOW", "O_DIRECT", "O_LARGEFILE", "MINSIGSTKSZ"].iter().zip(consts) {
+        for (name, value) in ["O_DIRECTORY", "O_NOFOLLOW", "O_DIRECT", "O_LARGEFILE", "MINSIGSTKSZ"].iter().zip(consts)
+        {
             assert_eq!(v(h, name), value as i64, "{name}");
         }
     }
@@ -151,10 +157,40 @@ fn constants_that_differ() {
     assert_eq!(v(&a, "AT_MINSIGSTKSZ"), aarch64::AT_MINSIGSTKSZ as i64);
     // What the shared code uses as one value for both really is one.
     for k in [
-        "O_APPEND", "O_NONBLOCK", "O_CREAT", "O_EXCL", "O_TRUNC", "O_CLOEXEC", "O_PATH", "F_GETLK", "F_SETLKW", "MAP_FIXED",
-        "MAP_ANONYMOUS", "MAP_NORESERVE", "MAP_FIXED_NOREPLACE", "SA_SIGINFO", "SA_ONSTACK", "SA_RESTART", "SA_NODEFER",
-        "SA_RESETHAND", "SA_RESTORER", "SIGBUS", "SIGUSR1", "SIGCHLD", "SIGSTOP", "SIGSYS", "AT_HWCAP", "AT_PLATFORM",
-        "AT_SYSINFO_EHDR", "AT_RANDOM", "AT_EXECFN", "TCGETS", "TIOCGWINSZ", "FIONREAD", "CLONE_SETTLS", "CLONE_VFORK",
+        "O_APPEND",
+        "O_NONBLOCK",
+        "O_CREAT",
+        "O_EXCL",
+        "O_TRUNC",
+        "O_CLOEXEC",
+        "O_PATH",
+        "F_GETLK",
+        "F_SETLKW",
+        "MAP_FIXED",
+        "MAP_ANONYMOUS",
+        "MAP_NORESERVE",
+        "MAP_FIXED_NOREPLACE",
+        "SA_SIGINFO",
+        "SA_ONSTACK",
+        "SA_RESTART",
+        "SA_NODEFER",
+        "SA_RESETHAND",
+        "SA_RESTORER",
+        "SIGBUS",
+        "SIGUSR1",
+        "SIGCHLD",
+        "SIGSTOP",
+        "SIGSYS",
+        "AT_HWCAP",
+        "AT_PLATFORM",
+        "AT_SYSINFO_EHDR",
+        "AT_RANDOM",
+        "AT_EXECFN",
+        "TCGETS",
+        "TIOCGWINSZ",
+        "FIONREAD",
+        "CLONE_SETTLS",
+        "CLONE_VFORK",
         "CLONE_CHILD_CLEARTID",
     ] {
         assert_eq!(v(&a, k), v(&x, k), "{k}");
@@ -168,9 +204,25 @@ fn constants_that_differ() {
 fn structures_shared_by_both() {
     let (a, x) = (arm(), x86());
     for k in [
-        "flock.size", "flock.l_start", "flock.l_len", "flock.l_pid", "statfs.size", "statfs.f_blocks", "statfs.f_fsid",
-        "statfs.f_namelen", "statfs.f_flags", "termios.size", "termios.c_cc", "stack_t.size", "stack_t.ss_flags",
-        "stack_t.ss_size", "siginfo.size", "siginfo.si_code", "siginfo.si_pid", "siginfo.si_uid", "siginfo.si_status",
+        "flock.size",
+        "flock.l_start",
+        "flock.l_len",
+        "flock.l_pid",
+        "statfs.size",
+        "statfs.f_blocks",
+        "statfs.f_fsid",
+        "statfs.f_namelen",
+        "statfs.f_flags",
+        "termios.size",
+        "termios.c_cc",
+        "stack_t.size",
+        "stack_t.ss_flags",
+        "stack_t.ss_size",
+        "siginfo.size",
+        "siginfo.si_code",
+        "siginfo.si_pid",
+        "siginfo.si_uid",
+        "siginfo.si_status",
         "siginfo.si_addr",
     ] {
         assert_eq!(v(&a, k), v(&x, k), "{k}");
@@ -201,7 +253,10 @@ fn the_arm64_signal_frame() {
     assert_eq!(v(&a, "sigcontext.size") as usize + signal::UC_MCONTEXT, signal::UCONTEXT_SIZE);
     assert_eq!(v(&a, "_aarch64_ctx.size"), 8);
     assert_eq!(v(&a, "fpsimd_context.size"), signal::FPSIMD_SIZE as i64);
-    assert_eq!((v(&a, "fpsimd_context.fpsr"), v(&a, "fpsimd_context.fpcr"), v(&a, "fpsimd_context.vregs")), (8, 12, 16));
+    assert_eq!(
+        (v(&a, "fpsimd_context.fpsr"), v(&a, "fpsimd_context.fpcr"), v(&a, "fpsimd_context.vregs")),
+        (8, 12, 16)
+    );
     assert_eq!(v(&a, "esr_context.size"), signal::ESR_SIZE as i64);
     assert_eq!(v(&a, "esr_context.esr"), 8);
     assert_eq!(v(&a, "FPSIMD_MAGIC"), signal::FPSIMD_MAGIC as i64);
@@ -215,15 +270,16 @@ fn the_arm64_signal_frame() {
     assert_eq!(v(&a, "libc.user_regs_struct.size"), core::mem::size_of::<signal::Regs>() as i64);
     assert_eq!((v(&a, "user_pt_regs.sp"), v(&a, "user_pt_regs.pc"), v(&a, "user_pt_regs.pstate")), (248, 256, 264));
     // Linux's minimum: rt_sigframe, the record, 16 bytes of alignment.
-    assert!(signal::MIN_STACK <= aarch64::MINSIGSTKSZ);
-    assert_eq!(signal::FRAME_SIZE % 16, 0);
+    assert_eq!(signal::MIN_STACK, 4720);
+    assert_eq!(signal::FRAME_SIZE, 4688);
 }
 
 #[test]
 fn hwcap_bits_and_names() {
     let a = arm();
     for &(bit, name) in cpu::NAMES {
-        let key = if bit < 32 { format!("HWCAP_{}", name.to_uppercase()) } else { format!("HWCAP2_{}", name.to_uppercase()) };
+        let key =
+            if bit < 32 { format!("HWCAP_{}", name.to_uppercase()) } else { format!("HWCAP2_{}", name.to_uppercase()) };
         // A few of Linux's macro names differ from the cpuinfo names.
         let key = match key.as_str() {
             "HWCAP2_SMEI16I64" => "HWCAP2_SME_I16I64".into(),

@@ -71,17 +71,11 @@ pub struct Regs {
 }
 
 /// The FP/SIMD registers: v0-v31, FPSR and FPCR.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct FpSimd {
     pub v: [u128; 32],
     pub fpsr: u32,
     pub fpcr: u32,
-}
-
-impl Default for FpSimd {
-    fn default() -> FpSimd {
-        FpSimd { v: [0; 32], fpsr: 0, fpcr: 0 }
-    }
 }
 
 /// Size of `struct user_fpsimd_state`: v0-v31, then FPSR and FPCR (the
@@ -278,11 +272,8 @@ pub fn read_frame(b: &[u8; FRAME_SIZE]) -> Result<Restored, BadFrame> {
         at += size;
     }
     let fpsimd = fpsimd.ok_or(BadFrame::NoFpSimd)?;
-    let stack = Stack {
-        sp: get64(b, UC + UC_STACK),
-        flags: get32(b, UC + UC_STACK + 8),
-        size: get64(b, UC + UC_STACK + 16),
-    };
+    let stack =
+        Stack { sp: get64(b, UC + UC_STACK), flags: get32(b, UC + UC_STACK + 8), size: get64(b, UC + UC_STACK + 16) };
     Ok(Restored { regs, fpsimd, mask: get64(b, UC + UC_SIGMASK), stack })
 }
 
@@ -312,7 +303,15 @@ mod tests {
         let (regs, fpsimd) = sample();
         let info = [7u8; SIGINFO_SIZE];
         let stack = Stack { sp: 0x5000_0000, flags: SS_DISABLE, size: 0 };
-        let d = Delivery { regs, fpsimd, mask: 0x8001, stack, siginfo: &info, fault_address: 0xdead, esr: Some(0x9200_0047) };
+        let d = Delivery {
+            regs,
+            fpsimd,
+            mask: 0x8001,
+            stack,
+            siginfo: &info,
+            fault_address: 0xdead,
+            esr: Some(0x9200_0047),
+        };
         let mut f = [0u8; FRAME_SIZE];
         write_frame(&d, &mut f);
         assert_eq!(&f[..SIGINFO_SIZE], &info[..]);
@@ -354,7 +353,8 @@ mod tests {
     fn bad_frames_are_refused() {
         let (regs, fpsimd) = sample();
         let info = [0u8; SIGINFO_SIZE];
-        let d = Delivery { regs, fpsimd, mask: 0, stack: Stack::default(), siginfo: &info, fault_address: 0, esr: None };
+        let d =
+            Delivery { regs, fpsimd, mask: 0, stack: Stack::default(), siginfo: &info, fault_address: 0, esr: None };
         let mut good = [0u8; FRAME_SIZE];
         write_frame(&d, &mut good);
         let sc = UC + UC_MCONTEXT;

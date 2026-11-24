@@ -5,6 +5,7 @@
 //! until `EAGAIN`, which works the same), and `EPOLLONESHOT` disables a
 //! descriptor once reported.
 
+use super::abi::native::{EPOLL_DATA_AT, EPOLL_EVENT_SIZE};
 use super::fs::{Special, O_CLOEXEC};
 use crate::proc::{readiness, Handle, Process};
 use crate::sync::{IrqMutex, Mutex};
@@ -309,10 +310,9 @@ pub fn epoll_ctl(p: &Process, epfd: u64, op: u64, fd: u64, event: u64) -> Result
     match op {
         // ADD, MOD
         1 | 3 => {
-            // struct epoll_event is packed: u32 events, u64 data.
-            let raw: [u8; 12] = user::get(event)?;
-            let events = u32::from_le_bytes(raw[0..4].try_into().unwrap());
-            let data = u64::from_le_bytes(raw[4..12].try_into().unwrap());
+            // struct epoll_event: u32 events, u64 data (packed on x86-64).
+            let raw: [u8; EPOLL_EVENT_SIZE] = user::get(event)?;
+            let (events, data) = aurora_linuxabi::decode_epoll_event(&raw, EPOLL_DATA_AT);
             if op == 1 && set.contains_key(&fd) {
                 return Err(EEXIST);
             }
@@ -437,10 +437,8 @@ pub fn epoll_wait(p: &Process, epfd: u64, events: u64, max: u64, timeout_ms: i64
         let ready = ep.ready(p, max as usize, 0);
         if !ready.is_empty() {
             for (i, (ev, data)) in ready.iter().enumerate() {
-                let mut raw = [0u8; 12];
-                raw[0..4].copy_from_slice(&ev.to_le_bytes());
-                raw[4..12].copy_from_slice(&data.to_le_bytes());
-                user::put(events + i as u64 * 12, &raw)?;
+                let raw: [u8; EPOLL_EVENT_SIZE] = aurora_linuxabi::encode_epoll_event(*ev, *data, EPOLL_DATA_AT);
+                user::put(events + (i * EPOLL_EVENT_SIZE) as u64, &raw)?;
             }
             return Ok(ready.len() as u64);
         }

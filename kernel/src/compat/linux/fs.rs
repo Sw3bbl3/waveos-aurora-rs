@@ -18,7 +18,8 @@ pub const AT_FDCWD: u64 = -100i64 as u64;
 pub const AT_REMOVEDIR: u64 = 0x200;
 const AT_EMPTY_PATH: u64 = 0x1000;
 pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
-const O_NOFOLLOW: u64 = 0o400000;
+// (O_NOFOLLOW and O_DIRECTORY differ between architectures.)
+use super::abi::native::{O_DIRECTORY, O_NOFOLLOW};
 const O_PATH: u64 = 0o10000000;
 pub const O_CLOEXEC: u64 = 0o2000000;
 
@@ -29,7 +30,6 @@ const O_EXCL: u64 = 0o200;
 pub const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 const O_NONBLOCK: u64 = 0o4000;
-const O_DIRECTORY: u64 = 0o200000;
 
 /// The read-only Linux tree (from the system image) and the writable one.
 pub const SYSTEM_ROOT: &str = "/System/Linux";
@@ -1340,24 +1340,25 @@ fn ids(i: &Info) -> (u32, u32) {
     })
 }
 
-/// Linux's `struct stat` (144 bytes on x86-64).
+/// Linux's `struct stat`, laid out for the architecture (`abi`).
 fn put_stat(ptr: u64, i: &Info) -> Result<u64, isize> {
     let (uid, gid) = ids(i);
-    let mut b = [0u8; 144];
-    let mut w = |off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
-    w(0, 0x803); // st_dev
-    w(8, i.ino);
-    w(16, if i.mode & S_IFDIR != 0 { 2 } else { 1 }); // st_nlink
-    w(24, i.mode as u64 | ((uid as u64) << 32)); // st_mode, st_uid
-    w(32, gid as u64); // st_gid
-    w(40, i.rdev);
-    w(48, i.size);
-    w(56, 4096); // st_blksize
-    w(64, i.size.div_ceil(512)); // st_blocks
-    w(72, i.mtime as u64); // st_atime
-    w(88, i.mtime as u64);
-    w(104, i.ctime as u64);
-    user::put(ptr, &b).map(|_| 0)
+    let s = aurora_linuxabi::Stat {
+        dev: 0x803,
+        ino: i.ino,
+        mode: i.mode,
+        nlink: if i.mode & S_IFDIR != 0 { 2 } else { 1 },
+        uid,
+        gid,
+        rdev: i.rdev,
+        size: i.size,
+        blksize: 4096,
+        blocks: i.size.div_ceil(512),
+        atime: (i.mtime, 0),
+        mtime: (i.mtime, 0),
+        ctime: (i.ctime, 0),
+    };
+    super::abi::native::put_stat(ptr, &s)
 }
 
 pub fn stat_path(p: &Process, dirfd: u64, ptr: u64, buf: u64, flags: u64) -> Result<u64, isize> {

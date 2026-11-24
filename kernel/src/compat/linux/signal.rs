@@ -19,11 +19,12 @@
 //! fault in a thread (a bad memory access, an invalid instruction, a
 //! division by zero, `int3`) becomes a signal for a handler the program set
 //! (`force`); without one the process crashes, reported as before.
+//!
+//! The frame itself, `rt_sigreturn` and how a call is made again are the
+//! architecture's (`abi::native::signal`).
 
-use super::nr;
-use crate::arch::fpu::FpuState;
-#[cfg(target_arch = "x86_64")]
-use crate::arch::syscall::user_rflags;
+use super::abi::native::signal::{self as frame, Regs};
+use super::abi::{self, nr};
 use crate::arch::syscall::SyscallFrame;
 use crate::arch::trap::TrapFrame;
 use crate::proc::{self, Process};
@@ -43,13 +44,14 @@ pub const SIGSTOP: u32 = 19;
 const SIG_DFL: u64 = 0;
 const SIG_IGN: u64 = 1;
 const SA_NOCLDSTOP: u64 = 1;
-const SA_SIGINFO: u64 = 4;
-const SA_ONSTACK: u64 = 0x0800_0000;
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))] // (x86-64 passes the siginfo always)
+pub const SA_SIGINFO: u64 = 4;
+pub const SA_ONSTACK: u64 = 0x0800_0000;
 const SA_RESTART: u64 = 0x1000_0000;
 const SA_NODEFER: u64 = 0x4000_0000;
 const SA_RESETHAND: u64 = 0x8000_0000;
-const SS_ONSTACK: u32 = 1;
-const SS_DISABLE: u32 = 2;
+pub const SS_ONSTACK: u32 = 1;
+pub const SS_DISABLE: u32 = 2;
 /// `si_code` values.
 pub const SI_USER: i32 = 0;
 pub const SI_TKILL: i32 = -6;
@@ -73,10 +75,10 @@ fn ends_process(sig: u32) -> bool {
 /// An action set with `rt_sigaction`.
 #[derive(Clone, Copy, Default)]
 pub struct Action {
-    handler: u64,
-    flags: u64,
-    restorer: u64,
-    mask: u64,
+    pub handler: u64,
+    pub flags: u64,
+    pub restorer: u64,
+    pub mask: u64,
 }
 
 /// What a pending signal carries into its handler's `siginfo`.
@@ -89,12 +91,12 @@ pub struct Info {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Thread {
+pub struct Thread {
     blocked: u64,
     pending: u64,
     /// `sigaltstack`: base and size (0: none).
-    alt_sp: u64,
-    alt_size: u64,
+    pub alt_sp: u64,
+    pub alt_size: u64,
     /// The mask to put back after a handler that ends `rt_sigsuspend`.
     suspended: Option<u64>,
 }
@@ -311,94 +313,27 @@ fn restartable(nr: u64) -> bool {
 }
 
 const EINTR_RET: u64 = (-(EINTR as i64)) as u64;
-/// Markers of XSAVE data in a signal frame's SIMD state (Linux's).
-const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
-const FP_XSTATE_MAGIC2: u32 = 0x4650_5845;
 
-/// A thread's registers, in the order of Linux's `sigcontext`: r8–r15, rdi,
-/// rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, rflags; and the trap's error code
-/// and number.
-#[derive(Clone, Copy, Default)]
-pub struct Regs {
-    g: [u64; 18],
-    err: u64,
-    trapno: u64,
+/// True if `sig` with `info` is a fault of the thread's own (a bad access,
+/// an invalid instruction…) rather than a signal someone sent.
+pub fn is_fault(sig: u32, info: &Info) -> bool {
+    matches!(sig, 4 | 5 | 7 | 8 | SIGSEGV) && info.pid == 0
 }
 
-const R_R11: usize = 3;
-const R_RDI: usize = 8;
-const R_RSI: usize = 9;
-const R_RDX: usize = 12;
-const R_RAX: usize = 13;
-const R_RCX: usize = 14;
-const R_RSP: usize = 15;
-const R_RIP: usize = 16;
-const R_RFLAGS: usize = 17;
-
-#[cfg(target_arch = "x86_64")]
-impl Regs {
-    fn from_syscall(f: &SyscallFrame) -> Regs {
-        // `syscall` keeps rip in rcx and rflags in r11, unless the frame
-        // holds the real ones (`full`, after `rt_sigreturn`).
-        let (rcx, r11) = if f.full != 0 { (f.rcx, f.r11) } else { (f.rip, f.rflags) };
-        Regs {
-            g: [
-                f.r8, f.r9, f.r10, r11, f.r12, f.r13, f.r14, f.r15, f.rdi, f.rsi, f.rbp, f.rbx, f.rdx, f.rax, rcx,
-                f.rsp, f.rip, f.rflags,
-            ],
-            ..Default::default()
-        }
+/// The `siginfo` a handler gets (the same layout on every architecture).
+pub fn siginfo_bytes(sig: u32, info: &Info) -> [u8; 128] {
+    let mut si = [0u8; 128];
+    si[0..4].copy_from_slice(&sig.to_le_bytes());
+    si[8..12].copy_from_slice(&info.code.to_le_bytes());
+    if is_fault(sig, info) {
+        // A fault's address (`si_addr`).
+        si[16..24].copy_from_slice(&info.addr.to_le_bytes());
+    } else {
+        si[16..20].copy_from_slice(&info.pid.to_le_bytes());
+        si[20..24].copy_from_slice(&super::ids_of(info.pid).0.to_le_bytes());
+        si[24..28].copy_from_slice(&info.status.to_le_bytes());
     }
-
-    fn write_syscall(&self, f: &mut SyscallFrame) {
-        let g = &self.g;
-        [f.r8, f.r9, f.r10] = [g[0], g[1], g[2]];
-        [f.r12, f.r13, f.r14, f.r15, f.rdi, f.rsi, f.rbp, f.rbx, f.rdx, f.rax] =
-            [g[4], g[5], g[6], g[7], g[8], g[9], g[10], g[11], g[12], g[13]];
-        f.rsp = g[R_RSP];
-        f.rip = g[R_RIP];
-        f.rflags = user_rflags(g[R_RFLAGS]);
-        f.rcx = g[R_RCX];
-        f.r11 = g[R_R11];
-    }
-
-    fn from_trap(f: &TrapFrame) -> Regs {
-        Regs {
-            g: [
-                f.r8, f.r9, f.r10, f.r11, f.r12, f.r13, f.r14, f.r15, f.rdi, f.rsi, f.rbp, f.rbx, f.rdx, f.rax, f.rcx,
-                f.rsp, f.rip, f.rflags,
-            ],
-            err: f.error,
-            trapno: f.vector,
-        }
-    }
-
-    fn write_trap(&self, f: &mut TrapFrame) {
-        let g = &self.g;
-        [f.r8, f.r9, f.r10, f.r11, f.r12, f.r13, f.r14, f.r15] = [g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]];
-        [f.rdi, f.rsi, f.rbp, f.rbx, f.rdx, f.rax, f.rcx] = [g[8], g[9], g[10], g[11], g[12], g[13], g[14]];
-        f.rsp = g[R_RSP];
-        f.rip = g[R_RIP];
-        f.rflags = user_rflags(g[R_RFLAGS]);
-    }
-}
-
-// arm64: signal frames (`rt_sigframe` with `sigcontext` and the FP/SIMD
-// record) are not built yet; a handled signal ends the program instead
-// (`enter_handler` fails), and nothing is read from or written to frames.
-#[cfg(target_arch = "aarch64")]
-impl Regs {
-    fn from_syscall(_f: &SyscallFrame) -> Regs {
-        Regs::default()
-    }
-
-    fn write_syscall(&self, _f: &mut SyscallFrame) {}
-
-    fn from_trap(_f: &TrapFrame) -> Regs {
-        Regs::default()
-    }
-
-    fn write_trap(&self, _f: &mut TrapFrame) {}
+    si
 }
 
 /// What to do about the signals pending for thread `me`.
@@ -477,7 +412,7 @@ pub fn on_trap_return(f: &mut TrapFrame) {
     }
     if let Next::Handler { sig, info, action, old_mask, thread } = next(&p, l, sched::current_id()) {
         let mut regs = Regs::from_trap(f);
-        if enter_handler(&mut regs, sig, info, &action, old_mask, &thread).is_err() {
+        if frame::enter_handler(&p, &mut regs, sig, info, &action, old_mask, &thread).is_err() {
             proc::terminate_by_signal(&p, SIGSEGV);
             return;
         }
@@ -500,18 +435,20 @@ pub fn force(p: &Process, sig: u32, info: Info, f: &mut TrapFrame) -> bool {
     l.signals.refresh_any(&s);
     drop(s);
     let mut regs = Regs::from_trap(f);
-    if enter_handler(&mut regs, sig, info, &action, old_mask, &thread).is_err() {
+    if frame::enter_handler(p, &mut regs, sig, info, &action, old_mask, &thread).is_err() {
         return false;
     }
     regs.write_trap(f);
     true
 }
 
-/// On the way back to user mode from system call `nr` (its result is in
-/// `f.rax`): restarts it, or enters the handler of a pending signal.
-pub fn on_return(f: &mut SyscallFrame, nr: u64, p: &alloc::sync::Arc<Process>) {
+/// On the way back to user mode from system call `native` (the number the
+/// program used; `args` its arguments; its result is in the frame):
+/// restarts it, or enters the handler of a pending signal.
+pub fn on_return(f: &mut SyscallFrame, native: u64, args: &[u64; 6], p: &alloc::sync::Arc<Process>) {
     let Some(l) = &p.linux else { return };
     let me = sched::current_id();
+    let nr = abi::native::canonical(native);
     let interrupted = f.ret() == EINTR_RET && nr != nr::RT_SIGRETURN;
     // Nearly always nothing to do: say so without the lock, which every
     // thread of the process would otherwise take on every system call.
@@ -522,16 +459,16 @@ pub fn on_return(f: &mut SyscallFrame, nr: u64, p: &alloc::sync::Arc<Process>) {
         Next::Nothing => {
             // Woken for a signal another thread took: carry on as if nothing happened.
             if interrupted && restartable(nr) {
-                restart(f, nr);
+                frame::restart(f, native, args);
             }
         }
         Next::Ended => {}
         Next::Handler { sig, info, action, old_mask, thread } => {
             if interrupted && action.flags & SA_RESTART != 0 && restartable(nr) {
-                restart(f, nr);
+                frame::restart(f, native, args);
             }
             let mut regs = Regs::from_syscall(f);
-            if enter_handler(&mut regs, sig, info, &action, old_mask, &thread).is_err() {
+            if frame::enter_handler(p, &mut regs, sig, info, &action, old_mask, &thread).is_err() {
                 // No room for the frame: the process ends as if it had crashed.
                 proc::terminate_by_signal(p, SIGSEGV);
                 return;
@@ -541,163 +478,37 @@ pub fn on_return(f: &mut SyscallFrame, nr: u64, p: &alloc::sync::Arc<Process>) {
     }
 }
 
-/// Sets the frame up to make system call `nr` again.
-#[cfg(target_arch = "x86_64")]
-fn restart(f: &mut SyscallFrame, nr: u64) {
-    f.rip -= 2; // the `syscall` instruction
-    f.rax = nr;
-}
-
-/// arm64: not yet (the result replaced x0, the first argument; Linux keeps
-/// `orig_x0` for this). The call returns EINTR.
-#[cfg(target_arch = "aarch64")]
-fn restart(_f: &mut SyscallFrame, _nr: u64) {}
-
-/// Bytes from the frame's start to the `ucontext` and the `siginfo`.
-const UC: u64 = 8;
-const INFO: u64 = UC + 304;
-const FRAME: u64 = INFO + 128;
-/// `ucontext` offsets: the stack, the registers (`sigcontext`), the mask.
-const UC_STACK: u64 = 16;
-const UC_MCONTEXT: u64 = 40;
-const UC_SIGMASK: u64 = 296;
-
-/// Builds the signal frame on the user stack and points `f` at the handler.
-fn enter_handler(r: &mut Regs, sig: u32, info: Info, a: &Action, old_mask: u64, t: &Thread) -> Result<(), isize> {
-    if cfg!(not(target_arch = "x86_64")) {
-        return Err(ENOSYS); // see the arm64 `Regs`
-    }
-    let rsp = r.g[R_RSP];
-    let on_alt = t.alt_size != 0 && (t.alt_sp..t.alt_sp + t.alt_size).contains(&rsp);
-    let use_alt = a.flags & SA_ONSTACK != 0 && t.alt_size != 0 && !on_alt;
-    let mut sp = if use_alt { t.alt_sp + t.alt_size } else { rsp - 128 };
-    // The SIMD state (XSAVE's, with the markers Linux puts around it, or
-    // FXSAVE's), then the frame; the handler starts as if called.
-    let size = crate::arch::fpu::size() as u64;
-    sp = (sp - size - 4) & !63;
-    let fpstate = sp;
-    sp = ((sp - FRAME) & !15) - 8;
-
-    let mut fpu = FpuState::new();
-    fpu.save();
-    user::put_bytes(fpstate, fpu.as_bytes())?;
-    let xfeatures = crate::arch::fpu::xfeatures();
-    if xfeatures != 0 {
-        // struct _fpx_sw_bytes, in the FXSAVE area's spare bytes.
-        user::put(fpstate + 464, &[FP_XSTATE_MAGIC1, size as u32 + 4])?;
-        user::put(fpstate + 472, &xfeatures)?;
-        user::put(fpstate + 480, &(size as u32))?;
-        user::put(fpstate + size, &FP_XSTATE_MAGIC2)?;
-    }
-
-    let mut uc = [0u8; 304];
-    let mut w = |off: u64, v: u64| uc[off as usize..off as usize + 8].copy_from_slice(&v.to_le_bytes());
-    w(UC_STACK, t.alt_sp);
-    w(
-        UC_STACK + 8,
-        if t.alt_size == 0 {
-            SS_DISABLE
-        } else if on_alt {
-            SS_ONSTACK
-        } else {
-            0
-        } as u64,
-    );
-    w(UC_STACK + 16, t.alt_size);
-    for (i, v) in r.g.iter().enumerate() {
-        w(UC_MCONTEXT + i as u64 * 8, *v);
-    }
-    // cs, gs, fs, ss
-    #[cfg(target_arch = "x86_64")]
-    w(UC_MCONTEXT + 144, crate::arch::gdt::USER_CS as u64 | (crate::arch::gdt::USER_SS as u64) << 48);
-    w(UC_MCONTEXT + 152, r.err);
-    w(UC_MCONTEXT + 160, r.trapno);
-    w(UC_MCONTEXT + 168, old_mask); // oldmask
-    w(UC_MCONTEXT + 176, info.addr); // cr2
-    w(UC_MCONTEXT + 184, fpstate);
-    w(UC_SIGMASK, old_mask);
-
-    let mut si = [0u8; 128];
-    si[0..4].copy_from_slice(&sig.to_le_bytes());
-    si[8..12].copy_from_slice(&info.code.to_le_bytes());
-    if matches!(sig, 4 | 5 | 7 | 8 | SIGSEGV) && info.pid == 0 {
-        // A fault's address (`si_addr`).
-        si[16..24].copy_from_slice(&info.addr.to_le_bytes());
-    } else {
-        si[16..20].copy_from_slice(&info.pid.to_le_bytes());
-        si[20..24].copy_from_slice(&super::ids_of(info.pid).0.to_le_bytes());
-        si[24..28].copy_from_slice(&info.status.to_le_bytes());
-    }
-
-    user::put_bytes(sp, &a.restorer.to_le_bytes())?;
-    user::put_bytes(sp + UC, &uc)?;
-    user::put_bytes(sp + INFO, &si)?;
-
-    r.g[R_RIP] = a.handler;
-    r.g[R_RSP] = sp;
-    r.g[R_RDI] = sig as u64;
-    r.g[R_RSI] = sp + INFO;
-    r.g[R_RDX] = sp + UC;
-    r.g[R_RAX] = 0;
-    r.g[R_RFLAGS] &= !0x500; // TF, DF
-    let _ = a.flags & SA_SIGINFO; // the arguments are passed either way
-    Ok(())
-}
-
-/// `rt_sigreturn` (arm64): no frames to return from yet.
-#[cfg(target_arch = "aarch64")]
-pub fn sigreturn(_p: &Process, _f: &mut SyscallFrame) -> Result<u64, isize> {
-    Err(ENOSYS)
-}
-
-/// `rt_sigreturn`: puts back what the signal frame at the stack holds.
-#[cfg(target_arch = "x86_64")]
+/// `rt_sigreturn`: puts back what the handler's signal frame holds.
 pub fn sigreturn(p: &Process, f: &mut SyscallFrame) -> Result<u64, isize> {
+    p.linux.as_ref().ok_or(EINVAL)?;
+    frame::sigreturn(p, f)
+}
+
+/// Sets the calling thread's mask (`rt_sigreturn`).
+pub fn set_blocked(p: &Process, mask: u64) {
+    if let Some(l) = &p.linux {
+        let mut s = l.signals.state.lock();
+        s.thread(sched::current_id()).blocked = mask & !UNBLOCKABLE;
+        l.signals.refresh_any(&s);
+    }
+}
+
+/// Puts back the alternate stack a signal frame recorded (arm64's
+/// `rt_sigreturn`, as `sigaltstack` would set it).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub fn restore_altstack(p: &Process, sp: u64, flags: u32, size: u64) -> Result<(), isize> {
     let l = p.linux.as_ref().ok_or(EINVAL)?;
-    let uc = f.rsp; // the handler's `ret` popped the return address
-    let mut raw = [0u8; 304];
-    user::get_bytes(uc, &mut raw)?;
-    let r = |off: u64| u64::from_le_bytes(raw[off as usize..off as usize + 8].try_into().unwrap());
-    let m = |i: u64| r(UC_MCONTEXT + i * 8);
-    f.r8 = m(0);
-    f.r9 = m(1);
-    f.r10 = m(2);
-    // rcx and r11 too: the thread may have been interrupted anywhere, so
-    // this call leaves with every register as the frame holds it.
-    f.r11 = m(3);
-    f.rcx = m(14);
-    f.full = 1;
-    f.r12 = m(4);
-    f.r13 = m(5);
-    f.r14 = m(6);
-    f.r15 = m(7);
-    f.rdi = m(8);
-    f.rsi = m(9);
-    f.rbp = m(10);
-    f.rbx = m(11);
-    f.rdx = m(12);
-    f.rax = m(13);
-    f.rsp = m(15);
-    f.rip = m(16);
-    f.rflags = user_rflags(m(17));
-    if f.rip >= aurora_abi::layout::USER_END {
-        proc::terminate_by_signal(p, SIGSEGV);
-        return Err(EFAULT);
-    }
-    let fpstate = r(UC_MCONTEXT + 184);
-    if fpstate != 0 {
-        // XSAVE data when the frame says so, else the FXSAVE part.
-        let magic: u32 = user::get(fpstate + 464)?;
-        let len = if magic == FP_XSTATE_MAGIC1 { crate::arch::fpu::size() } else { 512 };
-        let mut bytes = alloc::vec![0u8; len];
-        user::get_bytes(fpstate, &mut bytes)?;
-        FpuState::from_bytes(&bytes).restore();
-    }
-    let mask = r(UC_SIGMASK) & !UNBLOCKABLE;
     let mut s = l.signals.state.lock();
-    s.thread(sched::current_id()).blocked = mask;
-    l.signals.refresh_any(&s);
-    Ok(f.rax)
+    let t = s.thread(sched::current_id());
+    if flags & SS_DISABLE != 0 {
+        (t.alt_sp, t.alt_size) = (0, 0);
+    } else if (t.alt_sp, t.alt_size) != (sp, size) {
+        if size < abi::native::MINSIGSTKSZ {
+            return Err(ENOMEM);
+        }
+        (t.alt_sp, t.alt_size) = (sp, size);
+    }
+    Ok(())
 }
 
 /// `rt_sigaction`.
@@ -771,7 +582,7 @@ pub fn sigaltstack(p: &Process, new: u64, old: u64) -> Result<u64, isize> {
         let [sp, flags, size]: [u64; 3] = user::get(new)?;
         let (sp, size) = if flags as u32 & SS_DISABLE != 0 {
             (0, 0)
-        } else if size < 2048 {
+        } else if size < abi::native::MINSIGSTKSZ {
             return Err(ENOMEM);
         } else {
             (sp, size)
