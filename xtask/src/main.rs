@@ -38,7 +38,7 @@
 //!   cargo xtask linux-root [PKG...]     fetch Debian packages (default: WebKitGTK, Firefox ESR, bash, coreutils,
 //!                                         Python) and their dependencies into target/linux-root (with --arch
 //!                                         aarch64: Debian's arm64 ones, into target/linux-root-aarch64; --base:
-//!                                         only libc, BusyBox and GNU Hello)
+//!                                         only libc, BusyBox and GNU Hello; --into DIR: there instead)
 //!   cargo xtask userland                user space alone
 //!   cargo xtask linux-programs          the Linux programs of the system image alone (BusyBox, the C tests…)
 //!   cargo xtask migrate-disk [--from DISK] [--to DISK]  a new disk for --arch with another one's files
@@ -455,17 +455,22 @@ fn main() {
             exit(status.code().unwrap_or(1));
         }
         Some("linux-root") => {
+            // `--into DIR`: somewhere else than the architecture's root.
+            let into = args.iter().position(|a| a == "--into").and_then(|i| args.get(i + 1)).cloned();
             let mut pkgs: Vec<String> = args
                 .iter()
                 .skip(1)
-                .filter(|a| !a.starts_with("--") && a.as_str() != arch.name())
+                .filter(|a| !a.starts_with("--") && a.as_str() != arch.name() && Some(*a) != into.as_ref())
                 .cloned()
                 .collect();
             // `--base`: the smallest root (libc, BusyBox, GNU Hello).
             if flag("--base") {
                 pkgs.extend(debian::BASE_PACKAGES.iter().map(|s| s.to_string()));
             }
-            let dir = debian::build(&pkgs_or_default(pkgs));
+            let dir = match &into {
+                Some(d) => debian::build_into(Path::new(d), &pkgs_or_default(pkgs)),
+                None => debian::build(&pkgs_or_default(pkgs)),
+            };
             println!("wrote {} ({} MiB)", dir.display(), dir_size(&dir) >> 20);
         }
         Some("image") => {
@@ -1884,7 +1889,14 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
     let shown = if heads > 1 { format!("display {gpu} with {heads} heads") } else { format!("display {gpu}") };
     println!("running kernel tests with the disk on {disk}, network {net}, {shown}, USB on {usb}, {memory_mib} MiB of memory");
     // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux.
-    let mesa_root = mesa.then(mesa::root_dir);
+    // AURORA_TEST_LINUX_ROOT=1 (or a folder): the architecture's Linux root
+    // (`cargo xtask linux-root`, as it is), or that folder, as /Linux
+    // instead, for the Debian program tests.
+    let mesa_root = match env::var("AURORA_TEST_LINUX_ROOT") {
+        Ok(v) if !mesa && v == "1" => Some(debian::root_dir()),
+        Ok(v) if !mesa && !v.is_empty() => Some(PathBuf::from(v)),
+        _ => mesa.then(mesa::root_dir),
+    };
     let disk_size = match &mesa_root {
         Some(r) => dir_size(r) + 256 * 1024 * 1024,
         // Cards keep their 128 MiB (a size a card can have); a disk gets

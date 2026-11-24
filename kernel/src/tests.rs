@@ -99,6 +99,7 @@ const TESTS: &[Test] = &[
     ("Linux programs: Mesa's Vulkan (lavapipe), a triangle read back (vkcheck)", linux_mesa_vulkan),
     ("Linux programs: Mesa in a WaveOS window (es2gears through wl-bridge)", linux_mesa_window),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
+    ("Linux programs: Debian's dynamically linked hello and curl", linux_debian),
     ("sandbox: policy, consent, grants, bookmarks, system manifests", crate::sandbox::selftest::policy),
     ("sandbox: a native program refused, given files, allowed and revoked (sbxtest)", crate::sandbox::selftest::programs),
     ("sandbox: a Linux program tries every way out (sandboxtest)", crate::sandbox::selftest::linux),
@@ -128,6 +129,10 @@ const ARCH_SKIPS: &[(&str, &str)] = &[
     ("ACPI: AML, sleep states, battery", "a PC's ACPI: sleep states, \\_S5 and the test battery's SSDT"),
     ("I2C:", "the I2C touchpad is a PC ACPI device (test SSDT)"),
     ("sleep (S3) and wake", "no suspend to RAM on Arm"),
+    (
+        "Linux programs: the DRM device",
+        "the display on `virt` is ramfb, not a PCI device as drmtest expects (virtio-gpu comes later)",
+    ),
 ];
 
 pub fn run() {
@@ -913,6 +918,40 @@ fn linux_modetest() {
 /// (`cargo xtask test --mesa` puts them there; other disks skip the Mesa tests).
 const MESA_KMSCUBE: &str = "/Linux/usr/bin/kmscube";
 
+/// Debian's GNU Hello (glibc, started through the dynamic loader), and curl
+/// fetching from the test server when it is there too: on a disk with a
+/// Linux root (`AURORA_TEST_LINUX_ROOT=1 cargo xtask test`), skipped
+/// otherwise.
+fn linux_debian() {
+    if crate::fs::stat("/Linux/usr/bin/hello").is_err() {
+        crate::kprint!("(skipped: no Linux root on this disk; see AURORA_TEST_LINUX_ROOT) ");
+        return;
+    }
+    let started = crate::time::now_ns();
+    let (code, text) =
+        run_linux_program("/System/Linux/bin/busybox", &linux_env_argv(&[], &["/usr/bin/hello"]), None, None, 60_000);
+    assert_eq!(code, Some(0), "hello failed");
+    assert!(text.contains("Hello, world!"), "hello said something else");
+    crate::kprint!("[hello: {} ms] ", (crate::time::now_ns() - started) / 1_000_000);
+    let port = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok());
+    let (Some(port), Ok(_)) = (port, crate::fs::stat("/Linux/usr/bin/curl")) else {
+        crate::kprint!("(curl: not on the disk) ");
+        return;
+    };
+    // (The test repository's catalogue: every architecture's build has one.)
+    let catalogue = if cfg!(target_arch = "aarch64") { "catalog-aarch64.txt" } else { "catalog.txt" };
+    let url = alloc::format!("http://10.0.2.2:{port}/repo/{catalogue}");
+    let started = crate::time::now_ns();
+    let argv = linux_env_argv(
+        &[],
+        &["/usr/bin/curl", "-sS", "-o", "/tmp/curl-index", "-w", "curl got %{http_code} %{size_download}\n", &url],
+    );
+    let (code, text) = run_linux_program("/System/Linux/bin/busybox", &argv, None, None, 60_000);
+    assert_eq!(code, Some(0), "curl failed");
+    assert!(text.contains("curl got 200"), "curl did not get the page");
+    crate::kprint!("[curl: {} ms] ", (crate::time::now_ns() - started) / 1_000_000);
+}
+
 /// Runs a program from the Linux packages by its Linux path, through
 /// BusyBox's `env` with `vars` added to the environment.
 fn linux_env_argv<'a>(vars: &[&'a str], argv: &[&'a str]) -> Vec<&'a str> {
@@ -1111,10 +1150,12 @@ fn linux_mesa_glmark2() {
 fn linux_abi() {
     use crate::compat::linux::abi::{self, nr, Call};
     use crate::compat::linux::vdso;
-    let native = |name: &str, x86: u64| if cfg!(target_arch = "aarch64") {
-        aurora_linuxabi::aarch64::TABLE.number(name).unwrap()
-    } else {
-        x86
+    let native = |name: &str, x86: u64| {
+        if cfg!(target_arch = "aarch64") {
+            aurora_linuxabi::aarch64::TABLE.number(name).unwrap()
+        } else {
+            x86
+        }
     };
     for (name, n) in [("openat", nr::OPENAT), ("newfstatat", nr::NEWFSTATAT), ("rt_sigreturn", nr::RT_SIGRETURN)] {
         assert_eq!(abi::native::lookup(native(name, n)), Call::Shared(n), "{name}");
