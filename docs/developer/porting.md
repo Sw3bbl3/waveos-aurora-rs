@@ -153,3 +153,56 @@ signals for Linux programs (`compat::linux::signal` builds x86 frames only;
 on arm64 a handled signal ends the program), the Linux system call table
 for arm64, the vDSO and the C half of the kernel (x86-only builds), the
 PCI I/O window and ECAM, the second PL011 (telemetry), devices.
+
+## Native user space on aarch64
+
+Every program in `userland/` builds for aarch64 (`cargo xtask userland
+--arch aarch64` builds user space alone; `build --arch aarch64` puts it in
+the system image).
+
+- **Target:** `userland/aarch64-aurora-user.json`: EL0 code for ARMv8.0
+  with NEON (FP/SIMD is always there for user programs), unaligned access
+  allowed (unlike the kernel's target), static, no red zone. Core and
+  alloc are rebuilt for it (`-Zbuild-std`), into `target/user-aarch64`, so
+  user space can use `-Z branch-protection=bti,pac-ret`: return addresses
+  are signed (PAC) and indirect-branch targets marked (BTI). Both are hint
+  instructions, free on processors without them; BTI is enforced only
+  once the kernel sets the guarded-page bit in user mappings, which it
+  doesn't yet.
+- **System calls:** `corekit::sys::syscall6`, the convention above.
+- **Start-up:** `corekit/src/start.rs` is the one place that depends on
+  the state EL0 starts in. Its `_start` aligns SP to 16 bytes, zeroes x29
+  and x30 (the end of the frame-pointer chain) and calls the program's
+  `__aurora_start` (from `corekit::entry!`) with x0, the argument block,
+  untouched. Threads start at their function with the argument in x0.
+  Native code uses no thread pointer; TPIDR_EL0 belongs to Linux programs.
+- **CPU features:** EL0 can't read the ID registers, so programs read the
+  `Features:` line of the kernel's CPU report (`aurora_abi::report::CPU`,
+  `has_features`), once, on the first question. corekit installs that as
+  the detector of `vendor/cpufeatures` (see its WAVEOS-PATCHES.md), which
+  the RustCrypto crates ask: AES-GCM then uses the AES and PMULL
+  instructions where the processor has them (`--cfg aes_armv8 --cfg
+  polyval_armv8`) and their constant-time portable code otherwise.
+  ChaCha20 uses NEON (`--cfg chacha20_force_neon`). SHA-256 and Poly1305
+  stay portable: sha2 0.10's ARMv8 code needs a C compiler.
+- **SIMD:** the compositor's pixel loops (`lumen::simd`: blend, shade,
+  cross-fade) have NEON versions beside the SSE2 ones, and video frames
+  are converted to ARGB with NEON (`nebula_media::pixels`). Both compute
+  the same 16- and 32-bit sums as the scalar code and keep the same bits,
+  so pixels are identical on both architectures; host tests compare them
+  with the scalar code (natively on an Apple-silicon Mac, SSE2 on x86 CI or
+  under Rosetta). A soft-float kernel has no SIMD paths: there the
+  functions handle no pixels and the scalar code does all of them.
+- **Not architecture-specific:** Pulsar is an interpreter (no JIT); f64
+  arithmetic is IEEE on both and Rust never fuses operations, so results
+  match; NaN bit patterns differ (x86's default NaN is negative, Arm's
+  positive), which nothing observes (`Map` keys canonicalise NaN). The
+  H.264 and AAC decoders are portable Rust on both (rusty_aac's own SIMD
+  needs `std`). memcpy and friends come from `compiler_builtins` on both.
+- **Packages:** a GINA manifest's `architecture` is `x86_64` or `aarch64`;
+  the executable's ELF machine must agree, and WaveOS refuses packages for
+  the other architecture ("This app needs a different processor
+  architecture"). Host tools read both. `uname`, `neofetch`, Nebula's
+  `navigator.userAgent` and the WaveSDK use `aurora_abi::ARCH`.
+- **usertest:** its UMIP check becomes "an EL0 read of SCTLR_EL1 stops the
+  program" on aarch64.

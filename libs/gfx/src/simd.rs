@@ -37,6 +37,11 @@ pub fn enabled() -> bool {
     if cfg!(target_feature = "sse2") || cfg!(target_feature = "neon") {
         return true;
     }
+    // Only the x86 loops (assembly) exist without the target's SIMD
+    // feature; elsewhere there is nothing to run.
+    if !cfg!(target_arch = "x86_64") {
+        return false;
+    }
     let gate: fn() -> bool = unsafe { core::mem::transmute(GATE.load(Ordering::Acquire)) };
     gate()
 }
