@@ -21,6 +21,8 @@ pub struct Start {
     pub brk: u64,
     /// The vDSO's address (0: none).
     pub vdso: u64,
+    /// The auxiliary vector as the stack holds it (`/proc/self/auxv`).
+    pub auxv: Vec<u8>,
 }
 
 fn seg_prot(flags: u32) -> Prot {
@@ -172,11 +174,13 @@ pub fn load(
     // (The architecture's own entries last: arm64's AT_HWCAP2 and
     // AT_MINSIGSTKSZ.)
     let extra = super::abi::native::extra_auxv(vdso);
+    let auxv_at = words.len();
     for (k, v) in auxv.into_iter().filter(|&(k, v)| k != 33 || v != 0).chain(extra) {
         words.push(k);
         words.push(v);
     }
     words.extend([0, 0]); // AT_NULL
+    let auxv: Vec<u8> = words[auxv_at..].iter().flat_map(|w| w.to_le_bytes()).collect();
     let sp = (strings_at - words.len() as u64 * 8) & !0xF;
     if sp < stack_bottom + PAGE_SIZE * 4 {
         return Err(E2BIG);
@@ -185,5 +189,5 @@ pub fn load(
     aspace.write_bytes(sp, &bytes)?;
     aspace.write_bytes(strings_at, &strings)?;
     aspace.write_bytes(random_at, &random)?;
-    Ok(Start { entry: start_at, sp, brk, vdso })
+    Ok(Start { entry: start_at, sp, brk, vdso, auxv })
 }

@@ -357,6 +357,7 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/proc/pressure/memory" => mem(pressure()),
         "/proc/self/status" => mem(status(p)),
         "/proc/self/maps" => mem(super::mm::maps(p)),
+        "/proc/self/auxv" => Special::Mem { data: p.linux.as_ref().map(|l| l.auxv()).unwrap_or_default(), pos: 0 },
         "/proc/self/cmdline" => mem(format!("{}\0", p.name())),
         "/proc/self/comm" | "/proc/self/task/self/comm" => mem(format!("{}\n", p.name())),
         "/proc/self/stat" => mem(format!(
@@ -1144,7 +1145,15 @@ fn folder_entries(host: &str) -> Vec<(String, u8)> {
         "/dev/dri" => return super::drm::node_names().into_iter().map(|n| (n, 2)).collect(),
         "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false), ("pressure", true)],
         "/proc/self" => {
-            &[("exe", false), ("maps", false), ("cmdline", false), ("comm", false), ("stat", false), ("status", false)]
+            &[
+                ("exe", false),
+                ("maps", false),
+                ("cmdline", false),
+                ("comm", false),
+                ("stat", false),
+                ("status", false),
+                ("auxv", false),
+            ]
         }
         "/proc/pressure" => &[("memory", false)],
         "/dev/shm" => return super::shm::names().into_iter().map(|n| (n, DT_REG)).collect(),

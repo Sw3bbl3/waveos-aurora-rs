@@ -68,6 +68,8 @@ pub struct Linux {
     /// Where the program's vDSO is (0: none): arm64 signal handlers
     /// return through it.
     vdso: AtomicU64,
+    /// The program's auxiliary vector (`/proc/self/auxv`).
+    auxv: Mutex<alloc::vec::Vec<u8>>,
 }
 
 impl Linux {
@@ -81,6 +83,7 @@ impl Linux {
             trace: core::sync::atomic::AtomicBool::new(false),
             counts: syscount::Counts::default(),
             vdso: AtomicU64::new(0),
+            auxv: Mutex::new(alloc::vec::Vec::new()),
         }
     }
 
@@ -101,6 +104,7 @@ impl Linux {
             trace: core::sync::atomic::AtomicBool::new(self.trace.load(core::sync::atomic::Ordering::Relaxed)),
             counts: syscount::Counts::new(self.counts.on()),
             vdso: AtomicU64::new(self.vdso()),
+            auxv: Mutex::new(self.auxv()),
         }
     }
 
@@ -109,9 +113,15 @@ impl Linux {
         self.vdso.load(Ordering::Relaxed)
     }
 
-    /// Records where `exec` put the vDSO.
-    pub fn set_vdso(&self, at: u64) {
-        self.vdso.store(at, Ordering::Relaxed);
+    /// The auxiliary vector the program started with.
+    pub fn auxv(&self) -> alloc::vec::Vec<u8> {
+        self.auxv.lock().clone()
+    }
+
+    /// Records what `exec` set up: where the vDSO went, the auxiliary vector.
+    pub fn started(&self, start: &exec::Start) {
+        self.vdso.store(start.vdso, Ordering::Relaxed);
+        *self.auxv.lock() = start.auxv.clone();
     }
 
     /// A new program (`exec`) with its heap at `brk`.

@@ -168,7 +168,7 @@ fn exec_guest(
     proc::exec_single_thread(p)?;
     let l = p.linux.as_ref().ok_or(EINVAL)?;
     l.exec_reset(start.brk, &envp);
-    l.set_vdso(start.vdso);
+    l.started(&start);
     close_on_exec(p, l);
     proc::exec_replace(p, aspace, &host);
     sched::set_fs_base(0);
