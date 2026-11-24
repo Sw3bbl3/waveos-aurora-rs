@@ -604,8 +604,8 @@ fn linux_thread(raw: u64) {
 
 fn user_thread(raw: u64) {
     let start = unsafe { alloc::boxed::Box::from_raw(raw as *mut ThreadStart) };
-    // Entered like a function call: rsp ≡ 8 (mod 16).
-    let (entry, sp, arg) = (start.entry, start.stack - 8, start.arg);
+    // Entered like a function call (`arch::syscall::call_sp`).
+    let (entry, sp, arg) = (start.entry, crate::arch::syscall::call_sp(start.stack), start.arg);
     drop(start);
     if interrupted() {
         return; // the process is already going away

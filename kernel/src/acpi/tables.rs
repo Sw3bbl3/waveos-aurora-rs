@@ -13,6 +13,26 @@ pub struct IrqOverride {
     pub flags: u16,
 }
 
+/// The Arm Generic Interrupt Controller and timer as the MADT and GTDT
+/// describe them (all zero on x86).
+#[derive(Debug, Clone, Default)]
+pub struct GicInfo {
+    /// GIC version from the distributor entry (2, 3 or 4; 0 if none).
+    pub version: u8,
+    /// Distributor registers.
+    pub gicd: u64,
+    /// Redistributor discovery ranges (base, length): GICv3 and later.
+    pub gicr_ranges: Vec<(u64, u32)>,
+    /// Usable CPUs: (MPIDR, GICR base of that CPU or 0, GICC base for GICv2).
+    pub cpus: Vec<(u64, u64, u64)>,
+    /// GICv2m MSI frames: (base, first SPI, SPI count; 0 count: read MSI_TYPER).
+    pub msi_frames: Vec<(u64, u16, u16)>,
+    /// The EL1 virtual timer's interrupt (a PPI), from the GTDT (0: unknown).
+    pub virtual_timer_gsi: u32,
+    /// Its GTDT flags (bit 0 edge, bit 1 active low).
+    pub virtual_timer_flags: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AcpiInfo {
     pub revision: u8,
@@ -46,6 +66,8 @@ pub struct AcpiInfo {
     pub gpe0_blk_len: u8,
     /// FADT ARM_BOOT_ARCH flags (PSCI present, PSCI through `hvc`; 0 on x86).
     pub arm_boot_arch: u16,
+    /// Arm: the GIC and the generic timer's interrupt.
+    pub gic: GicInfo,
 }
 
 impl AcpiInfo {
@@ -92,6 +114,10 @@ pub fn parse(rsdp_phys: u64) -> AcpiInfo {
                 b"FACP" => parse_fadt(table, &mut info),
                 b"MCFG" => parse_mcfg(table, &mut info),
                 b"HPET" => info.hpet = Some(read::<u64>(table + 44)),
+                b"GTDT" if table_len(table) >= 72 => {
+                    info.gic.virtual_timer_gsi = read::<u32>(table + 64);
+                    info.gic.virtual_timer_flags = read::<u32>(table + 68);
+                }
                 _ => {}
             }
         }
@@ -100,7 +126,7 @@ pub fn parse(rsdp_phys: u64) -> AcpiInfo {
         "acpi",
         "rev {}, {} CPU(s), IOAPIC {:#x}, {} IRQ override(s), PM1a_CNT {:#x}",
         info.revision,
-        info.cpu_apic_ids.len(),
+        info.cpu_apic_ids.len().max(info.gic.cpus.len()),
         info.ioapic_phys,
         info.overrides.len(),
         info.pm1a_cnt
@@ -138,6 +164,25 @@ unsafe fn parse_madt(table: u64, info: &mut AcpiInfo) {
                 flags: read::<u16>(e + 8),
             }),
             5 => info.lapic_phys = read::<u64>(e + 4),
+            // Arm: GIC CPU interface (one per CPU), distributor, MSI frame,
+            // redistributor range.
+            0xB if size >= 76 => {
+                if read::<u32>(e + 12) & 1 != 0 {
+                    let gicc = read::<u64>(e + 32);
+                    let gicr = read::<u64>(e + 60);
+                    info.gic.cpus.push((read::<u64>(e + 68), gicr, gicc));
+                }
+            }
+            0xC if size >= 21 => {
+                info.gic.gicd = read::<u64>(e + 8);
+                info.gic.version = read::<u8>(e + 20);
+            }
+            0xD if size >= 24 => {
+                let flags = read::<u32>(e + 16);
+                let (count, base) = if flags & 1 != 0 { (read::<u16>(e + 20), read::<u16>(e + 22)) } else { (0, 0) };
+                info.gic.msi_frames.push((read::<u64>(e + 8), base, count));
+            }
+            0xE if size >= 16 => info.gic.gicr_ranges.push((read::<u64>(e + 4), read::<u32>(e + 12))),
             _ => {}
         }
         off += size;

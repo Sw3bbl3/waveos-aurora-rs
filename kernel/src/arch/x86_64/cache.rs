@@ -24,6 +24,11 @@ pub fn flush_line(p: *const u8) {
     unsafe { core::arch::asm!("clflush [{}]", in(reg) p, options(nostack, preserves_flags)) };
 }
 
+/// Makes instructions written to `[va, va + len)` visible to instruction
+/// fetch: nothing to do, x86 keeps its caches coherent.
+#[inline(always)]
+pub fn sync_code(_va: u64, _len: u64) {}
+
 /// Writes back and invalidates every cache of this CPU (`wbinvd`): slow,
 /// for before sleep or changing memory types.
 #[inline]

@@ -18,7 +18,7 @@ pub const SLOTS: &str = "/.system";
 const BOOT_CONF: &str = "/Boot/aurora/boot.conf";
 /// The bootloader on the EFI partition and its name in a slot (this processor's).
 const BOOT_FILE: &str = if cfg!(target_arch = "aarch64") { "BOOTAA64.EFI" } else { "BOOTX64.EFI" };
-const BOOTLOADER: &str = if cfg!(target_arch = "aarch64") { "/Boot/EFI/BOOT/BOOTAA64.EFI" } else { "/Boot/EFI/BOOT/BOOTX64.EFI" };
+pub(crate) const BOOTLOADER: &str = if cfg!(target_arch = "aarch64") { "/Boot/EFI/BOOT/BOOTAA64.EFI" } else { "/Boot/EFI/BOOT/BOOTX64.EFI" };
 
 static FLAGS: AtomicU32 = AtomicU32::new(0);
 static MARKED: AtomicBool = AtomicBool::new(false);

@@ -38,7 +38,7 @@
 //!   cargo xtask linux-root [PKG...]     fetch Debian packages (default: WebKitGTK, Firefox ESR, bash, coreutils,
 //!                                         Python) and their dependencies into target/linux-root (with --arch
 //!                                         aarch64: Debian's arm64 ones, into target/linux-root-aarch64; --base:
-//!                                         only libc, BusyBox and GNU Hello)
+//!                                         only libc, BusyBox and GNU Hello; --into DIR: there instead)
 //!   cargo xtask userland                user space alone
 //!   cargo xtask linux-programs          the Linux programs of the system image alone (BusyBox, the C tests…)
 //!   cargo xtask migrate-disk [--from DISK] [--to DISK]  a new disk for --arch with another one's files
@@ -457,17 +457,22 @@ fn main() {
             exit(status.code().unwrap_or(1));
         }
         Some("linux-root") => {
+            // `--into DIR`: somewhere else than the architecture's root.
+            let into = args.iter().position(|a| a == "--into").and_then(|i| args.get(i + 1)).cloned();
             let mut pkgs: Vec<String> = args
                 .iter()
                 .skip(1)
-                .filter(|a| !a.starts_with("--") && a.as_str() != arch.name())
+                .filter(|a| !a.starts_with("--") && a.as_str() != arch.name() && Some(*a) != into.as_ref())
                 .cloned()
                 .collect();
             // `--base`: the smallest root (libc, BusyBox, GNU Hello).
             if flag("--base") {
                 pkgs.extend(debian::BASE_PACKAGES.iter().map(|s| s.to_string()));
             }
-            let dir = debian::build(&pkgs_or_default(pkgs));
+            let dir = match &into {
+                Some(d) => debian::build_into(Path::new(d), &pkgs_or_default(pkgs)),
+                None => debian::build(&pkgs_or_default(pkgs)),
+            };
             println!("wrote {} ({} MiB)", dir.display(), dir_size(&dir) >> 20);
         }
         Some("image") => {
@@ -516,12 +521,6 @@ fn main() {
             println!("wrote {}", out.display());
         }
         Some("test") => {
-            if aarch64 {
-                // No isa-debug-exit on `virt`: the runner needs the kernel's
-                // way of reporting (see virt.rs) before it can run there.
-                eprintln!("cargo xtask test --arch aarch64: not yet; the aarch64 kernel has no self-test harness");
-                exit(2);
-            }
             let n = args
                 .iter()
                 .position(|a| a == "--displays")
@@ -881,8 +880,8 @@ fn build(profile: Profile, test: bool) -> PathBuf {
     fs::write(esp.join("aurora/update.txt"), factory.encode()).expect("write update.txt");
     // Both architectures' halves of the same demo repository (store.rs).
     store::demo_repository(&programs, &esp, &root().join("target/repo"));
-    if test && arch == arch::Arch::X86_64 {
-        store::test_repositories(&programs, &esp, &root().join("target/test-repo"));
+    if test {
+        store::test_repositories(&programs, &esp, &test_repo_dir());
     }
     esp
 }
@@ -1809,7 +1808,7 @@ fn repo_response(req: &[u8]) -> Option<Reply> {
     let line = text.lines().next()?;
     let path = line.strip_prefix("GET ")?.split(' ').next()?;
     let (prefix, rest) = path.strip_prefix('/')?.split_once('/')?;
-    let base = root().join("target/test-repo");
+    let base = test_repo_dir();
     let dir = match prefix {
         "repo" | "badrepo" | "flaky" | "corrupt" | "truncated" | "slow" => base.join("main"),
         "stale" | "expired" | "rotated" => base.join(prefix),
@@ -1817,13 +1816,13 @@ fn repo_response(req: &[u8]) -> Option<Reply> {
     };
     let mut reply = file_reply(&text, &dir, rest);
     let ranged = text.contains("\r\nRange: ");
-    let payload = rest.starts_with("packages/") || rest.starts_with("system/objects/");
+    let payload = rest.starts_with("packages/") || rest.starts_with("packages-aarch64/") || rest.starts_with("system/objects/");
     if !reply.head.starts_with("HTTP/1.1 200") {
         return Some(reply);
     }
     let whole = |body: &[u8]| format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
     match prefix {
-        "badrepo" if rest == "index.txt" || rest == "catalog.txt" => {
+        "badrepo" if rest == "index.txt" || rest == "catalog.txt" || rest == "catalog-aarch64.txt" => {
             reply.body = String::from_utf8_lossy(&reply.body).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes();
             reply.head = whole(&reply.body);
         }
@@ -1840,6 +1839,12 @@ fn repo_response(req: &[u8]) -> Option<Reply> {
         _ => {}
     }
     Some(reply)
+}
+
+/// `target/test-repo`, with the architecture's suffix: each architecture's
+/// test repositories hold its own packages and system updates.
+fn test_repo_dir() -> PathBuf {
+    root().join(format!("target/test-repo{}", arch::current().suffix()))
 }
 
 /// A free port on the host (for forwarding into the guest).
@@ -1888,8 +1893,16 @@ fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str,
     // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux; with
     // AURORA_TEST_ROOT=browsers, the browser measurements on a disk with the
     // default Linux packages (Voyage, Firefox) instead.
+    // AURORA_TEST_LINUX_ROOT=1 (or a folder): the architecture's Linux root
+    // (`cargo xtask linux-root`, as it is), or that folder, as /Linux
+    // instead, for the Debian program tests.
     let browsers = mesa && env::var("AURORA_TEST_ROOT").as_deref() == Ok("browsers");
-    let mesa_root = if browsers { Some(linux_root()) } else { mesa.then(mesa::root_dir) };
+    let mesa_root = match env::var("AURORA_TEST_LINUX_ROOT") {
+        Ok(v) if !mesa && v == "1" => Some(debian::root_dir()),
+        Ok(v) if !mesa && !v.is_empty() => Some(PathBuf::from(v)),
+        _ if browsers => Some(linux_root()),
+        _ => mesa.then(mesa::root_dir),
+    };
     let disk_size = match &mesa_root {
         Some(r) => dir_size(r) + 256 * 1024 * 1024,
         // Cards keep their 128 MiB (a size a card can have); a disk gets
@@ -2445,7 +2458,13 @@ fn run_tests_once(
         return Err(output);
     }
     let cut = output.contains("harness: power cut") && output.contains("\ntest result: ok.");
-    match status.and_then(|s| s.code()) {
+    // `virt` has no isa-debug-exit: the aarch64 kernel prints the code and
+    // powers off (docs/developer/porting.md); read it as that device's status.
+    let status = status.and_then(|s| s.code()).map(|code| match arch::current() {
+        arch::Arch::Aarch64 => exit_line(&output).map_or(1, |c| (c as i32) << 1 | 1),
+        arch::Arch::X86_64 => code,
+    });
+    match status {
         Some(33) => Ok(output),
         Some(_) if cut => {
             println!("harness: the power was cut mid-install after the tests passed, as planned");
@@ -2462,8 +2481,20 @@ fn run_tests_once(
     }
 }
 
+/// The code in the last `[aurora-exit N]` line the kernel printed.
+fn exit_line(output: &str) -> Option<u32> {
+    output.lines().rev().find_map(|l| l.trim().strip_prefix("[aurora-exit ")?.strip_suffix(']')?.parse().ok())
+}
+
 #[cfg(test)]
 mod rtc_tests {
+    #[test]
+    fn aarch64_exit_line() {
+        assert_eq!(super::exit_line("x\n[aurora-exit 16]\n"), Some(16));
+        assert_eq!(super::exit_line("[aurora-exit 17]\nlater\n"), Some(17));
+        assert_eq!(super::exit_line("no code"), None);
+    }
+
     #[test]
     fn seed_utc_and_guest_offset() {
         assert_eq!(super::rtc_timestamp(946684800), "2000-01-01T00:00:00");

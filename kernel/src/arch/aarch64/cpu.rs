@@ -189,6 +189,30 @@ pub fn frame_pointer() -> u64 {
     fp
 }
 
+/// The ID registers Linux programs' features come from, in this order:
+/// MIDR_EL1, ID_AA64PFR0/1, ID_AA64ISAR0/1/2, ID_AA64MMFR0/1/2 (for
+/// `compat::linux`: HWCAPs and emulated EL0 `mrs`).
+pub fn id_registers() -> [u64; 9] {
+    [
+        midr(),
+        read!("id_aa64pfr0_el1"),
+        read!("id_aa64pfr1_el1"),
+        read!("id_aa64isar0_el1"),
+        read!("id_aa64isar1_el1"),
+        read!("id_aa64isar2_el1"),
+        read!("id_aa64mmfr0_el1"),
+        read!("id_aa64mmfr1_el1"),
+        read!("id_aa64mmfr2_el1"),
+    ]
+}
+
+/// The calling CPU's user thread pointer (TPIDR_EL0). Programs set it
+/// themselves (`msr tpidr_el0`), so the scheduler reads it back when a task
+/// leaves the CPU.
+pub fn thread_pointer() -> u64 {
+    read!("tpidr_el0")
+}
+
 /// Sets the user thread pointer (TPIDR_EL0) of the calling CPU.
 pub fn set_thread_pointer(base: u64) {
     // SAFETY: TPIDR_EL0 is the user's thread register; the kernel never uses it.

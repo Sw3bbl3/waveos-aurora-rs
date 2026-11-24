@@ -454,6 +454,9 @@ impl Controller {
                 if (control & TRB_CYCLE != 0) != ev.cycle {
                     break;
                 }
+                // The rest of the TRB only after its cycle bit (a weakly ordered
+                // CPU may otherwise read it from before the controller wrote it).
+                fence(Ordering::Acquire);
                 let t = (ev.segment.read::<u64>(off), ev.segment.read::<u32>(off + 8), control);
                 ev.dequeue += 1;
                 if ev.dequeue == EVENT_TRBS {

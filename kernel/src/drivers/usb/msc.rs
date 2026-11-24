@@ -95,6 +95,10 @@ impl UsbDisk {
             Ok(n) => n,
             Err(code) => {
                 log!("usb", "{}: status of SCSI {:#04x} failed ({})", self.model, cdb[0], code);
+                // The device may still be in the command (QEMU usb-storage has
+                // been seen to keep a status request pending when it follows
+                // the data at once): reset it, so the retry starts clean.
+                self.reset_recovery();
                 return Err(EIO);
             }
         };

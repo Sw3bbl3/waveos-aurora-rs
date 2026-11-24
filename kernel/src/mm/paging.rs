@@ -53,7 +53,7 @@ pub fn map_mmio(phys: u64, size: u64) -> u64 {
     while p < phys + size {
         let va = phys_to_virt(p);
         if let Some(e) = kernel_leaf(va).filter(|e| **e & pte::PRESENT == 0) {
-            *e = p | pte::PRESENT | pte::WRITABLE | pte::NO_CACHE;
+            *e = pte::leaf(p | pte::PRESENT | pte::WRITABLE | pte::NO_CACHE);
             mmu::flush_page(va);
         }
         p += PAGE_SIZE;

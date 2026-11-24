@@ -1476,7 +1476,11 @@ pub fn self_test() {
     assert!(!s.advance(5000) && s.value() == 0);
 
     // The SSE2 row blend the transitions use agrees with the scalar one, in
-    // a task that may use SIMD registers (as the compositor does).
+    // a task that may use SIMD registers (as the compositor does). The
+    // soft-float kernel has it only as x86 assembly: elsewhere nothing to check.
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
     use core::sync::atomic::{AtomicU8, Ordering};
     static SIMD: AtomicU8 = AtomicU8::new(0);
     lumen::simd::set_gate(crate::gui::simd_allowed);

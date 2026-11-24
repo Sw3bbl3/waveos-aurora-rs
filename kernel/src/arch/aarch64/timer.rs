@@ -80,9 +80,15 @@ fn ticks_per_ms() -> u64 {
     read!("cntfrq_el0") / 1000
 }
 
+/// CNTKCTL_EL1.EL0VCTEN: EL0 may read CNTVCT_EL0 and CNTFRQ_EL0 (the
+/// Linux vDSO's clock, as on Linux).
+const CNTKCTL_EL0VCTEN: u64 = 1 << 1;
+
 /// Starts this CPU's timer in the chosen mode, disarmed (periodic: ticking).
 pub fn start_local() {
     let cpu = super::percpu::cpu_id();
+    // SAFETY: only opens the virtual count to user mode.
+    unsafe { regs::write!("cntkctl_el1", read!("cntkctl_el1") | CNTKCTL_EL0VCTEN) };
     match mode() {
         Mode::Periodic => arm_ticks(ticks_per_ms()),
         Mode::OneShot => ctl(CTL_IMASK),

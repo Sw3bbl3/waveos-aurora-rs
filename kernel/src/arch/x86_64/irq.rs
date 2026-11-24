@@ -83,6 +83,11 @@ pub fn mask_gsi(gsi: u32) {
     apic::mask_gsi(gsi)
 }
 
+/// Whether devices can raise MSIs: always, on x86.
+pub fn msi_available() -> bool {
+    true
+}
+
 /// The MSI message (address, data) that raises `vector` on the boot CPU.
 pub fn msi_message(vector: u8) -> (u64, u32) {
     (0xFEE0_0000 | (apic::boot_apic_id() as u64) << 12, vector as u32)
