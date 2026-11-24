@@ -335,6 +335,18 @@ UEFI firmware, GICv2 systems, non-coherent DMA, PL011 consoles at other
 addresses than `virt`'s, PSCI through `smc` on hardware, firmware entering
 at EL2 with E2H forced on).
 
+Not yet run anywhere, because the aarch64 kernel doesn't start user
+programs yet: every native aarch64 program (corekit's `svc` calls and
+start-up, the run-time detection of the ARMv8 AES/PMULL instructions for
+TLS, the NEON pixel and video paths inside WaveOS — those are checked by
+host tests on an Apple-silicon Mac), the arm64 Linux programs (BusyBox,
+wl-bridge, the C tests, Doom: built, not run) and the arm64 Debian root. The x86 and aarch64 disks'
+architecture checks, `migrate-disk`, the per-architecture catalogues and
+the slot check in the bootloader are tested on the host only (image and
+repository tests; `cargo test -p xtask -p gina`). On QEMU 8.2 (Ubuntu
+24.04), which can't choose the `virt` machine's MSI controller, the guest
+gets an ITS under TCG instead of a GICv2m frame.
+
 ## Compatibility
 
 Please add a row for each machine you try.

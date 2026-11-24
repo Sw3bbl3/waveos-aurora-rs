@@ -206,3 +206,46 @@ the system image).
   `navigator.userAgent` and the WaveSDK use `aurora_abi::ARCH`.
 - **usertest:** its UMIP check becomes "an EL0 read of SCTLR_EL1 stops the
   program" on aarch64.
+
+## Linux programs for arm64 (groundwork)
+
+What the Linux layer needs from outside `kernel/src/compat/linux` exists
+for arm64; the layer itself (arm64's system call table, signal frames,
+the auxiliary vector) is still to come.
+
+- **The system image's Linux programs** build for arm64 with `--arch
+  aarch64` (`cargo xtask linux-programs --arch aarch64` builds them alone):
+  BusyBox (Debian's `busybox-static`, arm64), the Wayland bridge for
+  `aarch64-unknown-linux-musl` (its system calls: `svc #0`, arm64's
+  numbers, `clone`/`ppoll`/`unlinkat` where arm64 has no `fork`/`poll`/
+  `unlink`), the C tests in `linux-tests/` and Doom, with clang
+  (`--target=aarch64-linux-musl`), Debian's arm64 `musl-dev` and the Rust
+  toolchain's `compiler_builtins` for 128-bit `long double`. In the C
+  sources: `waveos.h`'s `wave_call` uses `svc #0` and x8; `linuxtest`
+  checks the NEON registers where x86 checks YMM; `proctest` uses `udf`,
+  `brk` and x9/x10 and skips integer division by zero (it doesn't trap on
+  Arm); `linuxfuzz` leaves out the calls only x86-64 has. libdrm's
+  `modetest` and NetSurf are x86-only so far, and so is the Mesa test disk.
+- **The Debian root** (`cargo xtask linux-root --arch aarch64`, into
+  `target/linux-root-aarch64`) comes from the arm64 index of the same
+  pinned snapshot and `Release`; `--base` takes only libc, BusyBox and GNU
+  Hello. Debian's architecture name, the multiarch triplet
+  (`aarch64-linux-gnu`), musl's triplet and glibc's loader
+  (`/lib/ld-linux-aarch64.so.1`) all come from `xtask/src/arch.rs`.
+  `run`/`image --arch aarch64` put it on the disk as `/Linux` with the
+  same flags as on x86 (`--linux-root`, `--no-linux-root`; by default when
+  it can be fetched).
+
+## Tools
+
+- `xtask/src/arch.rs` holds everything that differs per architecture in
+  the build; `xtask/src/virt.rs` the `virt` machine's QEMU line.
+- The launcher's Processor choice, per-processor option tables and
+  presets: `xtask/src/runconfig.rs` (`available_on`, `builtin_presets_for`,
+  `options_json`'s `by_arch`).
+- Disks: `aurora/arch`, `refresh_esp`'s refusal, `cargo xtask migrate-disk`
+  (`xtask/src/migrate.rs`), see BUILDING.md.
+- Repositories and updates per architecture: store-and-updates.md,
+  "Architectures".
+- CI: `host-arm64` runs the host tests on an arm64 runner (the NEON
+  paths); `aarch64` builds, lints and boots the aarch64 system under TCG.
