@@ -649,7 +649,7 @@ download [Freedoom][fd] 0.13.0 (BSD-3-Clause, 24 MB, both phases) from its
 GitHub release when there is none. The data isn't in the system image
 because it would not fit on the installation disc.
 
-Controls: arrow keys move, Ctrl fires, Space opens doors, Shift runs, Alt
+Controls: arrow keys move, Ctrl, X or the left mouse button fires, Space or the right button opens doors, Shift runs, Alt
 strafes, number keys switch weapons, Esc opens the menu.
 
 [dg]: https://github.com/ozkl/doomgeneric

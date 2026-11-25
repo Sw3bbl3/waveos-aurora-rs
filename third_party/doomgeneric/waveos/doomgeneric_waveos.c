@@ -79,10 +79,13 @@ void DG_DrawFrame(void)
     wave_win_present(window, 0, 0, w, h);
 }
 
+// The game's name, then how to fire: the one control people ask about.
 void DG_SetWindowTitle(const char *title)
 {
-    if (window >= 0)
-        wave_win_set_title(window, title, strlen(title));
+    char full[160];
+    int n = snprintf(full, sizeof full, "%s - Ctrl, X or click fires, Space opens doors", title);
+    if (window >= 0 && n > 0)
+        wave_win_set_title(window, full, n < (int)sizeof full ? n : (int)sizeof full - 1);
 }
 
 void DG_SleepMs(uint32_t ms)
@@ -244,11 +247,49 @@ int DG_GetKey(int *pressed, unsigned char *key)
         case WAVE_EV_CLOSE_REQUESTED:
             exit(0);
         case WAVE_EV_RESIZE:
+            // The window has a new size: ask for a picture that size (the
+            // old one would stay, small, in the window's corner).
+            if (e.x > 0 && e.y > 0)
+                wave_call(WAVE_WIN_RESIZE, window, e.x, e.y, 0, 0);
             wave_win_surface(window, &surface);
             break;
+        case WAVE_EV_POINTER_DOWN:
+        case WAVE_EV_POINTER_UP:
+        {
+            // The left button fires and the right one opens doors, in the
+            // game; a button that went down there comes up there too.
+            static unsigned char held[3];
+            if (e.a != 1 && e.a != 2)
+                break;
+            if (e.kind == WAVE_EV_POINTER_DOWN)
+            {
+                if (menuactive || held[e.a])
+                    break;
+                held[e.a] = e.a == 1 ? KEY_FIRE : KEY_USE;
+                *pressed = 1;
+                *key = held[e.a];
+                return 1;
+            }
+            if (held[e.a])
+            {
+                *pressed = 0;
+                *key = held[e.a];
+                held[e.a] = 0;
+                return 1;
+            }
+            break;
+        }
         case WAVE_EV_KEY:
         {
             unsigned char k = doom_key(&e);
+            // X fires too, in the game: on a Mac, Ctrl with the arrow keys
+            // belongs to the host. In menus it stays a letter.
+            static int x_fires;
+            if (k == 'x' && (e.c != 0 ? !menuactive : x_fires))
+            {
+                x_fires = e.c != 0;
+                k = KEY_FIRE;
+            }
             if (k)
             {
                 *pressed = e.c != 0;

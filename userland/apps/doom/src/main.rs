@@ -277,9 +277,9 @@ impl App for Doom {
             .push(
                 HStack::new()
                     .push(
-                        Text::paragraph("Arrows move · Ctrl fires · Space opens · Esc for the menu")
-                            .style(TextStyle::Footnote)
-                            .foreground(Color::TertiaryLabel)
+                        Text::paragraph("Arrows move · Ctrl, X or a click fires · Space opens doors · Esc for the menu")
+                            .style(TextStyle::Subheadline)
+                            .foreground(Color::SecondaryLabel)
                             .grow(1),
                     )
                     .push(Button::new("Open Doom Folder").action(Msg::OpenFolder).control_size(ControlSize::Small))
