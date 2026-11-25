@@ -16,8 +16,8 @@ WaveOS is developed and tested in QEMU. Milestone 5 adds the drivers a real PC n
 
 - **Firmware:** 64-bit UEFI with Secure Boot off. Legacy BIOS (CSM) can't start WaveOS.
 - **Processor:** WaveOS uses up to 16 cores and parks the rest. AVX is used when the processor has it (WebKit's JavaScript compiler benefits) but isn't required.
-- **Memory:** WaveOS has no swap, so a program that runs out of memory fails. The desktop uses about 230 MiB; with Voyage showing a Wikipedia article, about 850 MiB in all. With 1 GiB, Voyage can't load WebKit and doesn't open. These figures come from QEMU at 1920 × 1080.
-- **Apple computers:** Macs with Apple silicon can't start WaveOS (it's built for x86-64); run it in a virtual machine there.
+- **Memory:** When memory runs short WaveOS compresses pages programs haven't used lately, then moves them to an encrypted swap file, and as a last resort ends a background program ([how](developer/memory.md)). The desktop uses about 230 MiB; with Voyage showing a Wikipedia article, about 850 MiB in all. These figures come from QEMU at 1920 × 1080, measured before swap existed (when Voyage could not open in 1 GiB); they have not been measured again since.
+- **Apple computers:** Macs with Apple silicon can't start WaveOS directly (their firmware isn't UEFI); run it in a virtual machine there, where the 64-bit Arm build runs at the processor's own speed (`make run`; see [64-bit Arm](#64-bit-arm)).
 
 The machines most likely to work are desktop PCs from about 2012 to 2020 with the disk in AHCI mode, a USB keyboard and mouse, and an Intel 82574L network card. Laptops are a harder fit: their touchpads, Wi-Fi and sleep are often the kinds WaveOS doesn't drive yet.
 
@@ -338,17 +338,16 @@ addresses than `virt`'s, PSCI through `smc` on hardware, firmware entering
 at EL2 with E2H forced on, GICv4 redistributor layouts, more than one
 GICv2m frame or an ITS, big.LITTLE CPUs with differing ID registers).
 
-Not yet run anywhere, because the aarch64 kernel doesn't start user
-programs yet: every native aarch64 program (corekit's `svc` calls and
-start-up, the run-time detection of the ARMv8 AES/PMULL instructions for
-TLS, the NEON pixel and video paths inside WaveOS — those are checked by
-host tests on an Apple-silicon Mac), the arm64 Linux programs (BusyBox,
-wl-bridge, the C tests, Doom: built, not run), the arm64 Debian root, and
-the Linux layer's arm64 ABI — its call table, `stat`/`epoll_event`
-layouts, signal frames and `rt_sigreturn`, restarting, the arm64 vDSO,
-the auxiliary vector and ID-register emulation (the tables, layouts,
-frames and HWCAP decoding are checked by host tests against Debian's
-arm64 headers, `cargo test -p aurora-linuxabi`). The x86 and aarch64 disks'
+What has run there, under HVF on an Apple M2: the kernel self-tests on
+both boots, the scripted desktop session (`tools/smoke_desktop.py`), every
+native aarch64 program, the arm64 Linux programs (BusyBox, wl-bridge, the
+C tests, Doom), the arm64 Debian root with Mesa, Voyage and Firefox, and
+video with sound in both browsers (`cargo xtask video-check`). The Linux
+layer's arm64 ABI is also checked on the host against Debian's arm64
+headers (`cargo test -p aurora-linuxabi`). Not there: suspend to RAM, the
+simulated battery, the ported Linux GPU driver, NetSurf and libdrm's
+`modetest` (x86-64 only so far). Under emulation (TCG) the aarch64 suite
+was not rerun after the latest changes. The x86 and aarch64 disks'
 architecture checks, `migrate-disk`, the per-architecture catalogues and
 the slot check in the bootloader are tested on the host only (image and
 repository tests; `cargo test -p xtask -p gina`). On QEMU 8.2 (Ubuntu

@@ -228,6 +228,17 @@ device tests (the display is ramfb, not a PCI GPU).
   TCG), against the 400 ms floor. The guest sends every packet, 48
   frames per millisecond.
 
+- The wake-up fix above was completed afterwards: with the counter alone
+  a waiter could still read it just after `wake_all` raised it and join
+  the list just before `wake_all` emptied it. `wake_all` now leaves
+  waiters on the list and each leaves it itself after its sleep; "wait
+  queues: a wakeup just before the waiter sleeps doesn't lose the next"
+  fails without it (round 85 on x86 with the counter alone). The same
+  stall had made browser starts 5 s or 10 s longer at random.
+- QEMU's window on macOS shows nothing from virtio-gpu's cursor plane, so
+  `xtask run` sets `cursor=software` there and the compositor draws the
+  pointer (`--hardware-cursor` keeps the plane).
+
 Not yet: the C half of the kernel (x86-only builds), the PCI I/O window,
 the second PL011 (telemetry), ASIDs, per-process pointer-authentication
 keys.

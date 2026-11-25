@@ -42,6 +42,8 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 | ![Voyage on WaveOS showing Wikipedia's article on WebKit](docs/screenshots/voyage.png) | ![Firefox on WaveOS in the dark theme, showing example.com in several languages](docs/screenshots/firefox.png) |
 | **Voyage.** WebKit, JavaScript and all, quickly. | **Firefox.** Mozilla's engine, unchanged. |
 
+On an Apple-silicon Mac both browsers run on the Arm build at the host processor's own speed: a cold start to a painted page takes two to three seconds, and video plays with sound (H.264, VP9 and AV1 up to 1080p in the playback test, `cargo xtask video-check`). [The measurements](docs/LINUX.md#two-abis-x86-64-and-arm64) say what was timed and how.
+
 ## JavaScript, written from scratch too.
 
 **Pulsar** is our own JavaScript engine: a compiler, a virtual machine, a garbage collector, and core standard-library facilities, from classes and generators to `async`/`await` and regular expressions. It passes more than 34,000 of the official conformance tests. In Terminal, type `js` and start writing: `js` for a prompt, `js file.js` to run a file.
@@ -72,7 +74,7 @@ Display drivers for Intel and AMD graphics, laptop touchpads over I²C, and othe
 
 Connect a controller and the desktop becomes **Wave Play**: a console-style home for your games and apps, with a quick overlay on the home button, and the desktop back the moment you want it.
 
-Underneath, Linux games find what they expect. WaveOS's own display drivers speak Linux's DRM/KMS interface at `/dev/dri/card0`, and keyboards, mice and controllers appear as standard `evdev` devices, so unmodified libdrm and SDL2 programs run as they are. Hardware-accelerated 3D is the work in progress: see the [roadmap](docs/ROADMAP.md).
+Underneath, Linux games find what they expect. WaveOS's own display drivers speak Linux's DRM/KMS interface at `/dev/dri/card0`, and keyboards, mice and controllers appear as standard `evdev` devices, so unmodified libdrm and SDL2 programs run as they are. Mesa runs unmodified on top, so OpenGL and Vulkan programs draw today in software (llvmpipe and lavapipe), in windows without a copy. **Doom** is in the box: the left mouse button, X or Ctrl fires, and its window resizes and maximizes with the picture. Hardware-accelerated 3D is the work in progress: see the [roadmap](docs/ROADMAP.md).
 
 ## See inside, while it runs.
 
@@ -96,7 +98,7 @@ make run
 
 A minute later, you're at the desktop. Add `--monitor` to open the System Explorer alongside it.
 
-**Which processor.** WaveOS runs on 64-bit Arm and on x86-64, and by default on your computer's own where QEMU can run it at full speed: on an **Apple-silicon Mac** that is Arm, under Hypervisor.framework, many times faster than the x86-64 build, which QEMU emulates instruction by instruction there. On an x86 PC it is x86-64. The other one is always a choice away: `make run ARCH=x86_64` (or `ARCH=aarch64`), `cargo xtask run --arch x86_64`, or **Processor** in the launcher.
+**Which processor.** WaveOS runs on 64-bit Arm and on x86-64, and by default on your computer's own where QEMU can run it at full speed: on an **Apple-silicon Mac** that is Arm, under Hypervisor.framework, many times faster than the x86-64 build, which QEMU emulates instruction by instruction there. On an x86 PC it is x86-64. The other one is always a choice away: `make run ARCH=x86_64` (or `ARCH=aarch64`), `cargo xtask run --arch x86_64`, or the **Chipset** card at the top of the launcher, which shows both with the board each boots on and whether it runs at full speed here.
 
 **Each processor has its own disk** (`target/waveos-aurora-aarch64.img` for Arm, `target/waveos-aurora.img` for x86-64). The first Arm run makes a new one and never touches the x86 disk; if you have used WaveOS on x86 before, it says so, and `cargo xtask migrate-disk --arch aarch64` copies your files across, reading the x86 disk only ([BUILDING.md](docs/BUILDING.md#two-architectures-x86_64-and-aarch64)). The first run also fetches Debian's packages for the Linux programs (Voyage, Firefox ESR…) and says how much it downloads (about 1.9 GB for Arm, once); `--no-linux-root` leaves them off. How the port works: [porting.md](docs/developer/porting.md). To try a real PC, see [HARDWARE.md](docs/HARDWARE.md); for every build command, see [FEATURES.md](docs/FEATURES.md#build-commands).
 
