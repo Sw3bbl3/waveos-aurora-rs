@@ -17,6 +17,7 @@ mod fullscreen;
 mod handle;
 mod harbor;
 mod lagoon;
+mod lean;
 mod notifications;
 mod play;
 mod reveal;
@@ -267,6 +268,8 @@ pub struct Desktop {
     coves: coves::Coves,
     /// Lagoon, every window spread out (while open, opening or closing).
     lagoon: Option<lagoon::Lagoon>,
+    /// A dragged window leaning with the pointer.
+    lean: lean::Lean,
 }
 
 impl Desktop {
@@ -349,6 +352,7 @@ impl Desktop {
             moorings_on: 0,
             coves: coves::Coves::default(),
             lagoon: None,
+            lean: lean::Lean::default(),
         };
         d.account = Account::load();
         d.shore = Self::startup_shore(d.account.as_ref());
@@ -1018,6 +1022,7 @@ impl Desktop {
             || self.play_moving()
             || self.lagoon_moving()
             || self.sliding()
+            || self.lean_moving()
             || self.windows.iter().any(|w| w.chrome.moving(self.now_ms, theme::reduce_motion()))
             || (!theme::reduce_motion() && cursor::animated(self.cursor_shape()))
     }
@@ -1135,6 +1140,7 @@ impl Desktop {
         } else if released & BUTTON_LEFT != 0 {
             self.grab = None;
             let drag = self.drag.take();
+            self.lean_release();
             if let Some(d) = drag {
                 // Moved by hand: it stays where it was put, whatever displays come back.
                 if let Some(i) = self.index_of(d.window) {
@@ -1350,7 +1356,11 @@ impl Desktop {
             if matches!(d.kind, DragKind::Move) {
                 self.moorings_drag(i, x, y);
             }
-            self.damage(old.union(&new));
+            if matches!(d.kind, DragKind::Move) {
+                self.lean_moved(d.window, x);
+            }
+            let area = self.lean_area(old.union(&new));
+            self.damage(area);
             self.drag_damage = false;
             return;
         }
@@ -1744,6 +1754,7 @@ impl Desktop {
         busy |= self.step_play();
         busy |= self.step_lagoon();
         busy |= self.step_slide();
+        busy |= self.step_lean();
         if busy {
             16
         } else {
@@ -2016,7 +2027,9 @@ impl Desktop {
             }
             let is_focused = Some(self.windows[i].id) == focused;
             let env = self.env_at(is_focused, self.windows[i].rect);
-            paint_window(cv, &mut self.windows[i], is_focused, &env, true);
+            if !self.paint_leaning(cv, i) {
+                paint_window(cv, &mut self.windows[i], is_focused, &env, true);
+            }
         }
     }
 
