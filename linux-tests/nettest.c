@@ -228,6 +228,32 @@ static void udp(void) {
     socklen_t len = sizeof from;
     CHECK(recvfrom(a, buf, sizeof buf, 0, (void *)&from, &len) == 8 && strcmp(buf, "datagram") == 0, "recvfrom");
     CHECK(from.sin_family == AF_INET && ntohs(from.sin_port) != 0, "the sender's address");
+    // Segmentation offload (UDP_SEGMENT, as QUIC stacks send): no socket
+    // default, but a message's own segment size makes one datagram each.
+    int seg = 4;
+    errno = 0;
+    CHECK(setsockopt(b, 17 /* SOL_UDP */, 103 /* UDP_SEGMENT */, &seg, sizeof seg) == -1 && errno == ENOPROTOOPT,
+          "no default UDP_SEGMENT");
+    char batch[] = "one!two!thr";
+    struct iovec iov = {batch, 11};
+    union {
+        struct cmsghdr h;
+        char room[CMSG_SPACE(sizeof(unsigned short))];
+    } ctl = {0};
+    struct msghdr msg = {.msg_name = &addr, .msg_namelen = sizeof addr, .msg_iov = &iov, .msg_iovlen = 1,
+                         .msg_control = ctl.room, .msg_controllen = sizeof ctl.room};
+    struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+    c->cmsg_level = 17;
+    c->cmsg_type = 103;
+    c->cmsg_len = CMSG_LEN(sizeof(unsigned short));
+    *(unsigned short *)CMSG_DATA(c) = 4;
+    CHECK(sendmsg(b, &msg, 0) == 11, "sendmsg with UDP_SEGMENT");
+    const char *want[] = {"one!", "two!", "thr"};
+    for (int i = 0; i < 3; i++) {
+        memset(buf, 0, sizeof buf);
+        CHECK(poll(&pfd, 1, 5000) == 1 && recv(a, buf, sizeof buf, 0) == (ssize_t)strlen(want[i])
+              && strcmp(buf, want[i]) == 0, "one datagram per segment");
+    }
     struct addrinfo *res = NULL;
     CHECK(getaddrinfo("localhost", "80", NULL, &res) == 0 && res, "getaddrinfo(localhost)");
     freeaddrinfo(res);
