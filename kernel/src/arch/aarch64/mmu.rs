@@ -267,3 +267,49 @@ pub fn write_combining_self_test() {
     crate::mm::vmm::kunmap(va, 1);
     crate::mm::frame::free(frame);
 }
+
+/// (bench) What switching the user half costs, in ns per switch, with the
+/// kernel then touching 16 pages (as a switch's caller does): as
+/// [`load_root`] does it (every CPU's TLB dropped), with this CPU's TLB
+/// only, and with no flush at all (the floor ASIDs approach). Runs with
+/// interrupts off, so no task runs on the empty user half it switches to.
+#[cfg(feature = "ktest")]
+pub fn switch_cost(rounds: u32) -> [u64; 3] {
+    let empty = crate::mm::frame::alloc().expect("a frame");
+    let buf = alloc::vec![1u8; 16 * 4096];
+    // SAFETY: a fresh frame: an empty top-level table (no user mappings).
+    unsafe { core::ptr::write_bytes(crate::mm::phys_to_virt(empty) as *mut u8, 0, 4096) };
+    let mut out = [0; 3];
+    super::interrupts::without_interrupts(|| {
+        let old = read!("ttbr0_el1");
+        for (k, slot) in out.iter_mut().enumerate() {
+            let t0 = crate::time::now_ns();
+            for i in 0..rounds {
+                let root = if i % 2 == 0 { empty } else { old };
+                // SAFETY: the kernel runs from TTBR1; nothing user runs
+                // until `old` is back (interrupts are off).
+                unsafe {
+                    regs::dsb_ish();
+                    regs::write!("ttbr0_el1", root);
+                    regs::isb();
+                    match k {
+                        0 => flush_all(),
+                        1 => core::arch::asm!("dsb nshst", "tlbi vmalle1", "dsb nsh", "isb", options(nostack)),
+                        _ => {}
+                    }
+                }
+                let mut sum = 0u8;
+                for p in 0..16 {
+                    sum = sum.wrapping_add(unsafe { core::ptr::read_volatile(&buf[p * 4096]) });
+                }
+                core::hint::black_box(sum);
+            }
+            *slot = (crate::time::now_ns() - t0) / rounds as u64;
+            // SAFETY: back to the running task's own user half.
+            unsafe { regs::write!("ttbr0_el1", old) };
+            flush_all();
+        }
+    });
+    crate::mm::frame::free(empty);
+    out
+}
