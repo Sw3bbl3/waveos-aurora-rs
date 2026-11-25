@@ -202,6 +202,22 @@ impl Arch {
         }
     }
 
+    /// The launcher's name for the chipset: the processor family in a few words.
+    pub fn chipset_name(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "Intel / AMD",
+            Arch::Aarch64 => "Arm",
+        }
+    }
+
+    /// The board QEMU builds for this choice, for the launcher's Chipset card.
+    pub fn chipset_note(self) -> &'static str {
+        match self {
+            Arch::X86_64 => "Q35 PC chipset (ICH9): PCIe, AHCI, ACPI and APIC interrupts, with UEFI firmware (OVMF)",
+            Arch::Aarch64 => "QEMU virt board: PCIe, GICv3 interrupts, PSCI power control, with UEFI firmware (EDK2)",
+        }
+    }
+
     /// The default without `--arch` (see [`DEFAULT_TO_ACCELERATED_HOST`]).
     pub fn default_choice() -> Arch {
         Arch::default_on(Arch::host(), |a| a.accelerated_here())

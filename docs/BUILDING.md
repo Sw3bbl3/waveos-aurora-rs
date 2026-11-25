@@ -55,6 +55,8 @@ Each display opens in its own host window. How depends on what your QEMU was bui
 
 QEMU's Cocoa window can show only one display at a time (View menu), so VNC is what gives macOS separate windows. When QEMU exits, the Screen Sharing windows stay open with a "connection lost" message: close them yourself.
 
+On macOS, with `--gpu virtio`, WaveOS draws the pointer into the picture itself (`cursor=software` in boot.conf): QEMU's window there shows nothing from virtio-gpu's cursor plane. `--hardware-cursor` keeps the plane, for another viewer (VNC, a newer QEMU).
+
 With `--gpu virtio` the desktop extends over every display: the menu bar and Harbor on display 1, the others to its right (arrange them in Settings → Display). QEMU switches outputs 2 to N on only when a user interface asks for a size, which Screen Sharing and most VNC viewers never do, so xtask asks itself through one more VNC server per output, on a Unix socket in the session directory. With `--gpu std` only display 1 is used (the `secondary-vga` windows keep showing the firmware's last text). One QEMU caveat: the USB tablet is absolute over the rectangle around all displays, so in a VM with several windows the pointer lands where that rectangle says rather than under the host cursor; use a mouse (`AURORA_QEMU_ARGS="-device usb-mouse"`) or move between displays at their shared edges.
 
 `cargo xtask test --gpu virtio --displays 3` runs the multi-monitor kernel test: the harness plugs the extra heads in and out through their VNC servers and compares a QMP screendump of each head with what the compositor drew.
@@ -118,7 +120,7 @@ On an Apple-silicon Mac, aarch64 runs under Hypervisor.framework (`-accel hvf -c
 
 Each architecture has its own output, so switching never rebuilds the other: `target/<triple>/` for the bootloader and kernel, `target/user` and `target/user-aarch64` for user space, `target/esp` and `target/esp-aarch64` for the EFI partition (`EFI/BOOT/BOOTX64.EFI` or `BOOTAA64.EFI`, and `aurora/arch` naming the architecture), and its own disk: `target/waveos-aurora.img` stays the x86 disk, `target/waveos-aurora-aarch64.img` is the Arm one. A disk records its architecture, and `run` refuses to refresh a disk for the other one (its files are never touched).
 
-The launcher's **Processor** choice (in "What to boot") switches between the two: each says in one line what it costs here ("Runs at full speed on this computer" or "Emulated instruction by instruction here"), and its devices and presets are only those its machine has (on aarch64: no simulated battery and no ported Linux GPU driver; virtio-gpu is the default display and "Plain framebuffer" the firmware's `ramfb`). The page starts on the default architecture, the one `DEFAULT_TO_ACCELERATED_HOST` picks.
+The launcher's **Chipset** card, at the top of the page, switches between the two (Intel / AMD and Arm): each names the board QEMU builds for it and says in one line what it costs here ("Runs at full speed on this computer" or "Emulated instruction by instruction here"), and its devices and presets are only those its machine has (on aarch64: no simulated battery and no ported Linux GPU driver; virtio-gpu is the default display and "Plain framebuffer" the firmware's `ramfb`). The page starts on the default architecture, the one `DEFAULT_TO_ACCELERATED_HOST` picks.
 
 More aarch64 commands:
 

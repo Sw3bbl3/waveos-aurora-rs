@@ -197,6 +197,22 @@ select:disabled { opacity: .5; }
 .note.warn { background: rgba(199, 119, 0, 0.12); }
 .note.bad { background: var(--bad-soft); }
 
+/* Chipset */
+.chipsets { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; padding-bottom: 10px; }
+.chipset {
+  position: relative; text-align: left; padding: 13px 14px; border-radius: 14px; cursor: pointer; font: inherit; color: inherit;
+  border: 1px solid var(--hairline); background: var(--glass-strong);
+}
+.chipset b { display: block; font-size: 15px; }
+.chipset .arch { display: block; color: var(--ink-3); font-size: 12px; margin-top: 1px; }
+.chipset .speed { display: inline-block; margin-top: 9px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.chipset .speed.fast { background: var(--accent-soft); color: var(--accent); }
+.chipset .speed.slow { background: rgba(199, 119, 0, 0.14); color: var(--ink-2); }
+.chipset .board { display: block; color: var(--ink-2); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
+.chipset[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.chipset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chip-help { padding-bottom: 12px; }
+
 /* Presets */
 .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; padding-bottom: 10px; }
 .preset {
@@ -296,6 +312,13 @@ dialog .buttons { justify-content: flex-end; }
 
 <main>
   <div class="stack">
+    <section class="card glass" aria-labelledby="h-chipset">
+      <h2 id="h-chipset">Chipset</h2>
+      <p class="lede">The kind of computer WaveOS boots on. Each has its own build and its own disk, so switching never touches the other's files.</p>
+      <div class="chipsets" id="arch" role="group" aria-label="Chipset"></div>
+      <div class="help chip-help" id="arch-help"></div>
+    </section>
+
     <section class="card glass" aria-labelledby="h-presets">
       <h2 id="h-presets">Presets</h2>
       <p class="lede">Start from one of these, then change anything below.</p>
@@ -311,11 +334,6 @@ dialog .buttons { justify-content: flex-end; }
 
     <section class="card glass" aria-labelledby="h-what">
       <h2 id="h-what">What to boot</h2>
-      <div class="row">
-        <div class="label">Processor</div>
-        <div class="control"><div class="seg" id="arch"></div></div>
-        <div class="help" id="arch-help"></div>
-      </div>
       <div class="row">
         <div class="label">Boot</div>
         <div class="control"><div class="seg" id="action"></div></div>
@@ -584,9 +602,23 @@ const isTest = () => config.action === "test";
 
 function render() {
   const O = machine();
-  seg($("arch"), S.options.arch, config.arch, switchArch);
+  const chips = $("arch");
+  chips.textContent = "";
+  for (const a of S.options.arch) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chipset";
+    b.setAttribute("aria-pressed", String(a.value === config.arch));
+    const add = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; e.textContent = text; b.appendChild(e); };
+    add("b", "", a.name || a.label);
+    add("span", "arch", a.label);
+    add("span", "speed " + (a.accelerated ? "fast" : "slow"), a.accelerated ? "Full speed on this computer" : "Emulated: much slower");
+    add("span", "board", a.chipset || "");
+    b.addEventListener("click", () => switchArch(a.value));
+    chips.appendChild(b);
+  }
   const chosen = S.options.arch.find((a) => a.value === config.arch) || {};
-  $("arch-help").textContent = chosen.help || "";
+  $("arch-help").textContent = (chosen.help || "") + ". Disk: " + diskPath() + ".";
   seg($("action"), [{ value: "run", label: "Desktop" }, { value: "test", label: "Kernel tests", available: O.tests }], config.action, (v) => set({ action: v }));
   $("action-help").textContent = isTest()
     ? "cargo xtask test: the kernel self-tests on a fresh test disk (512 MiB, no window), booted twice. Your own disk isn't touched."

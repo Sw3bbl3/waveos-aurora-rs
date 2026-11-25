@@ -734,7 +734,14 @@ pub fn options_json(caps: &dyn Fn(Arch) -> QemuCaps) -> Value {
     json!({
         "arch": ARCHES.iter().map(|&(v, label)| {
             let a = Arch::parse(v).unwrap();
-            json!({"value": v, "label": label, "help": a.speed_note(), "accelerated": a.accelerated_here()})
+            json!({
+                "value": v,
+                "label": label,
+                "help": a.speed_note(),
+                "accelerated": a.accelerated_here(),
+                "name": a.chipset_name(),
+                "chipset": a.chipset_note(),
+            })
         }).collect::<Vec<_>>(),
         "by_arch": by_arch,
         "disk": top["disk"],

@@ -28,6 +28,8 @@
 //!       --displays N                      simulate N displays (1-4), each in its own window (see displays.rs)
 //!       --wifi-sim                        simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
 //!       --virtual-gamepad                 a game controller played on the keyboard, connected at start-up
+//!       --hardware-cursor                 on macOS with --gpu virtio: keep the pointer on the cursor plane
+//!                                         (QEMU's window there doesn't show it, so WaveOS draws it instead)
 //!                                         (Super+G connects and disconnects it at any time; see Wave Play)
 //!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
 //!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
@@ -412,6 +414,13 @@ fn main() {
             image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
                 .expect("write boot.conf");
             image::set_boot_option(&img, "gpu", gpu_driver(gpu)).expect("write boot.conf");
+            // QEMU's window on macOS shows no pointer from virtio-gpu's cursor
+            // plane, so WaveOS draws the pointer into the picture there
+            // (--hardware-cursor keeps the plane).
+            let software_cursor =
+                cfg!(target_os = "macos") && gpu.starts_with("virtio") && !flag("--hardware-cursor");
+            image::set_boot_option(&img, "cursor", if software_cursor { "software" } else { "hardware" })
+                .expect("write boot.conf");
             // QEMU's usb-net offers RNDIS and CDC-ECM: which one --net asked for.
             image::set_boot_option(&img, "usbnet", usb_net_mode(net)).expect("write boot.conf");
             // A keyboard-driven game controller, for Wave Play without one.
