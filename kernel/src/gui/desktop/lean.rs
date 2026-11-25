@@ -1,7 +1,7 @@
-//! A dragged window swings from the pointer like something held by one
-//! point: it turns a few degrees against the way it is moving (its far end
-//! trails behind), in proportion to how fast, and when the drag slows or
-//! ends it swings back past level and settles on a loose spring. Only the
+//! A dragged window turns about the point held, against the way it is
+//! moving and more the faster it goes (a true rotation; its size never
+//! changes), and comes back level smoothly, without overshooting, when the
+//! drag slows or ends. Only the
 //! drawing changes: the window's rectangle, hit-testing and where it lands
 //! stay exactly as without it, and once level the window is drawn as ever.
 //! Off with Reduce Motion.
@@ -10,12 +10,12 @@ use super::*;
 use crate::gui::canvas::blend;
 use lumen::spring::Spring;
 
-/// The turn asked for at most, in 1/10000 radian (about 4.5 degrees).
-const MOST: i32 = 800;
-/// The furthest the spring's swing may carry it (about 6 degrees).
-const SWING: i32 = 1050;
-/// A loose spring: it overshoots and wobbles a few times before resting.
-const LOOSE: (u32, u32) = (420, 300);
+/// The turn asked for at most, in 1/10000 radian (about 8 degrees).
+const MOST: i32 = 1400;
+/// The furthest it is ever drawn turned.
+const SWING: i32 = 1400;
+/// Follows the speed smoothly and comes back level without overshooting.
+const LOOSE: (u32, u32) = (260, 1000);
 
 #[derive(Default)]
 pub(super) struct Lean {
@@ -52,8 +52,8 @@ impl Desktop {
         let speed = (x - l.last.0) * 1000 / dt; // points a second
         l.last = (x, now);
         if let Some(s) = l.turn.as_mut() {
-            // Moving right, what hangs below the pointer trails to the left.
-            s.set_target((speed * 2 / 5).clamp(-MOST, MOST), now);
+            // It turns against the way it is going, more the faster it goes.
+            s.set_target((-speed * 3 / 5).clamp(-MOST, MOST), now);
         }
     }
 
