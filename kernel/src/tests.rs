@@ -50,6 +50,7 @@ const TESTS: &[Test] = &[
     ("clock: TSC/HPET monotonic", clock),
     ("timers: queue order, accuracy, cancel, on every CPU", timer_queue),
     ("tickless: timeouts fire on CPUs with the tick stopped", tickless_timeouts),
+    ("wait queues: a wakeup just before the waiter sleeps doesn't lose the next", wait_queue_early_wakeup),
     ("tickless: quiet idle (timer interrupts per CPU) and idle accounting", quiet_idle),
     ("user copies recover from faults", user_copy_fault),
     ("hardening: SMEP/SMAP/UMIP, kernel W^X, stack guards, ASLR", hardening),
@@ -1311,7 +1312,10 @@ fn stop_bridge() {
     for p in crate::proc::all().iter().filter(|p| p.name() == "wl-bridge") {
         let _ = crate::proc::kill(p.pid);
     }
-    eventually(5000, || !crate::proc::all().iter().any(|p| p.name() == "wl-bridge" && p.exit_code().is_none()));
+    // Reaped, not only killed: until the reaper closes its descriptors its
+    // socket still answers, and the next browser's `wl-bridge --background`
+    // takes it for a running bridge (then the browser finds no display).
+    eventually(5000, || !crate::proc::all().iter().any(|p| p.name() == "wl-bridge" && !p.is_reaped()));
 }
 
 /// Like [`run_linux_program_watched`] with Lumen Server running (`c`): its
@@ -3252,6 +3256,61 @@ fn timer_queue() {
     if n >= 2 && together {
         assert!(cpus.count_ones() >= 2, "every timer was armed on one CPU");
     }
+}
+
+/// A waiter on a [`crate::sync::WaitQueue`] (as disk and USB drivers wait
+/// for their interrupts) is woken by the wakeup for its own event, even when
+/// another wakeup came while it was between joining the queue and sleeping:
+/// one task signals the queue over and over for nothing, another signals it
+/// once its event has happened, and each wait must end soon after that, not
+/// at its timeout (as virtio-blk reads did, stalling browsers for 5 s).
+fn wait_queue_early_wakeup() {
+    use core::sync::atomic::{AtomicBool, AtomicU64};
+    static QUEUE: crate::sync::WaitQueue = crate::sync::WaitQueue::new();
+    static EVENT: AtomicU64 = AtomicU64::new(0);
+    static ASKED: AtomicU64 = AtomicU64::new(0);
+    static STOP: AtomicBool = AtomicBool::new(false);
+    static STOPPED: AtomicU32 = AtomicU32::new(0);
+    fn noise() {
+        while !STOP.load(Ordering::Acquire) {
+            QUEUE.wake_all();
+            core::hint::spin_loop();
+        }
+        STOPPED.fetch_add(1, Ordering::AcqRel);
+    }
+    // The event: a millisecond after each round asks for it, on another task.
+    fn signal() {
+        while !STOP.load(Ordering::Acquire) {
+            let asked = ASKED.load(Ordering::Acquire);
+            if asked > EVENT.load(Ordering::Acquire) {
+                sched::sleep_ms(1);
+                EVENT.store(asked, Ordering::Release);
+                QUEUE.wake_all();
+            } else {
+                sched::yield_now();
+            }
+        }
+        STOPPED.fetch_add(1, Ordering::AcqRel);
+    }
+    EVENT.store(0, Ordering::Release);
+    ASKED.store(0, Ordering::Release);
+    STOP.store(false, Ordering::Release);
+    STOPPED.store(0, Ordering::Release);
+    sched::spawn("t-wq-noise", noise);
+    sched::spawn("t-wq-event", signal);
+    let mut worst = 0;
+    for round in 1..=300u64 {
+        ASKED.store(round, Ordering::Release);
+        let t0 = time::uptime_ms();
+        let done = QUEUE.wait(3000, || EVENT.load(Ordering::Acquire) >= round);
+        let took = time::uptime_ms() - t0;
+        worst = worst.max(took);
+        assert!(done, "round {round}: the event never came");
+        assert!(took < 1000, "round {round}: woken {took} ms after a 1 ms event (a lost wakeup)");
+    }
+    STOP.store(true, Ordering::Release);
+    eventually(2000, || STOPPED.load(Ordering::Acquire) == 2);
+    crate::kprint!("[300 waits, slowest {worst} ms] ");
 }
 
 /// Timeouts end on time on CPUs that are idle with no tick: each task's CPU

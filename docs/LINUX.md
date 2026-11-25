@@ -685,6 +685,8 @@ focus, grabs and rumble, with the kernel test playing the user).
 To see what a Linux program asks of the kernel, put `WAVEOS_STRACE=1` in
 its environment: every system call it makes, with its arguments, the path
 it names (if any) and its result, goes to the system log.
+`WAVEOS_STRACE=NAME` traces only the processes named NAME (a browser's
+own process, say, not the helpers that inherit its environment).
 `WAVEOS_SYSCOUNT=1` is lighter: when the program ends (or `exec`s
 another), the log gets how many of each call it made and the time they
 took, waits included, most first.

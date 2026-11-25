@@ -222,11 +222,15 @@ impl WaitQueue {
         }
     }
 
+    /// Wakes every waiter, leaving each on the list: a waiter leaves it
+    /// itself, after its sleep. `wakes` alone left a hole: a waiter that read
+    /// it just after this increment, then joined the list just before this
+    /// took the list away, saw no change and slept off the list (the wait
+    /// queue test lost a wakeup that way on x86 by its 85th round).
     pub fn wake_all(&self) {
-        // (Before the list is taken: a waiter it takes sees the change.)
         self.wakes.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-        let waiters = core::mem::take(&mut *self.waiters.lock());
-        for t in waiters {
+        let waiters = self.waiters.lock();
+        for &t in waiters.iter() {
             crate::sched::wake(t);
         }
     }
