@@ -19,6 +19,17 @@ pub trait CharDev: Send + Sync {
         Err(ENOTTY)
     }
 
+    /// `ioctl` on a descriptor that is non-blocking or not (for requests
+    /// that may wait).
+    fn ioctl_nb(&self, request: u32, arg: u64, _nonblock: bool) -> Result<u64, isize> {
+        self.ioctl(request, arg)
+    }
+
+    /// The ALSA PCM it is, if it is one (for `mmap`).
+    fn pcm(&self) -> Option<&super::sound::Pcm> {
+        None
+    }
+
     /// Readable, writable, and hung up (the device is gone).
     fn readiness(&self) -> (bool, bool, bool);
 

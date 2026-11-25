@@ -188,6 +188,13 @@ Writing to the file, or deleting it, drops it from the cache.
   `MAP_SHARED` mappings of them, or anonymous ones: every process mapping
   the object sees the same memory, across `fork` and when the descriptor is
   passed over a local socket. `ftruncate` and `fallocate` size them.
+  `MAP_SHARED` mappings of a disk file opened for writing share their
+  pages too, through that open file (its `dup`s, `fork`s and passed
+  descriptors): what one writes, the others see, so a program can write
+  code through one mapping and run it through another (GStreamer's ORC
+  does, in a deleted temporary file). What is written through them stays
+  in memory and doesn't reach the file yet; a mapping only for reading
+  shows the file as it is.
 - **Threads:** `clone` for threads with thread-local storage (`arch_prctl`),
   and the child-tid handshake `pthread_join` uses. `futex` waits and wakes
   (with deadlines and bit sets), moves waiters from one futex to another
@@ -231,7 +238,11 @@ Writing to the file, or deleting it, drops it from the cache.
   datagram and sequenced-packet, named by a path or in the abstract
   namespace, `socketpair`, `SO_PEERCRED`, descriptors passed with
   `SCM_RIGHTS`, and the sender's credentials with `SO_PASSCRED`
-  (`SCM_CREDENTIALS`). `sendmmsg`/`recvmmsg` and `FIONREAD` too.
+  (`SCM_CREDENTIALS`). `sendmmsg`/`recvmmsg` and `FIONREAD` too. A UDP
+  message with `UDP_SEGMENT` (segmentation offload) goes out as one
+  datagram per segment; the socket-wide `UDP_SEGMENT` option is refused
+  (`ENOPROTOOPT`), so QUIC stacks that probe for it (Firefox's HTTP/3)
+  don't count on it.
 - **Symbolic links:** the read-only tree's links come with the system image
   (`/bin/sh` and every other BusyBox command are links to `/bin/busybox`,
   where Debian puts them); `symlink` makes new ones in the writable tree.
@@ -329,12 +340,61 @@ again before `WAVE_EV_BUFFER_RELEASE` says WaveOS no longer reads it.
 display's frame number and time (`CLOCK_MONOTONIC`), its refresh period,
 and whether it was scanned out without a copy.
 
-Programs written for Linux's own sound interfaces reach the same streams
-through OSS: `/dev/dsp` is a WaveOS sound stream, and its `ioctl`s (format,
-channels, rate, buffer space, delay, sync, reset) describe it as it is,
-48 kHz 16-bit stereo, so a program that asks for another rate is told the
-one it gets and converts (GStreamer's `osssink` does, and with it WebKit's
-media). There is no PulseAudio or ALSA.
+Programs written for Linux's own sound interfaces reach the same mixer
+through ALSA and OSS:
+
+- **ALSA:** one sound card, `/dev/snd/controlC0` and its playback device
+  `/dev/snd/pcmC0D0p`, with the kernel's `ioctl`s
+  ([`sound.rs`](../kernel/src/compat/linux/sound.rs)), so the ALSA library
+  and everything over it (Firefox's cubeb, GStreamer's `alsasink` and with
+  it WebKit's media, SDL, PortAudio, Wine) play unchanged. Each open is a
+  stream of its own in the mixer, so any number of programs play at once
+  without `dmix`; `/etc/asound.conf` makes the default device `plug` over
+  the card, which converts what it doesn't take itself. The card takes
+  48 kHz, one or two channels, 16-bit, 32-bit or float samples, written
+  (`snd_pcm_writei`) or through the mapped buffer (`mmap` access,
+  committed with `SYNC_PTR`); the status and control pages aren't mapped,
+  so libasound uses `SYNC_PTR` for them, as it does on some
+  architectures. The hardware pointer is what the mixer has taken; the
+  delay adds what it has mixed into the device's ring and isn't heard
+  yet, so players that time pictures by `snd_pcm_delay` keep them in step
+  with the sound. A stream that runs dry while running goes to `XRUN` as on
+  Linux. `/proc/asound` lists the card. The structures are the same for
+  x86-64 and arm64 programs, so both get the one implementation. Opening
+  the playback device needs the sound capability (an app without it gets
+  `EACCES`). There is no capture device yet (microphones are WaveOS's
+  `record`); one would need the microphone capability and show the menu
+  bar's recording indicator while open, as `record` does.
+- **OSS:** `/dev/dsp` is a WaveOS sound stream, and its `ioctl`s (format,
+  channels, rate, buffer space, delay, sync, reset) describe it as it is,
+  48 kHz 16-bit stereo, so a program that asks for another rate is told the
+  one it gets and converts. Its delay counts what the mixer holds too.
+
+There is no PulseAudio or PipeWire server: ALSA is what both browsers (and
+nearly every Linux program) can use without one, in the program's own
+process, with nothing more to start; PulseAudio's library is on the disk
+(Firefox looks for a server first and moves on to ALSA when there is
+none; WaveOS's Firefox settings ask for ALSA straight away). Debian's
+Firefox ESR links libasound and opens ALSA in-process through cubeb; its
+WebKit plays through GStreamer, whose `alsasink` (gstreamer1.0-alsa) is
+on the disk. A PulseAudio endpoint would mean a server speaking
+PulseAudio's own protocol over a socket, for programs that already
+work without one. Firefox's content processes open the card themselves
+(`media.cubeb.sandbox` off): their connection to the parent's AudioIPC
+server never completes here yet, and with Firefox's sandboxes off the
+server would keep nothing out.
+
+`cargo xtask video-check` measures video playback in both browsers on a
+disposable disk with the full Linux root (`--browsers firefox,voyage`,
+`--cases h264-360,…,av1-1080`, `--secs N`): it makes test clips with the
+host's ffmpeg (a moving pattern and a steady 440 Hz tone, in the
+containers YouTube serves), serves them to an MSE player page
+(`tools/video_mse.html`), records the guest's sound card to a WAV file,
+and reports for each case the time to the first frame, frames decoded,
+presented and dropped, the media clock's rate, A/V drift (presented frame
+against the media clock), stalls, gaps in the recorded tone, and each
+sound stream's underruns from the kernel's log. `--min-fps`,
+`--max-drift` and `--max-gaps` make it fail below a bar.
 
 ## The display (DRM)
 

@@ -51,6 +51,8 @@ pub const DEFAULT_PACKAGES: &[&str] = &[
     // for streaming sites (YouTube's audio), H.264 and AV1.
     "gstreamer1.0-plugins-bad",
     "gstreamer1.0-libav",
+    // GStreamer's ALSA sink: WebKit's sound, through WaveOS's ALSA card.
+    "gstreamer1.0-alsa",
     "ca-certificates",
     // Mesa's spinning cube, full screen on the DRM device (its libraries,
     // GBM, EGL and GLES, come with WebKit anyway).
@@ -270,6 +272,9 @@ pub fn waveos_settings(dir: &Path) -> Vec<(String, PathBuf)> {
         ("/etc/firefox-esr/waveos.js", src.join("waveos.js")),
         ("/usr/share/firefox-esr/distribution/policies.json", src.join("policies.json")),
         ("/etc/xdg/gtk-3.0/settings.ini", src.join("gtk-settings.ini")),
+        // ALSA's default device: WaveOS's mixer (libasound, for Firefox,
+        // GStreamer and SDL).
+        ("/etc/asound.conf", root().join("linux-programs/alsa/asound.conf")),
     ];
     // Voyage, the web browser, built for these packages.
     if let Some(voyage) = super::voyage::build(dir) {

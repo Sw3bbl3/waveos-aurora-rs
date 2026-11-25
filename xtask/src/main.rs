@@ -103,6 +103,7 @@ mod testdisplays;
 mod usbredir;
 mod virt;
 mod voyage;
+mod videocheck;
 mod webcheck;
 
 use std::env;
@@ -167,6 +168,7 @@ fn main() {
 
     match args.first().map(String::as_str) {
         Some("web-check") => webcheck::run(&args[1..]),
+        Some("video-check") => videocheck::run(&args[1..]),
         Some("fsck") => {
             let img = args[1..].iter().find(|a| !a.starts_with("--")).map(String::as_str).unwrap_or("target/test-disk.img");
             match image::check_home(Path::new(img), flag("--repair")) {

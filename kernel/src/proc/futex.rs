@@ -102,6 +102,14 @@ pub fn wait(addr: u64, expected: u32, timeout_ms: u64) -> Result<u64, isize> {
 
 /// [`wait`], for a futex that may be shared between processes.
 pub fn wait_shared(addr: u64, expected: u32, timeout_ms: u64, shared: bool) -> Result<u64, isize> {
+    let deadline = crate::time::now_ns().saturating_add(timeout_ms.saturating_mul(1_000_000));
+    wait_until_ns(addr, expected, deadline, shared)
+}
+
+/// [`wait_shared`] with a deadline in ns of `time::now_ns` (`u64::MAX`:
+/// none), kept to the nanosecond (Linux's `FUTEX_WAIT` timeouts, which
+/// condition variables and timers are made of).
+pub fn wait_until_ns(addr: u64, expected: u32, deadline: u64, shared: bool) -> Result<u64, isize> {
     let (k, _pinned) = key_pinned(addr, shared, true)?;
     let me = sched::current_id();
     MOVED.lock().remove(&me);
@@ -131,11 +139,10 @@ pub fn wait_shared(addr: u64, expected: u32, timeout_ms: u64, shared: bool) -> R
             }
         }
     }
-    let deadline = crate::time::uptime_ms().saturating_add(timeout_ms);
     // A requeue moves this waiter to another key: follow it.
     let mut at = k;
     loop {
-        let now = crate::time::uptime_ms();
+        let now = crate::time::now_ns();
         match where_queued(at, me) {
             None => return Ok(0),
             Some(k) => at = k,
@@ -148,7 +155,7 @@ pub fn wait_shared(addr: u64, expected: u32, timeout_ms: u64, shared: bool) -> R
             dequeue(at, me);
             return Err(ETIMEDOUT);
         }
-        sched::wait_until(deadline - now, || !queued(at, me) || super::interrupted());
+        sched::wait_until_ns(deadline, || !queued(at, me) || super::interrupted());
     }
 }
 

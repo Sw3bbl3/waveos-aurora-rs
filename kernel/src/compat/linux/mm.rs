@@ -9,8 +9,11 @@
 
 use crate::mm::vmm::{AddressSpace, Prot};
 use crate::mm::PAGE_SIZE;
+use super::shm::ShmFile;
 use crate::proc::{Handle, Process};
 use alloc::string::String;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use aurora_abi::err::*;
 use aurora_abi::layout;
 use core::fmt::Write;
@@ -129,12 +132,24 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
             return map_frames(p, addr, n, flags, prot_bits, &frames);
         }
     }
+    // An ALSA PCM's buffer, shared with the mixer side.
+    if flags & MAP_ANONYMOUS == 0 {
+        if let Some(buf) = super::fs::pcm_buffer(p, fd as u64, offset) {
+            let frames = buf?.frames(0, n);
+            if (frames.len() as u64) < n {
+                return Err(EINVAL);
+            }
+            return map_frames(p, addr, n, flags, prot_bits, &frames);
+        }
+    }
     // Shared memory: the same frames in every process that maps it.
     let shared = if flags & MAP_SHARED != 0 {
         if flags & MAP_ANONYMOUS != 0 {
             Some(super::shm::ShmFile::new(n * PAGE_SIZE)?)
+        } else if let Some(shm) = super::fs::shm_of(p, fd as u64) {
+            Some(shm)
         } else {
-            super::fs::shm_of(p, fd as u64)
+            file_shared(p, fd, prot_bits)?
         }
     } else {
         None
@@ -157,8 +172,8 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
         None
     };
     // A disk file's pages come from the cache every mapping of it shares
-    // (read first if need be). Shared mappings of disk files are private
-    // for now: what is written to them stays in the process.
+    // (read first if need be). Shared mappings of a file opened read-only
+    // can't be written; of one opened for writing, see `file_shared`.
     let cached = if flags & MAP_ANONYMOUS == 0 && file_data.is_none() {
         let h = p.fd(fd as usize)?;
         let Handle::File(f) = &*h else { return Err(ENODEV) };
@@ -214,6 +229,87 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
     }
     update_resident(p, aspace);
     Ok(va)
+}
+
+/// What `MAP_SHARED` mappings of disk files opened for writing map: one
+/// object per open file description (`dup`, `fork` and descriptors passed
+/// over sockets share it), holding the file's contents as they were at the
+/// first such mapping, so every mapping through it sees what the others
+/// write. Programs that write code through one mapping and run it through
+/// another rely on that (GStreamer's ORC maps a deleted temporary file
+/// twice, writable and executable), as do ones that share memory through a
+/// deleted file. What is written stays in memory, not in the file (as for
+/// any shared mapping of a disk file here, before); `ftruncate` resizes the
+/// object too. Entries go when their description closes (the mappings
+/// keep their frames).
+static FILE_SHARED: crate::sync::Mutex<Vec<(Weak<Handle>, Arc<ShmFile>)>> = crate::sync::Mutex::new(Vec::new());
+
+/// Files larger than this map as before (a copy would cost too much).
+const FILE_SHARED_MAX: u64 = 64 << 20;
+
+/// The object for a description, if it has one.
+pub fn file_shared_of(h: &Arc<Handle>) -> Option<Arc<ShmFile>> {
+    let mut list = FILE_SHARED.lock();
+    list.retain(|(w, _)| w.strong_count() > 0);
+    list.iter().find(|(w, _)| w.as_ptr() == Arc::as_ptr(h)).map(|(_, s)| s.clone())
+}
+
+/// The shared object to map for `MAP_SHARED` of `fd`, made if need be.
+/// None (the mapping reads the file's cached pages, as before) for a file
+/// opened read-only, a large one, or not a disk file; and for a mapping
+/// only for reading while the description has no object yet: SQLite, say,
+/// maps its database that way and writes it with `write`, and an object
+/// would keep the contents of its first mapping.
+fn file_shared(p: &Process, fd: i64, prot_bits: u64) -> Result<Option<Arc<ShmFile>>, isize> {
+    let h = p.fd(fd as usize)?;
+    let Handle::File(f) = &*h else { return Ok(None) };
+    let (fs, ino, size, writable) = {
+        let f = f.lock();
+        (f.fs.clone(), f.ino, f.size()?, f.writable)
+    };
+    if let Some(s) = file_shared_of(&h) {
+        // The file grew (SQLite extends its shared-memory file with
+        // `write` before mapping the new part): the object takes the new
+        // part from the file.
+        if size > s.size() && size <= FILE_SHARED_MAX {
+            let from = s.size();
+            s.resize(size)?;
+            fill(&s, &fs, ino, from, size)?;
+        }
+        return Ok(Some(s));
+    }
+    if !writable || prot_bits & (PROT_WRITE | PROT_EXEC) == 0 || size > FILE_SHARED_MAX {
+        return Ok(None);
+    }
+    // Read before taking the list's lock (the disk may be slow).
+    let obj = ShmFile::new(size)?;
+    fill(&obj, &fs, ino, 0, size)?;
+    let mut list = FILE_SHARED.lock();
+    // Another thread may have made one meanwhile: the first one counts.
+    if let Some((_, s)) = list.iter().find(|(w, _)| w.as_ptr() == Arc::as_ptr(&h)) {
+        return Ok(Some(s.clone()));
+    }
+    list.push((Arc::downgrade(&h), obj.clone()));
+    Ok(Some(obj))
+}
+
+/// Copies bytes `from..to` of the file into `obj`.
+fn fill(obj: &ShmFile, fs: &Arc<dyn crate::fs::Filesystem>, ino: crate::fs::Ino, from: u64, to: u64) -> Result<(), isize> {
+    if to <= from {
+        return Ok(());
+    }
+    let mut buf = crate::syscall::user::buffer((to - from).min(1 << 20) as usize)?;
+    let mut at = from;
+    while at < to {
+        let want = (to - at).min(buf.len() as u64) as usize;
+        let got = fs.read(ino, at, &mut buf[..want])?;
+        if got == 0 {
+            break;
+        }
+        obj.write_at(at, &buf[..got])?;
+        at += got as u64;
+    }
+    Ok(())
 }
 
 /// Maps `frames` shared over the first pages of an `n`-page range, at

@@ -163,10 +163,10 @@ impl TimerFd {
         t.count > 0
     }
 
-    /// Milliseconds until it next expires, if it is armed.
-    pub fn due_in(&self) -> Option<u64> {
+    /// When it next expires (ns of `time::now_ns`), if it is armed.
+    pub fn due_at(&self) -> Option<u64> {
         let t = self.state.lock();
-        (t.next != 0).then(|| t.next.saturating_sub(time::now_ns()).div_ceil(1_000_000))
+        (t.next != 0).then_some(t.next)
     }
 
     pub fn read(&self, out: &mut [u8]) -> Result<usize, isize> {
@@ -174,9 +174,10 @@ impl TimerFd {
             return Err(EINVAL);
         }
         loop {
-            let wait_ms = {
+            let deadline = {
                 let mut t = self.state.lock();
-                t.advance(time::now_ns());
+                let now = time::now_ns();
+                t.advance(now);
                 if t.count > 0 {
                     out[..8].copy_from_slice(&t.count.to_le_bytes());
                     t.count = 0;
@@ -184,9 +185,9 @@ impl TimerFd {
                 }
                 if t.next == 0 {
                     // Never expires: wait for a signal (or a re-arm by another thread).
-                    1000
+                    now + 1_000_000_000
                 } else {
-                    t.next.saturating_sub(time::now_ns()).div_ceil(1_000_000).max(1)
+                    t.next
                 }
             };
             if self.nonblocking {
@@ -195,7 +196,7 @@ impl TimerFd {
             if crate::proc::interrupted() {
                 return Err(EINTR);
             }
-            crate::sched::wait_until(wait_ms, crate::proc::interrupted);
+            crate::sched::wait_until_ns(deadline, crate::proc::interrupted);
         }
     }
 }
@@ -407,13 +408,14 @@ impl Epoll {
         readiness::Watch::new(&keys)
     }
 
+    /// When the soonest timer it watches expires (ns).
     fn next_timer(&self, p: &Process) -> Option<u64> {
         let set = self.interest.lock();
         set.iter()
             .filter(|(_, (events, _))| *events & !(EPOLLONESHOT | 1 << 31) != 0)
             .filter_map(|(&fd, _)| match &*p.fd(fd as usize).ok()? {
                 Handle::Special(s) => match &*s.lock() {
-                    Special::Timer(t) => t.due_in(),
+                    Special::Timer(t) => t.due_at(),
                     _ => None,
                 },
                 _ => None,
@@ -422,8 +424,17 @@ impl Epoll {
     }
 }
 
-/// `epoll_wait`/`epoll_pwait`.
-pub fn epoll_wait(p: &Process, epfd: u64, events: u64, max: u64, timeout_ms: i64, mask: u64) -> Result<u64, isize> {
+/// `epoll_wait`/`epoll_pwait` (a timeout in ms), `epoll_pwait2` (in ns:
+/// `timeout_ns`, which wins when given).
+pub fn epoll_wait(
+    p: &Process,
+    epfd: u64,
+    events: u64,
+    max: u64,
+    timeout_ms: i64,
+    mask: u64,
+    timeout_ns: Option<u64>,
+) -> Result<u64, isize> {
     if max == 0 || max > 4096 {
         return Err(EINVAL);
     }
@@ -431,9 +442,10 @@ pub fn epoll_wait(p: &Process, epfd: u64, events: u64, max: u64, timeout_ms: i64
     if mask != 0 {
         super::signal::wait_with_mask(p, mask)?;
     }
-    let deadline = (timeout_ms >= 0).then(|| time::uptime_ms() + timeout_ms as u64);
+    let timeout_ns = timeout_ns.or_else(|| (timeout_ms >= 0).then(|| timeout_ms as u64 * 1_000_000));
+    let deadline = timeout_ns.map(|ns| time::now_ns().saturating_add(ns));
     loop {
-        let watch = (timeout_ms != 0).then(|| ep.watch(p));
+        let watch = (timeout_ns != Some(0)).then(|| ep.watch(p));
         let ready = ep.ready(p, max as usize, 0);
         if !ready.is_empty() {
             for (i, (ev, data)) in ready.iter().enumerate() {
@@ -442,17 +454,17 @@ pub fn epoll_wait(p: &Process, epfd: u64, events: u64, max: u64, timeout_ms: i64
             }
             return Ok(ready.len() as u64);
         }
-        let now = time::uptime_ms();
+        let now = time::now_ns();
         if deadline.is_some_and(|d| now >= d) {
             return Ok(0);
         }
         if crate::proc::interrupted() {
             return Err(EINTR);
         }
-        let mut wait = deadline.map_or(1000, |d| d - now);
+        let mut until = deadline.unwrap_or(now + 1_000_000_000);
         if let Some(t) = ep.next_timer(p) {
-            wait = wait.min(t.max(1));
+            until = until.min(t);
         }
-        watch.unwrap().wait(wait.max(1));
+        watch.unwrap().wait_until_ns(until.max(now + 1));
     }
 }

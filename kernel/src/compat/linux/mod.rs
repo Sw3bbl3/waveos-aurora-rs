@@ -34,6 +34,7 @@ mod net;
 mod process;
 pub mod shm;
 pub mod signal;
+pub mod sound;
 mod syscount;
 mod sysfs;
 pub mod uevent;
@@ -409,16 +410,16 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>, number: u64) 
         nr::EPOLL_CREATE => events::epoll_create(&p, 0),
         nr::EPOLL_CREATE1 => events::epoll_create(&p, a[0]),
         nr::EPOLL_CTL => events::epoll_ctl(&p, a[0], a[1], a[2], a[3]),
-        nr::EPOLL_WAIT => events::epoll_wait(&p, a[0], a[1], a[2], a[3] as i32 as i64, 0),
-        nr::EPOLL_PWAIT => events::epoll_wait(&p, a[0], a[1], a[2], a[3] as i32 as i64, a[4]),
+        nr::EPOLL_WAIT => events::epoll_wait(&p, a[0], a[1], a[2], a[3] as i32 as i64, 0, None),
+        nr::EPOLL_PWAIT => events::epoll_wait(&p, a[0], a[1], a[2], a[3] as i32 as i64, a[4], None),
         nr::EPOLL_PWAIT2 => {
-            let ms = if a[3] == 0 {
-                -1
+            let ns = if a[3] == 0 {
+                None
             } else {
                 let [sec, nsec]: [i64; 2] = crate::syscall::user::get(a[3])?;
-                sec.max(0) * 1000 + nsec.max(0) / 1_000_000
+                Some((sec.max(0) as u64).saturating_mul(1_000_000_000).saturating_add(nsec.max(0) as u64))
             };
-            events::epoll_wait(&p, a[0], a[1], a[2], ms, a[4])
+            events::epoll_wait(&p, a[0], a[1], a[2], -1, a[4], ns)
         }
 
         nr::MMAP => mm::mmap(&p, a[0], a[1], a[2], a[3], a[4] as i64, a[5]),
