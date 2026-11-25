@@ -535,7 +535,16 @@ pub fn oom() {
     assert!(front.proc.exit_code().is_none(), "the program in front ended: {}", front.out);
     assert!(service.proc.exit_code().is_none(), "the protected program ended");
     assert!(kswapd::oom_kills() > kills);
-    let note = core::iter::from_fn(crate::gui::notify::take).find(|n| n.title == "Out of memory");
+    // The notice is posted just after the program is ended, by whichever
+    // task ran out of memory: the exit can be seen here before it.
+    let deadline = time::uptime_ms() + 5_000;
+    let note = loop {
+        let note = core::iter::from_fn(crate::gui::notify::take).find(|n| n.title == "Out of memory");
+        if note.is_some() || time::uptime_ms() >= deadline {
+            break note;
+        }
+        sched::sleep_ms(20);
+    };
     assert!(note.is_some_and(|n| n.body.contains("fuzz")), "no notification");
     // The one in front kept every page right.
     drop(balloon);
