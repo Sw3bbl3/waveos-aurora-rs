@@ -71,12 +71,32 @@ one machine (an Apple M2 Mac on mains power), 2026-11-24:
 | Firefox: window | 1432 | 16635 |
 | Firefox: page painted | 2050 | 21610 |
 
-One run each of real sites (not signed in; real sites vary by the
-minute): Wikipedia's "Web browser" article painted in 18.6 s (Voyage) and
-3.0 s (Firefox) on aarch64, against 32.2 s and 29.0 s on x86-64; YouTube's
-home page in 15.1 s and 4.3 s, against 36.6 s and 43.3 s. Voyage takes
-about 11.7 s to show its window for an `https://` address on aarch64
-against 2.5 s for the local `http://` page: not yet explained.
+One run each of real sites that day (not signed in; real sites vary by
+the minute): Wikipedia's "Web browser" article painted in 18.6 s (Voyage)
+and 3.0 s (Firefox) on aarch64, against 32.2 s and 29.0 s on x86-64;
+YouTube's home page in 15.1 s and 4.3 s, against 36.6 s and 43.3 s.
+
+Voyage's long and uneven starts on aarch64 in those numbers (its window
+came up after about 2 s plus a multiple of 5 s) were a kernel bug, since
+fixed: a disk read's completion could wake its reader only at the
+driver's 5 s timeout (a lost wake-up in `WaitQueue`, which the faster
+processor under HVF hit often; the test "wait queues: a wakeup just
+before the waiter sleeps doesn't lose the next" covers it). After the fix,
+on aarch64 under HVF on the same Mac, 2026-11-25, cold start to the page
+painted: the local article in 2.2-2.7 s (Voyage) and 2.2-2.4 s (Firefox),
+two runs each; one run each of `http://example.com/` in 2.4 s and 2.2 s,
+the Wikipedia article in 4.4 s and 3.3 s, and YouTube's home page in
+5.8 s and 4.6 s. The x86-64 column was not measured again.
+
+Start to the desktop on aarch64 under HVF takes about 1.3 s from QEMU's
+start (the firmware's boot-menu wait, 5.4 s of the 5.9 s it took before,
+is turned off).
+
+Known on aarch64: a YouTube video opened first after a boot can stop
+after about 30 s with "Something went wrong" (2 of 6 first plays in
+Firefox, 1 of 1 in Voyage, in one evening's runs; later plays ran past
+two minutes). The cause is not found: it is not the wake-up bug above and
+not HTTP/3 alone. Reloading the page plays it.
 
 Not yet on arm64: `extra_context` frames (only needed with SVE). musl's
 `vfork` is plain `fork` on arm64 (it has no `vfork` of its own there).

@@ -83,14 +83,23 @@ WaveOS Aurora grows in milestones. Each one ends with something you can boot and
 The direction for graphics, replacing the earlier plan to port more Linux GPU drivers: WaveOS's own Rust display drivers expose Linux's DRM/KMS interface, and unmodified Mesa runs on top through the Linux layer, with Steam games as the eventual target.
 
 - **Done:** the display core; native virtio-gpu, Intel (Skylake to Raptor Lake) and AMD (Polaris to Navi 3x, Ryzen APUs) display drivers that take over the firmware's mode (Intel and AMD untested on real hardware); Nvidia detection; several displays; `/dev/dri/card0` with dumb buffers, atomic commits, page-flip events and PRIME (libdrm's `modetest` runs unmodified); `evdev`, `hidraw`, `uinput` and udev-style discovery (SDL2 recognises controllers unmodified); Wave Play.
-- **Next:** Mesa's software path (llvmpipe, lavapipe) over the DRM device; virtio-gpu 3D (virgl and Venus); render nodes, GEM and command submission for Intel, then AMD; an Nvidia driver through the GSP firmware ([design](developer/nvidia-display.md)); 32-bit Linux programs for Steam's client.
+- **Also done:** Mesa's software path (llvmpipe, lavapipe) over the DRM device, with OpenGL and Vulkan programs and the browsers drawing in windows without a copy, and full-screen windows scanned out directly.
+- **Next:** virtio-gpu 3D (virgl and Venus); render nodes, GEM and command submission for Intel, then AMD; an Nvidia driver through the GSP firmware ([design](developer/nvidia-display.md)); 32-bit Linux programs for Steam's client.
+
+## Done in this round: 64-bit Arm, and a faster web
+
+- **aarch64:** the kernel, every native program and the Linux layer's arm64 ABI run on QEMU's `virt` machine, at the host processor's own speed on Apple-silicon Macs, where it is now what `make run` starts ([porting notes](developer/porting.md)). The launcher's Chipset card switches between it and x86-64; each has its own disk, and `cargo xtask migrate-disk` carries files across.
+- **Browsers:** Voyage and Firefox on arm64, two to three seconds from a cold start to a painted page there, against 16 to 22 on the emulated x86-64 build on the same Mac ([measurements](LINUX.md#two-abis-x86-64-and-arm64)).
+- **Sound for Linux programs** through an ALSA device layer, and video with sound in both browsers (`cargo xtask video-check`).
+- **Under it:** a lost wake-up in the kernel's wait queues (disk reads and syncs that woke 5 s late), a deadlock when a window buffer was freed, AuroraFS consistency after power cuts (`cargo xtask powercut`, `cargo xtask fsck`), swap and compressed memory, per-app sandboxing, the Store and A/B system updates, network over USB.
+- **Still open on aarch64:** suspend to RAM; address-space identifiers (every switch flushes the TLB today, measured at 0.5-1 µs); per-process pointer-authentication keys; a YouTube video that can stop about 30 s into its first play after a boot.
 
 ## Future work
 
 Candidates, in no fixed order:
 
-- Tickless idle with TSC-deadline timers; per-CPU NVMe queues.
-- I²C-HID touchpads (laptops' built-in ones); Bluetooth input.
+- Per-CPU NVMe queues.
+- Bluetooth input; hibernation; webcams (UVC).
 - More Linux graphics drivers on the compatibility layer in `kernel/linux` (virtio-gpu runs since 0.9): TTM, the DRM GPU scheduler and firmware loading for amdgpu and i915/xe, then a Linux-compatible interface for Mesa (3D). The Linux driver should also restore the display after sleep. (The native virtio-gpu driver, the default since the display core, does; the ported one stays selectable with `gpu=linux`.)
 - Wi-Fi on real hardware: firmware loading and Intel's command protocol for the iwlwifi adapters WaveOS already recognizes (the station, WPA2 and CCMP are done); WPA3 (SAE).
 - More of the web platform (WebP, SVG, CORS); a user-space window server.
