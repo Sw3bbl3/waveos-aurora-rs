@@ -1312,7 +1312,10 @@ fn stop_bridge() {
     for p in crate::proc::all().iter().filter(|p| p.name() == "wl-bridge") {
         let _ = crate::proc::kill(p.pid);
     }
-    eventually(5000, || !crate::proc::all().iter().any(|p| p.name() == "wl-bridge" && p.exit_code().is_none()));
+    // Reaped, not only killed: until the reaper closes its descriptors its
+    // socket still answers, and the next browser's `wl-bridge --background`
+    // takes it for a running bridge (then the browser finds no display).
+    eventually(5000, || !crate::proc::all().iter().any(|p| p.name() == "wl-bridge" && !p.is_reaped()));
 }
 
 /// Like [`run_linux_program_watched`] with Lumen Server running (`c`): its
