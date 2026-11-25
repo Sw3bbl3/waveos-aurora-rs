@@ -143,11 +143,6 @@ impl Desktop {
         self.lagoon.as_ref().is_some_and(|l| !l.closing)
     }
 
-    /// Lagoon is on screen (opening, open or closing): it paints instead of the windows.
-    pub(super) fn lagoon_shows(&self) -> bool {
-        self.lagoon.is_some()
-    }
-
     pub(super) fn lagoon_moving(&self) -> bool {
         self.lagoon.as_ref().is_some_and(|l| {
             // (Closing, it is moving until it is gone.)
