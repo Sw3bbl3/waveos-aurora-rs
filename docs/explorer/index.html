@@ -1194,6 +1194,9 @@ function renderMemory() {
     <div class="card"><h4>Kernel heap</h4><div class="sub num">${fmtBytes(m.heapUsed)} in use of ${fmtBytes(m.heap)}</div>
       <div class="meter"><i style="width:${(m.heapUsed / m.heap * 100).toFixed(1)}%;background:var(--accent)"></i></div>
       <div class="legend-row"><span>Window surfaces, glyph caches, file caches and process tables live here.</span></div></div>
+    ${m.swapTotal !== undefined ? `<div class="card"><h4>Swap</h4><div class="sub num">${fmtBytes(m.swapUsed)} swapped out of ${fmtBytes(m.swapTotal)} · pressure ${["none", "warning", "critical"][m.pressure] || "—"}</div>
+      <div class="meter"><i style="width:${(m.swapUsed / Math.max(1, m.swapTotal) * 100).toFixed(1)}%;background:#BF5AF2"></i></div>
+      <div class="legend-row"><span>${fmtBytes(m.compressedPages * 4096)} compressed into ${fmtBytes(m.compressedBytes)} of memory</span><span>${fmtBytes(m.diskSwapUsed)} in the swap file</span><span>${m.swapOuts} out · ${m.swapIns} in · ${m.oomKills} ended for memory</span></div></div>` : ""}
     <div class="card"><h4>Memory over time</h4><div class="sub">Used physical memory, last minute</div>${sparkSvg(S.history.map(h => h.mem), live)}</div>
   </div>
   <div class="card" style="margin-top:12px"><h4>Per process</h4><div class="sub">Private memory each app has mapped (code, heap, stack)</div>

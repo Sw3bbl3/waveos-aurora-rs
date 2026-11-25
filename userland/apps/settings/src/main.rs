@@ -1,6 +1,6 @@
 //! Settings — appearance, display, keyboard, trackpad and mouse, game
 //! controllers and Wave Play, network, date and time, sound, notifications, the desktop,
-//! login, accessibility, and information about this computer.
+//! login, apps, software update, accessibility, and information about this computer.
 //!
 //! Start with a pane name (`Settings.elf keyboard`) or a setting
 //! (`Settings.elf keyboard/repeat-rate`) to open it, as Seek does.
@@ -25,7 +25,9 @@ use waveui::Request;
 
 mod displays;
 mod installed;
+mod privacy;
 mod search;
+mod update;
 mod users;
 
 /// The `energy_mode` values, in the order the picker shows them.
@@ -52,11 +54,13 @@ pub enum Pane {
     Bar,
     Login,
     Apps,
+    Update,
+    Privacy,
     Accessibility,
     About,
 }
 
-const PANES: [(Pane, &str, &str, u32); 18] = [
+const PANES: [(Pane, &str, &str, u32); 20] = [
     (Pane::Appearance, "Appearance", "appearance", 0xFF5E5CE6),
     (Pane::Display, "Display", "display", 0xFF0A84FF),
     (Pane::Keyboard, "Keyboard", "keyboard", 0xFF8E8E93),
@@ -73,6 +77,8 @@ const PANES: [(Pane, &str, &str, u32); 18] = [
     (Pane::Bar, "Top Bar & Clock", "bar", 0xFF2F62F5),
     (Pane::Login, "Users & Login", "login", 0xFF8E5CF5),
     (Pane::Apps, "Apps", "apps", 0xFF32ADE6),
+    (Pane::Update, "Software Update", "update", 0xFF2C7BE5),
+    (Pane::Privacy, "Privacy & Security", "privacy", 0xFF0A84FF),
     (Pane::Accessibility, "Accessibility", "accessibility", 0xFF147EFB),
     (Pane::About, "About", "about", 0xFF30B0C7),
 ];
@@ -116,6 +122,8 @@ pub enum Msg {
     ClearNote,
     Users(users::UserMsg),
     Apps(installed::AppMsg),
+    Update(update::UpdMsg),
+    Privacy(privacy::PrivacyMsg),
     /// Several displays: arrangement, main display, mirroring, each display's settings.
     Displays(displays::DisplayMsg),
 }
@@ -150,6 +158,10 @@ pub struct Settings {
     users: users::UsersState,
     /// Apps installed from packages.
     apps: installed::AppsState,
+    /// Software Update.
+    update: update::UpdateState,
+    /// What apps may do.
+    privacy: privacy::PrivacyState,
     /// Display, with several displays.
     displays: displays::DisplaysState,
 }
@@ -191,6 +203,8 @@ impl Settings {
             now: corekit::time::now(),
             users: Default::default(),
             apps: Default::default(),
+            update: Default::default(),
+            privacy: Default::default(),
             displays: Default::default(),
         };
         s.load_custom_thumb();
@@ -253,6 +267,11 @@ impl Settings {
             Pane::About => self.info = corekit::process::sys_info(),
             Pane::Login => self.users.refresh(),
             Pane::Apps => self.apps.refresh(),
+            Pane::Update => {
+                self.update.refresh();
+                self.update.check_on_open();
+            }
+            Pane::Privacy => self.privacy.refresh(),
             _ => {}
         }
     }
@@ -914,7 +933,17 @@ impl Settings {
                 (false, _) if wireless => ("Not connected", Color::Gray),
                 (false, _) => ("Cable unplugged", Color::Red),
             };
-            let kind = if wireless { "Wi-Fi" } else { "Ethernet" };
+            let usb = corekit::net::name_of(i).starts_with("usb") || corekit::net::driver_of(i).contains("USB");
+            let kind = match (wireless, usb) {
+                (true, _) => "Wi-Fi",
+                (false, true) => "USB Ethernet",
+                (false, false) => "Ethernet",
+            };
+            let speed = match i.speed_mbps {
+                0 => String::from("—"),
+                m if m >= 1000 && m % 1000 == 0 => format!("{} Gb/s", m / 1000),
+                m => format!("{m} Mb/s"),
+            };
             let mac = i.mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
             let mut dns: Vec<String> =
                 i.dns.iter().filter(|d| **d != [0; 4]).map(|d| corekit::net::ip_string(*d)).collect();
@@ -932,6 +961,7 @@ impl Settings {
                 ("Router", ip(i.gateway)),
                 ("DNS servers", if dns.is_empty() { String::from("—") } else { dns.join(", ") }),
                 ("Hardware address", mac),
+                ("Link speed", speed),
                 ("DHCP lease", lease),
                 ("Received", format!("{} ({} packets)", human(i.rx_bytes), i.rx_packets)),
                 ("Sent", format!("{} ({} packets)", human(i.tx_bytes), i.tx_packets)),
@@ -1512,6 +1542,8 @@ impl App for Settings {
             Msg::Users(m) => self.users_update(m, cx),
             Msg::Displays(m) => self.displays_update(m, cx),
             Msg::Apps(m) => self.apps_update(m, cx),
+            Msg::Update(m) => self.update_update(m, cx),
+            Msg::Privacy(m) => self.privacy_update(m, cx),
         }
     }
 
@@ -1534,7 +1566,8 @@ impl App for Settings {
         match self.pane {
             Pane::Controllers => Some(50),
             Pane::DateTime | Pane::Network => Some(1000),
-            Pane::Appearance | Pane::About => Some(2000),
+            Pane::Appearance | Pane::About | Pane::Privacy => Some(2000),
+            Pane::Update => Some(if self.update.busy() { 150 } else { 1000 }),
             _ => None,
         }
     }
@@ -1562,6 +1595,7 @@ impl App for Settings {
                 }
                 missing
             }
+            Pane::Update => self.update.changed(),
             _ => {
                 self.refresh();
                 true
@@ -1590,6 +1624,8 @@ impl App for Settings {
                 Pane::Bar => self.bar(),
                 Pane::Login => self.users_pane(),
                 Pane::Apps => self.apps_pane(),
+                Pane::Update => self.update_pane(),
+                Pane::Privacy => self.privacy_pane(),
                 Pane::Accessibility => self.accessibility(),
                 Pane::About => self.about(env),
             };
@@ -1690,6 +1726,21 @@ fn pane_glyph(cv: &mut Surface, pane: Pane, r: Rect, tile: u32) {
         Pane::Apps => {
             for (dx, dy) in [(-6, -6), (1, -6), (-6, 1), (1, 1)] {
                 cv.fill_round_rect(Rect::new(cx + dx, cy + dy, 5, 5), 1, w);
+            }
+        }
+        Pane::Update => {
+            // Two arrows chasing round.
+            // stroke_arc takes 1/16 points and 1024ths of a turn.
+            cv.stroke_arc(cx * 16, cy * 16, 6 * 16, 2 * 16, 57, 398, w);
+            cv.stroke_arc(cx * 16, cy * 16, 6 * 16, 2 * 16, 569, 398, w);
+            cv.fill_circle(cx + 6, cy - 3, 2, w);
+            cv.fill_circle(cx - 6, cy + 3, 2, w);
+        }
+        Pane::Privacy => {
+            // A hand raised: stop.
+            cv.fill_round_rect(Rect::new(cx - 5, cy - 3, 10, 10), 3, w);
+            for k in 0..4 {
+                cv.fill_round_rect(Rect::new(cx - 5 + k * 3, cy - 7, 2, 6), 1, w);
             }
         }
         Pane::Login => {

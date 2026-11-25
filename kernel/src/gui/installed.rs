@@ -97,25 +97,51 @@ pub fn pinned() -> Vec<App> {
     ids.split(',').filter_map(|id| apps.iter().find(|a| a.manifest.id == id).cloned()).take(16).collect()
 }
 
+/// The test server's address, from the harness (None: no server).
+#[cfg(feature = "ktest")]
+fn test_base() -> Option<String> {
+    let port = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok())?;
+    Some(format!("http://10.0.2.2:{port}/"))
+}
+
+/// Starts `pkgtest BASE phase [arg]`.
+#[cfg(feature = "ktest")]
+fn start_pkgtest(base: &str, phase: &str, arg: &str) -> alloc::sync::Arc<crate::proc::Process> {
+    let pid = crate::proc::spawn("/System/Bin/pkgtest", &["pkgtest", base, phase, arg], [None, None, None], 0)
+        .expect("spawn pkgtest");
+    crate::proc::get(pid).unwrap()
+}
+
+/// Runs `pkgtest BASE phase [arg]` to the end; it must pass.
+#[cfg(feature = "ktest")]
+fn pkgtest(base: &str, phase: &str, arg: &str) {
+    let p = start_pkgtest(base, phase, arg);
+    let deadline = crate::time::uptime_ms() + 240_000;
+    while p.exit_code().is_none() && crate::time::uptime_ms() < deadline {
+        crate::sched::sleep_ms(20);
+    }
+    assert_eq!(p.exit_code(), Some(0), "pkgtest {phase} failed (see log above)");
+}
+
+/// Set by `pkgtest` while it writes an install's files (see pkgtest).
+#[cfg(feature = "ktest")]
+const MARKER: &str = "/pkgtest-installing";
+
 /// `cargo xtask test`: installs, updates and removes apps from the host's
 /// test repository with `pkgtest`, and checks the desktop sees each step.
 #[cfg(feature = "ktest")]
 pub fn self_test() {
-    let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) else {
+    let Some(base) = test_base() else {
         crate::kprint!("[no test server: skipped] ");
         return;
     };
-    let base = format!("http://10.0.2.2:{port}/");
-    let run = |phase: &str| {
-        let pid = crate::proc::spawn("/System/Bin/pkgtest", &["pkgtest", &base, phase], [None, None, None], 0)
-            .expect("spawn pkgtest");
-        let p = crate::proc::get(pid).unwrap();
-        let deadline = crate::time::uptime_ms() + 180_000;
-        while p.exit_code().is_none() && crate::time::uptime_ms() < deadline {
-            crate::sched::sleep_ms(20);
-        }
-        assert_eq!(p.exit_code(), Some(0), "pkgtest {phase} failed (see log above)");
-    };
+    // The previous start was cut off in the middle of an install (see
+    // `power_cut`): nothing may be half-installed.
+    if crate::fs::stat(MARKER).is_ok() {
+        pkgtest(&base, "powercut-check", "");
+        crate::kprint!("[power cut mid-install: recovered] ");
+    }
+    let run = |phase: &str| pkgtest(&base, phase, "");
     run("install");
     let apps = list();
     let gallery = apps.iter().find(|a| a.manifest.id == "dev.example.gallery").expect("the desktop sees the Gallery");
@@ -128,5 +154,128 @@ pub fn self_test() {
     run("remove");
     assert!(!list().iter().any(|a| a.manifest.id == "dev.example.gallery" || a.manifest.id == "org.waveos.doom"));
     assert!(pinned().is_empty(), "removal unpins");
-    crate::kprint!("[install, update, remove from the repository] ");
+    crate::kprint!("[install, update, roll back, remove from the repository] ");
+}
+
+/// Catalogue signatures and freshness, key rotation, damaged, cut-short
+/// and resumed downloads, pausing and cancelling (`pkgtest store`).
+#[cfg(feature = "ktest")]
+pub fn store_test() {
+    let Some(base) = test_base() else {
+        crate::kprint!("[no test server: skipped] ");
+        return;
+    };
+    pkgtest(&base, "store", "");
+    crate::kprint!("[rollback, freeze, rotation, damaged, resumed, paused, cancelled] ");
+}
+
+/// An install killed half-way: nothing becomes live, the next install
+/// clears what it left (`pkgtest slowinstall`, then `recover`).
+#[cfg(feature = "ktest")]
+pub fn kill_test() {
+    let Some(base) = test_base() else {
+        crate::kprint!("[no test server: skipped] ");
+        return;
+    };
+    let _ = crate::fs::unlink(MARKER);
+    let p = start_pkgtest(&base, "slowinstall", "");
+    let deadline = crate::time::uptime_ms() + 120_000;
+    while crate::fs::stat(MARKER).is_err() && p.exit_code().is_none() && crate::time::uptime_ms() < deadline {
+        crate::sched::sleep_ms(20);
+    }
+    assert!(p.exit_code().is_none(), "the slow install ended before it could be killed");
+    crate::proc::kill(p.pid).expect("kill pkgtest");
+    // Until its threads have left and the reaper has it: it is gone, not
+    // an installer still at work.
+    let pid = p.pid;
+    drop(p);
+    let deadline = crate::time::uptime_ms() + 10_000;
+    while crate::proc::get(pid).is_some_and(|p| p.exit_code().is_none()) && crate::time::uptime_ms() < deadline {
+        crate::sched::sleep_ms(20);
+    }
+    pkgtest(&base, "recover", "");
+    crate::kprint!("[killed mid-install, recovered] ");
+}
+
+/// The version after this one (0.8.0 → 0.8.1), as xtask numbers test updates.
+#[cfg(feature = "ktest")]
+fn next_version(v: &str) -> String {
+    let (head, last) = v.rsplit_once('.').unwrap_or(("0", v));
+    format!("{head}.{}", last.parse::<u32>().unwrap_or(0) + 1)
+}
+
+/// A whole-system update across starts (with the harness):
+///
+/// 1. From the EFI partition's system: update to the next version (only
+///    the files that changed are downloaded), installed into slot a and
+///    armed; the harness starts again.
+/// 2. Running slot a on trial: it is the new version; the start is marked
+///    good. Then an update whose kernel never starts goes into slot b with
+///    one try; the harness starts again, letting the processor reset.
+/// 3. That kernel faulted at once, the bootloader ran out of tries and
+///    went back to slot a: the failure is reported, nothing else changed.
+#[cfg(feature = "ktest")]
+pub fn system_test() {
+    use crate::gui::sysupdate;
+    let Some(base) = test_base() else {
+        crate::kprint!("[no test server: skipped] ");
+        return;
+    };
+    if matches!(crate::gui::prefs::boot_option("test_disk").as_deref(), Some("sd" | "emmc")) {
+        // The firmware can't read the card the home volume is on.
+        crate::kprint!("[slots on an SD card: skipped] ");
+        return;
+    }
+    // In the self-test build the desktop doesn't run: mark this start good
+    // as its first frame would.
+    sysupdate::mark_good();
+    let deadline = crate::time::uptime_ms() + 30_000;
+    while sysupdate::outcome().is_none() && crate::time::uptime_ms() < deadline {
+        crate::sched::sleep_ms(20);
+    }
+    let outcome = sysupdate::outcome().expect("the start was not marked");
+    let good = next_version(crate::VERSION);
+    let broken = next_version(&good);
+    let version = crate::fs::read_all("/System/version.txt").unwrap_or_default();
+    let version = String::from(String::from_utf8_lossy(&version).lines().next().unwrap_or(""));
+    let failed = crate::gui::prefs::boot_option("system_failed");
+    match (sysupdate::booted_slot(), failed) {
+        ("a", Some(f)) => {
+            assert_eq!(f, "b", "the broken update's slot is reported");
+            assert!(version.ends_with(&good), "back on {good}: {version}");
+            assert!(crate::gui::prefs::boot_option("system_tries").is_none());
+            pkgtest(&base, "system-fallback", &broken);
+            crate::kprint!("[{broken} never started; back on {good}] ");
+        }
+        ("esp", _) => {
+            assert!(version.ends_with(crate::VERSION), "{version}");
+            pkgtest(&base, "system-stage", &good);
+            crate::kprint!("[{good} installed in slot a; next start uses it] ");
+        }
+        ("a", None) => {
+            assert!(version.ends_with(&good), "slot a runs {good}: {version}");
+            assert!(outcome.contains("marked good"), "{outcome}");
+            assert!(crate::gui::prefs::boot_option("system_tries").is_none(), "no tries left pending");
+            pkgtest(&base, "system-broken", &broken);
+            crate::kprint!("[started {good} from slot a; a broken {broken} armed in slot b] ");
+            crate::kprintln!("\nharness: expect fallback");
+        }
+        (slot, f) => panic!("unexpected start: slot {slot}, failed {f:?} ({outcome})"),
+    }
+}
+
+/// After the suite on the first start: an install the harness cuts the
+/// power during (the next start checks, in `self_test`).
+#[cfg(feature = "ktest")]
+pub fn power_cut() {
+    let Some(base) = test_base() else { return };
+    let _ = crate::fs::unlink(MARKER);
+    crate::fs::sync_all();
+    let p = start_pkgtest(&base, "powercut", "");
+    // The harness turns the machine off once pkgtest says so.
+    let deadline = crate::time::uptime_ms() + 120_000;
+    while p.exit_code().is_none() && crate::time::uptime_ms() < deadline {
+        crate::sched::sleep_ms(100);
+    }
+    crate::kprintln!("power cut: the harness did not cut the power");
 }

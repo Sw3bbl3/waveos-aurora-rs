@@ -54,13 +54,13 @@ pub fn clone_thread(
     if flags & (CLONE_VM | CLONE_THREAD) != CLONE_VM | CLONE_THREAD {
         return Err(ENOSYS);
     }
-    if stack == 0 || stack >= aurora_abi::layout::USER_END || f.rip >= aurora_abi::layout::USER_END {
+    if stack == 0 || stack >= aurora_abi::layout::USER_END || f.pc() >= aurora_abi::layout::USER_END {
         return Err(EINVAL);
     }
     // The child returns from the same call with 0, on its own stack.
     let mut child = *f;
-    child.rax = 0;
-    child.rsp = stack;
+    child.set_return(0);
+    child.set_sp(stack);
     let fs = if flags & CLONE_SETTLS != 0 { tls } else { sched::fs_base() };
     let linux = p.linux.as_ref().ok_or(EINVAL)?;
     // The thread must not run before its bookkeeping is in place, so its
@@ -135,20 +135,21 @@ pub fn futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u64) 
     let shared = op & PRIVATE == 0;
     match op & 0x7F {
         WAIT | WAIT_BITSET => {
-            let ms = if timeout == 0 {
+            let deadline = if timeout == 0 {
                 u64::MAX
             } else {
                 let [sec, nsec]: [i64; 2] = user::get(timeout)?;
-                let rel = (sec.max(0) as u64) * 1000 + (nsec.max(0) as u64).div_ceil(1_000_000);
+                let t = (sec.max(0) as u64).saturating_mul(1_000_000_000).saturating_add(nsec.max(0) as u64);
+                let now = time::now_ns();
                 if op & 0x7F == WAIT_BITSET {
                     // An absolute deadline on CLOCK_MONOTONIC (or REALTIME).
-                    let now = if op & 256 != 0 { realtime_ns() / 1_000_000 } else { time::now_ns() / 1_000_000 };
-                    rel.saturating_sub(now)
+                    let clock = if op & 256 != 0 { realtime_ns() } else { now };
+                    now.saturating_add(t.saturating_sub(clock))
                 } else {
-                    rel
+                    now.saturating_add(t)
                 }
             };
-            match proc::futex::wait_shared(addr, val as u32, ms, shared) {
+            match proc::futex::wait_until_ns(addr, val as u32, deadline, shared) {
                 Err(EAGAIN) if proc::interrupted() => Err(EINTR),
                 r => r,
             }
@@ -162,6 +163,48 @@ pub fn futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u64) 
     }
 }
 
+/// `sched_getattr`: every thread runs under SCHED_OTHER at nice 0 (WaveOS
+/// has one policy for programs), so that is what the `struct sched_attr`
+/// says (VER1, 56 bytes; a smaller `size` gets its first part).
+pub fn sched_getattr(p: &proc::Process, pid: u64, attr: u64, size: u64, flags: u64) -> Result<u64, isize> {
+    const VER1: usize = 56;
+    if attr == 0 || flags != 0 || (size as usize) < 48 {
+        return Err(EINVAL);
+    }
+    if pid != 0 && pid as u32 != p.pid && super::signal::task_of(p, pid).is_none() {
+        return Err(ESRCH);
+    }
+    let n = (size as usize).min(VER1);
+    let mut a = [0u8; VER1];
+    a[0..4].copy_from_slice(&(n as u32).to_le_bytes()); // size; policy, flags, nice, priority, runtime… 0
+    a[52..56].copy_from_slice(&1024u32.to_le_bytes()); // sched_util_max: the whole CPU
+    user::put_bytes(attr, &a[..n]).map(|_| 0)
+}
+
+/// `get_mempolicy`: one memory node and the default policy. With
+/// MPOL_F_MEMS_ALLOWED the node mask is node 0; with MPOL_F_NODE |
+/// MPOL_F_ADDR `mode` is the node of the address (0).
+pub fn get_mempolicy(mode: u64, nodemask: u64, maxnode: u64, flags: u64) -> Result<u64, isize> {
+    const MEMS_ALLOWED: u64 = 4;
+    if flags & !7 != 0 {
+        return Err(EINVAL);
+    }
+    if mode != 0 {
+        user::put(mode, &0i32)?; // MPOL_DEFAULT, or node 0
+    }
+    if nodemask != 0 {
+        if maxnode == 0 {
+            return Err(EINVAL);
+        }
+        let words = maxnode.div_ceil(64).min(16);
+        for i in 0..words {
+            let bits: u64 = if i == 0 && flags & MEMS_ALLOWED != 0 { 1 } else { 0 };
+            user::put(nodemask + i * 8, &bits)?;
+        }
+    }
+    Ok(0)
+}
+
 pub fn sched_getaffinity(len: u64, ptr: u64) -> Result<u64, isize> {
     let n = crate::arch::percpu::count() as u64;
     let mask: u64 = if n >= 64 { u64::MAX } else { (1 << n) - 1 };
@@ -173,20 +216,26 @@ pub fn sched_getaffinity(len: u64, ptr: u64) -> Result<u64, isize> {
 
 pub fn uname(ptr: u64) -> Result<u64, isize> {
     let mut b = [0u8; 65 * 6];
-    let fields = ["Linux", "aurora", "6.12.0-waveos", "#1 SMP WaveOS Aurora", "x86_64", "(none)"];
+    let machine = super::abi::native::MACHINE;
+    let fields = ["Linux", "aurora", "6.12.0-waveos", "#1 SMP WaveOS Aurora", machine, "(none)"];
     for (i, f) in fields.iter().enumerate() {
         b[i * 65..i * 65 + f.len()].copy_from_slice(f.as_bytes());
     }
     user::put(ptr, &b).map(|_| 0)
 }
 
+/// `sysinfo`: uptime, memory (free, and the caches as "buffers"), swap,
+/// and the number of processes, in bytes (`mem_unit` 1).
 pub fn sysinfo(ptr: u64) -> Result<u64, isize> {
-    let m = crate::mm::stats();
+    let m = crate::mm::kswapd::meminfo();
     let mut b = [0u8; 112];
     let mut w = |off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
     w(0, time::uptime_ms() / 1000);
-    w(32, m.total_bytes);
-    w(40, m.total_bytes - m.used_bytes);
+    w(32, m.total);
+    w(40, m.free);
+    w(56, crate::fs::cache::held_blocks() * 4096);
+    w(64, m.swap_total);
+    w(72, m.swap_total.saturating_sub(m.swap_used));
     b[80..82].copy_from_slice(&(proc::all().len() as u16).to_le_bytes());
     b[104..108].copy_from_slice(&1u32.to_le_bytes()); // mem_unit
     user::put(ptr, &b).map(|_| 0)
@@ -295,11 +344,8 @@ pub fn nanosleep(req: u64, rem: u64, absolute: bool, clock: u64) -> Result<u64, 
             }
             return Err(EINTR);
         }
-        let left_ms = (until - now) / 1_000_000;
-        if left_ms == 0 {
-            sched::yield_now();
-        } else {
-            sched::wait_until(left_ms, proc::interrupted);
-        }
+        // To the nanosecond (a frame paced by `nanosleep` wakes when it
+        // asked, and the last part of a sleep isn't spent spinning).
+        sched::wait_until_ns(until, proc::interrupted);
     }
 }

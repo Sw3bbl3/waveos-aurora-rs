@@ -731,7 +731,7 @@ fn acpi_task() {
         });
         if let Some((gsi, level, low)) = irq {
             if let Some(v) = crate::arch::irq::alloc("sdhci", on_gsi, shared as *const Shared as usize) {
-                if crate::arch::apic::route_gsi(gsi, v, level, low) {
+                if crate::arch::irq::route_gsi(gsi, v, level, low) {
                     shared.mode.store(1, Ordering::Release);
                     log!("sdhci", "{}: interrupt GSI {} vector {:#x}", slot.name, gsi, v);
                 }

@@ -1,0 +1,14 @@
+# What Installer may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.installer"
+name = "Installer"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Installer.elf"
+description = "Installs apps from GINA packages."
+categories = ["system"]
+permissions = ["all-files", "admin", "elevate", "network", "launch", "spawn", "notifications", "preferences", "background"]

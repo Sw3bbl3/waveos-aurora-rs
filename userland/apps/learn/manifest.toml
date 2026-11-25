@@ -1,0 +1,14 @@
+# What Learn may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.learn"
+name = "Learn"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Learn.elf"
+description = "The guides and tutorials, offline."
+categories = ["system"]
+permissions = ["preferences", "launch", "spawn"]

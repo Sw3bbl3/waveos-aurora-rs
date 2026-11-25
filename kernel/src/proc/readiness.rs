@@ -67,6 +67,11 @@ impl Watch {
     pub fn wait(self, ms: u64) {
         sched::wait_until(ms, || self.notified.load(Ordering::Acquire) || super::interrupted());
     }
+
+    /// Like [`Watch::wait`], until `deadline` (ns of `time::now_ns`).
+    pub fn wait_until_ns(self, deadline: u64) {
+        sched::wait_until_ns(deadline, || self.notified.load(Ordering::Acquire) || super::interrupted());
+    }
 }
 
 impl Drop for Watch {

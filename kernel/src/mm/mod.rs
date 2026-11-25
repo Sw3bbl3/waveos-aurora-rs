@@ -1,12 +1,18 @@
-//! Memory management: physical frames, kernel heap, page tables.
+//! Memory management: physical frames, kernel heap, page tables, and
+//! what happens when memory runs short (`kswapd`, `swap`, `swapfile`).
 
 pub mod aslr;
 pub mod frame;
 pub mod heap;
 pub mod kstack;
+pub mod kswapd;
 pub mod paging;
 #[cfg(feature = "ktest")]
 pub mod selftest;
+pub mod swap;
+#[cfg(feature = "ktest")]
+pub mod swaptest;
+pub mod swapfile;
 pub mod vmm;
 
 use bootinfo::{BootInfo, PHYS_OFFSET};
@@ -46,11 +52,12 @@ pub fn stats() -> MemStats {
 /// and mid-sized allocations count as free, as they did when the heap was
 /// one region carved out at boot, so the heap growing on demand (or keeping
 /// an empty slab) is not mistaken for a leak. The stacks of exited tasks
-/// that `kstack` keeps for the next task count as free too.
+/// that `kstack` keeps for the next task count as free too, and so does
+/// the swap slot table, which grows with the most swap ever used.
 #[cfg(feature = "ktest")]
 pub fn leak_check_counts() -> (u64, u64) {
     let (total, free) = frame::counts();
-    (total, free + heap::held_frames() + kstack::cached_frames())
+    (total, free + heap::held_frames() + kstack::cached_frames() + swap::stats().table_frames)
 }
 
 /// The allocators' details for a telemetry snapshot, as JSON members to
@@ -61,13 +68,17 @@ pub fn leak_check_counts() -> (u64, u64) {
 /// and `[size, objects in use, slabs]` for every size class in use.
 pub fn write_telemetry(o: &mut impl core::fmt::Write) {
     let f = frame::stats();
+    let m = kswapd::meminfo();
+    let s = swap::stats();
     let (hits, misses) = heap::cache_counts();
     let permille = |h: u64, m: u64| (h * 1000).checked_div(h + m).unwrap_or(1000);
     let _ = write!(
         o,
         concat!(
             ",\"framesFree\":{},\"dma32Free\":{},\"framesCached\":{},\"frameFailures\":{},\"doubleFrees\":{},",
-            "\"heapReclaimed\":{},\"frameCacheHit\":{},\"heapCacheHit\":{},\"irqOffMaxNs\":{},\"classes\":["
+            "\"heapReclaimed\":{},\"frameCacheHit\":{},\"heapCacheHit\":{},\"irqOffMaxNs\":{},",
+            "\"compressedBytes\":{},\"compressedPages\":{},\"swapTotal\":{},\"swapUsed\":{},",
+            "\"diskSwapUsed\":{},\"swapIns\":{},\"swapOuts\":{},\"pressure\":{},\"oomKills\":{},\"classes\":["
         ),
         f.free,
         f.dma32_free,
@@ -77,7 +88,16 @@ pub fn write_telemetry(o: &mut impl core::fmt::Write) {
         heap::reclaimed_frames(),
         permille(f.cache_hits, f.cache_misses),
         permille(hits, misses),
-        irq_off_max_ns()
+        irq_off_max_ns(),
+        m.compressed_bytes,
+        m.compressed_pages,
+        m.swap_total,
+        m.swap_used,
+        m.disk_swap_used,
+        s.swapins,
+        s.swapouts,
+        kswapd::level(),
+        kswapd::oom_kills()
     );
     let mut first = true;
     for c in 0..heap::CLASSES {
@@ -130,6 +150,47 @@ pub fn report(o: &mut impl core::fmt::Write) {
         user,
         sleeping,
     );
+    let s = swap::stats_nowait();
+    let _ = writeln!(
+        o,
+        concat!(
+            "mem: swap {} of {} slots ({} table frames): {} pages compressed to {} KiB in {} pool frames, ",
+            "{} of one word, {} on disk (of {}), {} cached shared; {} out, {} in, {} written back, {} refused; ",
+            "pressure {}, {} OOM kills"
+        ),
+        s.slots,
+        s.capacity,
+        s.table_frames,
+        s.zram_pages,
+        s.zram_bytes / 1024,
+        s.pool_frames,
+        s.same_pages,
+        s.disk_pages,
+        swapfile::pages(),
+        s.cached_pages,
+        s.swapouts,
+        s.swapins,
+        s.writebacks,
+        s.refused,
+        kswapd::level(),
+        kswapd::oom_kills(),
+    );
+    let avg_us = |(n, ns): (u64, u64)| (ns / 1000).checked_div(n).unwrap_or(0);
+    let (reads, writes) = swapfile::io_counts();
+    let _ = write!(
+        o,
+        "mem: swap-in {} us compressed ({} pages), {} us from disk ({} pages); swap file {} reads, {} writes",
+        avg_us(s.in_zram),
+        s.in_zram.0,
+        avg_us(s.in_disk),
+        s.in_disk.0,
+        reads,
+        writes,
+    );
+    if let Some(e) = swapfile::failure() {
+        let _ = write!(o, " (none: {})", aurora_abi::err::name(e));
+    }
+    let _ = writeln!(o, "; {} counted frames", s.counted);
     let _ = write!(o, "mem: classes (size:live/slab KiB)");
     for c in 0..heap::CLASSES {
         let s = heap::class_stats_nowait(c);
@@ -176,18 +237,18 @@ pub(crate) fn on_heap_failure(size: usize) {
     }
 }
 
-/// Every process's threads, resident memory, page tables and descriptors
-/// (allocates a list: only where the heap still works).
+/// Every process's threads, resident memory, swapped-out pages, page
+/// tables and descriptors (allocates a list: only where the heap still works).
 #[cfg_attr(not(feature = "ktest"), allow(dead_code))] // memory reports in self-tests
 pub fn report_processes(o: &mut impl core::fmt::Write) {
-    let _ = write!(o, "mem: procs (pid:name:threads:resident KiB:table frames:fds)");
+    let _ = write!(o, "mem: procs (pid:name:threads:resident KiB:swapped pages:table frames:fds)");
     for p in crate::proc::all() {
-        let (res, tables) = match p.aspace.try_lock() {
-            Some(g) => g.as_ref().map_or((0, 0), |a| (a.resident / 1024, a.table_frames())),
-            None => (0, 0),
+        let (res, swapped, tables) = match p.aspace.try_lock() {
+            Some(g) => g.as_ref().map_or((0, 0, 0), |a| (a.resident / 1024, a.swapped, a.table_frames())),
+            None => (0, 0, 0),
         };
         let fds = p.fds.try_lock().map_or(0, |f| f.iter().filter(|h| h.is_some()).count());
-        let _ = write!(o, " {}:{}:{}:{}:{}:{}", p.pid, p.name(), p.thread_count(), res, tables, fds);
+        let _ = write!(o, " {}:{}:{}:{}:{}:{}:{}", p.pid, p.name(), p.thread_count(), res, swapped, tables, fds);
     }
     let _ = writeln!(o);
 }
@@ -198,7 +259,7 @@ static IRQ_OFF_MAX: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 pub(crate) fn tsc() -> u64 {
-    unsafe { core::arch::x86_64::_rdtsc() }
+    crate::arch::cpu::cycles()
 }
 
 /// Records an interrupts-off stretch that began at `start` (a [`tsc`] value).

@@ -80,6 +80,29 @@ pub trait Filesystem: Send + Sync {
     fn sync(&self) -> FsResult<()> {
         Ok(())
     }
+    /// `ino` is open (an [`OpenFile`]): if its last name is removed, the
+    /// filesystem keeps it, readable and writable, until [`Filesystem::close_ino`].
+    /// Without that, the number could go to a new file or folder while a
+    /// descriptor still wrote to (or truncated) it.
+    fn open_ino(&self, _ino: Ino) -> FsResult<()> {
+        Ok(())
+    }
+    /// Looks `name` up in `dir` and holds what it names open, at once. An
+    /// inode number from an earlier lookup is not enough: the file may be
+    /// removed meanwhile and its inode given to a new one.
+    fn open_at(&self, dir: Ino, name: &str) -> FsResult<Ino> {
+        let ino = self.lookup(dir, name)?;
+        self.open_ino(ino)?;
+        Ok(ino)
+    }
+    /// One holder of `ino` closed it.
+    fn close_ino(&self, _ino: Ino) {}
+    /// Shutting down: writes everything out and, where the filesystem
+    /// keeps one, sets its "cleanly unmounted" mark (the next mount then
+    /// needs no check).
+    fn unmount(&self) -> FsResult<()> {
+        self.sync()
+    }
     /// Memory is short: give back what a cache holds (without waiting
     /// for a lock someone holds).
     fn shrink(&self) {}
@@ -108,11 +131,32 @@ pub trait Filesystem: Send + Sync {
     fn enable_owners(&self, _uid: u32, _gid: u32) -> FsResult<bool> {
         Ok(false)
     }
+    /// Makes file `ino` the swap file, of at least `size` bytes (blocks
+    /// allocated, not written), and says where its blocks are. From then
+    /// on, until the next boot, the filesystem refuses to read, write,
+    /// truncate, rename or remove it: the swap file writes its blocks
+    /// directly (`mm::swapfile`).
+    fn swap_file(&self, _ino: Ino, _size: u64) -> FsResult<SwapExtents> {
+        Err(EOPNOTSUPP)
+    }
     /// Verifies on-disk consistency (filesystems that support it).
     #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
     fn check(&self) -> Result<(), String> {
         Ok(())
     }
+    /// What the check at mount found, one problem per line ("" for
+    /// nothing), if the volume was not cleanly unmounted and so was checked.
+    #[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+    fn mount_check(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Where a swap file's blocks are: the device, then runs of (first page
+/// of the file, first sector, pages).
+pub struct SwapExtents {
+    pub dev: Arc<dyn crate::drivers::block::BlockDevice>,
+    pub runs: Vec<(u64, u64, u64)>,
 }
 
 struct Mount {
@@ -194,6 +238,7 @@ pub fn mount(path: &str, fs: Arc<dyn Filesystem>) {
 
 /// (total, free) bytes of the filesystem holding `path`, if it reports them.
 pub fn space_of(path: &str) -> Option<(u64, u64)> {
+    crate::sandbox::check_path(&resolve("/", path), crate::sandbox::Access::Stat).ok()?;
     let (fs, _) = mount_for(&resolve("/", path)).ok()?;
     fs.space()
 }
@@ -279,10 +324,42 @@ pub fn lookup(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino)> {
     lookup_full(&resolve("/", path)).map(|(fs, ino, _)| (fs, ino))
 }
 
-/// [`lookup`] of a normalised path, with the mount point.
+/// [`lookup`] of a normalised path, with the mount point. A sandboxed
+/// caller must be allowed to see it (see `sandbox`).
 fn lookup_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String)> {
+    crate::sandbox::check_path(path, crate::sandbox::Access::Stat)?;
     let (fs, rest, mount) = mount_full(path)?;
     let ino = walk(&fs, &rest, &mount, perm::caller().as_ref())?;
+    Ok((fs, ino, mount))
+}
+
+/// [`lookup_full`], holding the file open (`open_ino`): the last
+/// component is looked up and held in one call (`Filesystem::open_at`), so
+/// what is held is what the path names, never a new file that got the inode
+/// of one removed meanwhile. The caller owns the hold.
+fn open_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String)> {
+    crate::sandbox::check_path(path, crate::sandbox::Access::Stat)?;
+    let (fs, rest, mount) = mount_full(path)?;
+    let cred = perm::caller();
+    let (dir, last) = match rest.rfind('/') {
+        Some(i) if !rest[i + 1..].is_empty() => (&rest[..i], Some(&rest[i + 1..])),
+        _ => (rest.as_str(), None),
+    };
+    let ino = match last {
+        None => {
+            let ino = walk(&fs, dir, &mount, cred.as_ref())?;
+            fs.open_ino(ino)?;
+            ino
+        }
+        Some(name) => {
+            if name.len() > aurora_abi::NAME_MAX {
+                return Err(ENAMETOOLONG);
+            }
+            let d = walk(&fs, dir, &mount, cred.as_ref())?;
+            perm::search(cred.as_ref(), &fs, &mount, d)?;
+            fs.open_at(d, name)?
+        }
+    };
     Ok((fs, ino, mount))
 }
 
@@ -305,6 +382,8 @@ fn parent_full(path: &str) -> FsResult<(Arc<dyn Filesystem>, Ino, String, String
     if MOUNTS.lock().iter().any(|m| m.path == path) {
         return Err(EPERM);
     }
+    // Making, removing or renaming an entry changes it.
+    crate::sandbox::check_path(&path, crate::sandbox::Access::Write)?;
     let (fs, dino, mount) = lookup_full(&resolve("/", dir))?;
     if fs.metadata(dino)?.kind != Kind::Dir {
         return Err(ENOTDIR);
@@ -327,6 +406,7 @@ pub struct Entry {
 /// Lists a directory, including mount points that live directly inside it.
 pub fn readdir(path: &str) -> FsResult<Vec<Entry>> {
     let path = resolve("/", path);
+    crate::sandbox::check_path(&path, crate::sandbox::Access::Read)?;
     let (fs, ino, mount) = lookup_full(&path)?;
     if fs.metadata(ino)?.kind != Kind::Dir {
         return Err(ENOTDIR);
@@ -452,6 +532,18 @@ pub fn shrink_caches() {
     }
 }
 
+/// Before the power goes (shut down, restart): writes every filesystem out
+/// and marks those that keep such a mark cleanly unmounted. They stay
+/// mounted; anything changed after this clears the mark again.
+pub fn unmount_all() {
+    let all: Vec<Arc<dyn Filesystem>> = MOUNTS.lock().iter().map(|m| m.fs.clone()).collect();
+    for fs in all {
+        if let Err(e) = fs.unmount() {
+            log!("vfs", "unmounting {} failed: {}", fs.describe(), aurora_abi::err::name(e));
+        }
+    }
+}
+
 pub fn try_sync_all() -> FsResult<()> {
     let all: Vec<Arc<dyn Filesystem>> = MOUNTS.lock().iter().map(|m| m.fs.clone()).collect();
     let mut error = None;
@@ -464,7 +556,8 @@ pub fn try_sync_all() -> FsResult<()> {
     error.map_or(Ok(()), Err)
 }
 
-/// An open file (or directory) handle.
+/// An open file (or directory) handle. It holds its inode open on the
+/// filesystem ([`Filesystem::open_ino`]) until dropped.
 pub struct OpenFile {
     pub fs: Arc<dyn Filesystem>,
     pub ino: Ino,
@@ -472,6 +565,12 @@ pub struct OpenFile {
     pub readable: bool,
     pub writable: bool,
     pub append: bool,
+}
+
+impl Drop for OpenFile {
+    fn drop(&mut self) {
+        self.fs.close_ino(self.ino);
+    }
 }
 
 pub fn open(path: &str, flags: usize) -> FsResult<OpenFile> {
@@ -484,27 +583,42 @@ pub fn open_mode(path: &str, flags: usize, mode: Option<u16>) -> FsResult<OpenFi
     use aurora_abi::open::*;
     let writable = flags & (WRITE | APPEND | TRUNCATE) != 0;
     let mut created = false;
-    let (fs, ino, mount) = match lookup_full(&resolve("/", path)) {
-        Ok(found) => {
-            if flags & CREATE != 0 && flags & EXCLUSIVE != 0 {
-                return Err(EEXIST);
+    let access = if writable { crate::sandbox::Access::Write } else { crate::sandbox::Access::Read };
+    let full = resolve("/", path);
+    crate::sandbox::check_path(&full, access)?;
+    // Held from here on (and let go if any check below fails, by the drop).
+    let mut tries = 0;
+    let (fs, ino, mount) = loop {
+        tries += 1;
+        match open_full(&full) {
+            Ok(found) => break found,
+            // Missing: made, then opened like any other (if it went again
+            // meanwhile, or someone else made it first, the loop says).
+            Err(ENOENT) if flags & CREATE != 0 && tries < 8 => {
+                let (fs, dir, name, mount) = parent_full(path)?;
+                if fs.read_only() {
+                    return Err(EROFS);
+                }
+                perm::check_create(&fs, &mount, dir, &name)?;
+                let owner = perm::new_owner(perm::caller().as_ref(), &fs, &mount, dir, Kind::File, mode);
+                match fs.create_owned(dir, &name, Kind::File, owner) {
+                    Ok(_) => {
+                        index::added(&full, false);
+                        created = true;
+                    }
+                    Err(EEXIST) => {}
+                    Err(e) => return Err(e),
+                }
             }
-            found
+            Err(e) => return Err(e),
         }
-        Err(ENOENT) if flags & CREATE != 0 => {
-            let (fs, dir, name, mount) = parent_full(path)?;
-            if fs.read_only() {
-                return Err(EROFS);
-            }
-            perm::check_create(&fs, &mount, dir, &name)?;
-            let owner = perm::new_owner(perm::caller().as_ref(), &fs, &mount, dir, Kind::File, mode);
-            let ino = fs.create_owned(dir, &name, Kind::File, owner)?;
-            index::added(&resolve("/", path), false);
-            created = true;
-            (fs, ino, mount)
-        }
-        Err(e) => return Err(e),
     };
+    let file =
+        OpenFile { fs, ino, pos: 0, readable: flags & READ != 0 || !writable, writable, append: flags & APPEND != 0 };
+    let fs = &file.fs;
+    if flags & CREATE != 0 && flags & EXCLUSIVE != 0 && !created {
+        return Err(EEXIST);
+    }
     let md = fs.metadata(ino)?;
     if writable && fs.read_only() {
         return Err(EROFS);
@@ -514,13 +628,13 @@ pub fn open_mode(path: &str, flags: usize, mode: Option<u16>) -> FsResult<OpenFi
     }
     // The creator may write what it just made, whatever its mode says.
     if !created {
-        perm::check_open(&fs, &mount, ino, flags & READ != 0 || !writable, writable)?;
+        perm::check_open(fs, &mount, ino, flags & READ != 0 || !writable, writable)?;
     }
     if flags & TRUNCATE != 0 {
-        mapcache::forget(&fs, ino);
+        mapcache::forget(fs, ino);
         fs.truncate(ino, 0)?;
     }
-    Ok(OpenFile { fs, ino, pos: 0, readable: flags & READ != 0 || !writable, writable, append: flags & APPEND != 0 })
+    Ok(file)
 }
 
 impl OpenFile {

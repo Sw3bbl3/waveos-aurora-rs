@@ -1,7 +1,5 @@
 //! VMware backdoor absolute pointer ("vmmouse"), implemented by QEMU and VMware.
 
-use core::arch::asm;
-
 const MAGIC: u32 = 0x564D_5868;
 const PORT: u16 = 0x5658;
 const CMD_GETVERSION: u32 = 10;
@@ -20,29 +18,8 @@ pub struct Packet {
 }
 
 /// Issues a backdoor call; returns (eax, ebx, ecx, edx).
-///
-/// The hypervisor writes guest registers back on this `in` (eax..edx, and
-/// esi/edi for some commands). `rbx` is reserved by LLVM, so it is saved in
-/// `r8` — a register the backdoor never touches — and everything the backdoor
-/// may modify is declared clobbered.
 fn call(cmd: u32, arg: u32) -> (u32, u32, u32, u32) {
-    let (a, c, d): (u32, u32, u32);
-    let mut b: u64 = arg as u64;
-    unsafe {
-        asm!(
-            "xchg rbx, r8",
-            "in eax, dx",
-            "xchg rbx, r8",
-            inout("r8") b,
-            inout("eax") MAGIC => a,
-            inout("ecx") cmd => c,
-            inout("edx") PORT as u32 => d,
-            lateout("rsi") _,
-            lateout("rdi") _,
-            options(nostack)
-        );
-    }
-    (a, b as u32, c, d)
+    crate::arch::cpu::vmware_backdoor(MAGIC, PORT, cmd, arg)
 }
 
 pub fn init() -> bool {

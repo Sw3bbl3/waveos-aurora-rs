@@ -2,7 +2,8 @@
 //! on PCs since about 2012), [`ehci`] (USB 2), [`ohci`] and [`uhci`] (USB 1.1,
 //! often as EHCI's companions) — and class drivers for hubs ([`hub`]),
 //! keyboards, pointing devices, touchpads and game controllers ([`hid`]),
-//! storage ([`msc`]) and sound ([`uac`], over isochronous streams: [`iso`]).
+//! storage ([`msc`]), sound ([`uac`], over isochronous streams: [`iso`]) and
+//! networking ([`net`]: USB Ethernet adapters, docks and phone tethering).
 //!
 //! A controller driver implements [`Hcd`]: root ports, addressing a device
 //! and moving data. Everything above that is shared and lives in [`Bus`]:
@@ -18,6 +19,7 @@ pub mod hid;
 pub mod hub;
 pub mod iso;
 pub mod msc;
+pub mod net;
 pub mod ohci;
 pub mod uac;
 pub mod uhci;
@@ -151,6 +153,8 @@ pub struct DeviceDescriptor {
     pub serial_index: u8,
     /// `bcdDevice`: the device's release.
     pub release: u16,
+    /// How many configurations it offers.
+    pub configurations: u8,
 }
 
 impl DeviceDescriptor {
@@ -166,6 +170,7 @@ impl DeviceDescriptor {
             product_index: b[15],
             serial_index: b[16],
             release: u16::from_le_bytes([b[12], b[13]]),
+            configurations: b[17],
         })
     }
 }
@@ -207,6 +212,9 @@ pub struct Interface {
     pub endpoints: Vec<Endpoint>,
     /// Length of the HID report descriptor (HID interfaces).
     pub report_length: u16,
+    /// The class-specific descriptors that follow the interface descriptor
+    /// (CDC functional descriptors: the union, the MAC address string).
+    pub extra: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -238,6 +246,7 @@ impl Configuration {
                     protocol: d[7],
                     endpoints: Vec::new(),
                     report_length: 0,
+                    extra: Vec::new(),
                 }),
                 DESC_ENDPOINT if len >= 7 => {
                     if let Some(iface) = c.interfaces.last_mut() {
@@ -256,6 +265,14 @@ impl Configuration {
                 0x30 if len >= 6 => {
                     if let Some(ep) = c.interfaces.last_mut().and_then(|i| i.endpoints.last_mut()) {
                         ep.burst = d[2];
+                    }
+                }
+                // Class-specific interface descriptors (CDC functional ones).
+                0x24 => {
+                    if let Some(iface) = c.interfaces.last_mut() {
+                        if iface.extra.len() + len <= 1024 {
+                            iface.extra.extend_from_slice(d);
+                        }
                     }
                 }
                 DESC_HID if len >= 9 => {
@@ -362,10 +379,35 @@ pub trait Hcd: Send + Sync {
     fn control(&self, dev: u8, setup: Setup, data: Option<&mut [u8]>) -> Result<usize, u8>;
     /// A bulk or interrupt-OUT transfer of `len` bytes at physical `phys`.
     fn transfer(&self, dev: u8, ep: &Endpoint, phys: u64, len: usize, timeout_ms: u64) -> Result<usize, u8>;
+    /// Several OUT transfers `(phys, len)` in a row, each its own transfer
+    /// (a zero length is a zero-length packet), waiting once for all of
+    /// them: a network adapter's queued frames. Returns the bytes moved.
+    fn transfer_batch(&self, dev: u8, ep: &Endpoint, parts: &[(u64, usize)], timeout_ms: u64) -> Result<usize, u8> {
+        let mut moved = 0;
+        for &(phys, len) in parts {
+            moved += self.transfer(dev, ep, phys, len, timeout_ms)?;
+        }
+        Ok(moved)
+    }
     /// Sets up endpoints (and, for a hub, its properties) once a class driver picks them.
     fn configure(&self, dev: u8, eps: &[Endpoint], hub: Option<HubInfo>) -> bool;
     /// Starts polling an interrupt IN endpoint: `handler` gets every report.
     fn open_pipe(&self, dev: u8, ep: &Endpoint, handler: Arc<dyn PipeHandler>) -> bool;
+    /// Keeps `count` transfers of `size` bytes queued on a bulk IN endpoint
+    /// and hands each completed one to `handler` (from the controller's
+    /// event task: no blocking there) before queuing it again — a network
+    /// adapter's receive path. False if the controller can't: the caller
+    /// then loops over [`Hcd::transfer`].
+    fn open_stream(
+        &self,
+        _dev: u8,
+        _ep: &Endpoint,
+        _size: usize,
+        _count: usize,
+        _handler: Arc<dyn PipeHandler>,
+    ) -> bool {
+        false
+    }
     /// The device cleared an endpoint's halt: its data toggle starts over.
     fn reset_toggle(&self, _dev: u8, _ep_address: u8) {}
     /// Takes endpoints (of an alternate setting being left) off the schedule.
@@ -472,6 +514,8 @@ pub struct UsbDevice {
     pub pos: Position,
     pub desc: DeviceDescriptor,
     pub config: Configuration,
+    /// Which configuration (descriptor index) `config` is.
+    pub config_index: u8,
     pub name: String,
     /// The manufacturer, product and serial number strings (may be empty).
     pub maker: String,
@@ -490,6 +534,7 @@ impl UsbDevice {
         crate::drivers::evdev::UsbPlace {
             bus: self.bus.index as u8 + 1,
             ports,
+            config: self.config.value,
             interface,
             vendor: self.desc.vendor,
             product: self.desc.product,
@@ -504,6 +549,10 @@ impl UsbDevice {
 
     pub fn control(&self, setup: Setup, data: Option<&mut [u8]>) -> Result<usize, u8> {
         self.bus.control(self.dev, setup, data)
+    }
+    /// A string descriptor's text ("" when there is none).
+    pub fn string(&self, index: u8) -> String {
+        self.bus.string(self.dev, index)
     }
     pub fn speed(&self) -> Speed {
         self.pos.speed
@@ -635,6 +684,11 @@ impl Bus {
         self.hcd.transfer(dev, ep, phys, len, timeout_ms)
     }
 
+    /// See [`Hcd::transfer_batch`].
+    pub fn transfer_batch(&self, dev: u8, ep: &Endpoint, parts: &[(u64, usize)], timeout_ms: u64) -> Result<usize, u8> {
+        self.hcd.transfer_batch(dev, ep, parts, timeout_ms)
+    }
+
     pub fn configure(&self, dev: u8, eps: &[Endpoint], hub: Option<HubInfo>) -> bool {
         self.hcd.configure(dev, eps, hub)
     }
@@ -647,6 +701,18 @@ impl Bus {
 
     pub fn dma(&self, bytes: usize) -> Option<Dma> {
         self.hcd.dma(bytes)
+    }
+
+    /// See [`Hcd::open_stream`].
+    pub fn open_stream(
+        &self,
+        dev: u8,
+        ep: &Endpoint,
+        size: usize,
+        count: usize,
+        handler: Arc<dyn PipeHandler>,
+    ) -> bool {
+        self.hcd.open_stream(dev, ep, size, count, handler)
     }
 
     /// Addresses and configures a new device, then hands it to a class driver.
@@ -679,16 +745,21 @@ impl Bus {
             (false, false) if product.starts_with(maker.as_str()) => product.clone(),
             (false, false) => format!("{maker} {product}"),
         };
-        let mut head = [0u8; 9];
-        if self.hcd.control(dev, Setup::get_descriptor(DESC_CONFIG, 0, 0, 9), Some(&mut head)).is_err() {
-            return fail("no configuration descriptor");
+        // Most devices have one configuration. Network devices often offer
+        // several (vendor mode, CDC, RNDIS): `net::choose` picks.
+        let Some(first) = self.read_configuration(dev, 0) else { return fail("no configuration descriptor") };
+        let mut configs = vec![first];
+        for index in 1..desc.configurations.min(8) {
+            match self.read_configuration(dev, index) {
+                Some(c) => configs.push(c),
+                None => break,
+            }
         }
-        let total = u16::from_le_bytes([head[2], head[3]]).clamp(9, 4096);
-        let mut full = vec![0u8; total as usize];
-        let Ok(n) = self.hcd.control(dev, Setup::get_descriptor(DESC_CONFIG, 0, 0, total), Some(&mut full)) else {
-            return fail("configuration descriptor unreadable");
-        };
-        let Some(config) = Configuration::parse(&full[..n]) else { return fail("bad configuration descriptor") };
+        let config_index = net::choose(&desc, &configs);
+        let config = configs.swap_remove(config_index);
+        if config_index != 0 {
+            log!("usb", "{}: using configuration {} of {}", name, config.value, desc.configurations);
+        }
         if self.hcd.control(dev, Setup::set_configuration(config.value), None).is_err() {
             return fail("SET_CONFIGURATION failed");
         }
@@ -699,6 +770,7 @@ impl Bus {
             pos,
             desc: desc.clone(),
             config,
+            config_index: config_index as u8,
             name: name.clone(),
             maker: maker.clone(),
             model: product.clone(),
@@ -726,7 +798,17 @@ impl Bus {
         Some(dev)
     }
 
-    fn string(&self, dev: u8, index: u8) -> String {
+    /// Reads and parses configuration `index` (in descriptor order).
+    fn read_configuration(&self, dev: u8, index: u8) -> Option<Configuration> {
+        let mut head = [0u8; 9];
+        self.hcd.control(dev, Setup::get_descriptor(DESC_CONFIG, index, 0, 9), Some(&mut head)).ok()?;
+        let total = u16::from_le_bytes([head[2], head[3]]).clamp(9, 4096);
+        let mut full = vec![0u8; total as usize];
+        let n = self.hcd.control(dev, Setup::get_descriptor(DESC_CONFIG, index, 0, total), Some(&mut full)).ok()?;
+        Configuration::parse(&full[..n])
+    }
+
+    pub fn string(&self, dev: u8, index: u8) -> String {
         if index == 0 {
             return String::new();
         }
@@ -837,6 +919,9 @@ pub fn attach(dev: &UsbDevice) -> String {
             (CLASS_MSC, 0x06, 0x50) => msc::attach(dev, iface),
             // Xbox controllers have their own (vendor) protocols.
             (0xFF, 0x5D, 0x01) | (0xFF, 0x47, 0xD0) => hid::attach_xbox(dev, iface),
+            // Network adapters, docks and tethered phones.
+            (c, s, p) if net::function(c, s, p).is_some() => net::attach(dev, iface),
+            (0xFF, ..) if net::chip(dev).is_some() => net::attach_chip(dev, iface),
             _ => None,
         };
         if let Some(name) = taken {

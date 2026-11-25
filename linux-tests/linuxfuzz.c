@@ -14,6 +14,11 @@
 // paths stay inside /tmp/lfz (or are only read). The parent kills a child
 // that does not finish in time; a child that cannot be killed, or a
 // kernel panic, fails the test.
+//
+// `linuxfuzz SEED CHILDREN CALLS ORACLE` runs in a sandbox (the self-tests
+// start it in one) and also aims path calls, mutating ones included, at
+// the folder ORACLE, which it must never read or change: the kernel
+// watches it and fails the test if any call gets there.
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -119,8 +124,17 @@ static const char *ro_paths[] = {"/proc/self/maps", "/proc/self/status", "/dev/n
                                  "/proc/self/exe", "/etc/passwd", "", "/proc/self/cmdline", "/dev/zero"};
 static const char *cwd_paths[] = {SANDBOX, SANDBOX "/dir", "/proc", "/dev"};
 
+// The folder outside the sandbox to aim at (argv[4]), if any.
+static const char *oracle;
+
 static uint64_t path_at(rng *r, int half, int mutating) {
     char *s = r->scratch + half * 8192;
+    if (oracle && below(r, 4) == 0) {
+        static const char *forms[] = {"%s/secret.txt", "%s", "/tmp/lfz/../../..%s/secret.txt", "%s/new",
+                                      "%s/secret.txt/x", "%s/..", "%s//secret.txt/."};
+        snprintf(s, 8192, forms[below(r, sizeof forms / sizeof *forms)], oracle);
+        return (uint64_t)(uintptr_t)s;
+    }
     switch (below(r, 10)) {
     case 0: case 1: case 2: case 3:
         strcpy(s, rw_paths[below(r, sizeof rw_paths / sizeof *rw_paths)]);
@@ -182,17 +196,22 @@ static uint64_t sockaddr(rng *r) {
     return (uint64_t)(uintptr_t)sa;
 }
 
-// Which arguments are paths, for the calls that take them (x86-64 numbers);
-// bit 7: the call changes the filesystem.
+// Which arguments are paths, for the calls that take them (the machine's
+// numbers); bit 7: the call changes the filesystem. arm64 has Linux's
+// generic table, without the old path calls (open, stat, mkdir…), which
+// only x86-64 has.
 struct path_call { int nr; unsigned char args, mutating; };
 static const struct path_call path_calls[] = {
-    {SYS_open, 1, 2}, {SYS_stat, 1, 0}, {SYS_lstat, 1, 0}, {SYS_access, 1, 0}, {SYS_truncate, 1, 1},
+#ifdef SYS_open
+    {SYS_open, 1, 2}, {SYS_stat, 1, 0}, {SYS_lstat, 1, 0}, {SYS_access, 1, 0},
     {SYS_rename, 3, 1}, {SYS_mkdir, 1, 1}, {SYS_rmdir, 1, 1}, {SYS_creat, 1, 1}, {SYS_link, 3, 1},
     {SYS_unlink, 1, 1}, {SYS_symlink, 3, 1}, {SYS_readlink, 1, 0}, {SYS_chmod, 1, 1}, {SYS_chown, 1, 1},
-    {SYS_lchown, 1, 1}, {SYS_utime, 1, 1}, {SYS_mknod, 1, 1}, {SYS_statfs, 1, 0}, {SYS_setxattr, 1, 1},
+    {SYS_lchown, 1, 1}, {SYS_utime, 1, 1}, {SYS_mknod, 1, 1}, {SYS_utimes, 1, 1}, {SYS_futimesat, 2, 1},
+#endif
+    {SYS_truncate, 1, 1}, {SYS_statfs, 1, 0}, {SYS_setxattr, 1, 1},
     {SYS_lsetxattr, 1, 1}, {SYS_getxattr, 1, 0}, {SYS_lgetxattr, 1, 0}, {SYS_listxattr, 1, 0},
-    {SYS_removexattr, 1, 1}, {SYS_lremovexattr, 1, 1}, {SYS_llistxattr, 1, 0}, {SYS_utimes, 1, 1}, {SYS_inotify_add_watch, 2, 0}, {SYS_openat, 2, 2},
-    {SYS_mkdirat, 2, 1}, {SYS_mknodat, 2, 1}, {SYS_fchownat, 2, 1}, {SYS_futimesat, 2, 1},
+    {SYS_removexattr, 1, 1}, {SYS_lremovexattr, 1, 1}, {SYS_llistxattr, 1, 0}, {SYS_inotify_add_watch, 2, 0}, {SYS_openat, 2, 2},
+    {SYS_mkdirat, 2, 1}, {SYS_mknodat, 2, 1}, {SYS_fchownat, 2, 1},
     {SYS_newfstatat, 2, 0}, {SYS_unlinkat, 2, 1}, {SYS_renameat, 10, 1}, {SYS_linkat, 10, 1},
     {SYS_symlinkat, 5, 1}, {SYS_readlinkat, 2, 0}, {SYS_fchmodat, 2, 1}, {SYS_faccessat, 2, 0},
     {SYS_utimensat, 2, 1}, {SYS_renameat2, 10, 1}, {SYS_statx, 2, 0}, {SYS_chdir, 1, 3},
@@ -212,8 +231,11 @@ static int denied(long n) {
     case SYS_clock_settime: case SYS_adjtimex: case SYS_clock_adjtime: case SYS_mount: case SYS_umount2:
     case SYS_pivot_root: case SYS_chroot: case SYS_swapon: case SYS_swapoff: case SYS_acct:
     case SYS_init_module: case SYS_delete_module: case SYS_finit_module: case SYS_kexec_load:
-    case SYS_kexec_file_load: case SYS_iopl: case SYS_ioperm: case SYS_vhangup: case SYS_setsid:
-    case SYS_setpgid: case SYS_execve: case SYS_execveat: case SYS_fork: case SYS_vfork: case SYS_clone:
+    case SYS_kexec_file_load: case SYS_vhangup: case SYS_setsid:
+    case SYS_setpgid: case SYS_execve: case SYS_execveat: case SYS_clone:
+#ifdef SYS_fork
+    case SYS_iopl: case SYS_ioperm: case SYS_fork: case SYS_vfork:
+#endif
     case SYS_sync: case SYS_quotactl: case SYS_perf_event_open: case SYS_bpf:
 #ifdef SYS_clone3
     case SYS_clone3:
@@ -236,7 +258,10 @@ static void one_call(rng *r) {
     }
     if (denied(n)) return;
     // Rare: calls that end or wreck this child on purpose.
-    if ((n == SYS_exit || n == SYS_exit_group || n == SYS_rt_sigreturn || n == SYS_arch_prctl ||
+    if ((n == SYS_exit || n == SYS_exit_group || n == SYS_rt_sigreturn ||
+#ifdef SYS_arch_prctl
+         n == SYS_arch_prctl ||
+#endif
          n == SYS_munmap || n == SYS_mremap || n == SYS_brk || n == SYS_madvise) &&
         below(r, 200) != 0)
         return;
@@ -262,7 +287,11 @@ static void one_call(rng *r) {
         int mutating = path_calls[k].mutating;
         if (mutating == 2) {
             // open/openat: by the flags.
+#ifdef SYS_open
             uint64_t flags = n == SYS_open ? a[1] : a[2];
+#else
+            uint64_t flags = a[2];
+#endif
             mutating = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0;
         }
         if (mutating == 3) { // chdir
@@ -308,7 +337,10 @@ static void one_call(rng *r) {
         if (a[2] > (1 << 21)) a[2] = 1 << 21;
         break;
     // Waiting: not too long (the child ends its blocked threads anyway).
-    case SYS_poll: case SYS_epoll_wait: case SYS_epoll_pwait: a[2] = below(r, 20); break;
+#ifdef SYS_poll
+    case SYS_poll: case SYS_epoll_wait:
+#endif
+    case SYS_epoll_pwait: a[2] = below(r, 20); break;
     }
     syscall(n, a[0], a[1], a[2], a[3], a[4], a[5]);
 }
@@ -430,6 +462,10 @@ int main(int argc, char **argv) {
     uint64_t seed = argc > 1 ? strtoull(argv[1], NULL, 0) : 1;
     int children = argc > 2 ? atoi(argv[2]) : 8;
     long calls = argc > 3 ? atol(argv[3]) : 400;
+    if (argc > 4) {
+        oracle = argv[4];
+        printf("linuxfuzz: in a sandbox, aiming at %s\n", oracle);
+    }
     printf("linuxfuzz: seed %#llx, %d children of %ld calls on 3 threads\n", (unsigned long long)seed, children,
            calls);
     fflush(stdout);

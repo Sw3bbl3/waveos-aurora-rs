@@ -113,21 +113,23 @@ impl Drop for ShmFile {
     }
 }
 
-/// Objects in `/dev/shm`, by name.
+/// Objects in `/dev/shm`, by name (a sandboxed app's in a namespace of
+/// its own: `sandbox::ipc_key`).
 static NAMES: Mutex<BTreeMap<String, Arc<ShmFile>>> = Mutex::new(BTreeMap::new());
 
 /// Opens `/dev/shm/name`, making it with `create`.
 pub fn open(name: &str, create: bool, exclusive: bool, truncate: bool) -> Result<Arc<ShmFile>, isize> {
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty() || name.contains('/') || name.contains('\u{1}') {
         return Err(EINVAL);
     }
+    let key = crate::sandbox::ipc_key(name);
     let mut names = NAMES.lock();
-    let f = match names.get(name) {
+    let f = match names.get(&key) {
         Some(_) if create && exclusive => return Err(EEXIST),
         Some(f) => f.clone(),
         None if create => {
             let f = ShmFile::new(0)?;
-            names.insert(String::from(name), f.clone());
+            names.insert(key, f.clone());
             f
         }
         None => return Err(ENOENT),
@@ -140,13 +142,17 @@ pub fn open(name: &str, create: bool, exclusive: bool, truncate: bool) -> Result
 }
 
 pub fn unlink(name: &str) -> Result<(), isize> {
-    NAMES.lock().remove(name).map(|_| ()).ok_or(ENOENT)
+    let key = crate::sandbox::ipc_key(name);
+    NAMES.lock().remove(&key).map(|_| ()).ok_or(ENOENT)
 }
 
+/// The names the caller sees.
 pub fn names() -> Vec<String> {
-    NAMES.lock().keys().cloned().collect()
+    let all: Vec<String> = NAMES.lock().keys().cloned().collect();
+    crate::sandbox::ipc_visible(all)
 }
 
 pub fn lookup(name: &str) -> Option<Arc<ShmFile>> {
-    NAMES.lock().get(name).cloned()
+    let key = crate::sandbox::ipc_key(name);
+    NAMES.lock().get(&key).cloned()
 }

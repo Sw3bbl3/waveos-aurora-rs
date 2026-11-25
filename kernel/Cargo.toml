@@ -22,6 +22,7 @@ bootinfo = { path = "../libs/bootinfo" }
 lumen = { path = "../libs/gfx" }
 aurora-abi = { path = "../libs/abi" }
 aurora-elf = { path = "../libs/elf" }
+aurora-linuxabi = { path = "../libs/linuxabi" }
 aurorafs = { path = "../libs/aurorafs" }
 fat32 = { path = "../libs/fat32" }
 aurora-image = { path = "../libs/image" }
@@ -30,12 +31,13 @@ aurora-wifi = { path = "../libs/wifi" }
 aurora-hid = { path = "../libs/hid" }
 aurora-i2c = { path = "../libs/i2c" }
 aurora-sdmmc = { path = "../libs/sdmmc" }
+aurora-usbnet = { path = "../libs/usbnet" }
 aurora-acpi-res = { path = "../libs/acpires" }
 aurora-edid = { path = "../libs/edid" }
+aurora-lz4 = { path = "../libs/lz4" }
 aurora-igfx = { path = "../libs/igfx" }
 aurora-amdgfx = { path = "../libs/amdgfx" }
 aurora-nvgfx = { path = "../libs/nvgfx" }
-x86_64 = "0.15"
 spin = "0.9"
 acpi = "6.1"
 log = "0.4"
@@ -44,3 +46,6 @@ log = "0.4"
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 # PBKDF2 for the account password (gui::account).
 hmac = { version = "0.12", default-features = false }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = "0.15"

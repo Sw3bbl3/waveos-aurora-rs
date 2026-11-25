@@ -26,6 +26,7 @@
 //! `cargo clean` keeps them).
 
 use crate::displays::Displays;
+use crate::arch::Arch;
 use crate::runconfig::{self, Action, QemuCaps, RunConfig};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -189,7 +190,9 @@ fn boot_last() -> ! {
 fn xtask_command(config: &RunConfig) -> Command {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("xtask"));
     let mut cmd = Command::new(exe);
-    cmd.current_dir(crate::root()).arg(config.subcommand()).args(config.args());
+    // The configuration says which processor (`--arch` when it isn't the
+    // default), not the architecture this launcher was started with.
+    cmd.current_dir(crate::root()).arg(config.subcommand()).args(config.args()).env_remove("AURORA_ARCH");
     cmd
 }
 
@@ -226,7 +229,8 @@ struct Run {
 }
 
 struct Launcher {
-    caps: QemuCaps,
+    /// What each architecture's QEMU offers (x86_64 first).
+    caps: Vec<(Arch, QemuCaps)>,
     hub: Mutex<Hub>,
     run: Mutex<Run>,
     store: Mutex<Store>,
@@ -238,6 +242,10 @@ struct Launcher {
 }
 
 impl Launcher {
+    fn caps(&self, arch: Arch) -> &QemuCaps {
+        self.caps.iter().find(|(a, _)| *a == arch).map(|(_, c)| c).unwrap_or(&self.caps[0].1)
+    }
+
     fn state(&self, state: &str, message: &str) {
         self.run.lock().unwrap().state = state.into();
         self.hub.lock().unwrap().publish(json!({"ev": "state", "state": state, "message": message}));
@@ -402,10 +410,10 @@ impl Launcher {
             |(n, c)| json!({"name": n, "description": c.command_line(), "builtin": false, "config": c.to_json()}),
         ));
         let run = self.run.lock().unwrap();
-        let caps = &self.caps;
+        let caps = self.caps(crate::arch::current());
         let two = Displays::plan(vec![crate::displays::DEFAULT_SIZE; 2], false, cfg!(target_os = "macos"), caps);
         json!({
-            "options": runconfig::options_json(caps),
+            "options": runconfig::options_json(&|a| self.caps(a).clone()),
             "presets": presets,
             "last": store.last.as_ref().map(RunConfig::to_json),
             "store": store_path().display().to_string(),
@@ -426,7 +434,8 @@ impl Launcher {
         let displays = if config.action == Action::Test {
             Vec::new()
         } else {
-            Displays::plan(config.displays.clone(), config.headless, cfg!(target_os = "macos"), &self.caps).describe()
+            Displays::plan(config.displays.clone(), config.headless, cfg!(target_os = "macos"), self.caps(config.arch()))
+                .describe()
         };
         json!({"command": config.command_line(), "args": config.args(), "displays": displays})
     }
@@ -466,9 +475,11 @@ fn serve(port: u16, open: bool) {
         exit(1)
     });
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
-    let caps = QemuCaps::probe();
-    if !caps.found {
-        eprintln!("warning: qemu-system-x86_64 isn't on the PATH; install QEMU (see docs/BUILDING.md) to boot WaveOS");
+    let caps: Vec<(Arch, QemuCaps)> = crate::arch::ALL.into_iter().map(|a| (a, QemuCaps::probe_for(a))).collect();
+    for (a, c) in &caps {
+        if !c.found {
+            eprintln!("warning: {} isn't on the PATH; install QEMU (see docs/BUILDING.md) to boot WaveOS", a.qemu_binary());
+        }
     }
     let launcher = Arc::new(Launcher {
         caps,

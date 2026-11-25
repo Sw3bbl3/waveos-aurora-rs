@@ -753,11 +753,14 @@ pub(super) fn builtin_id(a: &apps::AppInfo) -> String {
         DisplayConfirm => "display-confirm",
         Other => "other",
         Installer => "installer",
+        Store => "store",
         Studio => "studio",
         Doom => "doom",
         Firefox => "firefox",
         Voyage => "voyage",
         Elevate => "elevate",
+        Consent => "consent",
+        Panel => "panel",
     };
     id.into()
 }

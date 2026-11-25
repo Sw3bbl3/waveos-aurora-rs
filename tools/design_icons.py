@@ -19,6 +19,7 @@ icons = {
  "learn": ("#7b7dff", "#7c3aed", f'<path d="M128 92c-18-12-40-14-62-10v80c22-4 44-2 62 10 18-12 40-14 62-10V82c-22-4-44-2-62 10z" {SW}/><path d="M128 92v80" {SW}/>'),
  "studio": ("#8b5cf6", "#0891b2", f'<path d="M98 88l-34 32 34 32M158 88l34 32-34 32M140 76l-24 88" {SW}/>'),
  "installer": ("#38bdf8", "#0369c9", f'<path d="M70 98l58-26 58 26v56l-58 26-58-26z" {SW}/><path d="M128 102v48M108 132l20 20 20-20" {SW}/>'),
+ "store": ("#fb7185", "#be123c", f'<path d="M72 96h112l-9 82a14 14 0 0 1-14 12H95a14 14 0 0 1-14-12z" {SW}/><path d="M104 96V86a24 24 0 0 1 48 0v10" {SW}/><path d="M100 146c9-9 19-9 28 0s19 9 28 0" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round"/>'),
  "welcome": ("#7e95ff", "#b84bff", f'<path d="M58 132c18-26 38-26 54 0s36 26 54 0 30-22 40-8" {SW}/><path d="M168 66v24M156 78h24" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round"/>'),
  "shoal": ("#8275de", "#6357bd", '<g fill="#fff">' + "".join(f'<circle cx="{x}" cy="{y}" r="15"/>' for x, y in [(84,82),(128,82),(172,82),(106,120),(150,120),(84,158),(128,158),(172,158)]) + "</g>"),
  "doom": ("#d0342c", "#3a0a0c", f'<circle cx="128" cy="118" r="50" {SW}/><path d="M128 50v30M128 156v30M60 118h30M166 118h30" {SW}/><circle cx="128" cy="118" r="10" fill="#ffb02e"/>'),

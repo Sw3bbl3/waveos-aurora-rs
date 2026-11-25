@@ -162,6 +162,8 @@ pub struct UsbPlace {
     pub bus: u8,
     /// Port path: the root port, then hub ports ("1", "1.3").
     pub ports: String,
+    /// The configuration in use (`bConfigurationValue`; 0 counts as 1).
+    pub config: u8,
     pub interface: u8,
     pub vendor: u16,
     pub product: u16,
@@ -514,7 +516,8 @@ impl Device {
         }
         match self.class {
             Class::Joystick => crate::drivers::gamepad::may_read(pid),
-            _ => has_focus(pid),
+            // Unfocused only for a sandboxed app the person let monitor input.
+            _ => has_focus(pid) || crate::sandbox::monitors_input(pid),
         }
     }
 

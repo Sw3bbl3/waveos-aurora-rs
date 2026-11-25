@@ -30,6 +30,7 @@ fn main() {
     println!("cargo:rerun-if-changed=vdso");
     println!("cargo:rerun-if-env-changed=WAVEOS_CC");
 
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let cc = std::env::var("WAVEOS_CC").unwrap_or_else(|_| "clang".into());
     if Command::new(&cc).arg("--version").output().is_err() {
         println!("cargo:warning=clang not found: building without the Linux GPU drivers (set WAVEOS_CC to use another clang)");
@@ -37,7 +38,12 @@ fn main() {
     }
     let linux = Path::new(&dir).join("linux");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    build_vdso(&cc, &Path::new(&dir).join("vdso"), &out);
+    build_vdso(&cc, &Path::new(&dir).join("vdso"), &out, &arch);
+    // The C half is x86-64 code so far: other architectures build without
+    // it (as without clang).
+    if arch != "x86_64" {
+        return;
+    }
     let mut files = Vec::new();
     for sub in SOURCES {
         let mut found: Vec<PathBuf> = std::fs::read_dir(linux.join(sub))
@@ -57,10 +63,17 @@ fn main() {
     println!("cargo:rustc-cfg=linuxkpi");
 }
 
-/// Compiles and links `vdso/vdso.c` into `vdso.so`, which the kernel
+/// Compiles and links the architecture's vDSO (`vdso/vdso.c` for x86-64,
+/// `vdso/vdso-aarch64.c` for arm64) into `vdso.so`, which the kernel
 /// includes (`WAVEOS_VDSO`). Leaves it out, with a warning, if `rust-lld`
 /// can't be found.
-fn build_vdso(cc: &str, src: &Path, out: &Path) {
+fn build_vdso(cc: &str, src: &Path, out: &Path, arch: &str) {
+    let (target, source, script, unwind) = match arch {
+        "x86_64" => ("--target=x86_64-unknown-linux-gnu", "vdso.c", "vdso.lds", "-fno-asynchronous-unwind-tables"),
+        // arm64 keeps its unwind tables (see vdso-aarch64.lds).
+        "aarch64" => ("--target=aarch64-unknown-linux-gnu", "vdso-aarch64.c", "vdso-aarch64.lds", "-fasynchronous-unwind-tables"),
+        _ => return,
+    };
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
     let sysroot = Command::new(rustc).args(["--print", "sysroot"]).output().ok().filter(|o| o.status.success());
     let lld = sysroot.and_then(|o| {
@@ -84,23 +97,16 @@ fn build_vdso(cc: &str, src: &Path, out: &Path) {
         }
     };
     run(Command::new(cc)
-        .args([
-            "--target=x86_64-unknown-linux-gnu",
-            "-fPIC",
-            "-O2",
-            "-ffreestanding",
-            "-fno-stack-protector",
-            "-fno-asynchronous-unwind-tables",
-            "-mgeneral-regs-only",
-            "-c",
-        ])
-        .arg(src.join("vdso.c"))
+        .args([target, "-fPIC", "-O2", "-ffreestanding", "-fno-stack-protector", unwind, "-mgeneral-regs-only", "-c"])
+        .arg(src.join(source))
         .arg("-o")
         .arg(&obj));
     run(Command::new(&lld)
         .args(["-flavor", "gnu", "-shared", "-soname=linux-vdso.so.1", "--hash-style=both"])
-        .args(["-z", "max-page-size=4096", "--build-id=none", "-Bsymbolic", "-nostdlib", "-T"])
-        .arg(src.join("vdso.lds"))
+        .args(["-z", "max-page-size=4096", "--build-id=none", "-Bsymbolic", "-nostdlib"])
+        .args(if arch == "aarch64" { &["--eh-frame-hdr"][..] } else { &[] })
+        .arg("-T")
+        .arg(src.join(script))
         .arg(&obj)
         .arg("-o")
         .arg(&so));

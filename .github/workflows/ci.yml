@@ -25,12 +25,66 @@ jobs:
       - name: Validate bilingual handbook
         run: cargo xtask docs
       - name: Filesystem library tests
-        run: cargo test -p aurora-desktop -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-zip -p aurora-wifi -p aurora-hid -p aurora-sdmmc -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask
+        run: cargo test -p aurora-desktop -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-zip -p aurora-wifi -p aurora-hid -p aurora-sdmmc -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p aurora-lz4 -p xtask
 
       - name: File transfer worker fault tests
         run: |
           rustc --edition=2021 --test userland/apps/files/tests/transfer.rs -o target/file-transfer-tests
           target/file-transfer-tests --test-threads=1
+
+  host-arm64:
+    # The same host tests on an Arm computer: the NEON paths (lumen's pixel
+    # loops, nebula-media's YUV conversion) run there and are compared with
+    # the portable code, as the SSE2 ones are on x86 above.
+    name: Host tests on arm64 (NEON paths)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Library and xtask tests
+        run: cargo test -p gina -p lumen -p nebula-media -p nebula-secure -p aurora-abi -p aurora-elf -p aurorafs -p xtask
+
+  aarch64:
+    name: aarch64 build, lint and boot (QEMU virt, TCG)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU and EDK2 for aarch64
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 clang
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Build bootloader, kernel and user space for aarch64
+        run: cargo xtask build --arch aarch64
+      - name: Clippy for aarch64 (user space, its libraries, bootloader, kernel)
+        run: cargo xtask lint --arch aarch64
+      - name: Boot (headless smoke test)
+        run: |
+          timeout 300 cargo xtask run --arch aarch64 --no-build --headless --fresh-disk --no-linux-root > serial-arm.log 2>&1 || true
+          sed 's/\x1b\[[0-9;]*[A-Za-z]//g' serial-arm.log | grep -v '^\s*$' | tail -40
+          grep -q "Aster kernel" serial-arm.log
+          grep -q "mounted System image" serial-arm.log
+
+  aarch64-kernel:
+    # The aarch64 kernel self-tests (with the arm64 Linux programs), emulated
+    # on an x86 runner: the default architecture on Apple-silicon Macs.
+    name: aarch64 kernel tests (QEMU virt, TCG, virtio-gpu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU and EDK2 for aarch64
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 clang
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Kernel self-tests, two boots on the same disk
+        env:
+          AURORA_TEST_TIMEOUT: "2400"
+        run: cargo xtask test --arch aarch64
 
   kernel:
     name: Kernel tests (${{ matrix.disk }}, ${{ matrix.smp }} CPU, ${{ matrix.net }})

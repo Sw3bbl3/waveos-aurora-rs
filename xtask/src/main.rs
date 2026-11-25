@@ -11,20 +11,25 @@
 //!                                         insert it from the QEMU monitor (`eject sdcard`, `change sdcard …`)
 //!       --fresh-disk                      recreate the disk (erases files saved inside WaveOS)
 //!       --monitor                         open the live System Explorer (http://127.0.0.1:7777)
-//!       --net virtio|e1000|e1000e|igb|rtl8139|none  network card (default virtio; also for `test`)
+//!       --net virtio|e1000|e1000e|igb|rtl8139|usb-ecm|usb-rndis|none  network card (default virtio; also
+//!                                         for `test`); usb-ecm and usb-rndis are QEMU's usb-net adapter on
+//!                                         the --usb controller, in its CDC-ECM or RNDIS configuration
 //!       --smp N                           number of CPUs (default 4)
 //!       --memory-mib N                    guest RAM in MiB (default 4096)
 //!       --audio-wav PATH                  record guest audio to a WAV file
 //!       --usb-audio                       add a USB speaker (QEMU's usb-audio, isochronous; with --audio-wav
 //!                                         it records to PATH-usb.wav)
-//!       --gpu std|virtio|virtio-linux     display adapter (default std; virtio runs the native virtio-gpu
-//!                                         driver, virtio-linux the ported Linux driver)
+//!       --gpu std|virtio|virtio-linux     display adapter (default std on x86-64, virtio on aarch64; virtio
+//!                                         runs the native virtio-gpu driver, virtio-linux the ported Linux
+//!                                         driver; aarch64's std is the firmware's 1024x768 ramfb)
 //!       --resolution WxH[,WxH…]           virtio's starting screen size (default 1920x1080; WaveOS then
 //!                                         follows the QEMU window when you resize it); with several
 //!                                         displays, one size each (std: the extra displays' EDID size)
 //!       --displays N                      simulate N displays (1-4), each in its own window (see displays.rs)
 //!       --wifi-sim                        simulated Wi-Fi networks ("Harbor Cafe", password "tide pools at dawn")
 //!       --virtual-gamepad                 a game controller played on the keyboard, connected at start-up
+//!       --hardware-cursor                 on macOS with --gpu virtio: keep the pointer on the cursor plane
+//!                                         (QEMU's window there doesn't show it, so WaveOS draws it instead)
 //!                                         (Super+G connects and disconnects it at any time; see Wave Play)
 //!       --usb xhci|ehci|ehci-ohci|ohci|uhci  USB controller (default xhci; ehci has UHCI companions,
 //!                                         ehci-ohci OHCI ones, as VirtualBox's USB 2.0 controller)
@@ -34,22 +39,48 @@
 //!                                         as /Linux, and on older disks when there's room
 //!       --linux-root                      a fresh disk with the Linux packages (stops if they can't be fetched)
 //!   cargo xtask linux-root [PKG...]     fetch Debian packages (default: WebKitGTK, Firefox ESR, bash, coreutils,
-//!                                         Python) and their dependencies into target/linux-root
+//!                                         Python) and their dependencies into target/linux-root (with --arch
+//!                                         aarch64: Debian's arm64 ones, into target/linux-root-aarch64; --base:
+//!                                         only libc, BusyBox and GNU Hello; --into DIR: there instead)
+//!   cargo xtask userland                user space alone
+//!   cargo xtask linux-programs          the Linux programs of the system image alone (BusyBox, the C tests…)
+//!   cargo xtask migrate-disk [--from DISK] [--to DISK]  a new disk for --arch with another one's files
 //!   cargo xtask image [--no-linux-root] build a fresh USB image target/waveos-aurora-usb.img
 //!   cargo xtask iso [--no-build]        build a UEFI optical image for VirtualBox and other VMs
 //!   cargo xtask test [--disk ...]       boot the kernel self-tests headless on a fresh disk
+//!                                         (--memory-mib N: guest RAM, default 512, 2048 with --mesa;
+//!                                         the swap tests overcommit whatever it is several times over)
 //!                                         (AURORA_TEST_FILTER=NAME runs matching tests; AURORA_FUZZ_SEED,
 //!                                         AURORA_FUZZ_ROUNDS, AURORA_FUZZ_ITERS, AURORA_LINUXFUZZ_CHILDREN and
 //!                                         AURORA_LINUXFUZZ_CALLS make the fuzzers run longer, with
-//!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 240;
+//!                                         AURORA_TEST_TIMEOUT seconds per boot instead of 480 (600 under
+//!                                         384 MiB, 1200 over 512);
 //!                                         AURORA_MEM_REPORT=SECS prints memory reports while they run;
-//!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data)
+//!                                         AURORA_SDHCI=pio|sdma|adma32|adma64 forces how SD cards move data;
+//!                                         AURORA_MESA_BENCH=1 with --mesa measures copies against zero-copy;
+//!                                         AURORA_TEST_ROOT=browsers with --mesa measures Voyage and Firefox;
+//!                                         AURORA_TEST_FILTER="page loads timed" times their cold starts and
+//!                                         page loads: AURORA_BROWSER_RUNS=N, AURORA_BROWSER_SITES="URL|title,…",
+//!                                         AURORA_BROWSER_ENV="VAR=value …";
+//!                                         AURORA_TEST_LINUX_ROOT=1|DIR: a Linux root as /Linux)
 //!       --displays N                      with --gpu virtio: N scanouts, plugged in and out by the
 //!                                         multi-monitor test, each checked by QMP screendump (testdisplays.rs)
 //!       --mesa                            only the Mesa tests, on a disk with Debian's Mesa, kmscube, glmark2
-//!                                         and Vulkan tools (target/mesa-root, fetched once) and 2 GiB of memory
+//!                                         and Vulkan tools (target/mesa-root[-aarch64], fetched once) and 2 GiB of
+//!                                         memory unless --memory-mib says otherwise
+//!   cargo xtask powercut [--iterations N] [--disk ...] [--smp N]
+//!                                       cut the power N times (default 300) at random moments while
+//!                                         four threads hammer the home volume (boot option fs_stress); after
+//!                                         each cut the volume is mounted and checked here (journal replayed
+//!                                         in memory) and every file the guest synced must be there, whole;
+//!                                         the next start carries on from the cut disk (AURORA_POWERCUT_SEED)
+//!   cargo xtask fsck [IMG] [--repair]   check the home volume of IMG (default target/test-disk.img), every
+//!                                         problem listed; the image is not changed unless --repair, which
+//!                                         repairs what is safe to and writes it back (never on a disk you
+//!                                         can't afford to lose without a copy)
 //!   cargo xtask lint                    clippy, warnings as errors, on every crate for its own target
 
+mod arch;
 mod battery;
 mod debian;
 mod display;
@@ -60,16 +91,21 @@ mod image;
 mod launcher;
 mod libdrm;
 mod linux;
+mod linuxabi;
 mod mesa;
+mod migrate;
 mod monitor;
 mod netsurf;
 mod package;
 mod runconfig;
 mod sounds;
+mod store;
 mod tar;
 mod testdisplays;
 mod usbredir;
+mod virt;
 mod voyage;
+mod videocheck;
 mod webcheck;
 
 use std::env;
@@ -78,12 +114,10 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const UEFI_TARGET: &str = "x86_64-unknown-uefi";
-const KERNEL_TARGET: &str = "x86_64-unknown-none";
-const USER_TARGET: &str = "x86_64-aurora-user";
-
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    // `--arch` (see arch.rs): every path and target below follows it.
+    let arch = arch::select_from_args(&args);
     let flag = |f: &str| args.iter().any(|a| a == f);
     let number = |name: &str, default: u64, min: u64, max: u64| -> u64 {
         match args.iter().position(|a| a == name) {
@@ -98,8 +132,14 @@ fn main() {
         }
     };
     let profile = if flag("--debug") { Profile::Debug } else { Profile::Release };
-    let disk =
-        args.iter().position(|a| a == "--disk").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("ahci");
+    // aarch64's `virt` machine has no built-in SATA: virtio is its disk.
+    let aarch64 = arch == arch::Arch::Aarch64;
+    let disk = args
+        .iter()
+        .position(|a| a == "--disk")
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+        .unwrap_or(if aarch64 { "virtio" } else { "ahci" });
     let smp: u32 =
         args.iter().position(|a| a == "--smp").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(4);
     if !runconfig::accepts(runconfig::DISKS, disk) {
@@ -109,10 +149,13 @@ fn main() {
     let net =
         args.iter().position(|a| a == "--net").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("virtio");
     if !runconfig::accepts(runconfig::NETS, net) {
-        eprintln!("--net must be virtio, e1000, e1000e, igb, rtl8139 or none");
+        eprintln!("--net must be virtio, e1000, e1000e, igb, rtl8139, usb-ecm, usb-rndis or none");
         exit(2);
     }
-    let gpu = args.iter().position(|a| a == "--gpu").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or("std");
+    // aarch64's "std" is the firmware's fixed-size ramfb: its display is virtio-gpu.
+    let default_gpu = if aarch64 { "virtio" } else { "std" };
+    let gpu =
+        args.iter().position(|a| a == "--gpu").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or(default_gpu);
     if !runconfig::accepts(runconfig::GPUS, gpu) {
         eprintln!("--gpu must be std, virtio or virtio-linux");
         exit(2);
@@ -127,6 +170,21 @@ fn main() {
 
     match args.first().map(String::as_str) {
         Some("web-check") => webcheck::run(&args[1..]),
+        Some("video-check") => videocheck::run(&args[1..]),
+        Some("fsck") => {
+            let img = args[1..].iter().find(|a| !a.starts_with("--")).map(String::as_str).unwrap_or("target/test-disk.img");
+            match image::check_home(Path::new(img), flag("--repair")) {
+                Ok(report) => print!("{report}"),
+                Err(e) => {
+                    eprintln!("fsck: {e}");
+                    exit(1);
+                }
+            }
+        }
+        Some("powercut") => {
+            let iterations = number("--iterations", 300, 1, 100_000);
+            power_cuts(profile, disk, smp, iterations as u32);
+        }
         Some("docs") => {
             println!("{}", help::build(&root()).unwrap_or_else(|e| panic!("{e}")).display());
         }
@@ -163,12 +221,24 @@ fn main() {
             }
         }
         Some("repo") => {
-            // Packages built from this checkout, or the given .gina files.
-            let out = args.iter().position(|a| a == "--out").and_then(|i| args.get(i + 1)).map(PathBuf::from);
-            let key = args.iter().position(|a| a == "--sign").and_then(|i| args.get(i + 1)).map(PathBuf::from);
-            let files: Vec<&String> = args.iter().skip(1).filter(|a| a.ends_with(".gina")).collect();
-            let out = out.unwrap_or_else(|| root().join("target/repo"));
-            if files.is_empty() {
+            // A folder of packages (with Store listings), the given .gina
+            // files, or the samples built from this checkout.
+            let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+            let out = value("--out").map(PathBuf::from).unwrap_or_else(|| root().join("target/repo"));
+            let key = match value("--sign") {
+                Some(k) => package::load_key(Path::new(&k)).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    exit(1)
+                }),
+                None => package::sample_key(),
+            };
+            let options: Vec<&str> = ["--out", "--sign", "--name", "--expires-days", "--mirror"]
+                .iter()
+                .flat_map(|o| args.iter().position(|a| a == o).and_then(|i| args.get(i + 1)))
+                .map(String::as_str)
+                .collect();
+            let inputs: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with("--") && !options.contains(&a.as_str())).collect();
+            if inputs.is_empty() {
                 build(profile, false);
                 println!("wrote the sample repository to {}", root().join("target/repo").display());
                 if out != root().join("target/repo") {
@@ -176,42 +246,160 @@ fn main() {
                     println!("copied it to {}", out.display());
                 }
             } else {
-                let key = match key {
-                    Some(k) => package::load_key(&k).unwrap_or_else(|e| {
+                let mut apps = Vec::new();
+                for input in &inputs {
+                    let path = Path::new(input);
+                    if path.is_dir() {
+                        apps.extend(store::read_folder(path).unwrap_or_else(|e| {
+                            eprintln!("{e}");
+                            exit(1)
+                        }));
+                    } else {
+                        let bytes = fs::read(path).unwrap_or_else(|e| panic!("{input}: {e}"));
+                        apps.push((bytes, store::Listing::default()));
+                    }
+                }
+                let name = value("--name").unwrap_or_else(|| key.1.clone());
+                let mut spec = store::Spec::new(&name, &key);
+                if let Some(days) = value("--expires-days").and_then(|d| d.parse().ok()) {
+                    spec.expires_days = days;
+                }
+                spec.mirrors = args.windows(2).filter(|w| w[0] == "--mirror").map(|w| w[1].clone()).collect();
+                fs::create_dir_all(&out).expect("create the repository folder");
+                match store::write(&out, &spec, &apps) {
+                    Ok(index) => println!(
+                        "wrote catalogue version {} ({} packages, expires in {} days) to {}",
+                        index.version,
+                        apps.len(),
+                        spec.expires_days,
+                        out.display()
+                    ),
+                    Err(e) => {
                         eprintln!("{e}");
-                        exit(1)
-                    }),
-                    None => package::sample_key(),
-                };
-                let packages: Vec<Vec<u8>> =
-                    files.iter().map(|f| fs::read(f).unwrap_or_else(|e| panic!("{f}: {e}"))).collect();
-                if let Err(e) = package::write_repository(&out, &key.1, &packages, &key) {
+                        exit(1);
+                    }
+                }
+            }
+            println!("serve it with: cargo xtask serve-repo {}", out.display());
+        }
+        Some("system-update") => {
+            // A system update built from this checkout, added to a repository.
+            let Some(version) = args.get(1).filter(|v| gina::version::valid(v)) else {
+                eprintln!("usage: cargo xtask system-update VERSION [--out REPO] [--min-from V] [--notes TEXT] [--sign KEY]");
+                exit(2);
+            };
+            let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+            let out = value("--out").map(PathBuf::from).unwrap_or_else(|| root().join("target/repo"));
+            let key = value("--sign").map(|k| package::load_key(Path::new(&k)).expect("key")).unwrap_or_else(store::system_key);
+            let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
+            let notes = value("--notes").unwrap_or_default();
+            let min_from = value("--min-from").unwrap_or_else(|| String::from("0.8"));
+            let b = store::Build { esp: &esp, version, min_from: &min_from, notes: &notes, broken: false };
+            fs::create_dir_all(&out).expect("create the repository folder");
+            match store::add_system_update(&out, &b, &key) {
+                Ok(r) => println!("added system update {} to {} (rewrite its catalogue with `cargo xtask repo`)", r.version, out.display()),
+                Err(e) => {
                     eprintln!("{e}");
                     exit(1);
                 }
-                println!("wrote a repository of {} packages to {}", packages.len(), out.display());
             }
-            println!("serve it with: python3 -m http.server -d {} 8000", out.display());
+        }
+        Some("serve-repo") => {
+            // Serves a repository (default: the demo one) to the guest, with
+            // byte ranges, at http://10.0.2.2:PORT/.
+            let dir = args.get(1).filter(|a| !a.starts_with("--")).map(PathBuf::from).unwrap_or_else(|| root().join("target/repo"));
+            let port = number("--port", 8000, 1, 65535) as u16;
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind the repository server");
+            println!("serving {} at http://127.0.0.1:{port}/ — in WaveOS: http://10.0.2.2:{port}/", dir.display());
+            // --slow sends packages slowly, to watch (and pause) downloads.
+            serve_files(listener, dir, if flag("--slow") { 60 } else { 0 });
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
         }
         Some("build") => {
             build(profile, false);
         }
+        Some("migrate-disk") => {
+            // A disk for this architecture with the files of one for the
+            // other (see migrate.rs). The source is only read.
+            let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(PathBuf::from);
+            let other = arch::ALL.into_iter().find(|a| *a != arch).expect("two architectures");
+            let from = value("--from").unwrap_or_else(|| other.disk(&root(), "waveos-aurora"));
+            let to = value("--to").unwrap_or_else(|| arch.disk(&root(), "waveos-aurora"));
+            if !from.exists() {
+                eprintln!("{} isn't there; name the disk to migrate with --from", from.display());
+                exit(2);
+            }
+            let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
+            println!("migrating {} to a new {} disk, {}", from.display(), arch.name(), to.display());
+            match migrate::migrate(&from, &esp, &to, arch) {
+                Ok(r) => {
+                    println!("wrote {} (fsck clean); {} was only read", to.display(), from.display());
+                    for (root, id) in &r.moved_apps {
+                        println!("  app moved: {id} ({root})");
+                    }
+                    for (root, id, version, name, a) in &r.reinstall {
+                        println!("  to reinstall: {name} {version} ({id}, {a}; listed in {root}/.reinstall)");
+                    }
+                    for l in &r.left_out {
+                        println!("  left out: {l}");
+                    }
+                    println!("boot it with: cargo xtask run --arch {}", arch.name());
+                }
+                Err(e) => {
+                    eprintln!("migrate-disk: {e}");
+                    exit(1);
+                }
+            }
+        }
+        Some("linux-abi") => linuxabi::generate(arch),
+        Some("linux-programs") => {
+            // The Linux programs of the system image alone, for `--arch`.
+            for (dest, src) in linux::programs() {
+                println!("{dest:<32} {}", src.display());
+            }
+        }
+        Some("userland") => {
+            // User space alone (`--arch` picks which), e.g. while the
+            // kernel for an architecture is still being brought up.
+            let programs = build_userland(profile);
+            println!("built {} programs into {}", programs.len(), arch.user_target_dir(&root()).display());
+        }
         Some("lint") => lint(),
         Some("launch") => launcher::main(&args[1..]),
         Some("run") => {
-            let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let developer = flag("--developer");
             let img = args
                 .iter()
                 .position(|a| a == "--disk-image")
                 .and_then(|i| args.get(i + 1))
                 .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    root().join(if developer { "target/waveos-developer.img" } else { "target/waveos-aurora.img" })
-                });
+                .unwrap_or_else(|| arch.disk(&root(), if developer { "waveos-developer" } else { "waveos-aurora" }));
+            // The first run of an architecture: its own new disk. The
+            // other's disk (the files made before) is left alone; say where
+            // the files are and how to bring them across.
+            if !args.iter().any(|a| a == "--disk-image") {
+                if let Some(note) = other_disk_note(&root(), arch, developer) {
+                    eprintln!("{note}");
+                }
+            }
+            // A disk for the other architecture: say so before building
+            // (`refresh_esp` refuses it anyway).
+            if !flag("--fresh-disk") {
+                if let Ok(Some(disk)) = image::disk_arch(&img) {
+                    if disk != arch.name() {
+                        let e = image::ArchMismatch { disk, new: arch.name().to_string() };
+                        eprintln!("{}: {e}", img.display());
+                        exit(1);
+                    }
+                }
+            }
+            let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let size = number("--disk-size-mib", if developer { 8192 } else { 256 }, 128, 65536) * 1024 * 1024;
             if !flag("--no-refresh") {
                 // Voyage, Firefox and the other Linux programs live on the disk, in /Linux.
+                // (Debian's packages for the build's architecture.)
                 let linux = if flag("--linux-root") {
                     Some(linux_root())
                 } else if flag("--no-linux-root") {
@@ -226,6 +414,15 @@ fn main() {
             image::set_boot_option(&img, "wifi_sim", if flag("--wifi-sim") { "1" } else { "0" })
                 .expect("write boot.conf");
             image::set_boot_option(&img, "gpu", gpu_driver(gpu)).expect("write boot.conf");
+            // QEMU's window on macOS shows no pointer from virtio-gpu's cursor
+            // plane, so WaveOS draws the pointer into the picture there
+            // (--hardware-cursor keeps the plane).
+            let software_cursor =
+                cfg!(target_os = "macos") && gpu.starts_with("virtio") && !flag("--hardware-cursor");
+            image::set_boot_option(&img, "cursor", if software_cursor { "software" } else { "hardware" })
+                .expect("write boot.conf");
+            // QEMU's usb-net offers RNDIS and CDC-ECM: which one --net asked for.
+            image::set_boot_option(&img, "usbnet", usb_net_mode(net)).expect("write boot.conf");
             // A keyboard-driven game controller, for Wave Play without one.
             image::set_boot_option(&img, "virtual_gamepad", if flag("--virtual-gamepad") { "1" } else { "0" })
                 .expect("write boot.conf");
@@ -265,6 +462,7 @@ fn main() {
                 }),
                 net,
                 netdev_extra: String::new(),
+                second_usb_net: false,
                 gpu,
                 resolution: Some(displays.primary()),
                 displays,
@@ -303,13 +501,27 @@ fn main() {
             exit(status.code().unwrap_or(1));
         }
         Some("linux-root") => {
-            let pkgs: Vec<String> = args.iter().skip(1).filter(|a| !a.starts_with("--")).cloned().collect();
-            let dir = debian::build(&pkgs_or_default(pkgs));
+            // `--into DIR`: somewhere else than the architecture's root.
+            let into = args.iter().position(|a| a == "--into").and_then(|i| args.get(i + 1)).cloned();
+            let mut pkgs: Vec<String> = args
+                .iter()
+                .skip(1)
+                .filter(|a| !a.starts_with("--") && a.as_str() != arch.name() && Some(*a) != into.as_ref())
+                .cloned()
+                .collect();
+            // `--base`: the smallest root (libc, BusyBox, GNU Hello).
+            if flag("--base") {
+                pkgs.extend(debian::BASE_PACKAGES.iter().map(|s| s.to_string()));
+            }
+            let dir = match &into {
+                Some(d) => debian::build_into(Path::new(d), &pkgs_or_default(pkgs)),
+                None => debian::build(&pkgs_or_default(pkgs)),
+            };
             println!("wrote {} ({} MiB)", dir.display(), dir_size(&dir) >> 20);
         }
         Some("image") => {
             let esp = build(profile, false);
-            let out = root().join("target/waveos-aurora-usb.img");
+            let out = arch.disk(&root(), "waveos-aurora-usb");
             let linux = if flag("--no-linux-root") { None } else { optional_linux_root() };
             let size = linux.as_deref().map_or(DISK_SIZE, |l| DISK_SIZE.max(dir_size(l) + 512 * 1024 * 1024));
             image::create_with(&esp, &root().join("assets/home"), linux.as_deref(), &out, size)
@@ -320,14 +532,14 @@ fn main() {
         Some("iso") => {
             let esp = if flag("--no-build") { esp_dir(false) } else { build(profile, false) };
             let target = root().join("target");
-            let staging = target.join("iso-staging");
+            let staging = target.join(format!("iso-staging{}", arch.suffix()));
             if staging.exists() {
                 fs::remove_dir_all(&staging).expect("remove old ISO staging directory");
             }
             fs::create_dir_all(staging.join("EFI/BOOT")).expect("create ISO staging directory");
             // The boot image holds 32 MiB at most, so the system image goes in
             // compressed (the bootloader inflates it).
-            let iso_esp = target.join("iso-esp");
+            let iso_esp = target.join(format!("iso-esp{}", arch.suffix()));
             let _ = fs::remove_dir_all(&iso_esp);
             copy_tree(&esp, &iso_esp).expect("copy the ESP");
             let tar = iso_esp.join("aurora/system.tar");
@@ -338,7 +550,7 @@ fn main() {
             }
             let boot_image = staging.join("EFI/BOOT/efiboot.img");
             image::create_efi_boot_image(&iso_esp, &boot_image).expect("create EFI boot image");
-            let out = target.join("waveos-aurora.iso");
+            let out = target.join(format!("waveos-aurora{}.iso", arch.suffix()));
             let status = Command::new("xorriso")
                 .args(["-as", "mkisofs", "-iso-level", "3", "-R", "-J", "-V", "WAVEOS_AURORA"])
                 .arg("-o")
@@ -366,7 +578,10 @@ fn main() {
                 eprintln!("the multi-monitor test needs --gpu virtio (the kernel drives one Bochs VGA)");
                 exit(2);
             }
-            test(profile, disk, smp, net, gpu, usb, n, flag("--mesa"))
+            let mesa = flag("--mesa");
+            // (Mesa's tests need the memory LLVM's code generator does.)
+            let memory_mib = number("--memory-mib", if mesa { 2048 } else { 512 }, 256, 32768);
+            test(profile, disk, (smp, memory_mib), net, gpu, usb, n, mesa)
         }
         Some("test262") => test262(&args[1..]),
         _ => {
@@ -442,16 +657,39 @@ fn pkgs_or_default(pkgs: Vec<String>) -> Vec<String> {
     }
 }
 
-/// `target/linux-root`, built with the default packages if it isn't there
-/// yet (or is missing one of them), with WaveOS's settings for its programs.
+/// `target/linux-root` (`-aarch64` for aarch64), built with the default
+/// packages if it isn't there yet (or is missing one of them), with
+/// WaveOS's settings for its programs.
 fn linux_root() -> PathBuf {
-    let dir = root().join("target/linux-root");
+    let dir = debian::root_dir();
     let installed = fs::read_to_string(dir.join("packages.txt")).unwrap_or_default();
     let complete = dir.join(".links").exists()
         && debian::DEFAULT_PACKAGES.iter().all(|p| installed.lines().any(|l| l.split(' ').next() == Some(*p)));
     let dir = if complete { dir } else { debian::build(&pkgs_or_default(Vec::new())) };
     debian::waveos_settings(&dir);
     dir
+}
+
+/// When `arch` has no disk of its own yet (under `root`) and the other
+/// architecture has one: a note that the files are there, and how to copy
+/// them across. Nothing is read from or written to the other disk.
+fn other_disk_note(root: &Path, arch: arch::Arch, developer: bool) -> Option<String> {
+    let stem = if developer { "waveos-developer" } else { "waveos-aurora" };
+    let mine = arch.disk(root, stem);
+    let other = arch::ALL.into_iter().find(|a| *a != arch)?;
+    let theirs = other.disk(root, stem);
+    (!mine.exists() && theirs.exists()).then(|| {
+        format!(
+            "note: this is the first {} run, so it gets its own new disk, {}.\n      \
+             Your files are on the {} disk, {}, which is left as it is;\n      \
+             `cargo xtask migrate-disk --arch {}` copies them to the new one.",
+            arch.name(),
+            mine.display(),
+            other.name(),
+            theirs.display(),
+            arch.name()
+        )
+    })
 }
 
 /// [`linux_root`], or nothing (with a warning) when the packages can't be
@@ -491,6 +729,10 @@ fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64, linux: Option<&P
                 "{} has an unsupported layout; disk preserved. Back it up before using --fresh-disk",
                 img.display()
             ),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                eprintln!("{}: {e}", img.display());
+                exit(1);
+            }
             Err(e) => panic!("could not update {}: {e}; disk preserved", img.display()),
         }
         let Some(linux) = linux else { return };
@@ -534,8 +776,26 @@ fn prepare_disk(esp: &Path, img: &Path, fresh: bool, size: u64, linux: Option<&P
     image::create_with(esp, &home, linux, img, size).expect("image creation failed");
 }
 
+/// Strips the debug information from a kernel going on a boot image.
+fn strip_debug(kernel: &Path) {
+    let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().expect("rustc sysroot");
+    let version = Command::new("rustc").arg("-vV").output().expect("rustc host");
+    let version = String::from_utf8_lossy(&version.stdout);
+    let host = version.lines().find_map(|line| line.strip_prefix("host: ")).expect("rustc host triple");
+    let objcopy = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
+        .join("lib/rustlib")
+        .join(host)
+        .join("bin/llvm-objcopy");
+    let status = Command::new(objcopy)
+        .arg("--strip-debug")
+        .arg(kernel)
+        .status()
+        .expect("llvm-objcopy (install llvm-tools-preview)");
+    assert!(status.success(), "could not strip packaged kernel debug information");
+}
+
 fn esp_dir(test: bool) -> PathBuf {
-    root().join(if test { "target/esp-test" } else { "target/esp" })
+    arch::current().esp_dir(&root(), test)
 }
 
 fn cargo_build(package: &str, target: &str, profile: Profile, features: &[&str]) {
@@ -556,6 +816,25 @@ fn cargo_build(package: &str, target: &str, profile: Profile, features: &[&str])
 /// Runs clippy over everything with warnings as errors: the host libraries
 /// and tools, the kernel (with and without its self-tests), the bootloader,
 /// and user space for its own target.
+/// The libraries user programs are built from, linted for a bare aarch64
+/// target by `lint --arch aarch64`.
+const AARCH64_USER_LIBS: &[&str] = &[
+    "aurora-abi",
+    "aurora-desktop",
+    "aurora-elf",
+    "aurora-image",
+    "aurora-lz4",
+    "aurora-wav",
+    "aurora-zip",
+    "gina",
+    "lumen",
+    "nebula-engine",
+    "nebula-media",
+    "nebula-script",
+    "nebula-secure",
+    "nebula-web",
+];
+
 fn lint() {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let deny = ["--", "-D", "warnings"];
@@ -569,16 +848,53 @@ fn lint() {
         .current_dir(root())
         .args(["clippy", "--workspace", "--all-targets", "--exclude", "aster", "--exclude", "firstlight"])
         .args(deny));
+    if arch::current() == arch::Arch::Aarch64 {
+        // User space first (it stands on its own), then the libraries it
+        // uses for a bare aarch64 target (clippy checks only a workspace's
+        // own members: this is where their NEON and ARMv8 crypto paths are
+        // checked on a computer of either architecture), the Linux
+        // programs for aarch64-unknown-linux-musl, then the bootloader and
+        // the kernel.
+        let mut user = Command::new(&cargo);
+        userland_cargo(&mut user, "clippy", Profile::Release);
+        run(user.args(deny));
+        let arch = arch::current();
+        run(Command::new(&cargo)
+            .current_dir(root())
+            .args(["clippy", "--release", "-Zjson-target-spec", "-Zbuild-std=core,alloc"])
+            .arg("--target")
+            .arg(root().join("userland").join(format!("{}.json", arch.user_target())))
+            .args(AARCH64_USER_LIBS.iter().flat_map(|p| ["--package", p]))
+            .env("RUSTFLAGS", arch.user_rustflags())
+            .args(deny));
+        for name in linux::rust_program_names() {
+            let mut cmd = Command::new(&cargo);
+            linux::rust_cargo(&mut cmd, "clippy", name);
+            run(cmd.arg("--all-targets").args(deny));
+        }
+        run(Command::new(&cargo)
+            .current_dir(root())
+            .args(["clippy", "--package", "firstlight", "--target", arch::current().uefi_target(), "--release"])
+            .args(deny));
+        for features in [&[][..], &["--features", "ktest"]] {
+            run(Command::new(&cargo)
+                .current_dir(root())
+                .args(["clippy", "--package", "aster", "--target", arch::current().kernel_target(), "--release"])
+                .args(features)
+                .args(deny));
+        }
+        return;
+    }
     for features in [&[][..], &["--features", "ktest"]] {
         run(Command::new(&cargo)
             .current_dir(root())
-            .args(["clippy", "--package", "aster", "--target", KERNEL_TARGET, "--release"])
+            .args(["clippy", "--package", "aster", "--target", arch::current().kernel_target(), "--release"])
             .args(features)
             .args(deny));
     }
     run(Command::new(&cargo)
         .current_dir(root())
-        .args(["clippy", "--package", "firstlight", "--target", UEFI_TARGET, "--release"])
+        .args(["clippy", "--package", "firstlight", "--target", arch::current().uefi_target(), "--release"])
         .args(deny));
     let mut user = Command::new(&cargo);
     userland_cargo(&mut user, "clippy", Profile::Release);
@@ -592,42 +908,46 @@ fn lint() {
 
 /// Builds both halves and lays out an EFI System Partition directory.
 fn build(profile: Profile, test: bool) -> PathBuf {
+    let arch = arch::current();
     verify_toolchain();
-    cargo_build("firstlight", UEFI_TARGET, profile, &[]);
-    cargo_build("aster", KERNEL_TARGET, profile, if test { &["ktest"] } else { &[] });
+    cargo_build("firstlight", arch.uefi_target(), profile, &[]);
+    cargo_build("aster", arch.kernel_target(), profile, if test { &["ktest"] } else { &[] });
 
     let target = root().join("target");
     let esp = esp_dir(test);
     fs::create_dir_all(esp.join("EFI/BOOT")).unwrap();
     fs::create_dir_all(esp.join("aurora")).unwrap();
-    fs::copy(target.join(UEFI_TARGET).join(profile.dir()).join("firstlight.efi"), esp.join("EFI/BOOT/BOOTX64.EFI"))
-        .expect("copy bootloader");
-    fs::copy(target.join(KERNEL_TARGET).join(profile.dir()).join("aster"), esp.join("aurora/kernel.elf"))
+    // Only this architecture's boot file: firmware that finds the other
+    // one would start a bootloader for the wrong kernel.
+    for other in arch::ALL.iter().filter(|a| **a != arch) {
+        let _ = fs::remove_file(esp.join("EFI/BOOT").join(other.boot_file()));
+    }
+    fs::copy(
+        target.join(arch.uefi_target()).join(profile.dir()).join("firstlight.efi"),
+        esp.join("EFI/BOOT").join(arch.boot_file()),
+    )
+    .expect("copy bootloader");
+    fs::copy(target.join(arch.kernel_target()).join(profile.dir()).join("aster"), esp.join("aurora/kernel.elf"))
         .expect("copy kernel");
+    // Which processor the partition is for: disks refuse an ESP refresh
+    // for the other one (see `image::refresh_esp`).
+    fs::write(esp.join(image::ARCH_FILE), format!("{}\n", arch.name())).expect("write the architecture");
     if profile == Profile::Release {
         // Keep the full ELF for host GDB. DWARF is never loaded by UEFI and
         // would otherwise crowd the bounded El Torito EFI boot image.
-        let sysroot = Command::new("rustc").args(["--print", "sysroot"]).output().expect("rustc sysroot");
-        let version = Command::new("rustc").arg("-vV").output().expect("rustc host");
-        let version = String::from_utf8_lossy(&version.stdout);
-        let host = version.lines().find_map(|line| line.strip_prefix("host: ")).expect("rustc host triple");
-        let objcopy = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim())
-            .join("lib/rustlib")
-            .join(host)
-            .join("bin/llvm-objcopy");
-        let status = Command::new(objcopy)
-            .arg("--strip-debug")
-            .arg(esp.join("aurora/kernel.elf"))
-            .status()
-            .expect("llvm-objcopy (install llvm-tools-preview)");
-        assert!(status.success(), "could not strip packaged kernel debug information");
+        strip_debug(&esp.join("aurora/kernel.elf"));
     }
     let mut programs = build_userland(profile);
     programs.extend(linux::programs());
     system_image(&programs, &esp.join("aurora/system.tar"));
-    package::sample_repository(&programs, &root().join("target/repo"));
+    // What a device starts from: its system described as an update, for
+    // the updater to work out which files a newer one changes.
+    let factory = store::describe_esp(&esp, env!("CARGO_PKG_VERSION")).expect("describe the system");
+    fs::write(esp.join("aurora/update.txt"), factory.encode()).expect("write update.txt");
+    // Both architectures' halves of the same demo repository (store.rs).
+    store::demo_repository(&programs, &esp, &root().join("target/repo"));
     if test {
-        package::test_repository(&programs, &root().join("target/test-repo"));
+        store::test_repositories(&programs, &esp, &test_repo_dir());
     }
     esp
 }
@@ -679,7 +999,8 @@ fn build_userland(profile: Profile) -> Vec<Program> {
     if !manifest.exists() {
         return Vec::new();
     }
-    let target_dir = root().join("target/user");
+    let arch = arch::current();
+    let target_dir = arch.user_target_dir(&root());
     let mut cmd = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     userland_cargo(&mut cmd, "build", profile);
     let status = cmd.status().expect("failed to run cargo for userland");
@@ -687,7 +1008,7 @@ fn build_userland(profile: Profile) -> Vec<Program> {
         exit(status.code().unwrap_or(1));
     }
 
-    let out_dir = target_dir.join(USER_TARGET).join(profile.dir());
+    let out_dir = target_dir.join(arch.user_target()).join(profile.dir());
     let mut programs = Vec::new();
     for entry in fs::read_dir(&out_dir).unwrap() {
         let path = entry.unwrap().path();
@@ -715,11 +1036,13 @@ fn build_userland(profile: Profile) -> Vec<Program> {
 }
 
 /// Sets up `cmd` to run cargo `subcommand` over the user-space workspace.
-/// User programs are built for our own target (ring 3 with SSE2; the kernel
-/// is soft-float), so core and alloc are rebuilt for it.
+/// User programs are built for our own target (ring 3 with SSE2 or NEON; the
+/// kernel is soft-float), so core and alloc are rebuilt for it, in a target
+/// folder per architecture.
 fn userland_cargo(cmd: &mut Command, subcommand: &str, profile: Profile) {
+    let arch = arch::current();
     let user_ld = root().join("userland/corekit/user.ld");
-    let spec = root().join("userland").join(format!("{USER_TARGET}.json"));
+    let spec = root().join("userland").join(format!("{}.json", arch.user_target()));
     cmd.current_dir(root().join("userland"))
         .args([
             subcommand,
@@ -731,8 +1054,8 @@ fn userland_cargo(cmd: &mut Command, subcommand: &str, profile: Profile) {
         .arg("--target")
         .arg(&spec)
         .arg("--target-dir")
-        .arg(root().join("target/user"))
-        .env("RUSTFLAGS", format!("-C link-arg=--script={} -C force-frame-pointers=yes", user_ld.display()));
+        .arg(arch.user_target_dir(&root()))
+        .env("RUSTFLAGS", format!("-C link-arg=--script={} {}", user_ld.display(), arch.user_rustflags()));
     if profile == Profile::Release {
         cmd.arg("--release");
     }
@@ -815,6 +1138,9 @@ fn system_image(programs: &[Program], out: &Path) {
     // by the system (see xtask/src/package.rs).
     t.dir("Keys");
     t.file("Keys/waveos-samples.pub", package::sample_public_key().as_bytes());
+    // Whom system updates are trusted from (never app publishers).
+    t.dir("Keys/Updates");
+    t.file("Keys/Updates/waveos-system.pub", store::system_public_key().as_bytes());
     if let Some(gallery) = package::gallery(programs, "1.0.0", Some(&package::sample_key())) {
         t.file("Developer/Examples/WaveUIGallery.gina", &gallery);
     }
@@ -852,10 +1178,9 @@ fn bundle_sdk(t: &mut tar::Tar) {
     ] {
         walk(t, &base, &base.join(relative));
     }
-    t.file(
-        "Developer/SDK/userland/x86_64-aurora-user.json",
-        &fs::read(base.join("userland/x86_64-aurora-user.json")).unwrap(),
-    );
+    for spec in arch::ALL.map(|a| format!("userland/{}.json", a.user_target())) {
+        t.file(&format!("Developer/SDK/{spec}"), &fs::read(base.join(&spec)).unwrap());
+    }
     let user = fs::read_to_string(base.join("userland/Cargo.toml")).unwrap();
     let user = user
         .lines()
@@ -962,8 +1287,11 @@ struct RunOpts<'a> {
     /// A USB speaker (`usb-audio`, id `usbaudio`): a UAC 1 device with an
     /// isochronous endpoint.
     usb_audio: bool,
-    /// Network card: virtio, e1000, e1000e, igb, rtl8139 or none (QEMU user networking).
+    /// Network card: virtio, e1000, e1000e, igb, rtl8139, usb-ecm, usb-rndis or none (QEMU user networking).
     net: &'a str,
+    /// A second USB network adapter on its own user network (`net1`, id
+    /// `usbnet1`): the tests' two-adapters-at-once check.
+    second_usb_net: bool,
     /// Extra user-networking options, e.g. host port forwards.
     netdev_extra: String,
     /// Display adapter: std (Bochs VGA) or virtio (virtio-vga, driven by the ported Linux driver).
@@ -1091,7 +1419,119 @@ fn disk_args(img: &Path, opts: &RunOpts) -> Vec<String> {
     a
 }
 
+/// QEMU's `-rtc` value: the guest's RTC is local to its chosen offset, not
+/// the host's zone. A fresh guest defaults to UTC. Using host localtime made
+/// its TLS clock several hours wrong, especially around DST and new
+/// certificates.
+fn rtc_arg(img: &Path) -> String {
+    let offset = image::preference(img, "utc_offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| (-720..=840).contains(v))
+        .unwrap_or(0);
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    format!("base={},clock=host", rtc_timestamp(unix + offset * 60))
+}
+
+/// A USB controller with a tablet (absolute pointer), a hub with a keyboard
+/// behind it, the USB stick, the virtual HID devices and the USB speaker;
+/// and the bus and hub port `--usb` gives them.
+fn usb_args(opts: &RunOpts) -> (Vec<String>, &'static str, &'static str) {
+    let mut a: Vec<String> = Vec::new();
+    let mut device = |d: String| a.extend([String::from("-device"), d]);
+    let (bus, tablet, hub, stick_port) = match opts.usb {
+        "ehci" => {
+            // An ICH9 EHCI with its three UHCI companions: the high-speed
+            // tablet and stick stay on EHCI; the full-speed hub (and the
+            // keyboard behind it) is handed to a companion.
+            device("ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on".into());
+            for (i, f) in [(1, 0), (2, 1), (3, 2)] {
+                device(format!(
+                    "ich9-usb-uhci{i},masterbus=ehci.0,firstport={},addr=1d.{f},multifunction=on",
+                    (i - 1) * 2
+                ));
+            }
+            ("ehci.0", "2", "3", "1")
+        }
+        "ehci-ohci" => {
+            // VirtualBox's USB 2.0 controller: an EHCI with an OHCI companion.
+            device("ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on".into());
+            device("pci-ohci,masterbus=ehci.0,firstport=0,num-ports=6,addr=1d.0,multifunction=on".into());
+            ("ehci.0", "2", "3", "1")
+        }
+        "ohci" => {
+            device("pci-ohci,id=ohci,num-ports=4".into());
+            ("ohci.0", "2", "3", "1")
+        }
+        "uhci" => {
+            // Two ports: the stick, and a hub with the tablet and keyboard.
+            device("piix3-usb-uhci,id=uhci".into());
+            ("uhci.0", "2.2", "2", "1")
+        }
+        _ => {
+            // Eight USB 2 ports (QEMU's default is four): room for the USB
+            // network adapters beside the tablet, stick, hub and speaker.
+            device("qemu-xhci,id=xhci,p2=8,p3=4".into());
+            ("xhci.0", "1", "3", "2")
+        }
+    };
+    device(format!("usb-hub,bus={bus},port={hub}"));
+    device(format!("usb-tablet,bus={bus},port={tablet}"));
+    device(format!("usb-kbd,bus={bus},port={hub}.1"));
+    a.extend(usbredir::qemu_args(&opts.virtual_hid, bus, hub));
+    if let Some(stick) = &opts.usb_stick {
+        a.extend(["-drive".into(), format!("id=stick,if=none,format=raw,file={}", stick.display())]);
+        a.extend(["-device".into(), format!("usb-storage,bus={bus},port={stick_port},drive=stick")]);
+    }
+    if opts.usb_audio {
+        // Recorded on its own when recording, so tests can tell it played.
+        let audiodev = match opts.audio.strip_prefix("wav:") {
+            Some(path) => {
+                a.extend([
+                    "-audiodev".into(),
+                    format!("wav,id=usbsnd,path={}", usb_audio_wav(Path::new(path)).display()),
+                ]);
+                "usbsnd"
+            }
+            None => "snd",
+        };
+        a.extend(["-device".into(), usb_audio_device(bus, audiodev)]);
+    }
+    (a, bus, hub)
+}
+
+/// A network card on QEMU's user networking (NAT; the host is 10.0.2.2).
+/// `pci_extra` goes on a PCI card's `-device` (aarch64 turns off the x86
+/// option ROMs QEMU would otherwise offer its firmware).
+fn net_args(opts: &RunOpts, bus: &str, hub: &str, pci_extra: &str) -> Vec<String> {
+    let mut a: Vec<String> = Vec::new();
+    if opts.net.starts_with("usb-") {
+        a.extend(["-netdev".into(), format!("user,id=net0{}", opts.netdev_extra)]);
+        a.extend(["-device".into(), usb_net_device(bus, hub, 0)]);
+        if opts.second_usb_net {
+            a.extend(["-netdev".into(), "user,id=net1".into()]);
+            a.extend(["-device".into(), usb_net_device(bus, hub, 1)]);
+        }
+    } else if opts.net != "none" {
+        a.extend(["-netdev".into(), format!("user,id=net0{}", opts.netdev_extra)]);
+        let card = match opts.net {
+            "e1000" => "e1000,netdev=net0",
+            "e1000e" => "e1000e,netdev=net0",
+            "igb" => "igb,netdev=net0",
+            "rtl8139" => "rtl8139,netdev=net0",
+            _ => "virtio-net-pci,netdev=net0,disable-legacy=on",
+        };
+        a.extend(["-device".into(), format!("{card}{pci_extra}")]);
+    } else {
+        // Without an explicit opt-out, QEMU silently creates a default NIC.
+        a.extend(["-nic".into(), "none".into()]);
+    }
+    a
+}
+
 fn qemu(img: &Path, opts: &RunOpts) -> Command {
+    if arch::current() == arch::Arch::Aarch64 {
+        return virt::qemu(img, opts);
+    }
     let code = find_ovmf();
     let vars = ovmf_vars(&code);
     let monitor = session_dir().join("qemu-monitor.sock");
@@ -1147,61 +1587,8 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
     };
     cmd.arg("-audiodev").arg(backend);
     cmd.args(["-device", "ich9-intel-hda", "-device", "hda-output,audiodev=snd"]);
-    // A USB controller with a tablet (absolute pointer), a hub with a
-    // keyboard behind it, and the USB stick.
-    let (bus, tablet, hub, stick_port) = match opts.usb {
-        "ehci" => {
-            // An ICH9 EHCI with its three UHCI companions: the high-speed
-            // tablet and stick stay on EHCI; the full-speed hub (and the
-            // keyboard behind it) is handed to a companion.
-            cmd.args(["-device", "ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on"]);
-            for (i, f) in [(1, 0), (2, 1), (3, 2)] {
-                cmd.arg("-device").arg(format!(
-                    "ich9-usb-uhci{i},masterbus=ehci.0,firstport={},addr=1d.{f},multifunction=on",
-                    (i - 1) * 2
-                ));
-            }
-            ("ehci.0", "2", "3", "1")
-        }
-        "ehci-ohci" => {
-            // VirtualBox's USB 2.0 controller: an EHCI with an OHCI companion.
-            cmd.args(["-device", "ich9-usb-ehci1,id=ehci,addr=1d.7,multifunction=on"]);
-            cmd.args(["-device", "pci-ohci,masterbus=ehci.0,firstport=0,num-ports=6,addr=1d.0,multifunction=on"]);
-            ("ehci.0", "2", "3", "1")
-        }
-        "ohci" => {
-            cmd.args(["-device", "pci-ohci,id=ohci,num-ports=4"]);
-            ("ohci.0", "2", "3", "1")
-        }
-        "uhci" => {
-            // Two ports: the stick, and a hub with the tablet and keyboard.
-            cmd.args(["-device", "piix3-usb-uhci,id=uhci"]);
-            ("uhci.0", "2.2", "2", "1")
-        }
-        _ => {
-            cmd.args(["-device", "qemu-xhci,id=xhci"]);
-            ("xhci.0", "1", "3", "2")
-        }
-    };
-    cmd.arg("-device").arg(format!("usb-hub,bus={bus},port={hub}"));
-    cmd.arg("-device").arg(format!("usb-tablet,bus={bus},port={tablet}"));
-    cmd.arg("-device").arg(format!("usb-kbd,bus={bus},port={hub}.1"));
-    cmd.args(usbredir::qemu_args(&opts.virtual_hid, bus, hub));
-    if let Some(stick) = &opts.usb_stick {
-        cmd.arg("-drive").arg(format!("id=stick,if=none,format=raw,file={}", stick.display()));
-        cmd.arg("-device").arg(format!("usb-storage,bus={bus},port={stick_port},drive=stick"));
-    }
-    if opts.usb_audio {
-        // Recorded on its own when recording, so tests can tell it played.
-        let audiodev = match opts.audio.strip_prefix("wav:") {
-            Some(path) => {
-                cmd.arg("-audiodev").arg(format!("wav,id=usbsnd,path={}", usb_audio_wav(Path::new(path)).display()));
-                "usbsnd"
-            }
-            None => "snd",
-        };
-        cmd.arg("-device").arg(usb_audio_device(bus, audiodev));
-    }
+    let (usb, bus, hub) = usb_args(opts);
+    cmd.args(usb);
     if let Some(source) = opts.host_battery {
         let page = battery::start(source, root().join("target/battery-page"));
         cmd.arg("-object").arg(format!(
@@ -1221,32 +1608,10 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         fs::write(&ssdt, i2c_ssdt::build()).expect("write I2C SSDT");
         cmd.arg("-acpitable").arg(format!("file={}", ssdt.display()));
     }
-    // A network card on QEMU's user networking (NAT; the host is 10.0.2.2).
-    if opts.net != "none" {
-        cmd.arg("-netdev").arg(format!("user,id=net0{}", opts.netdev_extra));
-        cmd.arg("-device").arg(match opts.net {
-            "e1000" => "e1000,netdev=net0",
-            "e1000e" => "e1000e,netdev=net0",
-            "igb" => "igb,netdev=net0",
-            "rtl8139" => "rtl8139,netdev=net0",
-            _ => "virtio-net-pci,netdev=net0,disable-legacy=on",
-        });
-    } else {
-        // Without an explicit opt-out, QEMU silently creates a default NIC.
-        cmd.args(["-nic", "none"]);
-    }
+    cmd.args(net_args(opts, bus, hub, ""));
     // Allow S3 (suspend to RAM); wake with QMP `system_wakeup` or a key press.
     cmd.args(["-global", "ICH9-LPC.disable_s3=0"]);
-    // The guest's RTC is local to its chosen offset, not the host's zone.
-    // A fresh guest defaults to UTC. Using host localtime made its TLS clock
-    // several hours wrong, especially around DST and new certificates.
-    let offset = image::preference(img, "utc_offset")
-        .and_then(|v| v.parse::<i64>().ok())
-        .filter(|v| (-720..=840).contains(v))
-        .unwrap_or(0);
-    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    let rtc = rtc_timestamp(unix + offset * 60);
-    cmd.args(["-rtc", &format!("base={rtc},clock=host")]);
+    cmd.args(["-rtc", &rtc_arg(img)]);
     cmd.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
     cmd.args(["-serial", "stdio"]);
     if let Some(sock) = &opts.telemetry {
@@ -1275,6 +1640,41 @@ fn qemu(img: &Path, opts: &RunOpts) -> Command {
         cmd.args(extra.split_whitespace());
     }
     cmd
+}
+
+/// The root port (or, on the two- and four-port USB 1 controllers, hub
+/// port) of USB network adapter `n` (0 or 1).
+fn usb_net_port(bus: &str, hub: &str, n: usize) -> String {
+    match bus {
+        "uhci.0" | "ohci.0" => format!("{hub}.{}", 7 + n),
+        _ => format!("{}", 5 + n),
+    }
+}
+
+/// The bus name and hub port `qemu` gives each `--usb` controller.
+fn usb_bus_and_hub(usb: &str) -> (&'static str, &'static str) {
+    match usb {
+        "ehci" | "ehci-ohci" => ("ehci.0", "3"),
+        "ohci" => ("ohci.0", "3"),
+        "uhci" => ("uhci.0", "2"),
+        _ => ("xhci.0", "3"),
+    }
+}
+
+/// The `-device` argument for USB network adapter `n` on `bus` (netdev `net<n>`).
+fn usb_net_device(bus: &str, hub: &str, n: usize) -> String {
+    let port = usb_net_port(bus, hub, n);
+    format!("usb-net,id=usbnet{n},netdev=net{n},bus={bus},port={port},mac=52:54:00:12:35:{:02x}", 0x56 + n)
+}
+
+/// Which configuration of QEMU's usb-net the kernel picks (`usbnet=` in
+/// boot.conf); empty (the kernel's own choice) for other cards.
+fn usb_net_mode(net: &str) -> &'static str {
+    match net {
+        "usb-rndis" => "rndis",
+        "usb-ecm" => "ecm",
+        _ => "",
+    }
 }
 
 /// The kernel's virtio-gpu driver for `--gpu` (`gpu=` in boot.conf).
@@ -1309,60 +1709,257 @@ fn start_test_http_server() -> u16 {
 }
 
 fn serve_test_http(listener: std::net::TcpListener) {
-    use std::io::{Read, Write};
+    use std::io::Write;
     std::thread::spawn(move || {
         let body = test_body();
         for conn in listener.incoming().map_while(Result::ok) {
             let body = body.clone();
             std::thread::spawn(move || {
                 let mut conn = conn;
-                let mut req = Vec::new();
-                let mut buf = [0u8; 1024];
-                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match conn.read(&mut buf) {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => req.extend_from_slice(&buf[..n]),
+                let Some(req) = read_request(&mut conn) else { return };
+                if let Some(r) = repo_response(&req) {
+                    r.send(&mut conn);
+                } else if req.starts_with(b"POST /sink ") {
+                    // The upload test: read the body, answer with its size.
+                    use std::io::Read;
+                    let head = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
+                    let want = String::from_utf8_lossy(&req[..head])
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string())
+                        })
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let mut got = req.len() - head;
+                    let mut buf = [0u8; 1024];
+                    while got < want {
+                        match conn.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => got += n,
+                        }
                     }
-                }
-                let resp = if let Some(r) = repo_response(&req) {
-                    r
+                    let text = got.to_string();
+                    let r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len());
+                    let _ = conn.write_all(r.as_bytes());
                 } else if req.starts_with(b"GET /big ") {
                     let mut r =
                         format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
                             .into_bytes();
                     r.extend_from_slice(&body);
-                    r
+                    let _ = conn.write_all(&r);
                 } else {
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
-                };
-                let _ = conn.write_all(&resp);
+                    let _ = conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                }
             });
         }
     });
 }
 
-/// The package tests' repository (`target/test-repo`) under `/repo/`, and
-/// under `/badrepo/` the same with an index altered after signing.
-fn repo_response(req: &[u8]) -> Option<Vec<u8>> {
-    let line = std::str::from_utf8(&req[..req.iter().position(|&b| b == b'\r')?]).ok()?;
+/// Reads one request's head.
+fn read_request(conn: &mut std::net::TcpStream) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut req = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+        match conn.read(&mut buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => req.extend_from_slice(&buf[..n]),
+        }
+        if req.len() > 64 * 1024 {
+            return None;
+        }
+    }
+    Some(req)
+}
+
+/// A response the test server sends, perhaps badly on purpose.
+struct Reply {
+    head: String,
+    body: Vec<u8>,
+    /// Send only this many body bytes, then hang up (a dropped connection).
+    cut: Option<usize>,
+    /// Send the body slowly: this many milliseconds per 16 KiB.
+    trickle_ms: u64,
+}
+
+impl Reply {
+    fn new(head: String, body: Vec<u8>) -> Reply {
+        Reply { head, body, cut: None, trickle_ms: 0 }
+    }
+
+    fn send(self, conn: &mut std::net::TcpStream) {
+        use std::io::Write;
+        if conn.write_all(self.head.as_bytes()).is_err() {
+            return;
+        }
+        let end = self.cut.unwrap_or(self.body.len()).min(self.body.len());
+        for chunk in self.body[..end].chunks(16 * 1024) {
+            if conn.write_all(chunk).is_err() {
+                return;
+            }
+            if self.trickle_ms > 0 {
+                std::thread::sleep(Duration::from_millis(self.trickle_ms));
+            }
+        }
+        let _ = conn.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// A file from `dir`, honouring `Range: bytes=N-`.
+fn file_reply(req: &str, dir: &Path, rest: &str) -> Reply {
+    let safe = !rest.is_empty() && rest.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
+    let Some(body) = safe.then(|| fs::read(dir.join(rest)).ok()).flatten() else {
+        return Reply::new(String::from("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), Vec::new());
+    };
+    let from = req
+        .lines()
+        .find_map(|l| l.strip_prefix("Range: bytes="))
+        .and_then(|r| r.trim().strip_suffix('-'))
+        .and_then(|n| n.parse::<usize>().ok());
+    match from {
+        Some(n) if n < body.len() => Reply::new(
+            format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {n}-{}/{}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                body.len() - 1,
+                body.len(),
+                body.len() - n
+            ),
+            body[n..].to_vec(),
+        ),
+        Some(_) => Reply::new(
+            format!(
+                "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                body.len()
+            ),
+            Vec::new(),
+        ),
+        None => Reply::new(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n", body.len()),
+            body,
+        ),
+    }
+}
+
+/// Serves a folder over HTTP until the program ends (`cargo xtask serve-repo`).
+fn serve_files(listener: std::net::TcpListener, dir: PathBuf, trickle_ms: u64) {
+    std::thread::spawn(move || {
+        for conn in listener.incoming().map_while(Result::ok) {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let mut conn = conn;
+                let Some(req) = read_request(&mut conn) else { return };
+                let text = String::from_utf8_lossy(&req).into_owned();
+                let path = text.strip_prefix("GET /").and_then(|r| r.split(' ').next()).unwrap_or("");
+                println!("{}", text.lines().next().unwrap_or(""));
+                let mut reply = file_reply(&text, &dir, path);
+                if path.starts_with("packages/") {
+                    reply.trickle_ms = trickle_ms;
+                }
+                reply.send(&mut conn);
+            });
+        }
+    });
+}
+
+/// The test server's web page for the browser timings (`/web/article.html`):
+/// an article of about 3000 words with headings, styles, pictures (inline
+/// SVG) and a script that builds a table of contents, made here so its
+/// bytes are the same on every run.
+fn web_page(rest: &str) -> Reply {
+    if rest != "article.html" {
+        return Reply::new(String::from("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), Vec::new());
+    }
+    let mut page = String::from(
+        "<!doctype html><html lang=en><meta charset=utf-8><title>WaveOS test article</title>\
+         <meta name=viewport content='width=device-width'>\
+         <style>body{font:17px/1.55 serif;max-width:760px;margin:2em auto;padding:0 1em;color:#222}\
+         h1,h2{font-family:sans-serif}nav{background:#f3f3f3;padding:.5em 1em;border-radius:6px}\
+         figure{margin:1.5em 0}figcaption{font:13px sans-serif;color:#666}</style>\
+         <h1>A test article</h1><nav id=toc><b>Contents</b></nav>",
+    );
+    for i in 0..30 {
+        let hue = i * 12;
+        page.push_str(&format!(
+            "<h2 id=s{i}>Section {i}</h2><figure><svg width=720 height=120 xmlns='http://www.w3.org/2000/svg'>\
+             <rect width=720 height=120 rx=10 fill='hsl({hue},60%,55%)'/><circle cx='{}' cy=60 r=40 fill='#fff8'/>\
+             </svg><figcaption>Figure {i}: a picture drawn from SVG.</figcaption></figure>",
+            60 + i * 20
+        ));
+        for _ in 0..2 {
+            page.push_str(
+                "<p>Browsers load a page in stages: the bytes arrive over the network, the parser builds the \
+                 document, styles are matched and laid out, and the result is painted and composited into the \
+                 window. Each stage has its own costs, and a page like this one, with text, pictures and a \
+                 little script, touches all of them without depending on anything but the server it came \
+                 from.</p>",
+            );
+        }
+    }
+    page.push_str(
+        "<script>for(const h of document.querySelectorAll('h2')){const a=document.createElement('a');\
+         a.href='#'+h.id;a.textContent=h.textContent;const d=document.createElement('div');d.append(a);\
+         document.getElementById('toc').append(d)}</script></html>",
+    );
+    let body = page.into_bytes();
+    Reply::new(
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()),
+        body,
+    )
+}
+
+/// The package tests' repositories (`target/test-repo`, see
+/// `store::test_repositories`), and copies that misbehave on purpose:
+///
+/// - `/repo/`, `/stale/`, `/expired/`, `/rotated/`: as built.
+/// - `/badrepo/`: the catalogue and index altered after signing.
+/// - `/flaky/`: packages and objects break off halfway unless resumed with a range.
+/// - `/corrupt/`: packages with one byte changed; `/truncated/`: packages cut short.
+/// - `/slow/`: packages sent slowly (to pause, cancel or kill mid-download).
+fn repo_response(req: &[u8]) -> Option<Reply> {
+    let text = String::from_utf8_lossy(req).into_owned();
+    let line = text.lines().next()?;
     let path = line.strip_prefix("GET ")?.split(' ').next()?;
-    let (bad, rest) = match (path.strip_prefix("/repo/"), path.strip_prefix("/badrepo/")) {
-        (Some(r), _) => (false, r),
-        (_, Some(r)) => (true, r),
+    let (prefix, rest) = path.strip_prefix('/')?.split_once('/')?;
+    if prefix == "web" {
+        return Some(web_page(rest));
+    }
+    let base = test_repo_dir();
+    let dir = match prefix {
+        "repo" | "badrepo" | "flaky" | "corrupt" | "truncated" | "slow" => base.join("main"),
+        "stale" | "expired" | "rotated" => base.join(prefix),
         _ => return None,
     };
-    let safe = !rest.is_empty() && rest.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
-    let body = safe.then(|| fs::read(root().join("target/test-repo").join(rest)).ok()).flatten();
-    let body = match body {
-        Some(b) if bad && rest == "index.txt" => {
-            String::from_utf8_lossy(&b).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes()
+    let mut reply = file_reply(&text, &dir, rest);
+    let ranged = text.contains("\r\nRange: ");
+    let payload = rest.starts_with("packages/") || rest.starts_with("packages-aarch64/") || rest.starts_with("system/objects/");
+    if !reply.head.starts_with("HTTP/1.1 200") {
+        return Some(reply);
+    }
+    let whole = |body: &[u8]| format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    match prefix {
+        "badrepo" if rest == "index.txt" || rest == "catalog.txt" || rest == "catalog-aarch64.txt" => {
+            reply.body = String::from_utf8_lossy(&reply.body).replace("\t1.1.0\t", "\t9.9.9\t").into_bytes();
+            reply.head = whole(&reply.body);
         }
-        Some(b) => b,
-        None => return Some(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()),
-    };
-    let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
-    r.extend_from_slice(&body);
-    Some(r)
+        "flaky" if payload && !ranged => reply.cut = Some(reply.body.len() / 2),
+        "corrupt" if payload => {
+            let mid = reply.body.len() / 2;
+            reply.body[mid] ^= 0x40;
+        }
+        "truncated" if payload => {
+            reply.body.truncate(reply.body.len() / 3);
+            reply.head = whole(&reply.body);
+        }
+        "slow" if payload => reply.trickle_ms = 150,
+        _ => {}
+    }
+    Some(reply)
+}
+
+/// `target/test-repo`, with the architecture's suffix: each architecture's
+/// test repositories hold its own packages and system updates.
+fn test_repo_dir() -> PathBuf {
+    root().join(format!("target/test-repo{}", arch::current().suffix()))
 }
 
 /// A free port on the host (for forwarding into the guest).
@@ -1394,17 +1991,40 @@ fn inbound_check(port: u16) {
 }
 
 #[allow(clippy::too_many_arguments)] // the test matrix
-fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str, heads: usize, mesa: bool) {
+fn test(profile: Profile, disk: &str, machine: (u32, u64), net: &str, gpu: &str, usb: &str, heads: usize, mesa: bool) {
+    let (smp, memory_mib) = machine;
     let esp = build(profile, true);
-    let img = root().join("target/test-disk.img");
+    // AURORA_TEST_KERNEL=path runs another kernel (a self-test build of an
+    // earlier commit, say) with this build's programs: for A/B comparisons
+    // of the `bench:` and `mm-bench:` lines.
+    if let Some(kernel) = env::var_os("AURORA_TEST_KERNEL") {
+        fs::copy(&kernel, esp.join("aurora/kernel.elf")).expect("copy AURORA_TEST_KERNEL");
+        strip_debug(&esp.join("aurora/kernel.elf"));
+        println!("testing the kernel {}", Path::new(&kernel).display());
+    }
+    let img = arch::current().disk(&root(), "test-disk");
     let shown = if heads > 1 { format!("display {gpu} with {heads} heads") } else { format!("display {gpu}") };
-    println!("running kernel tests with the disk on {disk}, network {net}, {shown}, USB on {usb}");
-    // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux and
-    // the memory LLVM's code generator needs.
-    let mesa_root = mesa.then(mesa::root_dir);
-    let (disk_size, memory_mib) = match &mesa_root {
-        Some(r) => (dir_size(r) + 256 * 1024 * 1024, 2048),
-        None => (128 * 1024 * 1024, 512),
+    println!("running kernel tests with the disk on {disk}, network {net}, {shown}, USB on {usb}, {memory_mib} MiB of memory");
+    // `--mesa`: the Mesa tests alone, with Mesa on the disk as /Linux; with
+    // AURORA_TEST_ROOT=browsers, the browser measurements on a disk with the
+    // default Linux packages (Voyage, Firefox) instead.
+    // AURORA_TEST_LINUX_ROOT=1 (or a folder): the architecture's Linux root
+    // (`cargo xtask linux-root`, as it is), or that folder, as /Linux
+    // instead, for the Debian program tests.
+    let browsers = mesa && env::var("AURORA_TEST_ROOT").as_deref() == Ok("browsers");
+    let mesa_root = match env::var("AURORA_TEST_LINUX_ROOT") {
+        Ok(v) if !mesa && v == "1" => Some(debian::root_dir()),
+        Ok(v) if !mesa && !v.is_empty() => Some(PathBuf::from(v)),
+        _ if browsers => Some(linux_root()),
+        _ => mesa.then(mesa::root_dir),
+    };
+    let disk_size = match &mesa_root {
+        Some(r) => dir_size(r) + 256 * 1024 * 1024,
+        // Cards keep their 128 MiB (a size a card can have); a disk gets
+        // room for two system updates beside the home folder (see the
+        // system update test, which cards skip).
+        None if disk == "sd" || disk == "emmc" => 128 * 1024 * 1024,
+        None => 384 * 1024 * 1024,
     };
     let http_port = start_test_http_server();
     let fwd_port = free_port();
@@ -1421,11 +2041,22 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
         if let Some(driver) = test_net_driver(net) {
             image::set_boot_option(&img, "test_net_driver", driver).expect("write boot.conf");
         }
-        if let Some(filter) = env::var("AURORA_TEST_FILTER").ok().or(mesa.then(|| String::from("Mesa"))) {
+        // USB networking: the configuration to pick, and the hot-plug tests.
+        image::set_boot_option(&img, "usbnet", usb_net_mode(net)).expect("write boot.conf");
+        if net.starts_with("usb-") {
+            image::set_boot_option(&img, "test_usb_net", net).expect("write boot.conf");
+        }
+        let default_filter = if browsers { "browsers in windows" } else { "Mesa" };
+        if let Some(filter) = env::var("AURORA_TEST_FILTER").ok().or(mesa.then(|| String::from(default_filter))) {
             image::set_boot_option(&img, "test_filter", &filter).expect("write boot.conf");
         }
         // A longer or reproducible fuzzing run (see `syscall_fuzz` in kernel/src/tests.rs).
         for (var, key) in [
+            // The browser timings: runs per browser, and real sites
+            // ("URL|title prefix,…") to load once each.
+            ("AURORA_BROWSER_RUNS", "browser_runs"),
+            ("AURORA_BROWSER_SITES", "browser_sites"),
+            ("AURORA_BROWSER_ENV", "browser_env"),
             ("AURORA_FUZZ_SEED", "fuzz_seed"),
             ("AURORA_FUZZ_ITERS", "fuzz_iters"),
             ("AURORA_FUZZ_ROUNDS", "fuzz_rounds"),
@@ -1433,6 +2064,14 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
             ("AURORA_LINUXFUZZ_CALLS", "linuxfuzz_calls"),
             // Seconds between memory reports while the fuzzers run (`mm::report`).
             ("AURORA_MEM_REPORT", "mem_report"),
+            // The swap tests: MiB left to programs ("all": all of memory),
+            // and how many times that they fill (`mm::swaptest`).
+            ("AURORA_SWAP_TEST_RAM", "swap_test_ram"),
+            ("AURORA_SWAP_FACTOR", "swap_factor"),
+            // MiB left to programs while the fuzzers run (memory pressure).
+            ("AURORA_FUZZ_RAM", "fuzz_ram"),
+            // The Mesa tests measure copies against zero-copy (`linux_mesa_bench`).
+            ("AURORA_MESA_BENCH", "mesa_bench"),
         ] {
             if let Ok(v) = env::var(var) {
                 image::set_boot_option(&img, key, &v).expect("write boot.conf");
@@ -1465,10 +2104,20 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
         } else {
             img.clone()
         };
+        // Cards can't hold the power cut and system update tests (see
+        // installed.rs); the Mesa run is its tests alone.
+        let cards = disk == "sd" || disk == "emmc";
+        let power_cut = !cards && !mesa;
+        if power_cut {
+            image::set_boot_option(&img, "test_power_cut", "1").expect("write boot.conf");
+        }
         // Boot twice on the same disk: the second boot checks what the first one saved.
         for boot in 1..=2 {
             println!("\n=== boot {boot} of 2 ===");
-            let media = TestMedia { img: &boot_img, sd_card: &sd_card };
+            if boot == 2 && power_cut {
+                image::set_boot_option(&img, "test_power_cut", "0").expect("write boot.conf");
+            }
+            let media = TestMedia { img: &boot_img, sd_card: &sd_card, allow_reboot: false };
             let output = match run_tests_once(&media, disk, (smp, memory_mib), net, gpu, usb, fwd_port, heads) {
                 Ok(output) => output,
                 Err(output) if sleep && output.contains("power: entering S3") && !output.contains("awake after S3") => {
@@ -1480,6 +2129,19 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
                 }
                 Err(_) => exit(1),
             };
+            // After the power cut, the home volume as the next start finds it
+            // (a copy, mounted and checked here: replaying its journal is the
+            // next start's own job) must be consistent.
+            if boot == 1 && output.contains("harness: power cut") {
+                match image::check_home_copy(&img) {
+                    Ok(0) => println!("harness: the home volume after the power cut checks clean"),
+                    Ok(n) => println!("harness: the home volume after the power cut checks clean ({n} file(s) open at the cut, freed at the next start)"),
+                    Err(e) => {
+                        eprintln!("\npower cut check FAILED: the home volume after the cut: {e}");
+                        exit(1);
+                    }
+                }
+            }
             if boot == 2 && !output.contains("verified from previous boot") {
                 eprintln!("\npersistence check FAILED: the second boot did not find the first boot's file");
                 exit(1);
@@ -1512,10 +2174,200 @@ fn test(profile: Profile, disk: &str, smp: u32, net: &str, gpu: &str, usb: &str,
                 }
                 println!("sound check: recorded audio peaks at {peak}");
             }
+            // The second start armed a system update that never starts: a
+            // third start must come back on the previous system by itself.
+            if boot == 2 && output.contains("harness: expect fallback") {
+                println!("\n=== boot 3: a system update that never starts ===");
+                image::set_boot_option(&img, "test_filter", "system update").expect("write boot.conf");
+                let media = TestMedia { img: &boot_img, sd_card: &sd_card, allow_reboot: true };
+                let output = run_tests_once(&media, disk, (smp, memory_mib), net, gpu, usb, fwd_port, heads)
+                    .unwrap_or_else(|_| exit(1));
+                if !output.contains("never started; back on") {
+                    eprintln!("\nsystem update check FAILED: the broken update did not fall back");
+                    exit(1);
+                }
+            }
         }
         break;
     }
     println!("\nall kernel tests passed (both boots){}", if sleep { "" } else { " — without the sleep test" });
+}
+
+/// `cargo xtask powercut`: boots the self-test kernel `iterations` times on
+/// one disk with the boot option `fs_stress`, and cuts the power (QMP
+/// `quit`: what the guest had not written is lost) at a random moment once
+/// the stress is running. After each cut, the home volume, mounted here as
+/// the next start would mount it, must check clean (files open at the cut
+/// aside: the next start frees them), and every file the guest said it had
+/// synced ("fsstress: durable PATH LEN") must be there with its contents.
+/// The next start then mounts the cut disk itself (and must find nothing
+/// but such files: "fsstress: mount check"). On a failure the disk is kept
+/// as target/powercut-failed.img.
+fn power_cuts(profile: Profile, disk: &str, smp: u32, iterations: u32) {
+    let esp = build(profile, true);
+    let img = arch::current().disk(&root(), "powercut-disk");
+    image::create_with(&esp, &root().join("assets/home"), None, &img, 256 * 1024 * 1024).expect("disk creation failed");
+    let seed: u64 = env::var("AURORA_POWERCUT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1)
+    });
+    println!("power cuts: {iterations} on {disk}, seed {seed} (AURORA_POWERCUT_SEED)");
+    let mut rng = seed | 1;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let (mut orphans, mut durable_checked, mut started) = (0usize, 0usize, Instant::now());
+    for it in 1..=iterations {
+        image::set_boot_option(&img, "fs_stress", &it.to_string()).expect("write boot.conf");
+        // 0.2 to 6 seconds of stress before the cut.
+        let delay = Duration::from_millis(200 + next() % 5800);
+        let output = match run_until_cut(&img, disk, smp, delay) {
+            Ok(o) => o,
+            Err(e) => fail_cut(&img, it, &e),
+        };
+        // AURORA_POWERCUT_LOG=DIR keeps each start's serial output as DIR/cut-N.log.
+        if let Ok(dir) = env::var("AURORA_POWERCUT_LOG") {
+            let _ = fs::create_dir_all(&dir);
+            let _ = fs::write(Path::new(&dir).join(format!("cut-{it}.log")), &output);
+        }
+        if let Some(problems) = output.split("fsstress: mount check: PROBLEMS").nth(1) {
+            fail_cut(&img, it, &format!("the guest's check at mount found problems:{problems}"));
+        }
+        match image::check_home_copy(&img) {
+            Ok(n) => orphans += n,
+            Err(e) => fail_cut(&img, it, &format!("the home volume after the cut: {e}")),
+        }
+        // What the guest synced survived. (Of this start's files only: the
+        // guest removes the ones from two starts ago.)
+        for line in output.lines().filter_map(|l| l.split("fsstress: durable ").nth(1)) {
+            let mut parts = line.split_whitespace();
+            let (Some(path), Some(len)) = (parts.next(), parts.next().and_then(|l| l.parse::<usize>().ok())) else {
+                continue;
+            };
+            let n: u32 = path.rsplit('/').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            let want: Vec<u8> =
+                (0..len).map(|i| (i as u32).wrapping_mul(31).wrapping_add(it * 7 + n * 13) as u8).collect();
+            match image::read_home_file(&img, path) {
+                Ok(got) if got == want => durable_checked += 1,
+                Ok(got) => fail_cut(&img, it, &format!("{path} was synced with {len} bytes but holds {} other ones", got.len())),
+                Err(e) => fail_cut(&img, it, &format!("{path} was synced but is gone: {e}")),
+            }
+        }
+        if it % 10 == 0 || it == iterations {
+            println!(
+                "power cuts: {it} of {iterations} done, all clean; {durable_checked} synced files checked, {orphans} open files freed ({:.0} s per cut)",
+                started.elapsed().as_secs_f64() / 10f64.min(it as f64)
+            );
+            started = Instant::now();
+        }
+    }
+    println!("\nall {iterations} power cuts left a consistent volume");
+}
+
+fn fail_cut(img: &Path, it: u32, why: &str) -> ! {
+    let keep = arch::current().disk(&root(), "powercut-failed");
+    let _ = fs::copy(img, &keep);
+    eprintln!("\npower cut {it} FAILED: {why}\n(the disk is kept as {})", keep.display());
+    exit(1);
+}
+
+/// One start with `fs_stress`: the power is cut `delay` after the stress
+/// says it is running. Returns what the guest printed.
+fn run_until_cut(img: &Path, disk: &str, smp: u32, delay: Duration) -> Result<String, String> {
+    use std::io::{BufRead, BufReader};
+    let opts = RunOpts {
+        memory_mib: 512,
+        keyboard_capture: false,
+        headless: true,
+        gdb: false,
+        log_int: false,
+        disk,
+        allow_reboot: false,
+        telemetry: None,
+        smp,
+        audio: String::from("none"),
+        net: "none",
+        netdev_extra: String::new(),
+        second_usb_net: false,
+        gpu: "std",
+        resolution: None,
+        displays: displays::Displays::single(displays::DEFAULT_SIZE),
+        usb: "xhci",
+        virtual_hid: Vec::new(),
+        battery: false,
+        host_battery: None,
+        usb_audio: false,
+        usb_stick: None,
+        emmc_partitions: false,
+        sd_card: None,
+    };
+    let mut cmd = qemu(img, &opts);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("qemu: {e}"))?;
+    let stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut all = String::new();
+        let mut cut_at: Option<Instant> = None;
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        loop {
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(line) => {
+                    if line.contains("fsstress: running") {
+                        cut_at = Some(Instant::now() + delay);
+                    }
+                    if line.contains("fsstress:") || line.contains("aurorafs:") || line.contains("panic") || line.contains("PANIC") {
+                        println!("{line}");
+                    }
+                    all.push_str(&line);
+                    all.push('\n');
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
+            if cut_at.is_some_and(|t| Instant::now() >= t) {
+                // The power goes: QEMU stops at once.
+                if let Err(e) = qmp_command("quit") {
+                    eprintln!("could not cut the power: {e}");
+                }
+                cut_at = None;
+                all.push_str(&format!("harness: power cut ({} ms after the stress started)\n", delay.as_millis()));
+            }
+        }
+        all
+    });
+    let start = Instant::now();
+    loop {
+        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(300) {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = reader.join().unwrap_or_default();
+    if !output.contains("harness: power cut") {
+        return Err(format!("the stress never ran (or the guest stopped by itself):\n{}", tail(&output, 40)));
+    }
+    if output.contains("KERNEL PANIC") {
+        return Err(format!("the guest panicked:\n{}", tail(&output, 40)));
+    }
+    Ok(output)
+}
+
+fn tail(s: &str, lines: usize) -> String {
+    let all: Vec<&str> = s.lines().collect();
+    all[all.len().saturating_sub(lines)..].join("\n")
 }
 
 /// Where the screendump the guest asked for as `name` goes.
@@ -1611,6 +2463,8 @@ fn test_net_driver(net: &str) -> Option<&'static str> {
         "e1000e" => "82574L",
         "igb" => "82576",
         "rtl8139" => "RTL8139",
+        "usb-ecm" => "CDC-ECM",
+        "usb-rndis" => "RNDIS",
         _ => return None,
     })
 }
@@ -1706,6 +2560,9 @@ fn recorded_peak(path: &Path) -> i32 {
 struct TestMedia<'a> {
     img: &'a Path,
     sd_card: &'a Path,
+    /// Let the processor reset (a triple fault restarts instead of ending
+    /// the run): for the start of a system update that never comes up.
+    allow_reboot: bool,
 }
 
 /// Boots the test kernel once, echoing its serial output. Returns the output,
@@ -1734,12 +2591,13 @@ fn run_tests_once(
         gdb: false,
         log_int: false,
         disk,
-        allow_reboot: false,
+        allow_reboot: media.allow_reboot,
         telemetry: None,
         smp,
         audio: format!("wav:{}", audio.display()),
         net,
         netdev_extra: format!(",hostfwd=tcp:127.0.0.1:{fwd_port}-:8080"),
+        second_usb_net: net.starts_with("usb-"),
         gpu,
         resolution: None,
         displays: if heads > 1 {
@@ -1775,6 +2633,7 @@ fn run_tests_once(
     let woke = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (slept_w, woke_w) = (slept_at.clone(), woke.clone());
     let sd_path = media.sd_card.to_path_buf();
+    let usb_kind = usb.to_string();
     let reader = std::thread::spawn(move || {
         let mut all = String::new();
         let mut harness = testdisplays::Harness::new(heads > 1);
@@ -1798,6 +2657,24 @@ fn run_tests_once(
                 );
                 if let Err(e) = qmp_execute(&add) {
                     eprintln!("could not plug the USB speaker back in: {e}");
+                }
+            }
+            // The USB network test pulls adapter N out mid-transfer and puts it back.
+            if let Some(n) = line.split("harness: unplug usbnet").nth(1).and_then(|n| n.trim().parse::<usize>().ok()) {
+                let del = format!(r#"{{"execute": "device_del", "arguments": {{"id": "usbnet{n}"}}}}"#);
+                if let Err(e) = qmp_execute(&del) {
+                    eprintln!("could not unplug USB network adapter {n}: {e}");
+                }
+            }
+            if let Some(n) = line.split("harness: replug usbnet").nth(1).and_then(|n| n.trim().parse::<usize>().ok()) {
+                let (bus, hub) = usb_bus_and_hub(&usb_kind);
+                let add = format!(
+                    r#"{{"execute": "device_add", "arguments": {{"driver": "usb-net", "id": "usbnet{n}", "netdev": "net{n}", "bus": "{bus}", "port": "{}", "mac": "52:54:00:12:35:{:02x}"}}}}"#,
+                    usb_net_port(bus, hub, n),
+                    0x56 + n
+                );
+                if let Err(e) = qmp_execute(&add) {
+                    eprintln!("could not plug USB network adapter {n} back in: {e}");
                 }
             }
             // A picture of the screen, checked after the run (`check_screendumps`).
@@ -1827,6 +2704,13 @@ fn run_tests_once(
             if line.contains("awake after S3") {
                 woke_w.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+            // The package test's power cut: QEMU ends at once, so whatever
+            // the guest had not written yet is lost, as when the power goes.
+            if line.contains("harness: power cut") {
+                if let Err(e) = qmp_command("quit") {
+                    eprintln!("could not cut the power: {e}");
+                }
+            }
             if line.contains("power: entering S3") {
                 *slept_w.lock().unwrap() = Some(Instant::now());
                 // The sleep test: wake the machine like a key press would.
@@ -1844,8 +2728,13 @@ fn run_tests_once(
     });
     let start = Instant::now();
     // Longer fuzzing runs need more: AURORA_TEST_TIMEOUT (seconds per boot).
-    // (The Mesa tests, with more memory, compile shaders under emulation.)
-    let default = if memory_mib > 512 { 1200 } else { 240 };
+    // (The Mesa tests, with more memory, compile shaders under emulation;
+    // on a small machine the swap tests go through the swap file on disk.)
+    let default = match memory_mib {
+        0..=383 => 600,
+        384..=512 => 480,
+        _ => 1200,
+    };
     let timeout =
         Duration::from_secs(env::var("AURORA_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(default));
     let status = loop {
@@ -1866,8 +2755,19 @@ fn run_tests_once(
         eprintln!("\nmulti-monitor check FAILED: a head did not show what the compositor drew (see above)");
         return Err(output);
     }
-    match status.and_then(|s| s.code()) {
+    let cut = output.contains("harness: power cut") && output.contains("\ntest result: ok.");
+    // `virt` has no isa-debug-exit: the aarch64 kernel prints the code and
+    // powers off (docs/developer/porting.md); read it as that device's status.
+    let status = status.and_then(|s| s.code()).map(|code| match arch::current() {
+        arch::Arch::Aarch64 => exit_line(&output).map_or(1, |c| (c as i32) << 1 | 1),
+        arch::Arch::X86_64 => code,
+    });
+    match status {
         Some(33) => Ok(output),
+        Some(_) if cut => {
+            println!("harness: the power was cut mid-install after the tests passed, as planned");
+            Ok(output)
+        }
         Some(code) => {
             eprintln!("\nkernel tests FAILED (qemu exit status {code})");
             Err(output)
@@ -1879,8 +2779,44 @@ fn run_tests_once(
     }
 }
 
+/// The code in the last `[aurora-exit N]` line the kernel printed.
+fn exit_line(output: &str) -> Option<u32> {
+    output.lines().rev().find_map(|l| l.trim().strip_prefix("[aurora-exit ")?.strip_suffix(']')?.parse().ok())
+}
+
 #[cfg(test)]
 mod rtc_tests {
+    /// A first aarch64 run beside an x86 personal disk: a note, and the x86
+    /// disk untouched; nothing once the aarch64 disk exists, or with no
+    /// other disk.
+    #[test]
+    fn first_run_on_the_other_architecture() {
+        use super::arch::Arch;
+        let root = std::env::temp_dir().join(format!("waveos-disknote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        assert_eq!(super::other_disk_note(&root, Arch::Aarch64, false), None);
+        let x86 = Arch::X86_64.disk(&root, "waveos-aurora");
+        std::fs::write(&x86, b"x86 files").unwrap();
+        let note = super::other_disk_note(&root, Arch::Aarch64, false).unwrap();
+        assert!(note.contains("migrate-disk --arch aarch64") && note.contains("waveos-aurora.img"), "{note}");
+        assert!(note.contains("waveos-aurora-aarch64.img"), "{note}");
+        // The same from the other side, and for the developer disk.
+        assert_eq!(super::other_disk_note(&root, Arch::X86_64, false), None);
+        assert_eq!(super::other_disk_note(&root, Arch::Aarch64, true), None);
+        std::fs::write(Arch::Aarch64.disk(&root, "waveos-aurora"), b"arm").unwrap();
+        assert_eq!(super::other_disk_note(&root, Arch::Aarch64, false), None);
+        assert_eq!(std::fs::read(&x86).unwrap(), b"x86 files");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn aarch64_exit_line() {
+        assert_eq!(super::exit_line("x\n[aurora-exit 16]\n"), Some(16));
+        assert_eq!(super::exit_line("[aurora-exit 17]\nlater\n"), Some(17));
+        assert_eq!(super::exit_line("no code"), None);
+    }
+
     #[test]
     fn seed_utc_and_guest_offset() {
         assert_eq!(super::rtc_timestamp(946684800), "2000-01-01T00:00:00");

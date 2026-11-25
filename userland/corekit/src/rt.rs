@@ -13,6 +13,9 @@ pub type Args = Vec<String>;
 /// `block` is null or the argument block the kernel passes to `_start`: a
 /// count followed by that many pointers to NUL-terminated strings.
 pub unsafe fn start(block: *const u64, main: fn(Args) -> i32) -> ! {
+    // Hardware AES and PMULL for TLS where the processor has them.
+    #[cfg(target_arch = "aarch64")]
+    cpufeatures::aarch64::set_detector(crate::sys::cpu_has);
     let args = unsafe { parse_args(block) };
     let code = main(args);
     crate::process::exit(code)

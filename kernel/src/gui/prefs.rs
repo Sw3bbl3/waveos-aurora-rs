@@ -3,7 +3,7 @@
 
 use super::server::{self, Command};
 use super::settings;
-use crate::drivers::{audio, display, keymap, ps2};
+use crate::drivers::{audio, display, keymap};
 use alloc::string::String;
 use aurora_abi::{err::*, pref};
 use lumen::displays;
@@ -36,6 +36,10 @@ fn default(key: &str) -> Option<&'static str> {
         pref::TRACKING_SPEED | pref::POINTER_SPEED => "5",
         pref::VOLUME => "70",
         pref::ENERGY_MODE => "balanced",
+        // Software Update: look for updates in the background; download
+        // system updates only when asked.
+        "software_update_check" => "1",
+        "software_update_download" => "0",
         _ => return None,
     })
 }
@@ -44,6 +48,12 @@ pub fn get(key: &str) -> Option<String> {
     // Read-only facts about the system, answered live.
     if key == "audio_device" {
         return audio::describe();
+    }
+    if key == "system_slot" {
+        return Some(String::from(super::sysupdate::booted_slot()));
+    }
+    if key == "system_bootloader" {
+        return Some(String::from(if super::sysupdate::bootloader_knows_slots() { "slots" } else { "legacy" }));
     }
     if key == "account_name" {
         return super::account::Account::load().map(|a| if a.full.is_empty() { a.name } else { a.full });
@@ -73,6 +83,8 @@ pub fn set(key: &str, value: &str) -> Result<(), isize> {
         | pref::NATURAL_SCROLLING
         | pref::PLAY_AUTO_ENTER
         | pref::PLAY_SOUNDS
+        | "software_update_check"
+        | "software_update_download"
             if value != "0" && value != "1" =>
         {
             return Err(EINVAL)
@@ -132,7 +144,9 @@ pub fn apply_system(key: &str) {
         pref::REPEAT_DELAY | pref::REPEAT_RATE => {
             let delay = get(pref::REPEAT_DELAY).and_then(|v| v.parse().ok()).unwrap_or(1u8);
             let rate = get(pref::REPEAT_RATE).and_then(|v| v.parse().ok()).unwrap_or(8u8);
-            ps2::set_typematic(delay.min(3), rate.min(31));
+            #[cfg(target_arch = "x86_64")]
+            crate::drivers::ps2::set_typematic(delay.min(3), rate.min(31));
+            let _ = (delay, rate);
         }
         pref::VOLUME | pref::MUTED => {
             let volume = get(pref::VOLUME).and_then(|v| v.parse().ok()).unwrap_or(70u32);

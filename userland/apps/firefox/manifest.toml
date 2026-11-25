@@ -1,0 +1,14 @@
+# What Firefox may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.firefox"
+name = "Firefox"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Firefox.elf"
+description = "Firefox ESR, the web browser."
+categories = ["system"]
+permissions = ["network", "audio", "microphone", "camera", "notifications", "spawn", "linux", "linux-home", "home", "display", "launch", "ipc", "clipboard", "background", "gamepad"]

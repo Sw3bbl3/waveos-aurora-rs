@@ -1,5 +1,5 @@
 //! Memory for Linux programs: `mmap`, `munmap`, `mprotect`, `brk`,
-//! `mremap`, `madvise`.
+//! `mremap`, `madvise`, `mlock`.
 //!
 //! Anonymous memory gets its pages when they are first touched (see
 //! `AddressSpace::map_lazy`): programs reserve gigabytes they never fill
@@ -9,8 +9,11 @@
 
 use crate::mm::vmm::{AddressSpace, Prot};
 use crate::mm::PAGE_SIZE;
+use super::shm::ShmFile;
 use crate::proc::{Handle, Process};
 use alloc::string::String;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use aurora_abi::err::*;
 use aurora_abi::layout;
 use core::fmt::Write;
@@ -23,7 +26,16 @@ const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
 const MAP_FIXED_NOREPLACE: u64 = 0x100000;
 const MREMAP_MAYMOVE: u64 = 1;
+const MADV_WILLNEED: u64 = 3;
 const MADV_DONTNEED: u64 = 4;
+const MADV_FREE: u64 = 8;
+const MADV_COLD: u64 = 20;
+const MADV_PAGEOUT: u64 = 21;
+const MADV_POPULATE_READ: u64 = 22;
+const MADV_POPULATE_WRITE: u64 = 23;
+const MCL_CURRENT: u64 = 1;
+const MCL_FUTURE: u64 = 2;
+const MCL_ONFAULT: u64 = 4;
 /// The heap (`brk`) may grow this far past the program.
 const BRK_LIMIT: u64 = 1 << 30;
 /// Largest single mapping.
@@ -120,12 +132,24 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
             return map_frames(p, addr, n, flags, prot_bits, &frames);
         }
     }
+    // An ALSA PCM's buffer, shared with the mixer side.
+    if flags & MAP_ANONYMOUS == 0 {
+        if let Some(buf) = super::fs::pcm_buffer(p, fd as u64, offset) {
+            let frames = buf?.frames(0, n);
+            if (frames.len() as u64) < n {
+                return Err(EINVAL);
+            }
+            return map_frames(p, addr, n, flags, prot_bits, &frames);
+        }
+    }
     // Shared memory: the same frames in every process that maps it.
     let shared = if flags & MAP_SHARED != 0 {
         if flags & MAP_ANONYMOUS != 0 {
             Some(super::shm::ShmFile::new(n * PAGE_SIZE)?)
+        } else if let Some(shm) = super::fs::shm_of(p, fd as u64) {
+            Some(shm)
         } else {
-            super::fs::shm_of(p, fd as u64)
+            file_shared(p, fd, prot_bits)?
         }
     } else {
         None
@@ -148,8 +172,8 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
         None
     };
     // A disk file's pages come from the cache every mapping of it shares
-    // (read first if need be). Shared mappings of disk files are private
-    // for now: what is written to them stays in the process.
+    // (read first if need be). Shared mappings of a file opened read-only
+    // can't be written; of one opened for writing, see `file_shared`.
     let cached = if flags & MAP_ANONYMOUS == 0 && file_data.is_none() {
         let h = p.fd(fd as usize)?;
         let Handle::File(f) = &*h else { return Err(ENODEV) };
@@ -205,6 +229,87 @@ pub fn mmap(p: &Process, addr: u64, len: u64, prot_bits: u64, flags: u64, fd: i6
     }
     update_resident(p, aspace);
     Ok(va)
+}
+
+/// What `MAP_SHARED` mappings of disk files opened for writing map: one
+/// object per open file description (`dup`, `fork` and descriptors passed
+/// over sockets share it), holding the file's contents as they were at the
+/// first such mapping, so every mapping through it sees what the others
+/// write. Programs that write code through one mapping and run it through
+/// another rely on that (GStreamer's ORC maps a deleted temporary file
+/// twice, writable and executable), as do ones that share memory through a
+/// deleted file. What is written stays in memory, not in the file (as for
+/// any shared mapping of a disk file here, before); `ftruncate` resizes the
+/// object too. Entries go when their description closes (the mappings
+/// keep their frames).
+static FILE_SHARED: crate::sync::Mutex<Vec<(Weak<Handle>, Arc<ShmFile>)>> = crate::sync::Mutex::new(Vec::new());
+
+/// Files larger than this map as before (a copy would cost too much).
+const FILE_SHARED_MAX: u64 = 64 << 20;
+
+/// The object for a description, if it has one.
+pub fn file_shared_of(h: &Arc<Handle>) -> Option<Arc<ShmFile>> {
+    let mut list = FILE_SHARED.lock();
+    list.retain(|(w, _)| w.strong_count() > 0);
+    list.iter().find(|(w, _)| w.as_ptr() == Arc::as_ptr(h)).map(|(_, s)| s.clone())
+}
+
+/// The shared object to map for `MAP_SHARED` of `fd`, made if need be.
+/// None (the mapping reads the file's cached pages, as before) for a file
+/// opened read-only, a large one, or not a disk file; and for a mapping
+/// only for reading while the description has no object yet: SQLite, say,
+/// maps its database that way and writes it with `write`, and an object
+/// would keep the contents of its first mapping.
+fn file_shared(p: &Process, fd: i64, prot_bits: u64) -> Result<Option<Arc<ShmFile>>, isize> {
+    let h = p.fd(fd as usize)?;
+    let Handle::File(f) = &*h else { return Ok(None) };
+    let (fs, ino, size, writable) = {
+        let f = f.lock();
+        (f.fs.clone(), f.ino, f.size()?, f.writable)
+    };
+    if let Some(s) = file_shared_of(&h) {
+        // The file grew (SQLite extends its shared-memory file with
+        // `write` before mapping the new part): the object takes the new
+        // part from the file.
+        if size > s.size() && size <= FILE_SHARED_MAX {
+            let from = s.size();
+            s.resize(size)?;
+            fill(&s, &fs, ino, from, size)?;
+        }
+        return Ok(Some(s));
+    }
+    if !writable || prot_bits & (PROT_WRITE | PROT_EXEC) == 0 || size > FILE_SHARED_MAX {
+        return Ok(None);
+    }
+    // Read before taking the list's lock (the disk may be slow).
+    let obj = ShmFile::new(size)?;
+    fill(&obj, &fs, ino, 0, size)?;
+    let mut list = FILE_SHARED.lock();
+    // Another thread may have made one meanwhile: the first one counts.
+    if let Some((_, s)) = list.iter().find(|(w, _)| w.as_ptr() == Arc::as_ptr(&h)) {
+        return Ok(Some(s.clone()));
+    }
+    list.push((Arc::downgrade(&h), obj.clone()));
+    Ok(Some(obj))
+}
+
+/// Copies bytes `from..to` of the file into `obj`.
+fn fill(obj: &ShmFile, fs: &Arc<dyn crate::fs::Filesystem>, ino: crate::fs::Ino, from: u64, to: u64) -> Result<(), isize> {
+    if to <= from {
+        return Ok(());
+    }
+    let mut buf = crate::syscall::user::buffer((to - from).min(1 << 20) as usize)?;
+    let mut at = from;
+    while at < to {
+        let want = (to - at).min(buf.len() as u64) as usize;
+        let got = fs.read(ino, at, &mut buf[..want])?;
+        if got == 0 {
+            break;
+        }
+        obj.write_at(at, &buf[..got])?;
+        at += got as u64;
+    }
+    Ok(())
 }
 
 /// Maps `frames` shared over the first pages of an `n`-page range, at
@@ -313,9 +418,10 @@ pub fn mremap(p: &Process, addr: u64, old_len: u64, new_len: u64, flags: u64) ->
 
 /// `mincore`: one byte per page of `[addr, addr + len)`, `ENOMEM` if any
 /// page isn't mapped. (Programs ask it whether a pointer may be read: EGL
-/// tells a Wayland display from other native displays this way.) Every
-/// mapped page counts as resident: untouched memory comes on first touch
-/// at no cost a program could notice.
+/// tells a Wayland display from other native displays this way.) A page
+/// swapped out (compressed or on disk) isn't resident; every other mapped
+/// page counts as resident: untouched memory comes on first touch at no
+/// cost a program could notice.
 pub fn mincore(p: &Process, addr: u64, len: u64, vec: u64) -> Result<u64, isize> {
     if !addr.is_multiple_of(PAGE_SIZE) {
         return Err(EINVAL);
@@ -327,28 +433,88 @@ pub fn mincore(p: &Process, addr: u64, len: u64, vec: u64) -> Result<u64, isize>
         return Err(ENOMEM);
     }
     let n = pages(len);
-    {
+    let resident: alloc::vec::Vec<u8> = {
         let mut guard = p.mem();
         let aspace = guard.as_mut().ok_or(ESRCH)?;
         if (0..n).any(|i| aspace.is_free(addr + i * PAGE_SIZE, 1)) {
             return Err(ENOMEM);
         }
-    }
-    let ones = alloc::vec![1u8; n as usize];
-    crate::syscall::user::put_bytes(vec, &ones)?;
+        (0..n).map(|i| !aspace.is_swapped(addr + i * PAGE_SIZE) as u8).collect()
+    };
+    crate::syscall::user::put_bytes(vec, &resident)?;
     Ok(0)
 }
 
+/// `madvise`: `MADV_DONTNEED` and `MADV_FREE` let pages go (they read as
+/// zero afterwards, which `MADV_FREE` allows too), `MADV_PAGEOUT` swaps
+/// them out now and `MADV_COLD` makes them the first to go, `MADV_WILLNEED`
+/// brings swapped-out ones back, `MADV_POPULATE_*` makes them all. The
+/// rest are hints taken without effect.
 pub fn madvise(p: &Process, addr: u64, len: u64, advice: u64) -> Result<u64, isize> {
     if !addr.is_multiple_of(PAGE_SIZE) {
         return Err(EINVAL);
     }
-    if advice == MADV_DONTNEED && len > 0 && user_range(addr, len) {
-        // The pages read as zero afterwards (anonymous memory lets them go).
-        let mut guard = p.mem();
-        let aspace = guard.as_mut().ok_or(ESRCH)?;
-        aspace.discard(addr, pages(len));
-        update_resident(p, aspace);
+    if len == 0 || !user_range(addr, len) {
+        return Ok(0);
     }
+    let n = pages(len);
+    match advice {
+        MADV_DONTNEED | MADV_FREE => {
+            let mut guard = p.mem();
+            let aspace = guard.as_mut().ok_or(ESRCH)?;
+            aspace.discard(addr, n)?;
+            update_resident(p, aspace);
+        }
+        MADV_COLD => p.mem().as_mut().ok_or(ESRCH)?.cold(addr, n),
+        MADV_PAGEOUT => {
+            let mut guard = p.mem();
+            let aspace = guard.as_mut().ok_or(ESRCH)?;
+            aspace.pageout(addr, n);
+            update_resident(p, aspace);
+        }
+        MADV_WILLNEED | MADV_POPULATE_READ | MADV_POPULATE_WRITE => {
+            let write = advice == MADV_POPULATE_WRITE;
+            if advice == MADV_WILLNEED {
+                p.mem().as_mut().ok_or(ESRCH)?.swap_in_range(addr, n);
+            } else if !crate::proc::prefault(addr, n * PAGE_SIZE, write) {
+                return Err(if crate::mm::vmm::check_current(addr, len, false) { ENOMEM } else { EFAULT });
+            }
+            update_resident(p, p.mem().as_ref().ok_or(ESRCH)?);
+        }
+        _ => {}
+    }
+    Ok(0)
+}
+
+/// `mlock` and `mlock2` (`lock`), `munlock`: the range rounded out to
+/// whole pages is brought in and kept in memory, or no longer kept.
+pub fn mlock(p: &Process, addr: u64, len: u64, lock: bool) -> Result<u64, isize> {
+    let start = addr & !(PAGE_SIZE - 1);
+    let end = addr.checked_add(len).ok_or(EINVAL)?.next_multiple_of(PAGE_SIZE);
+    if len == 0 {
+        return Ok(0);
+    }
+    if !user_range(start, end - start) {
+        return Err(ENOMEM);
+    }
+    let mut guard = p.mem();
+    let aspace = guard.as_mut().ok_or(ESRCH)?;
+    aspace.mlock(start, (end - start) / PAGE_SIZE, lock)?;
+    update_resident(p, aspace);
+    Ok(0)
+}
+
+/// `mlockall` (`lock`; what is mapped now — `MCL_FUTURE` is accepted but
+/// later mappings aren't locked) and `munlockall`.
+pub fn mlockall(p: &Process, flags: u64, lock: bool) -> Result<u64, isize> {
+    if lock && (flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 || flags & (MCL_CURRENT | MCL_FUTURE) == 0) {
+        return Err(EINVAL);
+    }
+    let mut guard = p.mem();
+    let aspace = guard.as_mut().ok_or(ESRCH)?;
+    if !lock || flags & MCL_CURRENT != 0 {
+        aspace.mlock_all(lock)?;
+    }
+    update_resident(p, aspace);
     Ok(0)
 }

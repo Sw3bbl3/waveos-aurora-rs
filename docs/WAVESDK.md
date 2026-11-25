@@ -82,7 +82,9 @@ dependencies = ["dev.example.runtime >= 1.0"]   # id, "id >= v" or "id = v"
 
 Versions are ordered numerically (`1.10` > `1.9`; `1.2` = `1.2.0`; `2.0.0-rc.1` < `2.0.0`). Unknown keys are refused, so a package can't declare itself a built-in or privileged app.
 
-**Permissions** are shown before installing and recorded for the per-app sandbox ([developer/sandboxing.md](developer/sandboxing.md)), whose capability bits they map to: `network` (NET_CLIENT), `network-server` (NET_SERVER), `audio` (AUDIO_OUT), `microphone` (AUDIO_IN), `gamepad` (GAMEPADS), `clipboard` (CLIPBOARD_READ), `notifications` (NOTIFY), `preferences` (PREFS_WRITE), `spawn` (SPAWN), `linux` (LINUX), `elevate` (ELEVATE), `home` (USER_FILES), and folder grants `documents`, `pictures`, `downloads`, `music`, `movies` (read and write) or `documents:read`, `pictures:read`, `downloads:read`. Every app may always use its own data folder, `~/Library/Containers/<id>` (`corekit::apps::data_dir`). **The sandbox does not exist yet**: today permissions are informational.
+**Permissions** are shown before installing and **enforced by the kernel** for format-2 packages: the app runs in a sandbox ([developer/sandboxing.md](developer/sandboxing.md)) and may use only what it declares — `network` (NET_CLIENT), `network-server` (NET_SERVER), `audio` (AUDIO_OUT), `microphone` (MICROPHONE), `camera`, `screen-capture`, `input-monitoring`, `usb`, `gamepad` (GAMEPADS), `clipboard` (CLIPBOARD_READ, reading it while another app is in front), `notifications` (NOTIFY), `background` (running without a window), `preferences` (PREFS_WRITE), `spawn` (SPAWN), `launch` (opening other apps and documents), `ipc` (other apps' local sockets and shared memory), `linux` (LINUX), `display` (the DRM card), `elevate` (ELEVATE), `home` (HOME: all your files), and folders `documents`, `pictures`, `downloads`, `music`, `movies`, `desktop` (read and write) or with `:read`. The microphone, camera, screen, input, USB and folders are asked about the first time the app uses them; the person can switch any of them off in Settings → Privacy & Security. Format-1 packages, which predate permissions, run with their account's rights (the devices still ask).
+
+Every app may always use its own **container**, `~/Library/Containers/<id>` (`Documents/`, `Preferences/`, `Caches/`, `tmp/`, `Home/`), without hard-coded paths: `corekit::sandbox::{container, documents, preferences, preferences_file, caches, temporary}` or `aurorakit::container`. Files beyond it come from the person: `corekit::sandbox::open_panel()`, `save_panel(name)` and `choose_folder()` show the system panel and give the app exactly what was picked; files dropped on the app (`drag_data`), pasted into it or opened with it are its to use too; `sandbox::bookmark(path)` returns a token to keep in the container, and `sandbox::resolve(token)` brings the file back in a later run. `sandbox::restrict(keep)` gives capabilities up for good, and `desktop::open_app_with(app, args)` opens another app as itself (with `launch`), passing it the documents among `args` this app may use.
 
 Format 1 manifests (`format = 1`, `developer` instead of `author`, none of the format 2 keys) still install; they can't be signed and have no hash list.
 
@@ -111,11 +113,11 @@ The signature is Ed25519 (RustCrypto's `ed25519-dalek`, strict verification) ove
        dist/dev.example.myapp-1.2.0.gina --sign ~/keys/example.key
    ```
    The icon and resources are read relative to the manifest. Without `--sign` the package is unsigned: it installs only after the person accepts a warning.
-4. **Publish a repository:** put the packages in a folder served over HTTPS (HTTP works for testing: the index is signed either way) with
+4. **Publish a repository:** put the packages in a folder (optionally with Store listings: `<app id>/listing.txt` and `<app id>/screenshots/*.png`, see [developer/store-and-updates.md](developer/store-and-updates.md)) and run
    ```sh
-   cargo xtask repo dist/*.gina --sign ~/keys/example.key --out site/stable
+   cargo xtask repo dist --sign ~/keys/example.key --out site/stable
    ```
-   which copies them to `packages/` and writes `index.txt` and its signature `index.sig`. Each index carries a `generated` date that only grows: devices refuse an older index from the same address (no rollback to old versions). Packages are checked against the size and SHA-256 the index names, and then their own signature is checked again.
+   which copies them to `packages/`, their icons and screenshots to `assets/`, and writes the signed catalogue (`catalog.txt`, `catalog.sig`) and, for older systems, `index.txt` and `index.sig`. Serve the folder over HTTPS (HTTP works too: everything is signed). Each catalogue has a version one higher than the last and expires after 30 days (`--expires-days N`): devices refuse an older catalogue from the same address (rollback) and an expired one (freeze), so re-run it at least that often. Packages are checked against the size and SHA-256 the catalogue names, and then their own signature is checked again. Trust roots (`root/<n>.txt`) let a repository move to a new signing key; `--mirror URL` lists mirrors.
 5. **Users add your key and repository** (both need an administrator):
    ```sh
    pkg trust example.key.pub
@@ -124,7 +126,7 @@ The signature is Ed25519 (RustCrypto's `ed25519-dalek`, strict verification) ove
    pkg install dev.example.myapp
    ```
 
-Each build of WaveOS makes its own sample key (`target/keys/waveos-samples.key`, never committed) and trusts it (`/System/Keys/waveos-samples.pub`); `cargo xtask build` writes a sample repository to `target/repo` (WaveUI Gallery and Doom as a `game`), signed with it. Serve it with `python3 -m http.server -d target/repo 8000` and in the guest run `pkg source add http://10.0.2.2:8000/`.
+Each build of WaveOS makes its own sample key (`target/keys/waveos-samples.key`, never committed) and trusts it (`/System/Keys/waveos-samples.pub`); `cargo xtask build` writes a demo repository to `target/repo` (WaveUI Gallery 1.0.0 and 1.1.0 and Doom as a `game`, with their Store pages, and a WaveOS update to the next version signed with the build's system update key), signed with it. Serve it with `cargo xtask serve-repo` and add `http://10.0.2.2:8000/` in the Store (or `pkg source add`). WaveOS itself comes with no repository configured.
 
 ### Installing
 
@@ -134,10 +136,12 @@ Each build of WaveOS makes its own sample key (`target/keys/waveos-samples.key`,
 | `~/Library/Applications/<id>/` | apps for one account (`pkg install --user`, "Install only for me") |
 | `<root>/<id>/active` | the live generation's folder name |
 | `<root>/<id>/<version>-<sha256>/` | a generation: the package's files, `META/hashes`, `META/signature`, and `META/receipt` (when, from where, signed by whom, size) |
+| `<root>/<id>/previous` | the generation an update replaced, kept for `pkg rollback` and the Store's Revert |
 | `<root>/.registry` | every installed app, one tab-separated line each: id, version, name, categories, program, icon, folder, extensions, size, publisher (for programs such as Wave Play; `corekit::apps::in_category("game")` reads the same) |
 | `~/Library/Containers/<id>/` | the app's data, kept apart from its files |
 | `/System/Keys/*.pub`, `/Applications/.keys/*.pub` | trusted publisher keys (shipped; added by administrators) |
-| `/Applications/.sources` | repository addresses |
+| `/Applications/.sources` | repository addresses (none out of the box) |
+| `~/Library/Packages/` | per account: the newest catalogue version seen per repository, trust roots, resumable downloads |
 
 An install stages the new generation in `.pending-<pid>`, flushes it, renames it into place, then writes `active` the same way (new file, flush, rename). Interrupted anywhere, the old version or the new one is live, never a mix; leftovers are cleared by the next install. Under `/Applications` files belong to `system:admin` (programs `rwxr-xr-x`, other files `rw-r--r--`, folders `rwxrwxr-x`) and the registry is `rw-r--r-- system`, so other accounts can run apps but not change them. Updates keep the app's data, must come from the same publisher key as the installed version, and may not go to an older version without `--allow-downgrade`. Missing dependencies and a too-old system stop an install before anything is written.
 
@@ -147,13 +151,15 @@ Installed apps appear in Shoal (games also under Play), Seek and Settings → Ap
 pkg install FILE.gina | URL | ID [--user] [--version V] [--allow-untrusted] [--allow-downgrade]
 pkg remove ID [--delete-data]       pkg list [--category game]     pkg info ID|FILE
 pkg verify [ID]                     pkg update [ID] [--check]      pkg search [TERM]
+pkg rollback ID                 pkg repo [URL]
+pkg system [status|check|download|install|restart|discard] [--version V]
 pkg source [list|add URL|remove URL]   pkg trust FILE.pub | untrust KEY | keys
 pkg pin ID | unpin ID               pkg registry
 ```
 
 Opening a `.gina` file in Files starts Installer: name, version, publisher, signature status, requested permissions, size and category, then progress. Unsigned packages and keys you don't trust need the "I trust where this package came from" box ticked first.
 
-For a precompiled example, open `/System/Developer/Examples/WaveUIGallery.gina`. It is compiled by the host when assembling the system image; it is **not evidence of native compilation**. A graphical Store and whole-system updates are designed in [developer/store-and-updates.md](developer/store-and-updates.md).
+For a precompiled example, open `/System/Developer/Examples/WaveUIGallery.gina`. It is compiled by the host when assembling the system image; it is **not evidence of native compilation**. The Store and Software Update are described in [developer/store-and-updates.md](developer/store-and-updates.md).
 
 ## Native commands and Studio
 

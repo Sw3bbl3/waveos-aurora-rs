@@ -28,27 +28,12 @@ pub fn active() -> bool {
     cfg!(aurora_ssp)
 }
 
-/// RDRAND/RDSEED through registers only (no address-taken locals, so this
-/// function carries no canary of its own), mixed with the TSC.
+/// Sets the canary from the CPU's random number generator and cycle
+/// counter (`arch::rng::early_seed`, which keeps to registers, so neither
+/// function carries a canary of its own).
 #[inline(never)]
 pub fn init() {
-    let leaf1 = core::arch::x86_64::__cpuid(1).ecx;
-    let leaf7 = core::arch::x86_64::__cpuid_count(7, 0).ebx;
-    let mut v = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    for _ in 0..4 {
-        let (hw, ok): (u64, u8);
-        unsafe {
-            if leaf7 & (1 << 18) != 0 {
-                core::arch::asm!("rdseed {0}", "setc {1}", out(reg) hw, out(reg_byte) ok, options(nomem, nostack));
-            } else if leaf1 & (1 << 30) != 0 {
-                core::arch::asm!("rdrand {0}", "setc {1}", out(reg) hw, out(reg_byte) ok, options(nomem, nostack));
-            } else {
-                (hw, ok) = (0, 0);
-            }
-        }
-        let t = unsafe { core::arch::x86_64::_rdtsc() };
-        v = v.rotate_left(17) ^ if ok != 0 { hw } else { 0 } ^ t.wrapping_mul(0xD6E8_FEB8_6659_FD93);
-    }
+    let v = crate::arch::rng::early_seed();
     // A zero byte first stops string overruns from copying the canary.
     __stack_chk_guard.store(v & !0xFF, Ordering::Relaxed);
 }

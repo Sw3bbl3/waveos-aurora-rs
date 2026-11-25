@@ -1,9 +1,12 @@
 //! fuzz: a system-call fuzzer for the native WaveOS ABI.
 //!
 //! ```text
-//! fuzz run [--seed N] [--rounds N] [--iters N] [--workers N] [--trace]
-//! fuzz child SEED ITERS WORKERS [trace]     one round (what each round runs)
+//! fuzz run [--seed N] [--rounds N] [--iters N] [--workers N] [--trace] [--oracle DIR]
+//! fuzz child SEED ITERS WORKERS [trace] [oracle=DIR]   one round (what each round runs)
 //! fuzz hog N                                takes all the memory it can (see `hog`)
+//! fuzz swap MIB SEED [THREADS [PASSES [MS]]] fills MIB of memory with a pattern and checks
+//!                                           every page of it, over and over, after a pause
+//!                                           of MS (see `swapcheck`; 0 passes: holds it)
 //! ```
 //!
 //! Every round is a child process. Its worker threads call every system
@@ -18,6 +21,11 @@
 //! change the rest of the system (power, display, preferences, the clock,
 //! files outside `/fuzz`, other processes) are left out or given only
 //! arguments the kernel must refuse.
+//!
+//! With `--oracle DIR` the fuzzer runs in a sandbox (the self-tests start
+//! it in one) and also aims every path call, mutating ones included, at
+//! `DIR`: files outside its sandbox it must never read or change. The
+//! kernel watches `DIR` and fails the test if any call reaches it.
 //!
 //! The parent checks that each round ends (killing it after a deadline),
 //! that every thread of it really goes away, and that processes blocked in
@@ -101,6 +109,26 @@ static STOP: AtomicBool = AtomicBool::new(false);
 static DONE: AtomicU32 = AtomicU32::new(0);
 static CALLS: AtomicU64 = AtomicU64::new(0);
 static TRACE: AtomicBool = AtomicBool::new(false);
+/// `--oracle`: a folder outside the sandbox to aim at (set before threads start).
+static ORACLE: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+fn set_oracle(dir: &str) {
+    let mut b = [0u8; 64];
+    let n = dir.len().min(63);
+    b[..n].copy_from_slice(&dir.as_bytes()[..n]);
+    for (i, w) in ORACLE.iter().enumerate() {
+        w.store(u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap()), Relaxed);
+    }
+}
+
+fn oracle() -> Option<String> {
+    let mut b = [0u8; 64];
+    for (i, w) in ORACLE.iter().enumerate() {
+        b[i * 8..i * 8 + 8].copy_from_slice(&w.load(Relaxed).to_le_bytes());
+    }
+    let n = b.iter().position(|&c| c == 0).unwrap_or(64);
+    (n > 0).then(|| String::from_utf8_lossy(&b[..n]).into_owned())
+}
 
 /// Paths the round may change (all inside the sandbox; relative ones
 /// resolve against a working directory that is kept inside it or /System).
@@ -278,6 +306,19 @@ impl Worker {
     /// A path argument (pointer, length). `mutating`: only the sandbox (or
     /// the read-only system image).
     fn path_at(&mut self, at: usize, mutating: bool) -> (u64, u64) {
+        // In a sandbox: often the oracle, mutating or not (it must hold).
+        if let Some(o) = oracle().filter(|_| self.r.one_in(4)) {
+            let p = match self.r.below(7) {
+                0 => format!("{o}/secret.txt"),
+                1 => o.clone(),
+                2 => format!("/fuzz/../..{o}/secret.txt"),
+                3 => format!("{o}/new-{}", self.r.below(4)),
+                4 => format!("{o}/secret.txt/x"),
+                5 => format!("{o}/.."),
+                _ => format!("{o}//secret.txt/."),
+            };
+            return self.put_str(at, p.as_bytes(), false);
+        }
         match self.r.below(12) {
             0..=4 => {
                 let p = self.r.pick(RW_PATHS);
@@ -599,6 +640,24 @@ impl Worker {
                 [p, l, self.buf(16), 0, 0, 0]
             }
             nr::AUDIO_DEVICES => [self.buf(1024), self.r.below(3), 0, 0, 0, 0],
+            // The sandbox: its own state, panels (nobody answers them here),
+            // bookmarks and Settings' list. Never PRIVACY_SET (it would change
+            // the person's decisions); dropping rights is rare, as it changes
+            // the rest of the round.
+            nr::SANDBOX => {
+                let op = self.r.pick(&[1u64, 1, 3, 4, 5, 6, 8, 0, 9, u64::MAX]);
+                match op {
+                    1 => [1, self.buf(400), 0, 0, 0, 0],
+                    3 => [3, self.r.below(5), self.buf(16), self.len(), self.buf(256), self.len()],
+                    4 | 5 => {
+                        let (p, l) = self.path(false);
+                        [op, p, l, self.buf(64), self.len(), 0]
+                    }
+                    6 => [6, self.buf(256), self.len(), 0, 0, 0],
+                    _ if self.r.one_in(50) => [2, self.r.next() | self.r.next(), 0, 0, 0, 0],
+                    _ => [op, self.int(), self.int(), 0, 0, 0],
+                }
+            }
             _ => [self.int(), self.int(), self.int(), self.int(), self.int(), self.int()],
         };
         Some(a)
@@ -1086,6 +1145,106 @@ fn parse_u64(v: &str) -> Option<u64> {
     }
 }
 
+/// Word `j` of page `page` of a `swapcheck` run: 256 bytes of noise of
+/// the page's own, then its first 64 bytes over and over — every page
+/// differs (and none is one repeated word), and it compresses about
+/// tenfold, as program memory often does.
+fn swap_word(seed: u64, page: u64, j: usize) -> u64 {
+    let j = if j < 32 { j } else { j % 8 };
+    mix(seed, page * 64 + j as u64)
+}
+
+/// Checks page `page` of the pattern, at `addr`; the first wrong word, if any.
+fn swap_verify(addr: u64, seed: u64, page: u64) -> Option<(usize, u64, u64)> {
+    let words = unsafe { core::slice::from_raw_parts(addr as *const u64, 512) };
+    words.iter().enumerate().map(|(j, &w)| (j, w, swap_word(seed, page, j))).find(|&(_, got, want)| got != want)
+}
+
+/// `fuzz swap`: maps `mib` MiB (more than memory holds, for the swap
+/// tests), writes every page with a pattern of its own from `threads`
+/// threads, then reads every page back `passes` times in a different
+/// order each time, checking every word. Prints `swap: ok` or the first
+/// page that came back wrong; the exit status is the number of bad pages.
+fn swapcheck(mib: u64, seed: u64, threads: u64, passes: u64, pause_ms: u64) -> i32 {
+    static BAD: AtomicU64 = AtomicU64::new(0);
+    let pages = mib * 256;
+    // In pieces: one mapping may be at most 1 GiB.
+    let piece = 64 * 256u64;
+    let mut bases = Vec::new();
+    let mut at = 0;
+    let t_map = time::uptime_ms();
+    while at < pages {
+        let n = (pages - at).min(piece);
+        match call(nr::MMAP, &[n * 4096]) {
+            Ok(b) => bases.push((at, n, b)),
+            Err(e) => {
+                println!("swap: mmap of {} MiB failed ({e}) after {} MiB", n / 256, at / 256);
+                return 1;
+            }
+        }
+        at += n;
+    }
+    println!("swap: mapped {} MiB in {} ms", mib, time::uptime_ms() - t_map);
+    let t0 = time::uptime_ms();
+    // Share `t` of the pages: every `threads`-th piece's, in an order of
+    // its own each pass (a stride prime to the size).
+    fn share(bases: &[(u64, u64, u64)], t: u64, threads: u64, write: bool, pass: u64, seed: u64) {
+        for &(first, n, base) in bases.iter().skip(t as usize).step_by(threads as usize) {
+            let stride = if pass == 0 { 1 } else { [7919u64, 104_729, 15_485_863][(pass % 3) as usize] };
+            let stride = if n % stride == 0 { 1 } else { stride };
+            for k in 0..n {
+                let i = k * stride % n;
+                let page = first + i;
+                if write {
+                    let words = unsafe { core::slice::from_raw_parts_mut((base + i * 4096) as *mut u64, 512) };
+                    for (j, w) in words.iter_mut().enumerate() {
+                        *w = swap_word(seed, page, j);
+                    }
+                } else if let Some((word, got, want)) = swap_verify(base + i * 4096, seed, page) {
+                    if BAD.fetch_add(1, Relaxed) < 4 {
+                        println!("swap: MISMATCH page {page} word {word}: {got:#x}, not {want:#x}");
+                    }
+                }
+            }
+        }
+    }
+    let run = |write: bool, pass: u64| {
+        let mut handles = Vec::new();
+        for t in 1..threads {
+            let mine = bases.clone();
+            match thread::spawn(move || share(&mine, t, threads, write, pass, seed)) {
+                Ok(h) => handles.push(h),
+                // (Memory may be too short for another thread: this one does it.)
+                Err(_) => share(&bases, t, threads, write, pass, seed),
+            }
+        }
+        share(&bases, 0, threads, write, pass, seed);
+        for h in handles {
+            h.join();
+        }
+    };
+    run(true, 0);
+    println!("swap: wrote {} MiB in {} ms", mib, time::uptime_ms() - t0);
+    if passes == 0 {
+        // Hold it (until killed), as a program sitting in the background.
+        loop {
+            time::sleep_ms(1000);
+        }
+    }
+    // Left alone a while (to be swapped out), if asked.
+    time::sleep_ms(pause_ms);
+    for pass in 1..=passes {
+        let t = time::uptime_ms();
+        run(false, pass);
+        println!("swap: pass {pass} checked {pages} pages in {} ms", time::uptime_ms() - t);
+    }
+    let bad = BAD.load(Relaxed);
+    if bad == 0 {
+        println!("swap: ok, {pages} pages checked {passes} times");
+    }
+    bad.min(100) as i32
+}
+
 fn main(args: corekit::Args) -> i32 {
     match args.get(1).map(String::as_str) {
         Some("child") => {
@@ -1093,9 +1252,20 @@ fn main(args: corekit::Args) -> i32 {
             let iters = args.get(3).and_then(|v| parse(v)).unwrap_or(1000);
             let workers = args.get(4).and_then(|v| parse(v)).unwrap_or(3);
             TRACE.store(args.get(5).map(String::as_str) == Some("trace"), Relaxed);
+            if let Some(o) = args.iter().find_map(|a| a.strip_prefix("oracle=")) {
+                set_oracle(o);
+            }
             return round(seed, iters, workers);
         }
         Some("hog") => return hog(args.get(2).and_then(|v| parse(v)).unwrap_or(0)),
+        Some("swap") => {
+            let mib = args.get(2).and_then(|v| parse(v)).unwrap_or(16);
+            let seed = args.get(3).and_then(|v| parse_u64(v)).unwrap_or(1);
+            let threads = args.get(4).and_then(|v| parse(v)).unwrap_or(2);
+            let passes = args.get(5).and_then(|v| parse(v)).unwrap_or(2);
+            let pause = args.get(6).and_then(|v| parse(v)).unwrap_or(0);
+            return swapcheck(mib, seed, threads, passes, pause);
+        }
         Some("run") => {}
         // Anything else (a round spawning this program with arguments it
         // made up, say) is a short-lived victim, never another fuzzer.
@@ -1107,6 +1277,11 @@ fn main(args: corekit::Args) -> i32 {
     let iters: u64 = arg(&args, "--iters", 1500);
     let workers: u32 = arg(&args, "--workers", 3);
     let trace = args.iter().any(|a| a == "--trace");
+    let oracle_arg = args.iter().position(|a| a == "--oracle").and_then(|i| args.get(i + 1)).cloned();
+    if let Some(o) = &oracle_arg {
+        set_oracle(o);
+        println!("fuzz: in a sandbox, aiming at {o}");
+    }
     println!("fuzz: seed {seed:#x}, {rounds} rounds of {iters} calls on each of {} threads", workers + 1);
     let mut failed = 0;
     let mut fail = |what: String| {
@@ -1140,6 +1315,10 @@ fn main(args: corekit::Args) -> i32 {
         let mut child_args = alloc::vec!["child", s_hex.as_str(), it.as_str(), wk.as_str()];
         if trace {
             child_args.push("trace");
+        }
+        let oracle_child = oracle_arg.as_ref().map(|o| format!("oracle={o}"));
+        if let Some(o) = &oracle_child {
+            child_args.push(o.as_str());
         }
         let start = time::uptime_ms();
         let pid = match process::spawn("/System/Bin/fuzz", &child_args, Stdio::default()) {

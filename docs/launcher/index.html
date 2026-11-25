@@ -197,6 +197,22 @@ select:disabled { opacity: .5; }
 .note.warn { background: rgba(199, 119, 0, 0.12); }
 .note.bad { background: var(--bad-soft); }
 
+/* Chipset */
+.chipsets { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; padding-bottom: 10px; }
+.chipset {
+  position: relative; text-align: left; padding: 13px 14px; border-radius: 14px; cursor: pointer; font: inherit; color: inherit;
+  border: 1px solid var(--hairline); background: var(--glass-strong);
+}
+.chipset b { display: block; font-size: 15px; }
+.chipset .arch { display: block; color: var(--ink-3); font-size: 12px; margin-top: 1px; }
+.chipset .speed { display: inline-block; margin-top: 9px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.chipset .speed.fast { background: var(--accent-soft); color: var(--accent); }
+.chipset .speed.slow { background: rgba(199, 119, 0, 0.14); color: var(--ink-2); }
+.chipset .board { display: block; color: var(--ink-2); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
+.chipset[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.chipset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chip-help { padding-bottom: 12px; }
+
 /* Presets */
 .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; padding-bottom: 10px; }
 .preset {
@@ -296,6 +312,13 @@ dialog .buttons { justify-content: flex-end; }
 
 <main>
   <div class="stack">
+    <section class="card glass" aria-labelledby="h-chipset">
+      <h2 id="h-chipset">Chipset</h2>
+      <p class="lede">The kind of computer WaveOS boots on. Each has its own build and its own disk, so switching never touches the other's files.</p>
+      <div class="chipsets" id="arch" role="group" aria-label="Chipset"></div>
+      <div class="help chip-help" id="arch-help"></div>
+    </section>
+
     <section class="card glass" aria-labelledby="h-presets">
       <h2 id="h-presets">Presets</h2>
       <p class="lede">Start from one of these, then change anything below.</p>
@@ -371,7 +394,7 @@ dialog .buttons { justify-content: flex-end; }
       <div class="row" data-run-only>
         <div class="label">Linux packages</div>
         <div class="control"><label class="switch"><input type="checkbox" id="linux"><span class="track"></span><span>Voyage, Firefox, bash, Python</span></label></div>
-        <div class="help">Fetched once into target/linux-root and put on the disk as /Linux. Off: a smaller disk, NetSurf as the browser.</div>
+        <div class="help">Debian's packages for this processor, fetched once (about 1.9 GB for Arm, 1.3 GB for x86-64) into target/linux-root (-aarch64 for Arm) and put on the disk as /Linux. Off: a smaller disk, NetSurf as the browser.</div>
       </div>
       <div class="row" data-run-only>
         <div class="label">Developer disk</div>
@@ -534,7 +557,7 @@ function seg(el, items, current, pick) {
     b.type = "button";
     b.textContent = it.label;
     b.setAttribute("aria-pressed", String(String(it.value) === String(current)));
-    if (it.available === false) { b.disabled = true; b.title = "Not in this QEMU"; }
+    if (it.available === false) { b.disabled = true; b.title = it.help && it.help.startsWith("Not on") ? it.help : "Not in this QEMU"; }
     else if (it.help) b.title = it.help;
     b.onclick = () => pick(it.value);
     el.appendChild(b);
@@ -546,24 +569,60 @@ function fillSelect(el, items, current) {
   for (const it of items) {
     const o = document.createElement("option");
     o.value = it.value;
-    o.textContent = it.label + (it.available === false ? " (not in this QEMU)" : "");
+    o.textContent = it.label + (it.available === false ? (it.help && it.help.startsWith("Not on") ? " (not on this machine)" : " (not in this QEMU)") : "");
     o.disabled = it.available === false;
     el.appendChild(o);
   }
   el.value = current;
 }
 
-const help = (table, value) => (S.options[table].find((c) => c.value === value) || {}).help || "";
+// The option tables of the processor chosen (its machine has its own devices).
+const machine = () => Object.assign({}, S.options, S.options.by_arch[config.arch] || {});
+const help = (table, value) => (machine()[table].find((c) => c.value === value) || {}).help || "";
+const suffix = () => config.arch === "aarch64" ? "-aarch64" : "";
+const diskPath = () => config.disk_image || ("target/" + (config.developer_disk ? "waveos-developer" : "waveos-aurora") + suffix() + ".img");
+
+// Another processor: keep what its machine also has, take its defaults for the rest.
+function switchArch(arch) {
+  if (arch === config.arch) return;
+  const next = S.options.by_arch[arch];
+  const patch = { arch };
+  for (const k of ["disk", "net", "gpu", "usb", "battery"]) {
+    const c = next[k].find((x) => x.value === config[k]);
+    if (!c || c.available === false) patch[k] = next.default[k];
+  }
+  if (config.disk === S.options.by_arch[config.arch].default.disk) patch.disk = next.default.disk;
+  if (!next.tests) patch.action = "run";
+  if (!next.linux_root) patch.linux = next.default.linux;
+  set(patch);
+}
 const mib = (n) => n >= 1024 ? (n / 1024) + " GiB" : n + " MiB";
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const isTest = () => config.action === "test";
 
 function render() {
-  const O = S.options;
-  seg($("action"), [{ value: "run", label: "Desktop" }, { value: "test", label: "Kernel tests" }], config.action, (v) => set({ action: v }));
+  const O = machine();
+  const chips = $("arch");
+  chips.textContent = "";
+  for (const a of S.options.arch) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chipset";
+    b.setAttribute("aria-pressed", String(a.value === config.arch));
+    const add = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; e.textContent = text; b.appendChild(e); };
+    add("b", "", a.name || a.label);
+    add("span", "arch", a.label);
+    add("span", "speed " + (a.accelerated ? "fast" : "slow"), a.accelerated ? "Full speed on this computer" : "Emulated: much slower");
+    add("span", "board", a.chipset || "");
+    b.addEventListener("click", () => switchArch(a.value));
+    chips.appendChild(b);
+  }
+  const chosen = S.options.arch.find((a) => a.value === config.arch) || {};
+  $("arch-help").textContent = (chosen.help || "") + ". Disk: " + diskPath() + ".";
+  seg($("action"), [{ value: "run", label: "Desktop" }, { value: "test", label: "Kernel tests", available: O.tests }], config.action, (v) => set({ action: v }));
   $("action-help").textContent = isTest()
     ? "cargo xtask test: the kernel self-tests on a fresh test disk (512 MiB, no window), booted twice. Your own disk isn't touched."
-    : "cargo xtask run: WaveOS on your persistent disk, target/waveos-aurora.img. Files saved inside WaveOS are kept.";
+    : "cargo xtask run: WaveOS on your persistent disk, " + diskPath() + ". Files saved inside WaveOS are kept. Each processor has its own disk.";
 
   // Displays
   const n = config.displays.length;
@@ -626,6 +685,7 @@ function render() {
     $(k).checked = !!config[k];
   }
   $("nobuild").checked = !config.build;
+  $("linux").disabled = !O.linux_root;
   $("sound").disabled = config.headless;
   $("keyboard_capture").disabled = config.headless;
 
@@ -638,7 +698,7 @@ function render() {
   // Presets
   const box = $("presets");
   box.textContent = "";
-  for (const p of S.presets) {
+  for (const p of S.presets.filter((p) => (p.config.arch || "x86_64") === config.arch)) {
     const b = document.createElement("div");
     b.className = "preset";
     b.tabIndex = 0;
@@ -760,7 +820,7 @@ function ask(dialog, okButton, cancelButton) {
 async function launch() {
   let confirmErase = false;
   if (config.fresh_disk && !isTest()) {
-    $("erase-path").textContent = config.disk_image || (config.developer_disk ? "target/waveos-developer.img" : "target/waveos-aurora.img");
+    $("erase-path").textContent = diskPath();
     if (!await ask($("erase-dialog"), $("erase-ok"), $("erase-cancel"))) return;
     confirmErase = true;
   }
@@ -868,7 +928,8 @@ function connect() {
 async function start() {
   try { const t = localStorage.getItem("waveos-launcher-theme"); if (t) document.documentElement.dataset.theme = t; } catch (_) {}
   S = await api("/api/state");
-  config = Object.assign({}, S.last || S.options.default);
+  config = Object.assign({}, S.options.default, S.last || {});
+  if (!S.options.by_arch[config.arch]) config.arch = S.options.default.arch;
   $("store-path").textContent = "Yours are kept in " + S.store.replace(/^.*\//, "") + " (not in git).";
   $("qemu-chip").textContent = S.qemu.found ? S.qemu.version.replace(/^QEMU emulator version /, "QEMU ") : "QEMU not found";
   if (!S.qemu.found) showError("qemu-system-x86_64 isn't on the PATH. Install QEMU (brew install qemu, or apt install qemu-system-x86 ovmf), then run make run again.");

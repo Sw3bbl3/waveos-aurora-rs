@@ -18,7 +18,8 @@ pub const AT_FDCWD: u64 = -100i64 as u64;
 pub const AT_REMOVEDIR: u64 = 0x200;
 const AT_EMPTY_PATH: u64 = 0x1000;
 pub const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
-const O_NOFOLLOW: u64 = 0o400000;
+// (O_NOFOLLOW and O_DIRECTORY differ between architectures.)
+use super::abi::native::{O_DIRECTORY, O_NOFOLLOW};
 const O_PATH: u64 = 0o10000000;
 pub const O_CLOEXEC: u64 = 0o2000000;
 
@@ -29,7 +30,6 @@ const O_EXCL: u64 = 0o200;
 pub const O_TRUNC: u64 = 0o1000;
 const O_APPEND: u64 = 0o2000;
 const O_NONBLOCK: u64 = 0o4000;
-const O_DIRECTORY: u64 = 0o200000;
 
 /// The read-only Linux tree (from the system image) and the writable one.
 pub const SYSTEM_ROOT: &str = "/System/Linux";
@@ -51,6 +51,13 @@ fn in_system_dirs(guest: &str) -> bool {
 /// Something new is made on the disk when its folder is there.
 pub fn to_host(guest: &str) -> String {
     let first = guest.trim_start_matches('/').split('/').next().unwrap_or("");
+    // A sandboxed app's Linux programs keep their temporary files and home
+    // folder in its container (see `sandbox::linux_private`).
+    if WRITABLE_DIRS.contains(&first) {
+        if let Some(private) = crate::sandbox::linux_private(guest) {
+            return private;
+        }
+    }
     if SYSTEM_DIRS.contains(&first) {
         let disk = format!("{WRITABLE_ROOT}{guest}");
         if fs::stat(&disk).is_ok() {
@@ -70,6 +77,9 @@ pub fn to_host(guest: &str) -> String {
 
 /// The Linux path for the WaveOS path `host`.
 pub fn to_guest(host: &str) -> String {
+    if let Some(guest) = crate::sandbox::linux_guest(host) {
+        return guest;
+    }
     for (root, dirs) in
         [(SYSTEM_ROOT, &SYSTEM_DIRS[..]), (WRITABLE_ROOT, &WRITABLE_DIRS[..]), (WRITABLE_ROOT, &SYSTEM_DIRS[..])]
     {
@@ -153,6 +163,10 @@ pub enum Special {
     Drm(Arc<super::drm::File>),
     /// A dma-buf: a GPU buffer exported from a card (`PRIME`).
     DmaBuf(Arc<crate::drivers::gpu::BufferObject>),
+    /// A sync file: a fence for a dma-buf's pending work. The processor
+    /// renders and the display reads synchronously here, so every one is
+    /// signalled already (`poll` says readable at once).
+    SyncFile,
 }
 
 impl Special {
@@ -174,7 +188,7 @@ impl Special {
             Special::Event(e) => e.read(out),
             Special::Timer(t) => t.read(out),
             Special::WaveEvents(pid) => super::events::wave_events_read(*pid, out),
-            Special::Epoll(_) | Special::DmaBuf(_) => Err(EINVAL),
+            Special::Epoll(_) | Special::DmaBuf(_) | Special::SyncFile => Err(EINVAL),
             Special::Drm(f) => super::drm::vblank::read(f, out, true),
             Special::Unix(u) => u.recv(out, false, false).map(|r| r.len),
             Special::Shm { file, pos } => {
@@ -213,7 +227,7 @@ impl Special {
             | Special::Inotify(_)
             | Special::Netlink(_) => Err(EINVAL),
             Special::Link(_) => Err(EBADF),
-            Special::Drm(_) | Special::DmaBuf(_) => Err(EINVAL),
+            Special::Drm(_) | Special::DmaBuf(_) | Special::SyncFile => Err(EINVAL),
             Special::Unix(u) => u.send(data, Vec::new(), None, false),
             Special::Shm { file, pos } => {
                 let n = file.write_at(*pos, data)?;
@@ -243,7 +257,7 @@ impl Special {
             Special::Inotify(_) => (0o600, 0),
             Special::Link(_) => (S_IFLNK | 0o777, 0),
             Special::Drm(f) => (S_IFCHR | 0o666, makedev(super::drm::MAJOR, f.minor as u64)),
-            Special::DmaBuf(_) => (0o600, 0),
+            Special::DmaBuf(_) | Special::SyncFile => (0o600, 0),
         }
     }
 }
@@ -335,7 +349,10 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
     }
     let user = account_user();
     Some(Ok(match guest {
-        "/dev" | "/proc" | "/proc/self" | "/dev/shm" | "/dev/dri" => {
+        "/dev" | "/proc" | "/proc/self" | "/proc/pressure" | "/dev/shm" | "/dev/dri" => {
+            Special::Dir { host: String::from(guest), entries: None, pos: 0 }
+        }
+        "/dev/snd" | "/proc/asound" if crate::drivers::audio::present() => {
             Special::Dir { host: String::from(guest), entries: None, pos: 0 }
         }
         "/dev/null" => Special::Null,
@@ -344,7 +361,10 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         "/dev/tty" | "/dev/console" => return Some(Err(ENXIO)),
         "/proc/cpuinfo" => mem(super::cpu::cpuinfo()),
         "/proc/meminfo" => mem(meminfo()),
+        "/proc/pressure/memory" => mem(pressure()),
+        "/proc/self/status" => mem(status(p)),
         "/proc/self/maps" => mem(super::mm::maps(p)),
+        "/proc/self/auxv" => Special::Mem { data: p.linux.as_ref().map(|l| l.auxv()).unwrap_or_default(), pos: 0 },
         "/proc/self/cmdline" => mem(format!("{}\0", p.name())),
         "/proc/self/comm" | "/proc/self/task/self/comm" => mem(format!("{}\n", p.name())),
         "/proc/self/stat" => mem(format!(
@@ -357,13 +377,24 @@ fn virtual_file(p: &Process, guest: &str) -> Option<Result<Special, isize>> {
         )),
         "/proc/mounts" | "/proc/self/mounts" | "/etc/mtab" => mem(mounts()),
         "/proc/version" => mem(String::from("Linux version 6.12.0-waveos (WaveOS Aurora)\n")),
+        g if g.starts_with("/proc/asound/") => match super::sound::proc_file(&g["/proc/asound/".len()..]) {
+            Some(text) => mem(text),
+            None => return Some(Err(ENOENT)),
+        },
         "/proc/sys/kernel/osrelease" => mem(String::from("6.12.0-waveos\n")),
         "/etc/passwd" => mem(passwd(&user)),
         "/etc/group" => mem(group(&user)),
         "/etc/hostname" => mem(String::from("aurora\n")),
         "/etc/hosts" => mem(String::from("127.0.0.1 localhost aurora\n::1 localhost aurora\n")),
         "/etc/resolv.conf" => mem(resolv_conf()),
-        _ => return None,
+        _ => {
+            // `/proc/<pid>/status`.
+            let pid = guest.strip_prefix("/proc/")?.strip_suffix("/status")?.parse::<u32>().ok()?;
+            match crate::proc::get(pid) {
+                Some(other) => mem(status(&other)),
+                None => return Some(Err(ENOENT)),
+            }
+        }
     }))
 }
 
@@ -413,15 +444,73 @@ fn group(user: &str) -> String {
     s
 }
 
+/// `/proc/meminfo`: memory, the caches, swap (the compressed store and the
+/// swap file together) and the compressed store (as Linux's zswap).
 fn meminfo() -> String {
-    let m = crate::mm::stats();
+    let m = crate::mm::kswapd::meminfo();
+    let s = crate::mm::swap::stats();
     let kib = |b: u64| b / 1024;
+    let page_kib = |pages: u64| pages * 4;
+    let mut out = String::new();
+    for (name, v) in [
+        ("MemTotal", kib(m.total)),
+        ("MemFree", kib(m.free)),
+        ("MemAvailable", kib(m.available)),
+        ("Buffers", page_kib(crate::fs::cache::held_blocks())),
+        ("Cached", page_kib(crate::fs::mapcache::held_pages())),
+        ("SwapCached", page_kib(s.cached_pages)),
+        ("SwapTotal", kib(m.swap_total)),
+        ("SwapFree", kib(m.swap_total.saturating_sub(m.swap_used))),
+        ("Zswap", kib(m.compressed_bytes)),
+        ("Zswapped", page_kib(m.compressed_pages)),
+    ] {
+        out.push_str(&format!("{:<16}{:>8} kB\n", format!("{name}:"), v));
+    }
+    out
+}
+
+/// `/proc/pressure/memory`: the share of time some program waited for
+/// memory, over 10, 60 and 300 seconds, and in all (microseconds). ("full",
+/// every program waiting at once, isn't tracked: it reads as none.)
+fn pressure() -> String {
+    let (total_ns, avg) = crate::mm::kswapd::pressure();
+    let pct = |v: u64| format!("{}.{:02}", v / 100, v % 100);
     format!(
-        "MemTotal:       {} kB\nMemFree:        {} kB\nMemAvailable:   {} kB\n",
-        kib(m.total_bytes),
-        kib(m.total_bytes - m.used_bytes),
-        kib(m.total_bytes - m.used_bytes)
+        "some avg10={} avg60={} avg300={} total={}\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        pct(avg[0]),
+        pct(avg[1]),
+        pct(avg[2]),
+        total_ns / 1000
     )
+}
+
+/// `/proc/<pid>/status`: who the process is and its memory (resident,
+/// swapped out, locked).
+fn status(p: &Process) -> String {
+    let c = p.mem().as_ref().map(|a| a.page_counts()).unwrap_or_default();
+    let cred = *p.cred.lock();
+    let kb = |pages: u64| pages * 4;
+    let mut out = format!(
+        "Name:\t{}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{u}\t{u}\t{u}\t{u}\nGid:\t{g}\t{g}\t{g}\t{g}\n",
+        p.name(),
+        if p.exit_code().is_some() { "Z (zombie)" } else { "S (sleeping)" },
+        p.pid,
+        p.pid,
+        p.parent,
+        u = cred.uid,
+        g = cred.gid
+    );
+    for (name, pages) in [
+        ("VmLck", c.locked),
+        ("VmRSS", c.private + c.shared),
+        ("RssAnon", c.private),
+        ("RssShmem", c.shared),
+        ("VmSwap", c.swapped),
+    ] {
+        out.push_str(&format!("{name}:\t{:>8} kB\n", kb(pages)));
+    }
+    out.push_str(&format!("Threads:\t{}\n", p.thread_count()));
+    out
 }
 
 fn mounts() -> String {
@@ -652,11 +741,11 @@ pub fn wait_keys(p: &Process, fd: usize, keys: &mut Vec<usize>) {
     }
 }
 
-/// When the soonest timer among `fds` expires (ms from now).
+/// When the soonest timer among `fds` expires (ns of `time::now_ns`).
 fn next_timer(p: &Process, fds: impl Iterator<Item = usize>) -> Option<u64> {
     fds.filter_map(|fd| match &*p.fd(fd).ok()? {
         Handle::Special(s) => match &*s.lock() {
-            Special::Timer(t) => t.due_in(),
+            Special::Timer(t) => t.due_at(),
             _ => None,
         },
         _ => None,
@@ -740,9 +829,18 @@ fn open_guest_mode(p: &Process, guest: &str, flags: u64, mode: u64) -> Result<Ar
     // OSS sound, which GStreamer and SDL can play through: a WaveOS sound
     // stream (`ENODEV` without a sound device).
     if guest == "/dev/dsp" {
+        crate::sandbox::require(aurora_abi::sandbox::AUDIO_OUT)?;
         return crate::drivers::audio::open().map(|s| Arc::new(Handle::Audio(s)));
     }
-    // The display devices' DRM nodes.
+    // ALSA's card: the same mixer (see `super::sound`).
+    if let Some(dev) = super::sound::open(guest) {
+        return dev.map(|d| special(Special::Device(d)));
+    }
+    // The display devices' DRM nodes. A card drives the display (and can
+    // read what it shows); render nodes only draw.
+    if guest.starts_with("/dev/dri/card") {
+        crate::sandbox::require(aurora_abi::sandbox::DISPLAY)?;
+    }
     if let Some(f) = super::drm::open(guest) {
         return Ok(special(Special::Drm(f?)));
     }
@@ -888,6 +986,16 @@ pub fn shm_of(p: &Process, fd: u64) -> Option<Arc<super::shm::ShmFile>> {
     }
 }
 
+/// The buffer `mmap` maps at `offset` of descriptor `fd` when it is an ALSA
+/// PCM (None: it isn't one).
+pub fn pcm_buffer(p: &Process, fd: u64, offset: u64) -> Option<Result<Arc<super::shm::ShmFile>, isize>> {
+    let dev = match &*p.fd(fd as usize).ok()? {
+        Handle::Special(s) => s.lock().chardev()?,
+        _ => return None,
+    };
+    super::sound::mmap_buffer(&*dev, offset)
+}
+
 /// `memfd_create`.
 pub fn memfd_create(p: &Process, _name: u64, flags: u64) -> Result<u64, isize> {
     let file = super::shm::ShmFile::new(0)?;
@@ -974,8 +1082,18 @@ pub fn getdents64(p: &Process, fd: u64, ptr: u64, len: u64) -> Result<u64, isize
     let mut s = s.lock();
     let Special::Dir { host, entries, pos } = &mut *s else { return Err(ENOTDIR) };
     if entries.is_none() {
+        // A sandbox may refuse a real folder's list (the made-up ones in
+        // /dev, /proc, /sys and /run/udev are everyone's).
+        let made_up =
+            ["/dev", "/proc"].iter().any(|d| crate::sandbox::under(host, d)) || super::input::lookup(host).is_some();
+        if !made_up {
+            crate::sandbox::check_path(host, crate::sandbox::Access::Read)?;
+        }
         let mut list = alloc::vec![(String::from("."), DT_DIR), (String::from(".."), DT_DIR)];
-        list.extend(dir_entries(host));
+        // A folder that can't be listed says why (a folder whose list came
+        // back empty made `rm -rf` report "Directory not empty" where the
+        // truth was "Permission denied").
+        list.extend(dir_entries(host)?);
         *entries = Some(list);
     }
     let entries = entries.as_ref().unwrap();
@@ -1009,56 +1127,95 @@ const DT_REG: u8 = 8;
 const DT_LNK: u8 = 10;
 
 /// The entries of a directory: real ones (and links), or the virtual `/dev` and `/proc`.
-fn dir_entries(host: &str) -> Vec<(String, u8)> {
-    let mut v = plain_entries(host);
+fn dir_entries(host: &str) -> Result<Vec<(String, u8)>, isize> {
+    let mut v = plain_entries(host)?;
     for name in super::links::in_dir(&to_guest(host)) {
         if !v.iter().any(|(n, _)| *n == name) {
             v.push((name, DT_LNK));
         }
     }
-    v
+    Ok(v)
 }
 
-fn plain_entries(host: &str) -> Vec<(String, u8)> {
-    let mut v = folder_entries(host);
-    // What the input devices add (/sys, /dev/input, /run/udev, …).
-    if let Some(extra) = super::input::entries(&to_guest(host)) {
-        for e in extra {
-            if !v.iter().any(|(n, _)| *n == e.0) {
-                v.push(e);
-            }
+fn plain_entries(host: &str) -> Result<Vec<(String, u8)>, isize> {
+    // What the input devices add (/sys, /dev/input, /run/udev, …): those
+    // folders may have nothing on the disk.
+    let extra = super::input::entries(&to_guest(host));
+    let mut v = match folder_entries(host) {
+        Ok(v) => v,
+        Err(_) if extra.is_some() => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    for e in extra.into_iter().flatten() {
+        if !v.iter().any(|(n, _)| *n == e.0) {
+            v.push(e);
         }
     }
-    v
+    Ok(v)
 }
 
-fn folder_entries(host: &str) -> Vec<(String, u8)> {
+fn folder_entries(host: &str) -> Result<Vec<(String, u8)>, isize> {
     let kind = |dir: bool| if dir { DT_DIR } else { DT_REG };
     // A layered system folder: what the disk has, then the system image.
     let guest = to_guest(host);
     if in_system_dirs(&guest) {
+        // Either layer may lack the folder; failing in both is an error.
         let mut v: Vec<(String, u8)> = Vec::new();
+        let mut error = None;
+        let mut listed = false;
         for root in [WRITABLE_ROOT, SYSTEM_ROOT] {
-            for e in fs::readdir(&format!("{root}{guest}")).unwrap_or_default() {
-                if !v.iter().any(|(n, _)| *n == e.name) {
-                    v.push((e.name, kind(e.kind == Kind::Dir)));
+            match fs::readdir(&format!("{root}{guest}")) {
+                Ok(entries) => {
+                    listed = true;
+                    for e in entries {
+                        if !v.iter().any(|(n, _)| *n == e.name) {
+                            v.push((e.name, kind(e.kind == Kind::Dir)));
+                        }
+                    }
                 }
+                Err(ENOENT) => {}
+                Err(e) => error = error.or(Some(e)),
             }
         }
-        return v;
+        return match (listed, error) {
+            (false, Some(e)) => Err(e),
+            (false, None) => Err(ENOENT),
+            _ => Ok(v),
+        };
     }
     let names: &[(&str, bool)] = match host {
+        "/dev" if crate::drivers::audio::present() => &[
+            ("null", false),
+            ("zero", false),
+            ("random", false),
+            ("urandom", false),
+            ("shm", true),
+            ("dri", true),
+            ("snd", true),
+        ],
         "/dev" => {
             &[("null", false), ("zero", false), ("random", false), ("urandom", false), ("shm", true), ("dri", true)]
         }
         // Character devices (DT_CHR).
-        "/dev/dri" => return super::drm::node_names().into_iter().map(|n| (n, 2)).collect(),
-        "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false)],
-        "/proc/self" => &[("exe", false), ("maps", false), ("cmdline", false), ("comm", false), ("stat", false)],
-        "/dev/shm" => return super::shm::names().into_iter().map(|n| (n, DT_REG)).collect(),
+        "/dev/dri" => return Ok(super::drm::node_names().into_iter().map(|n| (n, 2)).collect()),
+        "/dev/snd" => return Ok(super::sound::node_names().into_iter().map(|n| (n, 2)).collect()),
+        "/proc/asound" => &[("cards", false), ("devices", false), ("pcm", false), ("version", false)],
+        "/proc" => &[("self", true), ("cpuinfo", false), ("meminfo", false), ("version", false), ("pressure", true)],
+        "/proc/self" => {
+            &[
+                ("exe", false),
+                ("maps", false),
+                ("cmdline", false),
+                ("comm", false),
+                ("stat", false),
+                ("status", false),
+                ("auxv", false),
+            ]
+        }
+        "/proc/pressure" => &[("memory", false)],
+        "/dev/shm" => return Ok(super::shm::names().into_iter().map(|n| (n, DT_REG)).collect()),
         _ => {
-            let mut v: Vec<(String, u8)> = fs::readdir(host)
-                .unwrap_or_default()
+            let mut v: Vec<(String, u8)> = fs::readdir(host)?
                 .into_iter()
                 .filter(|e| !(e.name == ".links" && (host == SYSTEM_ROOT || host == WRITABLE_ROOT)))
                 .map(|e| (e.name, kind(e.kind == Kind::Dir)))
@@ -1071,10 +1228,10 @@ fn folder_entries(host: &str) -> Vec<(String, u8)> {
                     }
                 }
             }
-            return v;
+            return Ok(v);
         }
     };
-    names.iter().map(|&(n, d)| (String::from(n), kind(d))).collect()
+    Ok(names.iter().map(|&(n, d)| (String::from(n), kind(d))).collect())
 }
 
 fn fnv(s: &str) -> u64 {
@@ -1133,7 +1290,7 @@ fn info_for_path(p: &Process, guest: &str, follow_link: bool) -> Result<Info, is
         let (mode, rdev, owner) = super::input::node_stat(dev);
         return Ok(Info { owner, mode, size: 0, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
     }
-    if let Some(rdev) = super::drm::node_rdev(guest) {
+    if let Some(rdev) = super::drm::node_rdev(guest).or_else(|| super::sound::node_rdev(guest)) {
         return Ok(Info { owner: None, mode: S_IFCHR | 0o666, size: 0, ino: fnv(guest), rdev, mtime: 0, ctime: 0 });
     }
     if let Some(v) = virtual_file(p, guest) {
@@ -1248,24 +1405,25 @@ fn ids(i: &Info) -> (u32, u32) {
     })
 }
 
-/// Linux's `struct stat` (144 bytes on x86-64).
+/// Linux's `struct stat`, laid out for the architecture (`abi`).
 fn put_stat(ptr: u64, i: &Info) -> Result<u64, isize> {
     let (uid, gid) = ids(i);
-    let mut b = [0u8; 144];
-    let mut w = |off: usize, v: u64| b[off..off + 8].copy_from_slice(&v.to_le_bytes());
-    w(0, 0x803); // st_dev
-    w(8, i.ino);
-    w(16, if i.mode & S_IFDIR != 0 { 2 } else { 1 }); // st_nlink
-    w(24, i.mode as u64 | ((uid as u64) << 32)); // st_mode, st_uid
-    w(32, gid as u64); // st_gid
-    w(40, i.rdev);
-    w(48, i.size);
-    w(56, 4096); // st_blksize
-    w(64, i.size.div_ceil(512)); // st_blocks
-    w(72, i.mtime as u64); // st_atime
-    w(88, i.mtime as u64);
-    w(104, i.ctime as u64);
-    user::put(ptr, &b).map(|_| 0)
+    let s = aurora_linuxabi::Stat {
+        dev: 0x803,
+        ino: i.ino,
+        mode: i.mode,
+        nlink: if i.mode & S_IFDIR != 0 { 2 } else { 1 },
+        uid,
+        gid,
+        rdev: i.rdev,
+        size: i.size,
+        blksize: 4096,
+        blocks: i.size.div_ceil(512),
+        atime: (i.mtime, 0),
+        mtime: (i.mtime, 0),
+        ctime: (i.ctime, 0),
+    };
+    super::abi::native::put_stat(ptr, &s)
 }
 
 pub fn stat_path(p: &Process, dirfd: u64, ptr: u64, buf: u64, flags: u64) -> Result<u64, isize> {
@@ -1425,22 +1583,26 @@ pub fn ioctl(p: &Process, fd: u64, request: u64, arg: u64) -> Result<u64, isize>
     };
     if let Some(d) = &dev {
         if !matches!(request, 0x541B | 0x5421 | 0x5451 | 0x5450) {
-            return d.ioctl(request as u32, arg);
+            return d.ioctl_nb(request as u32, arg, nonblocking(p, fd));
         }
     }
     // DRM ('d') requests on a card, dma-buf ('b') ones on a dma-buf.
     if let Handle::Special(s) = &*h {
         let kind = request >> 8 & 0xFF;
-        let (card, dmabuf) = match &*s.lock() {
-            Special::Drm(f) => (Some(f.clone()), false),
-            Special::DmaBuf(_) => (None, true),
-            _ => (None, false),
+        let (card, dmabuf, sync) = match &*s.lock() {
+            Special::Drm(f) => (Some(f.clone()), false, false),
+            Special::DmaBuf(_) => (None, true, false),
+            Special::SyncFile => (None, false, true),
+            _ => (None, false, false),
         };
         if let (Some(f), 0x64) = (&card, kind) {
             return super::drm::ioctl(p, f, request, arg);
         }
         if dmabuf && kind == 0x62 {
-            return super::drm::dmabuf_ioctl(request, arg);
+            return super::drm::dmabuf_ioctl(p, request, arg);
+        }
+        if sync && kind == 0x3E {
+            return super::drm::sync_file_ioctl(p, request, arg);
         }
     }
     match request {
@@ -1512,12 +1674,17 @@ fn oss(stream: &crate::drivers::audio::Stream, request: u64, arg: u64) -> Result
             let info = [(free / FRAGMENT) as i32, (total / FRAGMENT) as i32, FRAGMENT as i32, free as i32];
             user::put(arg, &info).map(|_| 0)
         }
-        // SNDCTL_DSP_GETODELAY: bytes written but not played yet.
-        0x8004_5017 => put((stream.queued() * 2) as i32),
+        // SNDCTL_DSP_GETODELAY: bytes written but not heard yet: queued,
+        // and mixed into the device's ring ahead of what it plays (players
+        // time their pictures by this).
+        0x8004_5017 => {
+            let ahead = if stream.queued() > 0 { crate::drivers::audio::latency_frames() as usize } else { 0 };
+            put(((stream.queued() / 2 + ahead) * 4) as i32)
+        }
         // SNDCTL_DSP_GETOPTR: count_info { bytes played, blocks, ptr }.
         0x800C_5012 => {
-            let played = stream.control(aurora_abi::audio::POSITION)? * 4;
-            user::put(arg, &[played as i32, 0, 0]).map(|_| 0)
+            let played = stream.control(aurora_abi::audio::POSITION)?.saturating_sub(crate::drivers::audio::latency_frames());
+            user::put(arg, &[(played * 4) as i32, 0, 0]).map(|_| 0)
         }
         _ => Err(EINVAL),
     }
@@ -1651,20 +1818,20 @@ pub enum Timeout {
     Timespec(u64),
 }
 
-/// The deadline (uptime ms) for a timeout; `None`: wait forever.
+/// The deadline (ns of `time::now_ns`) for a timeout; `None`: wait forever.
 fn deadline(t: Timeout) -> Result<Option<u64>, isize> {
-    let ms = match t {
+    let ns = match t {
         Timeout::Timeval(0) | Timeout::Timespec(0) => return Ok(None),
         Timeout::Timeval(ptr) => {
             let [sec, usec]: [i64; 2] = user::get(ptr)?;
-            sec.max(0) as u64 * 1000 + (usec.max(0) as u64).div_ceil(1000)
+            (sec.max(0) as u64).saturating_mul(1_000_000_000).saturating_add(usec.max(0) as u64 * 1000)
         }
         Timeout::Timespec(ptr) => {
             let [sec, nsec]: [i64; 2] = user::get(ptr)?;
-            sec.max(0) as u64 * 1000 + (nsec.max(0) as u64).div_ceil(1_000_000)
+            (sec.max(0) as u64).saturating_mul(1_000_000_000).saturating_add(nsec.max(0) as u64)
         }
     };
-    Ok(Some(crate::time::uptime_ms() + ms))
+    Ok(Some(crate::time::now_ns().saturating_add(ns)))
 }
 
 /// Waits until `check` finds something ready (it returns a count), the
@@ -1678,7 +1845,7 @@ fn wait_ready(
 ) -> Result<u64, isize> {
     use crate::proc::readiness;
     loop {
-        let timed_out = deadline.is_some_and(|d| crate::time::uptime_ms() >= d);
+        let timed_out = deadline.is_some_and(|d| crate::time::now_ns() >= d);
         if timed_out {
             return check(true);
         }
@@ -1695,16 +1862,17 @@ fn wait_ready(
         if crate::proc::interrupted() {
             return Err(EINTR);
         }
-        let mut wait = deadline.map_or(1000, |d| d.saturating_sub(crate::time::uptime_ms()));
+        let now = crate::time::now_ns();
+        let mut until = deadline.unwrap_or(now + 1_000_000_000);
         if let Some(t) = next_timer(p, fds.iter().copied()) {
-            wait = wait.min(t);
+            until = until.min(t);
         }
-        watch.wait(wait.max(1));
+        watch.wait_until_ns(until.max(now + 1));
     }
 }
 
 pub fn poll(p: &Process, fds_ptr: u64, count: u64, timeout_ms: i64) -> Result<u64, isize> {
-    let deadline = (timeout_ms >= 0).then(|| crate::time::uptime_ms() + timeout_ms as u64);
+    let deadline = (timeout_ms >= 0).then(|| crate::time::now_ns() + timeout_ms as u64 * 1_000_000);
     poll_until(p, fds_ptr, count, deadline)
 }
 
@@ -1850,8 +2018,10 @@ pub fn chdir(p: &Process, ptr: u64) -> Result<u64, isize> {
 
 fn set_cwd(p: &Process, guest: &str) -> Result<u64, isize> {
     let host = to_host(guest);
-    if !fs::is_dir(&host) {
-        return Err(if fs::stat(&host).is_ok() { ENOTDIR } else { ENOENT });
+    match fs::stat(&host) {
+        Ok((m, _)) if m.kind == Kind::Dir => {}
+        Ok(_) => return Err(ENOTDIR),
+        Err(e) => return Err(e),
     }
     *p.cwd.lock() = host;
     Ok(0)
@@ -1885,6 +2055,7 @@ pub fn unlinkat(p: &Process, dirfd: u64, ptr: u64, flags: u64) -> Result<u64, is
         if crate::users::current().is_some_and(|c| !c.is_root()) {
             fs::perm::access(&fs::parent_path(&to_host(&guest)), fs::perm::W | fs::perm::X)?;
         }
+        super::links::may_change()?;
         return fs::perm::system(|| super::links::remove(&guest)).map(|_| 0);
     }
     let host = to_host(&guest);
@@ -1962,6 +2133,7 @@ pub fn symlinkat(p: &Process, target: u64, dirfd: u64, ptr: u64) -> Result<u64, 
     if crate::users::current().is_some_and(|c| !c.is_root()) {
         fs::perm::access(&fs::parent_path(&host), fs::perm::W | fs::perm::X)?;
     }
+    super::links::may_change()?;
     fs::perm::system(|| super::links::create(&guest, &to)).map(|_| 0)
 }
 
@@ -1975,10 +2147,30 @@ pub fn ftruncate(p: &Process, fd: u64, len: u64) -> Result<u64, isize> {
     if let Some(shm) = shm_of(p, fd) {
         return shm.resize(len).map(|_| 0);
     }
-    match &*p.fd(fd as usize)? {
-        Handle::File(f) => f.lock().truncate(len).map(|_| 0),
+    let h = p.fd(fd as usize)?;
+    match &*h {
+        Handle::File(f) => {
+            f.lock().truncate(len)?;
+            // Shared mappings made through this description follow.
+            if let Some(shared) = super::mm::file_shared_of(&h) {
+                shared.resize(len)?;
+            }
+            Ok(0)
+        }
         _ => Err(EINVAL),
     }
+}
+
+/// `fsync`, `fdatasync`, `syncfs`: when they return, the file (and, as
+/// AuroraFS commits one journal transaction for everything, every change
+/// before it on the same volume) is on the disk. Other descriptors
+/// (pipes, sockets) have nothing to write out.
+pub fn fsync(p: &Process, fd: u64) -> Result<u64, isize> {
+    let fs = match &*p.fd(fd as usize)? {
+        Handle::File(f) => f.lock().fs.clone(),
+        _ => return Ok(0),
+    };
+    fs.sync().map(|_| 0)
 }
 
 /// `fallocate`: makes room for `len` bytes at `off` (the file grows unless

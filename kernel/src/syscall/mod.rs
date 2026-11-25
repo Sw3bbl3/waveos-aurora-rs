@@ -9,30 +9,32 @@ use crate::{mm, sched, time};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use aurora_abi::sandbox as cap;
 use aurora_abi::{err::*, nr, DateTime, DirEntry, ProcInfo, Stat, SysInfo, NAME_MAX};
+use crate::sandbox::require;
 use core::sync::atomic::Ordering;
 
 type SysResult = Result<u64, isize>;
 
 /// Entry from the assembly stub (`arch::syscall`), with interrupts enabled.
-pub extern "sysv64" fn dispatch(f: &mut SyscallFrame) {
-    let a = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
-    crate::telemetry::syscall(f.rax as usize);
+pub extern "C" fn dispatch(f: &mut SyscallFrame) {
+    let a = f.args();
+    let nr = f.number();
+    crate::telemetry::syscall(nr as usize);
     // Linux programs use Linux's numbers and meanings. (The process is
     // looked up once, here, for all the steps of the call.)
     let p = proc::current();
     let linux = p.as_ref().filter(|p| p.linux.is_some());
-    let nr = f.rax;
     let result = match linux {
         Some(p) => crate::compat::linux::dispatch(f, p),
-        None => handle(f.rax as usize, a),
+        None => handle(nr as usize, a),
     };
-    f.rax = match result {
+    f.set_return(match result {
         Ok(v) => v,
         Err(e) => (-e.abs()) as u64,
-    };
+    });
     if let Some(p) = linux {
-        crate::compat::linux::signal::on_return(f, nr, p);
+        crate::compat::linux::signal::on_return(f, nr, &a, p);
     }
     proc::check_killed_of(p.as_deref());
 }
@@ -197,20 +199,32 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::FUTEX_WAKE => proc::futex::wake(a[0], a[1]),
         nr::CLIPBOARD_SET => {
             let data = user::slice(a[1], a[2].min(aurora_abi::clip::MAX_LEN as u64 + 1))?;
+            offered_files(a[0] as usize, &data)?;
             crate::gui::clipboard::set(a[0] as usize, &data).map(|_| 0)
         }
         nr::CLIPBOARD_GET => {
+            // What another app copied: when the person pastes (the app is in
+            // front), or with `clipboard`.
+            if !crate::sandbox::allows(cap::CLIPBOARD_READ) && crate::gui::server::frontmost() != sched::current_pid() {
+                return Err(EACCES);
+            }
             let mut out = user::slice_mut(a[1], a[2].min(aurora_abi::clip::MAX_LEN as u64))?;
             let n = crate::gui::clipboard::get(a[0] as usize, &mut out)?;
             out.commit(n)?;
+            // Files pasted: the app may use them.
+            if matches!(a[0] as usize, aurora_abi::clip::FILES | aurora_abi::clip::CUT_FILES) {
+                give_files(&out[..n.min(out.len())]);
+            }
             Ok(n as u64)
         }
         nr::DRAG_START => {
             let data = user::slice(a[1], a[2].min(aurora_abi::clip::MAX_LEN as u64 + 1))?;
+            offered_files(a[0] as usize, &data)?;
             crate::gui::server::drag_start(sched::current_pid(), a[0] as usize, &data, a[3] as u32, a[4] as usize)
                 .map(|_| 0)
         }
         nr::NOTIFY => {
+            require(cap::NOTIFY)?;
             let title = user::str(a[0], a[1].min(512))?;
             let body = user::str(a[2], a[3].min(2048))?;
             let p = proc::current().ok_or(EPERM)?;
@@ -229,6 +243,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         nr::PREF_SET => {
             let key = user::str(a[0], a[1].min(64))?;
             let value = user::str(a[2], a[3].min(1024))?;
+            require(cap::PREFS_WRITE)?;
             if crate::users::system_pref(&key) {
                 crate::users::require_admin("change how this computer starts up")?;
             }
@@ -245,6 +260,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             if !ok {
                 return Err(EINVAL);
             }
+            require(cap::SYSTEM)?;
             crate::users::require_admin("set the date and time")?;
             let rd = crate::drivers::rtc::DateTime {
                 year: d.year,
@@ -274,12 +290,19 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             out.commit(n * size)?;
             Ok(modes.len() as u64)
         }
-        nr::SET_DISPLAY => crate::gui::prefs::set_display(a[0] as u32, a[1] as u32),
+        nr::SET_DISPLAY => {
+            require(cap::SYSTEM)?;
+            crate::gui::prefs::set_display(a[0] as u32, a[1] as u32)
+        }
         nr::SYS_STATS => user::put(a[0], &sys_stats()).map(|_| 0),
         nr::DRAG_DATA => {
             let mut out = user::slice_mut(a[0], a[1].min(aurora_abi::clip::MAX_LEN as u64))?;
-            let n = crate::gui::dnd::data(sched::current_pid(), &mut out)?;
+            let (n, files) = crate::gui::dnd::data(sched::current_pid(), &mut out)?;
             out.commit(n)?;
+            // Files dropped on the app: it may use them.
+            if files {
+                give_files(&out[..n.min(out.len())]);
+            }
             Ok(n as u64)
         }
         nr::SYS_REPORT => {
@@ -287,7 +310,10 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
                 aurora_abi::report::PCI => crate::report::pci().into_bytes(),
                 aurora_abi::report::USB => crate::report::usb().into_bytes(),
                 aurora_abi::report::CPU => crate::report::cpu().into_bytes(),
-                aurora_abi::report::LOG => crate::report::log(),
+                aurora_abi::report::LOG => {
+                    require(cap::SYSTEM)?;
+                    crate::report::log()
+                }
                 _ => return Err(EINVAL),
             };
             let mut out = user::slice_mut(a[1], a[2])?;
@@ -308,6 +334,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
                 ICMP6 => (Kind::Icmp, true),
                 _ => return Err(EINVAL),
             };
+            require(cap::NET_CLIENT)?;
             let p = proc::current().ok_or(EPERM)?;
             p.install_fd(Arc::new(Handle::Socket(Socket::new(kind, v6)))).map(|fd| fd as u64)
         }
@@ -319,7 +346,11 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             let s = socket(a[0])?;
             s.bind(read_peer(&s, a[1])?).map(|_| 0)
         }
-        nr::LISTEN => socket(a[0])?.listen(a[1] as usize).map(|_| 0),
+        nr::LISTEN => {
+            // (A listener takes connections on every interface.)
+            require(cap::NET_SERVER)?;
+            socket(a[0])?.listen(a[1] as usize).map(|_| 0)
+        }
         nr::ACCEPT => {
             let listener = proc::current().ok_or(EPERM)?.fd(a[0] as usize)?;
             let Handle::Socket(s) = &*listener else { return Err(EINVAL) };
@@ -396,16 +427,19 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             if a[1] == 0 || a[1] > 32 || a[3] > 63 {
                 return Err(EINVAL);
             }
+            require(cap::SYSTEM)?;
             let ssid = user::slice(a[0], a[1])?;
             let password = if a[3] == 0 { String::new() } else { user::str(a[2], a[3])? };
             crate::drivers::wifi::connect(&ssid, &password)?;
             Ok(0)
         }
         nr::WIFI_DISCONNECT => {
+            require(cap::SYSTEM)?;
             crate::drivers::wifi::disconnect();
             Ok(0)
         }
         nr::GAMEPADS => {
+            require(cap::GAMEPADS)?;
             let list = crate::drivers::gamepad::list();
             let max = (a[1] as usize).min(16);
             let size = core::mem::size_of::<aurora_abi::GamepadInfo>();
@@ -419,6 +453,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             Ok(list.len() as u64)
         }
         nr::GAMEPAD_STATE => {
+            require(cap::GAMEPADS)?;
             let st = crate::drivers::gamepad::state_for(crate::sched::current_pid(), a[0] as u32).ok_or(ENODEV)?;
             let size = core::mem::size_of::<aurora_abi::GamepadState>();
             let mut out = user::slice_mut(a[1], size as u64)?;
@@ -427,6 +462,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             Ok(0)
         }
         nr::GAMEPAD_RUMBLE => {
+            require(cap::GAMEPADS)?;
             let level = |v: u64| v.min(255) as u8;
             crate::drivers::gamepad::rumble(a[0] as u32, level(a[1]), level(a[2]), a[3])?;
             Ok(0)
@@ -458,12 +494,14 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         }
         nr::POWER_INFO => user::put(a[0], &crate::acpi::power_info()).map(|_| 0),
         nr::AUDIO_OPEN => {
+            require(cap::AUDIO_OUT)?;
             let stream = crate::drivers::audio::open()?;
             let p = proc::current().ok_or(EPERM)?;
             p.install_fd(Arc::new(Handle::Audio(stream))).map(|fd| fd as u64)
         }
         nr::AUDIO_VOLUME => {
             if a[0] == aurora_abi::audio::SET {
+                require(cap::PREFS_WRITE)?;
                 crate::gui::prefs::set_volume(a[1].min(100) as u32, a[2] != 0);
             }
             Ok(crate::drivers::audio::state())
@@ -477,6 +515,7 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
             Ok(all.len() as u64)
         }
         nr::AUDIO_CAPTURE => {
+            require(cap::MICROPHONE)?;
             let capture = crate::drivers::audio::capture::open(a[0] as u32)?;
             let p = proc::current().ok_or(EPERM)?;
             p.install_fd(Arc::new(Handle::AudioIn(capture))).map(|fd| fd as u64)
@@ -493,12 +532,17 @@ pub(crate) fn handle(nr: usize, a: [u64; 6]) -> SysResult {
         | nr::WIN_SET_TITLE
         | nr::WIN_SET_CURSOR
         | nr::WIN_SET_PROGRAM
+        | nr::WIN_BUFFER
+        | nr::WIN_BUFFER_DESTROY
+        | nr::WIN_ATTACH
+        | nr::WIN_SET_FULLSCREEN
         | nr::WIN_CLOSE
         | nr::WIN_RESIZE
         | nr::NEXT_EVENT => crate::gui::server::syscall(nr, a),
         nr::CRED_GET | nr::CRED_SET | nr::CHMOD | nr::CHOWN | nr::STAT_OWNER | nr::USERS | nr::ELEVATE => {
             crate::users::syscall::handle(nr, a)
         }
+        nr::SANDBOX => crate::sandbox::syscall::handle(a),
         _ => Err(ENOSYS),
     }
 }
@@ -571,7 +615,30 @@ fn spawn(a: [u64; 6]) -> SysResult {
             }
         }
     }
-    proc::spawn(&path, &args, stdio, me.pid).map(|pid| pid as u64)
+    let confine = crate::sandbox::spawn_policy(&me, &path, &args)?;
+    proc::spawn_confined(&path, &args, None, stdio, me.pid, confine).map(|pid| pid as u64)
+}
+
+/// A sandboxed app may offer (copy, drag) only files it may read itself.
+fn offered_files(kind: usize, data: &[u8]) -> Result<(), isize> {
+    use aurora_abi::clip::*;
+    let Some(s) = crate::sandbox::current() else { return Ok(()) };
+    if !matches!(kind, FILES | CUT_FILES) {
+        return Ok(());
+    }
+    for line in String::from_utf8_lossy(data).lines().filter(|l| !l.is_empty()) {
+        s.check_path(&fs::resolve("/", line), crate::sandbox::Access::Read)?;
+    }
+    Ok(())
+}
+
+/// The person moved these files to the calling app (a paste or a drop):
+/// it may read and change them.
+fn give_files(list: &[u8]) {
+    let Some(s) = crate::sandbox::current() else { return };
+    for line in String::from_utf8_lossy(list).lines().filter(|l| l.starts_with('/')) {
+        s.grant(line, true);
+    }
 }
 
 pub(crate) fn read(fd: usize, ptr: u64, len: u64) -> SysResult {
@@ -611,16 +678,46 @@ fn mmap(len: u64) -> SysResult {
     if len == 0 || len > 1 << 30 {
         return Err(EINVAL);
     }
+    use mm::vmm::Fault;
     let pages = len.div_ceil(mm::PAGE_SIZE);
     let p = proc::current().ok_or(EPERM)?;
-    let mut guard = p.mem();
-    let aspace = guard.as_mut().ok_or(ESRCH)?;
-    let va = aspace.reserve(pages).ok_or(ENOMEM)?;
-    if let Err(e) = aspace.map_anon(va, pages, mm::vmm::Prot::ReadWrite) {
-        aspace.unmap(va, pages);
-        return Err(e);
+    let va = {
+        let mut guard = p.mem();
+        let aspace = guard.as_mut().ok_or(ESRCH)?;
+        let va = aspace.reserve(pages).ok_or(ENOMEM)?;
+        aspace.map_lazy(va, pages, mm::vmm::Prot::ReadWrite)?;
+        va
+    };
+    // The memory is made now (a WaveOS program's `mmap` either gets it or
+    // fails), a chunk at a time with the address space let go in between,
+    // so `kswapd` can swap out what this process filled before.
+    let undo = |e| {
+        if let Some(a) = p.mem().as_mut() {
+            a.unmap(va, pages);
+        }
+        Err(e)
+    };
+    let mut done = 0;
+    while done < pages {
+        let n = (pages - done).min(64);
+        let r = match p.mem().as_mut() {
+            Some(a) => a.prefault(va + done * mm::PAGE_SIZE, n * mm::PAGE_SIZE, true),
+            None => Fault::Invalid,
+        };
+        match r {
+            Fault::Resolved => done += n,
+            // (No out-of-memory killing for this: the call fails instead.)
+            Fault::NoMemory if mm::kswapd::wait_for_memory() && !proc::interrupted() => {}
+            Fault::NoMemory => return undo(ENOMEM),
+            // Unmapped meanwhile by another thread.
+            Fault::Invalid => return undo(ENOMEM),
+        }
     }
-    p.resident_kib.store(aspace.resident / 1024, Ordering::Relaxed);
+    if let Some(a) = p.mem().as_mut() {
+        // Every page is made: nothing lazy is left to remember there.
+        a.made(va, pages);
+        p.resident_kib.store(a.resident / 1024, Ordering::Relaxed);
+    }
     Ok(va)
 }
 
@@ -744,6 +841,16 @@ fn sys_stats() -> aurora_abi::SysStats {
     s.frames = crate::telemetry::FRAMES.load(Ordering::Relaxed);
     s.windows = crate::gui::server::windows().len() as u32;
     s.processes = proc::all().iter().filter(|p| p.exit_code().is_none()).count() as u32;
+    let mi = mm::kswapd::meminfo();
+    let sw = mm::swap::stats();
+    s.mem_available = mi.available;
+    (s.mem_compressed, s.mem_compressed_pages) = (mi.compressed_bytes, mi.compressed_pages * mm::PAGE_SIZE);
+    (s.swap_total, s.swap_used, s.swap_file_total, s.swap_file_used) =
+        (mi.swap_total, mi.swap_used, mi.disk_swap_total, mi.disk_swap_used);
+    (s.swap_ins, s.swap_outs) = (sw.swapins, sw.swapouts);
+    s.mem_pressure = mm::kswapd::level();
+    s.mem_stall_10s = mm::kswapd::pressure().1[0] as u32;
+    s.oom_kills = mm::kswapd::oom_kills();
     s
 }
 

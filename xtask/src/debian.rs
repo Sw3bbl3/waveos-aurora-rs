@@ -11,6 +11,12 @@
 //! Symbolic links go into `.links`, since WaveOS's file systems have none.
 //! Maintainer scripts don't run; the few things they would set up are done
 //! here (see [`configure`]).
+//!
+//! Each architecture has its own root (`target/linux-root` for x86_64,
+//! `target/linux-root-aarch64`), from Debian's `amd64` or `arm64` index:
+//! both are listed, with their hashes, in the one pinned `Release`, so the
+//! chain of hashes is the same. Names that depend on the architecture
+//! (Debian's, the multiarch triplet) come from `arch.rs`.
 
 use super::linux::{fetch, gunzip, unpack_deb};
 use super::root;
@@ -20,7 +26,16 @@ use std::path::{Path, PathBuf};
 
 const SNAPSHOT: &str = "https://snapshot.debian.org/archive/debian/20261001T000000Z";
 const RELEASE_SHA256: &str = "abcf5882746e0f68171f41adbb4ac01b74b49d62d203379befb9265804311a4f";
-const INDEX: &str = "main/binary-amd64/Packages.gz";
+
+/// The package index of the build's architecture, as `Release` names it.
+fn index_path() -> String {
+    format!("main/binary-{}/Packages.gz", crate::arch::current().debian())
+}
+
+/// The smallest root that shows the way works: the C library, BusyBox and
+/// GNU Hello (a dynamically linked program, so the loader runs too).
+/// `cargo xtask linux-root --base`.
+pub const BASE_PACKAGES: &[&str] = &["libc6", "busybox", "hello"];
 
 /// What `cargo xtask linux-root` installs without arguments.
 /// (WenQuanYi Micro Hei: Chinese, Japanese and Korean text, which DejaVu
@@ -36,6 +51,8 @@ pub const DEFAULT_PACKAGES: &[&str] = &[
     // for streaming sites (YouTube's audio), H.264 and AV1.
     "gstreamer1.0-plugins-bad",
     "gstreamer1.0-libav",
+    // GStreamer's ALSA sink: WebKit's sound, through WaveOS's ALSA card.
+    "gstreamer1.0-alsa",
     "ca-certificates",
     // Mesa's spinning cube, full screen on the DRM device (its libraries,
     // GBM, EGL and GLES, come with WebKit anyway).
@@ -48,9 +65,18 @@ pub const DEFAULT_PACKAGES: &[&str] = &[
 /// What `cargo xtask test --mesa` puts on its disk: Mesa's GBM, EGL, GL,
 /// GLES and Vulkan (lavapipe) drivers and the unmodified programs that drive
 /// them full screen through `/dev/dri/card0` (kmscube, glmark2's DRM builds),
+/// glmark2's Wayland build (in a window and full screen through `wl-bridge`),
 /// plus `eglinfo` and `vulkaninfo`.
-pub const MESA_PACKAGES: &[&str] =
-    &["kmscube", "glmark2-drm", "glmark2-es2-drm", "mesa-vulkan-drivers", "vulkan-tools", "mesa-utils-bin"];
+pub const MESA_PACKAGES: &[&str] = &[
+    "kmscube",
+    "glmark2-drm",
+    "glmark2-es2-drm",
+    // The same in a window (Wayland, through wl-bridge), full screen too.
+    "glmark2-es2-wayland",
+    "mesa-vulkan-drivers",
+    "vulkan-tools",
+    "mesa-utils-bin",
+];
 
 /// Packages never installed: they only matter to a running Debian system
 /// (package management, init, the system bus).
@@ -99,11 +125,11 @@ fn index() -> BTreeMap<String, Package> {
     let sha = text
         .split("SHA256:")
         .nth(1)
-        .and_then(|sums| sums.lines().find(|l| l.ends_with(&format!(" {INDEX}"))))
+        .and_then(|sums| sums.lines().find(|l| l.ends_with(&format!(" {}", index_path()))))
         .and_then(|l| l.split_whitespace().next())
         .expect("index checksum in Release")
         .to_string();
-    let gz = fetch(&format!("{SNAPSHOT}/dists/bookworm/{INDEX}"), &sha).expect("Debian package index");
+    let gz = fetch(&format!("{SNAPSHOT}/dists/bookworm/{}", index_path()), &sha).expect("Debian package index");
     let raw = String::from_utf8(gunzip(&fs::read(gz).unwrap())).unwrap();
     let mut out = BTreeMap::new();
     for para in raw.split("\n\n") {
@@ -172,9 +198,27 @@ fn resolve<'a>(idx: &'a BTreeMap<String, Package>, wanted: &[String]) -> Vec<&'a
     seen.into_values().collect()
 }
 
-/// Builds `target/linux-root` from `packages` (and what they need).
+/// The build's architecture's Linux root: `target/linux-root` (x86_64)
+/// or `target/linux-root-aarch64`.
+pub fn root_dir() -> PathBuf {
+    root().join(format!("target/linux-root{}", crate::arch::current().suffix()))
+}
+
+/// Builds [`root_dir`] from `packages` (and what they need).
 pub fn build(packages: &[String]) -> PathBuf {
-    build_into(&root().join("target/linux-root"), packages)
+    build_into(&root_dir(), packages)
+}
+
+/// What fetching the packages will download.
+fn download_note(bytes: u64) -> String {
+    if bytes == 0 {
+        String::from("all of them already downloaded")
+    } else {
+        format!(
+            "downloading {} MiB from snapshot.debian.org, once (--no-linux-root leaves the Linux programs off)",
+            bytes.div_ceil(1 << 20)
+        )
+    }
 }
 
 /// Builds a Linux root in `out` from `packages` (and what they need).
@@ -182,7 +226,21 @@ pub fn build_into(out: &Path, packages: &[String]) -> PathBuf {
     let idx = index();
     let list = resolve(&idx, packages);
     let size: u64 = list.iter().map(|p| p.get("Installed-Size").parse::<u64>().unwrap_or(0)).sum();
-    println!("Linux root: {} Debian packages, {} MiB installed", list.len(), size / 1024);
+    // What has to come over the network first (downloads stay in
+    // target/downloads, so only the first time).
+    let cache = root().join("target/downloads");
+    let missing: u64 = list
+        .iter()
+        .filter(|p| !cache.join(p.get("Filename").rsplit('/').next().unwrap_or("")).exists())
+        .map(|p| p.get("Size").parse::<u64>().unwrap_or(0))
+        .sum();
+    println!(
+        "Linux root: {} Debian {} packages, {} MiB installed; {}",
+        list.len(),
+        crate::arch::current().debian(),
+        size / 1024,
+        download_note(missing)
+    );
     let out = out.to_path_buf();
     let _ = fs::remove_dir_all(&out);
     fs::create_dir_all(&out).unwrap();
@@ -214,6 +272,9 @@ pub fn waveos_settings(dir: &Path) -> Vec<(String, PathBuf)> {
         ("/etc/firefox-esr/waveos.js", src.join("waveos.js")),
         ("/usr/share/firefox-esr/distribution/policies.json", src.join("policies.json")),
         ("/etc/xdg/gtk-3.0/settings.ini", src.join("gtk-settings.ini")),
+        // ALSA's default device: WaveOS's mixer (libasound, for Firefox,
+        // GStreamer and SDL).
+        ("/etc/asound.conf", root().join("linux-programs/alsa/asound.conf")),
     ];
     // Voyage, the web browser, built for these packages.
     if let Some(voyage) = super::voyage::build(dir) {
@@ -312,18 +373,19 @@ fn configure(root: &Path, links: &mut BTreeMap<String, String>) {
     // Libraries that `update-alternatives` links into place when a package
     // is installed (FFmpeg, in GStreamer's libav plugin, needs BLAS and
     // LAPACK): linked to the one implementation in the root.
+    let triplet = crate::arch::current().multiarch();
     for (lib, dir) in [("libblas.so.3", "blas"), ("liblapack.so.3", "lapack")] {
-        let from = root.join("usr/lib/x86_64-linux-gnu").join(dir);
+        let from = root.join("usr/lib").join(triplet).join(dir);
         let real =
             fs::read_dir(&from).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
         if let Some(file) = real.filter(|f| f.starts_with(lib)).min() {
-            links.insert(format!("/usr/lib/x86_64-linux-gnu/{lib}"), format!("{dir}/{file}"));
+            links.insert(format!("/usr/lib/{triplet}/{lib}"), format!("{dir}/{file}"));
         }
     }
     // An empty loader cache: the loader then searches the usual folders.
     let etc = root.join("etc");
     fs::create_dir_all(&etc).unwrap();
-    fs::write(etc.join("ld.so.conf"), "/usr/local/lib\n/lib/x86_64-linux-gnu\n/usr/lib/x86_64-linux-gnu\n").unwrap();
+    fs::write(etc.join("ld.so.conf"), format!("/usr/local/lib\n/lib/{triplet}\n/usr/lib/{triplet}\n")).unwrap();
     fs::write(etc.join("machine-id"), "5761766553797374656d4c696e757830\n").unwrap();
     for (tool, dir) in GENERATED {
         let dir = root.join(dir);

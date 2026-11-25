@@ -1,0 +1,4 @@
+featured=1
+about=Every WaveUI control in one window: buttons, toggles, sliders, pickers, text fields, lists, grids and sheets, each in a few lines of Rust.\n\nThe WaveSDK's example app. Open it next to Studio to see how a WaveOS app is put together, then package your own with cargo xtask package.
+notes.1.1.0=A newer build of the same gallery, to try updating, rolling back and Update All in the Store.
+notes.1.0.0=The first version.

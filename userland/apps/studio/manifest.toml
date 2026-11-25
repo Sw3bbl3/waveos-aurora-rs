@@ -1,0 +1,14 @@
+# What Studio may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.studio"
+name = "Studio"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Studio.elf"
+description = "Builds WaveOS apps with the WaveSDK."
+categories = ["system"]
+permissions = ["home", "admin", "spawn", "launch", "network", "notifications", "background"]

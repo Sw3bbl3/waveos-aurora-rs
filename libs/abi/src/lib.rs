@@ -1,15 +1,30 @@
 //! The WaveOS Aurora system-call ABI, shared by the Aster kernel and user space.
 //!
-//! Calling convention (`syscall` instruction): number in `rax`, arguments in
-//! `rdi, rsi, rdx, r10, r8, r9`, result in `rax`. Results `>= 0` are success;
-//! negative results are `-errno` (see [`err`]).
+//! Calling convention, the same numbers and arguments on both architectures:
+//!
+//! | | instruction | number | arguments | result | clobbered |
+//! |---|---|---|---|---|---|
+//! | x86-64 | `syscall` | `rax` | `rdi, rsi, rdx, r10, r8, r9` | `rax` | `rcx`, `r11` |
+//! | aarch64 | `svc #0` | `x8` | `x0`–`x5` | `x0` | none |
+//!
+//! Results `>= 0` are success; negative results are `-errno` (see [`err`]).
+//! Every other register keeps its value (on aarch64 the vector registers
+//! too). A program starts at its ELF entry with the argument block's
+//! address in its first argument register (`rdi`, `x0`); a thread starts
+//! at its function with the spawn argument there. There is no thread pointer: `TPIDR_EL0` and `fs` are left to
+//! Linux programs.
 //!
 //! Every struct that crosses the boundary is `#[repr(C)]` and contains only
 //! integers, so the kernel never has to trust user-written enum discriminants.
+//! The layouts are the same on both architectures (64-bit little-endian).
 
 #![no_std]
 
 pub mod input;
+
+/// The processor architecture this code is built for, as GINA packages
+/// and `uname` name it: `x86_64` or `aarch64`.
+pub const ARCH: &str = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
 
 /// System call numbers.
 pub mod calendar;
@@ -224,7 +239,268 @@ pub mod nr {
     /// `/dev/input` and the controllers. `pid` must belong to the caller's
     /// account; 0 clears it.
     pub const WIN_SET_PROGRAM: usize = 93;
-    pub const COUNT: usize = 94;
+    /// `sandbox(op, a, b, c, d) -> value` — the calling app's sandbox, the
+    /// system open and save panel, file bookmarks and (for Settings) the
+    /// privacy decisions; see [`super::sandbox`].
+    pub const SANDBOX: usize = 94;
+    /// `win_buffer(fd, offset, width | height << 32, stride, format) -> id`
+    /// — Linux programs only: pixels a window can show instead of its own
+    /// surface, without a copy (see `win_attach`). `fd` is a dma-buf (a
+    /// DRM buffer from PRIME) or shared memory (`memfd`, `/dev/shm`);
+    /// `offset` and `stride` are in bytes; `format` is a DRM fourcc
+    /// (`XR24`, `AR24` premultiplied). The memory is held from now on, until
+    /// `win_buffer_destroy` and the compositor no longer reads it.
+    pub const WIN_BUFFER: usize = 95;
+    /// `win_buffer_destroy(id)` — the program has no more use for buffer `id`.
+    pub const WIN_BUFFER_DESTROY: usize = 96;
+    /// `win_attach(window, buffer | scale << 32, x | y << 32, w | h << 32)`
+    /// — the window shows `buffer` (drawn at `scale`, 1 if 0) from now on,
+    /// and `x`, `y`, `w`, `h` of it (pixels) changed; buffer 0 goes back to the window's own
+    /// surface. The buffer is read where it is: the program must not draw
+    /// into it again before an [`super::event::BUFFER_RELEASE`] for it.
+    /// With [`super::attach::LAYERS`] | n in place of the buffer, the window
+    /// shows `n` buffers stacked ([`super::WinLayer`]s at the third argument;
+    /// the damage, in window pixels, follows as `x | y << 32, w | h << 32`).
+    pub const WIN_ATTACH: usize = 97;
+    /// `win_set_fullscreen(window, on)` — shows the window's content over
+    /// the whole display it is on (no frame, bar or Harbor), or not.
+    pub const WIN_SET_FULLSCREEN: usize = 98;
+    pub const COUNT: usize = 99;
+}
+
+/// Per-app sandboxing (`sandbox`, see docs/developer/sandboxing.md).
+///
+/// A sandboxed process may do only what its app's manifest declares and
+/// its user allowed. Capabilities and folder grants share one bit set:
+/// the low half are capabilities a package may declare, bits 32–39 are
+/// for the system's own apps only, and bits 40 and up are folders.
+pub mod sandbox {
+    /// Outgoing connections (`socket`, `connect`).
+    pub const NET_CLIENT: u64 = 1 << 0;
+    /// Accepting connections from other computers (`listen` beyond loopback).
+    pub const NET_SERVER: u64 = 1 << 1;
+    /// Playing sound.
+    pub const AUDIO_OUT: u64 = 1 << 2;
+    /// Recording from a microphone (asks the person first).
+    pub const MICROPHONE: u64 = 1 << 3;
+    /// A camera (reserved: no camera drivers yet; asks first).
+    pub const CAMERA: u64 = 1 << 4;
+    /// Seeing other apps' windows or the screen, including through the
+    /// DRM device (asks first).
+    pub const SCREEN_CAPTURE: u64 = 1 << 5;
+    /// Observing input meant for other apps (asks first).
+    pub const INPUT_MONITOR: u64 = 1 << 6;
+    pub const GAMEPADS: u64 = 1 << 7;
+    /// Raw USB and other devices (asks first).
+    pub const USB: u64 = 1 << 8;
+    /// Starting programs of its own (they inherit the sandbox).
+    pub const SPAWN: u64 = 1 << 9;
+    /// Asking the desktop to open other apps and documents.
+    pub const LAUNCH: u64 = 1 << 10;
+    /// Talking to other apps: their local sockets, shared memory, signals.
+    pub const IPC: u64 = 1 << 11;
+    pub const NOTIFY: u64 = 1 << 12;
+    /// Running on without a window.
+    pub const BACKGROUND: u64 = 1 << 13;
+    /// Reading the clipboard while another app is in front.
+    pub const CLIPBOARD_READ: u64 = 1 << 14;
+    /// Changing system preferences (appearance, wallpaper, volume).
+    pub const PREFS_WRITE: u64 = 1 << 15;
+    /// Running Linux programs.
+    pub const LINUX: u64 = 1 << 16;
+    /// Asking for the administrator capability (the system prompt).
+    pub const ELEVATE: u64 = 1 << 17;
+    /// Driving a display directly (the DRM device).
+    pub const DISPLAY: u64 = 1 << 18;
+
+    /// System apps only: power, displays, network setup, the kernel log.
+    pub const SYSTEM: u64 = 1 << 32;
+    /// System apps only: keeps an administrator account's capability.
+    pub const ADMIN: u64 = 1 << 33;
+    /// System apps only: reads and changes every app's privacy decisions.
+    pub const PRIVACY: u64 = 1 << 34;
+    /// System apps only: signals and ends the account's other programs.
+    pub const PROCESSES: u64 = 1 << 35;
+    /// System apps only: the account's Linux home and temporary folders.
+    pub const LINUX_HOME: u64 = 1 << 36;
+
+    /// Folders in the home folder (read, or read and write).
+    pub const DOCUMENTS_READ: u64 = 1 << 40;
+    pub const DOCUMENTS: u64 = 1 << 41;
+    pub const DOWNLOADS_READ: u64 = 1 << 42;
+    pub const DOWNLOADS: u64 = 1 << 43;
+    pub const PICTURES_READ: u64 = 1 << 44;
+    pub const PICTURES: u64 = 1 << 45;
+    pub const MUSIC_READ: u64 = 1 << 46;
+    pub const MUSIC: u64 = 1 << 47;
+    pub const MOVIES_READ: u64 = 1 << 48;
+    pub const MOVIES: u64 = 1 << 49;
+    pub const DESKTOP_READ: u64 = 1 << 50;
+    pub const DESKTOP: u64 = 1 << 51;
+    /// Every file of the account (other apps' containers excepted).
+    pub const HOME: u64 = 1 << 52;
+    /// System apps only: every file the account may use.
+    pub const ALL_FILES: u64 = 1 << 53;
+
+    /// What only the system's own apps may hold.
+    pub const SYSTEM_ONLY: u64 = SYSTEM | ADMIN | PRIVACY | PROCESSES | LINUX_HOME | ALL_FILES;
+    /// What the person is asked about the first time an app uses it.
+    pub const GUARDED: u64 = MICROPHONE
+        | CAMERA
+        | SCREEN_CAPTURE
+        | INPUT_MONITOR
+        | USB
+        | DOCUMENTS_READ
+        | DOCUMENTS
+        | DOWNLOADS_READ
+        | DOWNLOADS
+        | PICTURES_READ
+        | PICTURES
+        | MUSIC_READ
+        | MUSIC
+        | MOVIES_READ
+        | MOVIES
+        | DESKTOP_READ
+        | DESKTOP
+        | HOME;
+    /// Every bit with a meaning.
+    pub const ALL: u64 = 0x7_FFFF | SYSTEM_ONLY | (0x3F_FF << 40);
+
+    /// The permission names of manifests (`gina`), and their bits.
+    pub const NAMES: &[(&str, u64)] = &[
+        ("network", NET_CLIENT),
+        ("network-server", NET_SERVER),
+        ("audio", AUDIO_OUT),
+        ("microphone", MICROPHONE),
+        ("camera", CAMERA),
+        ("screen-capture", SCREEN_CAPTURE),
+        ("input-monitoring", INPUT_MONITOR),
+        ("gamepad", GAMEPADS),
+        ("usb", USB),
+        ("spawn", SPAWN),
+        ("launch", LAUNCH),
+        ("ipc", IPC),
+        ("notifications", NOTIFY),
+        ("background", BACKGROUND),
+        ("clipboard", CLIPBOARD_READ),
+        ("preferences", PREFS_WRITE),
+        ("linux", LINUX),
+        ("elevate", ELEVATE),
+        ("display", DISPLAY),
+        ("system", SYSTEM),
+        ("admin", ADMIN),
+        ("privacy", PRIVACY),
+        ("processes", PROCESSES),
+        ("linux-home", LINUX_HOME),
+        ("documents:read", DOCUMENTS_READ),
+        ("documents", DOCUMENTS),
+        ("downloads:read", DOWNLOADS_READ),
+        ("downloads", DOWNLOADS),
+        ("pictures:read", PICTURES_READ),
+        ("pictures", PICTURES),
+        ("music:read", MUSIC_READ),
+        ("music", MUSIC),
+        ("movies:read", MOVIES_READ),
+        ("movies", MOVIES),
+        ("desktop:read", DESKTOP_READ),
+        ("desktop", DESKTOP),
+        ("home", HOME),
+        ("all-files", ALL_FILES),
+    ];
+
+    /// The bit for permission `name`.
+    pub fn bit(name: &str) -> Option<u64> {
+        NAMES.iter().find(|(n, _)| *n == name).map(|(_, b)| *b)
+    }
+
+    /// The permission name of a single bit.
+    pub fn name(bit: u64) -> Option<&'static str> {
+        NAMES.iter().find(|(_, b)| *b == bit).map(|(n, _)| *n)
+    }
+
+    /// `sandbox(INFO, *mut Info)`.
+    pub const INFO: usize = 1;
+    /// `sandbox(RESTRICT, keep)`: drops every capability not in `keep`
+    /// (forever, for the caller and the programs it starts from then on).
+    /// An unconfined program becomes sandboxed with a container of its own.
+    pub const RESTRICT: usize = 2;
+    /// `sandbox(PANEL, mode, name, name_len, out, out_len) -> path length`:
+    /// the system open (or save) panel. The person picks a file or folder;
+    /// the caller may then use exactly that (and, for a folder, what is in
+    /// it) until it exits. `-ECANCELED` if they cancel.
+    pub const PANEL: usize = 3;
+    /// `sandbox(BOOKMARK, path, len, out)`: a bookmark (32 hex digits at
+    /// `out`) for a file or folder the person gave the app, that brings
+    /// the same access back in later runs.
+    pub const BOOKMARK: usize = 4;
+    /// `sandbox(RESOLVE, token, len, out, out_len) -> path length`.
+    pub const RESOLVE: usize = 5;
+    /// `sandbox(PRIVACY_LIST, out, out_len) -> full length`: every app and
+    /// what it may do, as text lines (see `PRIVACY_SET`). Settings only.
+    pub const PRIVACY_LIST: usize = 6;
+    /// `sandbox(PRIVACY_SET, line, len)`: `"<app id>\t<permission>\t<allow|deny|ask>"`,
+    /// or `"<app id>\tbookmark\t<token>\tforget"`. Takes effect at once,
+    /// also for running programs. Settings only.
+    pub const PRIVACY_SET: usize = 7;
+    /// `sandbox(IN_USE) -> bits`: guarded capabilities in use right now
+    /// (the microphone while anything records).
+    pub const IN_USE: usize = 8;
+
+    /// [`PANEL`] modes.
+    pub const PANEL_OPEN: u64 = 0;
+    pub const PANEL_SAVE: u64 = 1;
+    pub const PANEL_FOLDER: u64 = 2;
+
+    /// [`Info`] flags.
+    pub const SANDBOXED: u32 = 1;
+    /// One of the system's own apps (its manifest comes with the system).
+    pub const SYSTEM_APP: u32 = 2;
+    /// A program without a manifest of its own (the default profile).
+    pub const LEGACY: u32 = 4;
+
+    /// The calling process's sandbox (`sandbox(INFO)`).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct Info {
+        pub flags: u32,
+        pub id_len: u32,
+        /// What it may do right now.
+        pub caps: u64,
+        /// What its manifest declares.
+        pub declared: u64,
+        /// Guarded capabilities the person allowed, and refused.
+        pub allowed: u64,
+        pub denied: u64,
+        pub container_len: u32,
+        pub _pad: u32,
+        /// The app's id (`org.example.app`).
+        pub id: [u8; 96],
+        /// Its private folder.
+        pub container: [u8; 192],
+    }
+
+    impl Info {
+        pub const fn zeroed() -> Self {
+            Info {
+                flags: 0,
+                id_len: 0,
+                caps: 0,
+                declared: 0,
+                allowed: 0,
+                denied: 0,
+                container_len: 0,
+                _pad: 0,
+                id: [0; 96],
+                container: [0; 192],
+            }
+        }
+        pub fn id(&self) -> &str {
+            core::str::from_utf8(&self.id[..(self.id_len as usize).min(96)]).unwrap_or("")
+        }
+        pub fn container(&self) -> &str {
+            core::str::from_utf8(&self.container[..(self.container_len as usize).min(192)]).unwrap_or("")
+        }
+    }
 }
 
 /// A process's identity (`cred_get`, `cred_set`).
@@ -583,7 +859,8 @@ pub struct NetInterface {
     pub tx_bytes: u64,
     pub driver: [u8; 32],
     pub driver_len: u32,
-    pub _pad2: u32,
+    /// Link speed in Mb/s (0: unknown).
+    pub speed_mbps: u32,
 }
 
 /// `sys_report` kinds.
@@ -596,6 +873,30 @@ pub mod report {
     pub const CPU: u64 = 2;
     /// The kernel log (`dmesg`).
     pub const LOG: u64 = 3;
+
+    /// Whether the [`CPU`] report's `Features:` line (names separated by
+    /// spaces) lists every name in `names`. How programs learn what the
+    /// processor can do: on aarch64, `aes`, `pmull`, `sha256`, `crc32`,
+    /// `atomics`, … (the kernel reads the ID registers, which EL0 can't).
+    pub fn has_features(report: &str, names: &[&str]) -> bool {
+        let Some(line) = report.lines().find_map(|l| l.trim_start().strip_prefix("Features:")) else {
+            return false;
+        };
+        names.iter().all(|n| line.split_ascii_whitespace().any(|f| f == *n))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn features_line() {
+            let r = "Processor:  Apple M2\nFeatures:   aes pmull sha1 sha256 crc32 atomics\nCPUs: 4\n";
+            assert!(super::has_features(r, &["aes", "pmull"]));
+            assert!(super::has_features(r, &["sha256"]));
+            assert!(!super::has_features(r, &["aes", "sve"]));
+            assert!(!super::has_features(r, &["sha"]));
+            assert!(!super::has_features("Processor: x\n", &["aes"]));
+        }
+    }
 }
 
 /// Power sources, from ACPI (`power_info`).
@@ -745,10 +1046,13 @@ pub mod err {
     pub const EINPROGRESS: isize = 115;
     pub const ECONNREFUSED: isize = 111;
     pub const EHOSTUNREACH: isize = 113;
+    /// The person cancelled (the open and save panel).
+    pub const ECANCELED: isize = 125;
 
     pub fn name(e: isize) -> &'static str {
         match e.abs() {
             EPERM => "operation not permitted",
+            ECANCELED => "cancelled",
             ENOENT => "no such file or directory",
             ESRCH => "no such process",
             EINTR => "interrupted",
@@ -949,6 +1253,27 @@ pub struct SysStats {
     pub frames: u64,
     pub windows: u32,
     pub processes: u32,
+    /// Memory free plus what caches would give back (bytes).
+    pub mem_available: u64,
+    /// Bytes the compressed memory store takes, and the bytes of the pages
+    /// in it (uncompressed).
+    pub mem_compressed: u64,
+    pub mem_compressed_pages: u64,
+    /// Swap (compressed store and swap file) size and use, and the swap
+    /// file's part of each (bytes).
+    pub swap_total: u64,
+    pub swap_used: u64,
+    pub swap_file_total: u64,
+    pub swap_file_used: u64,
+    /// Pages swapped in and out since boot.
+    pub swap_ins: u64,
+    pub swap_outs: u64,
+    /// 0 none, 1 warning, 2 critical (see [`event::MEMORY_PRESSURE`]).
+    pub mem_pressure: u32,
+    /// Share of the last 10 s some program waited for memory (1/100 %).
+    pub mem_stall_10s: u32,
+    /// Programs ended because memory ran out, since boot.
+    pub oom_kills: u64,
 }
 
 /// A window's pixel buffer, mapped into the owning process.
@@ -1216,7 +1541,7 @@ pub mod event {
     pub const SCREEN: u32 = 14;
     /// The compositor has shown what the window presented last (a window
     /// presents again after this to draw at the screen's pace). At most
-    /// one is queued per window.
+    /// one is queued per window; [`super::frame`] says when it was shown.
     pub const FRAME: u32 = 15;
     /// A game controller changed: `a` = its id, `b` = its buttons (the
     /// [`super::gamepad`] bits), `c` = 1 connected, 2 disconnected, 0 a
@@ -1229,6 +1554,51 @@ pub mod event {
     /// display's size in points, `b` = its scale, `c` = how many displays
     /// there are. Every window gets one when it first appears.
     pub const DISPLAY: u32 = 17;
+    /// Memory pressure changed, sent to every window: `a` = 0 none, 1
+    /// warning (memory is short and being reclaimed: let go of caches you
+    /// can rebuild), 2 critical (programs wait for memory, and one may be
+    /// ended soon: free all you can).
+    pub const MEMORY_PRESSURE: u32 = 18;
+    /// The compositor no longer reads buffer `a` (`win_attach`): the
+    /// program may draw into it again.
+    pub const BUFFER_RELEASE: u32 = 19;
+    /// The window became full screen (`a` = 1) or left it (`a` = 0); a
+    /// [`RESIZE`] gives its new size.
+    pub const FULLSCREEN: u32 = 20;
+}
+
+/// `win_attach` with several buffers: a window made of a program's surfaces
+/// (its main one, sub-surfaces such as a video, pop-up menus), each shown
+/// where it is, without composing them into one picture first.
+pub mod attach {
+    /// The buffer argument of `win_attach` is this | the number of layers.
+    pub const LAYERS: u64 = 1 << 31;
+    pub const MAX_LAYERS: usize = 16;
+}
+
+/// One layer of a window (`win_attach` with [`attach::LAYERS`]), bottom
+/// first: the part `src` of `buffer` (its pixels) shown at `dst` (window
+/// pixels, at the attach's scale; scaled when the sizes differ).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WinLayer {
+    pub buffer: u32,
+    pub flags: u32,
+    pub src: [i32; 4],
+    pub dst: [i32; 4],
+}
+
+/// What a [`event::FRAME`] says about when the frame was shown: `a` = the
+/// display's frame counter, `b` = its refresh period in nanoseconds, `c`
+/// and `d` = the time the frame started showing (monotonic nanoseconds, low
+/// and high halves), `x` = these flags.
+pub mod frame {
+    /// Shown at a frame start of the display (vertical blank).
+    pub const VSYNC: i32 = 1;
+    /// The time is the display's own (not estimated).
+    pub const HW_CLOCK: i32 = 2;
+    /// The display scanned the program's buffer out itself: no copy.
+    pub const ZERO_COPY: i32 = 8;
 }
 
 /// A single input/window event. Field meaning depends on `kind`:

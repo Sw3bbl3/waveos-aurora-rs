@@ -23,7 +23,7 @@ const TESTS: &[Test] = &[
     ("mm: out of memory", mm::selftest::out_of_memory),
     ("isqrt", sqrt),
     ("account_password_hash", crate::gui::account::self_test),
-    ("write-combining mappings", crate::arch::pat::self_test),
+    ("write-combining mappings", crate::arch::mmu::write_combining_self_test),
     ("LinuxKPI: runtime, DRM and the GPU display", linux_kpi),
     ("display: EDID, connectors, mode sets, atomic commits, cursor plane", crate::drivers::gpu::selftest::display),
     ("intel display: firmware takeover on a simulated engine", crate::drivers::gpu::intel::selftest::run),
@@ -46,9 +46,11 @@ const TESTS: &[Test] = &[
     ("clipboard and Trash", clipboard_and_trash),
     ("SMP: work on every CPU, lock stress", smp_work),
     ("SMP: TLB shootdown", smp_shootdown),
+    ("locks: waiters for a lock held long sleep, so even an idle-task holder runs", mutex_long_hold),
     ("clock: TSC/HPET monotonic", clock),
     ("timers: queue order, accuracy, cancel, on every CPU", timer_queue),
     ("tickless: timeouts fire on CPUs with the tick stopped", tickless_timeouts),
+    ("wait queues: a wakeup just before the waiter sleeps doesn't lose the next", wait_queue_early_wakeup),
     ("tickless: quiet idle (timer interrupts per CPU) and idle accounting", quiet_idle),
     ("user copies recover from faults", user_copy_fault),
     ("hardening: SMEP/SMAP/UMIP, kernel W^X, stack guards, ASLR", hardening),
@@ -56,6 +58,7 @@ const TESTS: &[Test] = &[
     ("sound: HDA playback", sound),
     ("sound: format and rate conversion", crate::drivers::audio::convert::self_test),
     ("sound: device registry and capture streams", sound_devices),
+    ("sound: ALSA hardware parameter rules", crate::compat::linux::sound::self_test),
     ("ACPI: AML, sleep states, battery", acpi_runtime),
     ("USB: hub, keyboard, tablet, storage", usb),
     ("sound: USB audio (isochronous), unplug and replug mid-stream", usb_audio),
@@ -63,15 +66,30 @@ const TESTS: &[Test] = &[
     ("I2C: ACPI scan, HID over I2C touchpad (software bus)", i2c_touchpad),
     ("TCP: retransmission ACK bounds", crate::net::tcp::retransmission_ack_test),
     ("network: DHCP, ICMP, UDP, TCP", network),
+    ("USB network: two adapters, unplug mid-transfer, routes move, replug, DHCP", usb_network),
+    ("USB network on simulated devices: CDC-NCM (RTL8156 dock with a keyboard), ASIX AX88179 and AX88772", usb_network_simulated),
     ("Wi-Fi: scan, WPA2 join, DHCP over CCMP (simulated network)", wifi),
     ("sleep (S3) and wake", sleep_and_wake),
     ("clock: the vDSO agrees with the kernel's clocks (after sleep, set-clock, zone)", vdso_clock),
+    ("Linux ABI: call lookup, the vDSO's symbols", linux_abi),
     ("ACPI: a failing AML task leaves the system running", acpi_isolation),
     ("address spaces", address_spaces),
     ("user processes (usertest)", user_processes),
-    ("packages: install, update and remove from a repository (pkgtest)", crate::gui::installed::self_test),
+    ("packages: install, update, roll back and remove from a repository (pkgtest)", crate::gui::installed::self_test),
+    (
+        "packages: catalogue freshness, key rotation, damaged and resumed downloads, pause and cancel (pkgtest)",
+        crate::gui::installed::store_test,
+    ),
+    ("packages: an install killed half-way leaves nothing half-installed (pkgtest)", crate::gui::installed::kill_test),
+    ("system update: download, install alongside, start on trial, fall back (pkgtest)", crate::gui::installed::system_test),
     ("syscall fuzzer (native calls, racing threads, kills)", syscall_fuzz),
     ("memory exhaustion: programs take all they can, the kernel keeps its reserve and recovers", memory_exhaustion),
+    ("mm: what memory costs a program under no pressure (bench)", memory_bench),
+    ("mm: what switching address spaces costs (bench)", switch_bench),
+    ("swap: private, fork-shared, shared and locked pages out and back", mm::swaptest::semantics),
+    ("swap: a program fills several times its memory, every page checked", mm::swaptest::overcommit),
+    ("swap: pages through the swap file, then it fills; the kernel is unharmed", mm::swaptest::file_full),
+    ("swap: out of memory ends the right program", mm::swaptest::oom),
     ("Learn: both offline libraries", learn_library),
     ("Linux programs: files, memory, threads, clocks (linuxtest)", linux_programs),
     ("Linux programs: processes, signals, the shell (proctest)", linux_processes),
@@ -82,10 +100,26 @@ const TESTS: &[Test] = &[
     ("Linux programs: Mesa's kmscube (GBM, EGL, GLES on llvmpipe) on the DRM device", linux_mesa_kmscube),
     ("Linux programs: Mesa's desktop OpenGL and GLES (glmark2) on the DRM device", linux_mesa_glmark2),
     ("Linux programs: Mesa's Vulkan (lavapipe), a triangle read back (vkcheck)", linux_mesa_vulkan),
-    ("Linux programs: Mesa in a WaveOS window (es2gears through wl-bridge)", linux_mesa_window),
+    ("Linux programs: Mesa in a WaveOS window (es2gears through wl-bridge, dma-bufs)", linux_mesa_window),
+    ("Linux programs: Mesa's Vulkan in a WaveOS window (vkcube on lavapipe, shared memory)", linux_mesa_vulkan_window),
+    (
+        "Linux programs: Mesa in windows with the compositor: zero-copy, direct scanout and back, clients killed mid-frame",
+        linux_mesa_composited,
+    ),
+    ("Linux programs: Mesa in windows, copies against zero-copy, measured (AURORA_MESA_BENCH=1)", linux_mesa_bench),
+    ("Linux programs: browsers in windows, copies against zero-copy, measured", linux_browsers_measured),
+    ("Linux programs: browsers in windows, start-up and page loads timed", linux_browsers_timed),
     ("Linux programs: syscall fuzzer (linuxfuzz)", linux_fuzz),
+    ("Linux programs: Debian's dynamically linked hello and curl", linux_debian),
+    ("sandbox: policy, consent, grants, bookmarks, system manifests", crate::sandbox::selftest::policy),
+    ("sandbox: a native program refused, given files, allowed and revoked (sbxtest)", crate::sandbox::selftest::programs),
+    ("sandbox: a Linux program tries every way out (sandboxtest)", crate::sandbox::selftest::linux),
+    ("sandbox: windowless apps end only when idle and without background", crate::sandbox::selftest::background),
+    ("sandbox: the native fuzzer never reaches the oracle", crate::sandbox::selftest::fuzz_native),
+    ("sandbox: the Linux fuzzer never reaches the oracle", crate::sandbox::selftest::fuzz_linux),
     ("storage: disk + GPT", storage_devices),
     ("storage: controller round trip", block_round_trip),
+    ("storage: request latency (reads, writes, flushes, a file synced)", block_latency),
     ("SD/eMMC: the card the system runs from, and the second reader's card", sd_cards),
     ("SD card: data integrity by PIO, SDMA and ADMA2, across block and buffer boundaries", sd_integrity),
     ("SD card: throughput by PIO, SDMA and ADMA2, against the system disk", sd_throughput),
@@ -97,10 +131,33 @@ const TESTS: &[Test] = &[
     ("persistence across reboot", persistence),
 ];
 
+/// Tests that need what this architecture's machine (QEMU's `virt` for
+/// aarch64) or port doesn't have yet: (name prefix, why).
+#[cfg(target_arch = "x86_64")]
+const ARCH_SKIPS: &[(&str, &str)] = &[];
+#[cfg(target_arch = "aarch64")]
+const ARCH_SKIPS: &[(&str, &str)] = &[
+    ("LinuxKPI:", "the C half of the kernel is built for x86 only"),
+    ("ACPI: AML, sleep states, battery", "a PC's ACPI: sleep states, \\_S5 and the test battery's SSDT"),
+    ("I2C:", "the I2C touchpad is a PC ACPI device (test SSDT)"),
+    ("sleep (S3) and wake", "no suspend to RAM on Arm"),
+];
+
 pub fn run() {
+    // `cargo xtask powercut`: filesystem work until the power goes.
+    if let Some(iteration) = crate::gui::prefs::boot_option("fs_stress") {
+        fs_stress(iteration.parse().unwrap_or(0));
+    }
     // Devices present at boot finish setting up first (the frame counts
     // some tests compare would otherwise move underneath them).
     crate::drivers::usb::settle(10_000);
+    // Under hardware virtualization the tests start well within the time
+    // the boot's own tasks (AML, the boot log) take to finish: wait for them.
+    if cfg!(target_arch = "aarch64") {
+        while crate::time::uptime_ms() < 5_000 {
+            crate::sched::sleep_ms(100);
+        }
+    }
     // `cargo xtask test --filter NAME` runs only matching tests (and the
     // persistence check the harness relies on).
     let filter = crate::gui::prefs::boot_option("test_filter");
@@ -108,9 +165,13 @@ pub fn run() {
     if skip_virtual_hid {
         crate::kprintln!("SKIP virtual USB HID tests: QEMU has no usb-redir device");
     }
+    for (name, why) in ARCH_SKIPS {
+        crate::kprintln!("SKIP tests \"{name}…\": {why}");
+    }
     let chosen: Vec<&Test> = TESTS
         .iter()
         .filter(|(name, _)| !skip_virtual_hid || !name.starts_with("USB HID:"))
+        .filter(|(name, _)| !ARCH_SKIPS.iter().any(|(prefix, _)| name.starts_with(prefix)))
         .filter(|(name, _)| filter.as_deref().is_none_or(|f| name.contains(f) || name.starts_with("persistence")))
         .collect();
     crate::kprintln!("\nrunning {} kernel tests", chosen.len());
@@ -120,6 +181,10 @@ pub fn run() {
         crate::kprintln!("ok");
     }
     crate::kprintln!("\ntest result: ok. {} passed", chosen.len());
+    // On the first start the harness then cuts the power in mid-install.
+    if crate::gui::prefs::boot_option("test_power_cut").as_deref() == Some("1") {
+        crate::gui::installed::power_cut();
+    }
     power::qemu_exit(0x10);
 }
 
@@ -384,6 +449,7 @@ const FUZZ_SLACK: u64 = 32;
 fn syscall_fuzz() {
     let opt = |k: &str, d: &str| crate::gui::prefs::boot_option(k).unwrap_or_else(|| alloc::string::String::from(d));
     let (seed, iters, rounds) = (opt("fuzz_seed", "1"), opt("fuzz_iters", "1500"), opt("fuzz_rounds", "4"));
+    let _squeezed = fuzz_pressure();
     let heap_before = mm::heap::usage().1;
     let before = free_frames();
     let pid = crate::proc::spawn(
@@ -426,6 +492,192 @@ fn syscall_fuzz() {
     );
     let heap_after = mm::heap::usage().1;
     crate::kprint!("[seed {seed}, heap {} KiB → {} KiB] ", heap_before / 1024, heap_after / 1024);
+    home_volume_ok("the native fuzzer");
+}
+
+/// `cargo xtask powercut` (boot option `fs_stress=N`, the iteration): four
+/// threads make, write, rename, truncate and remove files and folders in
+/// one small tree on the home volume, keep descriptors open across
+/// removals, and race each other, until the harness cuts the power at a
+/// random moment. Meanwhile the main thread writes a file at a time into
+/// `/Stress/durable/iN`, syncs, and only then says so ("fsstress: durable
+/// PATH LEN"): the harness checks that every file it was told about
+/// survived the cut, whole. The first line says what this start's check at
+/// mount found.
+fn fs_stress(iteration: u32) -> ! {
+    let (root, _) = fs::lookup("/").unwrap();
+    match root.mount_check() {
+        None => crate::kprintln!("fsstress: mount check: not needed (cleanly unmounted)"),
+        Some(r) if r.is_empty() => crate::kprintln!("fsstress: mount check: clean"),
+        Some(r) if r.lines().all(|l| l.contains("an orphan")) => {
+            crate::kprintln!("fsstress: mount check: {} orphan(s) freed", r.lines().count())
+        }
+        Some(r) => crate::kprintln!("fsstress: mount check: PROBLEMS\n{r}"),
+    }
+    let _ = fs::mkdir("/Stress");
+    let _ = fs::mkdir("/Stress/w");
+    let _ = fs::mkdir("/Stress/durable");
+    // What the harness has checked already goes (keeps the folder small).
+    if let Ok(old) = fs::readdir("/Stress/durable") {
+        for e in old {
+            if e.name.trim_start_matches('i').parse::<u32>().is_ok_and(|n| n + 2 < iteration) {
+                let _ = fs::remove_tree(&alloc::format!("/Stress/durable/{}", e.name));
+            }
+        }
+    }
+    STRESS_SEED.store(iteration.wrapping_mul(2_654_435_761) ^ time::uptime_ms() as u32, Ordering::Relaxed);
+    for _ in 0..4 {
+        sched::spawn("fsstress", fs_stress_worker);
+    }
+    let dir = alloc::format!("/Stress/durable/i{iteration}");
+    let _ = fs::mkdir(&dir);
+    crate::kprintln!("fsstress: running (iteration {iteration}, at {} ms)", time::now_ns() / 1_000_000);
+    let mut n = 0u32;
+    loop {
+        let len = 1000 + (n as usize * 7919) % 60_000;
+        let path = alloc::format!("{dir}/{n}");
+        let t0 = time::now_ns();
+        let written = fs::write_all(&path, &durable_bytes(iteration, n, len));
+        let t1 = time::now_ns();
+        let synced = written.is_ok() && fs::try_sync_all().is_ok();
+        let t2 = time::now_ns();
+        if synced {
+            // (The harness reads the path and length; the times are for people.)
+            crate::kprintln!(
+                "fsstress: durable {path} {len} (at {} ms: write {} ms, sync {} ms)",
+                t0 / 1_000_000,
+                (t1 - t0) / 1_000_000,
+                (t2 - t1) / 1_000_000
+            );
+        } else {
+            crate::kprintln!("fsstress: not synced {path}: {written:?} ({} ms)", (t2 - t0) / 1_000_000);
+        }
+        n += 1;
+        sched::sleep_ms(150);
+    }
+}
+
+/// The contents of durable file `n` of iteration `it` (the harness makes
+/// the same bytes to compare).
+fn durable_bytes(it: u32, n: u32, len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i as u32).wrapping_mul(31).wrapping_add(it * 7 + n * 13) as u8).collect()
+}
+
+static STRESS_SEED: AtomicU32 = AtomicU32::new(0);
+static STRESS_WORKER: AtomicU32 = AtomicU32::new(0);
+
+fn fs_stress_worker() {
+    let me = STRESS_WORKER.fetch_add(1, Ordering::Relaxed);
+    let mut x = (STRESS_SEED.load(Ordering::Relaxed) as u64) << 8 | me as u64 | 1;
+    let mut rnd = move |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n.max(1)
+    };
+    const NAMES: &[&str] = &["a", "b", "c", "d", "a/x", "a/y", "b/x", "a/x/z", "b/x/z", "c/q"];
+    let mut held: Vec<fs::OpenFile> = Vec::new();
+    let data: Vec<u8> = (0..(512 * 1024)).map(|i| (i * 7 + me as usize) as u8).collect();
+    loop {
+        let p = alloc::format!("/Stress/w/{}", NAMES[rnd(NAMES.len() as u64) as usize]);
+        let q = alloc::format!("/Stress/w/{}", NAMES[rnd(NAMES.len() as u64) as usize]);
+        let len = match rnd(10) {
+            0 => rnd(data.len() as u64) as usize,
+            _ => rnd(40_000) as usize,
+        };
+        let _ = match rnd(14) {
+            0..=1 => fs::mkdir(&p),
+            2..=4 => fs::open(&p, aurora_abi::open::WRITE | aurora_abi::open::CREATE).and_then(|mut f| {
+                f.seek(rnd(200_000) as i64, aurora_abi::seek::SET)?;
+                f.write(&data[..len])?;
+                if rnd(2) == 0 {
+                    held.push(f);
+                }
+                Ok(())
+            }),
+            5..=6 => fs::rename(&p, &q),
+            7 => fs::unlink(&p),
+            8 => fs::remove_tree(&p),
+            9 => fs::write_atomic(&p, &data[..len]).map(|_| ()),
+            10..=11 if !held.is_empty() => {
+                let i = rnd(held.len() as u64) as usize;
+                match rnd(3) {
+                    0 => held[i].truncate(rnd(100_000)),
+                    _ => held[i].write(&data[..len]).map(|_| ()),
+                }
+            }
+            12 if !held.is_empty() => {
+                let i = rnd(held.len() as u64) as usize;
+                drop(held.swap_remove(i));
+                Ok(())
+            }
+            _ => fs::try_sync_all(),
+        };
+        if held.len() > 6 {
+            held.remove(0);
+        }
+        sched::yield_now();
+    }
+}
+
+/// The home volume (AuroraFS) is consistent: run after everything that
+/// hammers it (the fuzzers). Whatever the fuzzers left in their scratch
+/// folders stays: the next boot fuzzing on top of it is a test too.
+pub fn home_volume_ok(what: &str) {
+    fs::sync_all();
+    let (root, _) = fs::lookup("/").unwrap();
+    if !root.describe().contains("AuroraFS") {
+        return;
+    }
+    if let Err(e) = root.check() {
+        panic!("after {what}, the home volume is not consistent: {e}");
+    }
+}
+
+/// What memory costs a program with no pressure on it: `fuzz swap` maps
+/// The cost of a switch of the user half's tables (`bench:` lines): as the
+/// kernel does it, and the alternatives (Arm: see `mmu::switch_cost`).
+fn switch_bench() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let [broadcast, local, none] = crate::arch::mmu::switch_cost(20_000);
+        crate::kprintln!(
+            "bench: address-space switch: every CPU's TLB {broadcast} ns, this CPU's {local} ns, no flush {none} ns"
+        );
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    crate::kprint!("(measured on aarch64 only) ");
+}
+
+/// 64 MiB, writes every page and reads it back (`bench:` lines, to compare
+/// kernels; it asserts nothing but that the pattern held).
+fn memory_bench() {
+    let (r, w) = crate::proc::new_pipe(true);
+    let argv = ["fuzz", "swap", "64", "9", "1", "1"];
+    let pid = crate::proc::spawn("/System/Bin/fuzz", &argv, [None, Some(w.clone()), Some(w)], 0).expect("spawn fuzz");
+    let pipe = match &*r {
+        crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
+        _ => unreachable!(),
+    };
+    let p = crate::proc::get(pid).unwrap();
+    let mut out = String::new();
+    let mut buf = [0u8; 256];
+    loop {
+        while let Ok(n @ 1..) = pipe.read(&mut buf, true) {
+            out.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        if p.exit_code().is_some() {
+            while let Ok(n @ 1..) = pipe.read(&mut buf, true) {
+                out.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+            break;
+        }
+        sched::sleep_ms(20);
+    }
+    for line in out.lines() {
+        crate::kprintln!("bench: {line}");
+    }
+    assert_eq!(p.exit_code(), Some(0), "{out}");
 }
 
 fn learn_library() {
@@ -471,8 +723,17 @@ fn linux_input() {
     }
     let (in_r, in_w) = crate::proc::new_pipe(false);
     let (out_r, out_w) = crate::proc::new_pipe(false);
-    let pid = crate::proc::spawn(path, &["inputtest"], [Some(in_r), Some(out_w.clone()), Some(out_w)], 0)
-        .expect("spawn inputtest");
+    // In the default profile, as the desktop would start it: nothing it
+    // does may need an answer nobody is here to give.
+    let pid = crate::proc::spawn_confined(
+        path,
+        &["inputtest"],
+        None,
+        [Some(in_r), Some(out_w.clone()), Some(out_w)],
+        0,
+        default_profile(path),
+    )
+    .expect("spawn inputtest");
     let p = crate::proc::get(pid).unwrap();
     let (to_test, from_test) = match (&*in_w, &*out_r) {
         (crate::proc::Handle::PipeWrite(w), crate::proc::Handle::PipeRead { pipe, .. }) => (w.clone(), pipe.clone()),
@@ -613,6 +874,7 @@ impl InputTestUser {
                 let v = felt.swap(0, Ordering::AcqRel);
                 alloc::format!("ok {} {}", v >> 8, v & 0xFF)
             }
+            #[cfg(target_arch = "x86_64")]
             "key" => {
                 for b in hex(&args) {
                     crate::drivers::ps2::keyboard_byte(b);
@@ -661,6 +923,7 @@ impl InputTestUser {
                 let place = evdev::UsbPlace {
                     bus: 9,
                     ports: String::from("1"),
+                    config: 1,
                     interface: 0,
                     vendor: 0x1209,
                     product: 0x0003,
@@ -709,7 +972,15 @@ impl InputTestUser {
                 alloc::format!("ok {}", names.join("|"))
             }
             "drain-native" => {
+                // (From the middle of the screen: earlier tests may have
+                // left the pointer at an edge, where motion is clamped.)
+                let (w, h) = input::screen_size();
+                input::warp(w / 2, h / 2);
                 while input::pop().is_some() {}
+                // Away from the edges, wherever earlier tests left it and
+                // whatever the screen size, so motion isn't clamped.
+                let (w, h) = input::screen_size();
+                input::warp(w / 2, h / 2);
                 self.pointer_from = input::pointer_position();
                 ok
             }
@@ -758,6 +1029,12 @@ impl InputTestUser {
 /// The harness checks screendumps of both (see `xtask`).
 fn linux_drm() {
     use crate::drivers::gpu::{self, output::Output, Damage};
+    // drmtest checks the card's PCI device in /sys: `virt`'s ramfb (`--gpu
+    // std` on aarch64) has none.
+    if !crate::drivers::pci::devices().iter().any(|d| d.class == 0x03) {
+        crate::kprint!("(skipped: the display is not a PCI device here; see --gpu virtio) ");
+        return;
+    }
     let desktop = Output::open(None).expect("no display");
     let (w, h) = desktop.size();
     unsafe { desktop.back_buffer() }.fill(0xFF33_6699);
@@ -820,6 +1097,47 @@ fn linux_modetest() {
 /// Where Debian's Mesa and its programs are when the disk has them
 /// (`cargo xtask test --mesa` puts them there; other disks skip the Mesa tests).
 const MESA_KMSCUBE: &str = "/Linux/usr/bin/kmscube";
+
+/// Debian installs `es2gears` under the architecture's triplet.
+const ES2GEARS: &str = if cfg!(target_arch = "aarch64") {
+    "/usr/bin/es2gears_wayland.aarch64-linux-gnu"
+} else {
+    "/usr/bin/es2gears_wayland.x86_64-linux-gnu"
+};
+
+/// Debian's GNU Hello (glibc, started through the dynamic loader), and curl
+/// fetching from the test server when it is there too: on a disk with a
+/// Linux root (`AURORA_TEST_LINUX_ROOT=1 cargo xtask test`), skipped
+/// otherwise.
+fn linux_debian() {
+    if crate::fs::stat("/Linux/usr/bin/hello").is_err() {
+        crate::kprint!("(skipped: no Linux root on this disk; see AURORA_TEST_LINUX_ROOT) ");
+        return;
+    }
+    let started = crate::time::now_ns();
+    let (code, text) =
+        run_linux_program("/System/Linux/bin/busybox", &linux_env_argv(&[], &["/usr/bin/hello"]), None, None, 60_000);
+    assert_eq!(code, Some(0), "hello failed");
+    assert!(text.contains("Hello, world!"), "hello said something else");
+    crate::kprint!("[hello: {} ms] ", (crate::time::now_ns() - started) / 1_000_000);
+    let port = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok());
+    let (Some(port), Ok(_)) = (port, crate::fs::stat("/Linux/usr/bin/curl")) else {
+        crate::kprint!("(curl: not on the disk) ");
+        return;
+    };
+    // (The test repository's catalogue: every architecture's build has one.)
+    let catalogue = if cfg!(target_arch = "aarch64") { "catalog-aarch64.txt" } else { "catalog.txt" };
+    let url = alloc::format!("http://10.0.2.2:{port}/repo/{catalogue}");
+    let started = crate::time::now_ns();
+    let argv = linux_env_argv(
+        &[],
+        &["/usr/bin/curl", "-sS", "-o", "/tmp/curl-index", "-w", "curl got %{http_code} %{size_download}\n", &url],
+    );
+    let (code, text) = run_linux_program("/System/Linux/bin/busybox", &argv, None, None, 60_000);
+    assert_eq!(code, Some(0), "curl failed");
+    assert!(text.contains("curl got 200"), "curl did not get the page");
+    crate::kprint!("[curl: {} ms] ", (crate::time::now_ns() - started) / 1_000_000);
+}
 
 /// Runs a program from the Linux packages by its Linux path, through
 /// BusyBox's `env` with `vars` added to the environment.
@@ -894,37 +1212,30 @@ fn linux_mesa_vulkan() {
 }
 
 /// Mesa drawing into a WaveOS window instead of the whole screen: Mesa's
-/// `es2gears` demo, a Wayland client, through `wl-bridge`. EGL's Wayland
-/// platform renders with llvmpipe into shared-memory buffers (`wl_shm`),
-/// which the bridge copies into the window on each commit. The window must
-/// show the red gear, turning: its picture changes from frame to frame.
+/// `es2gears` demo, a Wayland client, through `wl-bridge`. With `/etc/drirc`
+/// naming `kms_swrast` for the card, EGL's Wayland platform renders with
+/// llvmpipe into dumb buffers on the DRM device and hands them to the bridge
+/// as dma-bufs (`wl_drm`, `zwp_linux_dmabuf_v1`); the bridge attaches them
+/// to the window as they are (`win_attach`). The window must show the red
+/// gear, turning (its picture changes from frame to frame), from dma-bufs.
 /// (es2gears' own frame-rate line stays in its output buffer, a pipe here.)
 fn linux_mesa_window() {
     if crate::fs::stat(MESA_KMSCUBE).is_err() {
         crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
         return;
     }
-    let script = "wl-bridge --background && exec /usr/bin/es2gears_wayland.x86_64-linux-gnu";
-    let (mut red, mut frames, mut last, mut since) = (0usize, 0u32, 0u64, None);
+    let script = &alloc::format!("wl-bridge --background && exec {ES2GEARS}");
+    let (mut red, mut frames, mut last, mut since, mut dmabuf) = (0usize, 0u32, 0u64, None, 0u32);
     let (code, _) =
         run_linux_program_watched("/System/Linux/bin/busybox", &["sh", "-c", script], None, 300_000, &mut |_| {
             for (id, _, title) in crate::gui::server::windows() {
                 if title != "es2gears" {
                     continue;
                 }
-                let seen = crate::gui::server::with_surface_scaled(id, |px, _, _, _| {
-                    let red = px
-                        .iter()
-                        .filter(|&&p| {
-                            let (r, g, b) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
-                            r > 150 && g < 80 && b < 80
-                        })
-                        .count();
-                    // A cheap fingerprint of the picture.
-                    let sum = px.iter().step_by(7).fold(0u64, |h, &p| h.rotate_left(5) ^ p as u64);
-                    (red, sum)
-                });
-                if let Some((r, sum)) = seen {
+                if crate::gui::server::attached(id).is_some_and(|(b, ..)| b.dmabuf) {
+                    dmabuf += 1;
+                }
+                if let Some((r, sum)) = crate::gui::server::with_content(id, window_picture) {
                     red = red.max(r);
                     if r > 200 && sum != last {
                         last = sum;
@@ -936,14 +1247,657 @@ fn linux_mesa_window() {
             // Enough once it has turned for a while.
             frames >= 30 || since.is_some_and(|t| time::uptime_ms() > t + 20_000)
         });
-    // The bridge runs on in the background: it goes too.
-    for p in crate::proc::all().iter().filter(|p| p.name() == "wl-bridge") {
-        let _ = crate::proc::kill(p.pid);
-    }
+    stop_bridge();
     assert_eq!(code, Some(crate::proc::KILLED_CODE), "es2gears ended by itself");
     assert!(red > 200, "the window shows no red gear ({red} red pixels)");
     assert!(frames >= 5, "the gears did not turn ({frames} different pictures)");
-    crate::kprint!("[{frames} different pictures, {red} red pixels] ");
+    assert!(dmabuf > 0, "es2gears' frames did not reach the window as dma-bufs");
+    crate::kprint!("[{frames} different pictures, {red} red pixels, from dma-bufs] ");
+}
+
+/// Vulkan in a WaveOS window: `vkcube-wayland` on lavapipe, whose Wayland
+/// swapchain presents shared memory (`wl_shm`). The bridge attaches it to
+/// the window as it is too (no copy): the window must show shared memory,
+/// and the cube must turn.
+fn linux_mesa_vulkan_window() {
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return;
+    }
+    let script = "wl-bridge --background && exec /usr/bin/vkcube-wayland --c 100000";
+    let (mut frames, mut last, mut shm, mut since) = (0u32, 0u64, 0u32, None);
+    let (code, text) =
+        run_linux_program_watched("/System/Linux/bin/busybox", &["sh", "-c", script], None, 300_000, &mut |_| {
+            let Some(id) = window_titled("vkcube") else { return false };
+            if crate::gui::server::attached(id).is_some_and(|(b, ..)| !b.dmabuf) {
+                shm += 1;
+            }
+            if let Some((_, sum)) = crate::gui::server::with_content(id, window_picture) {
+                if sum != last {
+                    last = sum;
+                    frames += 1;
+                    since.get_or_insert(time::uptime_ms());
+                }
+            }
+            frames >= 20 || since.is_some_and(|t| time::uptime_ms() > t + 30_000)
+        });
+    stop_bridge();
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "vkcube ended by itself: {text}");
+    assert!(frames >= 5, "the cube did not turn ({frames} different pictures)");
+    assert!(shm > 0, "vkcube's frames did not reach the window as they are");
+    crate::kprint!("[{frames} different pictures, from shared memory as it is] ");
+}
+
+/// Red pixels in what a window shows, and a cheap fingerprint of the picture.
+fn window_picture(c: &crate::gui::server::Content) -> (usize, u64) {
+    let (mut red, mut sum) = (0, 0u64);
+    for y in 0..c.height as usize {
+        let row = &c.px[y * c.stride as usize..y * c.stride as usize + c.width as usize];
+        for (x, &p) in row.iter().enumerate() {
+            let (r, g, b) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
+            if r > 150 && g < 80 && b < 80 {
+                red += 1;
+            }
+            if x % 7 == 0 {
+                sum = sum.rotate_left(5) ^ (p & 0xFF_FFFF) as u64;
+            }
+        }
+    }
+    (red, sum)
+}
+
+/// Ends the bridge a test started in the background (and waits until it
+/// is gone, so the next test's bridge is its own).
+fn stop_bridge() {
+    for p in crate::proc::all().iter().filter(|p| p.name() == "wl-bridge") {
+        let _ = crate::proc::kill(p.pid);
+    }
+    // Reaped, not only killed: until the reaper closes its descriptors its
+    // socket still answers, and the next browser's `wl-bridge --background`
+    // takes it for a running bridge (then the browser finds no display).
+    eventually(5000, || !crate::proc::all().iter().any(|p| p.name() == "wl-bridge" && !p.is_reaped()));
+}
+
+/// Like [`run_linux_program_watched`] with Lumen Server running (`c`): its
+/// frames, not the test, answer windows' presents.
+fn run_composited(
+    c: &mut crate::gui::screens::Compositor,
+    argv: &[&str],
+    timeout_ms: u64,
+    watch: &mut dyn FnMut(&mut crate::gui::screens::Compositor, &[u8]) -> bool,
+) -> (Option<i64>, String) {
+    let (r, w) = crate::proc::new_pipe(false);
+    let pid = crate::proc::spawn(argv[0], &argv[1..], [None, Some(w.clone()), Some(w)], 0).expect("spawn");
+    let p = crate::proc::get(pid).unwrap();
+    let reader = match &*r {
+        crate::proc::Handle::PipeRead { pipe, .. } => pipe.clone(),
+        _ => unreachable!(),
+    };
+    let (mut out, mut buf) = (Vec::new(), [0u8; 512]);
+    let deadline = time::uptime_ms() + timeout_ms;
+    loop {
+        c.frame();
+        if p.exit_code().is_none() && watch(c, &out) {
+            let _ = crate::proc::kill(pid);
+        }
+        if reader.readable() {
+            match reader.read(&mut buf, true) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => {}
+            }
+        } else if p.exit_code().is_some() || time::uptime_ms() > deadline {
+            break;
+        } else {
+            sched::sleep_ms(4);
+        }
+    }
+    let text = String::from(String::from_utf8_lossy(&out));
+    for line in text.lines() {
+        crate::kprintln!("    {line}");
+    }
+    (p.exit_code(), text)
+}
+
+/// The client window whose title starts with `name`, or that shows what a
+/// program called `name` draws (a bridge's window).
+fn window_titled(name: &str) -> Option<u32> {
+    use crate::gui::server;
+    let program = |id: u32| server::program_of(id).and_then(crate::proc::get).map(|p| p.name());
+    server::windows().into_iter().find(|w| w.2.starts_with(name) || program(w.0).is_some_and(|n| n.contains(name))).map(|w| w.0)
+}
+
+/// Asks the harness for a screendump of the main display and the pixels it
+/// must show (device pixels, from `pixel`), then holds the picture still:
+/// no frame runs while the harness takes it.
+fn hold_and_screendump(c: &crate::gui::screens::Compositor, pixel: impl Fn(u32, u32) -> u32) {
+    assert!(c.wait_presented(3000), "the display never took its picture");
+    let s = &c.screens[c.main];
+    let (w, h) = s.out.size();
+    let mut line = alloc::format!("\nharness: screendump {}", s.head());
+    for (fx, fy) in [(1, 1), (4, 4), (6, 2), (2, 6), (7, 7), (4, 1)] {
+        let (x, y) = (w * fx / 8, h * fy / 8);
+        line.push_str(&alloc::format!(" {x},{y}={:06x}", pixel(x, y) & 0xFF_FFFF));
+    }
+    crate::kprintln!("{line}");
+    sched::sleep_ms(1500);
+}
+
+/// The compositor on the display, for the Mesa tests that run with it.
+fn mesa_compositor() -> crate::gui::screens::Compositor {
+    crate::gui::settings::load();
+    let _ = crate::gui::server::take_commands();
+    let mut c = crate::gui::screens::Compositor::new();
+    c.desktop.dismiss_shore();
+    c.settle(3000);
+    c
+}
+
+/// Mesa in a window with Lumen Server running: es2gears' dma-bufs are
+/// composited where they are (no copy before the compositor's own), the
+/// screen shows its window (a screendump checked against the compositor's
+/// picture), and es2gears killed mid-frame leaves a working desktop and
+/// bridge behind. Then full screen (glmark2's Wayland build, `--fullscreen`,
+/// a visual without alpha): the display scans the program's dma-bufs out
+/// directly (a screendump checked against the buffer on the plane), goes
+/// back to compositing for a notice, for Shoal and (without a cursor plane)
+/// for the pointer shown again, and to scanning out after each; glmark2
+/// killed while scanned out gives the plane back.
+fn linux_mesa_composited() {
+    if crate::fs::stat(MESA_KMSCUBE).is_err() {
+        crate::kprint!("(skipped: Mesa is not on this disk; see `cargo xtask test --mesa`) ");
+        return;
+    }
+    let mut c = mesa_compositor();
+    let busybox = "/System/Linux/bin/busybox";
+
+    // In a window: composited from the program's buffers.
+    let script = &alloc::format!("wl-bridge --background && exec {ES2GEARS}");
+    let (mut shown, mut held) = (0u32, false);
+    let (code, _) = run_composited(&mut c, &[busybox, "sh", "-c", script], 300_000, &mut |c, _| {
+        let Some(id) = window_titled("es2gears") else { return false };
+        if crate::gui::server::attached(id).is_some_and(|(b, ..)| b.dmabuf) {
+            shown += 1;
+        }
+        if shown >= 20 && !held {
+            held = true;
+            c.settle(500);
+            let s = &c.screens[c.main];
+            hold_and_screendump(c, |x, y| s.pixel(x, y));
+            return false;
+        }
+        // Killed mid-frame, once the screen was checked.
+        held && shown >= 30
+    });
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "es2gears ended by itself");
+    assert!(held, "es2gears' window never showed its dma-bufs ({shown} frames)");
+    c.settle(2000);
+    assert!(window_titled("es2gears").is_none(), "es2gears' window outlived it");
+    assert!(crate::proc::all().iter().any(|p| p.name() == "wl-bridge"), "the bridge died with its client");
+
+    // Full screen: scanned out, and back for what shows over it.
+    let script = "wl-bridge --background && exec /usr/bin/glmark2-es2-wayland --fullscreen \
+                  --visual-config a=0 -b build:duration=120";
+    #[derive(PartialEq, Debug)]
+    enum Step {
+        Start,
+        Scanout,
+        Notice,
+        Again,
+        Shoal,
+        Back,
+        Arrow,
+        Last,
+    }
+    // Without a cursor plane the pointer is drawn into the picture: scanning
+    // out waits until the program hides it (a cursor change, both ways).
+    let plane = crate::gui::cursor::hardware();
+    let hide = |id: u32, hidden: bool| {
+        use aurora_abi::cursor::{ARROW, HIDDEN};
+        crate::gui::server::set_cursor(id, if hidden { HIDDEN } else { ARROW })
+    };
+    let mut step = Step::Start;
+    let mut since = time::uptime_ms();
+    let (code, text) = run_composited(&mut c, &[busybox, "sh", "-c", script], 600_000, &mut |c, _| {
+        let Some(id) = window_titled("glmark2") else { return false };
+        let main = c.main;
+        let scanning = c.screens[main].scanning_out() == Some(id);
+        match step {
+            Step::Start if crate::gui::server::pictures(id) >= 10 && c.wait_presented(1000) => {
+                if !plane {
+                    assert!(!scanning, "scanned out with the pointer drawn over it");
+                    hide(id, true);
+                }
+                (step, since) = (Step::Scanout, time::uptime_ms());
+            }
+            Step::Scanout if scanning && c.screens[main].scanned_total >= 10 => {
+                // The buffer on the plane stays there (and unwritten) while no frame runs.
+                let b = c.screens[main].scanout_buffer().expect("a scanned-out buffer");
+                assert!(b.dmabuf, "glmark2's frames are not dma-bufs");
+                let stride = b.stride / 4;
+                hold_and_screendump(c, |x, y| b.pixels()[(y * stride + x) as usize]);
+                crate::gui::notify::system("Scanout test", "A notice over a full-screen program");
+                (step, since) = (Step::Notice, time::uptime_ms());
+            }
+            Step::Notice if !scanning && c.screens[main].shows_back_buffer() => {
+                // Composed again, the notice over the program.
+                let s = &c.screens[main];
+                hold_and_screendump(c, |x, y| s.pixel(x, y));
+                (step, since) = (Step::Again, time::uptime_ms());
+            }
+            Step::Again if scanning => {
+                c.desktop.toggle_launcher();
+                (step, since) = (Step::Shoal, time::uptime_ms());
+            }
+            Step::Shoal if !scanning && c.screens[main].shows_back_buffer() => {
+                c.desktop.toggle_launcher();
+                (step, since) = (Step::Back, time::uptime_ms());
+            }
+            Step::Back if scanning => {
+                let next = if plane { Step::Last } else { Step::Arrow };
+                if !plane {
+                    hide(id, false);
+                }
+                (step, since) = (next, time::uptime_ms());
+            }
+            Step::Arrow if !scanning && c.screens[main].shows_back_buffer() => {
+                hide(id, true);
+                (step, since) = (Step::Last, time::uptime_ms());
+            }
+            // Killed mid-frame while scanned out.
+            Step::Last if scanning && c.screens[main].scanned_total >= 40 => return true,
+            _ => assert!(time::uptime_ms() < since + 60_000, "stuck at {step:?} (scanning out: {scanning})"),
+        }
+        false
+    });
+    assert_eq!(code, Some(crate::proc::KILLED_CODE), "glmark2 ended by itself: {text}");
+    c.settle(2000);
+    let s = &c.screens[c.main];
+    assert!(s.scanning_out().is_none() && s.shows_back_buffer(), "the desktop's picture did not come back");
+    assert!(crate::proc::all().iter().any(|p| p.name() == "wl-bridge"), "the bridge died with its client");
+    stop_bridge();
+    let scanned = s.scanned_total;
+    c.close();
+    crate::kprint!("[{shown} frames composited from dma-bufs, {scanned} scanned out] ");
+}
+
+/// Mesa's frames in windows, measured (`cargo xtask test --mesa` with
+/// `AURORA_MESA_BENCH=1`): es2gears in a window, and glmark2's Wayland
+/// build in a window and full screen, each with the bridge copying every
+/// frame as before (`WL_BRIDGE_COPY=1`: shared memory, copied into the
+/// window) and without (dma-bufs shown as they are, scanned out full
+/// screen), interleaved, three rounds; medians of frames per second and of
+/// the compositor's time per frame. The bridge writes its own per-frame
+/// breakdown (client, hand-off, until shown) to the log as each ends.
+fn linux_mesa_bench() {
+    if crate::fs::stat(MESA_KMSCUBE).is_err() || crate::gui::prefs::boot_option("mesa_bench").as_deref() != Some("1")
+    {
+        crate::kprint!("(skipped: AURORA_MESA_BENCH=1 with --mesa runs it) ");
+        return;
+    }
+    // Once is enough: the first boot (the second finds its marker).
+    if crate::fs::stat("/Documents/.ktest-persist").is_ok() {
+        crate::kprint!("(measured on the first boot) ");
+        return;
+    }
+    let mut c = mesa_compositor();
+    let busybox = "/System/Linux/bin/busybox";
+    let gears = ES2GEARS;
+    let glmark = "/usr/bin/glmark2-es2-wayland -b build:duration=8 -b texture:duration=8";
+    let glmark_full = "/usr/bin/glmark2-es2-wayland --fullscreen --visual-config a=0 \
+                       -b build:duration=8 -b texture:duration=8";
+    let cases: [(&str, &str, Option<u64>); 3] =
+        [("es2gears window", gears, Some(12_000)), ("glmark2 window", glmark, None), ("glmark2 full", glmark_full, None)];
+    // Each run: (case, copied), [frames per second, compositor's share of
+    // the time (per mille), its composing and presenting time per picture
+    // (µs), glmark2's score].
+    let mut results: Vec<(usize, bool, [u64; 5])> = Vec::new();
+    for round in 0..3 {
+        for (k, (name, cmd, run_ms)) in cases.iter().enumerate() {
+            for copy in [round % 2 == 0, round % 2 != 0] {
+                // (Exported: the launch scripts start the bridge too, should it not be up yet.)
+                let env = if copy { "export WL_BRIDGE_COPY=1; " } else { "" };
+                let script = alloc::format!("{env}wl-bridge --background && exec {cmd}");
+                let before = c.totals;
+                let (mut first, mut pictures, mut window) = (None, 0u64, None);
+                let (_, text) = run_composited(&mut c, &[busybox, "sh", "-c", &script], 300_000, &mut |_, _| {
+                    let title = if k == 0 { "es2gears" } else { "glmark2" };
+                    if let Some(id) = window_titled(title) {
+                        window = Some(id);
+                        let n = crate::gui::server::pictures(id);
+                        let (t0, n0) = *first.get_or_insert((time::uptime_ms(), n));
+                        pictures = n - n0;
+                        return run_ms.is_some_and(|ms| time::uptime_ms() > t0 + ms);
+                    }
+                    false
+                });
+                let ms = first.map_or(1, |f: (u64, u64)| time::uptime_ms() - f.0).max(1);
+                let fps = pictures * 1000 / ms;
+                let t = c.totals;
+                let n = pictures.max(1);
+                let busy = (t.busy_ns - before.busy_ns) / 1000 / ms;
+                let compose = (t.paint_ns - before.paint_ns) / n / 1000;
+                let present = (t.present_ns - before.present_ns + t.scan_ns - before.scan_ns) / n / 1000;
+                let score = text
+                    .split("glmark2 Score:")
+                    .nth(1)
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                crate::kprintln!(
+                    "\nbench: {name} {}: {fps} frames/s over {ms} ms; compositor busy {}.{}% of the time, per picture \
+                     composing {compose} us, presenting {present} us ({} scanned out); score {score}",
+                    if copy { "copied" } else { "zero-copy" },
+                    busy / 10,
+                    busy % 10,
+                    t.scanned - before.scanned
+                );
+                let _ = window;
+                stop_bridge();
+                c.settle(1000);
+                results.push((k, copy, [fps, busy, compose, present, score]));
+            }
+        }
+    }
+    for (k, (name, ..)) in cases.iter().enumerate() {
+        for copy in [true, false] {
+            let median = |i: usize| {
+                let mut x: Vec<u64> = results.iter().filter(|r| (r.0, r.1) == (k, copy)).map(|r| r.2[i]).collect();
+                x.sort_unstable();
+                x.get(x.len() / 2).copied().unwrap_or(0)
+            };
+            let (fps, busy, compose, present, score) = (median(0), median(1), median(2), median(3), median(4));
+            crate::kprintln!(
+                "bench: median {name} {}: {fps} frames/s; compositor busy {}.{}%, composing {compose} us, \
+                 presenting {present} us a picture; score {score}",
+                if copy { "copied" } else { "zero-copy" },
+                busy / 10,
+                busy % 10
+            );
+        }
+    }
+    c.close();
+}
+
+/// Where Voyage is when the disk has the Linux packages
+/// (`AURORA_TEST_ROOT=browsers cargo xtask test --mesa` puts them there).
+const VOYAGE: &str = "/Linux/usr/lib/voyage/voyage";
+
+/// Dark pixels counted when a page is painted (sampled; see [`page_ink`]).
+const PAGE_INK: usize = 400;
+
+/// Dark pixels (text, pictures) in the lower four fifths of a window's
+/// buffers, every other pixel of every other row: a page has been painted
+/// once there are many (the browsers' own bars, above, have few).
+fn page_ink(c: &crate::gui::server::Content) -> usize {
+    let bufs: Vec<(&[u32], u32, u32, u32)> = if c.layers.is_empty() {
+        alloc::vec![(c.px, c.width, c.height, c.stride)]
+    } else {
+        c.layers.iter().map(|l| (l.buffer.pixels(), l.buffer.width, l.buffer.height, l.buffer.stride / 4)).collect()
+    };
+    let mut ink = 0;
+    for (px, w, h, stride) in bufs {
+        for y in (h / 5..h).step_by(2) {
+            let row = (y * stride) as usize;
+            for x in (0..w as usize).step_by(2) {
+                let p = px.get(row + x).copied().unwrap_or(0xFFFF_FFFF);
+                // (Not black: a buffer not drawn yet is all zeros. The
+                // alpha byte isn't looked at: buffers may be XRGB.)
+                if p & 0xFF_FFFF != 0 && ((p >> 16) & 0xFF) + ((p >> 8) & 0xFF) + (p & 0xFF) < 300 {
+                    ink += 1;
+                }
+            }
+        }
+    }
+    ink
+}
+
+/// Browser start-up and page loads, timed (`AURORA_TEST_ROOT=browsers
+/// AURORA_TEST_FILTER="page loads timed" cargo xtask test --mesa`): each
+/// browser is started cold `browser_runs` times (3 by default) on the test
+/// server's article (`/web/article.html`), and once on each real site in
+/// `browser_sites` ("URL|title,…", none by default). For each start: from
+/// the command to its window, to the window having the page's title (the
+/// page is parsed), and to the page's text and pictures being in the
+/// window (painted: [`page_ink`]).
+fn linux_browsers_timed() {
+    if crate::fs::stat(VOYAGE).is_err() {
+        crate::kprint!("(skipped: the browsers are not on this disk; AURORA_TEST_ROOT=browsers runs it) ");
+        return;
+    }
+    if crate::fs::stat("/Documents/.ktest-persist").is_ok() {
+        crate::kprint!("(timed on the first boot) ");
+        return;
+    }
+    let option = |k: &str| crate::gui::prefs::boot_option(k);
+    let runs: u32 = option("browser_runs").and_then(|r| r.parse().ok()).unwrap_or(3);
+    let port = option("test_http_port").unwrap_or_default();
+    let local = alloc::format!("http://10.0.2.2:{port}/web/article.html");
+    let mut pages: Vec<(String, String, u32)> = alloc::vec![(local, String::from("WaveOS test article"), runs)];
+    for site in option("browser_sites").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
+        if let Some((url, title)) = site.split_once('|') {
+            pages.push((String::from(url), String::from(title), 1));
+        }
+    }
+    let browsers: [(&str, &str); 2] =
+        [("voyage", "/System/Linux/bin/voyage"), ("firefox", "/System/Linux/bin/firefox --new-instance")];
+    // `browser_env`: variables for both ("A=1 B=2"), for experiments.
+    let env = option("browser_env").map_or(String::new(), |e| alloc::format!("export {e}; "));
+    let mut c = mesa_compositor();
+    for (page, (url, title, n)) in pages.iter().enumerate() {
+        for run in 0..*n {
+            for (program, cmd) in browsers {
+                let script = alloc::format!("{env}wl-bridge --background && exec {cmd} '{url}'");
+                let t0 = time::uptime_ms();
+                let (mut window, mut titled, mut painted) = (None, None, None);
+                let (mut next_look, mut most_ink) = (0, 0);
+                run_composited(&mut c, &["/System/Linux/bin/busybox", "sh", "-c", &script], 300_000, &mut |_, _| {
+                    let now = time::uptime_ms();
+                    if window.is_none() && window_titled(program).is_some() {
+                        window = Some(now - t0);
+                    }
+                    if let Some(id) = window_titled(title) {
+                        if titled.is_none() {
+                            window.get_or_insert(now - t0);
+                            titled = Some(now - t0);
+                        }
+                        // Painted: the page's text and pictures are in the window.
+                        if painted.is_none() && now >= next_look {
+                            next_look = now + 100;
+                            let ink = crate::gui::server::with_content(id, page_ink).unwrap_or(0);
+                            most_ink = most_ink.max(ink);
+                            if ink > PAGE_INK {
+                                painted = Some(now - t0);
+                                // A picture of it for the record (the first run of each page).
+                                if run == 0 {
+                                    crate::kprintln!("\nharness: screendump browser-{program}-{page}");
+                                }
+                            }
+                        }
+                    }
+                    // (Shown a little longer, for the picture.)
+                    if painted.is_some_and(|p| now > t0 + p + 2000) {
+                        return true;
+                    }
+                    if now > t0 + 240_000 {
+                        // What it shows instead, for the record.
+                        crate::kprintln!("\nharness: screendump browser-{program}-{page}-unpainted");
+                        sched::sleep_ms(1500);
+                        return true;
+                    }
+                    false
+                });
+                stop_bridge();
+                // Every process of it gone before the next start (a cold one).
+                let browser_left = || {
+                    crate::proc::all().iter().any(|p| {
+                        let name = p.name();
+                        p.exit_code().is_none()
+                            && ["firefox", "voyage", "WebKit", "wl-bridge"].iter().any(|n| name.contains(n))
+                    })
+                };
+                // (Its windows too: a window outlives its program briefly.)
+                eventually(60_000, || {
+                    !browser_left() && window_titled(title).is_none() && window_titled(program).is_none()
+                });
+                let ms = |v: Option<u64>| v.map_or(String::from("-"), |v| alloc::format!("{v}"));
+                crate::kprintln!(
+                    "\n    browser-time: {program} run {run} {url}: window {} ms, title {} ms, painted {} ms (ink {most_ink})",
+                    ms(window),
+                    ms(titled),
+                    ms(painted)
+                );
+                assert!(painted.is_some() || *n == 1, "{program} did not show {url}");
+            }
+        }
+    }
+}
+
+/// A long page with text, boxes and one thing always moving (a CSS
+/// animation, as a page with a spinner or a video changes a small part of
+/// the window on every frame), for the browser measurements.
+const SCROLL_PAGE: &str = "<!doctype html><meta charset=utf-8><title>scroll</title>\
+<style>body{font:16px sans-serif;margin:24px;background:#fafafa}p{max-width:720px;line-height:1.5}\
+.box{display:inline-block;width:120px;height:60px;margin:4px;background:linear-gradient(#4a8,#28c);border-radius:8px}\
+#spin{position:fixed;right:24px;top:24px;width:48px;height:48px;border-radius:24px;border:6px solid #28c;\
+border-top-color:transparent;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style>\
+<div id=spin></div>";
+
+/// Browsers in windows, measured (`AURORA_TEST_ROOT=browsers cargo xtask
+/// test --mesa`): Voyage (WebKit) and Firefox show a long local page with a
+/// spinner, then scroll it a notch at a time; each with the bridge copying
+/// every frame as before (`WL_BRIDGE_COPY=1`) and without (the browser's
+/// buffers shown as they are, as layers), interleaved, three rounds. For each
+/// run: how the bridge shows the window (its log), pictures per second while
+/// idle (the spinner) and scrolling, the compositor's busy share and time per
+/// picture, and input to photon: from a scroll event to the compositor
+/// having painted the browser's next picture (median).
+fn linux_browsers_measured() {
+    if crate::fs::stat(VOYAGE).is_err() {
+        crate::kprint!("(skipped: the browsers are not on this disk; AURORA_TEST_ROOT=browsers runs it) ");
+        return;
+    }
+    if crate::fs::stat("/Documents/.ktest-persist").is_ok() {
+        crate::kprint!("(measured on the first boot) ");
+        return;
+    }
+    let mut page = alloc::string::String::from(SCROLL_PAGE);
+    for i in 0..160 {
+        page.push_str(&alloc::format!(
+            "<h2>Section {i}</h2><p>WaveOS shows Linux browsers through the Wayland bridge. This paragraph is \
+             here to be scrolled past: its words wrap at the page's width, and the boxes below it are \
+             drawn with gradients and rounded corners.</p><div class=box></div><div class=box></div>"
+        ));
+    }
+    crate::fs::write_all("/Linux/tmp/waveos-scroll.html", page.as_bytes()).expect("write the page");
+    let mut c = mesa_compositor();
+    let busybox = "/System/Linux/bin/busybox";
+    let browsers: [(&str, &str, &str); 2] = [
+        ("voyage", "voyage", "/System/Linux/bin/voyage file:///tmp/waveos-scroll.html"),
+        ("firefox", "firefox", "/System/Linux/bin/firefox --new-instance file:///tmp/waveos-scroll.html"),
+    ];
+    for round in 0..3 {
+        for (name, program, cmd) in browsers {
+            for copy in [round % 2 == 0, round % 2 != 0] {
+                // (Exported: the launch scripts start the bridge too, should it not be up yet.)
+                let env = if copy { "export WL_BRIDGE_COPY=1; " } else { "" };
+                let script = alloc::format!("{env}wl-bridge --background && exec {cmd}");
+                let before = c.totals;
+                #[derive(PartialEq)]
+                enum Phase {
+                    Loading,
+                    Idle,
+                    Scrolling,
+                }
+                let mut phase = Phase::Loading;
+                let (mut since, mut mark, mut notches) = (time::uptime_ms(), (0u64, before), 0u32);
+                let mut idle = (0u64, 0u64);
+                let mut scroll = (0u64, 0u64, before);
+                let mut waits: Vec<u64> = Vec::new();
+                let mut pending: Option<(u64, u64, bool)> = None;
+                let (_, _) = run_composited(&mut c, &[busybox, "sh", "-c", &script], 900_000, &mut |c, _| {
+                    let Some(id) = window_titled(program).or_else(|| window_titled("scroll")) else {
+                        return time::uptime_ms() > since + 600_000;
+                    };
+                    let n = crate::gui::server::pictures(id);
+                    let now = time::uptime_ms();
+                    match phase {
+                        // Loaded once 20 s passed since the window appeared.
+                        Phase::Loading if now > since + 20_000 => {
+                            // The pointer over the page, for the scrolls.
+                            if let Some(r) = c.desktop.client_content(id) {
+                                let b = c.desktop.bounds();
+                                let at = r.center();
+                                crate::drivers::input::push(crate::drivers::input::InputEvent::Pointer {
+                                    x: at.0 - b.x,
+                                    y: at.1 - b.y,
+                                    buttons: 0,
+                                });
+                            }
+                            (phase, since, mark) = (Phase::Idle, now, (n, c.totals));
+                        }
+                        Phase::Loading => {}
+                        Phase::Idle if now > since + 10_000 => {
+                            let ms = (now - since).max(1);
+                            idle = ((n - mark.0) * 1000 / ms, (c.totals.busy_ns - mark.1.busy_ns) / 1000 / ms);
+                            (phase, since) = (Phase::Scrolling, now);
+                            scroll = (n, 0, c.totals);
+                        }
+                        Phase::Idle => {}
+                        Phase::Scrolling => {
+                            // A picture after the last scroll, and a frame of the
+                            // compositor's since (it painted it): input to photon.
+                            if let Some((t0, n0, seen)) = pending {
+                                if seen {
+                                    waits.push(time::now_ns() / 1000 - t0);
+                                    pending = None;
+                                } else if n > n0 {
+                                    pending = Some((t0, n0, true));
+                                } else if time::now_ns() / 1000 > t0 + 5_000_000 {
+                                    // No picture for it (the page didn't move).
+                                    pending = None;
+                                }
+                            }
+                            if pending.is_none() && notches < 30 && now >= since + notches as u64 * 400 {
+                                crate::drivers::input::push(crate::drivers::input::InputEvent::Scroll { dx: 0, dy: 120 });
+                                pending = Some((time::now_ns() / 1000, n, false));
+                                notches += 1;
+                            }
+                            if notches >= 30 && pending.is_none() || now > since + 60_000 {
+                                scroll.1 = (n - scroll.0) * 1000 / (now - since).max(1);
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                });
+                stop_bridge();
+                for p in crate::proc::all().iter().filter(|p| p.name().contains(program) || p.name().contains("WebKit")) {
+                    let _ = crate::proc::kill(p.pid);
+                }
+                c.settle(2000);
+                let t = c.totals;
+                let frames = (t.frames - scroll.2.frames).max(1);
+                let compose = (t.paint_ns - scroll.2.paint_ns) / frames / 1000;
+                let present = (t.present_ns - scroll.2.present_ns) / frames / 1000;
+                waits.sort_unstable();
+                let photon = waits.get(waits.len() / 2).copied().unwrap_or(0);
+                crate::kprintln!(
+                    "\nbrowser-bench: {name} {}: idle {} pictures/s, compositor busy {}.{}%; scrolling {} pictures/s, \
+                     composing {compose} us, presenting {present} us a frame; scroll to photon median {} ms over {} \
+                     notches",
+                    if copy { "copied" } else { "zero-copy" },
+                    idle.0,
+                    idle.1 / 10,
+                    idle.1 % 10,
+                    scroll.1,
+                    photon / 1000,
+                    waits.len()
+                );
+            }
+        }
+    }
+    c.close();
 }
 
 /// Runs a Mesa program from the Linux packages full screen (it takes the
@@ -1009,8 +1963,43 @@ fn linux_mesa_glmark2() {
         assert!(text.contains("llvmpipe"), "{program} did not render with llvmpipe");
         assert!(text.contains(api), "{program} did not report {api}");
         assert!(text.contains("glmark2 Score:"), "{program} did not finish");
-        assert!(flips >= 10, "{program} flipped {flips} times");
+        // (At 3840x2400 under emulation on a loaded host, a few frames a second.)
+        assert!(flips >= 4, "{program} flipped {flips} times");
         crate::kprint!("[{program}: {flips} flips] ");
+    }
+}
+
+/// The Linux layer's ABI: numbers reach the calls they name, and the vDSO
+/// exports what the C libraries look up (arm64's signal return among them).
+fn linux_abi() {
+    use crate::compat::linux::abi::{self, nr, Call};
+    use crate::compat::linux::vdso;
+    let native = |name: &str, x86: u64| {
+        if cfg!(target_arch = "aarch64") {
+            aurora_linuxabi::aarch64::TABLE.number(name).unwrap()
+        } else {
+            x86
+        }
+    };
+    for (name, n) in [("openat", nr::OPENAT), ("newfstatat", nr::NEWFSTATAT), ("rt_sigreturn", nr::RT_SIGRETURN)] {
+        assert_eq!(abi::native::lookup(native(name, n)), Call::Shared(n), "{name}");
+        assert_eq!(abi::native::canonical(native(name, n)), n, "{name}");
+    }
+    if cfg!(target_arch = "aarch64") {
+        assert_eq!(abi::native::lookup(native("clone", 0)), Call::Own);
+        assert_eq!(abi::native::lookup(1000), Call::None);
+    }
+    let wanted: &[&str] = if cfg!(target_arch = "aarch64") {
+        &["__kernel_clock_gettime", "__kernel_gettimeofday", "__kernel_clock_getres", "__kernel_rt_sigreturn"]
+    } else {
+        &["__vdso_clock_gettime", "__vdso_gettimeofday", "__vdso_time"]
+    };
+    if vdso::symbol(wanted[0]).is_none() {
+        crate::kprint!("(no vDSO in this build) ");
+        return;
+    }
+    for name in wanted {
+        assert!(vdso::symbol(name).is_some(), "the vDSO has no {name}");
     }
 }
 
@@ -1191,12 +2180,23 @@ impl MemReport {
 /// The Linux system-call fuzzer (`linux-tests/linuxfuzz.c`): random Linux
 /// calls from racing threads in disposable child processes. Longer runs:
 /// `AURORA_FUZZ_SEED`, `AURORA_LINUXFUZZ_CHILDREN`, `AURORA_LINUXFUZZ_CALLS`.
+/// Fuzzing under memory pressure: `fuzz_ram` (boot option;
+/// `AURORA_FUZZ_RAM`) MiB of memory left to programs while a fuzzer runs,
+/// the rest held here, so the fuzzers' processes swap and may meet the
+/// out-of-memory killer.
+fn fuzz_pressure() -> mm::swaptest::Balloon {
+    let mib = crate::gui::prefs::boot_option("fuzz_ram").and_then(|v| v.parse().ok());
+    mm::swaptest::Balloon::leaving(mib)
+}
+
 fn linux_fuzz() {
     let opt = |k: &str, d: &str| crate::gui::prefs::boot_option(k).unwrap_or_else(|| String::from(d));
     let (seed, children, calls) =
         (opt("fuzz_seed", "1"), opt("linuxfuzz_children", "6"), opt("linuxfuzz_calls", "300"));
+    let _squeezed = fuzz_pressure();
     let before = free_frames();
     run_linux_test_with("linuxfuzz", &["linuxfuzz", &seed, &children, &calls], "linuxfuzz passed", 30 * 60_000);
+    home_volume_ok("the Linux fuzzer");
     let deadline = time::uptime_ms() + 10_000;
     while free_frames() + FUZZ_SLACK < before && time::uptime_ms() < deadline {
         let _ = crate::gui::server::take_commands();
@@ -1219,6 +2219,13 @@ fn run_linux_test_with(name: &str, argv: &[&str], passed: &str, timeout_ms: u64)
     let (code, text) = run_linux_program(&path, argv, None, None, timeout_ms);
     assert_eq!(code, Some(0), "{name} failed");
     assert!(text.contains(passed), "{name} did not finish");
+}
+
+/// Linux programs run in the default profile, as the desktop starts them
+/// (see `sandbox`): their account's rights; the guarded devices would ask,
+/// and nobody answers in the tests, so a program needing one fails.
+fn default_profile(path: &str) -> crate::sandbox::Confine {
+    crate::sandbox::Confine::With(Some(crate::sandbox::for_launch(path)))
 }
 
 /// Runs a Linux program to its end (or `timeout_ms`), shows its output and
@@ -1255,7 +2262,8 @@ fn run_linux_program_watched(
         }
         None => (None, None),
     };
-    let pid = crate::proc::spawn(path, argv, [stdin, Some(w.clone()), Some(w)], 0).expect("spawn Linux program");
+    let pid = crate::proc::spawn_confined(path, argv, None, [stdin, Some(w.clone()), Some(w)], 0, default_profile(path))
+        .expect("spawn Linux program");
     let p = crate::proc::get(pid).unwrap();
     let stdin_until = time::uptime_ms() + stdin_ms.unwrap_or(0);
     let mut out = alloc::vec::Vec::new();
@@ -1363,6 +2371,55 @@ fn block_round_trip() {
     assert!(disk.read(disk.sectors(), &mut back[..ss as usize]).is_err(), "out-of-range read must fail");
     let after = interrupts();
     assert!(after > before, "no {} completion interrupts ({} → {})", owner, before, after);
+}
+
+/// How long the system disk takes per request, from the issuing task's view
+/// (submission, the device, the completion interrupt, the wake-up): what an
+/// `fsync` is made of. Prints the numbers; fails only on an error or on a
+/// request slower than a second, which no emulated disk should be.
+fn block_latency() {
+    let disk = main_disk();
+    let ss = disk.sector_size() as u64;
+    let scratch = disk.sectors() - 33 - (1 << 20) / ss;
+    let mut buf = alloc::vec![0x5Au8; 64 * 1024];
+    let mut report = alloc::string::String::new();
+    let mut measure = |what: &str, n: usize, f: &mut dyn FnMut(usize)| {
+        let mut us: Vec<u64> = (0..n)
+            .map(|i| {
+                let t0 = time::now_ns();
+                f(i);
+                (time::now_ns() - t0) / 1000
+            })
+            .collect();
+        us.sort_unstable();
+        let mean = us.iter().sum::<u64>() / n as u64;
+        let line = alloc::format!(
+            "{what}: mean {mean} us, median {} us, p90 {} us, max {} us ({n})",
+            us[n / 2],
+            us[n * 9 / 10],
+            us[n - 1]
+        );
+        assert!(us[n - 1] < 1_000_000, "{line}");
+        report.push_str(&alloc::format!("\n  {line}"));
+    };
+    measure("4 KiB read", 200, &mut |i| disk.read(scratch + (i as u64 % 64) * 8, &mut buf[..4096]).unwrap());
+    measure("4 KiB write", 200, &mut |i| disk.write(scratch + (i as u64 % 64) * 8, &buf[..4096]).unwrap());
+    measure("64 KiB write", 50, &mut |i| disk.write(scratch + (i as u64 % 8) * 128, &buf).unwrap());
+    measure("flush, nothing written", 50, &mut |_| disk.flush().unwrap());
+    measure("4 KiB write + flush", 50, &mut |i| {
+        disk.write(scratch + (i as u64 % 64) * 8, &buf[..4096]).unwrap();
+        disk.flush().unwrap();
+    });
+    let _ = fs::mkdir("/Stress");
+    measure("4 KiB file written and synced", 30, &mut |i| {
+        let path = alloc::format!("/Stress/latency-{}", i % 4);
+        fs::write_all(&path, &buf[..4096]).unwrap();
+        fs::try_sync_all().unwrap();
+    });
+    for i in 0..4 {
+        let _ = fs::unlink(&alloc::format!("/Stress/latency-{i}"));
+    }
+    crate::kprint!(" [{} on {}{report}\n]", disk.name(), disk.describe());
 }
 
 /// The second SD reader's card: the block device whose volume is AURORA-SD.
@@ -1724,7 +2781,7 @@ fn wavefs_ramdisk() {
         fs.sync().unwrap();
         fs.check().unwrap();
     }
-    let fs = AuroraFs::mount(dev).unwrap();
+    let fs = AuroraFs::mount(dev.clone()).unwrap();
     let docs = fs.lookup(fs.root(), "Documents").unwrap();
     let f = fs.lookup(docs, "note.txt").unwrap();
     let mut buf = [0u8; 19];
@@ -1732,6 +2789,39 @@ fn wavefs_ramdisk() {
     assert_eq!(&buf, b"kept across remount");
     let b = fs.lookup(docs, "big.bin").unwrap();
     assert_eq!(fs.metadata(b).unwrap().size, 300_000);
+    fs.check().unwrap();
+    // A file removed while open stays (its inode isn't given to anything
+    // new), is written through its holder, and goes at the last close.
+    fs.open_ino(f).unwrap();
+    fs.unlink(docs, "note.txt").unwrap();
+    let dir = fs.create(docs, "new-folder", Kind::Dir).unwrap();
+    assert_ne!(dir, f, "a removed file's inode was reused while open");
+    fs.write(f, 0, b"still writable").unwrap();
+    assert_eq!(fs.truncate(dir, 0), Err(aurora_abi::err::EISDIR));
+    fs.check().unwrap();
+    fs.close_ino(f);
+    assert!(fs.metadata(f).is_err(), "freed at the last close");
+    // A folder can't be moved into itself, whatever the caller checked.
+    let inner = fs.create(dir, "inner", Kind::Dir).unwrap();
+    assert_eq!(fs.rename(docs, "new-folder", inner, "x"), Err(aurora_abi::err::EINVAL));
+    fs.check().unwrap();
+    // Left open at a power cut: the next mount (not clean) frees it.
+    let g = fs.create(docs, "open-at-the-cut", Kind::File).unwrap();
+    fs.write(g, 0, &[1u8; 9000]).unwrap();
+    fs.open_ino(g).unwrap();
+    fs.unlink(docs, "open-at-the-cut").unwrap();
+    fs.sync().unwrap();
+    drop(fs);
+    let fs = AuroraFs::mount(dev.clone()).unwrap();
+    let report = fs.mount_check().expect("checked at mount");
+    assert!(report.contains("an orphan") && report.lines().all(|l| l.contains("an orphan")), "{report}");
+    fs.check().unwrap();
+    assert!(fs.metadata(g).is_err());
+    // A clean unmount needs no check at the next mount.
+    fs.unmount().unwrap();
+    drop(fs);
+    let fs = AuroraFs::mount(dev).unwrap();
+    assert!(fs.mount_check().is_none(), "a cleanly unmounted volume was checked");
     fs.check().unwrap();
 }
 
@@ -1755,12 +2845,41 @@ fn wavefs_home() {
     root.check().unwrap();
     let (total, free) = root.space().unwrap();
     assert!(free > 0 && free < total);
+    // A descriptor kept across the file's removal: its inode is not given
+    // to the folders made meanwhile, so a truncate through it can't cut
+    // one of them (how the fuzzers used to corrupt folders).
+    let mut f = fs::open("/Documents/held.txt", aurora_abi::open::WRITE | aurora_abi::open::CREATE).unwrap();
+    f.write(b"held open").unwrap();
+    fs::unlink("/Documents/held.txt").unwrap();
+    for i in 0..4 {
+        fs::mkdir(&alloc::format!("/Documents/after-{i}")).unwrap();
+        fs::write_all(&alloc::format!("/Documents/after-{i}/x"), b"x").unwrap();
+    }
+    f.truncate(0).unwrap();
+    f.write(b"still mine").unwrap();
+    root.check().unwrap();
+    drop(f);
+    for i in 0..4 {
+        fs::remove_tree(&alloc::format!("/Documents/after-{i}")).unwrap();
+    }
+    fs::sync_all();
+    root.check().unwrap();
+    // On a start after a power cut (the harness cuts one at the end of the
+    // first boot) the check at mount ran; it may only have found files that
+    // were open when the power went.
+    if let Some(report) = root.mount_check() {
+        assert!(report.lines().all(|l| l.contains("an orphan")), "the check at mount found:\n{report}");
+        match report.lines().count() {
+            0 => crate::kprint!("[checked at mount: clean] "),
+            n => crate::kprint!("[checked at mount: {n} file(s) open at the cut, freed] "),
+        }
+    }
 }
 
 fn fat_boot() {
     let kernel = fs::read_all("/Boot/aurora/kernel.elf").expect("kernel on the ESP");
     assert_eq!(&kernel[0..4], b"\x7fELF");
-    assert!(fs::read_all("/Boot/EFI/BOOT/BOOTX64.EFI").unwrap().starts_with(b"MZ"));
+    assert!(fs::read_all(crate::gui::sysupdate::BOOTLOADER).unwrap().starts_with(b"MZ"));
     fs::write_all("/Boot/Aurora test file.txt", b"written by Aster").unwrap();
     assert_eq!(fs::read_all("/Boot/aurora test FILE.txt").unwrap(), b"written by Aster"); // FAT is case-insensitive
     fs::unlink("/Boot/Aurora test file.txt").unwrap();
@@ -1908,6 +3027,54 @@ fn smp_work() {
     let seen = SEEN.load(Ordering::SeqCst).count_ones();
     crate::kprint!("[{} CPUs, work ran on {}] ", online, seen);
     assert_eq!(seen, online, "every CPU ran some of the work");
+}
+
+/// A `sync::Mutex` held across a long wait (I/O, say): its contenders must
+/// stop being ready (they sleep), or a holder that only runs when nothing
+/// else is ready — the boot code, in a CPU's idle task — never runs again.
+/// (That starved the second boot on one CPU with a virtio disk: the boot
+/// code held the disk's queue lock while three tasks yield-spun on it and
+/// on the locks behind it.) Here three tasks on the boot CPU contend for a
+/// lock this task holds while it sleeps; then they all get it.
+fn mutex_long_hold() {
+    static M: crate::sync::Mutex<u32> = crate::sync::Mutex::new(0);
+    static GOT: AtomicU32 = AtomicU32::new(0);
+    let before = crate::sync::LONG_WAITS.load(Ordering::Relaxed);
+    let guard = M.lock();
+    let ids: Vec<u64> = (0..3)
+        .map(|_| {
+            sched::spawn_on_bsp("t-lock", || {
+                *M.lock() += 1;
+                GOT.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+    // Held for a while: the contenders give up yielding and sleep; some
+    // moment finds none of them ready.
+    let start = time::uptime_ms();
+    let mut all_asleep = false;
+    while time::uptime_ms() < start + 200 {
+        sched::sleep_ms(2);
+        if time::uptime_ms() < start + 20 {
+            continue;
+        }
+        // Contenders that looked again at this same millisecond (their
+        // timers and ours fire together, as on a fast CPU they do every
+        // time) get to run and go back to sleep before we look.
+        for _ in 0..4 {
+            sched::yield_now();
+        }
+        let tasks = sched::list();
+        let mine: Vec<_> = tasks.iter().filter(|t| ids.contains(&t.id)).collect();
+        all_asleep |= mine.len() == 3 && mine.iter().all(|t| matches!(t.state, sched::State::Sleeping(_)));
+    }
+    let slept = crate::sync::LONG_WAITS.load(Ordering::Relaxed) - before;
+    drop(guard);
+    assert!(slept > 0, "contenders of a lock held 200 ms never slept: they would starve an idle-task holder");
+    assert!(all_asleep, "the contenders were never all asleep at once while the lock was held");
+    assert!(eventually(5000, || GOT.load(Ordering::SeqCst) == 3), "the contenders did not get the lock once it was free");
+    assert_eq!(*M.lock(), 3);
+    crate::kprint!("[{slept} sleeps] ");
 }
 
 fn smp_shootdown() {
@@ -2059,7 +3226,7 @@ fn timer_queue() {
         let slot =
             (0..16).find(|&s| ARMED_ON[s].compare_exchange(u32::MAX, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok());
         let Some(slot) = slot else { return };
-        x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::arch::interrupts::without_interrupts(|| {
             ARMED_ON[slot].store(crate::arch::percpu::cpu_id() as u32, Ordering::SeqCst);
             crate::timer::call_after_ms(5, fire, slot as u64, "ktest");
         });
@@ -2089,6 +3256,61 @@ fn timer_queue() {
     if n >= 2 && together {
         assert!(cpus.count_ones() >= 2, "every timer was armed on one CPU");
     }
+}
+
+/// A waiter on a [`crate::sync::WaitQueue`] (as disk and USB drivers wait
+/// for their interrupts) is woken by the wakeup for its own event, even when
+/// another wakeup came while it was between joining the queue and sleeping:
+/// one task signals the queue over and over for nothing, another signals it
+/// once its event has happened, and each wait must end soon after that, not
+/// at its timeout (as virtio-blk reads did, stalling browsers for 5 s).
+fn wait_queue_early_wakeup() {
+    use core::sync::atomic::{AtomicBool, AtomicU64};
+    static QUEUE: crate::sync::WaitQueue = crate::sync::WaitQueue::new();
+    static EVENT: AtomicU64 = AtomicU64::new(0);
+    static ASKED: AtomicU64 = AtomicU64::new(0);
+    static STOP: AtomicBool = AtomicBool::new(false);
+    static STOPPED: AtomicU32 = AtomicU32::new(0);
+    fn noise() {
+        while !STOP.load(Ordering::Acquire) {
+            QUEUE.wake_all();
+            core::hint::spin_loop();
+        }
+        STOPPED.fetch_add(1, Ordering::AcqRel);
+    }
+    // The event: a millisecond after each round asks for it, on another task.
+    fn signal() {
+        while !STOP.load(Ordering::Acquire) {
+            let asked = ASKED.load(Ordering::Acquire);
+            if asked > EVENT.load(Ordering::Acquire) {
+                sched::sleep_ms(1);
+                EVENT.store(asked, Ordering::Release);
+                QUEUE.wake_all();
+            } else {
+                sched::yield_now();
+            }
+        }
+        STOPPED.fetch_add(1, Ordering::AcqRel);
+    }
+    EVENT.store(0, Ordering::Release);
+    ASKED.store(0, Ordering::Release);
+    STOP.store(false, Ordering::Release);
+    STOPPED.store(0, Ordering::Release);
+    sched::spawn("t-wq-noise", noise);
+    sched::spawn("t-wq-event", signal);
+    let mut worst = 0;
+    for round in 1..=300u64 {
+        ASKED.store(round, Ordering::Release);
+        let t0 = time::uptime_ms();
+        let done = QUEUE.wait(3000, || EVENT.load(Ordering::Acquire) >= round);
+        let took = time::uptime_ms() - t0;
+        worst = worst.max(took);
+        assert!(done, "round {round}: the event never came");
+        assert!(took < 1000, "round {round}: woken {took} ms after a 1 ms event (a lost wakeup)");
+    }
+    STOP.store(true, Ordering::Release);
+    eventually(2000, || STOPPED.load(Ordering::Acquire) == 2);
+    crate::kprint!("[300 waits, slowest {worst} ms] ");
 }
 
 /// Timeouts end on time on CPUs that are idle with no tick: each task's CPU
@@ -2196,37 +3418,29 @@ fn user_copy_fault() {
 fn hardening() {
     use crate::arch::protect;
     use crate::mm::vmm::{self, AddressSpace, Prot};
-    use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
     let f = protect::features();
-    let cr4 = Cr4::read();
-    assert_eq!(cr4.contains(Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION), f.smep, "SMEP as CPUID says");
-    assert_eq!(cr4.contains(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION), f.smap, "SMAP as CPUID says");
-    assert_eq!(cr4.bits() & (1 << 11) != 0, f.umip, "UMIP as CPUID says");
-    assert!(Cr0::read().contains(Cr0Flags::WRITE_PROTECT), "CR0.WP");
+    protect::assert_this_cpu();
     assert!(protect::every_cpu().0, "SMEP/SMAP/UMIP on every CPU");
-    assert!(x86_64::registers::model_specific::Efer::read()
-        .contains(x86_64::registers::model_specific::EferFlags::NO_EXECUTE_ENABLE));
+    assert!(crate::arch::mmu::no_execute_enabled(), "no-execute enabled");
 
     // W^X: code is not writable, read-only data not executable or writable,
     // data not executable; the physical window (an alias of the code) is
     // not executable.
-    const W: u64 = 1 << 1;
-    const NX: u64 = 1 << 63;
+    use crate::arch::mmu::pte::{kernel_executable as x, kernel_writable as w};
     let text = hardening as *const () as u64;
     let rodata = "a string in .rodata".as_ptr() as u64;
     static DATA: AtomicU32 = AtomicU32::new(1);
     let data = &DATA as *const AtomicU32 as u64;
     let e = |va: u64| vmm::kernel_entry(va).expect("kernel image mapped");
-    assert_eq!(e(text) & (W | NX), 0, "kernel .text must be read-only and executable");
-    assert_eq!(e(rodata) & (W | NX), NX, "kernel .rodata must be read-only and no-execute");
-    assert_eq!(e(data) & (W | NX), W | NX, "kernel .data must be writable and no-execute");
-    let pml4 = unsafe { &*(mm::phys_to_virt(vmm::kernel_pml4()) as *const [u64; 512]) };
-    assert!(pml4[256] & NX != 0, "the physical window must be no-execute");
+    assert!(!w(e(text)) && x(e(text)), "kernel .text must be read-only and executable");
+    assert!(!w(e(rodata)) && !x(e(rodata)), "kernel .rodata must be read-only and no-execute");
+    assert!(w(e(data)) && !x(e(data)), "kernel .data must be writable and no-execute");
+    assert!(crate::arch::mmu::window_no_execute(vmm::kernel_pml4()), "the physical window must be no-execute");
     let (mut wx, mut checked) = (0, 0);
     for va in (0xffff_ffff_8000_0000u64..0xffff_ffff_8000_0000 + (64 << 20)).step_by(4096) {
         if let Some(e) = vmm::kernel_entry(va).filter(|e| e & 1 != 0) {
             checked += 1;
-            if e & W != 0 && e & NX == 0 {
+            if w(e) && x(e) {
                 wx += 1;
             }
         }
@@ -2239,15 +3453,16 @@ fn hardening() {
     let mut a = AddressSpace::new().unwrap();
     let va = 0x40_0000;
     a.map_anon(va, 1, Prot::ReadExec).unwrap();
-    a.write_bytes(va, &[0xC3]).unwrap(); // ret
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    let ret: &[u8] = if cfg!(target_arch = "aarch64") { &[0xC0, 0x03, 0x5F, 0xD6] } else { &[0xC3] };
+    a.write_bytes(va, ret).unwrap(); // ret
+    crate::arch::interrupts::without_interrupts(|| {
         unsafe { vmm::load(a.cr3()) };
         let plain_read_faults = crate::syscall::user::probe::read_faults(va);
         let copied: Result<u8, isize> = crate::syscall::user::get(va);
         let call_faults = crate::syscall::user::probe::exec_faults(va);
         unsafe { vmm::load(vmm::kernel_pml4()) };
         assert_eq!(plain_read_faults, f.smap, "a kernel read of user memory outside user_copy");
-        assert_eq!(copied, Ok(0xC3), "user_copy reads user memory");
+        assert_eq!(copied, Ok(ret[0]), "user_copy reads user memory");
         assert_eq!(call_faults, f.smep, "the kernel calling into a user page");
     });
     drop(a);
@@ -2507,7 +3722,10 @@ fn acpi_isolation() {
     // Everything else carries on; ACPI answers "unknown" from now on.
     assert_eq!(crate::acpi::power_info().flags & aurora_abi::power::ACPI, 0);
     crate::sched::sleep_ms(20);
-    assert!(crate::acpi::sleep_type(5).is_some(), "sleep types found earlier stay usable");
+    // (Arm firmware has no sleep states: it powers off through PSCI.)
+    if cfg!(target_arch = "x86_64") {
+        assert!(crate::acpi::sleep_type(5).is_some(), "sleep types found earlier stay usable");
+    }
 }
 
 fn usb() {
@@ -2720,8 +3938,7 @@ fn sleep_and_wake() {
     let (protected, inits) = crate::arch::protect::every_cpu();
     assert!(protected && inits >= 2, "SMEP/SMAP/UMIP not back on every CPU after sleep");
     assert!(
-        x86_64::registers::control::Cr4::read_raw() & crate::arch::protect::wanted_cr4()
-            == crate::arch::protect::wanted_cr4(),
+        crate::arch::protect::this_cpu_protected(),
         "CR4 protections lost across sleep"
     );
     // Drivers were reset and restarted: the disk, sound and USB work again.
@@ -2755,12 +3972,16 @@ fn sleep_and_wake() {
     // The network card was reset too: talk to the host again.
     if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
         use crate::net::socket::{Kind, Socket};
-        // An IPv4 address: the host is reached over IPv4, and an IPv6
-        // address alone (which can come first) makes `online` true.
+        // An IPv4 address on every wired card: the host is reached over
+        // IPv4, an IPv6 address alone (which can come first) makes `online`
+        // true, and with two USB adapters on look-alike networks (the same
+        // address on each) the route must not change under the connection.
         let v4 = || {
-            crate::net::interfaces()
-                .iter()
-                .any(|i| i.flags & aurora_abi::net::IF_LOOPBACK == 0 && !i.name.starts_with(b"wlan") && i.ip != [0; 4])
+            let wired: Vec<_> = crate::net::interfaces()
+                .into_iter()
+                .filter(|i| i.flags & aurora_abi::net::IF_LOOPBACK == 0 && !i.name.starts_with(b"wlan"))
+                .collect();
+            !wired.is_empty() && wired.iter().all(|i| i.ip != [0; 4])
         };
         assert!(wait_for(|| crate::net::online() && v4(), 10_000), "no network address after sleep");
         let c = Socket::new(Kind::Tcp, false);
@@ -2789,11 +4010,15 @@ fn network() {
     // The harness names the card it gave QEMU: that driver must be the one in use.
     if let Some(want) = crate::gui::prefs::boot_option("test_net_driver") {
         let ifs = crate::net::interfaces();
-        let card = ifs.iter().find(|i| i.name.starts_with(b"eth")).expect("no wired interface");
+        let card = ifs
+            .iter()
+            .find(|i| i.flags & aurora_abi::net::IF_LOOPBACK == 0 && !i.name.starts_with(b"wlan"))
+            .expect("no wired interface");
         let driver = core::str::from_utf8(&card.driver[..card.driver_len as usize]).unwrap_or("");
-        assert!(driver.contains(want.as_str()), "eth0 is driven by {driver:?}, expected {want:?}");
+        let name = core::str::from_utf8(&card.name[..card.name_len as usize]).unwrap_or("");
+        assert!(driver.contains(want.as_str()), "{name} is driven by {driver:?}, expected {want:?}");
         assert!(card.flags & aurora_abi::net::IF_LINK != 0, "{driver}: no link");
-        crate::kprint!("[{driver}] ");
+        crate::kprint!("[{name}: {driver}] ");
     }
 
     // ICMP echo, to ourselves over loopback and on our own address.
@@ -2874,25 +4099,39 @@ fn network() {
     );
     drop(c);
 
-    // To the host (10.0.2.2) through QEMU's NAT: 1 MiB over HTTP.
+    // To the host (10.0.2.2) through QEMU's NAT: 1 MiB over HTTP each way,
+    // timed (with the CPU time it took) to compare network cards.
     if let Some(port) = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()) {
-        let c = Socket::new(Kind::Tcp, false);
-        c.connect((crate::net::v4([10, 0, 2, 2]), port)).expect("connect to the host");
-        c.write(b"GET /big HTTP/1.1\r\nHost: host\r\n\r\n").unwrap();
-        c.option(aurora_abi::net::OPT_TIMEOUT, 20_000).unwrap();
-        let mut resp = Vec::new();
-        loop {
-            let n = c.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            resp.extend_from_slice(&buf[..n]);
-        }
-        let head = resp.windows(4).position(|w| w == b"\r\n\r\n").expect("HTTP header") + 4;
-        let body = &resp[head..];
+        let (body, ms, cpu) = measured(|| {
+            download(port, 20_000).unwrap_or_else(|e| {
+                for line in crate::drivers::usb::net::describe() {
+                    log!("net-test", "{line}");
+                }
+                panic!("download from the host: {}", aurora_abi::err::name(e))
+            })
+        });
         assert_eq!(body.len(), 1 << 20, "short body from the host");
         assert!(body.iter().enumerate().all(|(i, &b)| b as u32 == (i as u32).wrapping_mul(31).wrapping_add(7) % 251));
-        crate::kprint!("[1 MiB from the host] ");
+        crate::kprintln!(
+            "net-test: 1 MiB from the host in {} ms ({} KiB/s), {} CPU ms",
+            ms,
+            1024 * 1000 / ms.max(1),
+            cpu
+        );
+        let (stored, ms, cpu) = measured(|| upload(port, 1 << 20));
+        if stored != Some(1 << 20) {
+            for line in crate::drivers::usb::net::describe() {
+                log!("net-test", "{line}");
+            }
+        }
+        assert_eq!(stored, Some(1 << 20), "the host did not get the upload");
+        crate::kprintln!(
+            "net-test: 1 MiB to the host in {} ms ({} KiB/s), {} CPU ms",
+            ms,
+            1024 * 1000 / ms.max(1),
+            cpu
+        );
+        crate::kprint!("[1 MiB from and to the host] ");
 
         // From the host: QEMU forwards a host port to our 8080.
         let l = Socket::new(Kind::Tcp, false);
@@ -2916,6 +4155,253 @@ fn network() {
         crate::sched::sleep_ms(100);
     }
     network6();
+}
+
+/// Runs `f`; returns its result, the milliseconds it took and the CPU time
+/// (busy milliseconds over every CPU) the system spent meanwhile.
+fn measured<R>(f: impl FnOnce() -> R) -> (R, u64, u64) {
+    let busy = || crate::sched::cpu_times().iter().map(|c| c.0).sum::<u64>();
+    let (t0, b0) = (time::uptime_ms(), busy());
+    let r = f();
+    (r, time::uptime_ms() - t0, busy().saturating_sub(b0))
+}
+
+/// `GET /big` from the test HTTP server on the host: the body.
+fn download(port: u16, timeout_ms: u64) -> Result<Vec<u8>, isize> {
+    use crate::net::socket::{Kind, Socket};
+    let c = Socket::new(Kind::Tcp, false);
+    c.option(aurora_abi::net::OPT_TIMEOUT, timeout_ms)?;
+    c.connect((crate::net::v4([10, 0, 2, 2]), port))?;
+    c.write(b"GET /big HTTP/1.1\r\nHost: host\r\n\r\n")?;
+    let mut resp = Vec::new();
+    let mut buf = alloc::vec![0u8; 16384];
+    loop {
+        let n = c.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        resp.extend_from_slice(&buf[..n]);
+    }
+    let head = resp.windows(4).position(|w| w == b"\r\n\r\n").ok_or(aurora_abi::err::EIO)? + 4;
+    Ok(resp.split_off(head))
+}
+
+/// `POST /sink` with `len` bytes: how many the host says it stored.
+fn upload(port: u16, len: usize) -> Option<usize> {
+    use crate::net::socket::{Kind, Socket};
+    let c = Socket::new(Kind::Tcp, false);
+    c.option(aurora_abi::net::OPT_TIMEOUT, 20_000).ok()?;
+    c.connect((crate::net::v4([10, 0, 2, 2]), port)).ok()?;
+    c.write(alloc::format!("POST /sink HTTP/1.1\r\nHost: host\r\nContent-Length: {len}\r\n\r\n").as_bytes()).ok()?;
+    let data: Vec<u8> = (0..len).map(|i| (i * 7) as u8).collect();
+    let mut sent = 0;
+    while sent < len {
+        sent += c.write(&data[sent..]).ok()?;
+    }
+    let mut resp = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        match c.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => resp.extend_from_slice(&buf[..n]),
+        }
+    }
+    let head = resp.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    core::str::from_utf8(&resp[head..]).ok()?.trim().parse().ok()
+}
+
+/// USB networking end to end, with QEMU's usb-net (`--net usb-ecm` or
+/// `usb-rndis`): two adapters, each on its own user network, configured by
+/// DHCP; the first pulled out (QMP `device_del`) in the middle of a
+/// download, which must fail at once rather than at TCP's retry limit; its
+/// interface, routes and memory gone; traffic moving to the second; then
+/// plugged back in (`device_add`), as `usb0` again, with an address.
+fn usb_network() {
+    use crate::drivers::usb::net;
+    use crate::net::socket::{Kind, Socket};
+    let Some(mode) = crate::gui::prefs::boot_option("test_usb_net") else {
+        crate::kprint!("[no USB network adapter] ");
+        return;
+    };
+    let want = if mode == "usb-rndis" { "RNDIS" } else { "CDC-ECM" };
+    let port = crate::gui::prefs::boot_option("test_http_port").and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+    let name = |i: &aurora_abi::NetInterface| {
+        alloc::string::String::from_utf8_lossy(&i.name[..i.name_len as usize]).into_owned()
+    };
+    let usb = || crate::net::interfaces().into_iter().filter(|i| i.name.starts_with(b"usb")).collect::<Vec<_>>();
+    let configured = |n: &str| usb().iter().any(|i| name(i) == n && i.ip != [0; 4]);
+    assert!(
+        wait_for(|| net::adapters().len() == 2 && configured("usb0") && configured("usb1"), 20_000),
+        "two configured USB adapters expected: {:?}",
+        usb().iter().map(|i| (name(i), i.ip)).collect::<Vec<_>>()
+    );
+    for i in usb() {
+        let driver = core::str::from_utf8(&i.driver[..i.driver_len as usize]).unwrap_or("");
+        assert!(driver.contains(want), "{}: driver {driver:?}", name(&i));
+        crate::kprint!("[{} {} {} Mb/s] ", name(&i), driver, i.speed_mbps);
+    }
+    for line in net::describe() {
+        log!("net-test", "{line}");
+    }
+    // What two idle adapters cost (interrupt endpoints, receive streams).
+    let ((), _, idle_cpu) = measured(|| crate::sched::sleep_ms(1000));
+    log!("net-test", "idle with two USB adapters: {idle_cpu} CPU ms per second");
+    let route_name =
+        || crate::net::with(|s| s.route([10, 0, 2, 2]).map(|(i, _)| s.ifaces[i].name.clone())).unwrap_or_default();
+    assert_eq!(route_name(), "usb0", "the first adapter carries the default route");
+
+    // Pulled out mid-download (reading slowly, so most of the body is still
+    // to come): the transfer fails promptly, the interface and its memory go.
+    let first = net::adapters().into_iter().find(|a| a.mac[5] == 0x56).expect("adapter 0");
+    let weak = Arc::downgrade(&first);
+    drop(first);
+    let c = Socket::new(Kind::Tcp, false);
+    c.option(aurora_abi::net::OPT_TIMEOUT, 30_000).unwrap();
+    c.connect((crate::net::v4([10, 0, 2, 2]), port)).expect("connect over usb0");
+    c.write(b"GET /big HTTP/1.1\r\nHost: host\r\n\r\n").unwrap();
+    let mut buf = alloc::vec![0u8; 4096];
+    let mut got = 0;
+    while got < 32 * 1024 {
+        got += c.read(&mut buf).expect("download over usb0");
+    }
+    let t0 = time::uptime_ms();
+    crate::kprintln!("harness: unplug usbnet0");
+    assert!(wait_for(|| !usb().iter().any(|i| name(i) == "usb0"), 10_000), "usb0 did not go away");
+    let gone_ms = time::uptime_ms() - t0;
+    let failed = loop {
+        match c.read(&mut buf) {
+            Ok(0) => break false,
+            Ok(n) => got += n,
+            Err(_) => break true,
+        }
+    };
+    let failed_ms = time::uptime_ms() - t0;
+    assert!(failed && got < 1 << 20, "the download over the unplugged adapter went on ({got} bytes)");
+    assert!(failed_ms < 15_000, "the connection took {failed_ms} ms to fail");
+    drop(c);
+    assert!(wait_for(|| weak.upgrade().is_none(), 5000), "the unplugged adapter was not freed");
+    assert_eq!(route_name(), "usb1", "the route did not move to the second adapter");
+    crate::kprint!("[unplugged: gone in {gone_ms} ms, connection failed in {failed_ms} ms] ");
+    let body = download(port, 20_000).unwrap_or_else(|e| {
+        for line in net::describe() {
+            log!("net-test", "{line}");
+        }
+        panic!("download over usb1: {}", aurora_abi::err::name(e))
+    });
+    assert_eq!(body.len(), 1 << 20, "short download over usb1");
+
+    // Plugged back in: usb0 again, with an address, and the route back.
+    let t0 = time::uptime_ms();
+    crate::kprintln!("harness: replug usbnet0");
+    assert!(wait_for(|| usb().iter().any(|i| name(i) == "usb0"), 15_000), "usb0 did not come back");
+    let up_ms = time::uptime_ms() - t0;
+    assert!(wait_for(|| configured("usb0"), 15_000), "no address for usb0 after replugging");
+    let dhcp_ms = time::uptime_ms() - t0 - up_ms;
+    assert_eq!(route_name(), "usb0", "the route did not return to the first adapter");
+    let body = download(port, 20_000).expect("download after replugging");
+    assert_eq!(body.len(), 1 << 20);
+    crate::kprint!("[replugged: interface after {up_ms} ms, address {dhcp_ms} ms later] ");
+}
+
+/// The CDC-NCM driver (in a Realtek RTL8156 dock adapter's NCM
+/// configuration, chosen over its vendor one) and the ASIX AX88179 and
+/// AX88772 drivers, against simulated devices (`usb::net::sim`): each comes
+/// up with its MAC address, link speed and a DHCP address, answers ping and
+/// echoes a burst of UDP datagrams (batched into NCM blocks and ASIX
+/// aggregates), and goes away cleanly when unplugged.
+fn usb_network_simulated() {
+    use crate::drivers::usb::net::{
+        self,
+        sim::{self, Model},
+    };
+    use crate::net::socket::{Kind, Socket};
+    let hcd = sim::controller();
+    let models = [Model::Ncm, Model::Ax88179, Model::Ax88772];
+    let text = |b: &[u8]| alloc::string::String::from_utf8_lossy(b).into_owned();
+    let iface = |m: Model| crate::net::interfaces().into_iter().find(|i| i.mac == m.mac());
+    for m in models {
+        hcd.plug(m);
+    }
+    for m in models {
+        let up = wait_for(|| iface(m).is_some_and(|i| i.ip == m.client_ip()), 15_000);
+        assert!(up, "{m:?}: no address ({:?}); USB: {:?}", iface(m).map(|i| i.ip), crate::drivers::usb::list());
+        let i = iface(m).unwrap();
+        let (name, driver) = (text(&i.name[..i.name_len as usize]), text(&i.driver[..i.driver_len as usize]));
+        let want = match m {
+            Model::Ncm => "Realtek RTL8156 (CDC-NCM)",
+            Model::Ax88179 => "ASIX AX88179 (USB)",
+            Model::Ax88772 => "ASIX AX88772 (USB)",
+        };
+        assert_eq!(driver, want);
+        assert!(name.starts_with("eth"), "{driver} is {name}: an adapter with a vendor's address is ethN");
+        assert!(wait_for(|| iface(m).is_some_and(|i| i.speed_mbps == m.speed()), 2000), "{driver}: link speed");
+        assert!(m == Model::Ncm || hcd.seen(m).receiver_started, "{driver}: the receiver was not started");
+        let peer = crate::net::v4(m.peer_ip());
+        let ping = Socket::new(Kind::Icmp, false);
+        ping.option(aurora_abi::net::OPT_TIMEOUT, 3000).unwrap();
+        ping.send_to(&[8u8, 0, 0, 0, 0, 0, 0, 3, b'u', b's', b'b'], (peer, 0)).unwrap();
+        let mut buf = [0u8; 512];
+        let (n, from) = ping.recv_from(&mut buf).unwrap_or_else(|e| panic!("{driver}: no echo reply ({e})"));
+        assert_eq!((n, from.0, buf[0], &buf[8..11]), (11, peer, 0, &b"usb"[..]));
+        // A burst: every datagram comes back.
+        let u = Socket::new(Kind::Udp, false);
+        u.option(aurora_abi::net::OPT_TIMEOUT, 3000).unwrap();
+        for k in 0..24u8 {
+            u.send_to(&[k; 300], (peer, 7)).unwrap();
+        }
+        let mut echoed = 0;
+        while echoed < 24 {
+            match u.recv_from(&mut buf) {
+                Ok((300, _)) => echoed += 1,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert_eq!(echoed, 24, "{driver}: UDP echoes missing");
+        let seen = hcd.seen(m);
+        assert_eq!(seen.bad_transfers, 0, "{driver}: the device could not parse what we sent");
+        crate::kprint!("[{name} {driver}: {} Mb/s, up to {} frames per transfer] ", m.speed(), seen.most_per_transfer);
+    }
+    assert!(hcd.seen(Model::Ncm).most_per_transfer > 1, "no NCM block carried more than one frame");
+    // The dock is a composite device: its keyboard is a Linux input device
+    // too, in sysfs under the configuration the dock runs in (2).
+    let dock_keys =
+        || crate::drivers::evdev::devices().into_iter().find(|d| d.id.vendor == 0x0BDA && d.id.product == 0x8156);
+    assert!(
+        wait_for(|| dock_keys().is_some(), 5000),
+        "the dock's keyboard is not an input device: {:?}",
+        crate::drivers::usb::list()
+    );
+    let keys = dock_keys().unwrap();
+    let crate::drivers::evdev::Location::Usb(place) = &keys.location else {
+        panic!("the dock's keyboard is not on USB")
+    };
+    let (_, interface_dir, _) = crate::compat::linux::input::tree::usb_dirs(place);
+    assert!(interface_dir.ends_with(&alloc::format!("-{}:2.2", place.ports)), "sysfs: {interface_dir}");
+    let held = Arc::downgrade(&keys);
+    drop(keys);
+    // The default route: a built-in card wins over USB adapters, and USB
+    // adapters over a tethering link (QEMU's usb-net has a local address).
+    let names: Vec<_> = models.iter().filter_map(|&m| iface(m)).map(|i| text(&i.name[..i.name_len as usize])).collect();
+    let via = crate::net::with(|s| s.route([192, 0, 2, 1]).map(|(i, _)| s.ifaces[i].name.clone())).unwrap_or_default();
+    if crate::gui::prefs::boot_option("test_usb_net").is_some() {
+        assert!(names.contains(&via), "the default route is on {via}, not a USB Ethernet adapter ({names:?})");
+    } else if crate::net::interfaces()
+        .iter()
+        .any(|i| i.name.starts_with(b"eth") && !names.iter().any(|n| n.as_bytes() == &i.name[..i.name_len as usize]))
+    {
+        assert!(!names.contains(&via), "the default route moved from the built-in card to {via}");
+    }
+    let weak: Vec<_> =
+        net::adapters().iter().filter(|a| models.iter().any(|m| a.mac == m.mac())).map(Arc::downgrade).collect();
+    assert_eq!(weak.len(), 3);
+    for m in models {
+        hcd.unplug(m);
+    }
+    assert!(wait_for(|| models.iter().all(|&m| iface(m).is_none()), 10_000), "simulated adapters not removed");
+    assert!(wait_for(|| dock_keys().is_none(), 5000), "the dock's keyboard outlived the dock");
+    assert!(wait_for(|| held.upgrade().is_none(), 5000), "the dock's keyboard was not freed");
+    assert!(wait_for(|| weak.iter().all(|w| w.upgrade().is_none()), 10_000), "simulated adapters not freed");
 }
 
 /// IPv6: a link-local address at once, a global one from QEMU's router

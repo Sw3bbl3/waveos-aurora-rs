@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 pub mod repo;
 #[cfg(feature = "crypto")]
 pub mod sign;
+pub mod system;
 pub mod version;
 
 pub use version::{compare as compare_versions, Dependency};
@@ -46,9 +47,12 @@ pub const CATEGORIES: &[&str] =
     &["game", "productivity", "utility", "developer", "graphics", "media", "education", "network", "social", "system"];
 
 /// What an app may ask for, how the installer explains it, and the
-/// capability bit or folder grant of the coming sandbox it becomes
-/// (docs/developer/sandboxing.md). Today they are shown before installing.
-/// Every app may always use its own container (`~/Library/Containers/<id>`).
+/// sandbox capability or folder it becomes (`aurora_abi::sandbox`, see
+/// docs/developer/sandboxing.md). The kernel enforces them for format-2
+/// packages: an app may use only what it declares, and the guarded ones
+/// (microphone, camera, screen, input, USB, folders) only once the person
+/// allows it. Every app may always use its own container
+/// (`~/Library/Containers/<id>`) and files the person gives it.
 pub const PERMISSIONS: &[(&str, &str, &str)] = &[
     ("network", "Connect to the internet and your local network", "NET_CLIENT"),
     ("network-server", "Accept connections from other computers", "NET_SERVER"),
@@ -70,23 +74,89 @@ pub const PERMISSIONS: &[(&str, &str, &str)] = &[
     ("downloads:read", "Read files in Downloads", "read ~/Downloads"),
     ("music", "Read and change files in Music", "write ~/Music"),
     ("movies", "Read and change files in Movies", "write ~/Movies"),
+    ("music:read", "Read files in Music", "read ~/Music"),
+    ("movies:read", "Read files in Movies", "read ~/Movies"),
+    ("desktop", "Read and change files on the Desktop", "write ~/Desktop"),
+    ("desktop:read", "Read files on the Desktop", "read ~/Desktop"),
+    ("camera", "Use the camera", "CAMERA"),
+    ("screen-capture", "Record the screen and other apps' windows", "SCREEN_CAPTURE"),
+    ("input-monitoring", "Observe keys and pointer input meant for other apps", "INPUT_MONITOR"),
+    ("usb", "Use USB and other devices directly", "USB"),
+    ("launch", "Open other apps and documents", "LAUNCH"),
+    ("ipc", "Talk to other apps", "IPC"),
+    ("background", "Keep running without a window", "BACKGROUND"),
+    ("display", "Drive the display directly", "DISPLAY"),
+];
+
+/// Permissions only the system's own apps may hold (their manifests come
+/// with the system image; [`Manifest::parse_first_party`] accepts them,
+/// [`Manifest::parse`] never does).
+pub const SYSTEM_PERMISSIONS: &[(&str, &str, &str)] = &[
+    ("system", "Control power, displays, networks and the system log", "SYSTEM"),
+    ("admin", "Act with an administrator's capability", "ADMIN"),
+    ("privacy", "Change what other apps may do", "PRIVACY"),
+    ("processes", "End and signal your other programs", "PROCESSES"),
+    ("linux-home", "Use your Linux home and temporary folders", "LINUX_HOME"),
+    ("all-files", "Read and change every file you may", "ALL_FILES"),
 ];
 
 /// The installer's explanation of `permission`.
 pub fn describe_permission(permission: &str) -> &'static str {
-    PERMISSIONS.iter().find(|(p, _, _)| *p == permission).map(|(_, d, _)| *d).unwrap_or("Unknown permission")
+    PERMISSIONS
+        .iter()
+        .chain(SYSTEM_PERMISSIONS)
+        .find(|(p, _, _)| *p == permission)
+        .map(|(_, d, _)| *d)
+        .unwrap_or("Unknown permission")
 }
 
 /// Permissions that reach beyond the app's own files and windows enough to
 /// deserve a warning colour in the installer.
 pub fn sensitive_permission(permission: &str) -> bool {
-    matches!(permission, "home" | "microphone" | "linux" | "elevate" | "preferences" | "network-server")
+    matches!(
+        permission,
+        "home"
+            | "microphone"
+            | "linux"
+            | "elevate"
+            | "preferences"
+            | "network-server"
+            | "camera"
+            | "screen-capture"
+            | "input-monitoring"
+            | "usb"
+            | "ipc"
+    )
+}
+
+/// The processor architectures a package can be for (`architecture` in
+/// its manifest), named as `aurora_abi::ARCH` names them.
+pub const ARCHITECTURES: &[&str] = &["x86_64", "aarch64"];
+
+/// The architecture of the system this code runs in.
+pub const NATIVE_ARCH: &str = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+
+/// Whether this build is part of WaveOS itself (the kernel, apps, the
+/// installer: no host operating system), where only [`NATIVE_ARCH`]
+/// packages are installable; development hosts handle every architecture.
+const ON_WAVEOS: bool = cfg!(any(target_os = "none", target_os = "uefi"));
+
+/// The ELF machine of an architecture's executables.
+fn elf_machine(arch: &str) -> u16 {
+    if arch == "aarch64" {
+        aurora_elf::EM_AARCH64
+    } else {
+        aurora_elf::EM_X86_64
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Manifest {
     /// 1 or 2 (see the crate documentation).
     pub format: u32,
+    /// One of [`ARCHITECTURES`]; empty means x86_64, as every package made
+    /// before the aarch64 port is (see [`Manifest::arch`]).
+    pub architecture: String,
     pub id: String,
     pub name: String,
     /// The author or publisher (`developer` in format 1, `author` in format 2).
@@ -203,6 +273,16 @@ const FORMAT2_KEYS: &[&str] = &[
 
 impl Manifest {
     pub fn parse(text: &str) -> Result<Self> {
+        Self::parse_as(text, false)
+    }
+
+    /// A manifest of one of the system's own apps (it comes with the system
+    /// image, never in a package): it may also name [`SYSTEM_PERMISSIONS`].
+    pub fn parse_first_party(text: &str) -> Result<Self> {
+        Self::parse_as(text, true)
+    }
+
+    fn parse_as(text: &str, first_party: bool) -> Result<Self> {
         if text.len() > 16 * 1024 {
             return Err("Manifest too large");
         }
@@ -234,7 +314,8 @@ impl Manifest {
         if get("abi")?.parse::<u32>().ok() != Some(ABI) {
             return Err("Unsupported package format or ABI");
         }
-        if quoted(get("architecture")?)? != "x86_64" {
+        let architecture = quoted(get("architecture")?)?;
+        if !ARCHITECTURES.contains(&architecture.as_str()) {
             return Err("This app needs a different processor architecture");
         }
         let sdk = quoted(get("sdk")?)?;
@@ -246,6 +327,7 @@ impl Manifest {
         let list = |k: &str| values.get(k).map(|v| strings(v)).transpose().map(Option::unwrap_or_default);
         let m = Self {
             format,
+            architecture,
             id: quoted(get("id")?)?,
             name: quoted(get("name")?)?,
             developer: quoted(get(if format == 1 { "developer" } else { "author" })?)?,
@@ -260,11 +342,11 @@ impl Manifest {
             min_os: opt("min_os")?,
             dependencies: list("dependencies")?,
         };
-        m.validate()?;
+        m.validate(first_party)?;
         Ok(m)
     }
 
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, first_party: bool) -> Result<()> {
         let m = self;
         if !valid_id(&m.id) {
             return Err("App ID must be a lowercase reverse-domain identifier");
@@ -295,7 +377,11 @@ impl Manifest {
         if m.categories.len() > 4 || m.categories.iter().any(|c| !CATEGORIES.contains(&c.as_str())) {
             return Err("Unknown app category");
         }
-        if m.permissions.iter().any(|p| !PERMISSIONS.iter().any(|(k, _, _)| k == p)) {
+        let known = |p: &String| {
+            PERMISSIONS.iter().any(|(k, _, _)| k == p)
+                || (first_party && SYSTEM_PERMISSIONS.iter().any(|(k, _, _)| k == p))
+        };
+        if !m.permissions.iter().all(known) {
             return Err("Unknown permission");
         }
         if !m.min_os.is_empty() && !version::valid(&m.min_os) {
@@ -323,13 +409,14 @@ impl Manifest {
         }
         let array = |v: &[String]| format!("[{}]", v.iter().map(|s| q(s)).collect::<Vec<_>>().join(", "));
         let mut out = format!(
-            "format = {}\nid = {}\nname = {}\n{} = {}\nversion = {}\narchitecture = \"x86_64\"\nsdk = \"0.9\"\nabi = 1\nentry = {}\nicon = {}\nresources = {}\nextensions = {}\n",
+            "format = {}\nid = {}\nname = {}\n{} = {}\nversion = {}\narchitecture = {}\nsdk = \"0.9\"\nabi = 1\nentry = {}\nicon = {}\nresources = {}\nextensions = {}\n",
             self.format.max(1),
             q(&self.id),
             q(&self.name),
             if self.format == 2 { "author" } else { "developer" },
             q(&self.developer),
             q(&self.version),
+            q(self.arch()),
             q(&self.entry),
             q(&self.icon),
             array(&self.resources),
@@ -346,6 +433,20 @@ impl Manifest {
             );
         }
         out
+    }
+
+    /// The architecture the app is for (x86_64 when the field is empty).
+    pub fn arch(&self) -> &str {
+        if self.architecture.is_empty() {
+            "x86_64"
+        } else {
+            &self.architecture
+        }
+    }
+
+    /// Whether the app runs on this system's processor.
+    pub fn runs_here(&self) -> bool {
+        self.arch() == NATIVE_ARCH
     }
 
     /// The dependencies, parsed (they were validated with the manifest).
@@ -580,6 +681,11 @@ impl<'a> Package<'a> {
         }
         let manifest_bytes = files.iter().find(|f| f.path == "manifest.toml").ok_or("Missing manifest.toml")?.bytes;
         let manifest = Manifest::parse(core::str::from_utf8(manifest_bytes).map_err(|_| "Manifest is not UTF-8")?)?;
+        // Inside WaveOS, only apps for this processor; tools on a
+        // development computer read packages for either.
+        if ON_WAVEOS && !manifest.runs_here() {
+            return Err("This app needs a different processor architecture");
+        }
         let find = |p: &str| files.iter().find(|f| f.path == p).map(|f| f.bytes);
         let (hashes_bytes, signature) = if manifest.format == 2 {
             if files.iter().any(|f| f.path.starts_with("META/") && f.path != HASHES && f.path != SIGNATURE)
@@ -601,6 +707,9 @@ impl<'a> Package<'a> {
         };
         let executable = files.iter().find(|f| f.path == manifest.entry).ok_or("Missing executable")?;
         let image = aurora_elf::parse(executable.bytes).ok_or("Invalid native executable")?;
+        if image.machine != elf_machine(manifest.arch()) {
+            return Err("The executable is for a different processor than the manifest says");
+        }
         if executable.bytes[16..18] != 2u16.to_le_bytes()
             || image.virt_start < 0x400000
             || image.virt_end >= 0x0000800000000000

@@ -43,9 +43,9 @@ pub fn clone(
         return Err(EINVAL);
     }
     let mut frame = *f;
-    frame.rax = 0;
+    frame.set_return(0);
     if stack != 0 {
-        frame.rsp = stack;
+        frame.set_sp(stack);
     }
     let fs_base = if flags & CLONE_SETTLS != 0 { tls } else { sched::fs_base() };
     let child_linux = l.for_child();
@@ -111,6 +111,8 @@ pub fn execve(
     let guest = fs::path_arg(p, dirfd, path)?;
     let argv = string_array(argv)?;
     let envp = string_array(envp)?;
+    // Running another program takes `spawn` in a sandbox.
+    crate::sandbox::require(aurora_abi::sandbox::SPAWN)?;
     exec_guest(p, f, guest, argv, envp, 0)
 }
 
@@ -166,10 +168,11 @@ fn exec_guest(
     proc::exec_single_thread(p)?;
     let l = p.linux.as_ref().ok_or(EINVAL)?;
     l.exec_reset(start.brk, &envp);
+    l.started(&start);
     close_on_exec(p, l);
     proc::exec_replace(p, aspace, &host);
     sched::set_fs_base(0);
-    *f = SyscallFrame { rip: start.entry, rsp: start.sp, rflags: 0x202, ..Default::default() };
+    *f = SyscallFrame::user_start(start.entry, start.sp);
     Ok(0)
 }
 

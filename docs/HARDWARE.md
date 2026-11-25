@@ -65,6 +65,7 @@ Options go in `\aurora\boot.conf` on the EFI partition, one `key=value` per line
 | `sdhci=pio` | How SD cards and eMMC move data: `pio`, `sdma`, `adma32` or `adma64` (default: the best the controller offers). Try `sdhci=pio` if a card reader corrupts data or hangs. |
 | `sdhci_speed=high` | Caps the SD/eMMC bus: `high` (no UHS-I, HS200 or HS400), `default` (25 MHz), `slow` (12.5 MHz). |
 | `emmc=hs400` | Allows eMMC HS400 (off by default: whether a controller can do it isn't discoverable). |
+| `usbnet=ecm` | Which configuration a USB network device with several runs in: `ecm`, `ncm`, `eem`, `rndis` or `vendor` (default: NCM, then ECM, then a vendor chip with a driver, EEM, RNDIS). See [USB network adapters](#usb-network-adapters). |
 
 ## What to check
 
@@ -82,6 +83,7 @@ Work through the list and note what happens. The boot log (below) records the de
 - [ ] **Internal disk.** `lspci` should list the controller, and `df` should show whether a WaveOS volume was found.
 - [ ] **SD card reader and eMMC.** See [SD cards and eMMC](#sd-cards-and-emmc): a FAT32 card should appear in Files when inserted and go away when pulled out; `dmesg | grep sdhci` describes the controller and card.
 - [ ] **Network.** With a supported wired adapter (see below) plugged in, the menu-bar network item should show Connected and an address. In Terminal try `ifconfig`, `ping example.com` and `fetch https://example.com`, then open NetSurf.
+- [ ] **USB network adapter, dock or tethering.** Plug in a USB Ethernet adapter or dock with a cable, or a phone with USB tethering turned on (see [USB network adapters](#usb-network-adapters)). Within a few seconds `ifconfig` should show it (`eth…` or `usb…`) with an address, and Settings → Network its driver and speed. Start a download, pull it out: the download should fail at once and another interface (if any) take over; plug it back in. Please report the `usbnet:` and `usb:` lines from `dmesg` and the adapter's line in `lsusb`.
 - [ ] **Sound.** Play `play /System/Sounds/startup.wav`, then `play --tone 440 1000`. Try the volume keys, the menu-bar slider, and headphones in and out.
 - [ ] **USB audio.** Plug in a USB headset, speaker or DAC: `lsusb` should show it as `audio: speaker` (and `microphone`), and `record --list` should list it. Choose it in the menu bar's sound card or Settings → Sound, play a sound, change the volume, then `record -t 5 test.wav` and `play test.wav`. Unplug it while it plays: sound should move back to the built-in output.
 - [ ] **Battery (laptops).** Check the menu-bar percentage and `battery` in Terminal. Unplug and replug the charger.
@@ -251,6 +253,7 @@ Then check:
 
 - **Graphics.** On Intel graphics from Skylake to Raptor Lake a native display driver (untested on real hardware, see [above](#intel-graphics)) keeps the firmware's mode and adds a hardware pointer, EDID, hotplug detection and backlight control. Elsewhere WaveOS draws into the framebuffer the firmware set up (GOP). Either way the resolution changes only at boot (the Intel driver's `intel=modeset` aside). Several displays work in virtual machines (virtio-gpu with several scanouts); on real hardware they need a native display driver, and nothing of multi-monitor support (hotplug, per-display modes and scales, a separate presenting task per display, EDID identities for saved arrangements) has run on a real GPU or monitor. Two QEMU std VGAs (`secondary-vga`) are not driven together: only the first is used. After sleep the screen may stay dark on some machines, because the firmware doesn't re-initialize the display; the rest of the system resumes. In virtual machines, Bochs/QEMU std VGA and virtio-gpu (WaveOS's own driver, with a hardware cursor and the window size followed live) change resolution at once and restore the picture after sleep.
 - **The Linux DRM device** (`/dev/dri/card0`) is tested in QEMU on Bochs VGA, the native virtio-gpu driver and the ported Linux one (`gpu=linux`). Untested: a card on the firmware framebuffer alone (`simpledrm`; QEMU always has Bochs or virtio), devices with real vblank interrupts (no driver has them yet: vblanks are counted from the mode's refresh rate), and more than one card.
+- **Programs' buffers on the screen** (windows showing a Linux program's dma-bufs or shared memory as they are, and full-screen programs scanned out directly) are tested in QEMU on Bochs VGA and virtio-gpu only. Untested: direct scanout on the Intel and AMD drivers (a driver that can't scan a program's buffer out refuses the commit, and the window is composed instead), frame times taken from real vblank interrupts, and scanning out on a display other than the first while others compose.
 - **Storage.** AHCI, NVMe and virtio disks, SD cards and eMMC work, but Intel RST / RAID mode does not. USB storage and SD cards must be FAT32 (exFAT and NTFS aren't supported, and most SD cards above 32 GB come formatted exFAT). Realtek and Alcor PCIe card readers aren't supported (see [SD cards and eMMC](#sd-cards-and-emmc)). Installing to eMMC works the same as to any disk; booting from it needs firmware that can read it, as tablets' and laptops' firmware does (QEMU's OVMF can't, so the tests start the bootloader from a copy on another disk).
 - **Input.**
   - Touchpads and touch screens that connect over I²C (common on laptops since about 2016) have a driver that has not yet run on real hardware (see [above](#i2c-touchpads-and-touch-screens)); on most Intel laptops it polls the touchpad, as there is no GPIO driver yet. Many such touchpads also have a PS/2 fallback, which works as a plain pointer. I²C keyboards and pens aren't supported. USB Precision Touchpads get the full gestures.
@@ -260,7 +263,11 @@ Then check:
   - xHCI (USB 3), EHCI (USB 2) with its OHCI or UHCI companions, and OHCI and UHCI on their own (USB 1.1) are all driven. EHCI, OHCI and UHCI have only been tested in QEMU.
   - Isochronous transfers (USB audio) work on xHCI only; on EHCI, OHCI and UHCI, `lsusb` shows audio devices as unsupported. No webcams yet.
 - **Sound.** Intel HD Audio output (no microphone or HDMI audio yet), and USB Audio Class 1 and 2 speakers, headsets, DACs and microphones on xHCI. USB Audio 3.0-only devices aren't supported (most also offer UAC 1 or 2).
-- **Networking.** Wired Ethernet only; see [Wired network adapters](#wired-network-adapters) for which chips are driven and how far each is tested. Wi-Fi: Intel adapters from the Wireless 7265 to the Wi-Fi 6E AX211 are recognized, but WaveOS can't start their radio yet, so no real Wi-Fi works. IPv4 only, with the address from DHCP.
+- **Networking.** Wired Ethernet only: PCI cards (see [Wired network adapters](#wired-network-adapters)), and USB adapters, docks and Android USB tethering (see [USB network adapters](#usb-network-adapters); the vendor-mode ASIX drivers and the NCM and EEM ones are untested on real hardware, iPhone tethering isn't supported). Wi-Fi: Intel adapters from the Wireless 7265 to the Wi-Fi 6E AX211 are recognized, but WaveOS can't start their radio yet, so no real Wi-Fi works. IPv4 only, with the address from DHCP.
+- **System updates** (Software Update, see [developer/store-and-updates.md](developer/store-and-updates.md)) have run only in QEMU with OVMF. Untested on real firmware: the bootloader reading the home volume through the firmware's Block I/O protocol (it picks the AuroraFS partition on the boot disk by device path), its writes to `\aurora\boot.conf` before each trial start, and a new `BOOTX64.EFI` replacing the old one after a good start. Disks the firmware can't read (an SD card or eMMC on many machines, as in QEMU) can't start an update from slot a or b: the bootloader then starts the EFI partition's own system and reports the update as failed. An EFI partition too small for the system image as it is gets it compressed (`system.tar.zlib`), which takes a moment longer to start.
+- **App sandbox.** The kernel's checks are tested in QEMU from inside sandboxed native and Linux programs and fuzzers, but the window server's privacy prompt, open and save panel and the menu bar's microphone dot have not been driven by the tests (they answer for the person instead) and have not run on real hardware; the dot has not been seen with a real microphone. Camera and raw USB have no interfaces yet, so those permissions guard nothing so far; input monitoring (the Linux input devices) and screen capture (other programs' DRM framebuffers) are tested in QEMU only.
+- **Durability on real disks.** AuroraFS's crash safety rests on each disk's cache flush (see [developer/aurorafs.md](developer/aurorafs.md)): AHCI `FLUSH CACHE EXT`, NVMe Flush, virtio-blk flush (now with the device's write cache on), the eMMC cache flush, USB `SYNCHRONIZE CACHE`. Power cuts have been tested only in QEMU (`cargo xtask powercut`, where QEMU keeps every write it completed) and in the host simulation (lost, reordered and torn writes between flushes). **Untested:** real SATA and NVMe drives, SD cards, eMMC and USB sticks losing power, including ones that acknowledge a flush before their cache is safe (no filesystem can protect against those), and the eMMC cache flush on a real card.
+- **Swap.** The swap file (`/Security/swapfile`, made the first time memory runs short) has only been exercised on QEMU's AHCI, virtio and NVMe disks. Its I/O bypasses the filesystem, straight to the partition's sectors; it has not run on real SSDs or hard disks, and sends no TRIM for freed pages (their contents are encrypted with a per-boot key, so stale pages are noise). When the system volume is on a USB stick (booting from one), the swap file is there too: slow, and it wears the stick.
 - **Sleep** is S3 (suspend to RAM). Many machines since about 2019 support only "Modern Standby" (S0ix), which WaveOS doesn't implement. On those, Sleep isn't offered.
 
 ## Wired network adapters
@@ -286,6 +293,67 @@ What the untested drivers do, and what they leave out:
 - **Realtek RTL8168 family and RTL8125.** Written from Realtek's register descriptions. The driver tells the chip generations apart by the revision in the transmit configuration register, takes RTL8168G and later chips out of out-of-band (management) mode, resets the MAC, powers up the PHY if firmware left it off, and uses the PHY's power-on settings. It does not apply the per-revision PHY parameter tables or PHY firmware patches that other operating systems load; most chips link without them, but a few revisions may link slower or less reliably. The RTL8125 gets a link-status read over the PHY's OCP window; its 2.5 Gbit/s mode depends on the PHY's defaults. The boot log line `rtl8169: … (chip 0x…, …)` names the revision: please include it in reports.
 - **Intel igb and igc.** The 82576 path is exercised in QEMU. The other igb chips share its registers; the I225/I226 differ in their reset bit and get no PHY access (their PHY negotiates on its own). Copper ports only: fibre and SerDes variants of these chips aren't claimed.
 - **Intel chipset LAN (I217/I218/I219, 82579).** Not driven. Its PHY sits outside the chipset, may be in SMBus or ultra-low-power mode shared with the management engine, and needs a semaphore-guarded wake-up sequence, plus, on the I219, a descriptor-ring flush before every reset. Doing that wrong can leave the PHY unreachable until a power cycle, so these adapters are only reported. Use a PCIe card (Intel 82574L, I210, or a Realtek RTL8111) instead.
+
+## USB network adapters
+
+For a laptop without a supported built-in card: a USB Ethernet adapter, a USB-C dock, or a phone's USB tethering. Each one becomes an interface as soon as it is plugged in, asks DHCP for an address once its link is up, and goes away cleanly when pulled out: connections through it fail at once, and traffic moves to another interface. Adapters with a manufacturer's MAC address are named `ethN`; links with a made-up (locally administered) address, as tethered phones and USB gadgets use, are `usbN`. With several interfaces up, the default route prefers a built-in wired card, then a USB adapter, then a tethered phone, then Wi-Fi. Settings → Network shows each one as USB Ethernet with its driver and, where the device reports it, its link speed. After sleep the adapter is found again like a new one. `lsusb` names the driver, and the System Report lists each adapter's link and how many frames travel per USB transfer.
+
+"QEMU" means `cargo xtask test --net usb-ecm` or `--net usb-rndis` passes the network tests (DHCP, ping, UDP, TCP, a megabyte each way to the host, an inbound connection, IPv6, after S3 sleep) over QEMU's `usb-net`, with a second adapter at the same time, the first pulled out in the middle of a download and plugged back (QMP `device_del`/`device_add`), on xHCI and on EHCI (QEMU's usb-net is a full-speed device, so on an EHCI machine it runs on the UHCI companion, as a full-speed device does on a real one). "Simulated" means the self-tests' device models (`kernel/src/drivers/usb/net/sim.rs`) bring the driver up, get an address over DHCP, answer ping and echo a burst of datagrams, and are unplugged: that exercises the driver's plumbing and its framing both ways, but the models are written from the same understanding of the chips as the drivers, so **these drivers are untested on real hardware**. The wire formats are also tested and fuzzed on the host (`cargo test -p aurora-usbnet`).
+
+| Device | Ids | Driver | How it is driven | Tested |
+|---|---|---|---|---|
+| CDC-ECM: most USB-C dongles and docks offer it; Linux and Android gadgets; QEMU's usb-net | interface class 02/06 | `cdc.rs` | One frame per transfer; link and speed from the interrupt endpoint's notifications | QEMU (`--net usb-ecm`; xHCI and EHCI) |
+| RNDIS: Android USB tethering, Windows-first adapters | interface 02/02/ff, e0/01/03, ef/04/01 | `rndis.rs` | INITIALIZE, then queries (MAC, link speed, link state) and a packet filter; several packets per transfer when the device allows; link changes from status indications; the device's keepalives answered | QEMU (`--net usb-rndis`; xHCI and EHCI) |
+| CDC-NCM: 2.5 Gbit/s adapters, many docks | interface 02/0d | `cdc.rs` | 16-bit transfer blocks (NTB16; NTB32 received too) aggregating frames both ways, up to 32 KiB, with the device's alignment rules | Simulated |
+| CDC-EEM | interface 02/0c/07 | `cdc.rs` | A stream of headed frames (sentinel instead of CRC), echo requests answered; no MAC address from the device, so a random local one | Host tests only |
+| Realtek RTL8152, RTL8153, RTL8155, RTL8156 | 0bda:8152, 8153, 8155, 8156 (docks keep their chip's CDC configuration under their own ids) | `cdc.rs` | **Their CDC configuration**: ECM on the RTL8152/8153, NCM on the RTL8156 where it is offered | Simulated (RTL8156's NCM configuration) |
+| ASIX AX88772, AX88772A/B | 0b95:7720, 772a, 772b, 7e2b; Apple USB Ethernet Adapter 05ac:1402; D-Link DUB-E100 2001:1a02, 2001:3c05, 07d1:3c05; Linksys USB200M 13b1:0018 | `asix.rs` | Vendor mode | Simulated |
+| ASIX AX88179, AX88178A | 0b95:1790, 178a; D-Link DUB-1312 2001:4a00; Sitecom 0df6:0072; Samsung 04e8:a100; Lenovo 17ef:304b; Toshiba 0930:0a13 | `asix.rs` | Vendor mode; an AX88179A that also offers CDC-NCM runs in NCM | Simulated |
+
+Which configuration a device runs in is chosen when it is plugged in: a configuration with NCM wins, then ECM, then a vendor chip with a driver here, then EEM, then RNDIS. The boot option `usbnet=ecm`, `ncm`, `eem`, `rndis` or `vendor` prefers one where the device offers it (the boot log says `usb: … using configuration N` when it isn't the first).
+
+What the untested drivers do, and what they leave out:
+
+- **Realtek RTL8152/8153/8155/8156.** No vendor-mode driver: it needs Realtek's OCP register programming and per-revision PHY firmware patches, which can't be checked without the hardware. Their CDC configuration is a standard function the ECM and NCM drivers already run, so a dongle or dock that offers one works through it. In ECM mode frames are not aggregated, so expect less throughput than a vendor driver gives at gigabit speeds; ECM devices report their speed only if they send speed notifications. A Realtek device that offers no CDC configuration is listed by `lsusb` without a driver.
+- **ASIX AX88772.** Follows ASIX's reference bring-up: GPIOs, the embedded PHY selected and reset, the MAC address read from the chip, 10/100 autonegotiation restarted over MII, the receiver started for our address, broadcasts and all multicast. The link comes from the interrupt endpoint; when it comes up, speed and duplex are read back from the PHY and set in the MAC. Frames arrive on a stream that runs across transfers. Not done: the chip's checksum offload, its multicast hash filter (all multicast is accepted), wake-on-LAN, external PHYs other than the PHY address the chip reports.
+- **ASIX AX88179/AX88178A.** PHY power-up, clocks, MAC address, receive aggregation (bulk-in queue settings by link and bus speed), receiver on, autonegotiation restarted; on link-up, the PHY's speed and duplex go into the medium mode register. Receive transfers hold several frames with a trailer. Not done: checksum offload, the multicast filter, EEE and LED settings, wake-on-LAN. Some AX88179A firmware also offers CDC-NCM, which is preferred.
+- **CDC-NCM.** NTB16 out, NTB16 and NTB32 in; no CRC mode; datagrams placed as the device's divisor and remainder ask (a nonsensical value falls back to 4-byte alignment); the input block size is set to at most 32 KiB.
+- **CDC-EEM.** Only the framing is tested (on the host); no device or model has run the driver.
+- **RNDIS.** Tested in QEMU only; real phones answer the same messages, and any Android phone's USB tethering is RNDIS (newer ones may offer NCM, which then wins). The multicast list OID isn't used: all multicast is accepted.
+
+Not supported:
+
+- **iPhone USB tethering** (Apple's `ipheth`, 05ac:12xx). It needs the device switched to the configuration with Apple's tethering interface (vendor class, subclass fd, protocol 1), alternate setting 1, a vendor request for the MAC address and carrier checks, and its own framing (2-byte padded frames; recent iOS versions use NCM-style blocks after a vendor request). More importantly, as far as we know the phone tethers only to a computer it trusts (the "Trust This Computer?" prompt), which takes Apple's lockdown pairing protocol (TLS with device certificates, as `usbmuxd` and `libimobiledevice` implement it); none of that could be checked here without an iPhone, so no driver is attempted.
+- **SMSC/Microchip LAN9500/9512/9514 and LAN7800/7850** (0424:ec00, 9500, 9512, 9514, 7800, 7850; the Raspberry Pi's built-in Ethernet): vendor protocols not implemented.
+- **Realtek chips without a CDC configuration**, mobile broadband modems (MBIM, QMI) and Wi-Fi dongles.
+
+Performance (QEMU 11 under TCG on a Mac; QEMU's usb-net moves one frame per transfer, and its numbers vary from run to run): a megabyte to or from the host takes about 20–70 ms over usb-net on xHCI (15–50 MB/s), like virtio-net and faster than the emulated e1000 in the same setup, and about 2 s on EHCI (via its UHCI companion, at full speed: 0.5 MB/s each way). See [the developer notes](developer/usb-networking.md) for the measurements and where the time goes.
+
+## 64-bit Arm
+
+The aarch64 port runs only on QEMU's `virt` machine so far (HVF on Apple
+silicon, TCG elsewhere). Untested anywhere else: real Arm hardware (other
+UEFI firmware, GICv2 systems, non-coherent DMA, PL011 consoles at other
+addresses than `virt`'s, PSCI through `smc` on hardware, firmware entering
+at EL2 with E2H forced on, GICv4 redistributor layouts, more than one
+GICv2m frame or an ITS, big.LITTLE CPUs with differing ID registers).
+
+Not yet run anywhere, because the aarch64 kernel doesn't start user
+programs yet: every native aarch64 program (corekit's `svc` calls and
+start-up, the run-time detection of the ARMv8 AES/PMULL instructions for
+TLS, the NEON pixel and video paths inside WaveOS — those are checked by
+host tests on an Apple-silicon Mac), the arm64 Linux programs (BusyBox,
+wl-bridge, the C tests, Doom: built, not run), the arm64 Debian root, and
+the Linux layer's arm64 ABI — its call table, `stat`/`epoll_event`
+layouts, signal frames and `rt_sigreturn`, restarting, the arm64 vDSO,
+the auxiliary vector and ID-register emulation (the tables, layouts,
+frames and HWCAP decoding are checked by host tests against Debian's
+arm64 headers, `cargo test -p aurora-linuxabi`). The x86 and aarch64 disks'
+architecture checks, `migrate-disk`, the per-architecture catalogues and
+the slot check in the bootloader are tested on the host only (image and
+repository tests; `cargo test -p xtask -p gina`). On QEMU 8.2 (Ubuntu
+24.04), which can't choose the `virt` machine's MSI controller, the guest
+gets an ITS under TCG instead of a GICv2m frame.
 
 ## Compatibility
 

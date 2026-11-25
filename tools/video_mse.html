@@ -1,0 +1,427 @@
+<!doctype html>
+<meta charset=utf-8>
+<title>WaveOS video check</title>
+<!--
+  Plays the clips of tools/video_fixture.py through Media Source Extensions,
+  one case after another in this one document (a single click starts them
+  all, which is the user gesture browsers want before playing sound), and
+  POSTs what it measured to /result as JSON.
+
+  ?cases=h264-360,vp9-720,...  which cases (codec-height), in order
+  &secs=N                      seconds of playback measured per case
+  &tag=NAME                    a label copied into every result
+  &muted=1                     play without sound
+  &decode=h264-360,...         first, how fast WebCodecs decodes these (frames/s)
+-->
+<style>
+  html,body{margin:0;background:#111;color:#ddd;font:16px sans-serif;height:100%}
+  #start{position:fixed;inset:0;font-size:40px;background:#234;color:white;border:0;z-index:2}
+  video{display:block;width:100%;max-width:1280px;aspect-ratio:16/9;background:black}
+  #log{white-space:pre;font:13px monospace;padding:6px}
+</style>
+<button id=start>Start</button>
+<video id=v playsinline></video>
+<div id=log></div>
+<script>
+'use strict';
+const P = new URLSearchParams(location.search);
+const CASES = (P.get('cases') || 'h264-360,h264-720,vp9-360,vp9-720,av1-360,av1-720').split(',');
+const SECS = +(P.get('secs') || 20);
+const TAG = P.get('tag') || '';
+const MUTED = P.get('muted') === '1';
+const DECODE = (P.get('decode') || '').split(',').filter(Boolean);
+const VIDEO = {
+  h264: r => ({url: `h264-${r}.mp4`, type: `video/mp4; codecs="avc1.6400${{360: '1e', 720: '1f', 1080: '28'}[r]}"`}),
+  vp9: r => ({url: `vp9-${r}.webm`, type: 'video/webm; codecs="vp9"'}),
+  av1: r => ({url: `av1-${r}.mp4`, type: 'video/mp4; codecs="av01.0.08M.08"'}),
+};
+const AUDIO = {
+  h264: {url: 'aac.mp4', type: 'audio/mp4; codecs="mp4a.40.2"'},
+  vp9: {url: 'opus.webm', type: 'audio/webm; codecs="opus"'},
+  av1: {url: 'opus.webm', type: 'audio/webm; codecs="opus"'},
+};
+const logEl = document.getElementById('log');
+const log = s => { logEl.textContent += s + '\n'; };
+const now = () => performance.now();
+
+function post(record) {
+  record.tag = TAG;
+  record.ua = navigator.userAgent;
+  return fetch('/result', {method: 'POST', body: JSON.stringify(record)}).catch(() => {});
+}
+
+// What a site sees when it asks which codecs and sizes play (YouTube asks
+// MediaSource.isTypeSupported and MediaCapabilities before choosing).
+async function capabilities() {
+  const types = [
+    'video/mp4; codecs="avc1.4d401e"', 'video/mp4; codecs="avc1.64001f"', 'video/mp4; codecs="avc1.640028"',
+    'video/webm; codecs="vp9"', 'video/webm; codecs="vp09.00.51.08.01.01.01.01.00"',
+    'video/webm; codecs="vp09.02.51.10.01.09.16.09.00"',
+    'video/mp4; codecs="av01.0.08M.08"', 'video/mp4; codecs="av01.0.12M.10.0.110.09.16.09.0"',
+    'audio/mp4; codecs="mp4a.40.2"', 'audio/webm; codecs="opus"', 'audio/mp4; codecs="opus"',
+  ];
+  const out = {kind: 'caps', canPlayType: {}, isTypeSupported: {}, decodingInfo: {},
+               cores: navigator.hardwareConcurrency, rvfc: 'requestVideoFrameCallback' in HTMLVideoElement.prototype,
+               webcodecs: typeof VideoDecoder !== 'undefined'};
+  const v = document.createElement('video');
+  for (const t of types) {
+    out.canPlayType[t] = v.canPlayType(t);
+    out.isTypeSupported[t] = window.MediaSource ? MediaSource.isTypeSupported(t) : null;
+  }
+  if (navigator.mediaCapabilities) {
+    const probe = [['h264', 'video/mp4; codecs="avc1.640028"'], ['vp9', 'video/webm; codecs="vp09.00.51.08.01.01.01.01.00"'],
+                   ['av1', 'video/mp4; codecs="av01.0.08M.08"']];
+    for (const [name, contentType] of probe) {
+      for (const [w, h, fps] of [[640, 360, 30], [1280, 720, 30], [1920, 1080, 30], [1920, 1080, 60]]) {
+        try {
+          const r = await navigator.mediaCapabilities.decodingInfo({type: 'media-source',
+            video: {contentType, width: w, height: h, bitrate: 2500000, framerate: fps}});
+          out.decodingInfo[`${name}-${h}p${fps}`] = [r.supported, r.smooth, r.powerEfficient];
+        } catch (e) {
+          out.decodingInfo[`${name}-${h}p${fps}`] = String(e);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// A promise that rejects after `ms` (a stalled player's play() never settles).
+function within(promise, ms, what) {
+  return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(what + ' timed out')), ms))]);
+}
+
+function waitEvent(target, name) {
+  return new Promise(resolve => target.addEventListener(name, resolve, {once: true}));
+}
+
+async function append(sb, url, onFirst) {
+  const r = await fetch(url);
+  const data = new Uint8Array(await r.arrayBuffer());
+  const CHUNK = 256 * 1024;
+  for (let at = 0; at < data.length; at += CHUNK) {
+    sb.appendBuffer(data.subarray(at, Math.min(data.length, at + CHUNK)));
+    await waitEvent(sb, 'updateend');
+    if (at === 0 && onFirst) onFirst();
+  }
+  return data.length;
+}
+
+async function playCase(name) {
+  const [codec, res] = name.split('-');
+  const vid = VIDEO[codec](+res), aud = AUDIO[codec];
+  const result = {kind: 'case', case: name, codec, height: +res, secs: SECS, errors: [], events: {}};
+  const t0 = now();
+  // The same element every time: the Start click let it play sound, and
+  // browsers remember that for the element (WebKit) or the page (Firefox).
+  const v = document.getElementById('v');
+  v.muted = MUTED;
+  const listening = new AbortController();
+  for (const e of ['waiting', 'stalled', 'playing', 'pause', 'seeking', 'ended', 'error', 'canplay', 'loadeddata']) {
+    v.addEventListener(e, () => {
+      result.events[e] = (result.events[e] || 0) + 1;
+      if (e === 'error') result.errors.push('video: ' + (v.error && (v.error.code + ' ' + v.error.message)));
+    }, {signal: listening.signal});
+  }
+  result.cleanup = () => listening.abort();
+  if (!window.MediaSource || !MediaSource.isTypeSupported(vid.type)) {
+    result.status = 'unsupported';
+    return result;
+  }
+  const ms = new MediaSource();
+  v.src = URL.createObjectURL(ms);
+  await waitEvent(ms, 'sourceopen');
+  const vsb = ms.addSourceBuffer(vid.type);
+  let asb = null;
+  try {
+    asb = MediaSource.isTypeSupported(aud.type) ? ms.addSourceBuffer(aud.type) : null;
+  } catch (e) {
+    result.errors.push('audio: ' + e);
+  }
+  // Play once the first chunks of both are in, as a player would.
+  let firstV = false, firstA = !asb, playCalled = null, firstFrame = null;
+  const playing = new Promise(resolve => {
+    const ready = () => { if (firstV && firstA && playCalled === null) resolve(); };
+    const vDone = append(vsb, vid.url, () => { firstV = true; ready(); });
+    const aDone = asb ? append(asb, aud.url, () => { firstA = true; ready(); }) : Promise.resolve(0);
+    Promise.all([vDone, aDone]).then(([vb, ab]) => {
+      result.video_bytes = vb; result.audio_bytes = ab; result.appended_ms = Math.round(now() - t0);
+      try { ms.endOfStream(); } catch (e) {}
+    }, e => result.errors.push('append: ' + e));
+  });
+  try {
+    await within(playing, 60000, 'first append');
+  } catch (e) {
+    result.status = 'no-data';
+    result.errors.push(String(e));
+    return result;
+  }
+  result.setup_ms = Math.round(now() - t0);
+  playCalled = now();
+  try {
+    await within(v.play(), 30000, 'play()');
+  } catch (e) {
+    result.errors.push('play: ' + e);
+    v.muted = true;
+    result.muted_fallback = true;
+    try { await within(v.play(), 30000, 'muted play()'); } catch (e2) { result.errors.push('muted play: ' + e2); }
+  }
+  // Frames as presented, from requestVideoFrameCallback where there is one.
+  const frames = [];
+  let rvfc = 'requestVideoFrameCallback' in v;
+  if (rvfc) {
+    const onFrame = (t, m) => {
+      if (firstFrame === null) firstFrame = now();
+      frames.push([now(), m.presentedFrames, m.mediaTime, v.currentTime]);
+      if (frames.length < 20000) v.requestVideoFrameCallback(onFrame);
+    };
+    v.requestVideoFrameCallback(onFrame);
+  }
+  // Wait for the first frame (or for media time to move, without rVFC).
+  const deadline = now() + 60000 + SECS * 1000;
+  while (firstFrame === null && now() < deadline) {
+    await new Promise(r => setTimeout(r, 50));
+    if (!rvfc && v.currentTime > 0) firstFrame = now();
+    if (v.error) break;
+  }
+  if (firstFrame === null) {
+    result.status = 'no-first-frame';
+    result.ready_state = v.readyState;
+    result.current_time = v.currentTime;
+    const q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : {};
+    result.total_frames = q.totalVideoFrames; result.dropped_frames = q.droppedVideoFrames;
+    v.pause();
+    return result;
+  }
+  result.ttff_ms = Math.round(firstFrame - playCalled);
+  result.ttff_from_start_ms = Math.round(firstFrame - t0);
+  // Measure SECS seconds from the first frame, sampling once a second.
+  const q0 = v.getVideoPlaybackQuality(), w0 = now(), c0 = v.currentTime, f0 = frames.length;
+  const samples = [];
+  let stalls = 0, lastCt = c0;
+  for (let s = 1; s <= SECS; s++) {
+    await new Promise(r => setTimeout(r, 1000 - ((now() - w0) - (s - 1) * 1000)));
+    const q = v.getVideoPlaybackQuality();
+    const ct = v.currentTime;
+    if (!v.ended && ct - lastCt < 0.25) stalls++;
+    lastCt = ct;
+    samples.push([Math.round(now() - w0), +ct.toFixed(3), q.totalVideoFrames - q0.totalVideoFrames,
+                  q.droppedVideoFrames - q0.droppedVideoFrames, v.readyState]);
+    if (v.ended) break;
+  }
+  const q1 = v.getVideoPlaybackQuality(), w1 = now(), c1 = v.currentTime;
+  const wall = (w1 - w0) / 1000;
+  result.status = 'played';
+  result.wall_s = +wall.toFixed(3);
+  result.media_s = +(c1 - c0).toFixed(3);
+  result.clock_rate = +((c1 - c0) / wall).toFixed(3);
+  result.total_frames = q1.totalVideoFrames - q0.totalVideoFrames;
+  result.dropped_frames = q1.droppedVideoFrames - q0.droppedVideoFrames;
+  result.decoded_fps = +((result.total_frames - result.dropped_frames) / wall).toFixed(2);
+  result.stall_seconds = stalls;
+  result.samples = samples;
+  if (rvfc) {
+    const fr = frames.slice(f0);
+    if (fr.length > 1) {
+      const first = fr[0], last = fr[fr.length - 1];
+      result.presented_frames = last[1] - first[1];
+      result.presented_fps = +(result.presented_frames / ((last[0] - first[0]) / 1000)).toFixed(2);
+      result.callbacks = fr.length;
+      // A/V drift: the presented frame's time against the media clock
+      // (which follows the sound when there is sound).
+      const drift = fr.map(f => (f[2] - f[3]) * 1000);
+      result.drift_ms_mean = +(drift.reduce((a, b) => a + b, 0) / drift.length).toFixed(1);
+      result.drift_ms_max = +Math.max(...drift.map(Math.abs)).toFixed(1);
+      let gaps = 0, maxGap = 0;
+      for (let i = 1; i < fr.length; i++) {
+        const g = fr[i][0] - fr[i - 1][0];
+        maxGap = Math.max(maxGap, g);
+        if (g > 100) gaps++;
+      }
+      result.frame_gap_ms_max = Math.round(maxGap);
+      result.frame_gaps_over_100ms = gaps;
+    }
+  }
+  v.pause();
+  return result;
+}
+
+// How fast the browser's own decoders go, without playback in the way:
+// WebCodecs fed the bare streams (H.264 Annex B split at its access unit
+// delimiters, VP9 and AV1 from IVF), all frames queued, then flushed.
+function splitAnnexB(d) {
+  const starts = [];
+  for (let i = 0; i + 4 < d.length; i++) {
+    if (d[i] === 0 && d[i + 1] === 0 && d[i + 2] === 1) {
+      const type = d[i + 3] & 31;
+      const at = i > 0 && d[i - 1] === 0 ? i - 1 : i;
+      starts.push([at, type]);
+      i += 3;
+    }
+  }
+  const units = [];
+  let cur = null;
+  for (let k = 0; k < starts.length; k++) {
+    const [at, type] = starts[k];
+    if (type === 9) {
+      if (cur) units.push(cur);
+      cur = {start: at, key: false};
+    }
+    if (cur && type === 5) cur.key = true;
+    if (cur) cur.end = k + 1 < starts.length ? starts[k + 1][0] : d.length;
+  }
+  if (cur) units.push(cur);
+  return units.map(u => ({key: u.key, data: d.subarray(u.start, u.end)}));
+}
+
+function splitIvf(d, codec) {
+  const out = [];
+  let at = d[6] | d[7] << 8;
+  while (at + 12 <= d.length) {
+    const size = d[at] | d[at + 1] << 8 | d[at + 2] << 16 | d[at + 3] << 24;
+    const data = d.subarray(at + 12, at + 12 + size);
+    let key;
+    if (codec === 'vp9') {
+      key = (data[0] & 0xc0) === 0x80 && (data[0] & 0x08) === 0 && (data[0] & 0x04) === 0;
+    } else {
+      // An AV1 temporal unit that carries a sequence header starts a key frame.
+      key = false;
+      let p = 0;
+      while (p < data.length) {
+        const h = data[p], type = h >> 3 & 15, ext = h >> 2 & 1, hasSize = h >> 1 & 1;
+        p += 1 + ext;
+        let size = 0, shift = 0, b;
+        if (!hasSize) break;
+        do { b = data[p++]; size |= (b & 127) << shift; shift += 7; } while (b & 128);
+        if (type === 1) key = true;
+        p += size;
+      }
+    }
+    out.push({key, data});
+    at += 12 + size;
+  }
+  return out;
+}
+
+// Annex B access units to length-prefixed ones, and the avcC record from
+// the first SPS and PPS.
+function toAvcc(units) {
+  let sps = null, pps = null;
+  const chunks = units.map(u => {
+    const d = u.data, nals = [];
+    let i = 0, start = -1;
+    while (i + 3 <= d.length) {
+      if (d[i] === 0 && d[i + 1] === 0 && d[i + 2] === 1) {
+        if (start >= 0) nals.push(d.subarray(start, i > 0 && d[i - 1] === 0 ? i - 1 : i));
+        start = i + 3;
+        i += 3;
+      } else i++;
+    }
+    if (start >= 0) nals.push(d.subarray(start));
+    const keep = nals.filter(n => {
+      const t = n[0] & 31;
+      if (t === 7 && !sps) sps = n;
+      if (t === 8 && !pps) pps = n;
+      return t !== 9 && t !== 7 && t !== 8;
+    });
+    const out = new Uint8Array(keep.reduce((a, n) => a + 4 + n.length, 0));
+    let at = 0;
+    for (const n of keep) {
+      new DataView(out.buffer).setUint32(at, n.length);
+      out.set(n, at + 4);
+      at += 4 + n.length;
+    }
+    return {key: u.key, data: out};
+  });
+  const description = new Uint8Array(11 + sps.length + pps.length);
+  description.set([1, sps[1], sps[2], sps[3], 0xff, 0xe1, sps.length >> 8, sps.length & 255]);
+  description.set(sps, 8);
+  description.set([1, pps.length >> 8, pps.length & 255], 8 + sps.length);
+  description.set(pps, 11 + sps.length);
+  return {chunks, description};
+}
+
+async function decodeBench(name, limit) {
+  const [codec, res] = name.split('-');
+  const r = {kind: 'decode', case: name};
+  if (typeof VideoDecoder === 'undefined') { r.status = 'no-webcodecs'; return r; }
+  const url = codec === 'h264' ? `h264-${res}.h264` : `${codec}-${res}.ivf`;
+  const data = new Uint8Array(await (await fetch(url)).arrayBuffer());
+  let chunks = codec === 'h264' ? splitAnnexB(data) : splitIvf(data, codec);
+  chunks = chunks.slice(0, limit);
+  const w = {360: 640, 720: 1280, 1080: 1920}[res], h = +res;
+  const config = {codec: {h264: VIDEO.h264(+res).type.match(/avc1\.\w+/)[0], vp9: 'vp09.00.40.08', av1: 'av01.0.08M.08'}[codec],
+                  codedWidth: w, codedHeight: h};
+  if (codec === 'h264') {
+    const avcc = toAvcc(chunks);
+    chunks = avcc.chunks;
+    config.description = avcc.description;
+  }
+  try {
+    const support = await VideoDecoder.isConfigSupported(config);
+    if (!support.supported) { r.status = 'unsupported'; return r; }
+  } catch (e) { r.status = 'unsupported'; r.error = String(e); return r; }
+  let out = 0, error = null;
+  const dec = new VideoDecoder({output: f => { out++; f.close(); }, error: e => { error = String(e); }});
+  dec.configure(config);
+  const t0 = now();
+  chunks.forEach((c, i) => {
+    if (!error) dec.decode(new EncodedVideoChunk({type: c.key ? 'key' : 'delta', timestamp: i * 33333, data: c.data}));
+  });
+  try { await dec.flush(); } catch (e) { error = error || String(e); }
+  const ms = now() - t0;
+  try { dec.close(); } catch (e) {}
+  r.status = error ? 'error' : 'decoded';
+  if (error) r.error = error;
+  r.frames = out;
+  r.submitted = chunks.length;
+  r.ms = Math.round(ms);
+  r.fps = +(out / (ms / 1000)).toFixed(2);
+  return r;
+}
+
+async function run() {
+  document.getElementById('start').remove();
+  post({kind: 'start', cases: CASES});
+  post(await capabilities());
+  for (const name of DECODE) {
+    log(`decode ${name}: …`);
+    let r;
+    try { r = await decodeBench(name, {360: 300, 720: 150, 1080: 90}[name.split('-')[1]]); }
+    catch (e) { r = {kind: 'decode', case: name, status: 'exception', error: String(e)}; }
+    log(`decode ${name}: ${r.status} ${r.fps} frames/s (${r.frames} in ${r.ms} ms)`);
+    await post(r);
+  }
+  for (const name of CASES) {
+    log(`${name}: …`);
+    let r;
+    try {
+      r = await playCase(name);
+    } catch (e) {
+      r = {kind: 'case', case: name, status: 'exception', errors: [String(e)]};
+    }
+    log(`${name}: ${r.status} ttff ${r.ttff_ms} ms, decoded ${r.decoded_fps} fps, presented ${r.presented_fps}, dropped ${r.dropped_frames}`);
+    await post(Object.assign({}, r, {cleanup: undefined}));
+    if (r.cleanup) r.cleanup();
+    const v = document.getElementById('v');
+    v.pause();
+    v.removeAttribute('src');
+    v.load();
+    // Two seconds of quiet between cases: the recording of the sound card
+    // (which only runs while something plays) is split into cases there.
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  post({kind: 'done'});
+  log('done');
+}
+
+document.getElementById('start').addEventListener('click', () => {
+  // Inside the click: this is the user's gesture that allows sound.
+  const v = document.getElementById('v');
+  v.muted = MUTED;
+  v.play().catch(() => {});
+  v.pause();
+  run();
+}, {once: true});
+post({kind: 'ready'});
+</script>

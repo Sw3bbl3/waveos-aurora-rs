@@ -1,0 +1,14 @@
+# What Terminal may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.terminal"
+name = "Terminal"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Terminal.elf"
+description = "The command line: WaveOS and Linux programs."
+categories = ["system"]
+permissions = ["all-files", "network", "network-server", "audio", "microphone", "camera", "screen-capture", "input-monitoring", "usb", "gamepad", "spawn", "launch", "ipc", "notifications", "background", "clipboard", "preferences", "linux", "elevate", "display", "system", "admin", "processes", "linux-home"]

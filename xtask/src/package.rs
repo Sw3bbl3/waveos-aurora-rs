@@ -6,8 +6,6 @@
 //! trusts its public half (`/System/Keys/waveos-samples.pub`), so packages a
 //! build makes install on that build without a warning.
 use super::{root, Program};
-use gina::repo::{Entry, Index};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -119,6 +117,7 @@ pub fn gallery(programs: &[Program], version: &str, key: Option<&Key>) -> Option
     let icon = fs::read(root().join("assets/icons/studio.png")).ok()?;
     let m = gina::Manifest {
         format: 2,
+        architecture: crate::arch::current().name().into(),
         id: "dev.example.gallery".into(),
         name: "WaveUI Gallery".into(),
         developer: "WaveSDK Example".into(),
@@ -147,6 +146,7 @@ pub fn doom(programs: &[Program], key: Option<&Key>) -> Option<Vec<u8>> {
     let icon = fs::read(root().join("assets/icons/doom.png")).ok()?;
     let m = gina::Manifest {
         format: 2,
+        architecture: crate::arch::current().name().into(),
         id: "org.waveos.doom".into(),
         name: "Doom".into(),
         developer: "WaveOS".into(),
@@ -170,71 +170,17 @@ pub fn doom(programs: &[Program], key: Option<&Key>) -> Option<Vec<u8>> {
     Some(pack(&m, &files, key).expect("package Doom"))
 }
 
-/// Writes a repository folder: the packages under `packages/`, then a
-/// signed `index.txt` (`index.sig`) naming them.
-pub fn write_repository(dir: &Path, name: &str, packages: &[Vec<u8>], key: &Key) -> Result<(), String> {
-    let pkg_dir = dir.join("packages");
-    let _ = fs::remove_dir_all(dir);
-    fs::create_dir_all(&pkg_dir).map_err(|e| e.to_string())?;
-    let mut index = Index {
-        name: name.into(),
-        generated: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-        packages: Vec::new(),
-    };
-    for bytes in packages {
-        let p = gina::Package::parse(bytes).map_err(str::to_string)?;
-        let m = &p.manifest;
-        let file = format!("{}-{}.gina", m.id, m.version);
-        fs::write(pkg_dir.join(&file), bytes).map_err(|e| e.to_string())?;
-        index.packages.push(Entry {
-            id: m.id.clone(),
-            version: m.version.clone(),
-            sha256: Sha256::digest(bytes).into(),
-            size: bytes.len() as u64,
-            path: format!("packages/{file}"),
-            categories: m.categories.clone(),
-            name: m.name.clone(),
-            author: m.developer.clone(),
-            description: m.description.clone(),
-        });
-    }
-    let text = index.encode();
-    gina::repo::Index::parse(text.as_bytes()).map_err(str::to_string)?;
-    let sig = gina::sign::sign(&key.0, &gina::repo::signed_message(text.as_bytes()));
-    fs::write(dir.join("index.txt"), &text).map_err(|e| e.to_string())?;
-    fs::write(dir.join("index.sig"), sig.encode()).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// The sample repository (`target/repo`): the Gallery and Doom.
-pub fn sample_repository(programs: &[Program], dir: &Path) {
-    let key = sample_key();
-    let packages: Vec<Vec<u8>> =
-        [gallery(programs, "1.0.0", Some(&key)), doom(programs, Some(&key))].into_iter().flatten().collect();
-    write_repository(dir, "WaveOS Samples", &packages, &key).expect("write the sample repository");
-}
-
-/// The repository the kernel tests install from: the samples plus a newer
-/// Gallery (1.1.0) to update to.
-pub fn test_repository(programs: &[Program], dir: &Path) {
-    let key = sample_key();
-    let packages: Vec<Vec<u8>> = [
-        gallery(programs, "1.0.0", Some(&key)),
-        gallery(programs, "1.1.0", Some(&key)),
-        doom(programs, Some(&key)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    write_repository(dir, "WaveOS Test Repository", &packages, &key).expect("write the test repository");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store;
+    use gina::repo::Index;
+    use sha2::{Digest, Sha256};
     #[test]
     fn repository_round_trip() {
         let dir = std::env::temp_dir().join(format!("gina-repo-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
         let key = ([5u8; 32], String::from("Test"));
         let mut elf = vec![0u8; 121];
         elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
@@ -258,10 +204,16 @@ mod tests {
             version: "1.0".into(),
             entry: "bin/app".into(),
             categories: vec!["game".into()],
+            permissions: vec!["network".into()],
             ..Default::default()
         };
         let p = pack(&m, &[("bin/app", &elf)], Some(&key)).unwrap();
-        write_repository(&dir, "T", std::slice::from_ref(&p), &key).unwrap();
+        let listing = store::Listing { featured: true, about: "About A".into(), ..Default::default() };
+        // (An x86-64 program: the repository's x86-64 half, whatever the
+        // host's default architecture.)
+        let spec = || store::Spec { arch: crate::arch::Arch::X86_64, ..store::Spec::new("T", &key) };
+        store::write(&dir, &spec(), &[(p.clone(), listing.clone())]).unwrap();
+        // Format 1, for older systems.
         let text = fs::read(dir.join("index.txt")).unwrap();
         let sig = gina::Signature::parse(&fs::read_to_string(dir.join("index.sig")).unwrap()).unwrap();
         assert!(gina::sign::verify(&sig, &gina::repo::signed_message(&text)));
@@ -271,6 +223,18 @@ mod tests {
         assert_eq!(bytes, p);
         assert_eq!(<[u8; 32]>::from(Sha256::digest(&bytes)), e.sha256);
         assert_eq!(gina::Package::parse(&bytes).unwrap().verify_signature(), Ok(Some(gina::sign::public_key(&key.0))));
+        // The catalogue: signed, versioned, with the Store's details.
+        let text = fs::read(dir.join("catalog.txt")).unwrap();
+        let sigs = gina::repo::parse_signatures(&fs::read_to_string(dir.join("catalog.sig")).unwrap()).unwrap();
+        let k = gina::sign::public_key(&key.0);
+        assert!(gina::sign::verify_any(&sigs, &gina::repo::catalog_message(&text), &[k]).is_some());
+        let c = Index::parse(&text).unwrap();
+        assert_eq!((c.format, c.version, c.featured.clone()), (2, 1, vec![String::from("dev.example.a")]));
+        assert_eq!(c.packages[0].about, "About A");
+        assert_eq!(c.packages[0].permissions, ["network"]);
+        // Writing again makes the next version.
+        store::write(&dir, &spec(), &[(p, listing)]).unwrap();
+        assert_eq!(store::current_catalog_for(&dir, crate::arch::Arch::X86_64).unwrap().version, 2);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -44,3 +44,26 @@ pub fn parse_secret(text: &str) -> Result<([u8; 32], alloc::string::String)> {
 pub fn encode_secret(seed: &[u8; 32], name: &str) -> alloc::string::String {
     alloc::format!("ed25519-secret {} {}\n", crate::hex(seed), name)
 }
+
+/// The first of `keys` with a valid signature of `message` among `sigs`.
+pub fn verify_any(sigs: &[Signature], message: &[u8], keys: &[[u8; 32]]) -> Option<[u8; 32]> {
+    sigs.iter().find(|s| keys.contains(&s.key) && verify(s, message)).map(|s| s.key)
+}
+
+/// Accepts the root `text` (with its signatures) after `current`: the next
+/// version, signed by a root key of `current` and by one of its own.
+pub fn advance_root(current: &crate::repo::Root, text: &[u8], sigs: &[Signature]) -> Result<crate::repo::Root> {
+    use crate::repo::{root_message, Role, Root};
+    let next = Root::parse(text)?;
+    if next.version != current.version + 1 {
+        return Err("The repository's next trust root has the wrong version");
+    }
+    let message = root_message(text);
+    if verify_any(sigs, &message, &current.keys(Role::Root)).is_none() {
+        return Err("The repository's next trust root is not signed by its current root key");
+    }
+    if verify_any(sigs, &message, &next.keys(Role::Root)).is_none() {
+        return Err("The repository's next trust root is not signed by its own root key");
+    }
+    Ok(next)
+}

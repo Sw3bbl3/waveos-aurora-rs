@@ -27,7 +27,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use x86_64::instructions::interrupts;
+use crate::arch::interrupts;
 
 const QUANTUM_MS: u64 = 10;
 
@@ -283,10 +283,7 @@ fn kick(cpu: Option<usize>) {
             crate::power::idle::ipi_avoided(c);
             return;
         }
-        crate::arch::apic::send_ipi(
-            percpu::CPUS[c].lapic_id.load(Ordering::Relaxed),
-            crate::arch::idt::RESCHEDULE_VECTOR,
-        );
+        crate::arch::irq::send_ipi(c, crate::arch::irq::Ipi::Reschedule);
     }
 }
 
@@ -374,6 +371,13 @@ pub fn set_fs_base(base: u64) {
 
 /// The running task's thread pointer.
 pub fn fs_base() -> u64 {
+    // Where programs set it themselves (Arm's TPIDR_EL0), the register is
+    // the current value: a program's (a kernel thread's is stale).
+    if let Some(live) = crate::arch::cpu::user_thread_pointer() {
+        if crate::proc::current().is_some() {
+            return live;
+        }
+    }
     interrupts::without_interrupts(|| {
         SCHED
             .lock()
@@ -384,10 +388,7 @@ pub fn fs_base() -> u64 {
 }
 
 fn write_fs_base(base: u64) {
-    // A non-canonical base would fault the wrmsr itself.
-    if base < 0x8000_0000_0000 {
-        unsafe { x86_64::registers::model_specific::Msr::new(0xC000_0100).write(base) };
-    }
+    crate::arch::cpu::set_thread_pointer(base);
 }
 
 /// Spawns a kernel thread that keeps its own SIMD registers across switches,
@@ -451,7 +452,7 @@ fn spawn_inner_fpu(
 }
 
 /// First code run by a new task (called from the asm trampoline).
-pub extern "sysv64" fn task_entry(f: u64, arg: u64) -> ! {
+pub extern "C" fn task_entry(f: u64, arg: u64) -> ! {
     finish_switch();
     interrupts::enable();
     let f: fn(u64) = unsafe { core::mem::transmute(f as usize) };
@@ -549,12 +550,46 @@ fn pick_next(s: &mut Scheduler, cpu: usize) -> Option<TaskId> {
 /// Only the choice is made under the scheduler's lock, which every CPU
 /// takes: saving and loading registers and switching page tables (slow,
 /// especially in an emulator) come after it.
+/// Self-tests: when nothing was printed for 60 s while tasks keep being
+/// switched (a livelock, which no timeout reports), every task's stack
+/// goes to the log, once a minute at most.
+#[cfg(feature = "ktest")]
+fn hang_report(now: u64) {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let quiet = now.saturating_sub(crate::drivers::serial::last_output_ns());
+    let last = LAST.load(Ordering::Relaxed);
+    if quiet > 60_000_000_000
+        && now > last + 60_000_000_000
+        && LAST.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    {
+        crate::kprintln!("\nno output for {} s; tasks:", quiet / 1_000_000_000);
+        dump_stacks();
+        // The running task's own callers (it is the one switching).
+        let mut rbp = crate::arch::cpu::frame_pointer();
+        crate::kprint!("running task {}:", current_id());
+        for _ in 0..24 {
+            if rbp == 0 || !rbp.is_multiple_of(8) {
+                break;
+            }
+            let (next, ret) = unsafe { (*(rbp as *const u64), *((rbp + 8) as *const u64)) };
+            crate::kprint!(" {ret:#x}");
+            if next <= rbp || next - rbp > 1 << 20 {
+                break;
+            }
+            rbp = next;
+        }
+        crate::kprintln!();
+    }
+}
+
 fn schedule() {
     if !STARTED.load(Ordering::Acquire) {
         return;
     }
     let cpu = percpu::cpu_id();
     let now = time::now_ns();
+    #[cfg(feature = "ktest")]
+    hang_report(now);
     let (save, load, next_flag, switch_to, kick_idle) = {
         let mut guard = SCHED.lock();
         let Some(s) = guard.as_mut() else { return };
@@ -621,6 +656,12 @@ fn schedule() {
             PREV_ON_CPU[cpu].store(flag, Ordering::Relaxed);
             s.cpus[cpu].prev = dead.then_some(cur_id);
             let fpu = cur.fpu.as_mut().filter(|_| !dead).map(|f| &mut **f as *mut FpuState);
+            if cur.pid != 0 && !dead {
+                // A thread pointer the program set itself goes with it.
+                if let Some(live) = crate::arch::cpu::user_thread_pointer() {
+                    cur.fs_base = live;
+                }
+            }
             (cur.cr3, &mut cur.rsp as *mut u64, fpu)
         };
         let next = s.tasks.get_mut(&next_id).unwrap();
@@ -786,7 +827,13 @@ pub fn yield_now() {
 /// Marks the running task asleep until millisecond tick `until` (or until
 /// woken), with a timer on this CPU to wake it then.
 fn mark_sleeping(until: u64) {
-    let deadline = until.saturating_mul(1_000_000);
+    mark_sleeping_ns(until.saturating_mul(1_000_000));
+}
+
+/// Marks the running task asleep until `deadline` (ns of `time::now_ns`;
+/// `u64::MAX`: no timer), or until woken.
+fn mark_sleeping_ns(deadline: u64) {
+    let until = deadline / 1_000_000;
     if let Some(s) = SCHED.lock().as_mut() {
         let cur = s.cpus[percpu::cpu_id()].current;
         if let Some(t) = s.tasks.get_mut(&cur) {
@@ -821,8 +868,20 @@ pub fn sleep_ms(ms: u64) {
 /// `ready()` already holds. The task is marked sleeping *before* `ready()` is
 /// checked, so a wakeup from another CPU in between is never lost.
 pub fn wait_until(ms: u64, ready: impl Fn() -> bool) {
+    wait_until_deadline(tick_after(ms).saturating_mul(1_000_000), ready)
+}
+
+/// [`wait_until`] to the nanosecond: sleeps until `deadline` (ns of
+/// `time::now_ns`), not the millisecond tick after it — for Linux's
+/// `nanosleep`, `timerfd` and the timeouts of `poll` and `epoll`, which
+/// programs pace frames and sound by.
+pub fn wait_until_ns(deadline: u64, ready: impl Fn() -> bool) {
+    wait_until_deadline(deadline, ready)
+}
+
+fn wait_until_deadline(deadline: u64, ready: impl Fn() -> bool) {
     interrupts::without_interrupts(|| {
-        mark_sleeping(tick_after(ms));
+        mark_sleeping_ns(deadline);
         if ready() {
             if let Some(s) = SCHED.lock().as_mut() {
                 let cur = s.cpus[percpu::cpu_id()].current;
@@ -877,7 +936,7 @@ pub fn idle() -> ! {
             interrupts::disable();
             PARKED.fetch_or(1 << cpu, Ordering::AcqRel);
             loop {
-                x86_64::instructions::hlt();
+                crate::arch::cpu::halt();
             }
         }
     }
@@ -959,11 +1018,11 @@ pub fn dump_stacks_of(which: impl Fn(u32) -> bool) {
         // aurora_context_switch pushed rbp, rbx, r12–r15 below its return address.
         let mut frames = [0u64; 20];
         let mut n = 0;
-        if let Some(ret) = read(t.rsp + 48) {
+        if let Some(ret) = read(t.rsp + switch::SAVED_RETURN) {
             frames[0] = ret;
             n = 1;
         }
-        let mut rbp = read(t.rsp + 40).unwrap_or(0);
+        let mut rbp = read(t.rsp + switch::SAVED_FRAME_POINTER).unwrap_or(0);
         while n < frames.len() {
             let (Some(next), Some(ret)) = (read(rbp), read(rbp + 8)) else { break };
             frames[n] = ret;

@@ -4,6 +4,7 @@ use alloc::vec;
 fn manifest() -> Manifest {
     Manifest {
         format: 1,
+        architecture: "x86_64".into(),
         id: "dev.example.hello".into(),
         name: "Hello".into(),
         developer: "Example".into(),
@@ -11,6 +12,40 @@ fn manifest() -> Manifest {
         entry: "bin/app".into(),
         ..Default::default()
     }
+}
+
+/// [`elf`] for aarch64.
+fn arm_elf() -> Vec<u8> {
+    let mut b = elf();
+    b[18..20].copy_from_slice(&aurora_elf::EM_AARCH64.to_le_bytes());
+    b
+}
+
+#[test]
+fn architectures() {
+    // Before the port every manifest said x86_64; an empty field still does.
+    let old = Manifest { architecture: String::new(), ..manifest() };
+    assert_eq!(old.arch(), "x86_64");
+    assert!(old.encode().contains("architecture = \"x86_64\"\n"));
+    // An aarch64 package: on a development host (these tests) it parses,
+    // and it says it isn't for an x86 system.
+    let arm = Manifest { architecture: "aarch64".into(), ..manifest() };
+    let bytes = pack(&arm, &[("bin/app", &arm_elf())]).unwrap();
+    let p = Package::parse(&bytes).unwrap();
+    assert_eq!(p.manifest.arch(), "aarch64");
+    assert_eq!(p.manifest.runs_here(), NATIVE_ARCH == "aarch64");
+    // A manifest that misstates its executable's processor.
+    assert_eq!(
+        pack(&arm, &[("bin/app", &elf())]).unwrap_err(),
+        "The executable is for a different processor than the manifest says"
+    );
+    assert_eq!(
+        pack(&manifest(), &[("bin/app", &arm_elf())]).unwrap_err(),
+        "The executable is for a different processor than the manifest says"
+    );
+    // Architectures WaveOS doesn't run on.
+    let text = manifest().encode().replace("x86_64", "riscv64");
+    assert_eq!(Manifest::parse(&text), Err("This app needs a different processor architecture"));
 }
 
 fn manifest2() -> Manifest {
@@ -247,6 +282,23 @@ fn manifest_validation() {
     assert_eq!(manifest2().dependencies()[0].id, "dev.example.runtime");
 }
 
+/// The sandbox's permissions: packages may declare the new ones, never the
+/// system's own (only the manifests built into the system may).
+#[test]
+fn permissions_for_the_sandbox() {
+    let with = |perms: &[&str]| Manifest { permissions: perms.iter().map(|p| (*p).into()).collect(), ..manifest2() };
+    let text = with(&["camera", "screen-capture", "launch", "ipc", "background", "desktop:read"]).encode();
+    assert!(Manifest::parse(&text).is_ok());
+    for system in ["system", "admin", "privacy", "processes", "linux-home", "all-files"] {
+        let text = with(&["network", system]).encode();
+        assert_eq!(Manifest::parse(&text), Err("Unknown permission"), "{system} in a package");
+        assert!(Manifest::parse_first_party(&text).is_ok(), "{system} in the system's own manifest");
+    }
+    assert!(Manifest::parse_first_party(&with(&["root"]).encode()).is_err());
+    assert!(sensitive_permission("camera") && !sensitive_permission("launch"));
+    assert_eq!(describe_permission("all-files"), "Read and change every file you may");
+}
+
 #[test]
 fn installed_file_verification() {
     let bytes = signed();
@@ -293,6 +345,7 @@ fn index() -> repo::Index {
                 name: "Hello".into(),
                 author: "Example".into(),
                 description: "Says hello".into(),
+                ..Default::default()
             },
             repo::Entry {
                 id: "dev.example.hello".into(),
@@ -304,8 +357,11 @@ fn index() -> repo::Index {
                 name: "Hello".into(),
                 author: "Example".into(),
                 description: String::new(),
+                ..Default::default()
             },
         ],
+        format: 1,
+        ..Default::default()
     }
 }
 
@@ -334,6 +390,187 @@ fn repository_index() {
     }
 }
 
+fn catalog() -> repo::Index {
+    let mut i = index();
+    i.format = 2;
+    i.version = 7;
+    i.expires = 1_800_000_000;
+    i.mirrors = vec!["https://mirror.example/stable/".into()];
+    i.featured = vec!["dev.example.hello".into()];
+    let e = &mut i.packages[1];
+    e.installed_size = 12_345;
+    e.permissions = vec!["network".into(), "documents:read".into()];
+    e.min_os = "0.8".into();
+    e.published = 1_700_000_100;
+    e.icon = Some(repo::Asset { path: format!("assets/{}.png", hex(&[3; 32])), sha256: [3; 32], size: 900 });
+    e.screenshots = vec![repo::Asset { path: "assets/shot.png".into(), sha256: [4; 32], size: 9000 }];
+    e.about = "Line one\nLine two\twith a tab and a \\ backslash".into();
+    e.notes = "Faster.".into();
+    i.revoked = vec![("dev.example.hello".into(), "1.10.0".into())];
+    i.system = vec![repo::SystemRelease {
+        version: "0.9.0".into(),
+        path: "system/0.9.0/update.txt".into(),
+        sha256: [5; 32],
+        size: 2000,
+        min_from: "0.8".into(),
+        published: 1_700_000_200,
+    }];
+    i
+}
+
+#[test]
+fn repository_catalog() {
+    let c = catalog();
+    let text = c.encode();
+    assert!(text.starts_with("gina-repository 2\n"));
+    assert_eq!(repo::Index::parse(text.as_bytes()), Ok(c.clone()));
+    // Format 1 keeps only what older systems understand.
+    let v1 = repo::Index::parse(c.encode_v1().as_bytes()).unwrap();
+    assert_eq!((v1.format, v1.packages.len(), v1.packages[1].installed_size), (1, 2, 0));
+    // A revoked version is never the latest.
+    assert_eq!(c.latest("dev.example.hello").unwrap().version, "1.0.0");
+    assert!(c.is_revoked("dev.example.hello", "1.10"));
+    assert_eq!(c.versions("dev.example.hello")[0].version, "1.10.0");
+    assert_eq!(c.system_update("0.8.0").unwrap().version, "0.9.0");
+    assert!(c.system_update("0.9.0").is_none() && c.system_update("0.7").is_none());
+    for bad in [
+        text.replace("version\t7\n", ""),
+        text.replace("expires\t1800000000\n", ""),
+        text.replace("version\t7", "version\t0"),
+        text.replace("https://mirror", "ftp://mirror"),
+        text.replace("documents:read", "everything"),
+        text.replace("icon\tdev.example.hello\t1.10.0", "icon\tdev.example.other\t1.10.0"),
+        text.replace("\\n", "\\q"),
+        text.replace("\t2000\t0.8", "\t0\t0.8"),
+        text.replace("featured\tdev.example.hello", "featured\tNot An Id"),
+    ] {
+        assert!(repo::Index::parse(bad.as_bytes()).is_err(), "{bad}");
+    }
+    assert_eq!(repo::unescape(&repo::escape("a\\b\nc\td"), 100).unwrap(), "a\\b\nc\td");
+}
+
+#[test]
+fn catalog_freshness() {
+    let c = catalog();
+    let d = [9u8; 32];
+    let none = repo::Seen::default();
+    assert!(repo::check_fresh(&c, &d, 1_700_000_000, &none).is_ok());
+    // Expired: a frozen mirror.
+    let e = repo::check_fresh(&c, &d, 1_800_000_001, &none).unwrap_err();
+    assert!(e.contains("expired"), "{e}");
+    // Older than seen: a rollback.
+    let seen = repo::Seen { version: 8, digest: [1; 32], generated: 0 };
+    assert!(repo::check_fresh(&c, &d, 1_700_000_000, &seen).unwrap_err().contains("rollback"));
+    // Same version, different contents.
+    let seen = repo::Seen { version: 7, digest: [1; 32], generated: 0 };
+    assert!(repo::check_fresh(&c, &d, 1_700_000_000, &seen).is_err());
+    let seen = repo::Seen { version: 7, digest: d, generated: 0 };
+    assert!(repo::check_fresh(&c, &d, 1_700_000_000, &seen).is_ok());
+    assert!(repo::check_fresh(&index(), &d, 0, &none).is_err());
+}
+
+#[test]
+fn trust_roots_rotate() {
+    let (old, new, cat) = ([11u8; 32], [12u8; 32], [13u8; 32]);
+    let key = |s: &[u8; 32]| sign::public_key(s);
+    let root = |v: u64, root_key: &[u8; 32]| repo::Root {
+        version: v,
+        expires: 0,
+        keys: vec![
+            (repo::Role::Root, key(root_key), "Root".into()),
+            (repo::Role::Catalog, key(&cat), "Catalogue".into()),
+        ],
+    };
+    let r1 = root(1, &old);
+    assert_eq!(repo::Root::parse(r1.encode().as_bytes()), Ok(r1.clone()));
+    let r2 = root(2, &new);
+    let text = r2.encode();
+    let msg = repo::root_message(text.as_bytes());
+    let both = [sign::sign(&old, &msg), sign::sign(&new, &msg)];
+    assert_eq!(sign::advance_root(&r1, text.as_bytes(), &both), Ok(r2.clone()));
+    // Only the new key, only the old key, or the wrong version: refused.
+    assert!(sign::advance_root(&r1, text.as_bytes(), &both[1..]).is_err());
+    assert!(sign::advance_root(&r1, text.as_bytes(), &both[..1]).is_err());
+    assert!(sign::advance_root(&r2, text.as_bytes(), &both).is_err());
+    // A catalogue signed by the catalogue key verifies against the root.
+    let catalog = catalog().encode();
+    let sig = sign::sign(&cat, &repo::catalog_message(catalog.as_bytes()));
+    let sigs = repo::parse_signatures(&(sign::sign(&old, b"other").encode() + &sig.encode())).unwrap();
+    let m = repo::catalog_message(catalog.as_bytes());
+    assert_eq!(sign::verify_any(&sigs, &m, &r2.keys(repo::Role::Catalog)), Some(key(&cat)));
+    assert_eq!(sign::verify_any(&sigs, &m, &r2.keys(repo::Role::Root)), None);
+    for bad in [text.replace("version\t2", "version\t0"), text.replace("key\tcatalog", "key\tmaster")] {
+        assert!(repo::Root::parse(bad.as_bytes()).is_err());
+    }
+    assert!(repo::parse_signatures("").is_err());
+}
+
+/// A small system image as the build writes it.
+fn system_tar(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&system::tar_header("Apps", 0, true));
+    for (name, data) in files {
+        out.extend_from_slice(&system::tar_header(name, data.len() as u64, false));
+        out.extend_from_slice(data);
+        out.resize(out.len() + system::padding(data.len() as u64), 0);
+    }
+    out.resize(out.len() + 1024, 0);
+    out
+}
+
+#[test]
+fn system_update_rebuilds_the_image() {
+    let old = system_tar(&[("version.txt", b"WaveOS Aurora 0.8.0\n"), ("Apps/Files.elf", &[7; 1000]), ("empty", b"")]);
+    let new = system_tar(&[("version.txt", b"WaveOS Aurora 0.8.1\n"), ("Apps/Files.elf", &[7; 1000]), ("empty", b"")]);
+    let part = |b: &[u8]| system::Part { sha256: Sha256::digest(b).into(), size: b.len() as u64 };
+    let u = system::describe("x86_64", "0.8.1", "0.8", "Fixes.\nMore fixes.", part(b"kernel"), part(b"boot"), &new).unwrap();
+    assert_eq!(system::Update::parse(u.encode().as_bytes()), Ok(u.clone()));
+    assert_eq!(system::tar_size(&u.layout), new.len() as u64);
+    // Only what changed is missing: the new version.txt, kernel and bootloader.
+    let have: Vec<[u8; 32]> = system::layout_of(&old)
+        .unwrap()
+        .into_iter()
+        .filter_map(|(i, _)| match i {
+            system::Item::File { sha256, .. } => Some(sha256),
+            _ => None,
+        })
+        .collect();
+    let missing = u.missing(|s| have.contains(s));
+    assert_eq!(missing.len(), 3);
+    assert!(missing.contains(&(Sha256::digest(b"WaveOS Aurora 0.8.1\n").into(), 20)));
+    // Rebuilding from the entries gives the same bytes.
+    let mut rebuilt = Vec::new();
+    let objects: Vec<(system::Item, core::ops::Range<usize>)> = system::layout_of(&new).unwrap();
+    for item in &u.layout {
+        match item {
+            system::Item::Dir(p) => rebuilt.extend_from_slice(&system::tar_header(p, 0, true)),
+            system::Item::File { path, size, .. } => {
+                rebuilt.extend_from_slice(&system::tar_header(path, *size, false));
+                let (_, r) = objects.iter().find(|(i, _)| i.path() == path).unwrap();
+                rebuilt.extend_from_slice(&new[r.clone()]);
+                rebuilt.resize(rebuilt.len() + system::padding(*size), 0);
+            }
+        }
+    }
+    rebuilt.resize(rebuilt.len() + 1024, 0);
+    assert_eq!(rebuilt, new);
+    let text = u.encode();
+    for bad in [
+        text.replace("gina-system-update 1", "gina-system-update 2"),
+        text.replace("kernel\t", "kernal\t"),
+        text.replace("\t1000\n", "\t2000\n"),
+        text.replace("Apps/Files.elf", "../Files.elf"),
+        text.lines().filter(|l| !l.starts_with("bootloader")).map(|l| format!("{l}\n")).collect(),
+    ] {
+        assert!(system::Update::parse(bad.as_bytes()).is_err(), "{bad}");
+    }
+    // Images with other headers, or that end early, can't be rebuilt.
+    let mut odd = new.clone();
+    odd[100..108].copy_from_slice(b"0000777\0");
+    assert!(system::layout_of(&odd).is_err());
+    assert!(system::layout_of(&new[..new.len() - 512]).is_err());
+}
+
 /// Packages and indexes come from anywhere; a corrupt one is refused, never a panic.
 #[test]
 fn corrupt_inputs_never_panic() {
@@ -350,10 +587,27 @@ fn corrupt_inputs_never_panic() {
             assert_eq!(Manifest::parse(&m.encode()), Ok(m));
         }
     });
-    aurora_mutate::check("gina-index", &[index().encode().into_bytes()], 5000, |bytes| {
+    aurora_mutate::check("gina-index", &[index().encode().into_bytes(), catalog().encode().into_bytes()], 5000, |bytes| {
         if let Ok(i) = repo::Index::parse(bytes) {
             assert_eq!(repo::Index::parse(i.encode().as_bytes()), Ok(i));
         }
+    });
+    let root = repo::Root { version: 3, expires: 9, keys: vec![(repo::Role::Root, [1; 32], "R".into()), (repo::Role::Catalog, [2; 32], "C".into())] };
+    aurora_mutate::check("gina-root", &[root.encode().into_bytes()], 3000, |bytes| {
+        if let Ok(r) = repo::Root::parse(bytes) {
+            assert_eq!(repo::Root::parse(r.encode().as_bytes()), Ok(r));
+        }
+    });
+    let tar = system_tar(&[("version.txt", b"WaveOS Aurora 0.8.1\n"), ("Apps/A.elf", &[1; 700])]);
+    let part = system::Part { sha256: [1; 32], size: 10 };
+    let update = system::describe("x86_64", "0.8.1", "0.8", "Notes", part, part, &tar).unwrap();
+    aurora_mutate::check("gina-system-update", &[update.encode().into_bytes()], 3000, |bytes| {
+        if let Ok(u) = system::Update::parse(bytes) {
+            assert_eq!(system::Update::parse(u.encode().as_bytes()), Ok(u));
+        }
+    });
+    aurora_mutate::check("gina-system-image", &[tar], 2000, |bytes| {
+        let _ = system::layout_of(bytes);
     });
     aurora_mutate::check("gina-records", &[signer(b"x").encode().into_bytes()], 2000, |bytes| {
         let s = String::from_utf8_lossy(bytes);
@@ -373,4 +627,31 @@ fn required_resources_and_abi() {
     assert!(pack(&m, &[("bin/app", &elf())]).is_err());
     assert!(Manifest::parse(&manifest().encode().replace("abi = 1", "abi = 99")).is_err());
     assert!(Manifest::parse(&manifest().encode().replace("format = 1", "format = 3")).is_err());
+}
+
+/// Catalogues and system updates name their processor; x86_64 ones read
+/// exactly as before the port.
+#[test]
+fn architectures_in_catalogues_and_updates() {
+    assert_eq!(repo::catalog_files("x86_64"), ("catalog.txt", "catalog.sig"));
+    assert_eq!(repo::catalog_files("aarch64"), ("catalog-aarch64.txt", "catalog-aarch64.sig"));
+    let x86 = catalog();
+    assert_eq!(x86.arch(), "x86_64");
+    assert!(!x86.encode().contains("\narch\t"));
+    let arm = repo::Index { architecture: "aarch64".into(), ..catalog() };
+    let text = arm.encode();
+    assert!(text.contains("\nexpires\t") && text.contains("\narch\taarch64\n"));
+    let back = repo::Index::parse(text.as_bytes()).unwrap();
+    assert_eq!((back.arch(), &back), ("aarch64", &arm));
+    assert!(repo::Index::parse(text.replace("arch\taarch64", "arch\triscv64").as_bytes()).is_err());
+
+    let tar = system_tar(&[("version.txt", b"WaveOS Aurora 0.8.1\n")]);
+    let part = system::Part { sha256: [1; 32], size: 10 };
+    let x86 = system::describe("x86_64", "0.8.1", "", "", part, part, &tar).unwrap();
+    assert!(!x86.encode().contains("\narch\t"));
+    assert_eq!(x86.arch(), "x86_64");
+    let arm = system::describe("aarch64", "0.8.1", "", "", part, part, &tar).unwrap();
+    assert!(arm.encode().contains("\narch\taarch64\n"));
+    assert_eq!(system::Update::parse(arm.encode().as_bytes()).unwrap().arch(), "aarch64");
+    assert_eq!((system::boot_file("aarch64"), system::boot_file("x86_64")), ("BOOTAA64.EFI", "BOOTX64.EFI"));
 }

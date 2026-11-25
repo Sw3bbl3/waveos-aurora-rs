@@ -27,6 +27,11 @@ const SOL_SOCKET: u64 = 1;
 const SCM_RIGHTS: i32 = 1;
 const SCM_CREDENTIALS: i32 = 2;
 const SO_PASSCRED: u64 = 16;
+/// UDP segmentation offload (`linux/udp.h`): a message carries several
+/// datagrams of one size, at most 64 of them.
+const SOL_UDP: u64 = 17;
+const UDP_SEGMENT: u64 = 103;
+const UDP_MAX_SEGMENTS: usize = 64;
 const MSG_PEEK: u64 = 2;
 const MSG_TRUNC: u64 = 0x20;
 const MSG_CTRUNC: u64 = 0x8;
@@ -71,6 +76,7 @@ fn nonblock(p: &Process, fd: u64, flags: u64) -> bool {
 // ---------------------------------------------------------------- addresses
 
 /// A socket address as Linux programs write it.
+#[derive(Clone)]
 enum Addr {
     Net(crate::net::socket::Peer),
     Local(String),
@@ -171,6 +177,7 @@ pub fn socket(p: &Process, domain: u64, ty: u64, proto: u64) -> Result<u64, isiz
                 (SOCK_DGRAM | SOCK_RAW, 1 | 58) => Kind::Icmp,
                 _ => return Err(EPROTONOSUPPORT_),
             };
+            crate::sandbox::require(aurora_abi::sandbox::NET_CLIENT)?;
             let s = Socket::new(kind, domain == AF_INET6);
             if nb {
                 s.option(aurora_abi::net::OPT_NONBLOCK, 1)?;
@@ -336,7 +343,11 @@ pub fn listen(p: &Process, fd: u64, backlog: u64) -> Result<u64, isize> {
     }
     match sock(p, fd)? {
         Sock::Local(u) => u.listen().map(|_| 0),
-        s => s.net().listen(backlog.clamp(1, 128) as usize).map(|_| 0),
+        s => {
+            // (A listener takes connections on every interface.)
+            crate::sandbox::require(aurora_abi::sandbox::NET_SERVER)?;
+            s.net().listen(backlog.clamp(1, 128) as usize).map(|_| 0)
+        }
     }
 }
 
@@ -576,8 +587,10 @@ pub fn sendmsg(p: &Process, fd: u64, msg_ptr: u64, flags: u64) -> Result<u64, is
     let m = read_msg(msg_ptr)?;
     let data = gather(m.iov, m.iovlen)?;
     let to = if m.name != 0 && m.namelen != 0 { Some(read_addr(p, m.name, m.namelen)?) } else { None };
-    // Ancillary data: descriptors to pass (SCM_RIGHTS).
+    // Ancillary data: descriptors to pass (SCM_RIGHTS), and the size of
+    // each datagram when the data is several (UDP_SEGMENT).
     let mut fds = Vec::new();
+    let mut segment = 0usize;
     let mut at = 0u64;
     while m.control != 0 && at + 16 <= m.controllen {
         let [len, kind]: [u64; 2] = user::get(m.control + at)?;
@@ -591,10 +604,25 @@ pub fn sendmsg(p: &Process, fd: u64, msg_ptr: u64, flags: u64) -> Result<u64, is
                 fds.push(p.fd(n as usize)?);
             }
         }
+        if level == SOL_UDP && ty == UDP_SEGMENT as i32 && len >= 18 {
+            segment = user::get::<u16>(m.control + at + 16)? as usize;
+        }
         at += (len + 7) & !7;
     }
-    if !fds.is_empty() && matches!(sock(p, fd)?, Sock::Net(_)) {
+    let s = sock(p, fd)?;
+    if !fds.is_empty() && matches!(s, Sock::Net(_)) {
         return Err(EINVAL);
+    }
+    // Segmentation offload as the program asked for it: one datagram per
+    // `segment` bytes (the last may be shorter), as Linux's UDP GSO sends.
+    if segment > 0 && data.len() > segment {
+        if !matches!(s, Sock::Net(_)) || s.net().kind == Kind::Tcp || data.len().div_ceil(segment) > UDP_MAX_SEGMENTS {
+            return Err(EINVAL);
+        }
+        for chunk in data.chunks(segment) {
+            send_bytes(p, fd, chunk, Vec::new(), to.clone(), flags)?;
+        }
+        return Ok(data.len() as u64);
     }
     send_bytes(p, fd, &data, fds, to, flags)
 }
@@ -757,6 +785,13 @@ pub fn setsockopt(p: &Process, fd: u64, level: u64, name: u64, val: u64, len: u6
             let on: i32 = user::get(val)?;
             u.passcred.store(on != 0, core::sync::atomic::Ordering::Relaxed);
         }
+    }
+    // A default segment size for UDP segmentation offload isn't kept (each
+    // message's UDP_SEGMENT is): say so, as a kernel without it does, so
+    // programs that probe for it (QUIC stacks, Firefox's among them) don't
+    // send their batches as single oversized datagrams.
+    if level == SOL_UDP && name == UDP_SEGMENT {
+        return Err(ENOPROTOOPT);
     }
     // Everything else (reuse, keep-alive, buffer sizes, no-delay…) is accepted.
     Ok(0)

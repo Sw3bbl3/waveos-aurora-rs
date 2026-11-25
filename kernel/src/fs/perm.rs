@@ -14,8 +14,9 @@
 //! for everyone; the EFI partition (`/Boot`) to the system and the admin
 //! group; removable volumes to the logged-in account.
 //!
-//! On the home volume, `/Security`, `/Users` and `/Applications` are the
-//! system's: nobody else may create, remove or rename them.
+//! On the home volume, `/Security`, `/Users`, `/Applications` and `/.system`
+//! (system updates) are the system's: nobody else may create, remove or
+//! rename them.
 
 use super::*;
 use crate::users::{self, Cred};
@@ -27,7 +28,7 @@ pub const X: u16 = 1;
 const STICKY: u16 = 0o1000;
 
 /// Top-level names on the home volume only the system may change.
-const PROTECTED: [&str; 3] = ["Security", "Users", "Applications"];
+const PROTECTED: [&str; 4] = ["Security", "Users", "Applications", ".system"];
 /// The first account's personal folders, private on an upgraded volume.
 const PRIVATE: [&str; 6] = ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Movies"];
 
@@ -45,6 +46,12 @@ pub fn system<T>(f: impl FnOnce() -> T) -> T {
         SYSTEM_TASKS.lock().remove(&me);
     }
     out
+}
+
+/// True while kernel code runs for the system inside a system call
+/// ([`system`]): neither permissions nor the sandbox apply.
+pub fn acting_as_system() -> bool {
+    SYSTEM_TASKS.lock().contains(&crate::sched::current_id())
 }
 
 /// The credentials file access is checked against: None for the system.
@@ -212,6 +219,14 @@ pub fn session_allows(path: &str, want: u16) -> bool {
 
 /// `access()`: may the caller do `want` (R, W, X bits) with `path`?
 pub fn access(path: &str, want: u16) -> FsResult<()> {
+    let access = if want & W != 0 {
+        crate::sandbox::Access::Write
+    } else if want & R != 0 {
+        crate::sandbox::Access::Read
+    } else {
+        crate::sandbox::Access::Stat
+    };
+    crate::sandbox::check_path(&resolve("/", path), access)?;
     let (o, _) = stat_owner(path)?;
     let (_, ro) = stat(path)?;
     if want & W != 0 && ro {
@@ -222,6 +237,7 @@ pub fn access(path: &str, want: u16) -> FsResult<()> {
 
 /// `chmod`: the owner (or the system) changes the permission bits.
 pub fn chmod(path: &str, mode: u16) -> FsResult<()> {
+    crate::sandbox::check_path(&resolve("/", path), crate::sandbox::Access::Write)?;
     let (fs, ino, mount) = lookup_full(&resolve("/", path))?;
     if fs.read_only() {
         return Err(EROFS);
@@ -238,6 +254,7 @@ pub fn chmod(path: &str, mode: u16) -> FsResult<()> {
 /// `chown`: changing the owner takes the administrator capability; the
 /// owner may hand the group to one they are in. `u32::MAX` = unchanged.
 pub fn chown(path: &str, uid: u32, gid: u32) -> FsResult<()> {
+    crate::sandbox::check_path(&resolve("/", path), crate::sandbox::Access::Write)?;
     let (fs, ino, mount) = lookup_full(&resolve("/", path))?;
     if fs.read_only() {
         return Err(EROFS);
@@ -329,13 +346,22 @@ pub fn prepare_root_volume() {
             }
             let _ = ensure_system_dir(super::super::users::db::DIR);
         }
-        if !is_dir("/Applications") {
-            let _ = mkdir("/Applications");
+        ensure_admin_dir("/Applications");
+        ensure_admin_dir(crate::gui::sysupdate::SLOTS);
+    });
+}
+
+/// Makes `path` on the home volume if needed: the system's, and the admin
+/// group may change what is in it (`/Applications`, `/.system`).
+pub fn ensure_admin_dir(path: &str) {
+    system(|| {
+        if !is_dir(path) {
+            let _ = mkdir(path);
         }
-        if let Ok((o, explicit)) = stat_owner("/Applications") {
+        if let Ok((o, explicit)) = stat_owner(path) {
             let want = Owner { uid: users::ROOT_UID, gid: users::ADMIN_GID, mode: 0o775 };
             if !explicit || o != want {
-                let _ = set_owner_path("/Applications", want);
+                let _ = set_owner_path(path, want);
             }
         }
     });

@@ -19,6 +19,10 @@ macro_rules! item {
 }
 
 pub const SETTINGS: &[Setting] = &[
+    item!("update/check", "Check for software updates", "update upgrade new version system download", Update),
+    item!("update/auto-check", "Check for updates automatically", "update background automatic", Update),
+    item!("update/auto-download", "Download system updates automatically", "update background download", Update),
+    item!("update/repository", "App repositories", "store sources repository add url server", Update),
     item!("appearance/light", "Light appearance", "theme bright", Appearance),
     item!("appearance/dark", "Dark appearance", "theme night", Appearance),
     item!("appearance/accent", "Accent colour", "color highlight", Appearance),
@@ -55,6 +59,11 @@ pub const SETTINGS: &[Setting] = &[
     item!("login/password", "Change your password", "account security passwd lock", Login),
     item!("login/add", "Add an account", "users people family new user administrator", Login),
     item!("apps/list", "Installed apps", "uninstall remove packages gina dock size storage games", Apps),
+    item!("privacy/microphone", "Microphone access", "privacy record sound sandbox permission", Privacy),
+    item!("privacy/camera", "Camera access", "privacy video sandbox permission", Privacy),
+    item!("privacy/documents", "Files and folders access", "privacy documents downloads pictures sandbox permission", Privacy),
+    item!("privacy/network", "Network access for apps", "privacy internet sandbox permission", Privacy),
+    item!("privacy/bookmarks", "Files apps keep", "privacy bookmarks sandbox", Privacy),
     item!("desktop/dock-size", "Harbor size", "dock desktop icons magnification", Desktop),
     item!("desktop/dock-autohide", "Hide Harbor until pointed at", "dock autohide desktop space", Desktop),
     item!("desktop/glass", "Glass intensity", "desktop blur transparency lumen", Desktop),

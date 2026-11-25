@@ -343,6 +343,19 @@ fn shortcuts() -> Vec<Entry> {
         launch: Launch::Settings(pane),
     };
     alloc::vec![
+        // The Store, opened on its games: what's installed from it appears
+        // with the other games (the `Installed` source).
+        Entry {
+            id: String::from("store:games"),
+            title: String::from("Get More Games"),
+            detail: String::from("Games in the Store"),
+            kind: Kind::Game,
+            art: Art::Icon(Icon::Store),
+            launch: Launch::Program(
+                String::from("/System/Apps/Store.elf"),
+                alloc::vec![String::from("--category"), String::from("game")],
+            ),
+        },
         s("play", "Wave Play", "Entering on connect, sounds, vibration", "play"),
         s("controllers", "Controllers", "Test buttons, sticks and vibration", "controllers"),
         s("display", "Display", "Resolution and scale", "display"),
@@ -372,7 +385,7 @@ pub fn recent() -> Vec<String> {
 }
 
 pub fn remember(id: &str) {
-    if id == "desktop" || id.starts_with("settings:") {
+    if id == "desktop" || id.starts_with("settings:") || id.starts_with("store:") {
         return;
     }
     let mut list = recent();

@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use aurora_abi::err::*;
 
 const SYSTEM_LINKS: &str = "/System/Linux/.links";
-const USER_LINKS: &str = "/Linux/.links";
+pub const USER_LINKS: &str = "/Linux/.links";
 
 struct Table {
     system: BTreeMap<String, String>,
@@ -38,7 +38,11 @@ fn parse(text: &str) -> BTreeMap<String, String> {
 fn with<R>(f: impl FnOnce(&mut Table) -> R) -> R {
     let mut t = TABLE.lock();
     let table = t.get_or_insert_with(|| {
-        let read = |path| fs::read_all(path).ok().map(|b| parse(&String::from_utf8_lossy(&b))).unwrap_or_default();
+        // The system's own table, whoever asks first (a sandboxed app must not
+        // leave it empty for everyone).
+        let read = |path| {
+            fs::perm::system(|| fs::read_all(path)).ok().map(|b| parse(&String::from_utf8_lossy(&b))).unwrap_or_default()
+        };
         Table { system: read(SYSTEM_LINKS), user: read(USER_LINKS) }
     });
     f(table)
@@ -78,8 +82,19 @@ pub fn create(path: &str, to: &str) -> Result<(), isize> {
             return Err(EEXIST);
         }
         t.user.insert(String::from(path), String::from(to));
-        save(&t.user)
+        let saved = save(&t.user);
+        if saved.is_err() {
+            t.user.remove(path);
+        }
+        saved
     })
+}
+
+/// The links are everyone's (one table for the whole Linux tree): a
+/// sandboxed app may make or remove them only if it may change that table
+/// (Terminal may, a package may not), or it could plant one for others.
+pub fn may_change() -> Result<(), isize> {
+    crate::sandbox::check_path(USER_LINKS, crate::sandbox::Access::Write)
 }
 
 /// Removes a link made with [`create`]; links of the system image can't go.

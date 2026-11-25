@@ -1,0 +1,10 @@
+[package]
+name = "aurora-lz4"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+aurora-mutate = { path = "../mutate" }

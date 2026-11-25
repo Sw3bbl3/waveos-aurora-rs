@@ -95,6 +95,8 @@ pub struct Process {
     pub cwd: Mutex<String>,
     /// Who the process acts as (inherited from its parent; see `users`).
     pub cred: IrqMutex<crate::users::Cred>,
+    /// What its app may do (None: unconfined; see `sandbox`).
+    pub sandbox: IrqMutex<Option<Arc<crate::sandbox::Sandbox>>>,
     exit: AtomicI64,
     pub killed: AtomicBool,
     /// Set once a parent has collected the exit code with `wait`.
@@ -107,6 +109,9 @@ pub struct Process {
     /// Threads that have not been reaped yet.
     threads: AtomicU32,
     pub resident_kib: AtomicU64,
+    /// A system service the out-of-memory killer spares while any other
+    /// program is left (see `mm::kswapd::badness`).
+    pub oom_protected: AtomicBool,
     /// Set for Linux programs (their system calls go to `compat::linux`).
     pub linux: Option<crate::compat::linux::Linux>,
     entry: u64,
@@ -166,6 +171,11 @@ impl Process {
             }
         }
         MemGuard { guard: self.aspace.lock(), _owner: None }
+    }
+
+    /// Whether the reaper has freed the process's resources (its memory among them).
+    pub fn is_reaped(&self) -> bool {
+        self.reaped.load(Ordering::Acquire)
     }
 
     /// Threads not reaped yet.
@@ -229,13 +239,58 @@ pub fn get(pid: Pid) -> Option<Arc<Process>> {
 }
 
 /// An access to user address `addr` faulted (a write if `write`): makes
-/// the page there if it is lazy memory, or the process's own if it shares
-/// it since `fork` (see `AddressSpace::resolve_fault`). True if the access
-/// can go again.
+/// the page there if it is lazy memory, brings it back if it is swapped
+/// out, or makes it the process's own if it shares it since `fork` (see
+/// `AddressSpace::fault`). True if the access can go again.
 pub fn resolve_fault(addr: u64, write: bool) -> bool {
     let Some(p) = current() else { return false };
-    let mut guard = p.mem();
-    guard.as_mut().is_some_and(|a| a.resolve_fault(addr, write))
+    with_memory(&p, |a| a.fault(addr, write))
+}
+
+/// Runs a fault-like operation on `p`'s memory. When memory is out it
+/// waits for reclaim (its address-space lock let go meanwhile) and tries
+/// again; when reclaim can't keep up, the out-of-memory killer ends a
+/// program (perhaps this one: then false, and its threads leave at their
+/// next safe point).
+fn with_memory(p: &Process, mut op: impl FnMut(&mut AddressSpace) -> crate::mm::vmm::Fault) -> bool {
+    use crate::mm::{kswapd, vmm::Fault};
+    let mut without_room = 0;
+    for _ in 0..32 {
+        let r = {
+            let mut guard = p.mem();
+            match guard.as_mut() {
+                Some(a) => op(a),
+                None => Fault::Invalid,
+            }
+        };
+        match r {
+            Fault::Resolved => return true,
+            Fault::Invalid => return false,
+            Fault::NoMemory => {}
+        }
+        if p.killed.load(Ordering::Acquire) || !crate::arch::interrupts::are_enabled() {
+            return false;
+        }
+        let round = kswapd::rounds();
+        if kswapd::wait_for_memory() {
+            continue;
+        }
+        without_room += 1;
+        if kswapd::futile_since(round) {
+            kswapd::out_of_memory("reclaim found nothing more to free");
+        } else if without_room >= 10 {
+            kswapd::out_of_memory("a fault waited ten seconds for memory");
+        }
+        if p.killed.load(Ordering::Acquire) {
+            return false;
+        }
+    }
+    false
+}
+
+/// Whether the running thread's process is being ended.
+pub fn current_killed() -> bool {
+    current().is_some_and(|p| p.killed.load(Ordering::Acquire))
 }
 
 /// True if the running process has `addr` mapped (or reserved), whatever
@@ -250,8 +305,7 @@ pub fn is_mapped(addr: u64) -> bool {
 /// write) now, as faults would; false if some of it isn't mapped so.
 pub fn prefault(addr: u64, len: u64, write: bool) -> bool {
     let Some(p) = current() else { return false };
-    let mut guard = p.mem();
-    guard.as_mut().is_some_and(|a| a.prefault(addr, len, write))
+    with_memory(&p, |a| a.prefault(addr, len, write))
 }
 
 /// Each CPU's last answer to [`current`]: (pid, process). Process ids are
@@ -263,7 +317,7 @@ static CURRENT: [IrqMutex<(Pid, Option<Arc<Process>>)>; crate::arch::percpu::MAX
 /// call, so each CPU remembers its last answer rather than looking in the
 /// table, whose lock every CPU would otherwise queue for.
 pub fn current() -> Option<Arc<Process>> {
-    let (found, old) = x86_64::instructions::interrupts::without_interrupts(|| {
+    let (found, old) = crate::arch::interrupts::without_interrupts(|| {
         let pid = sched::current_pid();
         if pid == 0 {
             return (None, None);
@@ -283,6 +337,17 @@ pub fn current() -> Option<Arc<Process>> {
 
 pub fn all() -> Vec<Arc<Process>> {
     TABLE.lock().values().cloned().collect()
+}
+
+/// [`all`], or None if the list can't be allocated (memory is out).
+pub fn try_all() -> Option<Vec<Arc<Process>>> {
+    let mut out = Vec::new();
+    // (Sized outside the table's lock, which an allocation must not wait under.)
+    let n = TABLE.lock().len();
+    out.try_reserve_exact(n + 8).ok()?;
+    let table = TABLE.lock();
+    out.extend(table.values().take(n + 8).cloned());
+    Some(out)
 }
 
 pub fn init() {
@@ -314,17 +379,41 @@ pub fn spawn_env(
     stdio: [Option<Arc<Handle>>; 3],
     parent: Pid,
 ) -> Result<Pid, isize> {
+    spawn_confined(path, argv, env, stdio, parent, crate::sandbox::Confine::Inherit)
+}
+
+/// Like [`spawn_env`], in the sandbox `confine` says (see `sandbox`).
+pub fn spawn_confined(
+    path: &str,
+    argv: &[&str],
+    env: Option<&[String]>,
+    stdio: [Option<Arc<Handle>>; 3],
+    parent: Pid,
+    confine: crate::sandbox::Confine,
+) -> Result<Pid, isize> {
     use crate::compat::linux;
     if !room_for_thread() {
         return Err(ENOMEM);
     }
-    let data = fs::read_all(path)?;
+    // Another app the caller may launch is read for the system: the caller
+    // itself may not be able to read that app's files.
+    let launched = matches!(confine, crate::sandbox::Confine::With(_));
+    let sandbox = match confine {
+        crate::sandbox::Confine::Inherit => get(parent).and_then(|p| p.sandbox.lock().as_ref().map(|s| s.child())),
+        crate::sandbox::Confine::With(s) => s,
+    };
+    let data = if launched { fs::perm::system(|| fs::read_all(path)) } else { fs::read_all(path) }?;
     let image = aurora_elf::parse(&data).ok_or(ENOEXEC)?;
     let mut aspace = AddressSpace::new().ok_or(ENOMEM)?;
     let (entry, user_sp, arg, linux_state) = if linux::is_linux(&image, path) {
         // Linux programs need the execute bit too (WaveOS programs only
         // need to be readable, which `read_all` checked).
-        fs::perm::check_exec(path)?;
+        if !launched {
+            fs::perm::check_exec(path)?;
+        }
+        if let Some(s) = &sandbox {
+            s.require(aurora_abi::sandbox::LINUX)?;
+        }
         let user = linux::fs::account_user();
         linux::fs::prepare_root(&user, crate::users::for_child(parent).uid);
         let default_env;
@@ -338,6 +427,7 @@ pub fn spawn_env(
         let start = linux::exec::load(&data, &image, &linux::fs::to_guest(path), argv, env, &mut aspace)?;
         let state = linux::Linux::new(start.brk);
         state.configure(env);
+        state.started(&start);
         (start.entry, start.sp, 0, Some(state))
     } else {
         let (sp, block) = load_waveos(&data, &image, argv, &mut aspace)?;
@@ -350,6 +440,10 @@ pub fn spawn_env(
     let log = || Some(Arc::new(Handle::Log));
     let fds = alloc::vec![i.or_else(log), o.or_else(log), e.or_else(log)];
     let cwd = if parent != 0 { get(parent).map(|p| p.cwd.lock().clone()) } else { None };
+    let mut cred = crate::users::for_child(parent);
+    if let Some(s) = &sandbox {
+        crate::sandbox::narrow_cred(s, &mut cred);
+    }
     let process = Arc::new(Process {
         pid,
         parent,
@@ -362,10 +456,12 @@ pub fn spawn_env(
         pgid: AtomicU32::new(pid),
         sid: AtomicU32::new(pid),
         resident_kib: AtomicU64::new(aspace.resident / 1024),
+        oom_protected: AtomicBool::new(false),
         aspace: Mutex::new(Some(aspace)),
         fds: Mutex::new(fds),
         cwd: Mutex::new(cwd.unwrap_or_else(|| String::from("/"))),
-        cred: IrqMutex::new(crate::users::for_child(parent)),
+        cred: IrqMutex::new(cred),
+        sandbox: IrqMutex::new(sandbox),
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
         waited: AtomicBool::new(false),
@@ -508,8 +604,8 @@ fn linux_thread(raw: u64) {
 
 fn user_thread(raw: u64) {
     let start = unsafe { alloc::boxed::Box::from_raw(raw as *mut ThreadStart) };
-    // Entered like a function call: rsp ≡ 8 (mod 16).
-    let (entry, sp, arg) = (start.entry, start.stack - 8, start.arg);
+    // Entered like a function call (`arch::syscall::call_sp`).
+    let (entry, sp, arg) = (start.entry, crate::arch::syscall::call_sp(start.stack), start.arg);
     drop(start);
     if interrupted() {
         return; // the process is already going away
@@ -750,10 +846,12 @@ pub fn fork(
         pgid: AtomicU32::new(parent.pgid.load(Ordering::Relaxed)),
         sid: AtomicU32::new(parent.sid.load(Ordering::Relaxed)),
         resident_kib: AtomicU64::new(resident / 1024),
+        oom_protected: AtomicBool::new(false),
         aspace: Mutex::new(aspace),
         fds: Mutex::new(parent.fds.lock().clone()),
         cwd: Mutex::new(parent.cwd.lock().clone()),
         cred: IrqMutex::new(*parent.cred.lock()),
+        sandbox: IrqMutex::new(parent.sandbox.lock().as_ref().map(|s| s.child())),
         exit: AtomicI64::new(RUNNING),
         killed: AtomicBool::new(false),
         waited: AtomicBool::new(false),

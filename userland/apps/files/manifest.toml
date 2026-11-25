@@ -1,0 +1,14 @@
+# What Files may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.files"
+name = "Files"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Files.elf"
+description = "Every file and folder you have."
+categories = ["system"]
+permissions = ["all-files", "admin", "launch", "spawn", "system", "clipboard", "notifications"]

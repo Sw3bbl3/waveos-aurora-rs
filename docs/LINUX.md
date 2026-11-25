@@ -1,6 +1,7 @@
 # Linux programs on WaveOS
 
-WaveOS runs programs built for Linux (x86-64) next to its own. The kernel
+WaveOS runs programs built for Linux (x86-64, and arm64 on the aarch64
+port) next to its own. The kernel
 recognises them when it starts them, gives them the start-up Linux programs
 expect, and carries out their system calls with Linux's numbers and meanings.
 The code is in [`kernel/src/compat/linux`](../kernel/src/compat/linux).
@@ -16,6 +17,69 @@ This is being built in steps. What works today:
 | M4 | Sockets (TCP, UDP, local) | Done |
 | M5 | Shared memory and a Wayland bridge, for GTK programs | Done |
 | M6 | Firefox ESR | Done |
+| A1 | arm64 programs: the generic call table, arm64 layouts, signal frames, vDSO | Done: the static tests and Debian's hello and curl pass under HVF |
+
+## Two ABIs: x86-64 and arm64
+
+On the aarch64 port, Linux programs are arm64 ones (Debian's `arm64`
+packages, `aarch64-unknown-linux-musl` builds). The layer implements
+each call once; what differs between the ABIs is in
+`kernel/src/compat/linux/abi/` and `libs/linuxabi` (details in
+[developer/porting.md](developer/porting.md#the-linux-layers-abis)):
+
+| | x86-64 | arm64 |
+|---|---|---|
+| System call | `syscall`; number in rax, arguments rdi, rsi, rdx, r10, r8, r9 | `svc #0`; number in x8, arguments x0-x5, result in x0 |
+| Call table | Linux's x86-64 table (the layer's numbering) | the generic table: no `open`, `stat`, `fork`, `pipe`, `poll`, `select`, `dup2`, `rename`, `mkdir`, `epoll_wait`… only their `*at`/`p*`/`*2`/`3` forms, which x86-64 programs use too |
+| `clone` | `(flags, stack, ptid, ctid, tls)` | `(flags, stack, ptid, tls, ctid)` |
+| TLS | FS base, `arch_prctl` | TPIDR_EL0, set by the program or `clone(CLONE_SETTLS)` |
+| `struct stat` | 144 bytes | 128 bytes (32-bit `st_nlink`, `st_blksize`) |
+| `struct epoll_event` | packed, 12 bytes | 16 bytes |
+| Open flags | `O_DIRECTORY` 0o200000, `O_NOFOLLOW` 0o400000, `O_DIRECT` 0o40000, `O_LARGEFILE` 0o100000 | 0o40000, 0o100000, 0o200000, 0o400000 |
+| `MINSIGSTKSZ` | 2048 | 5120 |
+| Signal frame | SIMD state (XSAVE), restorer address, `ucontext`, `siginfo` | frame record, `siginfo`, `ucontext` with `fpsimd_context` (and `esr_context` for faults); x30 = the vDSO's `__kernel_rt_sigreturn` unless `SA_RESTORER` |
+| Restarted calls | rip -= 2, rax = the number | pc -= 4, x0 = the first argument |
+| vDSO | `__vdso_clock_gettime`, `__vdso_gettimeofday`, `__vdso_time` (TSC) | `__kernel_clock_gettime`, `__kernel_gettimeofday`, `__kernel_clock_getres`, `__kernel_rt_sigreturn` (CNTVCT_EL0) |
+| Auxiliary vector | `AT_HWCAP` = `cpuid` 1 EDX, `AT_PLATFORM` "x86_64" | `AT_HWCAP`, `AT_HWCAP2` from the ID registers, `AT_PLATFORM` "aarch64", `AT_MINSIGSTKSZ` |
+| `/proc/cpuinfo` | `flags`, family/model | `Features`, `CPU implementer`/`part`… |
+| `uname -m` | `x86_64` | `aarch64` |
+
+Everything else they read and write — `flock`, `statfs`, `termios`,
+`siginfo`, `sigaction`, signal numbers, `mmap`/`clone`/`SA_` flags, ioctl
+numbers, errno — is the same, and the host tests (`cargo test -p
+aurora-linuxabi`) check each value against Debian 12's Linux and glibc
+headers for both architectures (`cargo xtask linux-abi --arch <arch>`
+regenerates them). arm64's `PROT_BTI` and `PROT_MTE` are accepted and
+ignored; BTI, MTE, SVE and SME are not offered to programs.
+
+On aarch64 under HVF, Mesa (kmscube, glmark2, lavapipe, es2gears and
+vkcube in windows) and both browsers work: Voyage and Firefox ESR show
+local pages, Wikipedia and YouTube. With `--gpu virtio` the display is a
+PCI device and drmtest runs; on `--gpu std` (ramfb) it is skipped.
+
+Browser start-up, timed (`AURORA_TEST_ROOT=browsers
+AURORA_TEST_FILTER="page loads timed" cargo xtask test [--arch aarch64]
+--gpu virtio --mesa`): each start is cold (every browser process and
+window gone before the next), on the test server's article; "painted"
+is the article's text and pictures in the window. Medians, milliseconds,
+one machine (an Apple M2 Mac on mains power), 2026-11-24:
+
+| | aarch64, HVF (5 runs) | x86-64, TCG (3 runs) |
+|---|---|---|
+| Voyage: window | 2537 | 11756 |
+| Voyage: page painted | 2836 | 16233 |
+| Firefox: window | 1432 | 16635 |
+| Firefox: page painted | 2050 | 21610 |
+
+One run each of real sites (not signed in; real sites vary by the
+minute): Wikipedia's "Web browser" article painted in 18.6 s (Voyage) and
+3.0 s (Firefox) on aarch64, against 32.2 s and 29.0 s on x86-64; YouTube's
+home page in 15.1 s and 4.3 s, against 36.6 s and 43.3 s. Voyage takes
+about 11.7 s to show its window for an `https://` address on aarch64
+against 2.5 s for the local `http://` page: not yet explained.
+
+Not yet on arm64: `extra_context` frames (only needed with SVE). musl's
+`vfork` is plain `fork` on arm64 (it has no `vfork` of its own there).
 
 ## The shell
 
@@ -93,9 +157,12 @@ Writing to the file, or deleting it, drops it from the cache.
   `/dev/kmsg` (the system log: `2>/dev/kmsg` keeps a program's messages);
   the input devices and what describes them (`/dev/input`, `/dev/hidraw*`,
   `/dev/uinput`, `/sys`, `/run/udev`; see below);
-  `/proc/self/exe`, `/proc/meminfo`, `/proc/mounts`; `/proc/cpuinfo` and
-  `/sys/devices/system/cpu`, as Linux writes them from `cpuid` (the
-  `flags` line lists what the processor has and the kernel enables);
+  `/proc/self/exe`, `/proc/self/auxv`, `/proc/meminfo` (with swap and the compressed store
+  as `Zswap`), `/proc/pressure/memory`, `/proc/self/status` and
+  `/proc/<pid>/status` (`VmRSS`, `VmSwap`, `VmLck`), `/proc/mounts`;
+  `/proc/cpuinfo` and `/sys/devices/system/cpu`, as Linux writes them
+  from `cpuid` (the `flags` line lists what the processor has and the
+  kernel enables);
   `/dev/dri/card0` (see [The display](#the-display-drm)), the parts of
   `/sys` that describe it (`/sys/class/drm`, `/sys/dev/char`, the PCI
   device) and its udev record (`/run/udev/data/c226:0`); and
@@ -105,15 +172,29 @@ Writing to the file, or deleting it, drops it from the cache.
   `MAP_FIXED`), `mprotect`, `mremap`, `munmap` and `madvise`. Anonymous
   memory gets its pages when they are first touched, so a program can
   reserve gigabytes (WebKit's JavaScript engine maps 8 GiB) and pay only
-  for what it uses; `MADV_DONTNEED` gives pages back. `PROT_NONE`
-  reservations take no memory at all. `mincore` tells whether pages are
-  mapped.
+  for what it uses; `MADV_DONTNEED` and `MADV_FREE` give pages back,
+  `MADV_PAGEOUT` swaps them out now, `MADV_COLD` makes them the first to
+  go, `MADV_WILLNEED` brings swapped-out ones back. `PROT_NONE`
+  reservations take no memory at all. `mlock`, `mlock2`, `munlock`,
+  `mlockall` and `munlockall` keep pages in memory (`MCL_FUTURE` is
+  accepted, but memory mapped later isn't locked); `sysinfo` reports swap.
+  When memory runs short, pages are swapped out (see
+  [developer/memory.md](developer/memory.md)).
+  `mincore` tells whether pages are mapped and in memory (a swapped-out
+  page is not).
 - **The processor:** x87, SSE and AVX, with the kernel saving each thread's
   registers (XSAVE) across switches and in signal frames, as on Linux.
 - **Shared memory:** `memfd_create`, `shm_open` (`/dev/shm`) and
   `MAP_SHARED` mappings of them, or anonymous ones: every process mapping
   the object sees the same memory, across `fork` and when the descriptor is
   passed over a local socket. `ftruncate` and `fallocate` size them.
+  `MAP_SHARED` mappings of a disk file opened for writing share their
+  pages too, through that open file (its `dup`s, `fork`s and passed
+  descriptors): what one writes, the others see, so a program can write
+  code through one mapping and run it through another (GStreamer's ORC
+  does, in a deleted temporary file). What is written through them stays
+  in memory and doesn't reach the file yet; a mapping only for reading
+  shows the file as it is.
 - **Threads:** `clone` for threads with thread-local storage (`arch_prctl`),
   and the child-tid handshake `pthread_join` uses. `futex` waits and wakes
   (with deadlines and bit sets), moves waiters from one futex to another
@@ -157,7 +238,11 @@ Writing to the file, or deleting it, drops it from the cache.
   datagram and sequenced-packet, named by a path or in the abstract
   namespace, `socketpair`, `SO_PEERCRED`, descriptors passed with
   `SCM_RIGHTS`, and the sender's credentials with `SO_PASSCRED`
-  (`SCM_CREDENTIALS`). `sendmmsg`/`recvmmsg` and `FIONREAD` too.
+  (`SCM_CREDENTIALS`). `sendmmsg`/`recvmmsg` and `FIONREAD` too. A UDP
+  message with `UDP_SEGMENT` (segmentation offload) goes out as one
+  datagram per segment; the socket-wide `UDP_SEGMENT` option is refused
+  (`ENOPROTOOPT`), so QUIC stacks that probe for it (Firefox's HTTP/3)
+  don't count on it.
 - **Symbolic links:** the read-only tree's links come with the system image
   (`/bin/sh` and every other BusyBox command are links to `/bin/busybox`,
   where Debian puts them); `symlink` makes new ones in the writable tree.
@@ -242,12 +327,74 @@ Three calls fit windows into a program's own main loop:
   the arrow, a text I-beam, a pointing hand, a crosshair, busy, not
   allowed, resize left–right or up–down, move, or none.
 
-Programs written for Linux's own sound interfaces reach the same streams
-through OSS: `/dev/dsp` is a WaveOS sound stream, and its `ioctl`s (format,
-channels, rate, buffer space, delay, sync, reset) describe it as it is,
-48 kHz 16-bit stereo, so a program that asks for another rate is told the
-one it gets and converts (GStreamer's `osssink` does, and with it WebKit's
-media). There is no PulseAudio or ALSA.
+A window can also show pixels the program already has, without copying
+them into the window: `wave_win_buffer(fd, offset, width, height, stride,
+format)` makes a buffer over a dma-buf (a DRM buffer exported with PRIME)
+or shared memory (`memfd`, `/dev/shm`), in `XRGB8888` or premultiplied
+`ARGB8888`, and `wave_win_attach(window, buffer, scale, x, y, w, h)` shows
+it (buffer 0: the window's own surface again). The compositor reads the
+buffer where it is — a full-screen window's (`wave_win_set_fullscreen`) is
+scanned out by the display itself — so the program must not draw into it
+again before `WAVE_EV_BUFFER_RELEASE` says WaveOS no longer reads it.
+`WAVE_EV_FRAME` says when the window's last picture was shown: the
+display's frame number and time (`CLOCK_MONOTONIC`), its refresh period,
+and whether it was scanned out without a copy.
+
+Programs written for Linux's own sound interfaces reach the same mixer
+through ALSA and OSS:
+
+- **ALSA:** one sound card, `/dev/snd/controlC0` and its playback device
+  `/dev/snd/pcmC0D0p`, with the kernel's `ioctl`s
+  ([`sound.rs`](../kernel/src/compat/linux/sound.rs)), so the ALSA library
+  and everything over it (Firefox's cubeb, GStreamer's `alsasink` and with
+  it WebKit's media, SDL, PortAudio, Wine) play unchanged. Each open is a
+  stream of its own in the mixer, so any number of programs play at once
+  without `dmix`; `/etc/asound.conf` makes the default device `plug` over
+  the card, which converts what it doesn't take itself. The card takes
+  48 kHz, one or two channels, 16-bit, 32-bit or float samples, written
+  (`snd_pcm_writei`) or through the mapped buffer (`mmap` access,
+  committed with `SYNC_PTR`); the status and control pages aren't mapped,
+  so libasound uses `SYNC_PTR` for them, as it does on some
+  architectures. The hardware pointer is what the mixer has taken; the
+  delay adds what it has mixed into the device's ring and isn't heard
+  yet, so players that time pictures by `snd_pcm_delay` keep them in step
+  with the sound. A stream that runs dry while running goes to `XRUN` as on
+  Linux. `/proc/asound` lists the card. The structures are the same for
+  x86-64 and arm64 programs, so both get the one implementation. Opening
+  the playback device needs the sound capability (an app without it gets
+  `EACCES`). There is no capture device yet (microphones are WaveOS's
+  `record`); one would need the microphone capability and show the menu
+  bar's recording indicator while open, as `record` does.
+- **OSS:** `/dev/dsp` is a WaveOS sound stream, and its `ioctl`s (format,
+  channels, rate, buffer space, delay, sync, reset) describe it as it is,
+  48 kHz 16-bit stereo, so a program that asks for another rate is told the
+  one it gets and converts. Its delay counts what the mixer holds too.
+
+There is no PulseAudio or PipeWire server: ALSA is what both browsers (and
+nearly every Linux program) can use without one, in the program's own
+process, with nothing more to start; PulseAudio's library is on the disk
+(Firefox looks for a server first and moves on to ALSA when there is
+none; WaveOS's Firefox settings ask for ALSA straight away). Debian's
+Firefox ESR links libasound and opens ALSA in-process through cubeb; its
+WebKit plays through GStreamer, whose `alsasink` (gstreamer1.0-alsa) is
+on the disk. A PulseAudio endpoint would mean a server speaking
+PulseAudio's own protocol over a socket, for programs that already
+work without one. Firefox's content processes open the card themselves
+(`media.cubeb.sandbox` off): their connection to the parent's AudioIPC
+server never completes here yet, and with Firefox's sandboxes off the
+server would keep nothing out.
+
+`cargo xtask video-check` measures video playback in both browsers on a
+disposable disk with the full Linux root (`--browsers firefox,voyage`,
+`--cases h264-360,…,av1-1080`, `--secs N`): it makes test clips with the
+host's ffmpeg (a moving pattern and a steady 440 Hz tone, in the
+containers YouTube serves), serves them to an MSE player page
+(`tools/video_mse.html`), records the guest's sound card to a WAV file,
+and reports for each case the time to the first frame, frames decoded,
+presented and dropped, the media clock's rate, A/V drift (presented frame
+against the media clock), stalls, gaps in the recorded tone, and each
+sound stream's underruns from the kernel's log. `--min-fps`,
+`--max-drift` and `--max-gaps` make it fail below a bar.
 
 ## The display (DRM)
 
@@ -270,7 +417,8 @@ program drops master, closes the card or exits — also when it crashes or
 is killed. While it holds the screen, keys and the pointer still go to the
 desktop. Mesa runs on it unmodified (see [Mesa](#mesa-opengl-and-vulkan));
 render nodes, syncobjs and tiled formats are what hardware drivers will
-need next (see
+need next (a dma-buf's fences, as sync files, are always signalled today;
+see
 [display-core.md](developer/display-core.md#what-hardware-drivers-still-need)).
 
 ## Mesa (OpenGL and Vulkan)
@@ -284,11 +432,17 @@ OpenGL 4.5 through EGL, and Vulkan 1.3 through lavapipe.
   with events). `kmscube` and `glmark2-drm`/`glmark2-es2-drm` run as they
   are; the program takes the display from the desktop and gives it back
   when it ends.
-- **In a window**, through `wl-bridge`: Mesa's EGL on Wayland draws into
-  shared memory, and the bridge copies each frame into the WaveOS window
-  (`wl-bridge &` then `es2gears_wayland`).
+- **In a window**, through `wl-bridge`: Mesa's EGL on Wayland renders
+  into buffers on the DRM device and hands them over as dma-bufs, which
+  the window shows as they are — no copy before the compositor's own, and
+  none at all full screen, where the display scans them out
+  (`wl-bridge &` then `es2gears_wayland`, or `glmark2-es2-wayland
+  --fullscreen`). `/etc/drirc` tells Mesa to use `kms_swrast` on WaveOS's
+  display devices, which is what makes this happen.
 - **Vulkan** with lavapipe: rendering and reading back (`vulkaninfo`
-  lists it). Presenting full screen through `VK_KHR_display` is untried.
+  lists it), and in a window (`vkcube-wayland`): lavapipe's Wayland
+  swapchain uses shared memory, which the window shows as it is too. Presenting full screen
+  through `VK_KHR_display` is untried.
 
 `kmscube` is among the default packages (in Terminal: `kmscube`; Return
 ends it). The others (`glmark2-drm`, `mesa-vulkan-drivers`,
@@ -313,23 +467,34 @@ wl-bridge &
 gtk3-demo
 ```
 
-Each top-level window becomes a WaveOS window. The bridge copies every
-frame the program commits (shared-memory buffers, `wl_shm`) into the
-window, with its sub-surfaces and pop-up menus, and sends WaveOS's pointer,
+Each top-level window becomes a WaveOS window. It shows the buffers the
+program commits as they are — shared memory (`wl_shm`) or dma-bufs
+(`zwp_linux_dmabuf_v1` version 4 with feedback, and Mesa's `wl_drm`), its
+main surface, sub-surfaces (a browser's page, a video through a viewport)
+and pop-up menus as layers WaveOS stacks itself — and the program gets each
+back (`wl_buffer.release`) when WaveOS no longer reads it. Only what WaveOS
+can't show that way (other pixel formats) is composed by the bridge from
+copies. When a program says all of a surface changed, the bridge compares
+it with what is on screen and passes on only what did. Frame callbacks and presentation
+feedback (`wp_presentation`) are answered when the window's picture is on
+the screen, at the display's frame start. A full-screen request
+(`xdg_toplevel.set_fullscreen`) makes the WaveOS window full screen. The
+bridge sends WaveOS's pointer,
 scroll and key events back as Wayland events (a US keymap, built by the
 program's xkbcommon from the system's XKB data). WaveOS draws the window
 frame and resizes windows; the program is told the new size and draws
 again. Copying in a program offers the text to WaveOS's clipboard, and
 WaveOS's clipboard is what programs paste.
 
-OpenGL programs work the same way: with no GPU buffers offered (no
-`linux-dmabuf`), Mesa's EGL draws in software into shared memory, and the
-bridge copies each frame.
+OpenGL programs work the same way: Mesa's EGL renders with llvmpipe into
+dumb buffers on the DRM device and hands them over as dma-bufs (see
+[display-core.md](developer/display-core.md#mesa-in-a-window)).
+`WL_BRIDGE_COPY=1` in the bridge's environment makes it copy every frame
+as it used to, for comparisons.
 
 What isn't there yet: pop-up menus stay inside their window, drag and drop
-between programs, GPU buffers (`linux-dmabuf`: programs draw in software;
-see [display-core.md](developer/display-core.md#mesa-in-a-window) for the
-design), input methods, and touch.
+between programs, buffers from a GPU (render nodes, tiled layouts, fences
+to wait on), input methods, and touch.
 
 ## Voyage
 
@@ -484,7 +649,7 @@ download [Freedoom][fd] 0.13.0 (BSD-3-Clause, 24 MB, both phases) from its
 GitHub release when there is none. The data isn't in the system image
 because it would not fit on the installation disc.
 
-Controls: arrow keys move, Ctrl fires, Space opens doors, Shift runs, Alt
+Controls: arrow keys move, Ctrl, X or the left mouse button fires, Space or the right button opens doors, Shift runs, Alt
 strafes, number keys switch weapons, Esc opens the menu.
 
 [dg]: https://github.com/ozkl/doomgeneric
@@ -520,6 +685,8 @@ focus, grabs and rumble, with the kernel test playing the user).
 To see what a Linux program asks of the kernel, put `WAVEOS_STRACE=1` in
 its environment: every system call it makes, with its arguments, the path
 it names (if any) and its result, goes to the system log.
+`WAVEOS_STRACE=NAME` traces only the processes named NAME (a browser's
+own process, say, not the helpers that inherit its environment).
 `WAVEOS_SYSCOUNT=1` is lighter: when the program ends (or `exec`s
 another), the log gets how many of each call it made and the time they
 took, waits included, most first.

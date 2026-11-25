@@ -55,6 +55,8 @@ Each display opens in its own host window. How depends on what your QEMU was bui
 
 QEMU's Cocoa window can show only one display at a time (View menu), so VNC is what gives macOS separate windows. When QEMU exits, the Screen Sharing windows stay open with a "connection lost" message: close them yourself.
 
+On macOS, with `--gpu virtio`, WaveOS draws the pointer into the picture itself (`cursor=software` in boot.conf): QEMU's window there shows nothing from virtio-gpu's cursor plane. `--hardware-cursor` keeps the plane, for another viewer (VNC, a newer QEMU).
+
 With `--gpu virtio` the desktop extends over every display: the menu bar and Harbor on display 1, the others to its right (arrange them in Settings → Display). QEMU switches outputs 2 to N on only when a user interface asks for a size, which Screen Sharing and most VNC viewers never do, so xtask asks itself through one more VNC server per output, on a Unix socket in the session directory. With `--gpu std` only display 1 is used (the `secondary-vga` windows keep showing the firmware's last text). One QEMU caveat: the USB tablet is absolute over the rectangle around all displays, so in a VM with several windows the pointer lands where that rectangle says rather than under the host cursor; use a mouse (`AURORA_QEMU_ARGS="-device usb-mouse"`) or move between displays at their shared edges.
 
 `cargo xtask test --gpu virtio --displays 3` runs the multi-monitor kernel test: the harness plugs the extra heads in and out through their VNC servers and compares a QMP screendump of each head with what the compositor drew.
@@ -85,6 +87,7 @@ cargo xtask run --wifi-sim          # simulated Wi-Fi networks ("Harbor Cafe", p
 cargo xtask run --displays 2        # two simulated displays, each in its own window (see "Several displays")
 cargo xtask launch                  # the launcher page (make run); --last boots the last configuration (make quick)
 cargo xtask test [--disk virtio] [--smp 1] [--gpu virtio]   # kernel self-tests on a fresh disk, booted twice (exit status 0 = pass)
+cargo xtask test --memory-mib 256        # the same on a small machine (default 512 MiB); AURORA_TEST_FILTER=swap for the swap tests only
 cargo xtask lint                    # Clippy on every crate, for its own target; warnings are errors
 cargo test -p aurora-help -p gina -p aurorafs -p fat32 -p lumen -p aurora-image -p aurora-wav -p aurora-wifi -p aurora-hid -p nebula-web -p nebula-secure -p nebula-engine -p nebula-script -p nebula-media -p aurora-elf -p aurora-mutate -p xtask   # host-side tests
 AURORA_MUTATIONS=100 cargo test -p aurorafs --release   # robustness tests, 100x longer than CI runs them
@@ -104,6 +107,32 @@ The WaveSDK developer site is [docs/developer/index.html](developer/index.html).
 `cargo xtask test` also attaches a USB stick, the test battery, and records the sound output to `target/test-audio.wav`. It plugs in virtual USB keyboards, touchpads and game controllers through QEMU's `usb-redir` when the local QEMU has it (it asks `-device help`); Homebrew's macOS QEMU doesn't, so those checks are skipped there with a warning. `AURORA_TEST_NO_USBREDIR=1` skips them anyway, and `=0` insists on them.
 
 The launcher's own tests: `cargo test -p xtask` checks the option tables, the command lines and presets, and that `cargo xtask launch --no-open` serves the page. `cargo xtask build && cargo test -p xtask --test launcher -- --ignored` also launches a headless WaveOS through the launcher's API (on its own disk, `target/launcher-e2e.img`), waits for `Aurora desktop ready` and stops it. Its sleep test puts the VM to sleep and wakes it over QMP. Some OVMF builds (Ubuntu's, for one) fault while resuming, before WaveOS gets control: the harness notices and runs the suite again with `sleep=off`. Set `AURORA_TEST_SLEEP=off` to skip it from the start.
+
+## Two architectures: x86_64 and aarch64
+
+`build`, `run`, `test`, `lint`, `image`, `iso` and `launch` take `--arch x86_64|aarch64` (`make run ARCH=x86_64`, or `AURORA_ARCH=x86_64` in the environment, which `./waveos` passes on). Without it the architecture is this computer's own where QEMU can run it at full speed (`DEFAULT_TO_ACCELERATED_HOST` in `xtask/src/arch.rs`): aarch64 on an Apple-silicon Mac (Hypervisor.framework) and on an arm64 Linux PC with KVM, x86_64 on an x86 PC and everywhere else. `make run`, `make quick`, `./waveos` and the launcher page all start on it.
+
+**The first run on Arm.** It makes the Arm disk, `target/waveos-aurora-aarch64.img`, and never reads or writes the x86 one, `target/waveos-aurora.img`. If an x86 disk exists, it says that your files are there and that `cargo xtask migrate-disk --arch aarch64` copies them to the new disk (see below); it doesn't do so by itself. It also fetches Debian's arm64 packages for `/Linux` (Voyage, Firefox ESR, Mesa, GStreamer…) into `target/linux-root-aarch64` and says first how much it downloads (about 1.9 GB, once; nothing when `target/downloads` has them); `--no-linux-root` boots without them.
+
+**The display.** On aarch64 the default is `--gpu virtio` (virtio-gpu-pci, which follows the window size and is the PCI device Mesa and libdrm expect); `--gpu std` is the firmware's fixed 1024×768 `ramfb`, kept as a fallback. On x86_64 the default stays `std` (QEMU's standard VGA).
+
+On an Apple-silicon Mac, aarch64 runs under Hypervisor.framework (`-accel hvf -cpu host`): at the processor's own speed, where x86_64 is emulated instruction by instruction (TCG). Elsewhere aarch64 is emulated (`-cpu max` under TCG). The aarch64 machine is QEMU's `virt` with a GICv3 (`gic-version=3,msi=gicv2m,highmem=on,virtualization=off`), EDK2's aarch64 firmware (`edk2-aarch64-code.fd`, shipped with Homebrew's QEMU; Debian: `qemu-efi-aarch64`; `AAVMF_CODE`/`AAVMF_VARS` point elsewhere), xHCI with the USB tablet and keyboard, Intel HD Audio, virtio-net, virtio-rng, the disk on virtio-blk (`--disk ahci` adds an AHCI controller), virtio-gpu-pci for `--gpu virtio` (the default) and `ramfb` for `--gpu std`. See `xtask/src/virt.rs` for why each.
+
+Each architecture has its own output, so switching never rebuilds the other: `target/<triple>/` for the bootloader and kernel, `target/user` and `target/user-aarch64` for user space, `target/esp` and `target/esp-aarch64` for the EFI partition (`EFI/BOOT/BOOTX64.EFI` or `BOOTAA64.EFI`, and `aurora/arch` naming the architecture), and its own disk: `target/waveos-aurora.img` stays the x86 disk, `target/waveos-aurora-aarch64.img` is the Arm one. A disk records its architecture, and `run` refuses to refresh a disk for the other one (its files are never touched).
+
+The launcher's **Chipset** card, at the top of the page, switches between the two (Intel / AMD and Arm): each names the board QEMU builds for it and says in one line what it costs here ("Runs at full speed on this computer" or "Emulated instruction by instruction here"), and its devices and presets are only those its machine has (on aarch64: no simulated battery and no ported Linux GPU driver; virtio-gpu is the default display and "Plain framebuffer" the firmware's `ramfb`). The page starts on the default architecture, the one `DEFAULT_TO_ACCELERATED_HOST` picks.
+
+More aarch64 commands:
+
+```sh
+cargo xtask userland --arch aarch64    # user space alone, into target/user-aarch64
+cargo xtask lint --arch aarch64        # Clippy: user space and its libraries for the Arm user target, bootloader, kernel
+cargo xtask migrate-disk --arch aarch64   # a new Arm disk with the files of target/waveos-aurora.img
+```
+
+**Moving to the Arm build.** `cargo xtask migrate-disk --arch aarch64 [--from DISK] [--to DISK] [--no-build]` builds a new aarch64 disk (by default `target/waveos-aurora-aarch64.img`, from `target/waveos-aurora.img`) around a copy of the old disk's home volume: your files, settings, accounts and passwords, and apps' data, with owners, permissions and times. The old disk is only read (the copy it works on is a clone, deleted afterwards) and stays usable with `--arch x86_64`. Left behind: installed apps built for x86 (their data stays; each is listed in `/Applications/.reinstall`, `pkg list` shows them as "reinstall it", and installing one again takes it off the list), the system-update slots in `/.system` (one architecture's system each), and the Linux packages in `/Linux` (Linux home folders come along). It refuses to write over an existing disk or onto the one it reads, and checks the result with fsck.
+
+**Repositories for both.** One repository folder serves both architectures: `cargo xtask repo` and `system-update` write the half of the architecture they are run for (`catalog.txt`, `packages/`, `system/<version>/` for x86_64, as before; `catalog-aarch64.txt`, `packages-aarch64/`, `system-aarch64/<version>/` for aarch64), and the content-addressed update objects and trust roots are shared. Every package, catalogue and system update names its architecture (x86_64 ones in the old words, so older systems read them), and WaveOS only lists, installs and starts its own (`docs/developer/store-and-updates.md`).
 
 ## Booting on real hardware (experimental)
 

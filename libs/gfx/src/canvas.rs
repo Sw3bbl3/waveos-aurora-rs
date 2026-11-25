@@ -47,6 +47,70 @@ pub fn blend(dst: u32, src: u32, a: u32) -> u32 {
     0xFF00_0000 | rb | g
 }
 
+/// How [`Canvas::blit_buffer`] reads a program's pixels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pixels {
+    /// 0xXXRRGGBB: the top byte means nothing; shown opaque.
+    Opaque,
+    /// 0xAARRGGBB with premultiplied alpha (Wayland's `ARGB8888`), shown
+    /// over this opaque colour.
+    Over(u32),
+    /// Premultiplied too, over what the canvas has there already (a
+    /// program's sub-surface over its main one).
+    Blend,
+}
+
+impl Pixels {
+    /// Pixel `p` as the canvas stores it (opaque), over `d` where it is.
+    #[inline]
+    pub fn read(self, p: u32, d: u32) -> u32 {
+        match self {
+            Pixels::Opaque => p | 0xFF00_0000,
+            Pixels::Over(bg) => over_premultiplied(p, bg),
+            Pixels::Blend => over_premultiplied(p, d),
+        }
+    }
+
+    /// A row of pixels.
+    #[inline]
+    pub fn copy(self, dst: &mut [u32], src: &[u32]) {
+        // Rows of a page are mostly opaque even in a buffer with alpha: a
+        // quick check (vectorised) makes them a plain copy.
+        if self != Pixels::Opaque && src.iter().all(|&p| p >= 0xFF00_0000) {
+            dst.copy_from_slice(src);
+            return;
+        }
+        match self {
+            // A plain loop the compiler vectorises: as fast as a copy.
+            Pixels::Opaque => dst.iter_mut().zip(src).for_each(|(d, &s)| *d = s | 0xFF00_0000),
+            Pixels::Over(bg) => dst.iter_mut().zip(src).for_each(|(d, &s)| *d = over_premultiplied(s, bg)),
+            Pixels::Blend => dst.iter_mut().zip(src).for_each(|(d, &s)| *d = over_premultiplied(s, *d)),
+        }
+    }
+}
+
+/// Premultiplied `p` over the opaque colour `bg`. No divisions: two
+/// channels a multiply, `x / 255` as `(x + 128 + (x + 128 >> 8)) >> 8`.
+#[inline]
+pub fn over_premultiplied(p: u32, bg: u32) -> u32 {
+    let a = p >> 24;
+    if a == 255 {
+        return p;
+    }
+    if p & 0x00FF_FFFF == 0 && a == 0 {
+        return bg | 0xFF00_0000;
+    }
+    let inv = 255 - a;
+    let rb = (bg & 0x00FF_00FF) * inv + 0x0080_0080;
+    let rb = ((rb + ((rb >> 8) & 0x00FF_00FF)) >> 8) & 0x00FF_00FF;
+    let g = (bg & 0x0000_FF00) * inv + 0x0000_8000;
+    let g = ((g + ((g >> 8) & 0x0000_FF00)) >> 8) & 0x0000_FF00;
+    // Each channel plus the backdrop's share, at most 255 (a colour may
+    // exceed its alpha in a buffer that isn't quite premultiplied).
+    let add = |sh: u32, under: u32| ((p >> sh & 0xFF) + (under >> sh & 0xFF)).min(255) << sh;
+    0xFF00_0000 | add(16, rb) | add(8, g) | add(0, rb)
+}
+
 /// Linear interpolation between two colors, t in 0..=256.
 #[inline]
 pub fn mix(a: u32, b: u32, t: i32) -> u32 {
@@ -71,11 +135,10 @@ pub fn blend_row(row: &mut [u32], c: u32, a: u32) {
         row.fill(c | 0xFF00_0000);
         return;
     }
-    #[cfg(target_arch = "x86_64")]
     if row.len() >= 8 && crate::simd::enabled() {
         let mut i = 0;
         loop {
-            // SAFETY: `enabled` said SSE2 may be used here.
+            // SAFETY: `enabled` said SIMD may be used here.
             i += unsafe { crate::simd::blend_row(&mut row[i..], c, a) };
             if row.len() - i < 4 {
                 break;
@@ -109,12 +172,10 @@ pub fn blend_row(row: &mut [u32], c: u32, a: u32) {
 /// Blends black at a per-pixel opacity (`shade[i]`, 0..=255) over `row`.
 #[inline]
 pub fn shade_row(row: &mut [u32], shade: &[u32]) {
-    #[allow(unused_mut)] // Only the x86 SIMD path advances this cursor.
     let mut i = 0;
-    #[cfg(target_arch = "x86_64")]
     if row.len() >= 8 && crate::simd::enabled() {
         loop {
-            // SAFETY: `enabled` said SSE2 may be used here; `shade` matches `row`.
+            // SAFETY: `enabled` said SIMD may be used here; `shade` matches `row`.
             i += unsafe { crate::simd::shade_row(&mut row[i..], &shade[i..]) };
             if row.len() - i < 4 {
                 break;
@@ -339,6 +400,37 @@ impl<'a> Canvas<'a> {
     /// (anti-aliased) — window contents.
     pub fn blit(&mut self, src: &[u32], src_w: u32, src_h: u32, dst: Rect, radius: i32) {
         self.blit_px(src, src_w, src_h, self.to_px(dst), radius * self.scale)
+    }
+
+    /// Copies a program's `w`×`h` image (device pixels, `stride` pixels from
+    /// one row to the next: a buffer it drew into, read where it is) into
+    /// `dst`, read as `pixels` says, with all four corners rounded at
+    /// `radius`. When `dst` is not `w`×`h` device pixels (the image was
+    /// drawn for another scale) it is scaled, nearest pixel.
+    #[allow(clippy::too_many_arguments)] // an image with its layout, a place and a shape
+    pub fn blit_buffer(&mut self, src: &[u32], stride: u32, w: u32, h: u32, dst: Rect, radius: i32, pixels: Pixels) {
+        let all = Rect::new(0, 0, w as i32, h as i32);
+        let dst = self.to_px(dst);
+        self.blit_layer_px(src, stride, (w, h), all, dst, dst, radius * self.scale, pixels)
+    }
+
+    /// Like [`blit_buffer`](Self::blit_buffer) for part `part` (buffer
+    /// pixels) of the image, shown at `dst`, and only inside `shape` with
+    /// its corners rounded at `radius`: one of a window's layers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn blit_layer(
+        &mut self,
+        src: &[u32],
+        stride: u32,
+        size: (u32, u32),
+        part: Rect,
+        dst: Rect,
+        shape: Rect,
+        radius: i32,
+        pixels: Pixels,
+    ) {
+        let (dst, shape) = (self.to_px(dst), self.to_px(shape));
+        self.blit_layer_px(src, stride, size, part, dst, shape, radius * self.scale, pixels)
     }
 
     /// Copies opaque pixels covering `part` (row stride `part.w`, in device
@@ -773,6 +865,80 @@ impl<'a> Canvas<'a> {
                         0xFF00_0000 | src[((y - dst.y) as u32 * src_w + (x - dst.x) as u32) as usize]
                     })
                 });
+            }
+        }
+    }
+
+    /// [`blit_layer`](Self::blit_layer) in device pixels of this canvas.
+    #[allow(clippy::too_many_arguments)]
+    pub fn blit_layer_px(
+        &mut self,
+        src: &[u32],
+        stride: u32,
+        (w, h): (u32, u32),
+        part: Rect,
+        dst: Rect,
+        shape: Rect,
+        radius: i32,
+        pixels: Pixels,
+    ) {
+        let stride = stride as usize;
+        // Never read past the pixels given (the last row may be short).
+        let rows = if stride == 0 || src.len() < w as usize { 0 } else { (src.len() - w as usize) / stride + 1 };
+        let whole = Rect::new(0, 0, w as i32, (h as usize).min(rows) as i32);
+        let part = part.intersect(&whole);
+        if part.is_empty() || dst.w <= 0 || dst.h <= 0 || stride < w as usize {
+            return;
+        }
+        let exact = dst.w == part.w && dst.h == part.h;
+        let (pw, ph) = (part.w as i64, part.h as i64);
+        let at = |x: i32, y: i32| -> usize {
+            let (sx, sy) = if exact {
+                (part.x + x - dst.x, part.y + y - dst.y)
+            } else {
+                (
+                    part.x + ((x - dst.x) as i64 * pw / dst.w as i64) as i32,
+                    part.y + ((y - dst.y) as i64 * ph / dst.h as i64) as i32,
+                )
+            };
+            sy as usize * stride + sx as usize
+        };
+        let radius = radius.min(shape.w / 2).min(shape.h / 2).max(0);
+        let inside = dst.intersect(&shape).intersect(&self.pclip());
+        if inside.is_empty() {
+            return;
+        }
+        let straight = Rect::new(shape.x, shape.y + radius, shape.w, shape.h - 2 * radius).intersect(&inside);
+        let rows = if straight.w > 0 { straight.y..straight.bottom() } else { 0..0 };
+        for y in rows {
+            let d0 = (y * self.width + straight.x) as usize;
+            let row = &mut self.buf[d0..d0 + straight.w as usize];
+            if exact {
+                let s0 = at(straight.x, y);
+                pixels.copy(row, &src[s0..s0 + straight.w as usize]);
+            } else {
+                for (i, d) in row.iter_mut().enumerate() {
+                    *d = pixels.read(src[at(straight.x + i as i32, y)], *d);
+                }
+            }
+        }
+        if radius > 0 {
+            // The corner bands: what the rounded shape covers of each pixel.
+            for band in
+                [Rect::new(shape.x, shape.y, shape.w, radius), Rect::new(shape.x, shape.bottom() - radius, shape.w, radius)]
+            {
+                let band = band.intersect(&inside);
+                for y in band.y..band.bottom() {
+                    for x in band.x..band.right() {
+                        let cov = round_rect_coverage(&shape, radius, x, y);
+                        if cov == 0 {
+                            continue;
+                        }
+                        let i = (y * self.width + x) as usize;
+                        let c = pixels.read(src[at(x, y)], self.buf[i]);
+                        self.buf[i] = if cov >= 256 { c } else { mix(self.buf[i], c, cov as i32) };
+                    }
+                }
             }
         }
     }
@@ -1381,5 +1547,72 @@ mod scale_tests {
         let a2 = Canvas::new(&mut two, 400, 80).with_scale(2).text(0, 20, "Wave", f, 0xFFFF_FFFF);
         assert!((a1 - a2).abs() <= 2, "{a1} vs {a2}");
         assert!(two.iter().any(|&p| p != 0));
+    }
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+
+    #[test]
+    fn premultiplied_over_matches_the_exact_formula() {
+        for &bg in &[0xFFFF_FFFFu32, 0xFF20_4080, 0xFF00_0000] {
+            for a in [0u32, 1, 64, 127, 128, 200, 254, 255] {
+                for c in [0u32, a / 3, a / 2, a] {
+                    let p = a << 24 | c << 16 | (a - c / 2) << 8 | (c / 4);
+                    let exact = |sh: u32| (((p >> sh) & 0xFF) + (((bg >> sh) & 0xFF) * (255 - a) + 127) / 255).min(255);
+                    let want = 0xFF00_0000 | exact(16) << 16 | exact(8) << 8 | exact(0);
+                    let got = over_premultiplied(p, bg);
+                    for sh in [0, 8, 16] {
+                        let (g, w) = ((got >> sh) & 0xFF, (want >> sh) & 0xFF);
+                        assert!(g.abs_diff(w) <= 1, "{p:08x} over {bg:08x}: {got:08x}, not {want:08x}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn buffers_blit_at_their_stride_opaque_and_scaled() {
+        // 3x2 pixels, 4 a row; the fourth of each row must never show.
+        let src = [0x0011_2233u32, 0x0044_5566, 0x0077_8899, 0xDEAD, 0x00AA_BBCC, 0x00DD_EEFF, 0x0012_3456, 0xBEEF];
+        let mut buf = alloc::vec![0u32; 6 * 4];
+        let mut cv = Canvas::new(&mut buf, 6, 4);
+        cv.blit_buffer(&src, 4, 3, 2, Rect::new(1, 1, 3, 2), 0, Pixels::Opaque);
+        assert_eq!(&buf[7..10], &[0xFF11_2233, 0xFF44_5566, 0xFF77_8899]);
+        assert_eq!(&buf[13..16], &[0xFFAA_BBCC, 0xFFDD_EEFF, 0xFF12_3456]);
+        assert_eq!(buf[10], 0);
+        // Drawn for another scale: scaled, never past the last row.
+        let mut big = alloc::vec![0u32; 6 * 4];
+        let mut cv = Canvas::new(&mut big, 6, 4);
+        cv.blit_buffer(&src[..7], 4, 3, 2, Rect::new(0, 0, 6, 4), 0, Pixels::Opaque);
+        assert_eq!(big[0], 0xFF11_2233);
+        assert_eq!(big[23], 0xFF12_3456);
+        assert!(big.iter().all(|&p| p != 0xFF00_DEAD && p != 0xFF00_BEEF));
+    }
+
+    #[test]
+    fn layers_crop_blend_and_stay_inside_their_shape() {
+        // A 4x4 image; its middle 2x2 shown at (1, 1), blended (half-alpha
+        // white over black) and clipped by a 2x2 shape at (2, 2).
+        let mut src = alloc::vec![0x8080_8080u32; 16];
+        src[0] = 0xFFFF_0000;
+        let mut buf = alloc::vec![0xFF00_0000u32; 5 * 5];
+        let mut cv = Canvas::new(&mut buf, 5, 5);
+        let shape = Rect::new(2, 2, 2, 2);
+        cv.blit_layer(&src, 4, (4, 4), Rect::new(1, 1, 2, 2), Rect::new(1, 1, 2, 2), shape, 0, Pixels::Blend);
+        for y in 0..5 {
+            for x in 0..5 {
+                let inside = (2..3).contains(&x) && (2..3).contains(&y);
+                let want = if inside { 0xFF80_8080 } else { 0xFF00_0000 };
+                assert_eq!(buf[y * 5 + x], want, "({x}, {y})");
+            }
+        }
+        // Scaled: the 2x2 part over a 4x4 destination, never its red corner pixel.
+        let mut big = alloc::vec![0u32; 16];
+        let mut cv = Canvas::new(&mut big, 4, 4);
+        let all = Rect::new(0, 0, 4, 4);
+        cv.blit_layer(&src, 4, (4, 4), Rect::new(1, 1, 2, 2), all, all, 0, Pixels::Opaque);
+        assert!(big.iter().all(|&p| p == 0xFF80_8080));
     }
 }

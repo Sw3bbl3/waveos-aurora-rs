@@ -6,15 +6,19 @@
 //! crash reports) are built into the server and implement [`App`] directly.
 
 mod client;
+mod consent;
 mod crash;
 mod display;
 mod elevate;
+mod panel;
 mod power;
 
 pub use client::ClientApp;
+pub use consent::ConsentDialog;
 pub use crash::CrashDialog;
 pub use display::DisplayConfirm;
 pub use elevate::ElevateDialog;
+pub use panel::PanelDialog;
 
 use super::canvas::Canvas;
 use super::geom::Rect;
@@ -45,12 +49,17 @@ pub enum AppKind {
     /// A program not in the catalog.
     Other,
     Installer,
+    Store,
     Studio,
     Doom,
     Firefox,
     Voyage,
     /// The administrator prompt (`users::elevate`).
     Elevate,
+    /// The privacy prompt (`sandbox::consent`).
+    Consent,
+    /// The open and save panel (`sandbox::panel`).
+    Panel,
 }
 
 pub struct AppInfo {
@@ -88,6 +97,16 @@ pub static CATALOG: &[AppInfo] = &[
         listed: true,
         path: "/System/Apps/Studio.elf",
         single: false,
+        also: &[],
+    },
+    AppInfo {
+        kind: AppKind::Store,
+        name: "Store",
+        icon: Icon::Store,
+        pinned: false,
+        listed: true,
+        path: "/System/Apps/Store.elf",
+        single: true,
         also: &[],
     },
     AppInfo {
@@ -297,6 +316,26 @@ pub static CATALOG: &[AppInfo] = &[
         also: &[],
     },
     AppInfo {
+        kind: AppKind::Consent,
+        name: "Privacy",
+        icon: Icon::Settings,
+        pinned: false,
+        listed: false,
+        path: "",
+        single: false,
+        also: &[],
+    },
+    AppInfo {
+        kind: AppKind::Panel,
+        name: "Open",
+        icon: Icon::Files,
+        pinned: false,
+        listed: false,
+        path: "",
+        single: false,
+        also: &[],
+    },
+    AppInfo {
         kind: AppKind::Other,
         name: "App",
         icon: Icon::Aurora,
@@ -322,6 +361,8 @@ pub enum Request {
     Close,
     Shutdown,
     Reboot,
+    /// Start the system update that is ready, then restart.
+    UpdateAndRestart,
     Sleep,
     /// Keep the display mode just chosen.
     KeepDisplay,
@@ -408,6 +449,14 @@ pub trait App {
     }
     /// The administrator prompt: the request it answers.
     fn elevation(&self) -> Option<u64> {
+        None
+    }
+    /// The privacy prompt: the request it answers.
+    fn consent(&self) -> Option<u64> {
+        None
+    }
+    /// The open and save panel: the request it answers.
+    fn panel(&self) -> Option<u64> {
         None
     }
 }

@@ -2,7 +2,7 @@
 
 use super::{App, AppKind, Env};
 use crate::drivers::input::KeyEvent;
-use crate::gui::canvas::Canvas;
+use crate::gui::canvas::{Canvas, Pixels};
 use crate::gui::geom::Rect;
 use crate::gui::server;
 use crate::gui::theme::{self, WINDOW_RADIUS};
@@ -74,8 +74,59 @@ impl App for ClientApp {
         // the surface: blend there, copy everywhere else.
         let glass: alloc::vec::Vec<Rect> =
             self.materials().into_iter().map(|r| r.offset(area.x, area.y).intersect(&area)).collect();
-        let drawn = server::with_surface_scaled(self.id, |px, w, h, k| {
-            let k = k.max(1) as i32;
+        // Full screen: square corners (the display's own).
+        let corner = if server::fullscreen(self.id) { 0 } else { WINDOW_RADIUS };
+        let drawn = server::with_content(self.id, |content| {
+            let (px, w, h, k) = (content.px, content.width, content.height, content.scale.max(1) as i32);
+            // A buffer of the program's (a Linux program's dma-buf or shared
+            // memory through `wl-bridge`): read where it is, no copy before this one.
+            // Several of the program's surfaces (a browser's page and its
+            // video, pop-up menus): each drawn where it is, the whole window
+            // white underneath as the bridge composed it.
+            if !content.layers.is_empty() {
+                let cs = cv.scale;
+                let shape = cv.to_px(area);
+                let px_of = |r: Rect| {
+                    Rect::new(shape.x + r.x * cs / k, shape.y + r.y * cs / k, r.w * cs / k, r.h * cs / k)
+                };
+                // What lies under an opaque layer covering the whole window
+                // is never seen: drawing starts there (a browser's page over
+                // its main surface).
+                let covers = |l: &server::Layer| l.buffer.opaque() && px_of(l.dst).intersect(&shape) == shape;
+                let from = content.layers.iter().rposition(covers);
+                if from.is_none() {
+                    cv.with_clip(area, |cv| cv.fill_round_rect(area, corner, 0xFFFF_FFFF));
+                }
+                let radius = corner * cs;
+                for l in &content.layers[from.unwrap_or(0)..] {
+                    let b = &l.buffer;
+                    let pixels = if b.opaque() { Pixels::Opaque } else { Pixels::Blend };
+                    let dst = px_of(l.dst);
+                    let stride = b.stride / 4;
+                    // Square at the top (the compositor strip), round at the bottom.
+                    let top = Rect::new(area.x, area.y, area.w, corner);
+                    let lower = Rect::new(area.x, area.y + corner, area.w, (area.h - corner).max(0));
+                    let size = (b.width, b.height);
+                    cv.with_clip(top, |cv| cv.blit_layer_px(b.pixels(), stride, size, l.src, dst, shape, 0, pixels));
+                    cv.with_clip(lower, |cv| {
+                        cv.blit_layer_px(b.pixels(), stride, size, l.src, dst, shape, radius, pixels)
+                    });
+                }
+                return (area.w, area.h);
+            }
+            if let Some(opaque) = content.buffer {
+                let pixels = if opaque { Pixels::Opaque } else { Pixels::Over(0xFFFF_FFFF) };
+                let dst = Rect::new(area.x, area.y, w as i32 / k, h as i32 / k);
+                // Square at the top (the compositor strip); the bottom
+                // corners are rounded when the buffer reaches them.
+                let round = if dst.w >= area.w && dst.h >= area.h { corner } else { 0 };
+                let top = Rect::new(area.x, area.y, area.w, corner);
+                let lower = Rect::new(area.x, area.y + corner, area.w, (area.h - corner).max(0));
+                cv.with_clip(top, |cv| cv.blit_buffer(px, content.stride, w, h, dst, 0, pixels));
+                cv.with_clip(lower, |cv| cv.blit_buffer(px, content.stride, w, h, dst, round, pixels));
+                return (dst.w, dst.h);
+            }
+            let k = k.max(1);
             // Drawn for another scale (the window is on its way to a display
             // with this one, or straddles two): scaled until it catches up.
             if k != cv.scale {
@@ -86,8 +137,8 @@ impl App for ClientApp {
             // The top of the content joins the compositor strip squarely;
             // only the window's bottom corners belong to this surface.
             for (clip, radius) in [
-                (Rect::new(area.x, area.y, area.w, WINDOW_RADIUS), 0),
-                (Rect::new(area.x, area.y + WINDOW_RADIUS, area.w, (area.h - WINDOW_RADIUS).max(0)), WINDOW_RADIUS),
+                (Rect::new(area.x, area.y, area.w, corner), 0),
+                (Rect::new(area.x, area.y + corner, area.w, (area.h - corner).max(0)), corner),
             ] {
                 let clip = clip.intersect(&cv.clip);
                 if clip.is_empty() {
@@ -119,11 +170,11 @@ impl App for ClientApp {
         let (w, h) = drawn.unwrap_or((0, 0));
         if w < area.w {
             let r = Rect::new(area.x + w, area.y, area.w - w, area.h);
-            cv.with_clip(r, |cv| cv.fill_round_rect(area, WINDOW_RADIUS, bg));
+            cv.with_clip(r, |cv| cv.fill_round_rect(area, corner, bg));
         }
         if h < area.h {
             let r = Rect::new(area.x, area.y + h, w.min(area.w), area.h - h);
-            cv.with_clip(r, |cv| cv.fill_round_rect(area, WINDOW_RADIUS, bg));
+            cv.with_clip(r, |cv| cv.fill_round_rect(area, corner, bg));
         }
     }
     fn key(&mut self, ev: &KeyEvent, _env: &mut Env) -> bool {
@@ -173,6 +224,9 @@ impl App for ClientApp {
         false
     }
     fn focus(&mut self, focused: bool) {
+        // (The desktop says "lost" before "gained".)
+        server::set_frontmost(focused.then_some(self.id));
+        server::note_focus(self.id, focused);
         server::push_event(self.id, Event { kind: event::FOCUS, a: focused as u32, ..Default::default() });
     }
     fn request_close(&mut self) -> bool {

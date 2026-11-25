@@ -1,13 +1,17 @@
-//! 16550 UART on COM1 — the kernel's primary debug/log channel.
+//! The serial console — the kernel's primary debug/log channel: a 16550
+//! UART on COM1 (x86), a PL011 (Arm).
 
 use core::fmt::{self, Write};
 use spin::Mutex;
-use x86_64::instructions::port::Port;
+#[cfg(target_arch = "x86_64")]
+use crate::arch::io::Port;
 
+#[cfg(target_arch = "x86_64")]
 pub struct Serial {
     base: u16,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl Serial {
     pub const fn new(base: u16) -> Self {
         Self { base }
@@ -60,7 +64,54 @@ impl Write for Serial {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub static COM1: Mutex<Serial> = Mutex::new(Serial::new(0x3F8));
+
+/// A PL011 UART. QEMU's `virt` has its console at 0x0900_0000 (the ACPI
+/// SPCR table says so too; it is mapped device memory in the physical window).
+#[cfg(target_arch = "aarch64")]
+pub struct Serial {
+    base: u64,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Serial {
+    const DR: u64 = 0x00;
+    const FR: u64 = 0x18;
+    /// FR: transmit FIFO full.
+    const TXFF: u32 = 1 << 5;
+
+    pub const fn new(base: u64) -> Self {
+        Self { base }
+    }
+
+    fn reg(&self, off: u64) -> *mut u32 {
+        crate::mm::phys_to_virt(self.base + off) as *mut u32
+    }
+
+    /// Whether a second UART (the telemetry port) answers: not probed yet
+    /// (a read where nothing is mapped would fault), so no.
+    pub fn present(&self) -> bool {
+        false
+    }
+
+    /// The firmware set the UART up; nothing to change.
+    pub fn init(&mut self) {}
+
+    pub fn write_byte(&mut self, b: u8) {
+        // SAFETY: the UART's registers, device-mapped in the physical window.
+        unsafe {
+            let mut spins = 0;
+            while self.reg(Self::FR).read_volatile() & Self::TXFF != 0 && spins < 100_000 {
+                spins += 1;
+            }
+            self.reg(Self::DR).write_volatile(b as u32);
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub static COM1: Mutex<Serial> = Mutex::new(Serial::new(0x0900_0000));
 
 pub fn init() {
     COM1.lock().init();
@@ -90,9 +141,18 @@ impl fmt::Write for Ring {
 
 static RING: Mutex<Ring> = Mutex::new(Ring { buf: [0; 1 << 16], head: 0, len: 0 });
 
+/// When the kernel last printed (ns since boot).
+static LAST_OUTPUT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[cfg_attr(not(feature = "ktest"), allow(dead_code))]
+pub fn last_output_ns() -> u64 {
+    LAST_OUTPUT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    LAST_OUTPUT.store(crate::time::now_ns(), core::sync::atomic::Ordering::Relaxed);
+    crate::arch::interrupts::without_interrupts(|| {
         let _ = COM1.lock().write_fmt(args);
         let _ = RING.lock().write_fmt(args);
     });
@@ -100,7 +160,7 @@ pub fn _print(args: fmt::Arguments) {
 
 /// Everything the kernel printed recently, oldest first.
 pub fn history() -> alloc::vec::Vec<u8> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::interrupts::without_interrupts(|| {
         let r = RING.lock();
         (0..r.len).map(|i| r.buf[(r.head + i) % r.buf.len()]).collect()
     })

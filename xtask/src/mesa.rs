@@ -1,8 +1,9 @@
 //! The Mesa test disk's Linux root (`cargo xtask test --mesa`):
 //! Debian's Mesa (GBM, EGL, OpenGL, GLES, Vulkan with lavapipe) and the
 //! unmodified programs the Mesa tests run (`debian::MESA_PACKAGES`), in
-//! `target/mesa-root`, plus `vkcheck` (`linux-programs/vkcheck`), built
-//! here with clang against the packages' Vulkan loader, as Voyage is.
+//! `target/mesa-root` (`target/mesa-root-aarch64` for arm64), plus `vkcheck`
+//! (`linux-programs/vkcheck`), built here with clang against the packages'
+//! Vulkan loader, as Voyage is.
 
 use super::{debian, root};
 use std::fs;
@@ -12,9 +13,10 @@ use std::process::Command;
 /// Where `vkcheck` goes in the root.
 pub const VKCHECK_IN_ROOT: &str = "usr/local/bin/vkcheck";
 
-/// `target/mesa-root`, fetched once, with `vkcheck` (re)built into it.
+/// The build architecture's Mesa root, fetched once, with `vkcheck`
+/// (re)built into it.
 pub fn root_dir() -> PathBuf {
-    let dir = root().join("target/mesa-root");
+    let dir = root().join(format!("target/mesa-root{}", crate::arch::current().suffix()));
     let installed = fs::read_to_string(dir.join("packages.txt")).unwrap_or_default();
     let complete = dir.join(".links").exists()
         && debian::MESA_PACKAGES.iter().all(|p| installed.lines().any(|l| l.split(' ').next() == Some(*p)));
@@ -38,7 +40,8 @@ pub fn root_dir() -> PathBuf {
 /// A library in the root's library folders (following `.links`).
 fn find_lib(linux: &Path, name: &str) -> Option<PathBuf> {
     let links = fs::read_to_string(linux.join(".links")).unwrap_or_default();
-    ["usr/lib/x86_64-linux-gnu", "lib/x86_64-linux-gnu"].iter().find_map(|dir| {
+    let triplet = crate::arch::current().multiarch();
+    [format!("usr/lib/{triplet}"), format!("lib/{triplet}")].iter().find_map(|dir| {
         let direct = linux.join(dir).join(name);
         if direct.exists() {
             return Some(direct);
@@ -54,8 +57,10 @@ fn find_lib(linux: &Path, name: &str) -> Option<PathBuf> {
 /// Vulkan headers (`libc6-dev`, `linux-libc-dev`, `libvulkan-dev`), the
 /// Rust toolchain's lld, and the root's `libvulkan.so.1`.
 fn build_vkcheck(linux: &Path) -> Option<PathBuf> {
+    let arch = crate::arch::current();
+    let triplet = arch.multiarch();
     let src = root().join("linux-programs/vkcheck/vkcheck.c");
-    let out_dir = root().join("target/linux");
+    let out_dir = root().join(format!("target/linux{}", arch.suffix()));
     let exe = out_dir.join("vkcheck");
     let newest = fs::metadata(&src).and_then(|m| m.modified()).ok();
     if newest.is_some() && fs::metadata(&exe).and_then(|m| m.modified()).ok() >= newest {
@@ -74,12 +79,12 @@ fn build_vkcheck(linux: &Path) -> Option<PathBuf> {
     fs::create_dir_all(&out_dir).ok()?;
     let obj = out_dir.join("vkcheck.o");
     let mut cc = Command::new("clang");
-    cc.args(["--target=x86_64-linux-gnu", "-nostdinc", "-fno-pie", "-O2", "-Wall", "-Werror"]);
+    cc.arg(format!("--target={triplet}")).args(["-nostdinc", "-fno-pie", "-O2", "-Wall", "-Werror"]);
     for dir in [
         builtins,
-        libc_dev.join("usr/include/x86_64-linux-gnu"),
+        libc_dev.join("usr/include").join(triplet),
         libc_dev.join("usr/include"),
-        kernel_dev.join("usr/include/x86_64-linux-gnu"),
+        kernel_dev.join("usr/include").join(triplet),
         kernel_dev.join("usr/include"),
         vulkan_dev.join("usr/include"),
     ] {
@@ -88,9 +93,9 @@ fn build_vkcheck(linux: &Path) -> Option<PathBuf> {
     if !cc.arg("-c").arg(&src).arg("-o").arg(&obj).status().is_ok_and(|s| s.success()) {
         return None;
     }
-    let crt = libc_dev.join("usr/lib/x86_64-linux-gnu");
+    let crt = libc_dev.join("usr/lib").join(triplet);
     let linked = Command::new(lld)
-        .args(["-flavor", "gnu", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "--allow-shlib-undefined"])
+        .args(["-flavor", "gnu", "--dynamic-linker", arch.linux_loader(), "--allow-shlib-undefined"])
         .args(["--as-needed", "-s", "-o"])
         .arg(&exe)
         .arg(crt.join("crt1.o"))

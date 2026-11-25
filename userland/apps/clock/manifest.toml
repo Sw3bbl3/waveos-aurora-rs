@@ -1,0 +1,14 @@
+# What Clock may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.clock"
+name = "Clock"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "Clock.elf"
+description = "World clocks, alarms, a stopwatch and timers."
+categories = ["system"]
+permissions = ["notifications", "audio", "background"]

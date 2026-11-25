@@ -123,12 +123,17 @@ fn launcher_serves_the_page_and_the_command() {
     let state: serde_json::Value = serde_json::from_str(&state).unwrap();
     let disks: Vec<&str> =
         state["options"]["disk"].as_array().unwrap().iter().map(|d| d["value"].as_str().unwrap()).collect();
-    assert_eq!(disks, ["ahci", "virtio", "nvme"]);
+    assert_eq!(disks, ["ahci", "virtio", "nvme", "sd", "emmc"]);
+    let nets: Vec<&str> =
+        state["options"]["net"].as_array().unwrap().iter().map(|d| d["value"].as_str().unwrap()).collect();
+    assert!(nets.contains(&"usb-ecm") && nets.contains(&"usb-rndis"), "USB networking in the launcher: {nets:?}");
     assert!(state["presets"].as_array().unwrap().iter().any(|p| p["name"] == "Dual display"));
 
+    // (On this computer's default processor, whichever that is: no --arch.)
+    let (arch, gpu) = (&state["options"]["default"]["arch"], &state["options"]["default"]["gpu"]);
     let (code, cmd) = l.post(
         "/api/command",
-        serde_json::json!({"displays": ["1920x1080", "1280x800"], "gpu": "std", "smp": 2, "headless": true}),
+        serde_json::json!({"arch": arch, "displays": ["1920x1080", "1280x800"], "gpu": gpu, "smp": 2, "headless": true}),
     );
     assert_eq!(code, 200);
     assert_eq!(cmd["command"], "cargo xtask run --displays 2 --resolution 1920x1080,1280x800 --smp 2 --headless");

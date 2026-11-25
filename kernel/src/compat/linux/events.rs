@@ -5,6 +5,7 @@
 //! until `EAGAIN`, which works the same), and `EPOLLONESHOT` disables a
 //! descriptor once reported.
 
+use super::abi::native::{EPOLL_DATA_AT, EPOLL_EVENT_SIZE};
 use super::fs::{Special, O_CLOEXEC};
 use crate::proc::{readiness, Handle, Process};
 use crate::sync::{IrqMutex, Mutex};
@@ -162,10 +163,10 @@ impl TimerFd {
         t.count > 0
     }
 
-    /// Milliseconds until it next expires, if it is armed.
-    pub fn due_in(&self) -> Option<u64> {
+    /// When it next expires (ns of `time::now_ns`), if it is armed.
+    pub fn due_at(&self) -> Option<u64> {
         let t = self.state.lock();
-        (t.next != 0).then(|| t.next.saturating_sub(time::now_ns()).div_ceil(1_000_000))
+        (t.next != 0).then_some(t.next)
     }
 
     pub fn read(&self, out: &mut [u8]) -> Result<usize, isize> {
@@ -173,9 +174,10 @@ impl TimerFd {
             return Err(EINVAL);
         }
         loop {
-            let wait_ms = {
+            let deadline = {
                 let mut t = self.state.lock();
-                t.advance(time::now_ns());
+                let now = time::now_ns();
+                t.advance(now);
                 if t.count > 0 {
                     out[..8].copy_from_slice(&t.count.to_le_bytes());
                     t.count = 0;
@@ -183,9 +185,9 @@ impl TimerFd {
                 }
                 if t.next == 0 {
                     // Never expires: wait for a signal (or a re-arm by another thread).
-                    1000
+                    now + 1_000_000_000
                 } else {
-                    t.next.saturating_sub(time::now_ns()).div_ceil(1_000_000).max(1)
+                    t.next
                 }
             };
             if self.nonblocking {
@@ -194,7 +196,7 @@ impl TimerFd {
             if crate::proc::interrupted() {
                 return Err(EINTR);
             }
-            crate::sched::wait_until(wait_ms, crate::proc::interrupted);
+            crate::sched::wait_until_ns(deadline, crate::proc::interrupted);
         }
     }
 }
@@ -309,10 +311,9 @@ pub fn epoll_ctl(p: &Process, epfd: u64, op: u64, fd: u64, event: u64) -> Result
     match op {
         // ADD, MOD
         1 | 3 => {
-            // struct epoll_event is packed: u32 events, u64 data.
-            let raw: [u8; 12] = user::get(event)?;
-            let events = u32::from_le_bytes(raw[0..4].try_into().unwrap());
-            let data = u64::from_le_bytes(raw[4..12].try_into().unwrap());
+            // struct epoll_event: u32 events, u64 data (packed on x86-64).
+            let raw: [u8; EPOLL_EVENT_SIZE] = user::get(event)?;
+            let (events, data) = aurora_linuxabi::decode_epoll_event(&raw, EPOLL_DATA_AT);
             if op == 1 && set.contains_key(&fd) {
                 return Err(EEXIST);
             }
@@ -407,13 +408,14 @@ impl Epoll {
         readiness::Watch::new(&keys)
     }
 
+    /// When the soonest timer it watches expires (ns).
     fn next_timer(&self, p: &Process) -> Option<u64> {
         let set = self.interest.lock();
         set.iter()
             .filter(|(_, (events, _))| *events & !(EPOLLONESHOT | 1 << 31) != 0)
             .filter_map(|(&fd, _)| match &*p.fd(fd as usize).ok()? {
                 Handle::Special(s) => match &*s.lock() {
-                    Special::Timer(t) => t.due_in(),
+                    Special::Timer(t) => t.due_at(),
                     _ => None,
                 },
                 _ => None,
@@ -422,8 +424,17 @@ impl Epoll {
     }
 }
 
-/// `epoll_wait`/`epoll_pwait`.
-pub fn epoll_wait(p: &Process, epfd: u64, events: u64, max: u64, timeout_ms: i64, mask: u64) -> Result<u64, isize> {
+/// `epoll_wait`/`epoll_pwait` (a timeout in ms), `epoll_pwait2` (in ns:
+/// `timeout_ns`, which wins when given).
+pub fn epoll_wait(
+    p: &Process,
+    epfd: u64,
+    events: u64,
+    max: u64,
+    timeout_ms: i64,
+    mask: u64,
+    timeout_ns: Option<u64>,
+) -> Result<u64, isize> {
     if max == 0 || max > 4096 {
         return Err(EINVAL);
     }
@@ -431,30 +442,29 @@ pub fn epoll_wait(p: &Process, epfd: u64, events: u64, max: u64, timeout_ms: i64
     if mask != 0 {
         super::signal::wait_with_mask(p, mask)?;
     }
-    let deadline = (timeout_ms >= 0).then(|| time::uptime_ms() + timeout_ms as u64);
+    let timeout_ns = timeout_ns.or_else(|| (timeout_ms >= 0).then(|| timeout_ms as u64 * 1_000_000));
+    let deadline = timeout_ns.map(|ns| time::now_ns().saturating_add(ns));
     loop {
-        let watch = (timeout_ms != 0).then(|| ep.watch(p));
+        let watch = (timeout_ns != Some(0)).then(|| ep.watch(p));
         let ready = ep.ready(p, max as usize, 0);
         if !ready.is_empty() {
             for (i, (ev, data)) in ready.iter().enumerate() {
-                let mut raw = [0u8; 12];
-                raw[0..4].copy_from_slice(&ev.to_le_bytes());
-                raw[4..12].copy_from_slice(&data.to_le_bytes());
-                user::put(events + i as u64 * 12, &raw)?;
+                let raw: [u8; EPOLL_EVENT_SIZE] = aurora_linuxabi::encode_epoll_event(*ev, *data, EPOLL_DATA_AT);
+                user::put(events + (i * EPOLL_EVENT_SIZE) as u64, &raw)?;
             }
             return Ok(ready.len() as u64);
         }
-        let now = time::uptime_ms();
+        let now = time::now_ns();
         if deadline.is_some_and(|d| now >= d) {
             return Ok(0);
         }
         if crate::proc::interrupted() {
             return Err(EINTR);
         }
-        let mut wait = deadline.map_or(1000, |d| d - now);
+        let mut until = deadline.unwrap_or(now + 1_000_000_000);
         if let Some(t) = ep.next_timer(p) {
-            wait = wait.min(t.max(1));
+            until = until.min(t);
         }
-        watch.unwrap().wait(wait.max(1));
+        watch.unwrap().wait_until_ns(until.max(now + 1));
     }
 }

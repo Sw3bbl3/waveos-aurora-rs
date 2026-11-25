@@ -90,11 +90,40 @@ impl UsbDisk {
                 }
             }
         }
+        // The status wrapper. After data from the device it is looked for
+        // briefly first, then asked for again: QEMU's usb-storage leaves a
+        // status request that arrives before its SCSI command has finished
+        // (all the data sent, the command not yet complete) unanswered, and
+        // keeps the status for the next request. Under hardware
+        // virtualization the request comes that soon on most reads. The
+        // Bulk-Only spec lets a host read the status again; the reset this
+        // used to do threw the status away, and the retried command met the
+        // same race: 2 s each, up to 18 in a row.
         let csw = w.phys + 64;
-        let n = match self.bus.transfer(self.dev, &self.bulk_in, csw, 13, 2000) {
+        let first_wait = if inbound && len > 0 { 50 } else { 2000 };
+        let mut got = Err(0);
+        for (attempt, timeout) in [first_wait, 2000].into_iter().enumerate() {
+            got = self.bus.transfer(self.dev, &self.bulk_in, csw, 13, timeout);
+            match got {
+                Ok(n) if n >= 13 => break,
+                // Only a brief first look is tried again.
+                _ if attempt == 0 && timeout < 2000 => {}
+                _ => break,
+            }
+        }
+        let n = match got {
             Ok(n) => n,
             Err(code) => {
-                log!("usb", "{}: status of SCSI {:#04x} failed ({})", self.model, cdb[0], code);
+                log!(
+                    "usb",
+                    "{}: status of SCSI {:#04x} failed ({}) after {} of {} data bytes",
+                    self.model,
+                    cdb[0],
+                    code,
+                    moved,
+                    len
+                );
+                self.reset_recovery();
                 return Err(EIO);
             }
         };

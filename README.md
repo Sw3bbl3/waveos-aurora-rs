@@ -50,7 +50,7 @@ The bootloader, kernel, drivers, filesystem, window server, network stack, web b
 
 ## Every app in its own world.
 
-Each app runs as a separate, protected process. If one crashes, you see a polite "quit unexpectedly" — and everything else keeps right on working. Your files live on **AuroraFS**, a journaled filesystem built to survive a power cut.
+Each app runs as a separate, protected process. If one crashes, you see a polite "quit unexpectedly" — and everything else keeps right on working. Run out of memory and it keeps going too: pages you haven't touched in a while are compressed, then moved to an encrypted swap file, and come back the moment you need them. Your files live on **AuroraFS**, a journaled filesystem built to survive a power cut.
 
 | | |
 |---|---|
@@ -84,7 +84,7 @@ The **System Explorer** is a live map of the whole OS. Watch it boot, see each C
 
 ## Get started
 
-You need a Mac (Apple silicon or Intel) or a Linux PC, [rustup](https://rustup.rs) and QEMU (`brew install qemu`, or `sudo apt install qemu-system-x86 ovmf`).
+You need a Mac (Apple silicon or Intel) or a Linux PC, [rustup](https://rustup.rs) and QEMU (`brew install qemu`, or `sudo apt install qemu-system-x86 ovmf`, plus `qemu-system-arm qemu-efi-aarch64` on an Arm PC).
 
 ```sh
 git clone https://github.com/Sw3bbl3/waveos-aurora-rs.git
@@ -94,7 +94,11 @@ make run
 
 `make run` (or `./waveos` without make) opens the launcher in your browser: pick a preset or choose the displays, memory, devices and so on, then press Launch. The build output and the serial console stream into the page. `make quick` boots whatever you launched last, and `make` on its own lists the other shortcuts. Prefer the terminal? `cargo xtask run` does the same with the defaults.
 
-A minute later, you're at the desktop. Add `--monitor` to open the System Explorer alongside it. To try a real PC, see [HARDWARE.md](docs/HARDWARE.md); for every build command, see [FEATURES.md](docs/FEATURES.md#build-commands).
+A minute later, you're at the desktop. Add `--monitor` to open the System Explorer alongside it.
+
+**Which processor.** WaveOS runs on 64-bit Arm and on x86-64, and by default on your computer's own where QEMU can run it at full speed: on an **Apple-silicon Mac** that is Arm, under Hypervisor.framework, many times faster than the x86-64 build, which QEMU emulates instruction by instruction there. On an x86 PC it is x86-64. The other one is always a choice away: `make run ARCH=x86_64` (or `ARCH=aarch64`), `cargo xtask run --arch x86_64`, or **Processor** in the launcher.
+
+**Each processor has its own disk** (`target/waveos-aurora-aarch64.img` for Arm, `target/waveos-aurora.img` for x86-64). The first Arm run makes a new one and never touches the x86 disk; if you have used WaveOS on x86 before, it says so, and `cargo xtask migrate-disk --arch aarch64` copies your files across, reading the x86 disk only ([BUILDING.md](docs/BUILDING.md#two-architectures-x86_64-and-aarch64)). The first run also fetches Debian's packages for the Linux programs (Voyage, Firefox ESR…) and says how much it downloads (about 1.9 GB for Arm, once); `--no-linux-root` leaves them off. How the port works: [porting.md](docs/developer/porting.md). To try a real PC, see [HARDWARE.md](docs/HARDWARE.md); for every build command, see [FEATURES.md](docs/FEATURES.md#build-commands).
 
 ## Under the hood
 
@@ -103,6 +107,7 @@ A minute later, you're at the desktop. Add `--monitor` to open the System Explor
 | **Firstlight** | UEFI bootloader |
 | **Aster** | Hybrid kernel: multicore, ACPI, sleep and resume |
 | **AuroraFS** | Journaled, extent-based filesystem |
+| **kswapd** | Memory reclaim: compressed memory (our own LZ4), an encrypted swap file, and an out-of-memory killer that spares the app you're using |
 | **Lumen Server** | Compositing window server |
 | **WaveUI** | Declarative interface framework every app is built with ([WaveSDK](docs/WAVESDK.md)) |
 | **AuroraKit** | Windowing toolkit WaveUI runs on |

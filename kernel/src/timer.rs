@@ -18,7 +18,7 @@ use crate::sched::TaskId;
 use crate::sync::IrqMutex;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::instructions::interrupts;
+use crate::arch::interrupts;
 
 pub const NONE: u64 = u64::MAX;
 

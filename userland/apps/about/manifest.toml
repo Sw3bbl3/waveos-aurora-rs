@@ -1,0 +1,14 @@
+# What About may do: the system's own manifest, built into the kernel
+# (kernel/src/sandbox/manifests.rs). See docs/developer/sandboxing.md.
+format = 2
+id = "org.waveos.about"
+name = "About"
+author = "WaveOS"
+version = "0.8.0"
+architecture = "x86_64"
+sdk = "0.8"
+abi = 1
+entry = "About.elf"
+description = "What this computer is and runs."
+categories = ["system"]
+permissions = ["launch", "spawn"]

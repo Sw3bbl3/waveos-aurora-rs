@@ -94,8 +94,11 @@ dependencies = [
  "aurora-i2c",
  "aurora-igfx",
  "aurora-image",
+ "aurora-linuxabi",
+ "aurora-lz4",
  "aurora-nvgfx",
  "aurora-sdmmc",
+ "aurora-usbnet",
  "aurora-wav",
  "aurora-wifi",
  "aurorafs",
@@ -184,6 +187,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-linuxabi"
+version = "0.8.0"
+
+[[package]]
+name = "aurora-lz4"
+version = "0.8.0"
+dependencies = [
+ "aurora-mutate",
+]
+
+[[package]]
 name = "aurora-mutate"
 version = "0.8.0"
 
@@ -194,6 +208,13 @@ version = "0.8.0"
 [[package]]
 name = "aurora-sdmmc"
 version = "0.8.0"
+
+[[package]]
+name = "aurora-usbnet"
+version = "0.8.0"
+dependencies = [
+ "aurora-mutate",
+]
 
 [[package]]
 name = "aurora-wav"
@@ -693,9 +714,11 @@ name = "firstlight"
 version = "0.8.0"
 dependencies = [
  "aurora-elf",
+ "aurorafs",
  "bootinfo",
  "log",
  "miniz_oxide 0.8.9",
+ "sha2",
  "uefi",
 ]
 

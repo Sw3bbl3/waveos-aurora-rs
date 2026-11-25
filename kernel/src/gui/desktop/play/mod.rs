@@ -931,6 +931,20 @@ impl Desktop {
 
     /// Records a client's present; true when it shouldn't repaint (frozen
     /// under the overlay).
+    /// The program in front, full screen with nothing of Wave Play over it
+    /// (its buffer may be scanned out: see `Desktop::scanout_window`).
+    pub(super) fn play_scanout(&self) -> Option<u32> {
+        let p = &self.play;
+        let still = p.on && p.morph.settled() && p.morph.value() >= 1000;
+        if !still || p.overlay.is_some() || p.toast.is_some() || p.launch.is_some() || p.shrink.is_some() {
+            return None;
+        }
+        let Front::Game(id) = p.front else { return None };
+        let i = self.index_of(id)?;
+        let w = &self.windows[i];
+        (w.content() == self.screen()).then(|| w.app.client_id()).flatten()
+    }
+
     pub(super) fn play_presented(&mut self, client: u32) -> bool {
         if let Front::Game(id) = self.play.front {
             if self.index_of(id).and_then(|i| self.windows[i].app.client_id()) == Some(client) {
@@ -1462,7 +1476,11 @@ pub fn self_test() {
     assert!(!s.advance(5000) && s.value() == 0);
 
     // The SSE2 row blend the transitions use agrees with the scalar one, in
-    // a task that may use SIMD registers (as the compositor does).
+    // a task that may use SIMD registers (as the compositor does). The
+    // soft-float kernel has it only as x86 assembly: elsewhere nothing to check.
+    if !cfg!(target_arch = "x86_64") {
+        return;
+    }
     use core::sync::atomic::{AtomicU8, Ordering};
     static SIMD: AtomicU8 = AtomicU8::new(0);
     lumen::simd::set_gate(crate::gui::simd_allowed);

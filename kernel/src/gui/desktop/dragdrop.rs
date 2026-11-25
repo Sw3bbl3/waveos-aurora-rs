@@ -160,7 +160,7 @@ impl Desktop {
                 let client = self.index_of(id).and_then(|i| self.windows[i].app.client_id());
                 match client.and_then(server::pid_of) {
                     Some(pid) => {
-                        dnd::deliver(pid, s.payload.data.clone());
+                        dnd::deliver(pid, s.payload.data.clone(), s.payload.kind == aurora_abi::clip::FILES);
                         self.send_to_window(id, event::DROP, x, y);
                         self.raise(id);
                         true

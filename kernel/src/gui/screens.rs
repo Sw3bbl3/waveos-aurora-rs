@@ -21,8 +21,27 @@
 //! run [`Compositor::reconfigure`]: displays that went away are switched
 //! off and their windows move to the main display (`Desktop::set_displays`,
 //! which brings them back when the display returns).
+//!
+//! **Direct scanout.** When one window's content is all a display shows —
+//! a full-screen window, or the program in front in Wave Play — and the
+//! program attached a buffer of its own of the display's size without
+//! alpha (`win_attach`: a Linux program's dma-buf or shared memory through
+//! `wl-bridge`), the display scans that buffer out (a page flip on the
+//! primary plane through `gpu::owner`) and nothing is composed for it.
+//! Anything else appearing there — a notice, a menu, Shoal, the switcher,
+//! Wave Play's overlay, a pointer drawn into the picture — or the window
+//! leaving full screen or closing brings composition back the same frame:
+//! the back buffer is painted in full and flipped back. A buffer goes back
+//! to its program (`BUFFER_RELEASE`) only once no plane shows it.
+//!
+//! **Frame timing.** A window's `FRAME` event (its frame callbacks in
+//! `wl-bridge`) is sent at the start of the display frame after its picture
+//! was presented — the display's vertical blank, or the steady clock at its
+//! refresh rate on devices without vblank interrupts — with that frame's
+//! number and time, so programs drawing on each event get steady times.
 
 use super::desktop::{Desktop, DisplayArea, PowerAction};
+use super::server::{Shown, WinBuffer};
 use super::{boot, cursor, notify, prefs, server, settings, stages, PointerOn};
 use crate::drivers::gpu::{self, output::Output, ConnectorInfo, Damage, Framebuffer, KmsDevice, Status};
 use crate::drivers::input;
@@ -186,6 +205,25 @@ fn present_task() {
 
 // ------------------------------------------------------------- displays
 
+/// A program's buffer a display scans out.
+struct Scanout {
+    window: u32,
+    buffer: Arc<WinBuffer>,
+    /// The window's attach count when it was last shown.
+    attaches: u64,
+    fb: Arc<Framebuffer>,
+}
+
+/// What a display does this frame.
+enum Scan {
+    /// Composes, as usual.
+    Compose,
+    /// Scans a window's buffer out; true: a new picture was shown.
+    Direct(bool),
+    /// Composes again after scanning out: painted in full, flipped back.
+    Leave,
+}
+
 /// One display the desktop uses.
 pub struct Screen {
     pub out: Output,
@@ -219,6 +257,18 @@ pub struct Screen {
     pub skipped: u64,
     pub presents: (u64, u64, u64, u64),
     inline_total: u64,
+    /// Time presenting inline, since the start.
+    pub present_ns: u64,
+    scanout: Option<Scanout>,
+    /// Framebuffers made over programs' buffers (`None`: the device can't
+    /// scan that one out), kept while the buffers live.
+    scanout_fbs: Vec<(Arc<WinBuffer>, Option<Arc<Framebuffer>>)>,
+    /// Pictures scanned out directly (since the last statistics line, and
+    /// all), and the time their flips took (since the line).
+    pub scanned: u64,
+    pub scanned_total: u64,
+    scan_ns: u64,
+    pub scan_total_ns: u64,
 }
 
 /// A connector's identity for preferences, and a name for people.
@@ -312,7 +362,104 @@ impl Screen {
             skipped: 0,
             presents: (0, 0, 0, 0),
             inline_total: 0,
+            present_ns: 0,
+            scanout: None,
+            scanout_fbs: Vec::new(),
+            scanned: 0,
+            scanned_total: 0,
+            scan_ns: 0,
+            scan_total_ns: 0,
         }
+    }
+
+    /// The window whose buffer the display scans out now, if one.
+    pub fn scanning_out(&self) -> Option<u32> {
+        self.scanout.as_ref().map(|s| s.window)
+    }
+
+    /// The buffer the display scans out now (self-tests read what it shows).
+    #[cfg(feature = "ktest")]
+    pub fn scanout_buffer(&self) -> Option<Arc<WinBuffer>> {
+        self.scanout.as_ref().map(|s| s.buffer.clone())
+    }
+
+    /// Whether the primary plane shows the compositor's back buffer.
+    #[cfg(feature = "ktest")]
+    pub fn shows_back_buffer(&self) -> bool {
+        let (_, planes) = self.out.dev.state();
+        planes.iter().any(|p| p.fb.as_ref().is_some_and(|fb| Arc::ptr_eq(fb, self.out.framebuffer())))
+    }
+
+    /// Scans out the buffer of window `want` (when the desktop says only
+    /// it shows here), if the program attached one the display can show.
+    fn scan(&mut self, want: Option<u32>) -> Scan {
+        // Framebuffers over buffers no one else holds any more (the program
+        // let go of them, or ended) go, with their memory.
+        self.scanout_fbs.retain(|(k, _)| Arc::strong_count(k) > 1);
+        let next = want
+            .and_then(|w| server::attached(w).map(|(b, _, n)| (w, b, n)))
+            .filter(|(_, b, _)| b.opaque() && (b.width, b.height) == self.out.size());
+        let compose = |s: &Self| if s.scanout.is_some() { Scan::Leave } else { Scan::Compose };
+        let Some((window, buffer, attaches)) = next else { return compose(self) };
+        if let Some(s) = &mut self.scanout {
+            if s.window == window && s.buffer.id == buffer.id {
+                if s.attaches == attaches {
+                    return Scan::Direct(false);
+                }
+                // The same buffer with new pixels.
+                s.attaches = attaches;
+                let (w, h) = self.out.size();
+                let started = time::now_ns();
+                let _ = self.out.present_fb(&s.fb, &[Damage { x: 0, y: 0, w, h }]);
+                self.scan_ns += time::now_ns() - started;
+                self.scan_total_ns += time::now_ns() - started;
+                return Scan::Direct(true);
+            }
+        }
+        let Some(fb) = self.framebuffer_for(&buffer) else { return compose(self) };
+        let started = time::now_ns();
+        let flipped = self.out.scan_out(&fb);
+        self.scan_ns += time::now_ns() - started;
+        self.scan_total_ns += time::now_ns() - started;
+        if let Err(e) = flipped {
+            log!("gui", "{} can't scan out window {}'s buffer ({:?}); composing it", self.connector, window, e);
+            if let Some(entry) = self.scanout_fbs.iter_mut().find(|(b, _)| b.id == buffer.id) {
+                entry.1 = None;
+            }
+            return compose(self);
+        }
+        if self.scanout.is_none() {
+            let kind = if buffer.dmabuf { "dma-buf" } else { "shared memory" };
+            log!("gui", "{}: scanning out window {}'s buffer ({kind})", self.connector, window);
+        }
+        self.scanout = Some(Scanout { window, buffer: buffer.clone(), attaches, fb });
+        // The buffer it showed before goes back to its program.
+        server::set_on_plane(self.id, Some((window, buffer)));
+        Scan::Direct(true)
+    }
+
+    /// The framebuffer over a program's buffer, made once.
+    fn framebuffer_for(&mut self, b: &Arc<WinBuffer>) -> Option<Arc<Framebuffer>> {
+        if let Some((_, fb)) = self.scanout_fbs.iter().find(|(k, _)| k.id == b.id) {
+            return fb.clone();
+        }
+        let fb = Framebuffer::with_offset(b.bo.clone(), b.width, b.height, b.stride, b.offset, gpu::fourcc::XRGB8888);
+        let fb = fb.ok();
+        self.scanout_fbs.push((b.clone(), fb.clone()));
+        fb
+    }
+
+    /// Back to compositing: the back buffer (painted in full) on the
+    /// primary plane again; the buffer scanned out goes back to its program.
+    fn leave_scanout(&mut self) {
+        if self.scanout.take().is_none() {
+            return;
+        }
+        if let Err(e) = self.out.scan_back() {
+            log!("gui", "{}: could not show the desktop's picture again: {:?}", self.connector, e);
+        }
+        server::set_on_plane(self.id, None);
+        log!("gui", "{}: composing again", self.connector);
     }
 
     /// Busy presenting: its damage waits.
@@ -336,6 +483,10 @@ impl Screen {
             p.wait_idle(500);
         }
         self.cursor_shown = None;
+        // The mode set puts the new back buffer on the plane.
+        if self.scanout.take().is_some() {
+            server::set_on_plane(self.id, None);
+        }
         self.out.set_size(w, h)
     }
 
@@ -352,6 +503,7 @@ impl Screen {
                 stages::add(stages::Stage::Flush, elapsed);
                 self.presents.0 += 1;
                 self.inline_total += 1;
+                self.present_ns += elapsed;
                 self.presents.1 += elapsed;
                 self.presents.2 = self.presents.2.max(elapsed);
                 self.presents.3 += rects.iter().map(|r| r.w as u64 * r.h as u64).sum::<u64>();
@@ -363,6 +515,9 @@ impl Screen {
         if let Some(p) = self.presenter.take() {
             p.wait_idle(200);
             p.stop();
+        }
+        if self.scanout.take().is_some() {
+            server::set_on_plane(self.id, None);
         }
         if let Err(e) = self.out.disable() {
             log!("gui", "could not switch {} off: {:?}", self.connector, e);
@@ -444,6 +599,29 @@ pub struct Compositor {
     pub last_frame_ns: u64,
     pub frames: u64,
     ready: bool,
+    /// `FRAME` events waiting to go: (window, due ns, when it is shown).
+    shown: Vec<(u32, u64, Shown)>,
+    /// When each window's last `FRAME` event went.
+    frames_sent: Vec<(u32, u64)>,
+    /// Time spent in `frame` (the compositor's own work) since the last statistics line.
+    busy_ns: u64,
+    /// A log line per frame (`frame_log=1` in boot.conf).
+    frame_log: bool,
+    /// Since the start: frames with damage, and the time spent in `frame`,
+    /// painting and presenting (measurements read differences of these).
+    pub totals: Totals,
+}
+
+/// The compositor's work since it started (see [`Compositor::totals`]).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Totals {
+    pub frames: u64,
+    pub busy_ns: u64,
+    pub paint_ns: u64,
+    pub present_ns: u64,
+    pub scanned: u64,
+    /// Time flipping programs' buffers onto planes.
+    pub scan_ns: u64,
 }
 
 /// Whether the compositor runs (the self-tests make their own).
@@ -486,6 +664,11 @@ impl Compositor {
             last_frame_ns: 0,
             frames: 0,
             ready: false,
+            shown: Vec::new(),
+            frames_sent: Vec::new(),
+            busy_ns: 0,
+            frame_log: prefs::boot_option("frame_log").as_deref() == Some("1"),
+            totals: Totals::default(),
         };
         c.hw_cursor_setup();
         c.apply();
@@ -528,6 +711,8 @@ impl Compositor {
             }
             s.deferred.clear();
             s.materials.clear();
+            // Composed afresh: the next frame decides about scanning out again.
+            s.leave_scanout();
         }
         let main_area = self.areas.iter().position(|&i| i == self.main).unwrap_or(0);
         let areas: Vec<DisplayArea> = self
@@ -737,6 +922,7 @@ impl Compositor {
     /// One frame: input, commands, damage painted on each display and
     /// presented, the pointer. Returns how long to wait for the next (ms).
     pub fn frame(&mut self) -> u64 {
+        let entered = time::now_ns();
         let now = time::uptime_ms();
         let d = &mut self.desktop;
         d.set_now(now);
@@ -770,13 +956,21 @@ impl Compositor {
         self.update_pointer(now);
         self.desktop.finish_frame();
         for id in self.desktop.take_presented() {
-            server::frame_done(id);
+            let (due, at) = self.shown_at(id);
+            match self.shown.iter_mut().find(|s| s.0 == id) {
+                Some(s) => *s = (id, due, at),
+                None => self.shown.push((id, due, at)),
+            }
         }
+        self.send_frames();
         if painted {
             self.frames += 1;
             self.last_frame_ns = time::now_ns() - frame_start;
         }
-        if batch_pixels > 0 {
+        // One line per frame only when asked for (`frame_log=1` in boot.conf,
+        // for the benchmark scripts): every byte of the log is port I/O on
+        // the serial line, which under emulation costs more than the frame.
+        if batch_pixels > 0 && self.frame_log {
             let full = damage.iter().any(|r| *r == self.desktop.bounds());
             log!(
                 "frame",
@@ -799,7 +993,60 @@ impl Compositor {
             let (w, h) = m.out.size();
             super::take_screenshot(unsafe { m.out.back_buffer() }, w, h);
         }
+        let spent = time::now_ns() - entered;
+        self.busy_ns += spent;
+        self.totals.busy_ns += spent;
+        self.totals.frames += painted as u64;
+        self.totals.paint_ns = self.screens.iter().map(|s| s.paint_ns).sum();
+        self.totals.present_ns = self.screens.iter().map(|s| s.present_ns).sum();
+        self.totals.scanned = self.screens.iter().map(|s| s.scanned_total).sum();
+        self.totals.scan_ns = self.screens.iter().map(|s| s.scan_total_ns).sum();
+        // The next frame start a window's FRAME waits for.
+        if let Some(due) = self.shown.iter().map(|s| s.1).min() {
+            self.next_tick = self.next_tick.min(due.div_ceil(1_000_000));
+        }
         self.next_tick.saturating_sub(time::uptime_ms()).max(1)
+    }
+
+    /// When window `id`'s picture, presented now, is on screen — the start
+    /// of its display's next frame, with that frame's number — and when its
+    /// `FRAME` event goes: at once (the program draws its next picture
+    /// while this one waits for the frame start), but no more than one a
+    /// display frame: a program drawing faster waits for the next frame
+    /// start, so it runs at the refresh rate with steady times.
+    fn shown_at(&self, id: u32) -> (u64, Shown) {
+        let display = server::display_of(id);
+        let s = self.screens.iter().find(|s| s.id == display).unwrap_or(&self.screens[self.main]);
+        let (seq, start, period) = s.out.frame_clock();
+        let hw = if s.out.dev.caps().vblank_irq { aurora_abi::frame::HW_CLOCK } else { 0 };
+        let direct = if s.scanning_out() == Some(id) { aurora_abi::frame::ZERO_COPY } else { 0 };
+        let time_ns = start + period;
+        let at = Shown { seq: seq + 1, refresh_ns: period, time_ns, flags: aurora_abi::frame::VSYNC | hw | direct };
+        let sent = self.frames_sent.iter().find(|f| f.0 == id).map_or(0, |f| f.1);
+        let due = if sent >= start { start + period } else { time::now_ns() };
+        (due, at)
+    }
+
+    /// Sends the `FRAME` events whose frame has started.
+    fn send_frames(&mut self) {
+        let now = time::now_ns();
+        let mut i = 0;
+        while i < self.shown.len() {
+            if self.shown[i].1 <= now {
+                let (id, _, at) = self.shown.swap_remove(i);
+                server::frame_shown(id, at);
+                match self.frames_sent.iter_mut().find(|f| f.0 == id) {
+                    Some(f) => f.1 = now,
+                    None => self.frames_sent.push((id, now)),
+                }
+                // (Windows that went: their entries go too.)
+                if self.frames_sent.len() > 64 {
+                    self.frames_sent.retain(|f| server::display_of(f.0) != 0);
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Paints `damage` (desktop points) on every display it touches, plus
@@ -823,7 +1070,26 @@ impl Compositor {
                 }
                 continue;
             }
-            let force = !screen.deferred.is_empty();
+            // One window's buffer is all this display shows: scanned out.
+            let want = if self.mirror { None } else { self.desktop.scanout_window(area) };
+            let leaving = match screen.scan(want) {
+                Scan::Direct(shown) => {
+                    if shown {
+                        screen.scanned += 1;
+                        screen.scanned_total += 1;
+                    }
+                    screen.deferred.clear();
+                    continue;
+                }
+                Scan::Leave => {
+                    // The back buffer missed everything meanwhile.
+                    screen.deferred.clear();
+                    todo = alloc::vec![screen.rect];
+                    true
+                }
+                Scan::Compose => false,
+            };
+            let force = !screen.deferred.is_empty() || leaving;
             todo.append(&mut screen.deferred);
             if force {
                 merge(&mut todo);
@@ -862,8 +1128,11 @@ impl Compositor {
             }
             screen.painted += 1;
             screen.paint_ns += time::now_ns() - started;
-            // Everything painted on this display this frame goes to it at once.
-            if !rects.is_empty() {
+            // Everything painted on this display this frame goes to it at
+            // once (after scanning out: flipped back to, all of it).
+            if leaving {
+                screen.leave_scanout();
+            } else if !rects.is_empty() {
                 screen.present(&rects);
             }
             if si == main && self.mirror {
@@ -990,7 +1259,7 @@ impl Compositor {
             };
             log!(
                 "lumen",
-                "present on {} {}: {} frames, mean {} us, max {} us, {} kpx per frame{}",
+                "present on {} {}: {} frames, mean {} us, max {} us, {} kpx per frame{}{}",
                 s.out.dev.name(),
                 s.connector,
                 n,
@@ -1001,10 +1270,26 @@ impl Compositor {
                     alloc::format!("; {} frames held back while busy", s.skipped)
                 } else {
                     String::new()
+                },
+                if s.scanned > 0 {
+                    alloc::format!("; {} scanned out directly, {} us a flip", s.scanned, s.scan_ns / s.scanned / 1000)
+                } else {
+                    String::new()
                 }
             );
             s.skipped = 0;
+            s.scanned = 0;
+            s.scan_ns = 0;
         }
+        let spent = time::uptime_ms() - self.frame_stats.3;
+        log!(
+            "lumen",
+            "compositor busy {} ms of {} ({}%)",
+            self.busy_ns / 1_000_000,
+            spent,
+            self.busy_ns / 10_000 / spent.max(1)
+        );
+        self.busy_ns = 0;
         self.frame_stats = (0, 0, 0, time::uptime_ms());
         self.partial_stats = (0, 0);
     }
@@ -1017,6 +1302,8 @@ impl Compositor {
         self.ready = true;
         boot::finish();
         log!("boot", "Aurora desktop ready");
+        // A system update on trial has proved it starts.
+        super::sysupdate::mark_good();
         crate::drivers::audio::play_sound("startup");
         // Written a moment later, off the compositor, so it includes late devices.
         sched::spawn("bootlog", || {
@@ -1033,7 +1320,7 @@ impl Compositor {
             let wait = self.frame();
             self.first_frame_done();
             if let Some(action) = self.desktop.power {
-                crate::fs::sync_all();
+                crate::fs::unmount_all();
                 sched::sleep_ms(800);
                 match action {
                     PowerAction::Shutdown => crate::power::shutdown(),

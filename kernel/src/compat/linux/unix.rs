@@ -55,6 +55,8 @@ type QueueRef = Arc<Mutex<Queue>>;
 
 struct State {
     local: Option<String>,
+    /// Where `local` is in [`NAMES`] (in a sandboxed app's own namespace).
+    key: Option<String>,
     remote: Option<String>,
     listening: bool,
     backlog: VecDeque<Arc<Socket>>,
@@ -75,7 +77,9 @@ pub struct Socket {
     pub passcred: core::sync::atomic::AtomicBool,
 }
 
-/// Bound names: paths and abstract names (`@name`).
+/// Bound names: paths and abstract names (`@name`). A sandboxed app's
+/// names are kept apart from everyone else's (`sandbox::ipc_key`): it can
+/// reach only its own app's sockets, unless it may talk to other apps.
 static NAMES: Mutex<BTreeMap<String, Weak<Socket>>> = Mutex::new(BTreeMap::new());
 
 impl Socket {
@@ -85,6 +89,7 @@ impl Socket {
             rx: Arc::new(Mutex::new(Queue::default())),
             st: Mutex::new(State {
                 local: None,
+                key: None,
                 remote: None,
                 listening: false,
                 backlog: VecDeque::new(),
@@ -126,16 +131,18 @@ impl Socket {
     }
 
     pub fn bind(self: &Arc<Socket>, name: String) -> Result<(), isize> {
+        let key = crate::sandbox::ipc_key(&name);
         let mut names = NAMES.lock();
-        if names.get(&name).is_some_and(|w| w.strong_count() > 0) {
+        if names.get(&key).is_some_and(|w| w.strong_count() > 0) {
             return Err(EADDRINUSE);
         }
         let mut s = self.st.lock();
         if s.local.is_some() {
             return Err(EINVAL);
         }
-        s.local = Some(name.clone());
-        names.insert(name, Arc::downgrade(self));
+        s.local = Some(name);
+        s.key = Some(key.clone());
+        names.insert(key, Arc::downgrade(self));
         Ok(())
     }
 
@@ -154,7 +161,8 @@ impl Socket {
 
     /// Connects to the socket bound to `name`.
     pub fn connect(self: &Arc<Socket>, name: String, pid: u32) -> Result<(), isize> {
-        let target = NAMES.lock().get(&name).and_then(Weak::upgrade);
+        let key = crate::sandbox::ipc_key(&name);
+        let target = NAMES.lock().get(&key).and_then(Weak::upgrade);
         if self.ty == Type::Dgram {
             if target.is_none() {
                 return Err(ECONNREFUSED);
@@ -231,7 +239,8 @@ impl Socket {
         };
         let (queue, from) = match (self.ty, dest) {
             (Type::Dgram, Some(name)) => {
-                let target = NAMES.lock().get(&name).and_then(Weak::upgrade).ok_or(ECONNREFUSED)?;
+                let key = crate::sandbox::ipc_key(&name);
+                let target = NAMES.lock().get(&key).and_then(Weak::upgrade).ok_or(ECONNREFUSED)?;
                 (target.rx.clone(), local)
             }
             _ => (tx.ok_or(ENOTCONN)?, None),
@@ -418,7 +427,7 @@ impl Drop for Socket {
         if let Some(t) = &s.tx {
             t.lock().writer_gone = true;
         }
-        let local = s.local.clone();
+        let local = s.key.clone();
         let tx = s.tx.clone();
         drop(s);
         if let Some(name) = local {

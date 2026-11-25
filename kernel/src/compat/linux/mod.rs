@@ -17,6 +17,7 @@
 //! [`WAVE_BASE`] up: `WAVE_BASE + n` is WaveOS's call `n`, with WaveOS's
 //! arguments (`libs/linux/include/waveos.h` describes them for C).
 
+pub mod abi;
 pub mod chardev;
 mod cpu;
 pub mod drm;
@@ -25,14 +26,15 @@ pub mod exec;
 pub mod fs;
 pub mod inotify;
 pub mod input;
-mod links;
+pub mod links;
 mod misc;
 pub(crate) use misc::realtime_ns;
 mod mm;
 mod net;
 mod process;
-mod shm;
+pub mod shm;
 pub mod signal;
+pub mod sound;
 mod syscount;
 mod sysfs;
 pub mod uevent;
@@ -42,8 +44,10 @@ pub mod vdso;
 use crate::arch::syscall::SyscallFrame;
 use crate::proc;
 use crate::sync::Mutex;
+use abi::nr;
 use alloc::collections::BTreeMap;
 use aurora_abi::err::*;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 pub use fs::Special;
 
@@ -60,8 +64,17 @@ pub struct Linux {
     pub signals: signal::Signals,
     /// Log every system call (`WAVEOS_STRACE=1` in the environment).
     pub trace: core::sync::atomic::AtomicBool,
+    /// Only while the process has this name (`WAVEOS_STRACE=NAME`: one
+    /// program of a family that shares its environment, such as a browser's
+    /// first process without its helpers); empty: any.
+    trace_only: Mutex<alloc::string::String>,
     /// Count them (`WAVEOS_SYSCOUNT=1`).
     counts: syscount::Counts,
+    /// Where the program's vDSO is (0: none): arm64 signal handlers
+    /// return through it.
+    vdso: AtomicU64,
+    /// The program's auxiliary vector (`/proc/self/auxv`).
+    auxv: Mutex<alloc::vec::Vec<u8>>,
 }
 
 impl Linux {
@@ -73,13 +86,22 @@ impl Linux {
             nonblock: Mutex::new([0; 16]),
             signals: signal::Signals::new(),
             trace: core::sync::atomic::AtomicBool::new(false),
+            trace_only: Mutex::new(alloc::string::String::new()),
             counts: syscount::Counts::default(),
+            vdso: AtomicU64::new(0),
+            auxv: Mutex::new(alloc::vec::Vec::new()),
         }
     }
 
     /// Tracing and counting as the program's environment asks.
     pub fn configure(&self, env: &[alloc::string::String]) {
         self.trace.store(tracing(env), core::sync::atomic::Ordering::Relaxed);
+        *self.trace_only.lock() = env
+            .iter()
+            .find_map(|e| e.strip_prefix("WAVEOS_STRACE="))
+            .filter(|v| *v != "1")
+            .map(alloc::string::String::from)
+            .unwrap_or_default();
         self.counts.reset(syscount::wanted(env));
     }
 
@@ -92,8 +114,27 @@ impl Linux {
             nonblock: Mutex::new(*self.nonblock.lock()),
             signals: self.signals.for_child(),
             trace: core::sync::atomic::AtomicBool::new(self.trace.load(core::sync::atomic::Ordering::Relaxed)),
+            trace_only: Mutex::new(self.trace_only.lock().clone()),
             counts: syscount::Counts::new(self.counts.on()),
+            vdso: AtomicU64::new(self.vdso()),
+            auxv: Mutex::new(self.auxv()),
         }
+    }
+
+    /// The program's vDSO (`AT_SYSINFO_EHDR`; 0: none).
+    pub fn vdso(&self) -> u64 {
+        self.vdso.load(Ordering::Relaxed)
+    }
+
+    /// The auxiliary vector the program started with.
+    pub fn auxv(&self) -> alloc::vec::Vec<u8> {
+        self.auxv.lock().clone()
+    }
+
+    /// Records what `exec` set up: where the vDSO went, the auxiliary vector.
+    pub fn started(&self, start: &exec::Start) {
+        self.vdso.store(start.vdso, Ordering::Relaxed);
+        *self.auxv.lock() = start.auxv.clone();
     }
 
     /// A new program (`exec`) with its heap at `brk`.
@@ -148,197 +189,12 @@ pub fn is_linux(image: &aurora_elf::Image, path: &str) -> bool {
     image.interp.is_some() || image.gnu_note || image.osabi == 3 || !legacy.iter().any(|d| path.starts_with(d))
 }
 
-/// Linux system call numbers (x86-64).
-#[allow(dead_code)] // the table grows milestone by milestone
-mod nr {
-    pub const READ: u64 = 0;
-    pub const WRITE: u64 = 1;
-    pub const OPEN: u64 = 2;
-    pub const CLOSE: u64 = 3;
-    pub const STAT: u64 = 4;
-    pub const FSTAT: u64 = 5;
-    pub const LSTAT: u64 = 6;
-    pub const POLL: u64 = 7;
-    pub const LSEEK: u64 = 8;
-    pub const MMAP: u64 = 9;
-    pub const MPROTECT: u64 = 10;
-    pub const MUNMAP: u64 = 11;
-    pub const BRK: u64 = 12;
-    pub const RT_SIGACTION: u64 = 13;
-    pub const RT_SIGPROCMASK: u64 = 14;
-    pub const RT_SIGRETURN: u64 = 15;
-    pub const IOCTL: u64 = 16;
-    pub const PREAD64: u64 = 17;
-    pub const PWRITE64: u64 = 18;
-    pub const READV: u64 = 19;
-    pub const WRITEV: u64 = 20;
-    pub const ACCESS: u64 = 21;
-    pub const PIPE: u64 = 22;
-    pub const SELECT: u64 = 23;
-    pub const SCHED_YIELD: u64 = 24;
-    pub const MREMAP: u64 = 25;
-    pub const MSYNC: u64 = 26;
-    pub const MADVISE: u64 = 28;
-    pub const DUP: u64 = 32;
-    pub const DUP2: u64 = 33;
-    pub const PAUSE: u64 = 34;
-    pub const NANOSLEEP: u64 = 35;
-    pub const GETPID: u64 = 39;
-    pub const SOCKET: u64 = 41;
-    pub const CONNECT: u64 = 42;
-    pub const ACCEPT: u64 = 43;
-    pub const SENDTO: u64 = 44;
-    pub const RECVFROM: u64 = 45;
-    pub const SENDMSG: u64 = 46;
-    pub const RECVMSG: u64 = 47;
-    pub const SHUTDOWN: u64 = 48;
-    pub const BIND: u64 = 49;
-    pub const LISTEN: u64 = 50;
-    pub const GETSOCKNAME: u64 = 51;
-    pub const GETPEERNAME: u64 = 52;
-    pub const SOCKETPAIR: u64 = 53;
-    pub const SETSOCKOPT: u64 = 54;
-    pub const GETSOCKOPT: u64 = 55;
-    pub const CLONE: u64 = 56;
-    pub const FORK: u64 = 57;
-    pub const VFORK: u64 = 58;
-    pub const EXECVE: u64 = 59;
-    pub const EXIT: u64 = 60;
-    pub const WAIT4: u64 = 61;
-    pub const KILL: u64 = 62;
-    pub const UNAME: u64 = 63;
-    pub const FCNTL: u64 = 72;
-    pub const FLOCK: u64 = 73;
-    pub const FSYNC: u64 = 74;
-    pub const FDATASYNC: u64 = 75;
-    pub const TRUNCATE: u64 = 76;
-    pub const FTRUNCATE: u64 = 77;
-    pub const GETCWD: u64 = 79;
-    pub const CHDIR: u64 = 80;
-    pub const FCHDIR: u64 = 81;
-    pub const RENAME: u64 = 82;
-    pub const MKDIR: u64 = 83;
-    pub const RMDIR: u64 = 84;
-    pub const CREAT: u64 = 85;
-    pub const LINK: u64 = 86;
-    pub const UNLINK: u64 = 87;
-    pub const SYMLINK: u64 = 88;
-    pub const READLINK: u64 = 89;
-    pub const CHMOD: u64 = 90;
-    pub const FCHMOD: u64 = 91;
-    pub const CHOWN: u64 = 92;
-    pub const FCHOWN: u64 = 93;
-    pub const LCHOWN: u64 = 94;
-    pub const UMASK: u64 = 95;
-    pub const GETTIMEOFDAY: u64 = 96;
-    pub const GETRLIMIT: u64 = 97;
-    pub const GETRUSAGE: u64 = 98;
-    pub const SYSINFO: u64 = 99;
-    pub const TIMES: u64 = 100;
-    pub const GETUID: u64 = 102;
-    pub const GETGID: u64 = 104;
-    pub const SETUID: u64 = 105;
-    pub const SETGID: u64 = 106;
-    pub const GETEUID: u64 = 107;
-    pub const GETEGID: u64 = 108;
-    pub const SETPGID: u64 = 109;
-    pub const GETPPID: u64 = 110;
-    pub const GETPGRP: u64 = 111;
-    pub const SETSID: u64 = 112;
-    pub const GETGROUPS: u64 = 115;
-    pub const GETRESUID: u64 = 118;
-    pub const GETRESGID: u64 = 120;
-    pub const GETPGID: u64 = 121;
-    pub const GETSID: u64 = 124;
-    pub const RT_SIGPENDING: u64 = 127;
-    pub const RT_SIGTIMEDWAIT: u64 = 128;
-    pub const RT_SIGSUSPEND: u64 = 130;
-    pub const SIGALTSTACK: u64 = 131;
-    pub const STATFS: u64 = 137;
-    pub const FSTATFS: u64 = 138;
-    pub const GETPRIORITY: u64 = 140;
-    pub const SETPRIORITY: u64 = 141;
-    pub const SCHED_GETPARAM: u64 = 143;
-    pub const SCHED_GET_PRIORITY_MAX: u64 = 146;
-    pub const SCHED_GET_PRIORITY_MIN: u64 = 147;
-    pub const SCHED_GETSCHEDULER: u64 = 145;
-    pub const SCHED_SETSCHEDULER: u64 = 144;
-    pub const PRCTL: u64 = 157;
-    pub const ARCH_PRCTL: u64 = 158;
-    pub const SETRLIMIT: u64 = 160;
-    pub const SYNC: u64 = 162;
-    pub const GETTID: u64 = 186;
-    pub const READAHEAD: u64 = 187;
-    pub const TKILL: u64 = 200;
-    pub const EPOLL_CREATE: u64 = 213;
-    pub const TIME: u64 = 201;
-    pub const FUTEX: u64 = 202;
-    pub const SCHED_SETAFFINITY: u64 = 203;
-    pub const SCHED_GETAFFINITY: u64 = 204;
-    pub const GETDENTS64: u64 = 217;
-    pub const SET_TID_ADDRESS: u64 = 218;
-    pub const FADVISE64: u64 = 221;
-    pub const CLOCK_GETTIME: u64 = 228;
-    pub const CLOCK_GETRES: u64 = 229;
-    pub const CLOCK_NANOSLEEP: u64 = 230;
-    pub const EXIT_GROUP: u64 = 231;
-    pub const EPOLL_WAIT: u64 = 232;
-    pub const EPOLL_CTL: u64 = 233;
-    pub const TGKILL: u64 = 234;
-    pub const UTIMES: u64 = 235;
-    pub const WAITID: u64 = 247;
-    pub const OPENAT: u64 = 257;
-    pub const MKDIRAT: u64 = 258;
-    pub const FCHOWNAT: u64 = 260;
-    pub const NEWFSTATAT: u64 = 262;
-    pub const UNLINKAT: u64 = 263;
-    pub const RENAMEAT: u64 = 264;
-    pub const LINKAT: u64 = 265;
-    pub const SYMLINKAT: u64 = 266;
-    pub const READLINKAT: u64 = 267;
-    pub const FCHMODAT: u64 = 268;
-    pub const FACCESSAT: u64 = 269;
-    pub const PSELECT6: u64 = 270;
-    pub const PPOLL: u64 = 271;
-    pub const SET_ROBUST_LIST: u64 = 273;
-    pub const INOTIFY_INIT: u64 = 253;
-    pub const INOTIFY_ADD_WATCH: u64 = 254;
-    pub const INOTIFY_RM_WATCH: u64 = 255;
-    pub const INOTIFY_INIT1: u64 = 294;
-    pub const UTIMENSAT: u64 = 280;
-    pub const EPOLL_PWAIT: u64 = 281;
-    pub const ACCEPT4: u64 = 288;
-    pub const RECVMMSG: u64 = 299;
-    pub const SENDMMSG: u64 = 307;
-    pub const TIMERFD_CREATE: u64 = 283;
-    pub const EVENTFD: u64 = 284;
-    pub const TIMERFD_SETTIME: u64 = 286;
-    pub const TIMERFD_GETTIME: u64 = 287;
-    pub const EVENTFD2: u64 = 290;
-    pub const EPOLL_CREATE1: u64 = 291;
-    pub const FALLOCATE: u64 = 285;
-    pub const DUP3: u64 = 292;
-    pub const PIPE2: u64 = 293;
-    pub const PRLIMIT64: u64 = 302;
-    pub const RENAMEAT2: u64 = 316;
-    pub const GETRANDOM: u64 = 318;
-    pub const MEMFD_CREATE: u64 = 319;
-    pub const STATX: u64 = 332;
-    pub const EXECVEAT: u64 = 322;
-    pub const RSEQ: u64 = 334;
-    pub const CLONE3: u64 = 435;
-    pub const CLOSE_RANGE: u64 = 436;
-    pub const MINCORE: u64 = 27;
-    pub const FACCESSAT2: u64 = 439;
-    pub const EPOLL_PWAIT2: u64 = 441;
-}
-
 /// Linux programs make WaveOS call `n` as `WAVE_BASE + n` ("WA" in ASCII).
 pub const WAVE_BASE: u64 = 0x5741_0000;
 
 /// The WaveOS calls Linux programs may make: windows, events, sound,
-/// the clipboard, notifications, preferences, the screen's size and game
-/// controllers.
+/// the clipboard, notifications, preferences, the screen's size, game
+/// controllers and their sandbox (the open and save panel, bookmarks).
 fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
     use aurora_abi::nr as w;
     match n as usize {
@@ -349,6 +205,10 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::WIN_SET_TITLE
         | w::WIN_SET_CURSOR
         | w::WIN_SET_PROGRAM
+        | w::WIN_BUFFER
+        | w::WIN_BUFFER_DESTROY
+        | w::WIN_ATTACH
+        | w::WIN_SET_FULLSCREEN
         | w::WIN_CLOSE
         | w::WIN_RESIZE
         | w::NEXT_EVENT
@@ -363,14 +223,16 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
         | w::TIME_MS
         | w::GAMEPADS
         | w::GAMEPAD_STATE
-        | w::GAMEPAD_RUMBLE => crate::syscall::handle(n as usize, a),
+        | w::GAMEPAD_RUMBLE
+        | w::SANDBOX => crate::syscall::handle(n as usize, a),
         _ => Err(ENOSYS),
     }
 }
 
-/// True if the environment asks for system calls to be logged.
+/// True if the environment asks for system calls to be logged
+/// (`WAVEOS_STRACE=1`, or `WAVEOS_STRACE=NAME` for the processes named so).
 pub fn tracing(env: &[alloc::string::String]) -> bool {
-    env.iter().any(|e| e == "WAVEOS_STRACE=1")
+    env.iter().any(|e| e.strip_prefix("WAVEOS_STRACE=").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// The uid and gid of process `pid` (the session's if it is gone).
@@ -382,7 +244,7 @@ pub fn ids_of(pid: u32) -> (u32, u32) {
 /// Entry for a Linux process's system call (from `syscall::dispatch`).
 pub fn dispatch(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
     if let Some(l) = p.linux.as_ref().filter(|l| l.counts.on()) {
-        let (nr, start) = (f.rax, crate::time::now_ns());
+        let (nr, start) = (f.number(), crate::time::now_ns());
         let r = traced(f, p);
         l.counts.record(|| p.name(), nr, crate::time::now_ns() - start);
         return r;
@@ -390,12 +252,33 @@ pub fn dispatch(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Re
     traced(f, p)
 }
 
-fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
-    if !p.linux.as_ref().is_some_and(|l| l.trace.load(core::sync::atomic::Ordering::Relaxed)) {
-        return call(f, p);
+/// A call by the number the program used: its ABI's table says which
+/// shared call that is (`abi`).
+fn native(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
+    let n = f.number();
+    match abi::native::lookup(n) {
+        abi::Call::Shared(nr) => call(f, p, nr),
+        abi::Call::Own => abi::native::own(n, f, p),
+        abi::Call::None if (WAVE_BASE..WAVE_BASE + 0x1000).contains(&n) => wave_call(p, n - WAVE_BASE, f.args()),
+        abi::Call::None => {
+            unimplemented(n);
+            Err(ENOSYS)
+        }
     }
-    let (nr, a) = (f.rax, [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9]);
-    let r = call(f, p);
+}
+
+fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
+    if !p.linux.as_ref().is_some_and(|l| {
+        l.trace.load(core::sync::atomic::Ordering::Relaxed) && {
+            let only = l.trace_only.lock();
+            only.is_empty() || *only == p.name()
+        }
+    }) {
+        return native(f, p);
+    }
+    let (native_nr, a) = (f.number(), f.args());
+    let nr = abi::native::canonical(native_nr);
+    let r = native(f, p);
     let tid = misc::tid(p);
     // The path a call names, if it names one (which argument holds it).
     let path_arg = match nr {
@@ -417,7 +300,8 @@ fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u
     };
     log!(
         "strace",
-        "{tid} {nr}({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) {path} = {result}",
+        "{tid} {native_nr}{}({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) {path} = {result}",
+        label(native_nr),
         a[0],
         a[1],
         a[2],
@@ -428,11 +312,12 @@ fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u
     r
 }
 
-fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
+/// Call `number` (the layer's numbering, `abi::nr`) with the frame's arguments.
+fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>, number: u64) -> Result<u64, isize> {
     const SIGCHLD: u64 = signal::SIGCHLD as u64;
-    let a = [f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9];
+    let a = f.args();
     let p = p.clone();
-    match f.rax {
+    match number {
         nr::READ => fs::read(&p, a[0], a[1], a[2]),
         nr::WRITE => fs::write(&p, a[0], a[1], a[2]),
         nr::OPEN => fs::openat(&p, fs::AT_FDCWD, a[0], a[1], a[2]),
@@ -484,7 +369,8 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::STATFS => fs::statfs_path(&p, a[0], a[1]),
         nr::FSTATFS => fs::fstatfs(&p, a[0], a[1]),
         nr::FALLOCATE => fs::fallocate(&p, a[0], a[1], a[2], a[3]),
-        nr::FSYNC | nr::FDATASYNC | nr::FLOCK | nr::FADVISE64 | nr::READAHEAD => {
+        nr::FSYNC | nr::FDATASYNC | nr::SYNCFS => fs::fsync(&p, a[0]),
+        nr::FLOCK | nr::FADVISE64 | nr::READAHEAD => {
             p.fd(a[0] as usize)?;
             Ok(0)
         }
@@ -542,16 +428,16 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::EPOLL_CREATE => events::epoll_create(&p, 0),
         nr::EPOLL_CREATE1 => events::epoll_create(&p, a[0]),
         nr::EPOLL_CTL => events::epoll_ctl(&p, a[0], a[1], a[2], a[3]),
-        nr::EPOLL_WAIT => events::epoll_wait(&p, a[0], a[1], a[2], a[3] as i32 as i64, 0),
-        nr::EPOLL_PWAIT => events::epoll_wait(&p, a[0], a[1], a[2], a[3] as i32 as i64, a[4]),
+        nr::EPOLL_WAIT => events::epoll_wait(&p, a[0], a[1], a[2], a[3] as i32 as i64, 0, None),
+        nr::EPOLL_PWAIT => events::epoll_wait(&p, a[0], a[1], a[2], a[3] as i32 as i64, a[4], None),
         nr::EPOLL_PWAIT2 => {
-            let ms = if a[3] == 0 {
-                -1
+            let ns = if a[3] == 0 {
+                None
             } else {
                 let [sec, nsec]: [i64; 2] = crate::syscall::user::get(a[3])?;
-                sec.max(0) * 1000 + nsec.max(0) / 1_000_000
+                Some((sec.max(0) as u64).saturating_mul(1_000_000_000).saturating_add(nsec.max(0) as u64))
             };
-            events::epoll_wait(&p, a[0], a[1], a[2], ms, a[4])
+            events::epoll_wait(&p, a[0], a[1], a[2], -1, a[4], ns)
         }
 
         nr::MMAP => mm::mmap(&p, a[0], a[1], a[2], a[3], a[4] as i64, a[5]),
@@ -561,6 +447,10 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::MREMAP => mm::mremap(&p, a[0], a[1], a[2], a[3]),
         nr::MADVISE => mm::madvise(&p, a[0], a[1], a[2]),
         nr::MSYNC => Ok(0),
+        nr::MLOCK | nr::MLOCK2 => mm::mlock(&p, a[0], a[1], true),
+        nr::MUNLOCK => mm::mlock(&p, a[0], a[1], false),
+        nr::MLOCKALL => mm::mlockall(&p, a[0], true),
+        nr::MUNLOCKALL => mm::mlockall(&p, 0, false),
         nr::MINCORE => mm::mincore(&p, a[0], a[1], a[2]),
 
         nr::EXIT => misc::exit_thread(&p, a[0] as i64),
@@ -577,7 +467,7 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::GETGID | nr::GETEGID => Ok(p.cred.lock().gid as u64),
         nr::GETRESUID | nr::GETRESGID => {
             let c = *p.cred.lock();
-            let id = if f.rax == nr::GETRESUID { c.uid } else { c.gid };
+            let id = if number == nr::GETRESUID { c.uid } else { c.gid };
             for ptr in [a[0], a[1], a[2]] {
                 crate::syscall::user::put(ptr, &id)?;
             }
@@ -588,11 +478,11 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::SETUID | nr::SETGID => {
             let mut c = p.cred.lock();
             let id = a[0] as u32;
-            let same = if f.rax == nr::SETUID { c.uid == id } else { c.gid == id };
+            let same = if number == nr::SETUID { c.uid == id } else { c.gid == id };
             if same {
                 Ok(0)
             } else if c.is_root() {
-                if f.rax == nr::SETUID {
+                if number == nr::SETUID {
                     c.uid = id;
                 } else {
                     c.gid = id;
@@ -657,6 +547,17 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         },
         // One priority for every policy (as SCHED_OTHER has on Linux).
         nr::SCHED_GET_PRIORITY_MAX | nr::SCHED_GET_PRIORITY_MIN => Ok(0),
+        nr::SCHED_GETATTR => misc::sched_getattr(&p, a[0], a[1], a[2], a[3]),
+        // As sched_setscheduler: the ordinary policies, nice values kept by nobody.
+        nr::SCHED_SETATTR => {
+            let [_size, policy]: [u32; 2] = crate::syscall::user::get(a[1])?;
+            match policy {
+                0 | 3 | 5 => Ok(0),
+                1 | 2 | 6 => Err(EPERM),
+                _ => Err(EINVAL),
+            }
+        }
+        nr::GET_MEMPOLICY => misc::get_mempolicy(a[0], a[1], a[2], a[4]),
         nr::GETPRIORITY => Ok(20),
         nr::RT_SIGACTION => signal::sigaction(&p, a[0], a[1], a[2]),
         nr::RT_SIGPROCMASK => signal::sigprocmask(&p, a[0], a[1], a[2]),
@@ -684,10 +585,19 @@ fn call(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64
         nr::NANOSLEEP => misc::nanosleep(a[0], a[1], false, 0),
         nr::CLOCK_NANOSLEEP => misc::nanosleep(a[2], a[3], a[1] & 1 != 0, a[0]),
         n if (WAVE_BASE..WAVE_BASE + 0x1000).contains(&n) => wave_call(&p, n - WAVE_BASE, a),
-        n => {
-            unimplemented(n);
+        _ => {
+            unimplemented(f.number());
             Err(ENOSYS)
         }
+    }
+}
+
+/// " (name)" of native call `n` for logs, where the ABI names its calls
+/// (arm64); nothing on x86-64, whose logs show the number alone.
+fn label(n: u64) -> alloc::string::String {
+    match abi::native::name(n) {
+        "" => alloc::string::String::new(),
+        name => alloc::format!(" ({name})"),
     }
 }
 
@@ -702,6 +612,6 @@ fn unimplemented(n: u64) {
     if seen[word] & bit == 0 {
         seen[word] |= bit;
         let name = proc::current().map(|p| p.name()).unwrap_or_default();
-        log!("linux", "{name}: system call {n} is not supported yet (ENOSYS)");
+        log!("linux", "{name}: system call {n}{} is not supported yet (ENOSYS)", label(n));
     }
 }

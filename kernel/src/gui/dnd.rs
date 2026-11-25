@@ -48,15 +48,16 @@ impl Payload {
 }
 
 static PENDING: IrqMutex<Option<Payload>> = IrqMutex::new(None);
-/// The payload of the last drop, readable by the process it was dropped on.
-static DROPPED: IrqMutex<Option<(u32, Vec<u8>)>> = IrqMutex::new(None);
+/// The payload of the last drop, readable by the process it was dropped
+/// on: (pid, data, files rather than text).
+static DROPPED: IrqMutex<Option<(u32, Vec<u8>, bool)>> = IrqMutex::new(None);
 
 pub fn take_pending() -> Option<Payload> {
     PENDING.lock().take()
 }
 
-pub fn deliver(pid: u32, data: Vec<u8>) {
-    *DROPPED.lock() = Some((pid, data));
+pub fn deliver(pid: u32, data: Vec<u8>, files: bool) {
+    *DROPPED.lock() = Some((pid, data, files));
 }
 
 /// `drag_start(kind, ptr, len, count, icon)`.
@@ -72,14 +73,15 @@ pub fn start(pid: u32, window: u32, kind: usize, data: &[u8], count: u32, icon: 
     Ok(())
 }
 
-/// `drag_data(buf, len) -> full length`.
-pub fn data(pid: u32, out: &mut [u8]) -> Result<usize, isize> {
+/// `drag_data(buf, len) -> full length`, and whether the drop was files
+/// (a sandboxed app may then use them).
+pub fn data(pid: u32, out: &mut [u8]) -> Result<(usize, bool), isize> {
     let guard = DROPPED.lock();
     match &*guard {
-        Some((p, d)) if *p == pid => {
+        Some((p, d, files)) if *p == pid => {
             let n = d.len().min(out.len());
             out[..n].copy_from_slice(&d[..n]);
-            Ok(d.len())
+            Ok((d.len(), *files))
         }
         _ => Err(ENOENT),
     }
