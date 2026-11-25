@@ -204,9 +204,15 @@ impl WaitQueue {
         }
     }
 
+    /// Wakes every waiter. Each stays on the list until it leaves it
+    /// itself (after its sleep): a waiter is on the list a moment before it
+    /// is asleep, and a wakeup in that moment (for an earlier event) must not
+    /// take it off, or the wakeup for its own event finds the list empty and
+    /// it sleeps until its timeout (virtio-blk reads stalled for exactly
+    /// 5 s, now and then, this way).
     pub fn wake_all(&self) {
-        let waiters = core::mem::take(&mut *self.waiters.lock());
-        for t in waiters {
+        let waiters = self.waiters.lock();
+        for &t in waiters.iter() {
             crate::sched::wake(t);
         }
     }
