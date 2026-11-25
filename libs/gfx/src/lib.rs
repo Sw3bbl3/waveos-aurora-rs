@@ -11,6 +11,7 @@ pub mod displays;
 pub mod font;
 pub mod geom;
 pub mod icons;
+pub mod lagoon;
 pub mod layer;
 pub mod material;
 pub mod math;
