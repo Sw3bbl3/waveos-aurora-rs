@@ -1357,7 +1357,7 @@ impl Desktop {
                 self.moorings_drag(i, x, y);
             }
             if matches!(d.kind, DragKind::Move) {
-                self.lean_moved(d.window, x);
+                self.lean_moved(d.window, x, y);
             }
             let area = self.lean_area(old.union(&new));
             self.damage(area);
