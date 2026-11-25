@@ -1,5 +1,7 @@
 //! Glide: Alt+Tab shows the open windows as pictures in a row, most recent
-//! first. Tab moves along, releasing Alt brings the chosen one forward.
+//! first (those of every Cove; a window in another Cove is labelled with
+//! it). Tab moves along, releasing Alt brings the chosen one forward,
+//! going to its Cove first.
 
 use super::*;
 use crate::gui::canvas::with_alpha;
@@ -78,7 +80,7 @@ impl Desktop {
             .collect()
     }
 
-    fn finish_switcher(&mut self, activate: bool) {
+    pub(super) fn finish_switcher(&mut self, activate: bool) {
         self.begin_reveal(self.switcher_rect().inset(-30));
         let selected = self.switcher.take().and_then(|s| s.current());
         self.glide.clear();
@@ -162,6 +164,14 @@ impl Desktop {
                     }
                 }
                 None => cv.fill_round_rect(well, 8, with_alpha(t.text, 0x10)),
+            }
+            // A window in another Cove says which (choosing it goes there).
+            if let Some(c) = self.coves.index_of(w.cove).filter(|_| w.elsewhere) {
+                let name = self.cove_name(c);
+                let f = theme::ui_bold(11);
+                let tag = Rect::new(well.x + 4, well.y + 4, f.width(&name) + 16, 20);
+                cv.fill_round_rect(tag, 10, with_alpha(theme::accent(), 0xE0));
+                cv.text(tag.x + 8, tag.y + 14, &name, f, 0xFFFF_FFFF);
             }
             let icon = Rect::new(card.x + 12, card.bottom() - 30, 22, 22);
             icons::draw(cv, apps::info(w.app.kind()).icon, icon);

@@ -107,7 +107,7 @@ impl Desktop {
         let ids: Vec<u32> = self
             .windows
             .iter()
-            .filter(|w| !w.minimized && !w.animating && w.awaiting_frame.is_none())
+            .filter(|w| !w.hidden() && !w.animating && w.awaiting_frame.is_none())
             .map(|w| w.id)
             .collect();
         let mut windows = Vec::new();

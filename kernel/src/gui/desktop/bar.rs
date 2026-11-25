@@ -29,6 +29,7 @@ pub(super) const H: i32 = 38;
 const NOTICE_MS: u64 = 4000;
 const VOLUME_MS: u64 = 1200;
 const POWER_MS: u64 = 3000;
+const COVE_MS: u64 = 1100;
 /// Crest changes shape with a spring that overshoots once (Swell).
 const RISE_MS: u64 = 260;
 /// Volume keys move in sixteenths.
@@ -51,6 +52,8 @@ pub(super) enum Activity {
     Notice(Notification),
     Volume,
     Power,
+    /// Another Cove came forward: its name and where it is in the row.
+    Cove,
 }
 
 #[derive(Default)]
@@ -311,6 +314,7 @@ impl Desktop {
             Some((Activity::Notice(n), _)) => 26 + theme::ui_bold(12).width(&n.title).min(150) + 12,
             Some((Activity::Volume, _)) => 82,
             Some((Activity::Power, _)) => 70,
+            Some((Activity::Cove, _)) => 22 + theme::ui_bold(12).width(&self.cove_name(self.cove_index())),
             None => 0,
         }
     }
@@ -366,6 +370,10 @@ impl Desktop {
             Some(Activity::Notice(_)) => (380.min(self.w - 40), 62),
             Some(Activity::Volume) => (220, H),
             Some(Activity::Power) => (210, H),
+            Some(Activity::Cove) => {
+                let label = theme::ui_bold(14).width(&self.cove_name(self.cove_index()));
+                (18 + label + 16 + self.coves.ids.len() as i32 * 12 + 14, H)
+            }
             None => {
                 let time = theme::ui_bold(15).width(&time_text());
                 let w = if self.crest.hovered || self.locked() {
@@ -456,9 +464,10 @@ impl Desktop {
                 Activity::Notice(_) => NOTICE_MS,
                 Activity::Volume => VOLUME_MS,
                 Activity::Power => POWER_MS,
+                Activity::Cove => COVE_MS,
             };
-        // A notice that the volume interrupts comes back afterwards.
-        if let (Activity::Volume, Some((Activity::Notice(n), _))) = (&a, &self.crest.activity) {
+        // A notice that the volume (or a Cove's name) interrupts comes back afterwards.
+        if let (Activity::Volume | Activity::Cove, Some((Activity::Notice(n), _))) = (&a, &self.crest.activity) {
             self.crest.queue.push_front(n.clone());
         }
         self.crest.activity = Some((a, until));
@@ -765,6 +774,19 @@ impl Desktop {
                     cv.fill_round_rect(Rect::new(track.x, track.y, track.w * level / 100, 6), 3, theme::accent_glow());
                 }
             }
+            Some(Activity::Cove) => {
+                let label = self.cove_name(self.cove_index());
+                let f = theme::ui_bold(14);
+                cv.text(r.x + 18, r.y + 25, &label, f, ink);
+                // One dot a Cove, the one in front filled with the accent.
+                let n = self.coves.ids.len() as i32;
+                let x0 = r.right() - 14 - n * 12 + 6;
+                for i in 0..n {
+                    let on = i as usize == self.cove_index();
+                    let c = if on { theme::accent_glow() } else { with_alpha(ink, 0x50) };
+                    cv.fill_circle(x0 + i * 12, r.y + r.h / 2, if on { 4 } else { 3 }, c);
+                }
+            }
             Some(Activity::Power) => {
                 let b = battery();
                 let pct = b.map(|b| b.percent).unwrap_or(100);
@@ -813,6 +835,9 @@ impl Desktop {
             Some(Activity::Power) => {
                 let pct = battery().map(|b| b.percent).unwrap_or(100);
                 cv.text(r.x + 12, r.y + 18, &format!("{pct}% ⚡"), theme::ui_bold(12), OK);
+            }
+            Some(Activity::Cove) => {
+                cv.text(r.x + 11, r.y + 18, &self.cove_name(self.cove_index()), theme::ui_bold(12), ink);
             }
             None => {}
         }

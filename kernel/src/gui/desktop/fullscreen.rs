@@ -63,7 +63,7 @@ impl Desktop {
 
     /// The full-screen window whose content holds (`x`, `y`), topmost first.
     pub(super) fn fullscreen_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.windows.iter().rposition(|w| w.fullscreen.is_some() && !w.minimized && w.content().contains(x, y))
+        self.windows.iter().rposition(|w| w.fullscreen.is_some() && !w.hidden() && w.content().contains(x, y))
     }
 
     /// Full-screen windows, over the bar and Harbor: their content alone.
@@ -71,7 +71,7 @@ impl Desktop {
         let focused = self.focused_id();
         for i in 0..self.windows.len() {
             let w = &self.windows[i];
-            if w.fullscreen.is_none() || w.minimized || w.animating || !w.content().intersects(&cv.clip) {
+            if w.fullscreen.is_none() || w.hidden() || w.animating || !w.content().intersects(&cv.clip) {
                 continue;
             }
             let env = self.env_at(Some(w.id) == focused, w.rect);
@@ -102,6 +102,8 @@ impl Desktop {
             || self.items.rename.is_some()
             || self.crest_busy()
             || self.power.is_some()
+            || self.lagoon.is_some()
+            || self.sliding()
     }
 
     /// The client window (its server id) whose content alone is what
@@ -128,7 +130,7 @@ impl Desktop {
         if self.overlays_up() {
             return None;
         }
-        let i = self.windows.iter().rposition(|w| w.fullscreen.is_some() && !w.minimized && w.rect.intersects(&rect))?;
+        let i = self.windows.iter().rposition(|w| w.fullscreen.is_some() && !w.hidden() && w.rect.intersects(&rect))?;
         let w = &self.windows[i];
         if w.animating || w.awaiting_frame.is_some() || w.content() != rect {
             return None;

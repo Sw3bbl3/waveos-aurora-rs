@@ -7,6 +7,7 @@
 mod accounts;
 mod anim;
 mod bar;
+mod coves;
 mod displays;
 mod items;
 mod switcher;
@@ -15,6 +16,7 @@ mod dragdrop;
 mod fullscreen;
 mod handle;
 mod harbor;
+mod lagoon;
 mod notifications;
 mod play;
 mod reveal;
@@ -95,9 +97,17 @@ pub struct Window {
     on_display: u32,
     /// Full screen (`win_set_fullscreen`): where it was before.
     fullscreen: Option<Rect>,
+    /// The Cove it is in (see `coves`), and whether that Cove is not the one in front.
+    cove: u16,
+    elsewhere: bool,
 }
 
 impl Window {
+    /// Not on screen: minimised, or in a Cove that isn't in front.
+    pub fn hidden(&self) -> bool {
+        self.minimized || self.elsewhere
+    }
+
     /// App surface coordinates exclude the stable hover-control strip.
     pub fn content(&self) -> Rect {
         windowing::content(self.rect)
@@ -253,6 +263,10 @@ pub struct Desktop {
     force_scene: bool,
     /// The display a window is being dragged on (where Moorings shows).
     moorings_on: usize,
+    /// The desktops side by side, and the one in front.
+    coves: coves::Coves,
+    /// Lagoon, every window spread out (while open, opening or closing).
+    lagoon: Option<lagoon::Lagoon>,
 }
 
 impl Desktop {
@@ -333,6 +347,8 @@ impl Desktop {
             displays_changed: false,
             force_scene: false,
             moorings_on: 0,
+            coves: coves::Coves::default(),
+            lagoon: None,
         };
         d.account = Account::load();
         d.shore = Self::startup_shore(d.account.as_ref());
@@ -414,7 +430,7 @@ impl Desktop {
         if self.items.focused {
             return None;
         }
-        self.windows.iter().rev().find(|w| !w.minimized)
+        self.windows.iter().rev().find(|w| !w.hidden())
     }
 
     fn focused_id(&self) -> Option<u32> {
@@ -486,6 +502,8 @@ impl Desktop {
 
     fn add_window(&mut self, app: Box<dyn App>) {
         self.items.focused = false;
+        // A new window: Lagoon gives way to it.
+        self.close_lagoon(None);
         let (cw, ch) = app.size();
         // New windows open on the display with the pointer.
         let wa = self.work_area_on(self.display_at(self.cursor.0, self.cursor.1));
@@ -519,6 +537,8 @@ impl Desktop {
             away: None,
             on_display: 0,
             fullscreen: None,
+            cove: self.coves.current,
+            elsewhere: false,
         });
         if let Some(p) = prev {
             self.damage_window(p);
@@ -558,13 +578,21 @@ impl Desktop {
     pub fn raise(&mut self, id: u32) {
         self.items.focused = false;
         let Some(i) = self.index_of(id) else { return };
+        // A window in another Cove: go there first.
+        if self.windows[i].elsewhere {
+            if let Some(c) = self.coves.index_of(self.windows[i].cove) {
+                self.switch_cove(c, None);
+            }
+        }
+        let Some(i) = self.index_of(id) else { return };
         self.touch_mru(id);
         self.damage_all();
         let prev = self.focused_id();
         let mut w = self.windows.remove(i);
         let was_minimized = core::mem::replace(&mut w.minimized, false);
         self.windows.push(w);
-        if was_minimized {
+        // (Lagoon brings it back from Harbor itself.)
+        if was_minimized && self.lagoon.is_none() {
             let from = self.dock_icon_of(id);
             self.animate_restore(id, from);
         }
@@ -595,7 +623,11 @@ impl Desktop {
             s.remove(id);
         }
         self.damage_all();
-        self.animate_close(id);
+        if self.lagoon.is_some() {
+            self.lagoon_forget(id);
+        } else {
+            self.animate_close(id);
+        }
         if let Some(i) = self.index_of(id) {
             let b = self.windows[i].bounds();
             self.windows.remove(i);
@@ -881,7 +913,12 @@ impl Desktop {
                         continue;
                     }
                     if let Some(i) = self.window_of_client(id).and_then(|w| self.index_of(w)) {
-                        if !self.windows[i].minimized {
+                        // Under Lagoon: its picture there is made again.
+                        let wid = self.windows[i].id;
+                        if self.lagoon_presented(wid) {
+                            continue;
+                        }
+                        if !self.windows[i].hidden() {
                             let c = self.windows[i].content();
                             // The moved window is drawn over the backdrop, not in it.
                             self.drag_damage = self.drag.is_some_and(|d| d.window == self.windows[i].id);
@@ -979,6 +1016,8 @@ impl Desktop {
             || self.reveal_moving()
             || self.tour_moving()
             || self.play_moving()
+            || self.lagoon_moving()
+            || self.sliding()
             || self.windows.iter().any(|w| w.chrome.moving(self.now_ms, theme::reduce_motion()))
             || (!theme::reduce_motion() && cursor::animated(self.cursor_shape()))
     }
@@ -1014,6 +1053,7 @@ impl Desktop {
             .min(self.bar_deadline())
             .min(self.harbor_deadline())
             .min(self.play_deadline())
+            .min(self.lagoon_deadline())
     }
 
     /// Runs `f` against window `id`'s app and applies its requests.
@@ -1024,7 +1064,7 @@ impl Desktop {
         let content = self.windows[i].content();
         let before = self.windows[i].app.title();
         let redraw = f(self.windows[i].app.as_mut(), content, &mut env);
-        if redraw {
+        if redraw && !self.lagoon_presented(id) && !self.windows[i].hidden() {
             self.damage(content);
         }
         if self.windows[i].app.title() != before {
@@ -1042,6 +1082,7 @@ impl Desktop {
             InputEvent::Pointer { x, y, buttons } => self.pointer(x, y, buttons),
             InputEvent::Scroll { dx, dy } => self.scroll(dx, dy),
             InputEvent::Key(k) => self.key(k),
+            InputEvent::Swipe { up } => self.swipe(up),
         }
         if self.shore.is_none() {
             self.update_harbor();
@@ -1070,6 +1111,9 @@ impl Desktop {
             return;
         }
         if self.play_pointer(x, y, moved, pressed & BUTTON_LEFT != 0, released & BUTTON_LEFT != 0) {
+            return;
+        }
+        if self.lagoon_pointer(x, y, moved, pressed & BUTTON_LEFT != 0, released & BUTTON_LEFT != 0) {
             return;
         }
 
@@ -1124,7 +1168,7 @@ impl Desktop {
     /// notches for apps that step, and the exact amount for smooth ones.
     fn scroll(&mut self, dx: i32, dy: i32) {
         use crate::drivers::input::NOTCH;
-        if self.shore.is_some() || self.switcher.is_some() || self.play_covers() {
+        if self.shore.is_some() || self.switcher.is_some() || self.play_covers() || self.lagoon.is_some() {
             return;
         }
         let (x, y) = self.cursor;
@@ -1178,6 +1222,9 @@ impl Desktop {
             return c::HIDDEN;
         }
         if let Some(shape) = self.tour_cursor(x, y) {
+            return shape;
+        }
+        if let Some(shape) = self.lagoon_cursor(x, y) {
             return shape;
         }
         if let Some(d) = self.drag {
@@ -1238,9 +1285,9 @@ impl Desktop {
         if let Some(i) = self.fullscreen_at(x, y) {
             return Some(i);
         }
-        self.windows.iter().rposition(|w| {
-            !w.minimized && w.awaiting_frame.is_none() && w.fullscreen.is_none() && w.rect.contains(x, y)
-        })
+        self.windows
+            .iter()
+            .rposition(|w| !w.hidden() && w.awaiting_frame.is_none() && w.fullscreen.is_none() && w.rect.contains(x, y))
     }
 
     fn pointer_moved(&mut self, x: i32, y: i32) {
@@ -1491,6 +1538,9 @@ impl Desktop {
         if k.pressed && self.volume_key(k.code) {
             return;
         }
+        if self.lagoon_key(&k) {
+            return;
+        }
         // So do the brightness keys, when a display driver controls the panel.
         if k.pressed && matches!(k.code, KeyCode::BrightnessUp | KeyCode::BrightnessDown) {
             if let Some(b) = crate::drivers::gpu::brightness() {
@@ -1509,6 +1559,7 @@ impl Desktop {
                 if self.spotlight_open() {
                     self.toggle_spotlight();
                 }
+                self.close_lagoon(None);
                 self.toggle_launcher();
             }
             return;
@@ -1530,6 +1581,15 @@ impl Desktop {
         }
         if k.pressed {
             // Global shortcuts.
+            if self.cove_key(&k) {
+                return;
+            }
+            if (k.mods.super_key && k.code == KeyCode::Tab && !k.mods.ctrl && !k.mods.alt)
+                || (k.code == KeyCode::F3 && !k.mods.ctrl && !k.mods.alt && !k.mods.super_key && !k.mods.shift)
+            {
+                self.toggle_lagoon();
+                return;
+            }
             if k.mods.super_key {
                 if let Some(id) = self.focused_id() {
                     let placement = match k.code {
@@ -1682,6 +1742,8 @@ impl Desktop {
         }
         busy |= self.step_harbor();
         busy |= self.step_play();
+        busy |= self.step_lagoon();
+        busy |= self.step_slide();
         if busy {
             16
         } else {
@@ -1788,6 +1850,9 @@ impl Desktop {
             || self.dnd.is_some()
             || self.power.is_some()
             || self.tour.is_some()
+            || self.lagoon_moving()
+            || self.sliding()
+            || self.lagoon.as_ref().is_some_and(|_| self.lagoon_dragging())
             || self.play_full_frames())
     }
 
@@ -1803,8 +1868,11 @@ impl Desktop {
         if self.switcher.is_some() {
             materials.push(self.switcher_glass());
         }
+        if self.lagoon.is_some() {
+            return materials;
+        }
         for w in &self.windows {
-            if w.minimized {
+            if w.hidden() {
                 continue;
             }
             materials.extend(w.app.materials().into_iter().map(|r| r.offset(w.content().x, w.content().y)));
@@ -1840,7 +1908,8 @@ impl Desktop {
             staged(Stage::Cursor, || cursor::draw(cv, self.cursor.0, self.cursor.1, self.cursor_shape(), self.now_ms));
             return;
         }
-        let above = match self.backdrop_window() {
+        let covered = self.lagoon.is_some() || self.sliding();
+        let above = match self.backdrop_window().filter(|_| !covered) {
             Some(i) => {
                 if !self.backdrop_ok || self.backdrop.len() != cv.buf.len() {
                     // Compose what lies below the moved window once, over the whole screen.
@@ -1859,6 +1928,15 @@ impl Desktop {
                 staged(Stage::Wallpaper, || cv.blit_same(&self.backdrop, cv.clip));
                 i
             }
+            // Lagoon, or a slide between Coves, shows pictures instead of the windows.
+            None if self.lagoon.is_some() => {
+                self.paint_lagoon_backdrop(cv);
+                self.windows.len()
+            }
+            None if covered => {
+                self.paint_below(cv, 0);
+                self.windows.len()
+            }
             None => {
                 self.paint_below(cv, self.windows.len());
                 self.windows.len()
@@ -1866,12 +1944,14 @@ impl Desktop {
         };
         self.paint_windows(cv, above..self.windows.len());
         let overlays = crate::time::now_ns();
+        self.paint_slide(cv);
+        self.paint_lagoon(cv);
         self.paint_ghosts(cv);
         self.paint_moorings(cv);
         self.paint_shoal(cv);
         self.paint_harbor(cv);
         self.paint_bar(cv);
-        if self.windows.iter().any(|w| w.fullscreen.is_some()) {
+        if !covered && self.windows.iter().any(|w| w.fullscreen.is_some() && !w.hidden()) {
             self.paint_fullscreen(cv);
             // What still shows over a full-screen window.
             if self.launcher.is_some() {
@@ -1931,7 +2011,7 @@ impl Desktop {
         let clip = cv.clip;
         for i in range {
             let w = &self.windows[i];
-            if w.minimized || w.animating || w.fullscreen.is_some() || !w.bounds().intersects(&clip) {
+            if w.hidden() || w.animating || w.fullscreen.is_some() || !w.bounds().intersects(&clip) {
                 continue;
             }
             let is_focused = Some(self.windows[i].id) == focused;
