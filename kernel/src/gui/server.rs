@@ -671,8 +671,16 @@ pub fn process_exited(pid: u32) {
         crate::telemetry::window("close", id, pid, &c.title);
     }
     // Its buffers go once nothing shows them (a display scanning one out
-    // keeps it until the compositor has moved on).
-    BUFFERS.lock().retain(|_, b| b.pid != pid);
+    // keeps it until the compositor has moved on). Dropped after the lock:
+    // freeing the last reference unmaps the buffer, which waits for every
+    // other processor to drop its mapping, and one of them may be spinning
+    // on this lock with its interrupts off.
+    let buffers: Vec<Arc<WinBuffer>> = {
+        let mut all = BUFFERS.lock();
+        let ids: Vec<u32> = all.iter().filter(|(_, b)| b.pid == pid).map(|(&id, _)| id).collect();
+        ids.iter().filter_map(|id| all.remove(id)).collect()
+    };
+    drop(buffers);
     WAITERS.lock().remove(&pid);
 }
 
@@ -858,14 +866,16 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
         }
         nr::WIN_BUFFER_DESTROY => {
             let id = a[0] as u32;
-            let mut buffers = BUFFERS.lock();
-            match buffers.get(&id) {
-                Some(b) if b.pid == pid => {
-                    buffers.remove(&id);
-                    Ok(0)
+            // (Released after the lock, as in `process_exited`.)
+            let removed = {
+                let mut buffers = BUFFERS.lock();
+                match buffers.get(&id) {
+                    Some(b) if b.pid == pid => buffers.remove(&id),
+                    _ => return Err(EBADF),
                 }
-                _ => Err(EBADF),
-            }
+            };
+            drop(removed);
+            Ok(0)
         }
         nr::WIN_ATTACH => {
             let id = a[0] as u32;
@@ -907,7 +917,7 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
                     }
                 }
             };
-            let (gone, k) = {
+            let (gone, k, old) = {
                 let mut clients = CLIENTS.lock();
                 let c = clients.get_mut(&id).ok_or(EBADF)?;
                 let k = if new.is_some() { scale } else { c.surface.scale };
@@ -916,11 +926,14 @@ pub fn syscall(n: usize, a: [u64; 6]) -> Result<u64, isize> {
                 c.pictures += 1;
                 let now = c.attached.as_ref();
                 let mut gone: Vec<u32> = old
+                    .as_ref()
                     .map(|o| o.layers.iter().map(|l| l.buffer.id).filter(|&b| !now.is_some_and(|n| n.holds(b))).collect())
                     .unwrap_or_default();
                 gone.dedup();
-                (gone, k as i32)
+                // The old buffers are let go after the lock (see `process_exited`).
+                (gone, k as i32, old)
             };
+            drop(old);
             // Those it no longer shows are read no more (the compositor
             // reads under the lock), unless a display scans one out.
             for b in gone {
