@@ -37,7 +37,9 @@ Everything that works today, layer by layer. For the short tour, see the [README
   - a top bar of glass bubbles: the WayV menu and the app on the left; **Crest** in the middle with the time (the date on pointing, activities such as volume and new notifications), which can be turned off; **Seek** and the status ring on the right, opening **Current** (network, Calm, appearance, lock, sound, battery)
   - **Harbor**, a floating dock in three bays (pinned apps, open apps, the Downloads and Documents stacks and Trash), with a waterline under open apps, window peeks, ripples while an app starts, and sinking away from a window that reaches it
   - a permanent compact window strip reserves room for the title and smoothly revealed minimize, maximize and close controls; keyboard access with Alt+Space, dependable resize edges/corners, a focused waterline, and **Moorings** snapping into six layouts
-  - **Shoal** (all apps, full screen, with search and groups), **Seek** (apps, files, settings and sums), **Drift** (calendar, Calm and notifications) and **Glide** (Alt+Tab with window pictures)
+  - **Shoal** (all apps, full screen, with search and groups), **Seek** (apps, files, settings and sums), **Drift** (calendar, Calm and notifications) and **Glide** (Alt+Tab with window pictures, from every Cove)
+  - **Lagoon**, every window at once: the wallpaper blurs and each window of the desktop in front glides on a spring to a place of its own, as a live picture with its name and app icon (minimised ones rise from Harbor onto a shelf); every display shows its own windows; choose with the pointer, the arrow keys or Tab, type to narrow by name or app, close a window from its picture
+  - **Coves**, several desktops side by side: a row along Lagoon's top to add, remove (the windows move to the neighbour), look into, and drag windows onto; switching slides the windows aside on a spring while the wallpaper, bar and Harbor stay, and Crest names the Cove; bringing forward a window of another Cove (from Harbor, Glide, Seek or Wave Play) goes there first. Coves are not kept across a restart
   - Manrope throughout, light and dark everywhere, broadcast live to every app, and an accent colour that can follow the wallpaper
   - six licensed natural photographs, shown faithfully in both appearances: Tide, Mist, Dunes, Ripple, Coast and Alpine
   - an optional interactive tour in Welcome and Help, with anchored guidance and temporary practice content; reduced motion, reduced transparency and increased contrast throughout shared controls
@@ -125,8 +127,11 @@ The kernel log streams to your terminal over the serial port. See [BUILDING.md](
   - hold **Super** and drag anywhere in a window to move it
   - drag a window to the top of the screen to choose a Moorings layout (halves, thirds, quarters)
   - drag any edge or corner to resize; the cursor shows the direction
+- **Lagoon** (every window spread out): **Super+Tab** or **F3**, or sweep three fingers up on a touchpad (down closes it). Point at a window or move with the arrow keys or Tab; click it or press Enter to bring it forward. Type to narrow the windows by name or app (Escape clears what you typed, then closes Lagoon). The × on a picture, Ctrl+W or Delete closes that window. Minimised windows are on the shelf above Harbor; clicking one brings it back.
+- **Coves** (desktops side by side): in Lagoon, the row at the top shows them. Click one to look into it, **+** for a new one, the × on a Cove (pointed at) to remove it: its windows move to the Cove before it. Drag a window's picture onto a Cove to move it there (onto + for a Cove of its own). Anywhere: **Ctrl+Super+Left/Right** goes to the Cove beside, **Ctrl+Super+Shift+Left/Right** takes the front window along, **Ctrl+Super+D** adds a Cove and goes there, **Ctrl+Super+F4** removes the Cove you're in. Clicking an open app in Harbor, choosing a window in Glide, or opening from Seek an app that keeps one window (Settings, for one) goes to the Cove its window is in. A Cove spans every display; there can be eight.
 - **Shortcuts**:
-  - `Alt+Tab` cycles windows
+  - `Alt+Tab` cycles windows (of every Cove)
+  - `Super+Tab` or `F3` opens Lagoon; `Ctrl+Super+←/→` changes Cove
   - `Ctrl+W` or `Alt+F4` closes the front window
   - `Print Screen` or `Super+Shift+3` saves a screenshot to Pictures
   - in text: `Ctrl+A/C/X/V`, `Ctrl+Z` / `Ctrl+Shift+Z`, `Ctrl+F` to find, `Ctrl+S` to save
