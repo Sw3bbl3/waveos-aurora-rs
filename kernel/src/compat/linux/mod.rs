@@ -64,6 +64,10 @@ pub struct Linux {
     pub signals: signal::Signals,
     /// Log every system call (`WAVEOS_STRACE=1` in the environment).
     pub trace: core::sync::atomic::AtomicBool,
+    /// Only while the process has this name (`WAVEOS_STRACE=NAME`: one
+    /// program of a family that shares its environment, such as a browser's
+    /// first process without its helpers); empty: any.
+    trace_only: Mutex<alloc::string::String>,
     /// Count them (`WAVEOS_SYSCOUNT=1`).
     counts: syscount::Counts,
     /// Where the program's vDSO is (0: none): arm64 signal handlers
@@ -82,6 +86,7 @@ impl Linux {
             nonblock: Mutex::new([0; 16]),
             signals: signal::Signals::new(),
             trace: core::sync::atomic::AtomicBool::new(false),
+            trace_only: Mutex::new(alloc::string::String::new()),
             counts: syscount::Counts::default(),
             vdso: AtomicU64::new(0),
             auxv: Mutex::new(alloc::vec::Vec::new()),
@@ -91,6 +96,12 @@ impl Linux {
     /// Tracing and counting as the program's environment asks.
     pub fn configure(&self, env: &[alloc::string::String]) {
         self.trace.store(tracing(env), core::sync::atomic::Ordering::Relaxed);
+        *self.trace_only.lock() = env
+            .iter()
+            .find_map(|e| e.strip_prefix("WAVEOS_STRACE="))
+            .filter(|v| *v != "1")
+            .map(alloc::string::String::from)
+            .unwrap_or_default();
         self.counts.reset(syscount::wanted(env));
     }
 
@@ -103,6 +114,7 @@ impl Linux {
             nonblock: Mutex::new(*self.nonblock.lock()),
             signals: self.signals.for_child(),
             trace: core::sync::atomic::AtomicBool::new(self.trace.load(core::sync::atomic::Ordering::Relaxed)),
+            trace_only: Mutex::new(self.trace_only.lock().clone()),
             counts: syscount::Counts::new(self.counts.on()),
             vdso: AtomicU64::new(self.vdso()),
             auxv: Mutex::new(self.auxv()),
@@ -217,9 +229,10 @@ fn wave_call(p: &proc::Process, n: u64, a: [u64; 6]) -> Result<u64, isize> {
     }
 }
 
-/// True if the environment asks for system calls to be logged.
+/// True if the environment asks for system calls to be logged
+/// (`WAVEOS_STRACE=1`, or `WAVEOS_STRACE=NAME` for the processes named so).
 pub fn tracing(env: &[alloc::string::String]) -> bool {
-    env.iter().any(|e| e == "WAVEOS_STRACE=1")
+    env.iter().any(|e| e.strip_prefix("WAVEOS_STRACE=").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// The uid and gid of process `pid` (the session's if it is gone).
@@ -255,7 +268,12 @@ fn native(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u
 }
 
 fn traced(f: &mut SyscallFrame, p: &alloc::sync::Arc<proc::Process>) -> Result<u64, isize> {
-    if !p.linux.as_ref().is_some_and(|l| l.trace.load(core::sync::atomic::Ordering::Relaxed)) {
+    if !p.linux.as_ref().is_some_and(|l| {
+        l.trace.load(core::sync::atomic::Ordering::Relaxed) && {
+            let only = l.trace_only.lock();
+            only.is_empty() || *only == p.name()
+        }
+    }) {
         return native(f, p);
     }
     let (native_nr, a) = (f.number(), f.args());
