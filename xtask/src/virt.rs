@@ -192,6 +192,10 @@ pub fn args(img: &Path, opts: &RunOpts, env: &Env) -> Vec<String> {
     }
     a.extend(opts.displays.qemu_args(opts.gpu));
     a.extend(["-m".into(), opts.memory_mib.to_string(), "-smp".into(), opts.smp.to_string()]);
+    // The firmware's boot manager waits for a key before it boots (5.4 s of
+    // a 5.9 s start to the desktop under HVF); ArmVirtQemu takes the wait
+    // from QEMU's boot-menu-wait, which this makes zero.
+    a.extend(["-boot", "menu=on,splash-time=0"].map(String::from));
     if !opts.allow_reboot {
         a.push("-no-reboot".into());
     }

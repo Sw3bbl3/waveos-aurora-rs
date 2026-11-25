@@ -84,6 +84,7 @@ const TESTS: &[Test] = &[
     ("syscall fuzzer (native calls, racing threads, kills)", syscall_fuzz),
     ("memory exhaustion: programs take all they can, the kernel keeps its reserve and recovers", memory_exhaustion),
     ("mm: what memory costs a program under no pressure (bench)", memory_bench),
+    ("mm: what switching address spaces costs (bench)", switch_bench),
     ("swap: private, fork-shared, shared and locked pages out and back", mm::swaptest::semantics),
     ("swap: a program fills several times its memory, every page checked", mm::swaptest::overcommit),
     ("swap: pages through the swap file, then it fills; the kernel is unharmed", mm::swaptest::file_full),
@@ -633,6 +634,20 @@ pub fn home_volume_ok(what: &str) {
 }
 
 /// What memory costs a program with no pressure on it: `fuzz swap` maps
+/// The cost of a switch of the user half's tables (`bench:` lines): as the
+/// kernel does it, and the alternatives (Arm: see `mmu::switch_cost`).
+fn switch_bench() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let [broadcast, local, none] = crate::arch::mmu::switch_cost(20_000);
+        crate::kprintln!(
+            "bench: address-space switch: every CPU's TLB {broadcast} ns, this CPU's {local} ns, no flush {none} ns"
+        );
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    crate::kprint!("(measured on aarch64 only) ");
+}
+
 /// 64 MiB, writes every page and reads it back (`bench:` lines, to compare
 /// kernels; it asserts nothing but that the pattern held).
 fn memory_bench() {

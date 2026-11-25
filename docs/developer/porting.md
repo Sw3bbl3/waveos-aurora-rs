@@ -195,12 +195,42 @@ processes and signals, sockets, input devices). `cargo xtask test --arch
 aarch64` passes on 1 and 4 vCPUs under HVF; `tests::ARCH_SKIPS` lists what
 it skips and why: the C half of the kernel (LinuxKPI), a PC's ACPI sleep
 states and SSDT devices (test battery, I2C touchpad), S3, and the DRM
-device tests (the display is ramfb, not a PCI GPU). Known: on 4 vCPUs the
-first USB storage command after a while idle can lose its status phase;
-the driver resets the device and the retry succeeds.
+device tests (the display is ramfb, not a PCI GPU).
+
+### Status (milestone 3: daily use under HVF)
+
+- The gate adds `tools/smoke_desktop.py` (first-run setup, apps, typing,
+  a window drag, Shut Down, login on the next start) to the full suite.
+- Hardware virtualization runs the guest 15-60 times faster than TCG and
+  exposed races that emulation hid. A late interrupt could take a waiter
+  off a `WaitQueue` before it slept, and the next interrupt then found
+  nobody to wake. A disk request then looked lost for its 5 s timeout,
+  and fsync under load stalled (power-cut stress: 41 synced files in 30
+  cuts before, 577 after). QEMU's usb-storage leaves a status request
+  that comes before its SCSI command has finished unanswered; the driver
+  now reads the status again instead of resetting the device.
+- Start to desktop: 1.3 s from launching QEMU (it was 5.9 s, 5.4 s of
+  them EDK2's boot manager waiting for a key; `-boot
+  menu=on,splash-time=0` on the `virt` machine sets that wait to zero).
+  The kernel reaches the desktop 0.3-0.4 s after firstlight starts it.
+- Idle at the desktop (headless, logged in): QEMU uses about 0.02 s of
+  host CPU a minute. The timer is one-shot, an idle CPU waits in `wfi`,
+  and nothing wakes it periodically. (With a display window the host's
+  display refresh adds its own cost, not measured here.)
+- Address-space switches still drop the whole TLB (`tlbi vmalle1is`, no
+  ASIDs): 0.5-1 us each against 40-50 ns without a flush (`mm: what
+  switching address spaces costs (bench)`). ASIDs need user leaf entries
+  marked nG and an ASID retired when its root frame is freed (a new
+  address space can get the same frame).
+- The USB audio check records only the stream after the test's replug:
+  QEMU's wav file starts over when the device comes back. Its length is
+  the test's 600 ms window under HVF (about 880 ms of wall time under
+  TCG), against the 400 ms floor. The guest sends every packet, 48
+  frames per millisecond.
 
 Not yet: the C half of the kernel (x86-only builds), the PCI I/O window,
-the second PL011 (telemetry), virtio-gpu without a firmware framebuffer.
+the second PL011 (telemetry), ASIDs, per-process pointer-authentication
+keys.
 The Linux layer's arm64 ABI (call table, signal frames, vDSO) is in place:
 see "The Linux layer's ABIs".
 
