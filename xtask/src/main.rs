@@ -2216,6 +2216,11 @@ fn power_cuts(profile: Profile, disk: &str, smp: u32, iterations: u32) {
             Ok(o) => o,
             Err(e) => fail_cut(&img, it, &e),
         };
+        // AURORA_POWERCUT_LOG=DIR keeps each start's serial output as DIR/cut-N.log.
+        if let Ok(dir) = env::var("AURORA_POWERCUT_LOG") {
+            let _ = fs::create_dir_all(&dir);
+            let _ = fs::write(Path::new(&dir).join(format!("cut-{it}.log")), &output);
+        }
         if let Some(problems) = output.split("fsstress: mount check: PROBLEMS").nth(1) {
             fail_cut(&img, it, &format!("the guest's check at mount found problems:{problems}"));
         }
@@ -2323,7 +2328,7 @@ fn run_until_cut(img: &Path, disk: &str, smp: u32, delay: Duration) -> Result<St
                     eprintln!("could not cut the power: {e}");
                 }
                 cut_at = None;
-                all.push_str("harness: power cut\n");
+                all.push_str(&format!("harness: power cut ({} ms after the stress started)\n", delay.as_millis()));
             }
         }
         all
