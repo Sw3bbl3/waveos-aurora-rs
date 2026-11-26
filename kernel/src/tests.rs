@@ -32,6 +32,7 @@ const TESTS: &[Test] = &[
         "displays: layout, pointer crossing, per-display damage, slow display, hotplug, arrangement, mirroring, screendumps",
         displays,
     ),
+    ("Lagoon and Coves: overview, filter, desktops, carrying windows, activation, removal", lagoon_and_coves),
     ("rect math", rects),
     ("keyboard decoder", keyboard),
     ("ramfs + vfs", ramfs),
@@ -4521,6 +4522,243 @@ impl crate::gui::apps::App for Card {
     }
 }
 
+/// Lagoon (the window overview) and Coves (several desktops), driven
+/// through the input queue on the compositor's displays: Super+Tab spreads
+/// eight windows out (minimised ones on their own shelf), each where the
+/// screen shows its picture, without overlapping, on its own display;
+/// arrow keys and typing choose and narrow; Escape returns; a resting
+/// Lagoon repaints nothing; the frame cost while it opens; Reduce Motion.
+/// Then Coves: Ctrl+Super+D adds one, Ctrl+Super+Left/Right switch (with
+/// Shift the focused window comes along), bringing forward a window of
+/// another Cove goes there, a removed Cove's windows join its neighbour,
+/// and there are at most eight.
+fn lagoon_and_coves() {
+    use crate::drivers::input::{self, InputEvent, KeyEvent, Modifiers};
+    use crate::gui::screens::Compositor;
+    crate::gui::settings::load();
+    // With `--displays 2`, the second display is plugged in first.
+    let heads: usize =
+        crate::gui::prefs::boot_option("test_displays").and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 2);
+    if heads > 1 {
+        crate::kprintln!("\nharness: display set 1 1024x768");
+        let connected = || {
+            crate::drivers::gpu::devices()
+                .iter()
+                .map(|d| d.connectors().iter().filter(|c| c.status == crate::drivers::gpu::Status::Connected).count())
+                .sum::<usize>()
+        };
+        assert!(eventually(20_000, || connected() >= heads), "the second display never connected");
+    }
+    let _ = crate::gui::server::take_commands();
+    let mut c = Compositor::new();
+    c.desktop.dismiss_shore();
+    c.settle(2000);
+    let press = |c: &mut Compositor, code: KeyCode, ch: Option<char>, mods: Modifiers| {
+        for pressed in [true, false] {
+            input::push(InputEvent::Key(KeyEvent { code, ch, pressed, mods }));
+        }
+        c.frame();
+    };
+    let sup = Modifiers { super_key: true, ..Default::default() };
+    let cs = Modifiers { super_key: true, ctrl: true, ..Default::default() };
+    let none = Modifiers::default();
+    let settle = |c: &mut Compositor| {
+        let done = c.until(4000, |c| !c.desktop.shell_moving());
+        c.settle(300);
+        done
+    };
+    const COLOURS: [u32; 8] =
+        [0xFF1F_7A4C, 0xFF7A_1F4C, 0xFF1F_4C7A, 0xFFC0_7020, 0xFF20_70C0, 0xFF70_20C0, 0xFF60_A030, 0xFFA0_3060];
+    let ids: Vec<u32> = COLOURS.iter().map(|&k| c.desktop.add_test_window(Box::new(Card(k)))).collect();
+    c.settle(2500);
+    c.desktop.minimize(ids[7]);
+    // With several displays, one window goes to another one: Lagoon shows it there.
+    let elsewhere = c.screens.iter().position(|s| s.rect.x != 0 || s.rect.y != 0).map(|i| c.screens[i].rect);
+    if let Some(d) = elsewhere {
+        c.desktop.move_window(ids[6], Rect::new(d.x + 40, d.y + 40, 360, 220 + lumen::windowing::CHROME_H));
+    }
+    c.settle(2500);
+    let visible = |c: &Compositor| c.desktop.coves_state().2.into_iter().filter(|w| ids.contains(&w.0) && !w.2).count();
+    assert_eq!(visible(&c), 7);
+
+    // Super+Tab: every window, spread out; the minimised one below the rest.
+    let t0 = time::now_ns();
+    press(&mut c, KeyCode::Tab, None, sup);
+    let first = (time::now_ns() - t0) / 1000;
+    let opened = time::uptime_ms();
+    let (mut frames, mut slowest, mut paint) = (0u32, 0u64, Vec::new());
+    while c.desktop.shell_moving() && time::uptime_ms() < opened + 4000 {
+        let before = c.frames;
+        let t = time::now_ns();
+        c.frame();
+        c.wait_presented(1000);
+        if c.frames > before {
+            frames += 1;
+            slowest = slowest.max(time::now_ns() - t);
+            paint.push(c.last_frame_ns);
+        }
+        sched::sleep_ms(4);
+    }
+    let took = time::uptime_ms() - opened;
+    paint.sort_unstable();
+    let median = paint.get(paint.len() / 2).copied().unwrap_or(0);
+    crate::kprint!(
+        "(Lagoon opened with 8 windows in {took} ms: first frame {first} us, then {frames} frames, paint median {} us, slowest {} us) ",
+        median / 1000,
+        slowest / 1000
+    );
+    assert!(frames >= 5, "Lagoon opened in {frames} frames: not animated");
+    settle(&mut c);
+    let (open, tiles) = c.desktop.lagoon_state().expect("Super+Tab opens Lagoon");
+    assert!(open);
+    assert_eq!(tiles.len(), 8, "Lagoon shows {} of 8 windows", tiles.len());
+    for (i, a) in tiles.iter().enumerate() {
+        assert!(tiles[i + 1..].iter().all(|b| !a.1.intersects(&b.1)), "pictures overlap: {tiles:?}");
+        let rects: Vec<Rect> = c.screens.iter().map(|s| s.rect).collect();
+        assert!(
+            rects.iter().any(|r| r.contains(a.1.x, a.1.y) && r.contains(a.1.right() - 1, a.1.bottom() - 1)),
+            "{a:?} is off the displays"
+        );
+    }
+    let place = |id: u32| tiles.iter().find(|t| t.0 == id).unwrap().1;
+    if let Some(d) = elsewhere {
+        let r = place(ids[6]);
+        assert!(
+            d.contains(r.x, r.y) && d.contains(r.right() - 1, r.bottom() - 1),
+            "{r:?} isn't on the window's display {d:?}"
+        );
+        assert!(
+            ids[..6].iter().all(|&id| !d.intersects(&place(id))),
+            "a window of the main display went to another one"
+        );
+        crate::kprint!("(a window on the second display stays there) ");
+    }
+    let shelf = place(ids[7]);
+    assert!(ids[..7].iter().all(|&id| place(id).bottom() < shelf.y), "the minimised window is not below the others");
+    // The screen shows each window's picture where Lagoon put it.
+    let main = c.main;
+    let s = &c.screens[main];
+    for (k, &id) in ids[..7].iter().enumerate() {
+        let r = place(id);
+        if !s.rect.contains(r.x, r.y) || !s.rect.contains(r.right() - 1, r.bottom() - 1) {
+            continue;
+        }
+        let (cx, cy) = r.center();
+        let px = s.pixel(((cx - s.rect.x) * s.scale) as u32, ((cy - s.rect.y) * s.scale) as u32);
+        let near = (0..3).all(|b| ((px >> (b * 8)) & 0xFF).abs_diff((COLOURS[k] >> (b * 8)) & 0xFF) <= 4);
+        assert!(near, "window {k}'s picture isn't where Lagoon put it ({r:?}: {px:06x})");
+    }
+    // At rest it paints nothing.
+    let before = c.frames;
+    for _ in 0..20 {
+        c.frame();
+        sched::sleep_ms(16);
+    }
+    // (The clock may turn a minute meanwhile.)
+    assert!(c.frames <= before + 1, "a resting Lagoon repaints: {} frames", c.frames - before);
+    // Typing narrows it; Escape clears the search, then closes.
+    press(&mut c, KeyCode::Char, Some('z'), none);
+    press(&mut c, KeyCode::Char, Some('q'), none);
+    settle(&mut c);
+    assert_eq!(c.desktop.lagoon_state().unwrap().1.len(), 0, "no window is called zq");
+    press(&mut c, KeyCode::Escape, None, none);
+    press(&mut c, KeyCode::Char, Some('c'), none);
+    settle(&mut c);
+    assert_eq!(c.desktop.lagoon_state().unwrap().1.len(), 8, "every window is a Card");
+    press(&mut c, KeyCode::Escape, None, none);
+    // The arrow keys choose, Enter brings it forward.
+    let first = c.desktop.focused_window();
+    press(&mut c, KeyCode::Right, None, none);
+    press(&mut c, KeyCode::Down, None, none);
+    press(&mut c, KeyCode::Enter, None, none);
+    settle(&mut c);
+    assert!(c.desktop.lagoon_state().is_none(), "Enter closes Lagoon");
+    assert_ne!(c.desktop.focused_window(), first, "the chosen window did not come forward");
+    assert_eq!(visible(&c), 7);
+    // Reduce Motion: there at once.
+    crate::gui::prefs::set(aurora_abi::pref::REDUCE_MOTION, "1").unwrap();
+    c.frame();
+    press(&mut c, KeyCode::F3, None, none);
+    c.frame();
+    assert!(c.desktop.lagoon_state().is_some_and(|l| l.0) && !c.desktop.shell_moving(), "Reduce Motion animates");
+    press(&mut c, KeyCode::Escape, None, none);
+    c.frame();
+    assert!(c.desktop.lagoon_state().is_none());
+    crate::gui::prefs::set(aurora_abi::pref::REDUCE_MOTION, "0").unwrap();
+    c.settle(500);
+
+    // Coves.
+    assert_eq!(c.desktop.coves_state().1, 1);
+    press(&mut c, KeyCode::Char, Some('d'), cs);
+    settle(&mut c);
+    let (at, count, _) = c.desktop.coves_state();
+    assert_eq!((at, count), (1, 2), "Ctrl+Super+D adds a Cove and goes there");
+    assert_eq!(visible(&c), 0, "the new Cove shows windows");
+    assert_eq!(c.desktop.focused_window(), None);
+    press(&mut c, KeyCode::Left, None, cs);
+    settle(&mut c);
+    assert_eq!(c.desktop.coves_state().0, 0);
+    assert_eq!(visible(&c), 7);
+    let carried = c.desktop.focused_window().expect("a focused window");
+    press(&mut c, KeyCode::Right, None, Modifiers { shift: true, ..cs });
+    settle(&mut c);
+    let (at, _, windows) = c.desktop.coves_state();
+    assert_eq!(at, 1, "Ctrl+Super+Shift+Right goes right");
+    assert_eq!(
+        windows.iter().filter(|w| !w.2).map(|w| w.0).collect::<Vec<_>>(),
+        alloc::vec![carried],
+        "only the carried window is here"
+    );
+    assert_eq!(c.desktop.focused_window(), Some(carried));
+    // Past the last Cove nothing happens.
+    press(&mut c, KeyCode::Right, None, cs);
+    settle(&mut c);
+    assert_eq!(c.desktop.coves_state().0, 1);
+    // Bringing forward a window of the other Cove (as Harbor, Glide and Seek do) goes there.
+    let other = *ids[..7].iter().find(|&&i| i != carried).unwrap();
+    c.desktop.raise(other);
+    settle(&mut c);
+    assert_eq!(c.desktop.coves_state().0, 0, "raising a window of Cove 1 didn't go there");
+    assert_eq!(c.desktop.focused_window(), Some(other));
+    // Lagoon shows only the Cove in front.
+    press(&mut c, KeyCode::Tab, None, sup);
+    settle(&mut c);
+    assert_eq!(c.desktop.lagoon_state().unwrap().1.len(), 7);
+    press(&mut c, KeyCode::Tab, None, sup);
+    settle(&mut c);
+    assert!(c.desktop.lagoon_state().is_none(), "Super+Tab again closes Lagoon");
+    // Removing Cove 1 (not in front): its window joins Cove 0.
+    c.desktop.test_remove_cove(1);
+    settle(&mut c);
+    let (at, count, windows) = c.desktop.coves_state();
+    assert_eq!((at, count), (0, 1));
+    assert!(windows.iter().all(|w| w.1 == 0), "a window was left in a removed Cove");
+    assert_eq!(visible(&c), 8 - 1 /* still minimised */);
+    // Removing the Cove in front: its windows go to the one before it, which comes forward.
+    let a = c.desktop.test_add_cove().unwrap();
+    c.desktop.test_move_to_cove(other, a);
+    press(&mut c, KeyCode::Right, None, cs);
+    settle(&mut c);
+    assert_eq!(c.desktop.coves_state().0, 1);
+    press(&mut c, KeyCode::F4, None, cs);
+    settle(&mut c);
+    let (at, count, windows) = c.desktop.coves_state();
+    assert_eq!((at, count), (0, 1), "Ctrl+Super+F4 removes the Cove in front");
+    assert!(windows.iter().all(|w| w.1 == 0));
+    c.desktop.test_remove_cove(0);
+    assert_eq!(c.desktop.coves_state().1, 1, "the last Cove can't be removed");
+    // At most eight.
+    while c.desktop.test_add_cove().is_some() {}
+    assert_eq!(c.desktop.coves_state().1, 8);
+    for i in (1..8).rev() {
+        c.desktop.test_remove_cove(i);
+    }
+    assert_eq!(c.desktop.coves_state().1, 1);
+    for id in ids {
+        c.desktop.close(id);
+    }
+    c.settle(2000);
+}
 /// Asks the harness to check what every head shows: a few pixels of each
 /// display's back buffer, compared with a QMP screendump of its scanout.
 fn displays_screendump(c: &crate::gui::screens::Compositor) {

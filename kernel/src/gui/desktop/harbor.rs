@@ -180,6 +180,11 @@ impl Desktop {
         (Rect::new((self.w - total) / 2, y, total, self.bay_h()), bay_rects, items)
     }
 
+    /// Where Harbor's top is when it is up (whether or not it is now).
+    pub(super) fn harbor_top(&self) -> i32 {
+        self.h - 10 - self.bay_h()
+    }
+
     pub(super) fn dock_layout(&self) -> (Rect, Vec<(DockItem, Rect)>) {
         let (r, _, items) = self.harbor_layout();
         (r, items)
@@ -206,6 +211,7 @@ impl Desktop {
         let hide = (covered || theme::dock_autohide())
             && !self.harbor.revealed
             && self.launcher.is_none()
+            && !self.lagoon_open()
             && self.dnd.is_none();
         if hide != self.harbor.hidden {
             // Start from where it is now.
@@ -398,17 +404,21 @@ impl Desktop {
         self.windows.iter().any(|w| Self::window_package(w, &packages) == Some(p))
     }
 
+    /// The frontmost window that `which` picks: in the Cove in front if
+    /// there is one there, else in another Cove (which then comes forward).
+    fn topmost(&self, which: impl Fn(&super::Window) -> bool) -> Option<&super::Window> {
+        let mut all = self.windows.iter().rev().filter(|w| which(w));
+        let here = self.windows.iter().rev().find(|w| !w.elsewhere && which(w));
+        here.or_else(|| all.next())
+    }
+
     fn dock_click(&mut self, item: DockItem) {
         match item {
             DockItem::Package(p) => {
                 let packages = self.package_apps();
                 let focused = self.focused_id();
-                let topmost = self
-                    .windows
-                    .iter()
-                    .rev()
-                    .find(|w| Self::window_package(w, &packages) == Some(p))
-                    .map(|w| (w.id, w.minimized));
+                let topmost =
+                    self.topmost(|w| Self::window_package(w, &packages) == Some(p)).map(|w| (w.id, w.minimized));
                 match topmost {
                     Some((id, false)) if focused == Some(id) => self.minimize(id),
                     Some((id, _)) => self.raise(id),
@@ -430,7 +440,7 @@ impl Desktop {
             DockItem::Launcher => self.toggle_launcher(),
             DockItem::App(kind) => {
                 let focused_kind = self.focused().map(|w| w.app.kind());
-                let topmost = self.windows.iter().rev().find(|w| w.app.kind() == kind).map(|w| (w.id, w.minimized));
+                let topmost = self.topmost(|w| w.app.kind() == kind).map(|w| (w.id, w.minimized));
                 match topmost {
                     Some((id, false)) if focused_kind == Some(kind) => self.minimize(id),
                     Some((id, _)) => self.raise(id),

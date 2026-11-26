@@ -32,6 +32,10 @@ pub enum InputEvent {
         dx: i32,
         dy: i32,
     },
+    /// Three fingers swept up or down on a touchpad.
+    Swipe {
+        up: bool,
+    },
 }
 
 const CAPACITY: usize = 256;
@@ -201,14 +205,15 @@ pub fn touchpad_output(o: aurora_hid::gestures::Output, held: &mut u8) {
 }
 
 /// Three fingers swept across a touchpad. Sideways means back and forward
-/// (fingers to the right go back, as pages slide); up and down are free
-/// for the desktop to use.
+/// (fingers to the right go back, as pages slide); up and down are the
+/// desktop's (Lagoon).
 pub fn touchpad_swipe(s: aurora_hid::gestures::Swipe) {
     use aurora_hid::gestures::Swipe;
     let code = match s {
         Swipe::Right => KeyCode::Back,
         Swipe::Left => KeyCode::Forward,
-        Swipe::Up | Swipe::Down => return,
+        // Up opens Lagoon (every window spread out), down closes it.
+        Swipe::Up | Swipe::Down => return push(InputEvent::Swipe { up: s == Swipe::Up }),
     };
     for pressed in [true, false] {
         push(InputEvent::Key(KeyEvent { code, ch: None, pressed, mods: modifiers() }));

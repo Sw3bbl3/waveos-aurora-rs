@@ -136,7 +136,7 @@ impl Desktop {
     pub(super) fn animate_close(&mut self, id: u32) {
         let Some(i) = self.index_of(id) else { return };
         let r = self.windows[i].rect;
-        if self.windows[i].minimized || self.windows[i].animating {
+        if self.windows[i].hidden() || self.windows[i].animating {
             return;
         }
         self.add_ghost(Kind::Close, id, r, scaled(r, 930), (255, 0), lumen::motion::REVEAL);
